@@ -1,0 +1,852 @@
+/* admin.css — the built-in admin UI's design system.
+ *
+ * Plain CSS, no build step. Everything is driven by the custom properties in
+ * :root so the (not-yet-final) branding can be retuned in one place. Color
+ * slots c0..c7 (see paletteSize in ui/model.go) each set --slot; the pill,
+ * chip, avatar and dot components derive their fill from it via color-mix.
+ *
+ * Dark mode: every theme-dependent token is a light-dark(light, dark) pair, so
+ * the palette flips with the resolved `color-scheme`. By default that follows
+ * the OS; the footer toggle forces it by setting [data-theme] on <html> (see
+ * the data-theme rules below and the theme logic in admin.js). Components never
+ * bake in white/black/rgba — they mix against --tint-base/--shade-base or use
+ * the --overlay-* tokens so hover/inset/track surfaces invert with the theme. */
+
+:root {
+	color-scheme: light dark;
+
+	--bg: light-dark(#fbfbfa, #18181a);
+	--sidebar-bg: light-dark(#f4f4f1, #1e1e20);
+	--surface: light-dark(#ffffff, #242427);
+	--panel-bg: light-dark(#ffffff, #242427);
+
+	--text: light-dark(#1d1d1b, #ececea);
+	--muted: light-dark(#8b8b84, #9b9b94);
+	--faint: light-dark(#b6b6ae, #67675f);
+
+	--border: light-dark(#e9e9e4, #323236);
+	--border-strong: light-dark(#dcdcd5, #44444a);
+
+	--accent: light-dark(#5b5bd6, #8b8bf2);
+	--accent-ink: #ffffff;
+
+	--ink: light-dark(#1a1a18, #ececea); /* primary-button surface */
+	--ink-text: light-dark(#ffffff, #1a1a18); /* text/glyph on --ink */
+	--ink-hover: light-dark(#000000, #ffffff);
+
+	/* Neutral bases fed into color-mix so accent/slot tints lighten in light
+	 * mode and darken in dark mode, and pill text darkens vs. lightens. */
+	--tint-base: light-dark(#ffffff, #242427);
+	--shade-base: light-dark(#000000, #ffffff);
+
+	/* Translucent overlays for hover/active/inset/track surfaces — keyed off
+	 * the ink color in light mode, off white in dark so they read as a lift. */
+	--overlay-soft: light-dark(rgba(20, 20, 18, 0.018), rgba(255, 255, 255, 0.028));
+	--overlay-hover: light-dark(rgba(20, 20, 18, 0.04), rgba(255, 255, 255, 0.055));
+	--overlay-inset: light-dark(rgba(20, 20, 18, 0.03), rgba(255, 255, 255, 0.035));
+	--overlay-fill: light-dark(rgba(20, 20, 18, 0.05), rgba(255, 255, 255, 0.07));
+	--overlay-track: light-dark(rgba(20, 20, 18, 0.08), rgba(255, 255, 255, 0.11));
+	--backdrop: light-dark(rgba(20, 20, 18, 0.28), rgba(0, 0, 0, 0.55));
+
+	--radius-lg: 12px;
+	--radius: 9px;
+	--radius-sm: 7px;
+
+	--shadow-sm: 0 1px 2px light-dark(rgba(20, 20, 18, 0.06), rgba(0, 0, 0, 0.4));
+	--shadow-md: 0 6px 20px light-dark(rgba(20, 20, 18, 0.10), rgba(0, 0, 0, 0.5));
+	--shadow-panel: -16px 0 48px light-dark(rgba(20, 20, 18, 0.16), rgba(0, 0, 0, 0.6));
+	--shadow-pop: 0 10px 28px light-dark(rgba(20, 20, 18, 0.16), rgba(0, 0, 0, 0.5));
+
+	--mono: ui-monospace, "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+	--sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+/* Footer toggle forces the resolved scheme; absence follows the OS. */
+:root[data-theme="light"] { color-scheme: light; }
+:root[data-theme="dark"] { color-scheme: dark; }
+
+/* Color slots. Each sets --slot; components tint from it. */
+.c0 { --slot: #d97706; }
+.c1 { --slot: #dc2626; }
+.c2 { --slot: #16a34a; }
+.c3 { --slot: #5b5bd6; }
+.c4 { --slot: #0ea5e9; }
+.c5 { --slot: #7c3aed; }
+.c6 { --slot: #db2777; }
+.c7 { --slot: #0d9488; }
+.neutral { --slot: #71717a; }
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+	margin: 0;
+	font-family: var(--sans);
+	font-size: 14px;
+	color: var(--text);
+	background: var(--bg);
+	-webkit-font-smoothing: antialiased;
+}
+
+a { color: inherit; text-decoration: none; }
+
+/* ---- App shell -------------------------------------------------------- */
+
+.shell {
+	display: grid;
+	grid-template-columns: 272px 1fr;
+	height: 100vh;
+	overflow: hidden;
+}
+
+.sidebar {
+	display: flex;
+	flex-direction: column;
+	gap: 18px;
+	padding: 20px 16px;
+	background: var(--sidebar-bg);
+	border-right: 1px solid var(--border);
+	overflow-y: auto;
+}
+
+.main {
+	overflow-y: auto;
+	padding: 28px 36px 64px;
+}
+
+/* ---- Sidebar: brand --------------------------------------------------- */
+
+.brand {
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	padding: 0 6px;
+}
+
+.brand .mark {
+	width: 34px;
+	height: 34px;
+	border-radius: 9px;
+	background: var(--ink);
+	color: var(--ink-text);
+	display: grid;
+	place-items: center;
+	font-weight: 700;
+	flex: none;
+}
+
+.brand .name { font-weight: 700; font-size: 15px; line-height: 1.1; }
+.brand .tagline { color: var(--muted); font-size: 11px; letter-spacing: 0.02em; }
+
+/* ---- Sidebar: switcher cards ----------------------------------------- */
+
+.switcher {
+	position: relative;
+	display: flex;
+	align-items: center;
+	gap: 11px;
+	width: 100%;
+	padding: 11px 12px;
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	box-shadow: var(--shadow-sm);
+	cursor: default;
+	text-align: left;
+}
+
+.switcher.compact { padding: 9px 12px; }
+
+.switcher .badge {
+	width: 28px;
+	height: 28px;
+	border-radius: 7px;
+	display: grid;
+	place-items: center;
+	font-weight: 700;
+	font-size: 12px;
+	flex: none;
+	background: color-mix(in srgb, var(--accent) 16%, var(--tint-base));
+	color: var(--accent);
+}
+
+.switcher .badge.app { background: var(--accent); color: var(--accent-ink); }
+.switcher .badge.ws { font-family: var(--mono); font-size: 10px; }
+
+.switcher .lines { min-width: 0; flex: 1; }
+.switcher .title {
+	font-weight: 600;
+	font-size: 13px;
+	line-height: 1.2;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.switcher .sub {
+	color: var(--muted);
+	font-size: 11px;
+	font-family: var(--mono);
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+.switcher .chev { color: var(--faint); flex: none; }
+/* Invisible full-card overlay: clicking the card opens the native dropdown,
+ * while the visible title/sub/chevron below show through. */
+.switcher select[data-nav] {
+	position: absolute;
+	inset: 0;
+	width: 100%;
+	height: 100%;
+	margin: 0;
+	opacity: 0;
+	cursor: pointer;
+	border: none;
+	-webkit-appearance: none;
+	appearance: none;
+}
+
+/* ---- Sidebar: entity nav --------------------------------------------- */
+
+.nav-head {
+	font-size: 11px;
+	letter-spacing: 0.08em;
+	text-transform: uppercase;
+	color: var(--faint);
+	font-weight: 600;
+	padding: 0 8px;
+	margin-bottom: -6px;
+}
+
+.nav-list { display: flex; flex-direction: column; gap: 1px; }
+
+.nav-item {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	padding: 8px 10px;
+	border-radius: var(--radius-sm);
+	color: var(--text);
+}
+
+.nav-item:hover { background: var(--overlay-hover); }
+.nav-item.active { background: var(--surface); box-shadow: var(--shadow-sm); font-weight: 600; }
+
+.nav-item .dot {
+	width: 8px;
+	height: 8px;
+	border-radius: 50%;
+	flex: none;
+	background: var(--slot, var(--faint));
+}
+.nav-item:not(.active) .dot { background: color-mix(in srgb, var(--slot, #999) 55%, var(--faint)); }
+
+.nav-item .label { flex: 1; }
+.nav-item .count {
+	color: var(--muted);
+	font-variant-numeric: tabular-nums;
+	font-size: 12px;
+}
+.nav-item.active .count { color: var(--text); }
+
+/* ---- Sidebar: footer -------------------------------------------------- */
+
+.sidebar .foot {
+	margin-top: auto;
+	display: flex;
+	align-items: center;
+	justify-content: space-between;
+	padding: 10px 8px 2px;
+	border-top: 1px solid var(--border);
+	color: var(--muted);
+	font-size: 12px;
+}
+.sidebar .foot .live { display: flex; align-items: center; gap: 7px; }
+.sidebar .foot .live::before {
+	content: "";
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+	background: #16a34a;
+	box-shadow: 0 0 0 3px color-mix(in srgb, #16a34a 22%, transparent);
+}
+.sidebar .foot .foot-right { display: flex; align-items: center; gap: 10px; }
+
+.theme-toggle {
+	display: inline-grid;
+	place-items: center;
+	width: 26px;
+	height: 26px;
+	padding: 0;
+	border-radius: 7px;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1;
+}
+.theme-toggle:hover { color: var(--text); border-color: var(--border-strong); }
+
+/* ---- Main: entity header --------------------------------------------- */
+
+.page-head {
+	display: flex;
+	align-items: flex-start;
+	justify-content: space-between;
+	gap: 16px;
+	margin-bottom: 22px;
+}
+
+.page-title { display: flex; align-items: center; gap: 12px; }
+.page-title h1 { font-size: 26px; font-weight: 700; margin: 0; }
+.page-title .records {
+	background: var(--overlay-fill);
+	color: var(--muted);
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 500;
+}
+.page-sub { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-top: 4px; }
+
+.head-actions { display: flex; align-items: center; gap: 12px; flex: none; }
+
+/* ---- Buttons ---------------------------------------------------------- */
+
+.btn {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	font: inherit;
+	font-size: 13px;
+	font-weight: 600;
+	padding: 9px 16px;
+	border-radius: var(--radius);
+	border: 1px solid transparent;
+	cursor: pointer;
+	background: var(--surface);
+	color: var(--text);
+}
+.btn-primary { background: var(--ink); color: var(--ink-text); }
+.btn-primary:hover { background: var(--ink-hover); }
+.btn-ghost { background: transparent; border-color: var(--border-strong); color: var(--muted); }
+.btn-ghost:hover { color: var(--text); border-color: var(--faint); }
+.btn-sm { padding: 6px 11px; font-size: 12px; }
+.btn-danger { color: #dc2626; }
+
+/* ---- Filter bar ------------------------------------------------------- */
+
+.filter-bar {
+	display: flex;
+	align-items: center;
+	flex-wrap: wrap;
+	gap: 12px;
+	margin-bottom: 14px;
+}
+.filter-bar .lead {
+	font-size: 11px;
+	letter-spacing: 0.07em;
+	text-transform: uppercase;
+	color: var(--faint);
+	font-weight: 600;
+}
+
+/* Conditions read as sentences — "title contains milk" — so each row is one
+ * connected pill rather than three loose controls. The conditions flow as
+ * direct children of the bar (display: contents) so each wraps on its own,
+ * while the actions stay together on whichever line they land on. */
+.filter-conds { display: contents; }
+.filter-actions { display: flex; align-items: center; gap: 10px; }
+.filter-cond {
+	display: inline-flex;
+	align-items: center;
+	gap: 2px;
+	padding: 3px 4px 3px 8px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	background: var(--surface);
+}
+.filter-cond select, .filter-cond input {
+	font: inherit;
+	font-size: 13px;
+	padding: 4px 6px;
+	border: 1px solid transparent;
+	border-radius: var(--radius-sm);
+	background: transparent;
+	color: var(--text);
+	outline: none;
+	max-width: 24ch;
+}
+/* A free-text operand sizes to what is typed rather than to the browser's
+ * default 20-character input, so a short value doesn't leave a long gap. */
+.filter-cond input {
+	width: 12ch;
+	field-sizing: content;
+	min-width: 8ch;
+}
+.filter-cond select { cursor: pointer; }
+.filter-cond .f-op { color: var(--muted); }
+.filter-cond input::placeholder { color: var(--faint); }
+.filter-cond select:hover, .filter-cond input:hover { border-color: var(--border); }
+.filter-cond select:focus, .filter-cond input:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.filter-cond .x {
+	border: none;
+	background: transparent;
+	color: var(--faint);
+	cursor: pointer;
+	font-size: 12px;
+	line-height: 1;
+	padding: 4px 6px;
+}
+.filter-cond .x:hover { color: var(--text); }
+.filter-cond .f-err { color: #dc2626; font-size: 12px; padding-right: 6px; }
+
+/* A group asks about the elements of a repeated field, so its operand is a
+ * block of sub-conditions rather than a literal. They are indented under one
+ * head to show what they share: every one of them is asked of the SAME
+ * element, which is what an any() condition means. */
+.filter-group { flex-direction: column; align-items: stretch; gap: 6px; padding: 6px 6px 8px 8px; }
+.filter-group-head { display: flex; align-items: center; gap: 2px; }
+.filter-group-head .x { margin-left: auto; }
+.filter-subs {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+	margin-left: 10px;
+	padding-left: 12px;
+	border-left: 2px solid var(--border-strong);
+}
+.filter-sub { display: inline-flex; align-items: center; gap: 2px; }
+.filter-group > .chip-add { align-self: flex-start; margin-left: 22px; padding: 4px 10px; }
+
+/* The bar's reference operand is the same picker component as the editor's,
+ * sized for a condition row: chips stay inline, and the popover is narrow
+ * enough not to cover the conditions beside it. */
+.ref-inline .ref-values { min-height: 0; }
+.ref-inline .ref-chip { font-size: 13px; }
+.ref-inline .ref-add { padding: 4px 10px; font-size: 12px; }
+.ref-inline .ref-pop { width: 260px; }
+
+.filter-bar .f-match {
+	font: inherit;
+	font-size: 12px;
+	padding: 5px 8px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius);
+	background: transparent;
+	color: var(--muted);
+	cursor: pointer;
+}
+/* The combiner only means something once two conditions can disagree, and
+ * there is nothing to apply before the first one exists. Both appear the
+ * moment the DOM has them, so adding a condition needs no round trip. */
+.filter-bar:not(:has(.filter-cond + .filter-cond)) .f-match { display: none; }
+.filter-bar:not(:has(.filter-cond)) .f-apply { display: none; }
+.chip-add {
+	display: inline-flex;
+	align-items: center;
+	gap: 5px;
+	padding: 6px 12px;
+	border: 1px dashed var(--border-strong);
+	border-radius: var(--radius);
+	color: var(--muted);
+	font-size: 12px;
+	font-weight: 500;
+	cursor: pointer;
+	background: transparent;
+}
+.chip-add:hover { color: var(--text); border-color: var(--faint); }
+
+/* ---- Table ------------------------------------------------------------ */
+
+.table-wrap {
+	background: var(--surface);
+	border: 1px solid var(--border);
+	border-radius: var(--radius-lg);
+	overflow: hidden;
+}
+
+table.grid { border-collapse: collapse; width: 100%; }
+
+table.grid thead th {
+	text-align: left;
+	font-size: 11px;
+	letter-spacing: 0.06em;
+	text-transform: uppercase;
+	color: var(--muted);
+	font-weight: 600;
+	padding: 13px 20px;
+	border-bottom: 1px solid var(--border);
+	white-space: nowrap;
+}
+table.grid th.num, table.grid td.num { text-align: right; }
+
+table.grid tbody td {
+	padding: 14px 20px;
+	border-bottom: 1px solid var(--border);
+	vertical-align: middle;
+}
+table.grid tbody tr:last-child td { border-bottom: none; }
+table.grid tbody tr:hover { background: var(--overlay-soft); cursor: pointer; }
+
+td.primary { font-weight: 600; }
+td.primary a { color: var(--text); }
+td .muted { color: var(--faint); }
+
+/* Long free-text cells clamp to a couple of lines so one verbose row doesn't
+ * tower over the rest — the full value is one click away in the detail panel. */
+.cell-text {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	max-width: 44ch;
+}
+td.primary .cell-text { -webkit-line-clamp: 3; line-clamp: 3; max-width: 32ch; }
+
+/* Boolean cell: a quiet green check for true, a faint dash for false, so a
+ * column of bools reads at a glance instead of as a wall of "true"/"false". */
+.boolean {
+	display: inline-grid;
+	place-items: center;
+	width: 22px;
+	height: 22px;
+	border-radius: 6px;
+	font-size: 12px;
+	font-weight: 700;
+	line-height: 1;
+}
+.boolean.yes {
+	color: #16a34a;
+	background: color-mix(in srgb, #16a34a 15%, var(--tint-base));
+}
+.boolean.no { color: var(--faint); background: transparent; }
+.row-actions { text-align: right; white-space: nowrap; }
+.row-actions .btn { opacity: 0; transition: opacity 0.1s; }
+tr:hover .row-actions .btn { opacity: 1; }
+
+.empty {
+	padding: 56px 20px;
+	text-align: center;
+	color: var(--muted);
+}
+
+/* ---- Pills / chips / avatars ----------------------------------------- */
+
+.pill {
+	display: inline-flex;
+	align-items: center;
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 500;
+	white-space: nowrap;
+	background: color-mix(in srgb, var(--slot, #888) 13%, var(--tint-base));
+	color: color-mix(in srgb, var(--slot, #555) 72%, var(--shade-base));
+}
+
+.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.chip {
+	display: inline-flex;
+	align-items: center;
+	gap: 6px;
+	padding: 3px 10px;
+	border-radius: 999px;
+	font-size: 12px;
+	font-weight: 500;
+	background: color-mix(in srgb, var(--slot, #888) 13%, var(--tint-base));
+	color: color-mix(in srgb, var(--slot, #555) 72%, var(--shade-base));
+}
+.chip .x, .kv-row .x {
+	border: none;
+	background: transparent;
+	color: inherit;
+	opacity: 0.55;
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1;
+	padding: 0;
+}
+.chip .x:hover, .kv-row .x:hover { opacity: 1; }
+.chip .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--slot, #888); flex: none; }
+
+.avatar {
+	width: 26px;
+	height: 26px;
+	border-radius: 50%;
+	display: inline-grid;
+	place-items: center;
+	font-size: 10px;
+	font-weight: 700;
+	color: #fff;
+	background: var(--slot, #888);
+	border: 2px solid var(--surface);
+	flex: none; /* never let a flex parent squash the circle into an ellipse */
+}
+.avatar.sm {
+	width: 18px;
+	height: 18px;
+	font-size: 8px;
+	border: none;
+	margin: -1px -2px -1px -4px;
+	background: color-mix(in srgb, var(--slot, #888) 80%, var(--shade-base));
+}
+
+/* ---- Slide-over detail panel ----------------------------------------- */
+
+.panel-backdrop {
+	position: fixed;
+	inset: 0;
+	background: var(--backdrop);
+	z-index: 40;
+	animation: fade-in 0.16s ease both;
+}
+
+.panel {
+	position: fixed;
+	top: 0;
+	right: 0;
+	height: 100vh;
+	width: min(620px, 92vw);
+	background: var(--panel-bg);
+	box-shadow: var(--shadow-panel);
+	z-index: 41;
+	display: flex;
+	flex-direction: column;
+	animation: slide-in 0.2s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes fade-in { from { opacity: 0; } to { opacity: 1; } }
+@keyframes slide-in { from { transform: translateX(24px); opacity: 0.4; } to { transform: none; opacity: 1; } }
+
+.panel-head {
+	padding: 22px 28px 18px;
+	border-bottom: 1px solid var(--border);
+}
+.panel-crumb {
+	font-family: var(--mono);
+	font-size: 11px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+	color: var(--faint);
+	margin-bottom: 8px;
+}
+.panel-head h2 { margin: 0; font-size: 21px; font-weight: 700; }
+.panel-head .id { color: var(--muted); font-family: var(--mono); font-size: 12px; margin-top: 5px; }
+.panel-close {
+	position: absolute;
+	top: 20px;
+	right: 22px;
+	width: 30px;
+	height: 30px;
+	border-radius: 8px;
+	border: 1px solid var(--border);
+	background: var(--surface);
+	color: var(--muted);
+	cursor: pointer;
+	font-size: 15px;
+	line-height: 1;
+}
+.panel-close:hover { color: var(--text); }
+
+.panel-body { padding: 8px 28px 28px; overflow-y: auto; flex: 1; }
+.panel-foot {
+	padding: 16px 28px;
+	border-top: 1px solid var(--border);
+	display: flex;
+	gap: 10px;
+	justify-content: flex-end;
+}
+
+/* ---- Detail fields ---------------------------------------------------- */
+
+.field { margin: 20px 0; }
+.field > .flabel {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	margin-bottom: 8px;
+}
+.field .fname { font-weight: 600; font-size: 14px; }
+.ftype {
+	font-family: var(--mono);
+	font-size: 11px;
+	color: var(--muted);
+	background: var(--overlay-fill);
+	padding: 2px 7px;
+	border-radius: 5px;
+}
+
+.field input[type="text"],
+.field input[type="number"],
+.field textarea,
+.field select {
+	width: 100%;
+	font: inherit;
+	padding: 10px 12px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	background: var(--surface);
+	color: var(--text);
+	outline: none;
+}
+.field input:focus, .field textarea:focus, .field select:focus {
+	border-color: var(--accent);
+	box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 16%, transparent);
+}
+.field textarea { min-height: 76px; resize: vertical; line-height: 1.5; }
+.field input[readonly], .field textarea[readonly] { background: var(--overlay-inset); color: var(--muted); }
+
+/* enum as a segmented pill group (radios, no JS) */
+.enum-group { display: flex; flex-wrap: wrap; gap: 8px; }
+.enum-group input { position: absolute; opacity: 0; pointer-events: none; }
+.enum-group label {
+	display: inline-flex;
+	padding: 7px 15px;
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	font-size: 13px;
+	color: var(--muted);
+	cursor: pointer;
+	user-select: none;
+}
+.enum-group input:checked + label {
+	border-color: var(--accent);
+	background: color-mix(in srgb, var(--accent) 12%, var(--tint-base));
+	color: color-mix(in srgb, var(--accent) 78%, var(--shade-base));
+	font-weight: 600;
+}
+.enum-group input:disabled + label { opacity: 0.6; cursor: not-allowed; }
+
+/* reference / list editors */
+fieldset.field {
+	border: none;
+	margin: 20px 0;
+	padding: 0;
+}
+fieldset.field > legend {
+	display: flex;
+	align-items: center;
+	gap: 9px;
+	padding: 0;
+	margin-bottom: 8px;
+	font-weight: 600;
+	font-size: 14px;
+}
+.subfields {
+	border-left: 2px solid var(--border);
+	padding-left: 16px;
+	margin-top: 4px;
+}
+.list-item {
+	position: relative;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	padding: 12px;
+	padding-right: 32px;
+	margin-bottom: 8px;
+}
+.list-item .item-remove {
+	position: absolute;
+	top: 10px;
+	right: 10px;
+	border: none;
+	background: transparent;
+	color: inherit;
+	opacity: 0.55;
+	cursor: pointer;
+	font-size: 13px;
+	line-height: 1;
+	padding: 0;
+}
+.list-item .item-remove:hover { opacity: 1; }
+.kv-row { display: flex; gap: 8px; margin-bottom: 8px; align-items: center; }
+
+/* reference editor: selected value(s) on one row with an inline "+ Add" that
+ * opens a combobox popover (filter + options on one surface). Repeated refs
+ * render as wrap-flowing chips; a singular ref renders as a full-width row. */
+.ref-chip-label { font-weight: 500; }
+.ref-row { position: relative; display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ref-values.chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.ref-add { padding: 5px 12px; }
+.ref-add[aria-expanded="true"] { color: var(--text); border-color: var(--faint); }
+
+/* Singular ref: once a value is linked the row spans the full width (a
+ * neutral bar with the colored dot/avatar kept), and "+ Add" gives way to it.
+ * Empty, the container collapses so "+ Add" sits on its own. */
+.ref-values.single:has([data-ref-chip]) { flex: 1 1 100%; }
+.ref-values.single .ref-chip {
+	width: 100%;
+	padding: 9px 12px;
+	border-radius: var(--radius-sm);
+	font-size: 14px;
+	background: var(--overlay-inset);
+	color: var(--text);
+}
+.ref-values.single .ref-chip .ref-chip-label { font-weight: 600; }
+.ref-values.single .ref-chip .x { margin-left: auto; font-size: 14px; }
+.ref-field:not([data-ref-repeated]):has(.ref-values [data-ref-chip]) .ref-add { display: none; }
+
+/* Combobox popover: one surface holding the filter input above the options. */
+.ref-pop {
+	position: absolute;
+	top: calc(100% + 6px);
+	left: 0;
+	z-index: 30;
+	width: min(340px, 100%);
+	background: var(--surface);
+	border: 1px solid var(--border-strong);
+	border-radius: var(--radius-sm);
+	box-shadow: var(--shadow-pop);
+	overflow: hidden;
+}
+.ref-pop[hidden] { display: none; }
+/* Flipped above the row when there isn't room below (set by positionRefPicker). */
+.ref-pop.ref-pop--up { top: auto; bottom: calc(100% + 6px); }
+.ref-pop .ref-search {
+	width: 100%;
+	border: none;
+	border-bottom: 1px solid var(--border);
+	border-radius: 0;
+	padding: 10px 12px;
+	font: inherit;
+	background: transparent;
+	color: var(--text);
+	outline: none;
+}
+.ref-pop .ref-search:focus { box-shadow: none; border-bottom-color: var(--accent); }
+.ref-results { max-height: 248px; overflow-y: auto; }
+.ref-result {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 8px 12px;
+	border: none;
+	background: transparent;
+	text-align: left;
+	font: inherit;
+	color: var(--text);
+	cursor: pointer;
+}
+.ref-result:hover, .ref-result.active { background: color-mix(in srgb, var(--accent) 10%, var(--tint-base)); }
+.ref-result .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--slot, #888); }
+.ref-result-label { font-weight: 500; }
+.ref-result-sub { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--muted); }
+.ref-empty { padding: 10px 12px; color: var(--muted); font-size: 13px; }
+
+.progress {
+	height: 6px;
+	border-radius: 999px;
+	background: var(--overlay-track);
+	overflow: hidden;
+	margin-bottom: 12px;
+}
+.progress > span { display: block; height: 100%; background: #16a34a; }

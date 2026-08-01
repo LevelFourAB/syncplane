@@ -1,0 +1,3160 @@
+{
+	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating.",
+	"evalCases": [
+		{
+			"name": "eq string match",
+			"row": {
+				"id": "w1",
+				"label": "hello"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "hello"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "eq string mismatch",
+			"row": {
+				"label": "hello"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "world"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "implicit-presence number matches zero on empty row",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "implicit-presence string matches empty on empty row",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "neq number",
+			"row": {
+				"count": 3
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"doubleValue": 4
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "gt number",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 4
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "gte at boundary",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "lt at boundary is false",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "negative number lt",
+			"row": {
+				"count": -5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": -4
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "nested path match",
+			"row": {
+				"settings": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"settings",
+						"color"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "red"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "unset intermediate makes cmp false",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"settings",
+						"color"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "red"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "unset intermediate makes isNotSet true",
+			"row": {},
+			"cond": {
+				"present": {
+					"path": [
+						"settings",
+						"color"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "unset intermediate makes isSet false",
+			"row": {},
+			"cond": {
+				"present": {
+					"path": [
+						"settings",
+						"color"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "absent optional is not set",
+			"row": {},
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "absent optional does not equal empty string",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "optional set to empty string is set",
+			"row": {
+				"maybe": ""
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "optional set to empty string equals empty string",
+			"row": {
+				"maybe": ""
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"maybe"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "implicit-presence field is always set",
+			"row": {},
+			"cond": {
+				"present": {
+					"path": [
+						"label"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "empty submessage is set",
+			"row": {
+				"settings": {}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"settings"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "absent submessage is not set",
+			"row": {},
+			"cond": {
+				"present": {
+					"path": [
+						"settings"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "in match",
+			"row": {
+				"count": 3
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"count"
+					],
+					"values": [
+						{
+							"doubleValue": 1
+						},
+						{
+							"doubleValue": 3
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "in mismatch",
+			"row": {
+				"count": 3
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"count"
+					],
+					"values": [
+						{
+							"doubleValue": 1
+						},
+						{
+							"doubleValue": 2
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "in with empty values",
+			"row": {
+				"count": 3
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"count"
+					],
+					"values": []
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "in with bigint literal against number field",
+			"row": {
+				"count": 3
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"count"
+					],
+					"values": [
+						{
+							"intValue": "3"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "str startsWith",
+			"row": {
+				"label": "hello world"
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "hello"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "str endsWith",
+			"row": {
+				"label": "hello world"
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_ENDS_WITH",
+					"value": "world"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "str contains",
+			"row": {
+				"label": "hello world"
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "lo wo"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "str contains mismatch",
+			"row": {
+				"label": "hello world"
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "xyz"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "rep has match",
+			"row": {
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "rep has mismatch",
+			"row": {
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "c"
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "rep hasAny",
+			"row": {
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ANY",
+					"values": [
+						{
+							"stringValue": "c"
+						},
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "rep hasAny with empty values",
+			"row": {
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ANY",
+					"values": []
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "rep hasAll true",
+			"row": {
+				"tags": [
+					"a",
+					"b",
+					"c"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "c"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "rep hasAll false",
+			"row": {
+				"tags": [
+					"a"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "rep hasAll with empty values is vacuously true",
+			"row": {
+				"tags": []
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": []
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "rep isEmpty on empty row",
+			"row": {},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_IS_EMPTY",
+					"values": []
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "rep isEmpty false",
+			"row": {
+				"tags": [
+					"a"
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_IS_EMPTY",
+					"values": []
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "bigint eq exact above 2^53",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bigint eq double that rounds away",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 9007199254740993
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "bigint gt integral double needs exact arithmetic",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 9007199254740992
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bigint vs non-integral double compares as float",
+			"row": {
+				"big": "2"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": 2.5
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bigint eq representable double",
+			"row": {
+				"big": "42"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 42
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "negative bigint lt",
+			"row": {
+				"big": "-9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"intValue": "-9007199254740992"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "number field eq bigint literal",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"intValue": "5"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bigint field vs huge uint literal",
+			"row": {
+				"big": "1"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"uintValue": "18446744073709551615"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "bigint field lt huge uint literal",
+			"row": {
+				"big": "9223372036854775807"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"uintValue": "18446744073709551615"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bool eq true",
+			"row": {
+				"flag": true
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": true
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "bool never equals number",
+			"row": {
+				"flag": true
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 1
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "implicit-presence bool matches false on empty row",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": false
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "and both true",
+			"row": {
+				"count": 1,
+				"label": "x"
+			},
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GTE",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "x"
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "and one false",
+			"row": {
+				"count": 0,
+				"label": "x"
+			},
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GTE",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "x"
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "or one true",
+			"row": {
+				"count": 0,
+				"label": "x"
+			},
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GTE",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "x"
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "not flips",
+			"row": {
+				"label": "y"
+			},
+			"cond": {
+				"not": {
+					"cmp": {
+						"path": [
+							"label"
+						],
+						"op": "CMP_OP_EQ",
+						"value": {
+							"stringValue": "x"
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "empty and is true",
+			"row": {},
+			"cond": {
+				"and": {
+					"conds": []
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "empty or is false",
+			"row": {},
+			"cond": {
+				"or": {
+					"conds": []
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "astral label gt BMP literal uses UTF-16 order",
+			"row": {
+				"label": "𝄞"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"stringValue": "�"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "astral label lt BMP literal uses UTF-16 order",
+			"row": {
+				"label": "𝄞"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"stringValue": "�"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "ref leaf compares on its key field",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"project": {
+					"id": "p1"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"project",
+						"id"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "p1"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "ref leaf key mismatch",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"project": {
+					"id": "p1"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"project",
+						"id"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "p2"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "ref key on an unset ref is false",
+			"type": "issue",
+			"row": {
+				"id": "i1"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"project",
+						"id"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "p1"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "ref isSet when present",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"project": {
+					"id": "p1"
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"project"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "ref isNotSet when absent",
+			"type": "issue",
+			"row": {
+				"id": "i1"
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"project"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "composite-key ref isSet when present",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"pair": {
+					"ns": "n",
+					"id": "k"
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"pair"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text field contains matches plain text",
+			"row": {
+				"id": "w1",
+				"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"body"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "lo wo"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text field contains mismatch",
+			"row": {
+				"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"body"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "goodbye"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "text field eq compares the visible string",
+			"row": {
+				"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "hello world"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text field startsWith",
+			"row": {
+				"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"body"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "hell"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "unset text field reads as empty string",
+			"row": {},
+			"cond": {
+				"cmp": {
+					"path": [
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "empty text document reads as empty string",
+			"row": {
+				"body": "AQAAAA=="
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": ""
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text field compares its visible text, not its tombstones",
+			"row": {
+				"body": "AQEBcgsCAAEFBgVoZWxsbwAGBgUABQYgd29ybGQA"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "hello"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "non-ASCII text field eq compares the decoded string",
+			"row": {
+				"body": "AQEBcAYBAAEGBgpjYWbDqSDwn46JAA=="
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "café 🎉"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "non-ASCII text field startsWith",
+			"row": {
+				"body": "AQEBcAYBAAEGBgpjYWbDqSDwn46JAA=="
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"body"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "café"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text field contains an astral code point",
+			"row": {
+				"body": "AQEBcAYBAAEGBgpjYWbDqSDwn46JAA=="
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"body"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "🎉"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "NaN literal fails eq",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN literal satisfies neq",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "NaN literal fails gt",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN literal fails lt",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN literal fails gte",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN literal fails lte",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LTE",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN literal fails gte against a bigint field",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN field fails eq",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN field fails gte",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN field fails lte",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_LTE",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN field fails lt",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN field fails gt",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 5
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "NaN never equals NaN",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "Infinity literal is above every finite value",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": "Infinity"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "-Infinity literal is below every finite value",
+			"row": {
+				"count": 5
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": "-Infinity"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "Infinity field equals an Infinity literal",
+			"row": {
+				"ratio": "Infinity"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": "Infinity"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "Infinity is not integral, so a bigint field compares as float",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"doubleValue": "Infinity"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "NaN in a value list never matches",
+			"row": {
+				"ratio": "NaN"
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"ratio"
+					],
+					"values": [
+						{
+							"doubleValue": "NaN"
+						},
+						{
+							"doubleValue": 5
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any matches when one element satisfies the condition",
+			"row": {
+				"members": [
+					{
+						"uid": "u1"
+					},
+					{
+						"uid": "u2"
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"uid"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "u2"
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any is false when no element satisfies the condition",
+			"row": {
+				"members": [
+					{
+						"uid": "u1"
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"uid"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "u2"
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any on an empty list matches nothing",
+			"row": {},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"uid"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "u1"
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any binds its conditions to ONE element",
+			"row": {
+				"members": [
+					{
+						"uid": "u1",
+						"role": 1
+					},
+					{
+						"uid": "u2",
+						"role": 2
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"uid"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "u1"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"role"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"doubleValue": 2
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "the same conditions as separate terms are satisfied by different elements",
+			"row": {
+				"members": [
+					{
+						"uid": "u1",
+						"role": 1
+					},
+					{
+						"uid": "u2",
+						"role": 2
+					}
+				]
+			},
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"exists": {
+								"path": [
+									"members"
+								],
+								"cond": {
+									"cmp": {
+										"path": [
+											"uid"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "u1"
+										}
+									}
+								}
+							}
+						},
+						{
+							"exists": {
+								"path": [
+									"members"
+								],
+								"cond": {
+									"cmp": {
+										"path": [
+											"role"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"doubleValue": 2
+										}
+									}
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "not(any) means no element matches",
+			"row": {
+				"members": [
+					{
+						"uid": "u1"
+					}
+				]
+			},
+			"cond": {
+				"not": {
+					"exists": {
+						"path": [
+							"members"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"uid"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "u2"
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "not(any) on an empty list is true, like every negated condition on a missing value",
+			"row": {},
+			"cond": {
+				"not": {
+					"exists": {
+						"path": [
+							"members"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"uid"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "u1"
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any nests, each level scoping its own element",
+			"row": {
+				"members": [
+					{
+						"uid": "u1",
+						"tags": [
+							"x"
+						]
+					},
+					{
+						"uid": "u2",
+						"tags": [
+							"y"
+						]
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"uid"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "u2"
+										}
+									}
+								},
+								{
+									"rep": {
+										"path": [
+											"tags"
+										],
+										"op": "REP_OP_HAS",
+										"values": [
+											{
+												"stringValue": "y"
+											}
+										]
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "an element condition on a field the element lacks a value for is false",
+			"row": {
+				"members": [
+					{
+						"uid": "u1"
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"name"
+							],
+							"op": "STR_OP_CONTAINS",
+							"value": "z"
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "has over a to-many reference compares the target key",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					},
+					{
+						"id": "i3"
+					}
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"blocked_by"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "i3"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "has over a to-many reference is false for a key it does not hold",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					}
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"blocked_by"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "i3"
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "hasAny over a to-many reference needs one of the keys",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					}
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"blocked_by"
+					],
+					"op": "REP_OP_HAS_ANY",
+					"values": [
+						{
+							"stringValue": "i3"
+						},
+						{
+							"stringValue": "i2"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "hasAll over a to-many reference needs every key",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					}
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"blocked_by"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "i2"
+						},
+						{
+							"stringValue": "i3"
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "hasAll over a to-many reference holding every key",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					},
+					{
+						"id": "i3"
+					}
+				]
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"blocked_by"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "i2"
+						},
+						{
+							"stringValue": "i3"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "isEmpty still asks about the list itself, whatever the elements are",
+			"row": {},
+			"cond": {
+				"rep": {
+					"path": [
+						"members"
+					],
+					"op": "REP_OP_IS_EMPTY"
+				}
+			},
+			"want": true
+		}
+	],
+	"compareCases": [
+		{
+			"name": "number asc",
+			"a": {
+				"count": 1
+			},
+			"b": {
+				"count": 2
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "number desc",
+			"a": {
+				"count": 1
+			},
+			"b": {
+				"count": 2
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "missing sorts last under asc",
+			"a": {},
+			"b": {
+				"settings": {
+					"size": 1
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"size"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "missing sorts last under desc too",
+			"a": {},
+			"b": {
+				"settings": {
+					"size": 1
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"size"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "both missing falls through to row key",
+			"a": {},
+			"b": {},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"size"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "tie falls through to next key",
+			"a": {
+				"count": 1,
+				"label": "a"
+			},
+			"b": {
+				"count": 1,
+				"label": "b"
+			},
+			"keyA": "x",
+			"keyB": "y",
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				},
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "astral strings order by UTF-16 code unit",
+			"a": {
+				"label": "�"
+			},
+			"b": {
+				"label": "𝄞"
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "bigint order above 2^53",
+			"a": {
+				"big": "9007199254740992"
+			},
+			"b": {
+				"big": "9007199254740993"
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"big"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "full tie with equal keys",
+			"a": {
+				"count": 1
+			},
+			"b": {
+				"count": 1
+			},
+			"keyA": "x",
+			"keyB": "x",
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 0
+		},
+		{
+			"name": "bool orders false before true",
+			"a": {
+				"flag": false
+			},
+			"b": {
+				"flag": true
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"flag"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "NaN sorts after a finite value under asc",
+			"a": {
+				"ratio": "NaN"
+			},
+			"b": {
+				"ratio": 1
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "NaN sorts after a finite value under desc too",
+			"a": {
+				"ratio": "NaN"
+			},
+			"b": {
+				"ratio": 1
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"ratio"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "two NaNs tie and fall through to the next key",
+			"a": {
+				"ratio": "NaN",
+				"label": "b"
+			},
+			"b": {
+				"ratio": "NaN",
+				"label": "a"
+			},
+			"keyA": "x",
+			"keyB": "y",
+			"orderBy": [
+				{
+					"path": [
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				},
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "NaN sorts before a missing value",
+			"a": {
+				"settings": {
+					"ratio": "NaN"
+				}
+			},
+			"b": {},
+			"keyA": "b",
+			"keyB": "a",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "NaN sorts before a missing value under desc too",
+			"a": {
+				"settings": {
+					"ratio": "NaN"
+				}
+			},
+			"b": {},
+			"keyA": "b",
+			"keyB": "a",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "Infinity orders above a finite value",
+			"a": {
+				"ratio": "Infinity"
+			},
+			"b": {
+				"ratio": 1
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		},
+		{
+			"name": "text fields order by their visible string",
+			"a": {
+				"body": "AQEBcAUBAAEFBgVhcHBsZQA="
+			},
+			"b": {
+				"body": "AQEBcAYBAAEGBgZiYW5hbmEA"
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "text ordering reads the projection, not the encoding",
+			"a": {
+				"body": "AQEBcQkDAAECBwJ6egADBQQAAgVhcHBsZQAIAgUABwJ6egA="
+			},
+			"b": {
+				"body": "AQEBcAYBAAEGBgZiYW5hbmEA"
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "an absent text field ties with an empty document and falls through to row key",
+			"a": {},
+			"b": {
+				"body": "AQAAAA=="
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "astral text orders by UTF-16 code unit",
+			"a": {
+				"body": "AQEBcAEBAAEBBgPvv70A"
+			},
+			"b": {
+				"body": "AQEBcAEBAAEBBgTwnYSeAA=="
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": 1
+		}
+	],
+	"orderCases": [
+		{
+			"name": "multi-key sort with tie fallback and key tie-break",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 2,
+						"label": "b"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"count": 1,
+						"label": "z"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": 2,
+						"label": "a"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"count": 2,
+						"label": "a"
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_DESC"
+				},
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r3",
+				"r4",
+				"r1",
+				"r2"
+			]
+		},
+		{
+			"name": "missing values sort last regardless of direction",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"settings": {
+							"size": 5
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"size": 9
+						}
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"size"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": [
+				"r3",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "real then NaN then missing under asc",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "-Infinity"
+						}
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r4",
+				"r3",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "real then NaN then missing under desc too",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "-Infinity"
+						}
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": [
+				"r3",
+				"r4",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "bigint ordering above 2^53",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"big": "9007199254740993"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"big": "9007199254740992"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"big": "-9007199254740993"
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"big"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r3",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "astral labels order by UTF-16 code unit",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "𝄞"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "�"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "a"
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r3",
+				"r1",
+				"r2"
+			]
+		},
+		{
+			"name": "text fields sort by visible string",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"body": "AQEBcAYBAAEGBgZiYW5hbmEA"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"body": "AQEBcQkDAAECBwJ6egADBQQAAgVhcHBsZQAIAgUABwJ6egA="
+					}
+				},
+				{
+					"key": "r3",
+					"row": {}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"body": "AQEBcAYBAAEGBgpjYWbDqSDwn46JAA=="
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r3",
+				"r2",
+				"r1",
+				"r4"
+			]
+		}
+	],
+	"compileErrorCases": [
+		{
+			"name": "str op on a number field",
+			"cond": {
+				"str": {
+					"path": [
+						"count"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "3"
+				}
+			}
+		},
+		{
+			"name": "str op on an opaque bytes field",
+			"cond": {
+				"str": {
+					"path": [
+						"raw"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "x"
+				}
+			}
+		},
+		{
+			"name": "cmp on a message leaf",
+			"cond": {
+				"cmp": {
+					"path": [
+						"settings"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "cmp on an opaque bytes leaf",
+			"cond": {
+				"cmp": {
+					"path": [
+						"raw"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "cmp on a map leaf",
+			"cond": {
+				"cmp": {
+					"path": [
+						"attrs"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "cmp on a repeated leaf",
+			"cond": {
+				"cmp": {
+					"path": [
+						"tags"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "in on a message leaf",
+			"cond": {
+				"in": {
+					"path": [
+						"settings"
+					],
+					"values": [
+						{
+							"stringValue": "x"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "rep op on a singular field",
+			"cond": {
+				"rep": {
+					"path": [
+						"label"
+					],
+					"op": "REP_OP_IS_EMPTY"
+				}
+			}
+		},
+		{
+			"name": "rep has on a repeated message field",
+			"cond": {
+				"rep": {
+					"path": [
+						"members"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "u1"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "orderBy a message leaf",
+			"orderBy": [
+				{
+					"path": [
+						"doc"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			]
+		},
+		{
+			"name": "orderBy an opaque bytes leaf",
+			"orderBy": [
+				{
+					"path": [
+						"raw"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			]
+		},
+		{
+			"name": "orderBy a repeated leaf",
+			"orderBy": [
+				{
+					"path": [
+						"tags"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			]
+		},
+		{
+			"name": "orderBy a map leaf",
+			"orderBy": [
+				{
+					"path": [
+						"attrs"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			]
+		},
+		{
+			"name": "any over a repeated scalar, which has no element fields to ask about",
+			"cond": {
+				"exists": {
+					"path": [
+						"tags"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"uid"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "u1"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "any over a singular message field",
+			"cond": {
+				"exists": {
+					"path": [
+						"settings"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"color"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "red"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "an any() sub-condition naming a field the element type does not have",
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"nope"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "an any() over a reference list reaching past the target key",
+			"type": "issue",
+			"cond": {
+				"exists": {
+					"path": [
+						"blocked_by"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"title"
+							],
+							"op": "STR_OP_CONTAINS",
+							"value": "x"
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "has over a repeated message list with no reference identity",
+			"cond": {
+				"rep": {
+					"path": [
+						"members"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "u1"
+						}
+					]
+				}
+			}
+		}
+	]
+}

@@ -1,0 +1,20 @@
+# TypeScript generation is deliberately narrower than Go's: syncplane/cursor holds
+# the server's pull-position types (what is inside the opaque `bytes` cursor).
+# Excluding them here is what makes "cursors are opaque tokens" a property of
+# what ships rather than a convention — the client package cannot export a
+# schema it never generated.
+version: v2
+clean: true
+inputs:
+  - directory: proto/contract
+  - directory: proto/private
+    exclude_paths:
+      - proto/private/syncplane/cursor
+  - directory: proto/examples
+plugins:
+  # TypeScript message types + service descriptors (connect-es v2 consumes these)
+  - remote: buf.build/bufbuild/es:v2.12.0
+    out: client/src/gen
+    opt:
+      - target=ts
+      - import_extension=js

@@ -1,0 +1,426 @@
+import { type DescMessage, fromBinary, type MessageShape, toBinary } from '@bufbuild/protobuf';
+
+import {
+	confirmedKey,
+	confirmedPrefix,
+	type ConfirmedRecord,
+	confirmedWsPrefix,
+	overlayKey,
+	overlayPrefix,
+	type OverlayRecord,
+	overlayTextPrefix,
+	overlayTextRowPrefix,
+	overlayTextWsPrefix,
+	overlayWsPrefix,
+	splitOverlayTextSuffix,
+	splitWsKey,
+} from './keys.js';
+import type { KVRead } from './kv/store.js';
+import {
+	type EntityDef,
+	type EntityRegistry,
+	setTextFieldBytes,
+	textFieldBytes,
+} from './mutations.js';
+import { sortOrderedFields } from './ordering.js';
+import { reportError } from './report.js';
+import {
+	applyFragment,
+	decodeFragment,
+	decodeTextDoc,
+	encodeTextDoc,
+	type TextDoc,
+} from './text/index.js';
+import { textResidency } from './text/residency.js';
+import {
+	foldCacheKey,
+	foldCacheOf,
+	type FoldEntry,
+	isFragmentPrefix,
+	sameFragments,
+} from './textfold.js';
+
+/**
+ * Folds one row's optimistic text log (`ot/`) into its bytes, so every reader
+ * downstream of here sees whole documents — the same contract the confirmed
+ * store and the wire keep. A text edit is stored as the fragment it added
+ * rather than as a rewritten row (see keys.ts), and this is where that is put
+ * back together.
+ *
+ * Free for entities that declare no text field: the registry settles that from
+ * the schema alone, with no read.
+ *
+ * A fragment that will not apply is dropped rather than thrown: the local log
+ * is derived state whose base can legitimately go missing (a mutation rejected
+ * and dropped strands the edits queued behind it, which is the same case
+ * `withoutUnapplicableText` absorbs on the write path). Losing an optimistic
+ * edit here is a display regression that the next rebase corrects; failing the
+ * read would take down every watcher bound to the entity.
+ */
+export async function foldTextLog(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+	key: string,
+	bytes: Uint8Array,
+): Promise<Uint8Array> {
+	if (registry.textPathsOf(entity).length === 0) return bytes;
+	const fragments = new Map<string, Uint8Array[]>();
+	for await (const [ k, v ] of tx.scan(overlayTextRowPrefix(entity, workspaceId, key))) {
+		const field = fieldOfTextKey(entity, k);
+		if (field === undefined) continue;
+		const list = fragments.get(field);
+		if (list === undefined) fragments.set(field, [ v as Uint8Array ]);
+		else list.push(v as Uint8Array);
+	}
+	return applyTextLog(registry, entity, workspaceId, key, fragments, bytes);
+}
+
+/** The field segment of an `ot/` key, given the entity it was scanned under. */
+function fieldOfTextKey(entity: string, k: string): string | undefined {
+	return splitOverlayTextSuffix(k.slice(overlayTextPrefix(entity).length))?.field;
+}
+
+/**
+ * Applies already-collected fragments, in the key order they were scanned in —
+ * which is the order the edits were made, and therefore an order in which each
+ * fragment's parents already exist.
+ *
+ * Served from the row's cached fold whenever that still matches what is on
+ * disk, which is what keeps this off the O(document) path it would otherwise be
+ * on every notification (see textfold.ts). The cache decides only how much work
+ * to redo: every result below is what a cold fold would have produced.
+ */
+function applyTextLog(
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+	key: string,
+	fragments: Map<string, Uint8Array[]>,
+	bytes: Uint8Array,
+): Uint8Array {
+	if (fragments.size === 0) return bytes;
+	const def = registry.get(entity);
+	if (!def) return bytes;
+	const cache = foldCacheOf(registry);
+	const cacheKey = foldCacheKey(entity, workspaceId, key);
+	const prior = cache.take(cacheKey, bytes);
+	// Same row, same fragments: the fold is a pure function of the two, so
+	// neither the row nor any document has to be decoded to know the answer.
+	if (prior !== undefined && sameFragments(prior.frags, fragments)) {
+		cache.put(cacheKey, prior);
+		return prior.result;
+	}
+	let msg;
+	try {
+		msg = fromBinary(def.schema, bytes);
+	} catch {
+		return bytes;
+	}
+	const fields = new Map<string, Uint8Array>();
+	let changed = false;
+	for (const [ field, list ] of fragments) {
+		const base = textFieldBytes(def.schema, field, msg) ?? new Uint8Array();
+		const folded = foldFragments(base, list, entity, field, reusable(prior, field, list));
+		if (folded === undefined) continue;
+		fields.set(field, folded.bytes);
+		// The document this fold produced, left where the next fold of this
+		// field and any reader rendering it will look for it.
+		textResidency.put(folded.bytes, folded.doc);
+		if (folded.bytes !== base) {
+			setTextFieldBytes(def.schema, field, msg, folded.bytes);
+			changed = true;
+		}
+	}
+	const result = changed ? toBinary(def.schema, msg) : bytes;
+	cache.put(cacheKey, { base: bytes, frags: fragments, fields, result });
+	return result;
+}
+
+/**
+ * The document an entry can be extended from for one field: the one the last
+ * fold of this field produced, when the fragments already in it are a prefix of
+ * the ones just scanned. Anything else — a field the entry never held, a list
+ * that lost or reordered a fragment, a document since evicted from residency —
+ * has to be folded from the base again.
+ *
+ * Taken rather than borrowed, because extending it mutates it (residency.ts).
+ */
+function reusable(
+	prior: FoldEntry | undefined,
+	field: string,
+	list: readonly Uint8Array[],
+): { doc: TextDoc; applied: number } | undefined {
+	if (prior === undefined) return undefined;
+	const at = prior.fields.get(field);
+	const frags = prior.frags.get(field);
+	if (at === undefined || frags === undefined || !isFragmentPrefix(frags, list)) return undefined;
+	const doc = textResidency.take(at);
+	return doc === undefined ? undefined : { doc, applied: frags.length };
+}
+
+/**
+ * Applies a field's whole fragment list to its base document, or — given a
+ * `prior` document already holding a prefix of that list — only the tail.
+ *
+ * Decoded ONCE and encoded once, however many fragments there are. Going
+ * through the bytes-level entry point per fragment would decode and re-encode
+ * the document each time, making a burst of N edits cost N whole-document round
+ * trips — which is the shape this keyspace exists to avoid, reintroduced on the
+ * read path. `prior` removes the remaining decode as well, so a keystroke
+ * appended to a fold that is already cached costs the encode alone.
+ *
+ * Returns undefined when the base will not decode; the field is then left as
+ * it is, and no document is cached for it.
+ *
+ * A fragment that will not apply is dropped rather than thrown (see foldTextLog
+ * for why). `applyFragment` may mutate before it fails, so recovery rebuilds
+ * from the base and the fragments already known to apply rather than trusting a
+ * half-applied document — including `prior`, which is why a failure gives up on
+ * it too. That path costs a re-decode per failure, which is the right trade for
+ * something that only happens when a rejected mutation stranded the edits
+ * queued behind it.
+ */
+function foldFragments(
+	base: Uint8Array,
+	list: readonly Uint8Array[],
+	entity: string,
+	field: string,
+	prior?: { doc: TextDoc; applied: number },
+): { doc: TextDoc; bytes: Uint8Array } | undefined {
+	const applied: Uint8Array[] = prior === undefined ? [] : [ ...list.slice(0, prior.applied) ];
+	let doc = prior?.doc;
+	if (doc === undefined) {
+		try {
+			doc = decodeTextDoc(base, '');
+		} catch {
+			return undefined;
+		}
+	}
+	for (const fragment of list.slice(applied.length)) {
+		try {
+			applyFragment(doc, decodeFragment(fragment));
+			applied.push(fragment);
+		} catch (err) {
+			reportError(`text: a local edit to ${entity}/${field} could not be replayed`, err);
+			try {
+				doc = decodeTextDoc(base, '');
+			} catch {
+				return undefined;
+			}
+			for (const good of applied) applyFragment(doc, decodeFragment(good));
+		}
+	}
+	return { doc, bytes: applied.length === 0 ? base : encodeTextDoc(doc) };
+}
+
+/**
+ * Whether a row exists in the merged view, without decoding it or folding its
+ * text log. The question a PATCH's delete-wins check asks, and all it needs:
+ * the answer turns on the overlay's tombstone and the row's presence, neither
+ * of which the text log can change (a log entry only ever edits a field of a
+ * row that is already there).
+ */
+export async function rowPresent(
+	tx: KVRead,
+	entity: string,
+	workspaceId: string,
+	key: string,
+): Promise<boolean> {
+	const overlay = (await tx.get(overlayKey(entity, workspaceId, key))) as OverlayRecord | undefined;
+	if (overlay !== undefined) return !overlay.del;
+	return await tx.has(confirmedKey(entity, workspaceId, key));
+}
+
+/** Resolves a single row overlay-first. Returns the row bytes or undefined. */
+export async function readMergedRow(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+	key: string,
+): Promise<Uint8Array | undefined> {
+	const overlay = (await tx.get(overlayKey(entity, workspaceId, key))) as OverlayRecord | undefined;
+	if (overlay !== undefined) {
+		if (overlay.del) return undefined;
+		return await foldTextLog(tx, registry, entity, workspaceId, key, overlay.v);
+	}
+	const confirmed = (await tx.get(confirmedKey(entity, workspaceId, key))) as
+		| ConfirmedRecord
+		| undefined;
+	if (confirmed === undefined) return undefined;
+	return await foldTextLog(tx, registry, entity, workspaceId, key, confirmed.v);
+}
+
+/** A merged-view row: its bytes plus the confirmed base version (see Row.version). */
+export interface MergedRow {
+	v: Uint8Array;
+	version: bigint;
+}
+
+/**
+ * Resolves a single row overlay-first, also returning its confirmed base
+ * version — the workspace sequence the row was last server-acked at, or 0n
+ * when the row exists only optimistically (a local create not yet acked).
+ * The version reflects the confirmed base even when an optimistic overlay
+ * shadows it, which is exactly the base an expectedVersion CAS guard wants.
+ */
+export async function readMergedRowWithVersion(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+	key: string,
+): Promise<MergedRow | undefined> {
+	const overlay = (await tx.get(overlayKey(entity, workspaceId, key))) as OverlayRecord | undefined;
+	const confirmed = (await tx.get(confirmedKey(entity, workspaceId, key))) as
+		| ConfirmedRecord
+		| undefined;
+	const version = confirmed ? BigInt(confirmed.ver) : 0n;
+	const base = overlay !== undefined
+		? (overlay.del ? undefined : overlay.v)
+		: confirmed?.v;
+	if (base === undefined) return undefined;
+	return { v: await foldTextLog(tx, registry, entity, workspaceId, key, base), version };
+}
+
+/** A merged-view row plus the workspace it belongs to. */
+export interface ScopedRow extends MergedRow {
+	workspaceId: string;
+	key: string;
+}
+
+/**
+ * Scans live rows of an entity, overlay-first, in key order. With
+ * `workspaceId` it scans that workspace's contiguous prefix; without it, every
+ * workspace in the store — one prefix scan either way, which is what the
+ * entity-first key order buys.
+ *
+ * Results are ordered by (workspace, key) for a cross-workspace scan and by key
+ * within a single workspace, which is the order the underlying prefix scan
+ * yields.
+ */
+export async function scanMergedRows(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId?: string,
+): Promise<ScopedRow[]> {
+	const cPrefix = workspaceId === undefined
+		? confirmedPrefix(entity)
+		: confirmedWsPrefix(entity, workspaceId);
+	const oPrefix = workspaceId === undefined
+		? overlayPrefix(entity)
+		: overlayWsPrefix(entity, workspaceId);
+	// Keyed by the raw suffix (`<wsSegment>/<key>` or `<key>`), which is exactly
+	// what both prefixes share, so the overlay lines up with the confirmed row
+	// without re-encoding the workspace.
+	const rows = new Map<string, ScopedRow>();
+	const split = (suffix: string): { workspaceId: string; key: string } =>
+		workspaceId === undefined ? splitWsKey(suffix) : { workspaceId, key: suffix };
+	for await (const [ k, v ] of tx.scan(cPrefix)) {
+		const suffix = k.slice(cPrefix.length);
+		const rec = v as ConfirmedRecord;
+		rows.set(suffix, { ...split(suffix), v: rec.v, version: BigInt(rec.ver) });
+	}
+	for await (const [ k, v ] of tx.scan(oPrefix)) {
+		const suffix = k.slice(oPrefix.length);
+		const record = v as OverlayRecord;
+		if (record.del) {
+			rows.delete(suffix);
+		} else {
+			// Keep the confirmed base version under an optimistic edit; a row that
+			// exists only optimistically has no confirmed base, so version 0n.
+			const prior = rows.get(suffix);
+			rows.set(suffix, {
+				...(prior ?? split(suffix)),
+				v: record.v,
+				version: prior?.version ?? 0n,
+			});
+		}
+	}
+	await foldTextLogsInto(tx, registry, entity, workspaceId, rows);
+	return [ ...rows.entries() ]
+		.sort(([ a ], [ b ]) => (a < b ? -1 : a > b ? 1 : 0))
+		.map(([ , row ]) => row);
+}
+
+/**
+ * The scan's counterpart to foldTextLog: one prefix scan of the whole entity's
+ * text log, grouped onto the rows it belongs to, rather than a scan per row.
+ * Rows are keyed by the same `<wsSegment>/<key>` (or `<key>`) suffix the row
+ * keyspaces share, so a log entry lines up with its row without re-encoding the
+ * workspace.
+ */
+async function foldTextLogsInto(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string | undefined,
+	rows: Map<string, ScopedRow>,
+): Promise<void> {
+	if (registry.textPathsOf(entity).length === 0 || rows.size === 0) return;
+	const prefix = workspaceId === undefined
+		? overlayTextPrefix(entity)
+		: overlayTextWsPrefix(entity, workspaceId);
+	const entityPrefix = overlayTextPrefix(entity);
+	const byRow = new Map<string, Map<string, Uint8Array[]>>();
+	for await (const [ k, v ] of tx.scan(prefix)) {
+		// Split from the entity prefix, not the scan prefix: an `ot/` key always
+		// carries its workspace segment, and a cross-workspace scan needs it back
+		// in the suffix to line up with the rows, which are keyed the same way.
+		const rest = k.slice(entityPrefix.length);
+		const parts = splitOverlayTextSuffix(rest);
+		if (parts === undefined) continue;
+		const suffix = workspaceId === undefined
+			? `${rest.slice(0, rest.indexOf('/'))}/${parts.key}`
+			: parts.key;
+		if (!rows.has(suffix)) continue;
+		let fields = byRow.get(suffix);
+		if (fields === undefined) byRow.set(suffix, fields = new Map());
+		const list = fields.get(parts.field);
+		if (list === undefined) fields.set(parts.field, [ v as Uint8Array ]);
+		else list.push(v as Uint8Array);
+	}
+	for (const [ suffix, fields ] of byRow) {
+		const row = rows.get(suffix)!;
+		rows.set(suffix, {
+			...row,
+			v: applyTextLog(registry, entity, row.workspaceId, row.key, fields, row.v),
+		});
+	}
+}
+
+export interface Row<T = unknown> {
+	key: string;
+	value: T;
+	/**
+	 * Workspace the row lives in. Always set — a row is only ever inside one
+	 * workspace partition — and it is what makes a cross-workspace result
+	 * attributable (and routable back to the right `client.ws(id)` for a write).
+	 */
+	workspaceId: string;
+	/**
+	 * Server-confirmed version this row is based on — the workspace sequence
+	 * that last wrote it. 0n for rows that exist only optimistically (a local
+	 * create not yet acked). Pass as `expectedVersion` to a mutate call for a
+	 * compare-and-swap that rejects if the row moved server-side since you read.
+	 */
+	version: bigint;
+}
+
+export async function scanDecoded<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	workspaceId?: string,
+): Promise<Row<MessageShape<D>>[]> {
+	const rows = await scanMergedRows(tx, registry, def.name, workspaceId);
+	return rows.map((row) => {
+		const value = fromBinary(schema, row.v);
+		sortOrderedFields(schema, value);
+		return { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+	});
+}

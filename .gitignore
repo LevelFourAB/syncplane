@@ -1,0 +1,12 @@
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.task/
+.pnpm-store/
+*.test
+test-results/
+playwright-report/
+client/test/perf/results/
+client/test/perf/.corpus/

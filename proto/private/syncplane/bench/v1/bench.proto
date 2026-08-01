@@ -1,0 +1,203 @@
+syntax = "proto3";
+
+// Package syncplane.bench.v1 is the corpus the browser sync benchmarks measure
+// against: an issue tracker, because it is the smallest domain that puts every
+// cost the sync path can pay into one workspace.
+//
+// The entities are chosen for what they exercise, not for realism:
+//
+//   - Issue is the bulk of the corpus and carries the whole reference surface —
+//     two to-one refs to the same target, a to-many self-ref, a composite
+//     index, a fan-out index over repeated labels, and a keyed message list.
+//   - Comment is the append-heavy child: many small rows behind one reverse
+//     reference, which is what a follow closure has to widen over.
+//   - Note carries a collaborative-text body, so a corpus can be given weight
+//   in
+//     bytes without being given weight in rows.
+//   - Flat is the control. No refs, no text, no declared indexes, no nesting —
+//     a bootstrap number for it is the price of moving a row and nothing else,
+//     which is what makes the other entities' numbers attributable.
+//
+// Row counts per tier live in internal/benchapp, not here.
+//
+// Repo-private and benchmark-only. The entity names are unqualified ("issue",
+// "comment") even though syncplane.testdata.v1 registers some of the same ones:
+// entity names are unique per registry, and no process registers both. The
+// alternative — prefixing them — would spend the readability of every follow
+// spec in the suite (`bench_comments` rather than `comments`, since a reverse
+// relation is named by pluralizing the source ENTITY) on a collision that
+// cannot occur.
+package syncplane.bench.v1;
+
+import "syncplane/v1/options.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/bench/v1;benchv1";
+
+// Dimension entity: few rows, referenced by many. A follow from an issue lands
+// here, so it is also what a partial-sync client picks up beyond its base
+// scope.
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	// Short human key ("ENG-2"), the shape a real tracker addresses by.
+	string slug = 2;
+	string name = 3;
+	string status = 4 [(syncplane.v1.field_behavior) = { indexed: true }];
+	int64 created_at_ms = 5;
+}
+
+// The other follow target. Issue points at it twice, which is what makes the
+// reverse accessors disambiguate rather than collapse.
+message User {
+	option (syncplane.v1.entity) = {
+		name: "user"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string name = 2;
+	string email = 3;
+	string avatar_url = 4;
+	bool active = 5;
+}
+
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string name = 2;
+	string color = 3;
+}
+
+// The bulk entity. Roughly half of every tier's rows are issues, so bootstrap
+// and window-maintenance numbers are dominated by this message's shape.
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		// The board query: one project's issues, newest first. A path ending at
+		// a single-key reference extends to that reference's key field, so this
+		// component and a query naming `project` agree.
+		index: {
+			name: "by_project_updated"
+			key: [ { path: "project" }, { path: "updated_at_ms" desc: true } ]
+		}
+		// The triage query: filter on state, order by priority. The composite
+		// shape a single-field index can only serve by re-checking candidates.
+		index: {
+			name: "by_state_priority"
+			key: [ { path: "state" }, { path: "priority" desc: true } ]
+		}
+		// Fan-out: a row takes one position per label, so a
+		// labelled-newest-first window costs one range read rather than a scan.
+		index: {
+			name: "by_label_updated"
+			key: [ { path: "labels" }, { path: "updated_at_ms" desc: true } ]
+		}
+	};
+
+	string id = 1;
+	string title = 2;
+	// Plain string, not collaborative text: this is the payload-weight dial for
+	// the bulk entity, and giving it CRDT semantics would put text merge cost
+	// into every issue benchmark. Notes are where text is measured.
+	string body = 3;
+	// To-one ref: the row stores only project.id, the target resolves on read.
+	Project project = 4;
+	// Two refs to the same target, so reverse accessors disambiguate.
+	User assignee = 5;
+	User reporter = 6;
+	// To-many self-ref: a dependency chain, which is what `followDepth` > 1 has
+	// to walk transitively.
+	repeated Issue blocked_by = 7;
+	string state = 8 [(syncplane.v1.field_behavior) = { indexed: true }];
+	int32 priority = 9;
+	int32 estimate = 10;
+	// Write recency as a field. `byRecency` windows rank by workspace sequence
+	// and need no field at all; this is its comparable counterpart, so a
+	// benchmark can price an ordering the server has to read rows to compute.
+	int64 updated_at_ms = 11;
+	int64 created_at_ms = 12;
+	// Repeated scalar with a field mark — membership is a range read and one
+	// row occupies several index positions.
+	repeated string labels = 13
+		[(syncplane.v1.field_behavior) = { indexed: true }];
+	// Keyed message list: merged per element rather than replaced whole, so a
+	// row's merge cost grows with the list rather than with the row.
+	repeated ChecklistItem checklist = 14
+		[(syncplane.v1.field_behavior) = { key_field: "id" }];
+}
+
+// Element of Issue.checklist. Not an entity; identity comes from the field's
+// key_field.
+message ChecklistItem {
+	string id = 1;
+	string text = 2;
+	bool done = 3;
+}
+
+// The append-heavy child. Comments outnumber issues, are small, and hang off a
+// single reference — the shape that makes a reverse follow expensive and a
+// recency window cheap.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		index: {
+			name: "by_issue_created"
+			key: [ { path: "issue" }, { path: "created_at_ms" desc: true } ]
+		}
+	};
+
+	string id = 1;
+	Issue issue = 2;
+	User author = 3;
+	string body = 4;
+	int64 created_at_ms = 5;
+}
+
+// Byte weight without row weight: few rows, each holding a collaborative-text
+// document. Separated from Issue so the text CRDT's cost stays attributable
+// instead of being spread across every issue in the corpus.
+message Note {
+	option (syncplane.v1.entity) = {
+		name: "note"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string title = 2;
+	Project project = 3;
+	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
+	int64 updated_at_ms = 5;
+}
+
+// The control. Deliberately the dullest row the engine can move: scalars, one
+// repeated scalar and one map, no references, no text, no declared index. Its
+// per-row bootstrap cost is the floor every other entity's cost is read
+// against.
+message Flat {
+	option (syncplane.v1.entity) = {
+		name: "flat"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string name = 2;
+	string category = 3;
+	string note = 4;
+	int64 amount = 5;
+	int32 count = 6;
+	double ratio = 7;
+	bool active = 8;
+	int64 created_at_ms = 9;
+	repeated string tags = 10;
+	map<string, string> attrs = 11;
+}

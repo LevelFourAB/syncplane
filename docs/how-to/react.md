@@ -1,0 +1,188 @@
+# Build a UI with React
+
+`syncplane/react` is a first-party hooks layer over the same client — a separate
+entry point, with `react >= 18` as an optional peer dependency, so a non-React
+app never pulls it in.
+
+```tsx
+import { createReactSync } from 'syncplane/react';
+
+const { SyncProvider, db, useSyncStatus, useUndo } = createReactSync([
+	TodoSchema,
+]);
+
+// The provider builds the client, start()s it, and close()s it when the tree
+// unmounts.
+<SyncProvider
+	options={ { url, workspaceId: 'ws-123', entities: [ TodoSchema ] } }
+>
+	<TodoList />
+</SyncProvider>;
+
+function TodoList() {
+	const todos = db.todo.useQuery({ where: (t) => t.completed.eq(false) });
+	const { put, patch, del } = db.todo.useMutate();
+	const { online, pendingMutations } = useSyncStatus();
+	// ...
+}
+```
+
+`createReactSync(entities)` mirrors `client.db` exactly: same
+`uncapitalize(schema.name)` keys, same throw on two entities whose simple names
+collide. Every hook reads the live client from context at call time, so one `db`
+works under any provider (tests, several clients, a swapped connection).
+
+## Who owns the client
+
+`<SyncProvider>` takes **either** `options` **or** `client` — exactly one:
+
+- **`options`** — the provider constructs the client on mount, `start()`s it and
+  `close()`s it on unmount. `options` is read **once**; changing it later does
+  nothing, because swapping the store under a mounted tree is not something a
+  re-render can do safely. To move to another account, remount with a different
+  React `key`.
+- **`client`** — you built it and you keep its lifecycle. Right when something
+  outside React (a test, a worker, a non-React route) also holds it.
+
+Children render immediately in both cases: reads and writes are local-first and
+work before — and without — a successful `start()`. A `start()` that fails
+_locally_ (bad configuration, a KV format mismatch) is thrown during render for
+the nearest error boundary to catch; pass `onStartError` to handle it yourself.
+An unreachable **server** is not that: it shows up on `useSyncStatus()` and
+retries on its own.
+
+The provider is safe under `<StrictMode>`, whose mount → unmount → remount would
+otherwise close a client that cannot be reopened.
+
+## Choosing a workspace
+
+Every hook resolves its workspace in this order: an explicit `{ workspaceId }`
+option, then the nearest `<WorkspaceProvider>`, then the client's
+`defaultWorkspace`. A single-workspace app never thinks about it.
+
+```tsx
+// One route, one workspace: scope the subtree once.
+<WorkspaceProvider workspaceId={ teamId }>
+	<TodoList />
+</WorkspaceProvider>;
+
+// Or name it per call, when one component shows two workspaces at once.
+const personal = db.todo.useQuery({}, { workspaceId: 'personal' });
+```
+
+One client covers an account and all its workspaces
+([Hold several workspaces on one client](multiple-workspaces.md)), so switching
+workspaces is a re-render, not a reconnect. Reads, writes, text handles, undo
+and `useWorkspaceStatus()` all follow the resolved workspace; only
+`useSyncStatus()` stays account-wide. A client that holds several workspaces
+with no default throws a hook-level error naming the fix.
+
+## The hooks
+
+- **`useQuery(query, opts?)`** — the query is compiled and structurally hashed on
+  every render instead of taking a deps array: a structurally equal query (new
+  lambdas included) reuses the subscription, a changed one resubscribes. The
+  result is the same `coverage`-carrying array `client.query` returns, and it
+  keeps its reference until the rows actually change, so a memoized child does
+  not re-render on unrelated commits.
+
+  It also carries `loading`, `hydrating` and `error` — non-enumerable, like
+  `coverage`, so `toEqual([])` and `JSON.stringify` do not see them:
+
+  ```tsx
+  const todos = db.todo.useQuery({ where: (t) => t.completed.eq(false) });
+  if (todos.loading || todos.hydrating) return <Spinner />; // vs. genuinely empty
+  if (todos.error) return <Failed error={ todos.error } />;
+  return <ul>{ todos.map((t) => <Todo key={ t.key } row={ t } />) }</ul>;
+  ```
+
+  `loading` is true until the first callback — the only way to tell "not read
+  yet" from "read, and there is nothing", since both are `[]`. `hydrating` is
+  the same question one level out: a cold client's first snapshot lands entity
+  by entity, so a result can be read, empty, and still on its way. Guard an
+  empty state with both. `error` is set when the subscription could not be
+  established at all (the store never came up), which means no rows will ever
+  arrive; rows already delivered stay put. `{ include }` hydrates references and
+  is folded into the subscription identity.
+
+- **`useRow(key, opts?)`** — `{ row, loading, hydrating, error, patch, update,
+  del }`, where the writers bind the row's current `version` as the default
+  `expectedVersion`: a local-first compare-and-swap for free. They reject with a
+  clear error while the row is undefined, and `loading`/`hydrating` separate the
+  reasons it can be undefined — the entity has not been read yet, its rows are
+  still arriving, or it has all of them and this key is not one.
+
+  Every `useRow` on the same workspace, entity and `include` shares **one**
+  subscription with a key index in front of it, so a list of row hooks costs one
+  watch, and a commit re-renders only the hooks whose own row moved.
+
+- **`useSuspenseQuery(query, opts?)` / `useSuspenseRow(key, opts?)`** — the same
+  hooks, waiting for the first callback instead of reporting `loading`. They are
+  separate hooks rather than an option because the choice picks a fixed hook path
+  and must not change between renders of a call site. A subscription that fails
+  throws here for the nearest error boundary, since a suspended component has no
+  render to carry an error state.
+
+- **`useMutate(opts?)`** — the stable `{ put, patch, update, del }` facade.
+  Mutations are optimistic, so these promises resolve on **local** commit; a
+  server rejection arrives later, on the hook below.
+
+- **`useOnMutationRejected(handler, opts?)`** — runs `handler` for every mutation
+  that will never be applied: a server rejection, a poison drop, a purge, a
+  format upgrade. This is what a "your change could not be saved" toast hangs
+  off:
+
+  ```tsx
+  useOnMutationRejected((info) => {
+  	const what = info.targets.map((t) => `${t.entity} ${t.key}`).join(', ');
+  	toast(`Could not save ${what}: ${info.errorMessage}`);
+  });
+  ```
+
+  `info.targets` names the rows the mutation would have written (one for a CRUD
+  mutation, one per member for a batch), and `info.mutator` names the custom
+  mutator when it was one. The handler is held in a ref, so an inline arrow does
+  not resubscribe. Only the hook's resolved workspace is delivered by default;
+  pass `{ allWorkspaces: true }` for an app-wide surface. Rejections are
+  best-effort, not durable — see [Handle failures](handle-failures.md).
+
+- **`useText(key, field, opts?)`** — see
+  [Use collaborative text](use-collaborative-text.md#in-react).
+
+- **`useSyncStatus()`** — the live account-wide status object.
+  **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending
+  count, scope, access verdict and first-snapshot progress), which a busy
+  neighbour workspace does not re-render.
+
+  `hydration` is set only while a cold client is still downloading its first
+  snapshot — `{ pending, total, done }`, so a one-off progress bar is
+  `done / total` and disappears on its own:
+
+  ```tsx
+  const { hydration } = useWorkspaceStatus();
+  if (hydration) {
+  	return <Loading done={ hydration.done } total={ hydration.total } />;
+  }
+  ```
+
+- **`useUndo(opts?)`** — `{ canUndo, canRedo, undo, redo }` over the resolved
+  workspace's undo stacks; they are per workspace, because the mutation ids they
+  reference are.
+
+All of them are built on `useSyncExternalStore` with an SSR snapshot, and
+nothing hands out a mutable row: results are readonly, which is what makes the
+snapshot stable and tearing-free.
+
+## Server components and SSR
+
+The `syncplane/react` entry carries a `'use client'` directive, so a React
+Server Components build (the Next.js App Router, for one) can import it directly
+without an app-side wrapper. The hooks are still client-side: on the server they
+render their empty snapshot, since the data lives in the browser's store.
+
+## Related
+
+- [TypeScript client API](../reference/typescript-client.md#12-react-layer-syncplanereact)
+  — exact signatures.
+- [Handle failures](handle-failures.md) — where a rejected mutation shows up,
+  since it is not on the hook's promise.

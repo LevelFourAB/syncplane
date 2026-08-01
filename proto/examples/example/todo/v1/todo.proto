@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+package example.todo.v1;
+
+import "syncplane/v1/options.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/example/todo/v1;todov1";
+
+message Todo {
+	option (syncplane.v1.entity) = {
+		name: "todo"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string title = 2;
+	bool completed = 3;
+	// Milliseconds since epoch, set by the creating client. Used for ordering
+	// in the UI only; the server never interprets it.
+	int64 created_at_ms = 4;
+	// Fractional-indexing order key (generateKeyBetween). Reordering patches
+	// this one field on one row; plain string comparison gives the list
+	// order. Empty sorts first (legacy rows), falling back to created_at_ms.
+	string sort_key = 5;
+}
+
+// Args for the "complete_all" custom mutator.
+message CompleteAllArgs {
+	// When true, also mark already-completed todos (no-op, exercises masks).
+	bool include_completed = 1;
+}
+
+// A collaborative document (the demo's shared workspace notes). body holds an
+// encoded convergent text document: concurrent edits merge without
+// interleaving, and comment marks anchored to ranges travel with the text.
+message Note {
+	option (syncplane.v1.entity) = {
+		name: "note"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	bytes body = 2 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// A comment on a range of a note. The range itself lives INSIDE the note's
+// text document as a mark keyed "comment:<id>" (expand NONE), so it moves
+// with the text; this row carries the comment's content and lifecycle and
+// merges per-field LWW like any entity. Text edit and annotation write ship
+// in one batch so they are atomic and undo together.
+message Annotation {
+	option (syncplane.v1.entity) = {
+		name: "annotation"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	// Ref to the document row this comment belongs to.
+	Note note = 2;
+	string body = 3;
+	string author = 4;
+	bool resolved = 5;
+	int64 created_at_ms = 6;
+}

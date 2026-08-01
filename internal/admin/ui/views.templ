@@ -1,0 +1,601 @@
+package ui
+
+import (
+	"fmt"
+	"strconv"
+)
+
+// EntityPage is the browse page for one entity in one workspace: the header,
+// the view toggle, the filter bar and a paginated rich-cell table. Row clicks
+// open the detail slide-over (htmx → #panel-root).
+templ EntityPage(nav Nav, v EntityView) {
+	@Layout(nav, fmt.Sprintf("%s · %s", v.Title, v.WS)) {
+		<div class="page-head">
+			<div>
+				<div class="page-title">
+					<h1>{ v.Title }</h1>
+					<span class="records">{ countLabel(v.Count, v.More) } { recordsLabel(v.Filtered) }</span>
+				</div>
+				<div class="page-sub">{ v.FullName }</div>
+			</div>
+			<div class="head-actions">
+				<a
+					class="btn btn-primary"
+					href={ templ.SafeURL(rowsURL(v.AppID, v.WS, v.Entity) + "/new") }
+					hx-get={ rowsURL(v.AppID, v.WS, v.Entity) + "/new" }
+					hx-target="#panel-root"
+					hx-swap="innerHTML"
+				>+ New { v.Title }</a>
+			</div>
+		</div>
+		@FilterBar(v.Filter)
+		<div class="table-wrap">
+			if v.FilterError != "" {
+				<div class="empty">{ v.FilterError }</div>
+			} else if len(v.Rows) == 0 {
+				if v.Filtered {
+					<div class="empty">No rows match this filter.</div>
+				} else {
+					<div class="empty">No rows yet.</div>
+				}
+			} else {
+				<table class="grid">
+					<thead>
+						<tr>
+							<th>{ v.PrimaryLabel }</th>
+							for _, c := range v.Columns {
+								<th class={ templ.KV("num", c.Numeric) }>{ c.Label }</th>
+							}
+							<th></th>
+						</tr>
+					</thead>
+					<tbody id="rows">
+						@RowsFragment(v)
+					</tbody>
+				</table>
+			}
+		</div>
+	}
+}
+
+// RowsFragment is the htmx-swappable slice of table rows plus, when more rows
+// follow, a self-replacing "Load more" control. Each row opens the detail
+// panel; the delete button consumes its click so it does not also open it.
+templ RowsFragment(v EntityView) {
+	for _, r := range v.Rows {
+		<tr
+			id={ rowID(v.Entity, r.Key) }
+			hx-get={ fmt.Sprintf("%s/rows/%s", rowsURL(v.AppID, v.WS, v.Entity), r.Key) }
+			hx-target="#panel-root"
+			hx-swap="innerHTML"
+		>
+			<td class="primary"><span class="cell-text">{ primaryText(r) }</span></td>
+			for _, cell := range r.Cells {
+				<td class={ templ.KV("num", cell.Numeric) }>
+					@CellView(cell)
+				</td>
+			}
+			<td class="row-actions">
+				<button
+					class="btn btn-sm btn-danger"
+					hx-delete={ fmt.Sprintf("%s/rows/%s", rowsURL(v.AppID, v.WS, v.Entity), r.Key) }
+					hx-target={ "#" + rowID(v.Entity, r.Key) }
+					hx-swap="outerHTML"
+					hx-confirm={ "Delete " + r.Key + "?" }
+					hx-trigger="click consume"
+				>Delete</button>
+			</td>
+		</tr>
+	}
+	if v.PageMore {
+		<tr id="load-more">
+			<td colspan={ strconv.Itoa(len(v.Columns) + 2) }>
+				<button
+					class="btn btn-ghost btn-sm"
+					hx-get={ v.NextURL }
+					hx-target="#load-more"
+					hx-swap="outerHTML"
+				>Load more</button>
+			</td>
+		</tr>
+	}
+}
+
+// FilterBar is the condition builder above the browse table: a row per
+// condition (field · operator · operand), an add control that clones the blank
+// row, and Apply / Clear.
+//
+// It is a plain GET form, so applying a filter is a navigation and the filter
+// ends up in the URL — shareable, reloadable, and carried by "Load more".
+// Only the per-row refresh (which operators a field admits, which control its
+// operand needs) goes through htmx. The match select and Apply are hidden by
+// CSS until there is something for them to act on, so the bar stays quiet on an
+// unfiltered table without needing a round trip to appear.
+templ FilterBar(v FilterView) {
+	<form class="filter-bar" method="get" action={ templ.SafeURL(v.Action) } data-repeat="f">
+		<span class="lead">Filter</span>
+		<select class="f-match" name="match" aria-label="Combine conditions">
+			<option value="all" selected?={ v.Match != MatchAny }>match all</option>
+			<option value="any" selected?={ v.Match == MatchAny }>match any</option>
+		</select>
+		<div class="filter-conds" data-repeat-items>
+			for _, c := range v.Conds {
+				@FilterCond(v, c)
+			}
+		</div>
+		<div class="filter-actions">
+			<button class="chip-add" type="button" data-repeat-add="f">+ Condition</button>
+			<button class="btn btn-sm btn-primary f-apply" type="submit">Apply</button>
+			if v.Active {
+				<a class="btn btn-sm btn-ghost" href={ templ.SafeURL(v.Action) }>Clear</a>
+			}
+		</div>
+		@repeatTemplate("f") {
+			@FilterCond(v, v.Template)
+		}
+	</form>
+}
+
+// FilterCond is one condition row, and the fragment the row endpoint returns
+// when its field or operator changes. Until a field is chosen there are no
+// operators to offer, so the row is just the field select.
+//
+// A group row is the same head over a block of element-scoped sub-rows. It
+// stays the single .filter-cond so removing it takes the whole group, while
+// sub-rows carry .filter-sub and remove one at a time; every select inside
+// reloads the WHOLE group, which is what round-trips the sub-rows.
+templ FilterCond(v FilterView, c FilterCondView) {
+	if c.Group {
+		<div class="filter-cond filter-group" data-repeat={ c.SubName() }>
+			<div class="filter-group-head">
+				@filterHead(v, c)
+				<button type="button" class="x" data-repeat-remove aria-label="Remove condition">✕</button>
+			</div>
+			<div class="filter-subs" data-repeat-items>
+				for _, s := range c.Subs {
+					@filterSub(v, c, s)
+				}
+			</div>
+			if c.SubTemplate != nil {
+				<button type="button" class="chip-add" data-repeat-add={ c.SubName() }>+ Condition</button>
+				@repeatTemplate(c.SubName()) {
+					@filterSub(v, c, *c.SubTemplate)
+				}
+			}
+		</div>
+	} else {
+		<div class="filter-cond">
+			@filterHead(v, c)
+			@filterOperand(c)
+			<button type="button" class="x" data-repeat-remove aria-label="Remove condition">✕</button>
+			if c.Error != "" {
+				<span class="f-err" role="alert">{ c.Error }</span>
+			}
+		</div>
+	}
+}
+
+// filterHead is a condition's field and operator selects, shared by a plain row
+// and a group's head.
+templ filterHead(v FilterView, c FilterCondView) {
+	<select class="f-path" name={ c.Name + ".path" } aria-label="Field" { v.ReloadAttrs()... }>
+		<option value="">Field…</option>
+		for _, f := range v.Fields {
+			<option value={ f.Path } selected?={ f.Path == c.Path }>{ f.Label }</option>
+		}
+	</select>
+	if len(c.Ops) > 0 {
+		<select class="f-op" name={ c.Name + ".op" } aria-label="Operator" { v.ReloadAttrs()... }>
+			for _, o := range c.Ops {
+				<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+			}
+		</select>
+	}
+}
+
+// filterSub is one sub-condition of a group. Its field select offers the
+// ELEMENT's paths, and both selects reload the enclosing group rather than
+// themselves, so the server re-renders every sub-row against the chosen field.
+templ filterSub(v FilterView, group FilterCondView, c FilterCondView) {
+	<div class="filter-sub">
+		<select class="f-path" name={ c.Name + ".path" } aria-label="Field" { v.ReloadAttrs()... }>
+			<option value="">Field…</option>
+			for _, f := range group.SubFields {
+				<option value={ f.Path } selected?={ f.Path == c.Path }>{ f.Label }</option>
+			}
+		</select>
+		if len(c.Ops) > 0 {
+			<select class="f-op" name={ c.Name + ".op" } aria-label="Operator" { v.ReloadAttrs()... }>
+				for _, o := range c.Ops {
+					<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+				}
+			</select>
+		}
+		@filterOperand(c)
+		<button type="button" class="x" data-repeat-remove aria-label="Remove condition">✕</button>
+		if c.Error != "" {
+			<span class="f-err" role="alert">{ c.Error }</span>
+		}
+	</div>
+}
+
+// filterOperand renders the control the chosen operator needs for its operand.
+templ filterOperand(c FilterCondView) {
+	if c.Value.Kind != ValueNone {
+		switch c.Value.Kind {
+			case ValueRef:
+				@RefPicker(c.Value.Ref)
+			case ValueBool:
+				<select class="f-val" name={ c.Name + ".v" } aria-label="Value">
+					<option value="true" selected?={ c.Value.Value == "true" }>yes</option>
+					<option value="false" selected?={ c.Value.Value != "true" }>no</option>
+				</select>
+			case ValueEnum:
+				<select class="f-val" name={ c.Name + ".v" } aria-label="Value">
+					for _, o := range c.Value.Options {
+						<option value={ o.Value } selected?={ o.Selected }>{ o.Label }</option>
+					}
+				</select>
+			default:
+				<input
+					class="f-val"
+					type={ c.Value.InputType() }
+					name={ c.Name + ".v" }
+					value={ c.Value.Value }
+					placeholder={ c.Value.Placeholder }
+					aria-label="Value"
+					autocomplete="off"
+				/>
+		}
+	}
+}
+
+// CellView renders one typed table cell.
+templ CellView(c Cell) {
+	switch c.Kind {
+		case CellBool:
+			if c.Bool {
+				<span class="boolean yes" title="true">✓</span>
+			} else {
+				<span class="boolean no" title="false">–</span>
+			}
+		case CellPill:
+			<span class={ "pill", slotClass(c.Pill.Color) }>{ c.Pill.Label }</span>
+		case CellChips:
+			<div class="chips">
+				for _, p := range c.Chips {
+					<span class={ "chip", slotClass(p.Color) }>
+						if p.Initials != "" {
+							<span class="avatar sm">{ p.Initials }</span>
+						} else {
+							<span class="dot"></span>
+						}
+						{ p.Label }
+					</span>
+				}
+			</div>
+		default:
+			<span class={ "cell-text", templ.KV("muted", c.Muted) }>{ c.Text }</span>
+	}
+}
+
+// DetailPanel is the slide-over for one row: backdrop + panel + the generic
+// proto editor as a form. Saving redirects (HX-Redirect) so the table reloads;
+// admin.js handles Escape/backdrop close.
+templ DetailPanel(d Detail) {
+	<div class="panel-backdrop" data-panel-close></div>
+	<div class="panel" role="dialog" aria-modal="true">
+		<div class="panel-head">
+			<div class="panel-crumb">{ d.FullName } · { d.Workspace }</div>
+			<h2>{ panelTitle(d) }</h2>
+			if d.Edit {
+				<div class="id">id: { d.Key }</div>
+			}
+			<button class="panel-close" type="button" data-panel-close aria-label="Close">✕</button>
+		</div>
+		<form
+			id="detail-form"
+			if d.Edit {
+				hx-put={ fmt.Sprintf("%s/rows/%s", rowsURL(d.AppID, d.Workspace, d.Entity), d.Key) }
+			} else {
+				hx-post={ fmt.Sprintf("%s/rows", rowsURL(d.AppID, d.Workspace, d.Entity)) }
+			}
+			style="display:contents"
+		>
+			<div class="panel-body">
+				if d.Edit {
+					<input type="hidden" name="_version" value={ strconv.FormatUint(d.Version, 10) }/>
+				}
+				for _, f := range d.Fields {
+					@Field(f)
+				}
+			</div>
+			<div class="panel-foot">
+				<button class="btn btn-ghost" type="button" data-panel-close>Cancel</button>
+				<button class="btn btn-primary" type="submit">Save</button>
+			</div>
+		</form>
+	</div>
+}
+
+// Field renders one form field, recursing for sub-messages and keyed lists.
+templ Field(f FieldView) {
+	switch f.Kind {
+		case KindBool:
+			<div class="field">
+				<div class="flabel"><span class="fname">{ f.Label }</span>@typeChip(f)</div>
+				<div class="enum-group">
+					<input type="radio" id={ enumID(f.Name, 0) } name={ f.Name } value="false" checked?={ f.Value != "true" } disabled?={ f.ReadOnly }/>
+					<label for={ enumID(f.Name, 0) }>No</label>
+					<input type="radio" id={ enumID(f.Name, 1) } name={ f.Name } value="true" checked?={ f.Value == "true" } disabled?={ f.ReadOnly }/>
+					<label for={ enumID(f.Name, 1) }>Yes</label>
+				</div>
+			</div>
+		case KindEnum:
+			<div class="field">
+				<div class="flabel"><span class="fname">{ f.Label }</span>@typeChip(f)</div>
+				<div class="enum-group">
+					for i, o := range f.EnumOptions {
+						<input type="radio" id={ enumID(f.Name, i) } name={ f.Name } value={ o.Value } checked?={ o.Selected } disabled?={ f.ReadOnly }/>
+						<label for={ enumID(f.Name, i) }>{ o.Label }</label>
+					}
+				</div>
+			</div>
+		case KindOpaque:
+			<div class="field">
+				<div class="flabel"><span class="fname">{ f.Label }</span>@typeChip(f)<span class="ftype">opaque · base64</span></div>
+				<textarea name={ f.Name } readonly?={ f.ReadOnly }>{ f.Value }</textarea>
+			</div>
+		case KindText:
+			<div class="field">
+				<div class="flabel"><span class="fname">{ f.Label }</span>@typeChip(f)<span class="ftype">text · collaborative</span></div>
+				<textarea name={ f.Name } readonly?={ f.ReadOnly }>{ f.Value }</textarea>
+			</div>
+		case KindMessage:
+			<fieldset class="field">
+				<legend><span class="fname">{ f.Label }</span>@typeChip(f)</legend>
+				<div class="subfields">
+					for _, c := range f.Children {
+						@Field(c)
+					}
+				</div>
+			</fieldset>
+		case KindKeyedList:
+			<fieldset class="field" data-repeat={ f.Name }>
+				<legend><span class="fname">{ f.Label }</span>@typeChip(f)</legend>
+				<div data-repeat-items>
+					for _, item := range f.ListItems {
+						<div class="list-item">
+							if !f.ReadOnly {
+								@itemRemove("Remove item")
+							}
+							for _, c := range item {
+								@Field(c)
+							}
+						</div>
+					}
+				</div>
+				if !f.ReadOnly {
+					@addButton(f.Name, "+ Add item")
+					@repeatTemplate(f.Name) {
+						<div class="list-item">
+							@itemRemove("Remove item")
+							for _, c := range f.Template {
+								@Field(c)
+							}
+						</div>
+					}
+				}
+			</fieldset>
+		case KindRef:
+			<fieldset class="field">
+				<legend><span class="fname">{ f.Label }</span>@typeChip(f)</legend>
+				@RefPicker(f.Ref)
+			</fieldset>
+		case KindRepeatedScalar:
+			<fieldset class="field" data-repeat={ f.Name }>
+				<legend><span class="fname">{ f.Label }</span>@typeChip(f)</legend>
+				<div class="chips" data-repeat-items>
+					for i, v := range f.ScalarItems {
+						<span class="chip">
+							<input type="text" name={ indexedName(f.Name, i) } value={ v } readonly?={ f.ReadOnly }/>
+							if !f.ReadOnly {
+								@chipRemove()
+							}
+						</span>
+					}
+				</div>
+				if !f.ReadOnly {
+					@addChipButton(f.Name)
+					@repeatTemplate(f.Name) {
+						<span class="chip">
+							<input type="text" name={ f.Name + "[__i__]" } placeholder="value"/>
+							@chipRemove()
+						</span>
+					}
+				}
+			</fieldset>
+		case KindMap:
+			<fieldset class="field" data-repeat={ f.Name }>
+				<legend><span class="fname">{ f.Label }</span>@typeChip(f)</legend>
+				<div data-repeat-items>
+					for _, it := range f.MapItems {
+						<div class="kv-row">
+							<input type="text" name={ it.Name + ".key" } value={ it.Key } readonly?={ f.ReadOnly }/>
+							<input type="text" name={ it.Name + ".value" } value={ it.Value } readonly?={ f.ReadOnly }/>
+							if !f.ReadOnly {
+								@chipRemove()
+							}
+						</div>
+					}
+				</div>
+				if !f.ReadOnly {
+					@addButton(f.Name, "+ Add entry")
+					@repeatTemplate(f.Name) {
+						<div class="kv-row">
+							<input type="text" name={ f.Name + "[__i__].key" } placeholder="key"/>
+							<input type="text" name={ f.Name + "[__i__].value" } placeholder="value"/>
+							@chipRemove()
+						</div>
+					}
+				}
+			</fieldset>
+		default:
+			<div class="field">
+				<div class="flabel"><span class="fname">{ f.Label }</span>@typeChip(f)</div>
+				<input type={ f.InputType() } name={ f.Name } value={ f.Value } readonly?={ f.ReadOnly }/>
+			</div>
+	}
+}
+
+templ typeChip(f FieldView) {
+	if f.TypeLabel != "" {
+		<span class="ftype">{ f.TypeLabel }</span>
+	}
+}
+
+// RefPicker is the reference picker component: the chosen value(s) as chips
+// beside an inline "+ Add" that opens a combobox popover over the target
+// entity's rows. admin.js drives it entirely through the data- hooks here, so
+// the row editor and the filter bar's reference operand share one behaviour.
+templ RefPicker(c RefControl) {
+	<div
+		class={ "ref-field", templ.KV("ref-inline", c.Inline) }
+		data-repeat={ c.Name }
+		data-ref-name={ c.Name }
+		data-ref-repeated?={ c.Multi }
+	>
+		<div class="ref-row">
+			<div class={ "ref-values", templ.KV("single", !c.Multi && !c.Inline), templ.KV("chips", c.Multi || c.Inline) } data-repeat-items data-ref-items>
+				for _, item := range c.Items {
+					@refChip(c, item)
+				}
+			</div>
+			if !c.ReadOnly && c.PickerURL != "" {
+				<button type="button" class="chip-add ref-add" data-ref-add aria-haspopup="listbox" aria-expanded="false" aria-label={ "Add " + c.Entity }>+ Add</button>
+				<div class="ref-pop" data-ref-picker hidden role="dialog" aria-label={ "Add " + c.Entity }>
+					// form="none" associates the search box with no form at all, so
+					// typing here never rides along on the surrounding submission —
+					// it would otherwise land in the filter bar's GET URL. htmx sends
+					// the input's own value regardless of form association.
+					<input
+						class="ref-search"
+						type="text"
+						placeholder={ "Search " + c.Entity + "…" }
+						autocomplete="off"
+						name="__q"
+						form="none"
+						role="combobox"
+						aria-expanded="true"
+						hx-get={ c.PickerURL }
+						hx-trigger="focus, input changed delay:200ms"
+						hx-target="next .ref-results"
+						hx-swap="innerHTML"
+					/>
+					<div class="ref-results" data-ref-results role="listbox"></div>
+				</div>
+			}
+		</div>
+		if !c.ReadOnly && c.PickerURL != "" {
+			@refChipTemplate(c)
+		}
+	</div>
+}
+
+// refChip is one selected reference value: a labelled chip carrying the
+// target's key as hidden inputs, with a remove control. The label shows the
+// target's display name; the picker fills it on selection.
+//
+// The editor binds a reference stub, so it names one input per key field
+// (Name.<keyfield>, or Name[i].<keyfield> in a list). A filter operand is a
+// literal instead, so an inline chip submits the single key value under the
+// condition's own value name — several chips are simply several f[i].v.
+templ refChip(c RefControl, item RefItem) {
+	<span class={ "chip", "ref-chip", slotClass(item.Color) } data-ref-chip>
+		if item.Initials != "" {
+			<span class="avatar sm">{ item.Initials }</span>
+		} else {
+			<span class="dot"></span>
+		}
+		<span class="ref-chip-label" data-ref-label>{ item.Label }</span>
+		if c.Inline {
+			if len(c.Keys) == 1 {
+				<input type="hidden" name={ c.Name } value={ c.Key(item) } data-ref-key={ c.Keys[0] }/>
+			}
+		} else {
+			for _, k := range c.Keys {
+				<input type="hidden" name={ item.Name + "." + k } value={ item.Values[k] } data-ref-key={ k }/>
+			}
+		}
+		if !c.ReadOnly {
+			<button type="button" class="x" data-repeat-remove aria-label="Remove">✕</button>
+		}
+	</span>
+}
+
+// refChipTemplate is the blank chip the picker client clones on selection: the
+// client fills the label text and the hidden key inputs, and (for repeated refs)
+// substitutes the __i__ index placeholder in the input names.
+templ refChipTemplate(c RefControl) {
+	<template data-ref-tpl={ c.Name }>
+		@refChip(c, RefItem{Name: c.Name + "[__i__]", Values: map[string]string{}})
+	</template>
+}
+
+templ addButton(name, label string) {
+	<button type="button" class="chip-add" data-repeat-add={ name }>{ label }</button>
+}
+
+// itemRemove is the corner control on a keyed-list item; admin.js removes the
+// enclosing .list-item, so its inputs drop out of the submission and the
+// PATCH rewrites the list without it.
+templ itemRemove(label string) {
+	<button type="button" class="item-remove" data-repeat-remove aria-label={ label }>✕</button>
+}
+
+// chipRemove is the inline remove control shared by repeated-scalar chips and
+// map rows; admin.js removes the enclosing .chip / .kv-row.
+templ chipRemove() {
+	<button type="button" class="x" data-repeat-remove aria-label="Remove">✕</button>
+}
+
+templ addChipButton(name string) {
+	<button type="button" class="chip-add" data-repeat-add={ name }>+ Add</button>
+}
+
+// repeatTemplate holds the blank markup admin.js clones for a new repeated item;
+// __i__ in input names is replaced with the next index on add.
+templ repeatTemplate(name string) {
+	<template data-repeat-tpl={ name }>
+		{ children... }
+	</template>
+}
+
+// PickerResults renders the reference picker dropdown: one clickable row per
+// matching target, carrying the target's key-field values as a JSON object the
+// client copies into the hidden ref inputs on selection.
+templ PickerResults(rows []PickerRow) {
+	if len(rows) == 0 {
+		<div class="ref-empty">No matches</div>
+	} else {
+		for _, r := range rows {
+			<button
+				type="button"
+				class={ "ref-result", slotClass(r.Color) }
+				data-ref-result
+				data-keys={ r.KeysJSON }
+				data-label={ r.Label }
+			>
+				if r.Initials != "" {
+					<span class="avatar sm">{ r.Initials }</span>
+				} else {
+					<span class="dot"></span>
+				}
+				<span class="ref-result-label">{ r.Label }</span>
+				if r.Sub != "" && r.Sub != r.Label {
+					<span class="ref-result-sub">{ r.Sub }</span>
+				}
+			</button>
+		}
+	}
+}

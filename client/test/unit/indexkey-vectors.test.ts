@@ -1,0 +1,176 @@
+// Conformance vectors shared with the Go encoder
+// (engine/query/indexkey_test.go) — both must produce byte-identical entries,
+// and both must agree with their own row comparator about the order those
+// entries imply. Rows are protojson Widgets (or Issues); spec.key paths use
+// proto field names, so conditions are translated to localNames before they
+// reach the planner — which is what prepareQuery does in the real read path,
+// and what `blocked_by`/`blockedBy` makes visible.
+
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+import { type DescMessage, fromJson, type JsonValue } from '@bufbuild/protobuf';
+import { describe, expect, it } from 'vitest';
+
+import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
+import type { OrderKey, Path } from '../../src/query/ast.js';
+import { compareRows } from '../../src/query/evaluate.js';
+import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
+import { planQuery } from '../../src/query/plan.js';
+import { condFromProto, orderKeyFromProto } from '../../src/query/proto.js';
+import { localPathOf } from '../../src/query/wire.js';
+import { toLocalNames } from '../support/vector-paths.js';
+
+interface SpecVector {
+	name: string;
+	key: { path: Path; desc: boolean }[];
+}
+
+interface EncodeCase {
+	name: string;
+	type?: string;
+	row: JsonValue;
+	rowKey: string;
+	spec: SpecVector;
+	want: string[];
+}
+
+interface OrderCase {
+	name: string;
+	type?: string;
+	rows: { key: string; row: JsonValue }[];
+	spec: SpecVector;
+	want: string[];
+}
+
+const vectorsPath = join(
+	dirname(fileURLToPath(import.meta.url)),
+	'../../../testdata/indexkey/vectors.json',
+);
+const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as {
+	encodeCases: EncodeCase[];
+	orderCases: OrderCase[];
+};
+
+const schemaFor = (type?: string): DescMessage => (type === 'issue' ? IssueSchema : WidgetSchema);
+
+const encoderFor = (spec: SpecVector, schema: DescMessage): IndexEncoder =>
+	new IndexEncoder(spec.key.map((k) => compileIndexComponent(schema, k.path, k.desc)));
+
+/** The same spec expressed as an ordering, which is what the encoding has to
+ * agree with. */
+const orderFor = (spec: SpecVector): OrderKey[] =>
+	spec.key.map((k) => ({ path: k.path, dir: k.desc ? 'desc' : 'asc' }));
+
+/** Entries are one character per byte, so hex is a direct rendering. */
+const toHex = (entry: string): string => {
+	let out = '';
+	for (let i = 0; i < entry.length; i++) {
+		out += entry.charCodeAt(i).toString(16).padStart(2, '0');
+	}
+	return out;
+};
+
+describe('indexkey conformance vectors', () => {
+	it('has cases', () => {
+		expect(vectors.encodeCases.length).toBeGreaterThan(0);
+		expect(vectors.orderCases.length).toBeGreaterThan(0);
+	});
+
+	describe('encode', () => {
+		for (const tc of vectors.encodeCases) {
+			it(tc.name, () => {
+				const schema = schemaFor(tc.type);
+				const row = fromJson(schema, tc.row);
+				const entries = encoderFor(tc.spec, schema).encode(row, tc.rowKey, schema);
+				expect(entries.map(toHex)).toEqual(tc.want);
+			});
+		}
+	});
+
+	describe('order', () => {
+		for (const tc of vectors.orderCases) {
+			it(tc.name, () => {
+				const schema = schemaFor(tc.type);
+				const encoder = encoderFor(tc.spec, schema);
+				const rows = tc.rows.map((r) => {
+					const value = fromJson(schema, r.row);
+					const entries = encoder.encode(value, r.key, schema);
+					// An ordering has no meaning over a fan-out component, so every
+					// order vector's spec is single-entry.
+					expect(entries).toHaveLength(1);
+					return {
+						key: r.key,
+						value,
+						version: 0n,
+						workspaceId: 'ws',
+						entry: entries[0]!,
+					};
+				});
+
+				const byEntry = [ ...rows ].sort((
+					a,
+					b,
+				) => (a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0));
+				expect(byEntry.map((r) => r.key)).toEqual(tc.want);
+
+				// The encoding is only useful if it agrees with the comparator it
+				// replaces, so the two are asserted against each other and not
+				// merely against the same literal.
+				const orderBy = orderFor(tc.spec);
+				const byCompare = [ ...rows ].sort((a, b) => compareRows(a, b, orderBy, schema));
+				expect(byCompare.map((r) => r.key)).toEqual(byEntry.map((r) => r.key));
+			});
+		}
+	});
+});
+
+interface ProbeCase {
+	name: string;
+	type?: string;
+	indexes: SpecVector[];
+	cond?: JsonValue;
+	orderBy?: JsonValue[];
+	want: 'scan' | { index: string; ranges: number; ordered: boolean; residual: boolean };
+}
+
+const probeVectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { probeCases: ProbeCase[] };
+
+// The planner's decisions are shared because a planner that chose differently
+// would still return the right rows, just at a different cost — so nothing
+// else in either suite would notice the divergence.
+describe('planner conformance vectors', () => {
+	it('has cases', () => {
+		expect(probeVectors.probeCases.length).toBeGreaterThan(0);
+	});
+
+	for (const tc of probeVectors.probeCases) {
+		it(tc.name, () => {
+			const schema = schemaFor(tc.type);
+			const candidates = tc.indexes.map((spec) => ({
+				name: spec.name,
+				encoder: encoderFor(spec, schema),
+			}));
+			const where = tc.cond
+				? toLocalNames(schema, condFromProto(fromJson(ConditionSchema, tc.cond)))
+				: undefined;
+			const orderBy = tc.orderBy?.map((k) => {
+				const key = orderKeyFromProto(fromJson(OrderKeySchema, k));
+				return { ...key, path: localPathOf(schema, key.path) };
+			});
+
+			const plan = planQuery(candidates, where, orderBy);
+			if (tc.want === 'scan') {
+				expect(plan).toBeUndefined();
+				return;
+			}
+			expect(plan).toBeDefined();
+			expect(plan!.index).toBe(tc.want.index);
+			expect(plan!.ranges).toHaveLength(tc.want.ranges);
+			expect(plan!.ordered).toBe(tc.want.ordered);
+			expect(plan!.residual !== undefined).toBe(tc.want.residual);
+		});
+	}
+});

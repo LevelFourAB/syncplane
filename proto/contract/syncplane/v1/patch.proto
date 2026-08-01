@@ -1,0 +1,118 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+import "syncplane/v1/query.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// FieldDelta carries one collaborative-text field of a RowChange as delta
+// state instead of as part of the row snapshot. `field` is the field's dotted
+// proto path.
+//
+// `fragment` is a text delta-state fragment (format version 0x02) to apply to
+// the field's CONFIRMED bytes; empty means the field did not change over the
+// span and the recipient keeps what it already holds. Either way the field is
+// cleared in RowChange.value, so a row whose document dwarfs its other fields
+// no longer re-ships the document on every unrelated write.
+message FieldDelta {
+	string field = 1;
+	bytes fragment = 2;
+}
+
+// RowChange is a full-row snapshot (or tombstone) at a given workspace
+// sequence. Every field is a merged snapshot except the collaborative-text
+// fields named in text_deltas, which the recipient reconstructs from state it
+// already holds.
+message RowChange {
+	string entity = 1;
+	string key = 2;
+	// Workspace sequence number assigned to the mutation that last wrote this
+	// row. Monotonic per workspace.
+	uint64 version = 3;
+	oneof body {
+		// Serialized entity message. Full merged snapshot, EXCEPT that every
+		// field named in text_deltas is cleared.
+		bytes value = 4;
+		// True when the row was deleted.
+		bool tombstone = 5;
+	}
+	// Collaborative-text fields shipped as delta state relative to the
+	// recipient's cursor position. Empty on every path where the recipient's
+	// prior state is not known to match that position — bootstrap, delta
+	// resync, membership diffs, query results, and any scoped subscription
+	// whose visibility could have changed. A recipient that cannot reconstruct
+	// a named field must discard the page and re-bootstrap.
+	repeated FieldDelta text_deltas = 6;
+}
+
+// Patch is an ordered set of row changes to apply to confirmed state.
+message Patch {
+	repeated RowChange changes = 1;
+	// Entities whose entire confirmed state the client must drop BEFORE
+	// applying changes. Sent when an entity leaves the subscription set during
+	// a delta resync — one name instead of a tombstone per row.
+	repeated string drop_entities = 2;
+}
+
+// Subscription scopes what a client syncs. An empty subscription list means
+// full sync; a subscription without a predicate covers the whole entity.
+message Subscription {
+	string entity = 1;
+	// Rows of the entity matching this predicate sync; absent = whole entity.
+	Condition predicate = 2;
+	// Reference paths to follow from matched rows, expanding the synced set to
+	// a bounded-depth forward/reverse closure (key point-lookups forward,
+	// predicate scans reverse). Empty ⇒ today's static per-entity scope.
+	// Deliberately EXCLUDED from sub_hash: a follow-spec change is reconciled
+	// by the closure diff (Cursor.closure), not a base-scope delta resync.
+	// Every closure member is still subject to the same read filter as a base
+	// row — following a ref is never a permission-escalation path.
+	FollowSpec follow = 3;
+	// Bounds the synced set to the first `limit` rows of this subscription's
+	// predicate match under `order_by` — so the working set is a policy choice
+	// rather than the size of the entity. Absent ⇒ every matching row syncs.
+	// Unlike `follow`, a window IS part of sub_hash: widening or removing one
+	// needs rows the client does not hold, which only a delta resync can
+	// supply.
+	Window window = 4;
+}
+
+// Window caps a subscription's scope by RANK rather than by attribute: "the
+// N most recently updated open issues" instead of "every open issue".
+//
+// Membership is a set, not a boundary value — the server carries the exact
+// key-set on the cursor and diffs a freshly computed window against it on
+// every pull, so a row that fell off the tail is dropped precisely. That is
+// the same machinery reference-following already uses.
+message Window {
+	// Total order over the matched rows; ties break on row key, so the rank
+	// boundary is always well-defined. Mutually exclusive with by_recency.
+	repeated OrderKey order_by = 1;
+	// Maximum rows the window holds. Must be > 0 and <= the server's
+	// MaxWindowSize.
+	uint32 limit = 2;
+	// Order by the row's workspace sequence, descending — "the N most recently
+	// written matching rows". Needs no field decode to sort, so it is the
+	// cheap window to serve. Recency is a property of the STORED ROW rather
+	// than of the message, which is why it is a flag here instead of a magic
+	// order path: no field of an entity could express it, and a reserved path
+	// name would collide with a real field.
+	bool by_recency = 3;
+}
+
+// RefPath names a chain of reference relations to follow from a root entity.
+// Each segment is a forward ref field name or a reverse-relation name (the
+// emitter resolves direction from the ref graph). Used by both query-time
+// hydration (include) and reference-following subscriptions (follow).
+message RefPath {
+	repeated string segments = 1;
+}
+
+// FollowSpec is one shared shape driving include (client-local hydration) and
+// follow (subscription scope). It is a set of ref paths walked to a bounded
+// depth. depth 0 is treated as 1 (follow each path one hop).
+message FollowSpec {
+	repeated RefPath paths = 1;
+	uint32 depth = 2;
+}

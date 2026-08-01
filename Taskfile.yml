@@ -1,0 +1,132 @@
+version: '3'
+
+tasks:
+  generate:templ:
+    # Runs from the repo root so the paths templ bakes into its runtime errors
+    # are repo-rooted (internal/admin/ui/views.templ) rather than relative to
+    # wherever the task happened to start.
+    desc: Regenerate Go from internal/admin/ui templ templates
+    cmds:
+      - go tool templ generate -path .
+
+  generate:
+    desc: Regenerate Go + TS code from proto/ and templ templates
+    cmds:
+      - buf generate
+      - buf generate --template buf.gen.ts.yaml
+      - task: generate:templ
+
+  lint:
+    desc: Lint protobuf definitions
+    cmds:
+      - buf lint
+
+  breaking:
+    desc: Check protobuf backwards compatibility against main
+    cmds:
+      - |
+        if git rev-parse --verify --quiet main >/dev/null; then
+          buf breaking --against '.git#branch=main'
+        else
+          echo "no main branch yet; skipping breaking check"
+        fi
+
+  protobuf:push:
+    # --exclude-unnamed is what keeps proto/private and proto/examples off the
+    # registry: they have no `name` in buf.yaml, so buf skips them instead of
+    # failing the push. Add --create --create-visibility public the first time,
+    # and --git-metadata once the repo has an `origin` remote to attribute to.
+    desc: Publish the wire contract to buf.build/levelfourab/syncplane
+    cmds:
+      - buf push --exclude-unnamed {{.CLI_ARGS}}
+
+  vet:
+    desc: go vet the Go module
+    cmds:
+      - go vet ./...
+
+  typecheck:
+    desc: Typecheck the TS client
+    dir: client
+    cmds:
+      - pnpm run typecheck
+
+  test:
+    desc: Run all tests
+    cmds:
+      - task: test:go
+      - task: test:ts
+
+  test:go:
+    desc: Run Go test suites (Ginkgo)
+    cmds:
+      - go tool ginkgo run -r --randomize-all {{.CLI_ARGS}}
+
+  test:ts:
+    desc: Run all TS client tests
+    cmds:
+      - task: test:ts:unit
+      - task: test:ts:react
+      - task: test:ts:integration
+
+  test:ts:unit:
+    desc: Run TS client unit tests
+    dir: client
+    cmds:
+      - pnpm run test:unit
+
+  test:ts:react:
+    desc: Run syncplane/react hook tests (jsdom)
+    dir: client
+    cmds:
+      - pnpm run test:react
+
+  test:ts:integration:
+    desc: Run TS<->Go integration tests (spawns testserver)
+    dir: client
+    cmds:
+      - pnpm run test:integration
+
+  test:e2e:
+    desc: 'Multi-tab browser tests; BROWSER=chromium|firefox|webkit (install it first)'
+    dir: client
+    cmds:
+      - pnpm exec playwright test --project={{.BROWSER | default "chromium"}} {{.CLI_ARGS}}
+
+  test:e2e:install:
+    desc: 'Download a browser for test:e2e (~100 MB each); BROWSER="firefox webkit" for more'
+    dir: client
+    cmds:
+      - pnpm exec playwright install {{.BROWSER | default "chromium"}}
+
+  bench:browser:
+    desc: 'Browser sync benchmarks against a seeded corpus; TIERS=s,m for a quick pass'
+    dir: client
+    cmds:
+      - pnpm exec playwright test --config playwright.bench.config.ts --project={{.BROWSER | default "chromium"}} {{.CLI_ARGS}}
+
+  demo:server:
+    desc: Run the todo demo sync server (http://127.0.0.1:8787)
+    cmds:
+      - go run ./cmd/todoserver -db {{.ROOT_DIR}}/examples/todo/todo.db
+
+  demo:web:
+    desc: Run the todo demo web app (run demo:server in another terminal)
+    dir: examples/todo
+    cmds:
+      - pnpm -C ../../client install
+      - pnpm -C ../../client run build
+      - pnpm install
+      - pnpm run dev
+
+  ci:
+    # test:e2e is deliberately absent: it needs a downloaded browser, so it is
+    # opt-in for development and release checks rather than every run.
+    desc: Everything CI runs
+    cmds:
+      - task: lint
+      - task: breaking
+      - task: vet
+      - task: typecheck
+      - task: test:go
+      - task: test:ts

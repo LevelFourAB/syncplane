@@ -1,0 +1,68 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// AdminService is the trusted, server-side control plane for runtime schema
+// registration. It is intentionally separate from SyncService: it is mounted
+// on its own handler so it can bind to a private interface, off the public
+// sync surface browsers reach. Every call is gated by a RegisterAuthorizer
+// (deny-by-default); a built-in TokenAuthorizer checks a bearer token.
+service AdminService {
+	// Register ingests an app's serialized google.protobuf.FileDescriptorSet
+	// (the bytes the TS schema builder's defineSchema(...).toBinary()
+	// produces), persists it, and registers/evolves that app's entities so they
+	// serve full CRUD sync. Idempotent: an identical set is UNCHANGED, an
+	// additive evolution is UPDATED, a conflicting change is rejected.
+	rpc Register(RegisterRequest) returns (RegisterResponse);
+	// GetSchema returns an app's persisted descriptor set — "the server ships
+	// its schema", so a client can rebuild its descriptors from the server
+	// instead of importing the schema bundle.
+	rpc GetSchema(GetSchemaRequest) returns (GetSchemaResponse);
+}
+
+message RegisterRequest {
+	// App identity: a routing + storage-partition key (NOT encoded in the proto
+	// package, so two apps may both define sync.dynamic.Todo without
+	// collision).
+	string app_id = 1;
+	// Serialized google.protobuf.FileDescriptorSet, self-contained (bundles
+	// descriptor.proto + syncplane/v1/options.proto + the synthesized entity
+	// files).
+	bytes descriptor_set = 2;
+	// Optional optimistic-concurrency guard: if set, registration is rejected
+	// with failed_precondition unless it equals the app's current revision.
+	string expected_revision = 3;
+}
+
+enum RegisterStatus {
+	REGISTER_STATUS_UNSPECIFIED = 0;
+	// A new app was registered.
+	REGISTER_STATUS_CREATED = 1;
+	// An existing app's schema was additively evolved.
+	REGISTER_STATUS_UPDATED = 2;
+	// The submitted schema was identical to the registered one; a no-op.
+	REGISTER_STATUS_UNCHANGED = 3;
+}
+
+message RegisterResponse {
+	// The app's schema revision after registration (a stable hash of the
+	// canonical descriptor-set bytes); clients see this as SchemaRevision.
+	string revision = 1;
+	RegisterStatus status = 2;
+	// The entity wire names registered for this app, sorted.
+	repeated string entity_names = 3;
+}
+
+message GetSchemaRequest {
+	string app_id = 1;
+}
+
+message GetSchemaResponse {
+	// The app's serialized FileDescriptorSet, as registered. Empty
+	// descriptor_set with found=false when the app is unknown.
+	bytes descriptor_set = 1;
+	string revision = 2;
+	bool found = 3;
+}

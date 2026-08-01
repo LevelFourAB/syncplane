@@ -1,0 +1,136 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// Wire form of the client-side condition AST (client/src/query/ast.ts).
+// Paths are repeated proto field names (e.g. ["settings", "color"]) — the
+// output of the client's toWirePaths translation, never JS localNames.
+
+// QueryValue is a scalar literal in a condition. The branch preserves the
+// client-side kind: JS numbers travel as doubles, JS bigints as
+// sint64/uint64, so evaluation coercion rules match on both sides.
+message QueryValue {
+	oneof kind {
+		string string_value = 1;
+		double double_value = 2;
+		sint64 int_value = 3;
+		// Used for bigints above the int64 range.
+		uint64 uint_value = 4;
+		bool bool_value = 5;
+	}
+}
+
+enum CmpOp {
+	CMP_OP_UNSPECIFIED = 0;
+	CMP_OP_EQ = 1;
+	CMP_OP_NEQ = 2;
+	CMP_OP_GT = 3;
+	CMP_OP_GTE = 4;
+	CMP_OP_LT = 5;
+	CMP_OP_LTE = 6;
+}
+
+enum StrOp {
+	STR_OP_UNSPECIFIED = 0;
+	STR_OP_STARTS_WITH = 1;
+	STR_OP_ENDS_WITH = 2;
+	STR_OP_CONTAINS = 3;
+}
+
+enum RepOp {
+	REP_OP_UNSPECIFIED = 0;
+	REP_OP_HAS = 1;
+	REP_OP_HAS_ANY = 2;
+	REP_OP_HAS_ALL = 3;
+	REP_OP_IS_EMPTY = 4;
+}
+
+enum PresentOp {
+	PRESENT_OP_UNSPECIFIED = 0;
+	PRESENT_OP_IS_SET = 1;
+	PRESENT_OP_IS_NOT_SET = 2;
+}
+
+enum Direction {
+	DIRECTION_UNSPECIFIED = 0;
+	DIRECTION_ASC = 1;
+	DIRECTION_DESC = 2;
+}
+
+message CmpCond {
+	repeated string path = 1;
+	CmpOp op = 2;
+	QueryValue value = 3;
+}
+
+message InCond {
+	repeated string path = 1;
+	repeated QueryValue values = 2;
+}
+
+message StrCond {
+	repeated string path = 1;
+	StrOp op = 2;
+	string value = 3;
+}
+
+// RepCond asks about a repeated field as a whole. Membership (HAS, HAS_ANY,
+// HAS_ALL) compares ELEMENTS, so it needs comparable ones: a repeated scalar,
+// or a repeated single-key reference, which both sides rewrite to an
+// ExistsCond over the target's key field before evaluating. Membership in a
+// repeated message list is spelled with ExistsCond instead.
+message RepCond {
+	repeated string path = 1;
+	RepOp op = 2;
+	// HAS reads values[0]; HAS_ANY/HAS_ALL read all; IS_EMPTY reads none.
+	repeated QueryValue values = 3;
+}
+
+message PresentCond {
+	repeated string path = 1;
+	PresentOp op = 2;
+}
+
+// ExistsCond matches a row when AT LEAST ONE element of a repeated message
+// field satisfies `cond`. It is the only way to ask about the contents of
+// message elements, and the only condition whose sub-paths are relative to
+// something other than the row: `cond`'s paths resolve against the ELEMENT
+// message, so ["assignees"] + ["id"] reads "some assignee's id".
+//
+// The element scope is explicit for a reason. Distributing the quantifier over
+// each condition instead — reading a bare path as "some element" — makes
+// and(items.sku == "A", items.qty > 3) mean "some item has sku A AND some
+// (possibly other) item has qty > 3", and once the conditions are separate
+// terms nothing records that they were meant to describe the same element.
+message ExistsCond {
+	// Path to a repeated message field, from the row.
+	repeated string path = 1;
+	// Evaluated against each element, with paths relative to it. An empty list
+	// makes this false, like every condition on a missing value.
+	Condition cond = 2;
+}
+
+message ConditionList {
+	repeated Condition conds = 1;
+}
+
+message Condition {
+	oneof kind {
+		CmpCond cmp = 1;
+		InCond in = 2;
+		StrCond str = 3;
+		RepCond rep = 4;
+		PresentCond present = 5;
+		ConditionList and = 6;
+		ConditionList or = 7;
+		Condition not = 8;
+		ExistsCond exists = 9;
+	}
+}
+
+message OrderKey {
+	repeated string path = 1;
+	Direction dir = 2;
+}

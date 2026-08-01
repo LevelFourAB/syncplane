@@ -1,0 +1,3138 @@
+import {
+	clone,
+	create,
+	type DescMessage,
+	fromBinary,
+	type Message,
+	type MessageInitShape,
+	type MessageShape,
+} from '@bufbuild/protobuf';
+import { createClient, type Transport } from '@connectrpc/connect';
+
+import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
+import {
+	COMPLETE,
+	type Coverage,
+	CoverageResolver,
+	type RowSet,
+	withCoverage,
+} from './coverage.js';
+import { buildEntityApis, type EntityApis } from './db.js';
+import { reconcileStoreEntities } from './entities.js';
+import { debugVerifyTouchesEnv } from './env.js';
+import {
+	type CrudMutation,
+	CrudOp,
+	type Mutation,
+	MutationSchema,
+} from './gen/syncplane/v1/mutation_pb.js';
+import {
+	type FollowSpec,
+	FollowSpecSchema,
+	RefPathSchema,
+	type Subscription,
+	SubscriptionSchema,
+	type Window,
+	WindowSchema,
+} from './gen/syncplane/v1/patch_pb.js';
+import { SyncService } from './gen/syncplane/v1/service_pb.js';
+import {
+	confirmedWsPrefix,
+	FORMAT_VERSION,
+	META_CLIENT_ID,
+	META_FORMAT_VERSION,
+	META_WS_PREFIX,
+	metaLastMutationId,
+	metaWsPrefix,
+	overlayWsPrefix,
+	PENDING_ROOT,
+	pendingPrefix,
+	stagingWsRoot,
+	workspaceOfPendingKey,
+} from './keys.js';
+import { IDBKVStore } from './kv/idb.js';
+import { MemoryKVStore } from './kv/memory.js';
+import type { KVStore } from './kv/store.js';
+import {
+	applyTextStringsToCrud,
+	attachTextStrings,
+	buildBatch,
+	buildCustom,
+	buildDelete,
+	buildPatch,
+	buildPut,
+	encodeItemKey,
+	EntityRegistry,
+	expandCollectionMask,
+	extractTextStrings,
+	isTextField,
+	keyFieldsFor,
+	maskFromDiff,
+	maskFromInit,
+	maskNeedsExpansion,
+	type MergerSpec,
+	type PatchInit,
+	takeTextStrings,
+	type TextInit,
+	type TextStringEdits,
+} from './mutations.js';
+import { createKvMutex, type Mutex } from './mutex.js';
+import { buildIndexes } from './optimistic/index-build.js';
+import { IndexCache } from './optimistic/index-maintain.js';
+import { enqueuePending, readPending } from './optimistic/queue.js';
+import {
+	applyCrudLocally,
+	applyMutationLocally,
+	type MirrorMap,
+	type MutatorMirror,
+} from './optimistic/rebase.js';
+import { generateKeyBetween, newElementId, orderFieldOf, sortOrderedFields } from './ordering.js';
+import { assertSameResult, queryByIndex } from './query/execute.js';
+import {
+	type CompiledQuery,
+	compileQuery,
+	type Cond,
+	type OrderKey,
+	type Query,
+	type QueryRef,
+	runQuery,
+} from './query/index.js';
+import { condToProto, orderKeyToProto } from './query/proto.js';
+import { prepareQuery, toWirePaths } from './query/wire.js';
+import { readMergedRow, readMergedRowWithVersion, type Row, scanDecoded } from './read.js';
+import {
+	hydrate,
+	type HydratedRow,
+	type IncludeSpec,
+	loadForward,
+	type RefClient,
+	resolveReverse,
+} from './refs.js';
+import { reportError, safeInvoke } from './report.js';
+import { type ChangeShare, startChangeShare } from './sync/changeshare.js';
+import {
+	chunkBySize,
+	Coordinator,
+	DEFAULT_MAX_MUTATIONS_PER_PUSH,
+	describeMutation,
+	type RejectionInfo,
+	type RejectionTarget,
+} from './sync/coordinator.js';
+import type { SyncEventHandler } from './sync/events.js';
+import { IntentRegistry } from './sync/intent.js';
+import {
+	type SchemaSkewAction,
+	StatusTracker,
+	type SyncStatus,
+	type WorkspaceStatus,
+} from './sync/status.js';
+import { decodeTextDoc, encodeTextDoc } from './text/codec.js';
+import type { TextDoc } from './text/doc.js';
+import { openTextHandle, type TextHandle } from './text/handle.js';
+import { createPeerLeases, type PeerLease, type PeerLeases } from './text/peer.js';
+import { applyTextInverse, reinsertOp, type TextInverseOp } from './text/undo-ops.js';
+import { TouchSet } from './touch.js';
+import { type Inverse, invertCrud, type StackName, UndoManager, type UndoOptions } from './undo.js';
+import { type WatchCallback, WatcherHub, type WatchOptions } from './watch.js';
+
+export type { MirrorTx, MutatorMirror } from './optimistic/rebase.js';
+export type { Row } from './read.js';
+export type { RejectionInfo, RejectionTarget } from './sync/coordinator.js';
+export type {
+	BootstrapEvent,
+	LeadershipEvent,
+	PokeEvent,
+	PullEvent,
+	PushEvent,
+	RebaseEvent,
+	StreamEvent,
+	SyncEvent,
+	SyncEventHandler,
+	SyncEventOutcome,
+} from './sync/events.js';
+export type {
+	HydrationInfo,
+	SchemaSkewAction,
+	SchemaSkewInfo,
+	SyncErrorInfo,
+	SyncScopeInfo,
+	SyncStatus,
+	WorkspaceAccess,
+	WorkspaceStatus,
+} from './sync/status.js';
+
+/**
+ * Per-chunk timeout for the best-effort format-upgrade salvage push. The push
+ * runs outside the cross-tab lock, so a stall no longer wedges other tabs, but
+ * the bound still keeps a half-open connection from hanging start() forever —
+ * the unsent remainder is simply dropped and reported.
+ */
+const SALVAGE_PUSH_TIMEOUT_MS = 30_000;
+
+/**
+ * Field reference a SubscriptionSpec's `where` receives. Bound to the schema
+ * when the spec names one (`SubscriptionSpec<typeof TodoSchema>`); left loose
+ * on the bare `SubscriptionSpec`, because a spec written as an inline literal
+ * inside an array has no schema for TypeScript to infer the predicate from.
+ * The `subscription()` builder exists to close that gap and is the path to
+ * prefer — it types `where` against the schema in the same call.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type SpecRef<D extends DescMessage> = DescMessage extends D ? any : QueryRef<MessageShape<D>>;
+
+/**
+ * Scopes sync to one entity, optionally narrowed by a predicate (same shape
+ * as a query `where`).
+ *
+ * Prefer the `subscription()` builder, which infers the predicate's field
+ * types from the schema. Written as a bare literal the spec still works, but
+ * `where` receives an untyped reference (see SpecRef); annotating the spec —
+ * `const s: SubscriptionSpec<typeof TodoSchema> = { … }` — recovers the typing
+ * without the builder.
+ *
+ * A spec names an entity and a predicate, never a workspace — the same set
+ * applies to every workspace the client holds, and `client.ws(id)
+ * .setSubscriptions(...)` narrows one of them.
+ */
+export interface SubscriptionSpec<D extends DescMessage = DescMessage> {
+	schema: D;
+	where?: (w: SpecRef<D>) => Cond;
+	/**
+	 * Reference-following scope: also sync the closure reached by walking these
+	 * relations from the rows this subscription selects. Same ergonomic tree as
+	 * a query `include` (`{ project: true, blockedBy: { project: true } }`);
+	 * forward refs resolve by point-lookup, reverse relations by predicate scan,
+	 * each bounded by the server's follow limits. A followed row is still subject
+	 * to the same read filter as a base row.
+	 */
+	follow?: IncludeSpec;
+	/**
+	 * Rounds the follow path set is re-applied (transitive depth, e.g. a
+	 * dependency chain over a repeated self-ref). 0/absent ⇒ 1. Capped by the
+	 * server's MaxFollowDepth.
+	 */
+	followDepth?: number;
+	/**
+	 * Ordering the row cap applies to — the same lambda shape a query's
+	 * `orderBy` takes. Only meaningful with `limit`, and mutually exclusive
+	 * with `byRecency`.
+	 */
+	orderBy?: (w: SpecRef<D>) => OrderKey[];
+	/**
+	 * Caps the synced set at this many rows: only the first `limit` rows of the
+	 * predicate match under `orderBy` (or `byRecency`) sync, and a row that
+	 * falls off the tail is dropped from the local store.
+	 *
+	 * This is how a working set stays a policy choice rather than the size of
+	 * the entity. It also makes the local store PARTIAL in a way a predicate
+	 * alone does not: a client holding the top N by one order cannot answer a
+	 * local query ordered by another. Read `coverage` off any result to see
+	 * whether the answer is complete, and reach for `queryServer` when it is
+	 * not. Capped by the server's MaxWindowSize (default 1000).
+	 */
+	limit?: number;
+	/**
+	 * Rank by the row's server write sequence, newest first — "the N most
+	 * recently changed matching rows" — instead of by `orderBy`. Cheaper for
+	 * the server to maintain, since it needs no field comparison.
+	 */
+	byRecency?: boolean;
+}
+
+/**
+ * Typed builder for SubscriptionSpec, and the recommended way to write one:
+ * the predicate's field reference is inferred from `schema`, which a bare spec
+ * literal in an array cannot get.
+ */
+export function subscription<D extends DescMessage>(
+	schema: D,
+	where?: (w: QueryRef<MessageShape<D>>) => Cond,
+	opts?: {
+		include?: IncludeSpec;
+		depth?: number;
+		/** Row cap; see SubscriptionSpec.limit. */
+		limit?: number;
+		orderBy?: (w: QueryRef<MessageShape<D>>) => OrderKey[];
+		byRecency?: boolean;
+	},
+): SubscriptionSpec {
+	return {
+		schema,
+		where: where as SubscriptionSpec['where'],
+		follow: opts?.include,
+		followDepth: opts?.depth,
+		orderBy: opts?.orderBy as SubscriptionSpec['orderBy'],
+		limit: opts?.limit,
+		byRecency: opts?.byRecency,
+	};
+}
+
+/** Flattens an include tree into root-to-leaf relation chains (RefPath segments). */
+function includeToPaths(spec: IncludeSpec): string[][] {
+	const paths: string[][] = [];
+	for (const [ relation, sub ] of Object.entries(spec)) {
+		if (sub === true) {
+			paths.push([ relation ]);
+		} else {
+			for (const tail of includeToPaths(sub)) {
+				paths.push([ relation, ...tail ]);
+			}
+		}
+	}
+	return paths;
+}
+
+/**
+ * Serializes a follow include tree into a wire FollowSpec. The segment names
+ * are the same relation accessors the server's reference graph resolves
+ * (forward field localName or auto-named reverse relation), so the server picks
+ * the direction per segment.
+ */
+function compileFollow(include: IncludeSpec, depth?: number): FollowSpec {
+	return create(FollowSpecSchema, {
+		paths: includeToPaths(include).map((segments) => create(RefPathSchema, { segments })),
+		depth: depth && depth > 0 ? depth : 0,
+	});
+}
+
+/**
+ * Serializes a spec's row cap into a wire Window, or undefined when the spec
+ * sets none. `orderBy` arrives already translated to proto paths, since the
+ * window shares the query pipeline that does that translation.
+ *
+ * A limit is what makes a window; an ordering without one is rejected rather
+ * than ignored, because it would silently sync the whole entity.
+ */
+function compileWindow(spec: SubscriptionSpec, orderBy?: OrderKey[]): Window | undefined {
+	if (spec.limit === undefined) {
+		if (spec.orderBy || spec.byRecency) {
+			throw new Error('subscription orderBy/byRecency needs a limit to bound anything');
+		}
+		return undefined;
+	}
+	if (!Number.isInteger(spec.limit) || spec.limit <= 0) {
+		throw new Error(`subscription limit must be a positive integer, got ${spec.limit}`);
+	}
+	if (spec.byRecency && orderBy?.length) {
+		throw new Error('subscription cannot set both byRecency and orderBy');
+	}
+	return create(WindowSchema, {
+		limit: spec.limit,
+		byRecency: spec.byRecency ?? false,
+		orderBy: spec.byRecency ? [] : (orderBy ?? []).map(orderKeyToProto),
+	});
+}
+
+export interface SyncClientOptions<E extends readonly DescMessage[] = readonly DescMessage[]> {
+	/** Base URL of the sync server. Either url or transport is required. */
+	url?: string;
+	/** Pre-built Connect transport (used by tests / Node). */
+	transport?: Transport;
+	/**
+	 * Encoding the transport built from `url` uses. Ignored when `transport` is
+	 * supplied — that transport carries its own.
+	 *
+	 * Binary is the default and the one to ship: a row's largest field is
+	 * `RowChange.value`, the serialized entity, which JSON must base64 at +33%,
+	 * and a bootstrap chunk repeats every field name across 256 rows. Decoding
+	 * costs less too — JSON arrives as text to parse, then a base64 field to
+	 * decode, then the entity to parse out of that.
+	 *
+	 * `'json'` is for looking at traffic: it makes requests readable in the
+	 * browser's network inspector at the cost of the above. The server accepts
+	 * either, chosen per request from the content type, so this is a local
+	 * debugging switch and never something both ends must agree on.
+	 */
+	wireFormat?: 'binary' | 'json';
+	/**
+	 * Single-workspace shorthand for `workspaces: [id], defaultWorkspace: id`.
+	 * Give either this or `workspaces`.
+	 */
+	workspaceId?: string;
+	/**
+	 * Workspaces to sync. They share one store, one change stream and one push,
+	 * but keep separate cursors, pending queues and mutation-id counters — the
+	 * server sequences per workspace and requires per-workspace contiguous ids.
+	 * Workspaces can be added and removed at runtime (addWorkspace /
+	 * removeWorkspace).
+	 */
+	workspaces?: string[];
+	/**
+	 * Workspace the client-level API binds to: `client.mutate`, `client.db`,
+	 * `client.get/scan/query/watch`, `transact` and undo all target it, so a
+	 * single-workspace app never mentions a workspace. Defaults to the only
+	 * configured workspace; required (or set later) once there is more than one.
+	 * With no default, those methods throw and everything goes through
+	 * `client.ws(id)`.
+	 */
+	defaultWorkspace?: string;
+	/**
+	 * Storage scope: one IndexedDB database (and one KV mutex, cross-tab change
+	 * channel and stream-leadership lock) per account. Defaults to the single
+	 * configured workspace's id, which keeps a single-workspace client's store
+	 * exactly where it always was; REQUIRED when the client starts with more than
+	 * one workspace, since no workspace can stand for the whole account.
+	 *
+	 * Two accounts must never share an id: a credential is attached per request,
+	 * so they cannot share a stream, a store or a `clientId`. Use separate
+	 * SyncClients for separate accounts.
+	 */
+	accountId?: string;
+	/** Defaults to IndexedDB in browsers, in-memory elsewhere. */
+	kvStore?: KVStore;
+	/** Generated schemas of all syncable entities. */
+	entities: E;
+	/** Best-effort local mirrors of server-side custom mutators. */
+	mutators?: Record<string, MutatorMirror<DescMessage>>;
+	/**
+	 * Client mirrors of server merge hooks (Server.RegisterMerger) so
+	 * optimistic PATCHes and rebase replay merge opaque fields the same way.
+	 * Parity with the Go hook is the app's responsibility; divergence
+	 * self-heals on the next rebase.
+	 */
+	mergers?: MergerSpec[];
+	/**
+	 * Dead-letter surface for mutations that will never be applied: a server
+	 * rejection or a client-side poison drop (code "poison_dropped"). The info
+	 * names the workspace the mutation was queued for.
+	 *
+	 * Best-effort, not durable. A rejection bumps the server watermark (it is an
+	 * ack), so if the push *response* is lost the retry comes back
+	 * ALREADY_APPLIED: this callback never fires and the optimistic edit is
+	 * silently dropped at the next rebase. Apps that need guaranteed feedback
+	 * must persist results keyed by client/mutation id until acknowledged.
+	 */
+	onMutationRejected?: (info: RejectionInfo) => void;
+	/** Called whenever the sync status changes (also available via onStatusChange). */
+	onStatusChange?: (status: SyncStatus) => void;
+	/**
+	 * Observability seam: a typed stream of what the background coordinator did
+	 * — pushes, pulls, rebases, bootstraps, stream open/close, leadership — each
+	 * with its own duration and counts.
+	 *
+	 * This is what to measure sync with. `onStatusChange` reports the current
+	 * state for rendering; these report occurrences for aggregating, which is
+	 * the only way to get at latency and at the things a successful RPC hides
+	 * (a push whose mutations were all rejected is a 200 OK).
+	 *
+	 * Deliberately not an OpenTelemetry integration — the client ships to
+	 * browsers, so the vendor choice stays with the app. Map these to whatever
+	 * you already run. See sync/events.ts; the handler runs synchronously inside
+	 * the sync cycle, so it must not block.
+	 */
+	onSyncEvent?: SyncEventHandler;
+	/** Fallback poll interval in ms; 0 disables. Default 60s. */
+	pollIntervalMs?: number;
+	/** Hold the live change stream open. Default true. */
+	streamEnabled?: boolean;
+	/** Max row changes per pull page; 0 = server default. Pages loop until drained. */
+	pullLimit?: number;
+	/**
+	 * Cross-checks the watcher hub's incremental row updates against a full
+	 * re-scan on every commit and throws when they disagree. A development and
+	 * test aid — it doubles the read cost of every notification — that catches a
+	 * write path which changed a row without reporting it. Default false.
+	 */
+	debugVerifyTouches?: boolean;
+	/**
+	 * Also cross-checks every index-served local query against the equivalent
+	 * full scan and throws when they disagree. Same intent and same cost profile
+	 * as `debugVerifyTouches`, pointed at the other place a cheap answer stands
+	 * in for an expensive one — and it defaults on under the same
+	 * `SYNC_DEBUG_VERIFY_TOUCHES` environment variable, because an index that
+	 * answers differently from a scan is exactly the class of bug that flag
+	 * exists to catch.
+	 */
+	debugVerifyIndexReads?: boolean;
+	/**
+	 * Deterministic (invalid-argument) push failures of the head mutation before
+	 * the client drops it to the dead-letter surface (onMutationRejected, code
+	 * "poison_dropped"). Backstop against a queue wedged by an older server that
+	 * RPC-errors on a mutation a current one would ack. Default 5; <= 0 disables.
+	 */
+	poisonThreshold?: number;
+	/**
+	 * Largest number of mutations a single push RPC carries, counted ACROSS the
+	 * workspaces it batches (the engine's limit is a per-request total). A bigger
+	 * offline burst is split across sequential pushes. Default 256 (the engine's
+	 * default limit). Set this to match a server configured with a lower
+	 * MaxMutationsPerPush.
+	 */
+	maxMutationsPerPush?: number;
+	/**
+	 * Largest number of workspaces one request may name — push batches and
+	 * Subscribe scopes. Default 64 (the engine's default
+	 * Limits.MaxWorkspacesPerRequest). A client holding more splits its pushes
+	 * across requests; the extra workspaces sync through the poll path rather
+	 * than the stream.
+	 */
+	maxWorkspacesPerRequest?: number;
+	/**
+	 * Partial sync: only the listed entities (narrowed by their predicates)
+	 * sync to this client. Empty/absent = full sync. The set applies to EVERY
+	 * workspace the client holds; narrow one of them with
+	 * `client.ws(id).setSubscriptions(...)`. Changing a set later delta-resyncs
+	 * only the difference into the new scope.
+	 */
+	subscriptions?: SubscriptionSpec[];
+	/**
+	 * Entities the first snapshot should deliver first, most important first.
+	 *
+	 * A cold client applies the snapshot entity by entity and can read each one
+	 * as it lands, so this is what decides which part of the app has its data
+	 * while the rest still downloads — list what the first screen renders.
+	 * Everything else follows in the server's own order, so this is a
+	 * reordering, never a filter: nothing is dropped by leaving it out.
+	 *
+	 * Unset, a subscribed client is served in `subscriptions` order and a
+	 * full-sync client in the server's entity order. Only cold starts feel it —
+	 * a re-bootstrap swaps atomically, so its order is not observable.
+	 */
+	bootstrapPriority?: readonly DescMessage[];
+	/**
+	 * This build's schema revision — an opaque token matched against the one the
+	 * server advertises (Server.WithSchemaRevision). When the two differ, the
+	 * client surfaces the skew on its status (status().schemaSkew) and runs
+	 * onSchemaSkew to decide what to do. Leave unset to disable the handshake;
+	 * an unset server revision is likewise treated as "no information".
+	 */
+	schemaRevision?: string;
+	/**
+	 * Decides how to react to a schema-revision mismatch. Called once per
+	 * distinct server revision that differs from schemaRevision; the return
+	 * value drives the client:
+	 *   - "ignore": do nothing (clears any prior reaction).
+	 *   - "warn":   surface schemaSkew on the status, keep syncing normally.
+	 *   - "block":  surface schemaSkew AND suspend pushes (read-only / update
+	 *               required) until the revisions line up; pulls keep running.
+	 *   - "resync": surface schemaSkew AND force a clean re-bootstrap onto the
+	 *               server's current state.
+	 * Defaults to "warn" when omitted but schemaRevision is set. Has no effect
+	 * without schemaRevision.
+	 */
+	onSchemaSkew?: (info: { client: string; server: string }) => SchemaSkewAction;
+	/**
+	 * Enables in-memory undo/redo over local CRUD mutations. Custom mutations
+	 * are a barrier (both stacks clear). Stacks are PER WORKSPACE — mutation ids
+	 * are counted per workspace and a batch is one server savepoint, so an undo
+	 * step can never span two of them — and they die with the page.
+	 */
+	undo?: UndoOptions;
+}
+
+/** Compare-and-swap guard shared by the CRUD mutate calls. */
+export interface CasOptions {
+	/**
+	 * When set, the server applies the mutation only if the target row's current
+	 * version equals this value, otherwise it rejects with code "conflict" (the
+	 * optimistic edit rolls back and onMutationRejected fires). Read the base
+	 * version from `Row.version` (scan/query/watch/getRow). 0n means "apply only
+	 * if the row does not exist".
+	 */
+	expectedVersion?: bigint;
+}
+
+/** Options for a PATCH: the CAS guard plus an explicit field mask. */
+export interface PatchOptions extends CasOptions {
+	/** Field mask paths to merge; defaults to the keys present in `init`. */
+	paths?: string[];
+}
+
+/** A PATCH whose mask is given rather than derived — see PatchInit. */
+export interface MaskedPatchOptions extends PatchOptions {
+	paths: string[];
+}
+
+/** Options for an update: the CAS guard. The mask comes from the diff. */
+export type UpdateOptions = CasOptions;
+
+/**
+ * Edits a draft row in place. The draft is a private copy, so mutating it
+ * cannot disturb a row the app already holds, and only the fields it actually
+ * changes are written.
+ *
+ * Synchronous on purpose: awaiting inside the recipe would widen the window
+ * between the read it diffs against and the write it produces, for no gain —
+ * do the awaiting before the call and assign the results here.
+ */
+export type UpdateRecipe<D extends DescMessage> = (draft: MessageShape<D>) => void;
+
+/** The CRUD writes that can join a transact() batch. Bytes-typed init fields
+ * also accept plain strings for text fields (see TextInit). */
+interface CrudMutateApi {
+	put<D extends DescMessage>(
+		schema: D,
+		value: MessageShape<D> | TextInit<MessageInitShape<D>>,
+		opts?: CasOptions,
+	): Promise<void>;
+	/**
+	 * Merges the given fields into a row, leaving every other field alone. The
+	 * mask is the keys of `init` — so `init` carries the fields to change, not a
+	 * whole row (see PatchInit, and `update` for read-modify-write).
+	 */
+	patch<D extends DescMessage>(
+		schema: D,
+		key: string,
+		init: PatchInit<D>,
+		opts?: PatchOptions,
+	): Promise<void>;
+	/**
+	 * Merges named fields under a mask the caller supplies. The mask decides what
+	 * is written, so the source may be any message — this is how fields are
+	 * copied off a row that was read.
+	 */
+	patch<D extends DescMessage>(
+		schema: D,
+		key: string,
+		init: TextInit<MessageInitShape<D>>,
+		opts: MaskedPatchOptions,
+	): Promise<void>;
+	/**
+	 * Read-modify-write: reads the row, hands a draft to `recipe`, and PATCHes
+	 * the fields the recipe changed. Nothing changed, nothing written.
+	 *
+	 * This is the safe form of "fetch a row, edit it, save it": because the mask
+	 * covers only what moved, a field someone else changed meanwhile is not
+	 * written back stale, which a PUT of the same draft would do.
+	 *
+	 * Throws when the row is not there to read. That is a real state — partial
+	 * sync means a key can exist on the server and not locally — and a silent
+	 * no-op would hide it.
+	 */
+	update<D extends DescMessage>(
+		schema: D,
+		key: string,
+		recipe: UpdateRecipe<D>,
+		opts?: UpdateOptions,
+	): Promise<void>;
+	del(schema: DescMessage, key: string, opts?: CasOptions): Promise<void>;
+}
+
+interface MutateApi extends CrudMutateApi {
+	custom<D extends DescMessage>(
+		name: string,
+		argsSchema?: D,
+		args?: MessageInitShape<D>,
+	): Promise<void>;
+	/**
+	 * Opens a movable-list handle over a keyed `repeated Message` field that
+	 * declares an order_field. Insert/move/remove allocate fractional positions
+	 * and issue ordinary per-item PATCHes; reads come back sorted by position.
+	 */
+	list<D extends DescMessage>(schema: D, rowKey: string, field: string): ListHandle;
+}
+
+/**
+ * Ergonomic handle over a movable ordered list (a keyed message list with an
+ * order_field). All operations read the current local snapshot to find
+ * neighbors, then enqueue a normal row PATCH; convergence rides Phase 1's
+ * per-item merge.
+ */
+export interface ListHandle {
+	/** Inserts a new element at sorted index `index`; returns its element id. */
+	insertAt(index: number, itemInit: Record<string, unknown>): Promise<string>;
+	/** Inserts a new element just before the element with id `beforeId`. */
+	insertBefore(beforeId: string, itemInit: Record<string, unknown>): Promise<string>;
+	/** Moves the element with id `id` to sorted index `toIndex` (LWW on pos). */
+	move(id: string, toIndex: number): Promise<void>;
+	/** Removes the element with id `id` (clear-on-absent). */
+	remove(id: string): Promise<void>;
+}
+
+/**
+ * Handle passed to `transact(fn)`. CRUD writes issued through this handle —
+ * `tx.mutate.put` or `tx.db.x.mutate.put` — join the one atomic batch; reads
+ * see the pre-batch state (buffered writes are invisible until fn returns).
+ *
+ * Scoping is lexical-by-handle, not temporal: a write issued through the
+ * client itself (`client.mutate.*`) during one of fn's awaits is NOT captured —
+ * it queues as its own mutation. Custom mutations cannot batch, so the handle
+ * does not expose `custom`; issue those through the client directly.
+ *
+ * A transaction belongs to ONE workspace — the server commits a batch as one
+ * savepoint in one partition's sequence, so there is no cross-workspace atomic
+ * write and none is implied.
+ */
+export interface Transaction<E extends readonly DescMessage[] = readonly DescMessage[]> {
+	readonly workspaceId: string;
+	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
+	getRow<D extends DescMessage>(
+		schema: D,
+		key: string,
+	): Promise<Row<MessageShape<D>> | undefined>;
+	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
+	query<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>>;
+	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): () => void;
+	watchQuery<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): () => void;
+	resolveRef<D extends DescMessage>(
+		holderSchema: D,
+		fieldLocalName: string,
+		holder: MessageShape<D>,
+	): Promise<Row<Message> | Row<Message>[] | undefined>;
+	resolveReverseRef<D extends DescMessage>(
+		targetSchema: D,
+		relationName: string,
+		target: MessageShape<D>,
+		q?: Query<Message>,
+	): Promise<Row<Message>[]>;
+	mutate: CrudMutateApi;
+	db: EntityApis<E>;
+}
+
+/** Options for dropping a workspace from a running client. */
+export interface RemoveWorkspaceOptions {
+	/**
+	 * Also delete the workspace's local data: its confirmed rows, optimistic
+	 * overlay, bootstrap staging, cursor, watermarks and every mutation still
+	 * queued for it. Use this when access was revoked and the app has decided the
+	 * copy must not stay on the device (issue 079); without it the client merely
+	 * stops syncing and the rows remain readable until the workspace is added
+	 * back.
+	 *
+	 * The queued mutations are handed back in RemoveWorkspaceResult.discarded —
+	 * that is the only copy left, so an app that wants to keep unsent work must
+	 * take it from there.
+	 *
+	 * The store is shared across tabs, so a purge is visible to all of them: a
+	 * peer tab still holding the workspace sees its rows disappear and
+	 * re-bootstraps it on its next cycle.
+	 */
+	purge?: boolean;
+}
+
+/** A queued mutation that was dropped without ever reaching the server. */
+export interface DiscardedMutation {
+	workspaceId: string;
+	mutationId: bigint;
+	/**
+	 * The mutation as it sat in the queue, so an app can persist it or re-issue
+	 * it against another workspace. Re-enqueueing it as-is is not useful: ids are
+	 * minted per (workspace, client) and the server would see a gap.
+	 */
+	mutation: Mutation;
+}
+
+/** What `removeWorkspace` did. */
+export interface RemoveWorkspaceResult {
+	/** False when the client did not hold the workspace (the call was a no-op). */
+	removed: boolean;
+	/** Whether local data was deleted, i.e. the purge option was set and ran. */
+	purged: boolean;
+	/**
+	 * Mutations the purge threw away, in queue order. They can never be acked —
+	 * the workspace is gone locally and, in the revocation case, the server would
+	 * refuse them anyway — so this is where unsent work goes to be preserved if
+	 * the app wants it. Empty without `purge`, since the queue then survives.
+	 *
+	 * Each one is also reported through `onMutationRejected` with code
+	 * `workspace_purged`, so ignoring this value still does not lose the loss
+	 * silently.
+	 */
+	discarded: DiscardedMutation[];
+}
+
+/**
+ * Everything the client does inside one workspace. Reached through
+ * `client.ws(id)`; the same surface is mirrored on the client itself, bound to
+ * the default workspace, so a single-workspace app never names one.
+ */
+export interface WorkspaceClient<E extends readonly DescMessage[] = readonly DescMessage[]> {
+	readonly workspaceId: string;
+	readonly mutate: MutateApi;
+	readonly db: EntityApis<E>;
+	/** Opens a live text-field handle in this workspace (see TextHandle). */
+	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle>;
+	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
+	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
+	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
+	query<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>>;
+	queryServer<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+	): Promise<RowSet<MessageShape<D>>>;
+	watch<D extends DescMessage>(
+		schema: D,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void;
+	watchQuery<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void;
+	resolveRef<D extends DescMessage>(
+		holderSchema: D,
+		fieldLocalName: string,
+		holder: MessageShape<D>,
+	): Promise<Row<Message> | Row<Message>[] | undefined>;
+	resolveReverseRef<D extends DescMessage>(
+		targetSchema: D,
+		relationName: string,
+		target: MessageShape<D>,
+		q?: Query<Message>,
+	): Promise<Row<Message>[]>;
+	transact(fn: (tx: Transaction<E>) => Promise<void>): Promise<void>;
+	pendingCount(): Promise<number>;
+	/** This workspace's slice of the sync status. */
+	status(): WorkspaceStatus;
+	/** Replaces the subscription set for this workspace alone. */
+	setSubscriptions(specs: SubscriptionSpec[]): void;
+	undo(): Promise<boolean>;
+	redo(): Promise<boolean>;
+	canUndo(): boolean;
+	canRedo(): boolean;
+	onUndoChange(cb: () => void): () => void;
+}
+
+/**
+ * One workspace's view of a SyncClient: every read, write, transaction and undo
+ * step scoped to a single partition. Holds the workspace's undo stacks, since
+ * mutation ids — which the stacks reference — are counted per workspace.
+ */
+class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClient<E> {
+	readonly mutate: MutateApi;
+	private dbApi?: EntityApis<E>;
+	/** In-memory undo/redo over this workspace's local CRUD mutations. */
+	readonly undoMgr?: UndoManager;
+	/** This workspace's compiled subscription set (wire form). */
+	subscriptions: Subscription[];
+
+	constructor(
+		private client: SyncClient<E>,
+		readonly workspaceId: string,
+		subscriptions: Subscription[],
+		undoOpts?: UndoOptions,
+	) {
+		this.subscriptions = subscriptions;
+		if (undoOpts && undoOpts.enabled !== false) {
+			this.undoMgr = new UndoManager(undoOpts.maxDepth ?? 100);
+		}
+		this.mutate = {
+			...this.client.crudMutateApi(
+				(crud) => this.client.enqueue(this.workspaceId, { case: 'crud', value: crud }),
+				(schema, key) => this.get(schema, key),
+			),
+			custom: async (name, argsSchema, args) => {
+				await this.client.enqueue(this.workspaceId, {
+					case: 'custom',
+					value: buildCustom(name, argsSchema, args),
+				});
+			},
+			list: (schema, rowKey, field) => this.client.listHandle(this, schema, rowKey, field),
+		};
+	}
+
+	get db(): EntityApis<E> {
+		return (this.dbApi ??= buildEntityApis(this.client.entities, this, this.client.entityRegistry));
+	}
+
+	// Two names for one thing, deliberately: `textHandle` is the name db.ts's
+	// SchemaApi calls (it is implemented by transaction handles too, which have
+	// no text), while `text` is the WorkspaceClient counterpart of
+	// `client.text()` — so a caller holding either object writes the same call.
+	textHandle<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle> {
+		return this.client.textHandleIn(this, schema, key, field);
+	}
+
+	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle> {
+		return this.textHandle(schema, key, field);
+	}
+
+	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined> {
+		return this.client.getIn(this.workspaceId, schema, key);
+	}
+
+	getRow<D extends DescMessage>(
+		schema: D,
+		key: string,
+	): Promise<Row<MessageShape<D>> | undefined> {
+		return this.client.getRowIn(this.workspaceId, schema, key);
+	}
+
+	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>> {
+		return this.client.scanIn(this.workspaceId, schema);
+	}
+
+	query<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>> {
+		return this.client.queryIn(this.workspaceId, schema, q, opts);
+	}
+
+	queryServer<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+	): Promise<RowSet<MessageShape<D>>> {
+		return this.client.queryServerIn(this.workspaceId, schema, q);
+	}
+
+	watch<D extends DescMessage>(
+		schema: D,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void {
+		return this.client.registerWatch(
+			this.workspaceId,
+			schema,
+			cb,
+			undefined,
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	watchQuery<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void {
+		return this.client.registerWatch(
+			this.workspaceId,
+			schema,
+			cb,
+			prepareQuery(schema, compileQuery(q)),
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	resolveRef<D extends DescMessage>(
+		holderSchema: D,
+		fieldLocalName: string,
+		holder: MessageShape<D>,
+	): Promise<Row<Message> | Row<Message>[] | undefined> {
+		return this.client.resolveRefIn(this.workspaceId, holderSchema, fieldLocalName, holder);
+	}
+
+	resolveReverseRef<D extends DescMessage>(
+		targetSchema: D,
+		relationName: string,
+		target: MessageShape<D>,
+		q?: Query<Message>,
+	): Promise<Row<Message>[]> {
+		return this.client.resolveReverseRefIn(
+			this.workspaceId,
+			targetSchema,
+			relationName,
+			target,
+			q,
+		);
+	}
+
+	transact(fn: (tx: Transaction<E>) => Promise<void>): Promise<void> {
+		return this.client.transactIn(this, fn);
+	}
+
+	pendingCount(): Promise<number> {
+		return this.client.pendingCountIn(this.workspaceId);
+	}
+
+	status(): WorkspaceStatus {
+		return this.client.workspaceStatus(this.workspaceId);
+	}
+
+	setSubscriptions(specs: SubscriptionSpec[]): void {
+		this.client.setWorkspaceSubscriptions(this.workspaceId, specs);
+	}
+
+	undo(): Promise<boolean> {
+		return this.client.undoIn(this);
+	}
+
+	redo(): Promise<boolean> {
+		return this.client.redoIn(this);
+	}
+
+	canUndo(): boolean {
+		return this.undoMgr?.canUndo() ?? false;
+	}
+
+	canRedo(): boolean {
+		return this.undoMgr?.canRedo() ?? false;
+	}
+
+	onUndoChange(cb: () => void): () => void {
+		return this.undoMgr?.onChange(cb) ?? (() => {});
+	}
+}
+
+/**
+ * Local-read/local-write sync client. Mutations apply optimistically and
+ * queue locally (works fully offline); start() begins background sync.
+ *
+ * One client covers one ACCOUNT and any number of its workspaces: they share a
+ * store, a change stream and a push, so nothing about the client grows with
+ * workspace count except the data itself. Reads and writes at this level target
+ * the default workspace; `client.ws(id)` targets another, and `scanAll`/
+ * `queryAll` read across all of them at once.
+ *
+ * Two ACCOUNTS need two clients. A credential is attached per request, so two
+ * accounts can never share a stream — federating across them is forced, not
+ * chosen.
+ */
+export class SyncClient<const E extends readonly DescMessage[] = readonly DescMessage[]> {
+	/** Store partition; see SyncClientOptions.accountId. */
+	readonly accountId: string;
+	private opts: SyncClientOptions<E>;
+	/** @internal shared with the workspace scopes. */
+	readonly entityRegistry: EntityRegistry;
+	/**
+	 * Compiled secondary indexes, shared by the write path (maintenance) and the
+	 * read path (planning) so both agree on which index is which and on the spec
+	 * fingerprint its entries live under.
+	 */
+	readonly indexes: IndexCache;
+	/** See SyncClientOptions.debugVerifyIndexReads. */
+	private readonly verifyIndexReads: boolean;
+	private mirrors: MirrorMap;
+	private kvPromise?: Promise<KVStore>;
+	/**
+	 * Guards all KV writes (enqueue, clientId minting, rebase). Cross-tab in
+	 * browsers via Web Locks; the lock name matches the IDB database name so
+	 * tabs sharing a database share the lock. NON-REENTRANT: never call
+	 * kvMutex.run inside a kvMutex.run callback.
+	 */
+	private kvMutex: Mutex;
+	private hubInstance?: WatcherHub;
+	private hubPromise?: Promise<WatcherHub>;
+	private changeShare?: ChangeShare;
+	private coordinator?: Coordinator;
+	/**
+	 * Cross-tab intent record for this instance (sync/intent.ts): created in
+	 * start() and shared with the Coordinator; the enqueue path joins its
+	 * undo-ref updates into the enqueue transaction.
+	 */
+	private intentReg?: IntentRegistry;
+	/**
+	 * The in-flight (or completed) start, memoized so concurrent callers share
+	 * one. Cleared again when that start REJECTS, which is what makes start()
+	 * retryable; see start().
+	 */
+	private startPromise?: Promise<void>;
+	private closed = false;
+	/** Subscribers of the dead-letter surface; see onMutationRejected(). */
+	private rejectionListeners = new Set<(info: RejectionInfo) => void>();
+	private statusTracker = new StatusTracker();
+	private scopes = new Map<string, WorkspaceScope<E>>();
+	/**
+	 * Workspaces with an index build running. `again` records that a request
+	 * arrived while one was in flight; see buildWorkspaceIndexes().
+	 */
+	private indexBuilds = new Map<string, { again: boolean }>();
+	private defaultWorkspaceId?: string;
+	private transportPromise?: Promise<Transport>;
+	/**
+	 * The memoized device identity; see clientId(). Dropped again when a format
+	 * upgrade discards the stored one.
+	 */
+	private clientIdPromise?: Promise<string>;
+	/** Slot pool for text writer identities on this device (see text/peer.ts). */
+	private peerLeasesPromise?: Promise<PeerLeases>;
+
+	constructor(opts: SyncClientOptions<E>) {
+		const workspaces = resolveWorkspaces(opts);
+		this.opts = opts;
+		this.accountId = resolveAccountId(opts, workspaces);
+		this.kvMutex = createKvMutex(`sync:${this.accountId}`);
+		if (opts.onStatusChange) this.statusTracker.onChange(opts.onStatusChange);
+		this.entityRegistry = new EntityRegistry(opts.entities);
+		if (opts.mergers) this.entityRegistry.setMergers(opts.mergers);
+		this.indexes = new IndexCache(this.entityRegistry);
+		this.verifyIndexReads = opts.debugVerifyIndexReads ?? debugVerifyTouchesEnv();
+		this.mirrors = opts.mutators ?? {};
+		const initial = this.compileSubscriptions(opts.subscriptions ?? []);
+		for (const ws of workspaces) this.createScope(ws, initial);
+		this.defaultWorkspaceId = opts.defaultWorkspace
+			?? (workspaces.length === 1 ? workspaces[0] : undefined);
+		if (this.defaultWorkspaceId && !this.scopes.has(this.defaultWorkspaceId)) {
+			throw new Error(
+				`defaultWorkspace "${this.defaultWorkspaceId}" is not one of the configured workspaces`,
+			);
+		}
+		this.statusTracker.setDefaultWorkspace(this.defaultWorkspaceId);
+	}
+
+	/** @internal the schemas this client was configured with. */
+	get entities(): E {
+		return this.opts.entities;
+	}
+
+	/** The workspaces this client currently syncs, in the order they were added. */
+	get workspaces(): string[] {
+		return [ ...this.scopes.keys() ];
+	}
+
+	/**
+	 * The workspace the client-level API binds to, or undefined when the client
+	 * holds several and none was named.
+	 */
+	get defaultWorkspace(): string | undefined {
+		return this.defaultWorkspaceId;
+	}
+
+	/**
+	 * The workspace-scoped view of `workspaceId`. Throws for a workspace this
+	 * client does not hold — add it first with addWorkspace().
+	 */
+	ws(workspaceId: string): WorkspaceClient<E> {
+		const scope = this.scopes.get(workspaceId);
+		if (!scope) {
+			throw new Error(
+				`workspace "${workspaceId}" is not held by this client; call addWorkspace() first`,
+			);
+		}
+		return scope;
+	}
+
+	/**
+	 * Starts syncing another workspace. It bootstraps on the next cycle without
+	 * disturbing the others, and joins the existing stream and pushes. Adding a
+	 * workspace already held only replaces its subscription set.
+	 */
+	addWorkspace(workspaceId: string, specs?: SubscriptionSpec[]): WorkspaceClient<E> {
+		this.assertOpen();
+		const compiled = this.compileSubscriptions(specs ?? this.opts.subscriptions ?? []);
+		const existing = this.scopes.get(workspaceId);
+		if (existing) {
+			existing.subscriptions = compiled;
+			this.coordinator?.setSubscriptions(workspaceId, compiled);
+			return existing;
+		}
+		const scope = this.createScope(workspaceId, compiled);
+		this.coordinator?.addWorkspace(workspaceId, compiled);
+		return scope;
+	}
+
+	/**
+	 * Stops syncing a workspace, optionally deleting its local data (see
+	 * RemoveWorkspaceOptions.purge). Removing the default workspace leaves the
+	 * client without one, so the client-level API throws until another is chosen
+	 * — pass `defaultWorkspace` on a fresh client or use `client.ws(id)`.
+	 * Idempotent for a workspace the client does not hold.
+	 *
+	 * A purge discards whatever was still queued for the workspace; the result
+	 * carries those mutations. Discarding is not an error — it is what a purge
+	 * is — so this reports rather than throws, and the same mutations also reach
+	 * `onMutationRejected` for apps that would otherwise ignore the result.
+	 */
+	async removeWorkspace(
+		workspaceId: string,
+		opts?: RemoveWorkspaceOptions,
+	): Promise<RemoveWorkspaceResult> {
+		if (!this.scopes.delete(workspaceId)) {
+			return { removed: false, purged: false, discarded: [] };
+		}
+		this.coordinator?.removeWorkspace(workspaceId);
+		this.statusTracker.removeWorkspace(workspaceId);
+		if (this.defaultWorkspaceId === workspaceId) {
+			this.defaultWorkspaceId = undefined;
+			this.statusTracker.setDefaultWorkspace(undefined);
+		}
+		if (!opts?.purge) return { removed: true, purged: false, discarded: [] };
+		const discarded = await this.purgeWorkspace(workspaceId);
+		return { removed: true, purged: true, discarded };
+	}
+
+	/**
+	 * Deletes every trace of a workspace from the local store: confirmed rows,
+	 * optimistic overlay, bootstrap staging, pending queue, cursor and
+	 * watermarks. Watchers are notified so the UI drops the rows immediately.
+	 *
+	 * The pending queue is read inside the same transaction that deletes it, so
+	 * what comes back is exactly what was lost — a queue read before the call
+	 * could have been appended to in between.
+	 */
+	private async purgeWorkspace(workspaceId: string): Promise<DiscardedMutation[]> {
+		const kv = await this.kv();
+		const touched = new TouchSet();
+		const discarded = await this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const queued = await readPending(tx, workspaceId);
+				const doomed: string[] = [];
+				for (const entity of this.entityRegistry.names()) {
+					for await (const [ k ] of tx.scan(confirmedWsPrefix(entity, workspaceId))) doomed.push(k);
+					for await (const [ k ] of tx.scan(overlayWsPrefix(entity, workspaceId))) doomed.push(k);
+					// The index positions ride on the confirmed rows above, so they
+					// are deleted with them and need nothing here.
+					touched.entity(workspaceId, entity);
+				}
+				for (
+					const prefix of [
+						stagingWsRoot(workspaceId),
+						pendingPrefix(workspaceId),
+						metaWsPrefix(workspaceId),
+					]
+				) {
+					for await (const [ k ] of tx.scan(prefix)) doomed.push(k);
+				}
+				for (const k of doomed) await tx.del(k);
+				await tx.commit();
+				return queued.map((m) => ({ workspaceId, mutationId: m.mutationId, mutation: m }));
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+		await this.notifyChange(touched);
+		// After the commit and the notify: apps observe the rows as already gone,
+		// exactly as they do for a rejection rolled back before its callback.
+		for (const d of discarded) {
+			this.reportRejection({
+				workspaceId,
+				mutationId: d.mutationId,
+				errorCode: CodeWorkspacePurged,
+				errorMessage: `workspace ${workspaceId} was purged locally`,
+				...describeMutation(d.mutation),
+			});
+		}
+		return discarded;
+	}
+
+	private createScope(workspaceId: string, subscriptions: Subscription[]): WorkspaceScope<E> {
+		const scope = new WorkspaceScope<E>(this, workspaceId, subscriptions, this.opts.undo);
+		this.scopes.set(workspaceId, scope);
+		this.statusTracker.addWorkspace(workspaceId);
+		return scope;
+	}
+
+	/** The default workspace's scope, or a clear error explaining what to do. */
+	private defaultScope(): WorkspaceScope<E> {
+		const id = this.defaultWorkspaceId;
+		const scope = id ? this.scopes.get(id) : undefined;
+		if (!scope) {
+			throw new Error(
+				'this client has no default workspace; use client.ws(workspaceId) '
+					+ 'or set defaultWorkspace',
+			);
+		}
+		return scope;
+	}
+
+	/**
+	 * The workspace this client's own read/write methods target. Equivalent to
+	 * `client.ws(client.defaultWorkspace)`.
+	 */
+	get workspaceId(): string {
+		return this.defaultScope().workspaceId;
+	}
+
+	/** Writes bound to the default workspace. */
+	get mutate(): MutateApi {
+		return this.defaultScope().mutate;
+	}
+
+	/**
+	 * Per-entity typed facade derived from the message names in `entities`,
+	 * bound to the default workspace: `client.db.todo.mutate.put({...})`,
+	 * `client.db.todo.scan()`. Throws if two entities share a simple name; the
+	 * schema-first methods on the client itself remain the escape hatch.
+	 */
+	get db(): EntityApis<E> {
+		return this.defaultScope().db;
+	}
+
+	/** Opens a live text-field handle in the default workspace (see TextHandle). */
+	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle> {
+		return this.textHandleIn(this.defaultScope(), schema, key, field);
+	}
+
+	/**
+	 * Builds the put/patch/update/del facade over a `sink` that decides where
+	 * each built CrudMutation goes: a workspace scope's facade enqueues it as its
+	 * own mutation, a transact() handle's facade pushes it into the batch buffer.
+	 * `read` supplies the base row `update` diffs against, from the same place
+	 * that facade's reads come from — inside a transaction that is the pre-batch
+	 * state, matching every other read on the handle.
+	 * @internal
+	 */
+	crudMutateApi(
+		sink: (crud: CrudMutation) => Promise<void> | void,
+		read: <D extends DescMessage>(schema: D, key: string) => Promise<MessageShape<D> | undefined>,
+	): CrudMutateApi {
+		// Written as one wide signature rather than inline in the object literal:
+		// `patch` is overloaded on the interface, and a single implementation
+		// satisfying both arms cannot be contextually typed from them.
+		const patch = async <D extends DescMessage>(
+			schema: D,
+			key: string,
+			init: TextInit<MessageInitShape<D>>,
+			opts?: PatchOptions,
+		): Promise<void> => {
+			const def = this.entityRegistry.bySchema(schema);
+			const { init: cleaned, texts } = extractTextStrings(schema, init);
+			// The mask derives from the ORIGINAL init so extracted text
+			// fields keep their entry (explicit paths pass through).
+			const paths = opts?.paths ?? maskFromInit(schema, init as object);
+			const crud = buildPatch(
+				def,
+				schema,
+				key,
+				cleaned as MessageInitShape<D>,
+				paths,
+				opts?.expectedVersion,
+			);
+			attachTextStrings(crud, texts);
+			await sink(crud);
+		};
+		return {
+			put: async (schema, value, opts) => {
+				const def = this.entityRegistry.bySchema(schema);
+				// String-valued text fields ride a side map to enqueue, where
+				// they diff against the merged row under a leased peer.
+				const { init, texts } = extractTextStrings(schema, value);
+				const crud = buildPut(
+					def,
+					schema,
+					create(schema, init as MessageInitShape<typeof schema>),
+					opts?.expectedVersion,
+				);
+				attachTextStrings(crud, texts);
+				await sink(crud);
+			},
+			patch,
+			update: async (schema, key, recipe, opts) => {
+				const def = this.entityRegistry.bySchema(schema);
+				const base = await read(schema, key);
+				if (base === undefined) {
+					throw new Error(
+						`update: no row "${key}" for entity "${def.name}" to update. The row may exist on `
+							+ `the server without being synced here — read it first, or use put() to write `
+							+ `one unconditionally.`,
+					);
+				}
+				// The recipe edits a private copy: a row the app is already holding
+				// must not change under it, and a recipe that throws must leave
+				// nothing behind.
+				const draft = clone(schema, base);
+				recipe(draft);
+				const paths = maskFromDiff(schema, base, draft);
+				// Nothing moved, nothing to send. Dropping the write here rather than
+				// enqueuing an empty mask keeps a save-on-every-keystroke caller off
+				// the wire, and an empty mask is a no-op merge anyway.
+				if (paths.length === 0) return;
+				const keyFields = new Set(def.keyFields.map((f) => f.name));
+				const changedKeyField = paths.find((p) => keyFields.has(p));
+				if (changedKeyField !== undefined) {
+					throw new Error(
+						`update: recipe changed key field "${changedKeyField}" of entity "${def.name}". `
+							+ `A row's identity is fixed; write a new row instead.`,
+					);
+				}
+				await patch(schema, key, draft as TextInit<MessageInitShape<typeof schema>>, {
+					paths,
+					expectedVersion: opts?.expectedVersion,
+				});
+			},
+			del: async (schema, key, opts) => {
+				const def = this.entityRegistry.bySchema(schema);
+				await sink(buildDelete(def, key, opts?.expectedVersion));
+			},
+		};
+	}
+
+	/**
+	 * Builds a movable-list handle (see ListHandle). All operations read the
+	 * current sorted snapshot, allocate fractional positions / element ids, and
+	 * enqueue an ordinary row PATCH — insert/remove via per-item expansion, move
+	 * via an explicit `field.<id>.<pos>` mask so only the position changes (LWW),
+	 * preserving the element's other fields against a concurrent edit.
+	 * @internal
+	 */
+	/**
+	 * Opens a live handle over a collaborative text field (see TextHandle).
+	 * The field must carry (syncplane.v1.field_behavior).text and the row must
+	 * already exist — edits ship as PATCHes, which never upsert. Each handle
+	 * leases its own writer identity for as long as it is open; close() returns
+	 * the slot to the pool (see text/peer.ts).
+	 * @internal
+	 */
+	async textHandleIn<D extends DescMessage>(
+		scope: WorkspaceScope<E>,
+		schema: D,
+		rowKey: string,
+		fieldName: string,
+	): Promise<TextHandle> {
+		const def = this.entityRegistry.bySchema(schema);
+		const field = schema.fields.find((f) => f.name === fieldName || f.localName === fieldName);
+		if (!field || !isTextField(field)) {
+			throw new Error(`${schema.typeName}.${fieldName} is not a text field`);
+		}
+		const local = field.localName;
+		const fieldOf = (row: MessageShape<D> | undefined): Uint8Array | undefined =>
+			row === undefined
+				? undefined
+				: (row as Record<string, unknown>)[local] as Uint8Array | undefined;
+		return openTextHandle({
+			acquirePeer: async () => (await this.textPeerLeases()).acquire(),
+			load: async () => fieldOf(await scope.get(schema, rowKey)),
+			patch: (state, inverseOps, coalesce) => {
+				const crud = buildPatch(def, schema, rowKey, { [local]: state } as MessageInitShape<D>);
+				// The symbolic op-level inverse replaces the snapshot inverse:
+				// a state-CRDT snapshot merged back would be a silent no-op.
+				const override: Inverse | undefined = inverseOps && {
+					kind: 'text',
+					entity: def.name,
+					key: rowKey,
+					field: field.name,
+					ops: inverseOps,
+				};
+				return this.enqueue(scope.workspaceId, { case: 'crud', value: crud }, undefined, {
+					overrides: [ override ],
+					coalesce,
+				});
+			},
+			watch: (cb) =>
+				scope.watch(schema, (rows) => {
+					cb(fieldOf(rows.find((r) => r.key === rowKey)?.value));
+				}),
+		});
+	}
+
+	listHandle<D extends DescMessage>(
+		scope: WorkspaceScope<E>,
+		schema: D,
+		rowKey: string,
+		fieldName: string,
+	): ListHandle {
+		const field = schema.fields.find((f) => f.name === fieldName || f.localName === fieldName);
+		const order = field ? orderFieldOf(field) : undefined;
+		if (!field || !order || field.fieldKind !== 'list' || field.listKind !== 'message') {
+			throw new Error(`${schema.typeName}.${fieldName} is not a movable ordered list`);
+		}
+		const keyFields = keyFieldsFor(field);
+		if (keyFields.length !== 1) {
+			throw new Error(`${schema.typeName}.${fieldName}: movable list handle needs a single key field`);
+		}
+		const idLocal = keyFields[0]!.localName;
+		const posLocal = field.message.fields.find((f) => f.name === order)!.localName;
+		const listLocal = field.localName;
+		type Elem = Record<string, unknown>;
+
+		const snapshot = async (): Promise<Elem[]> => {
+			const row = await this.getIn(scope.workspaceId, schema, rowKey);
+			if (row === undefined) throw new Error(`row "${rowKey}" not found`);
+			return ((row as Record<string, unknown>)[listLocal] as Elem[] | undefined) ?? [];
+		};
+		const posOf = (e: Elem | undefined): string | null => (e ? String(e[posLocal] ?? '') : null);
+		const patch = (init: Record<string, unknown>, paths: string[]): Promise<void> =>
+			scope.mutate.patch(schema, rowKey, init as MessageInitShape<D>, { paths });
+
+		const insertAt = async (index: number, itemInit: Elem): Promise<string> => {
+			const list = await snapshot(); // sorted on read
+			const clientId = await this.clientId();
+			const pos = generateKeyBetween(posOf(list[index - 1]), posOf(list[index]), clientId);
+			const id = newElementId(clientId);
+			await patch({ [listLocal]: [ ...list, { ...itemInit, [idLocal]: id, [posLocal]: pos } ] }, [
+				field.name,
+			]);
+			return id;
+		};
+
+		return {
+			insertAt,
+			insertBefore: async (beforeId, itemInit) => {
+				const list = await snapshot();
+				const idx = list.findIndex((e) => e[idLocal] === beforeId);
+				return insertAt(idx === -1 ? list.length : idx, itemInit);
+			},
+			move: async (id, toIndex) => {
+				const without = (await snapshot()).filter((e) => e[idLocal] !== id);
+				const clientId = await this.clientId();
+				const pos = generateKeyBetween(posOf(without[toIndex - 1]), posOf(without[toIndex]), clientId);
+				const encId = encodeItemKey({ [idLocal]: id } as unknown as Message, keyFields);
+				await patch({ [listLocal]: [ { [idLocal]: id, [posLocal]: pos } ] }, [
+					`${field.name}.${encId}.${order}`,
+				]);
+			},
+			remove: async (id) => {
+				const list = await snapshot();
+				await patch({ [listLocal]: list.filter((e) => e[idLocal] !== id) }, [ field.name ]);
+			},
+		};
+	}
+
+	/**
+	 * The device's pool of text writer identities, keyed by clientId. A failed
+	 * mint is not cached — the pool needs the clientId, whose minting touches the
+	 * store and can fail transiently.
+	 * @internal
+	 */
+	private textPeerLeases(): Promise<PeerLeases> {
+		this.peerLeasesPromise ??= this.clientId().then(createPeerLeases, (err: unknown) => {
+			this.peerLeasesPromise = undefined;
+			throw err;
+		});
+		return this.peerLeasesPromise;
+	}
+
+	private kv(): Promise<KVStore> {
+		this.kvPromise ??= this.opts.kvStore
+			? Promise.resolve(this.opts.kvStore)
+			: typeof indexedDB !== 'undefined'
+			? IDBKVStore.open(`sync:${this.accountId}`)
+			: Promise.resolve(new MemoryKVStore());
+		return this.kvPromise;
+	}
+
+	/**
+	 * The one shared WatcherHub. Memoized by PROMISE, not by the resolved
+	 * instance: construction awaits the store, so two callers racing in the same
+	 * tick (two watch() registrations, or a watch racing a commit's notify) would
+	 * otherwise each build a hub, the second overwriting the first — leaving
+	 * watchers registered on an orphaned hub that no notify ever reaches.
+	 */
+	private hub(): Promise<WatcherHub> {
+		if (this.hubInstance) return Promise.resolve(this.hubInstance);
+		this.hubPromise ??= (async () => {
+			const hub = new WatcherHub(await this.kv(), this.entityRegistry, this.kvMutex, {
+				debugVerifyTouches: this.opts.debugVerifyTouches,
+				coverageOf: (entity, workspaceId) => this.coverage.coverageOf(entity, workspaceId),
+			});
+			hub.setRefClient(this.refClient());
+			// close() may have torn down during the kv await. Do not resurrect the
+			// shared hub or its cross-tab BroadcastChannel (close() already stopped
+			// the old one) — hand back a transient, watcher-less hub. It is inert
+			// (nothing is subscribed, no changeShare) and gets collected on drop.
+			if (this.closed) {
+				this.hubPromise = undefined;
+				return hub;
+			}
+			this.hubInstance = hub;
+			// A commit in another tab updates the shared store but only that tab's
+			// hub; mirror its touched set into ours so our watchers stay fresh.
+			this.changeShare = startChangeShare(this.accountId, (tokens) => {
+				void hub.notify(TouchSet.fromTokens(tokens));
+			});
+			return hub;
+		})();
+		return this.hubPromise;
+	}
+
+	/**
+	 * The workspace-aware resolver the ref layer and include-hydration run
+	 * against. Not `this`: the public read methods take no workspace (they bind
+	 * to the default one), while reference resolution must always name the
+	 * holder's own workspace.
+	 */
+	private refClient(): RefClient {
+		return {
+			getRow: (schema, workspaceId, key) => this.getRowIn(workspaceId, schema, key),
+			query: (schema, workspaceId, q) => this.queryIn(workspaceId, schema, q),
+		};
+	}
+
+	/**
+	 * Notifies local watchers of a committed touched set and fans it out to
+	 * other tabs. Every path that commits a write (enqueue, rebase, bootstrap,
+	 * rollback, purge) routes its notification through here so the broadcast can
+	 * never be forgotten alongside a local notify.
+	 */
+	private async notifyChange(touched: TouchSet): Promise<void> {
+		// An in-flight enqueue can land here after close(); skip rather than have
+		// hub() spin up a fresh WatcherHub/BroadcastChannel past teardown.
+		if (this.closed) return;
+		const hub = await this.hub();
+		if (this.closed) return;
+		await hub.notify(touched);
+		// Peers get the compat encoding (keyed tokens PLUS a wildcard per pair),
+		// so a tab of an older build still full-scans while a current one patches.
+		this.changeShare?.broadcast(touched.broadcastTokens());
+	}
+
+	private assertOpen(): void {
+		if (this.closed) throw new Error('SyncClient is closed');
+	}
+
+	/**
+	 * Begins background sync (bootstrap on first run, live stream + poll loops).
+	 *
+	 * Idempotent, and RETRYABLE: it does not wait for the first sync cycle (an
+	 * unreachable server surfaces on the status, not here), but the local steps
+	 * it does await — configuration, the KV format check, coordinator start-up —
+	 * can reject, and a rejected start leaves the client startable again.
+	 * Latching a "started" flag before those awaits instead would turn every
+	 * later start() into a silent no-op on a client that never syncs, with no
+	 * way back short of constructing a new one.
+	 */
+	async start(): Promise<void> {
+		this.assertOpen();
+		if (this.startPromise) return this.startPromise;
+		const run = this.startUp();
+		this.startPromise = run;
+		run.catch(() => {
+			// Only drop OUR memo: a start that failed after close(), or one racing
+			// a later successful start, must not unlatch someone else's.
+			if (this.startPromise === run) this.startPromise = undefined;
+		});
+		return run;
+	}
+
+	private async startUp(): Promise<void> {
+		const transport = await this.resolveTransport();
+		await this.ensureFormatVersion(transport);
+		// After the format check, which may have wiped the store this reads: a
+		// wiped store records no entities, and every one of ours is new again.
+		const newEntities = await this.reconcileEntities();
+		// Bring the hub (and its cross-tab change receiver) up before sync so
+		// other tabs' commits reach our watchers even before our first local one.
+		await this.hub();
+		// close() may have run during any of the awaits above. It is one-shot
+		// and already tore down, finding no coordinator to stop; bail before
+		// creating one whose stream/poll loops would run forever against the now
+		// closed store. (If close() instead races the coordinator.start() await
+		// below, it observes the assigned this.coordinator and stops it.)
+		if (this.closed) return;
+		this.intentReg = new IntentRegistry(await this.kv(), this.kvMutex);
+		const coordinator = new Coordinator({
+			transport,
+			kv: await this.kv(),
+			kvMutex: this.kvMutex,
+			accountId: this.accountId,
+			clientId: await this.clientId(),
+			registry: this.entityRegistry,
+			indexes: this.indexes,
+			onIndexesStale: (workspaceId) => this.startIndexBuild(workspaceId),
+			mirrors: this.mirrors,
+			notify: (touched) => this.notifyChange(touched),
+			status: this.statusTracker,
+			scopes: this.ownScopes(),
+			// Resolved through the registry so an unregistered schema fails here,
+			// at construction, rather than as a name the server silently ignores.
+			priorityEntities: this.opts.bootstrapPriority?.map(
+				(schema) => this.entityRegistry.bySchema(schema).name,
+			),
+			onMutationRejected: (info) => this.reportRejection(info),
+			onSyncEvent: this.opts.onSyncEvent,
+			pollIntervalMs: this.opts.pollIntervalMs,
+			streamEnabled: this.opts.streamEnabled,
+			pullLimit: this.opts.pullLimit,
+			poisonThreshold: this.opts.poisonThreshold,
+			maxMutationsPerPush: this.opts.maxMutationsPerPush,
+			maxWorkspacesPerRequest: this.opts.maxWorkspacesPerRequest,
+			// Undo references forward mutation ids; let compaction protect the ones
+			// whose inverse is a snapshot of one specific mutation, and remap them
+			// all, so squashing a queue never corrupts that workspace's undo stacks.
+			undoRefIds: this.opts.undo
+				? (ws) => this.scopes.get(ws)?.undoMgr?.foldBarrierIds() ?? new Set<bigint>()
+				: undefined,
+			onCompacted: this.opts.undo
+				? (ws, remap) => this.scopes.get(ws)?.undoMgr?.remapIds(remap)
+				: undefined,
+			clientRevision: this.opts.schemaRevision,
+			onSchemaSkew: this.opts.onSchemaSkew,
+			intent: this.intentReg,
+			forceResync: newEntities,
+		});
+		// Published before start() so a racing close() finds it (see above), and
+		// withdrawn again if that start fails, so a retry builds a fresh one rather
+		// than leaving a half-started coordinator behind it.
+		this.coordinator = coordinator;
+		try {
+			await coordinator.start();
+		} catch (err) {
+			if (this.coordinator === coordinator) this.coordinator = undefined;
+			await coordinator.stop().catch(() => {});
+			throw err;
+		}
+		this.startIndexBuild();
+	}
+
+	/**
+	 * Backfills index positions onto rows that predate an index, in the background.
+	 *
+	 * Deliberately not awaited: nothing depends on it. Until an index is marked
+	 * built every query scans, which is correct and merely slower, so making
+	 * start() wait would trade a real cost (a slow open) for no guarantee. A
+	 * failure is reported and dropped for the same reason — an unbuilt index is
+	 * a performance state, not a broken one.
+	 *
+	 * Runs for every held workspace at start(), and for one workspace whenever a
+	 * bootstrap swap leaves its indexes unbuilt.
+	 */
+	private startIndexBuild(workspaceId?: string): void {
+		if (this.indexes.empty) return;
+		if (workspaceId !== undefined) {
+			this.buildWorkspaceIndexes(workspaceId);
+			return;
+		}
+		for (const ws of this.scopes.keys()) this.buildWorkspaceIndexes(ws);
+	}
+
+	/**
+	 * Builds one workspace's indexes, coalescing concurrent requests.
+	 *
+	 * A build in flight is not cancelled and restarted — it may be most of the
+	 * way through a large entity — but it also cannot be trusted to finish the
+	 * job, since the swap that asked for a rebuild replaced the rows it was
+	 * walking. So the request is remembered and the walk simply repeated; the
+	 * first pass abandons its markers on the generation check (see
+	 * index-build.ts) and the repeat claims them, while an unchanged workspace
+	 * costs one key lookup per index.
+	 */
+	private buildWorkspaceIndexes(workspaceId: string): void {
+		const inflight = this.indexBuilds.get(workspaceId);
+		if (inflight !== undefined) {
+			inflight.again = true;
+			return;
+		}
+		const state = { again: false };
+		this.indexBuilds.set(workspaceId, state);
+		void (async () => {
+			try {
+				const kv = await this.kv();
+				do {
+					state.again = false;
+					if (this.closed) return;
+					await buildIndexes(
+						kv,
+						(fn) => this.kvMutex.run(fn),
+						this.entityRegistry,
+						this.indexes,
+						workspaceId,
+						// Stops the walk between batches when the client closes, so a
+						// build over a large store cannot outlive its store.
+						() => this.closed,
+					);
+				}
+				while (state.again);
+			} catch (err) {
+				reportError('secondary index build', err);
+			} finally {
+				this.indexBuilds.delete(workspaceId);
+			}
+		})();
+	}
+
+	/**
+	 * The single exit for "this mutation is dead" — server rejection, poison
+	 * drop, purge or format upgrade all land here, so every one of them trims the
+	 * undo stacks before the app sees it. Callers invoke it only after the local
+	 * state has been rolled back or deleted.
+	 */
+	private reportRejection(info: RejectionInfo): void {
+		// The undo stacks must not replay state that builds on the dead mutation.
+		// A purge removes the scope first, so its stacks are gone already.
+		const scope = this.scopes.get(info.workspaceId);
+		scope?.undoMgr?.onRejected(info.mutationId);
+		// Refresh this tab's intent record from the trimmed stacks. Own-tab
+		// only: a peer tab whose stacks reference the rejected mutation never
+		// hears about it (documented follow-up in issue 023 — needs a
+		// broadcast channel; its record merely over-protects until then).
+		if (scope?.undoMgr) {
+			void this.intentReg?.updateRefs(info.workspaceId, scope.undoMgr.foldBarrierIds());
+		}
+		// Isolated: the rollback has already landed, and the coordinator reports a
+		// batch of rejections in a loop — a throwing app handler must not skip the
+		// rest of that batch or fail the push cycle that carried them.
+		const onRejected = this.opts.onMutationRejected;
+		if (onRejected) safeInvoke(onRejected, info, 'onMutationRejected callback');
+		for (const listener of [ ...this.rejectionListeners ]) {
+			safeInvoke(listener, info, 'onMutationRejected listener');
+		}
+	}
+
+	/**
+	 * Subscribes to the dead-letter surface; returns an unsubscribe function.
+	 *
+	 * Reports exactly what the `onMutationRejected` OPTION does — that stays the
+	 * single-owner form a client is constructed with, and this is the
+	 * multi-listener one, so a UI layer can attach and detach with a component's
+	 * lifetime without owning (or stealing) the option. Same split as
+	 * `onStatusChange`, and every caveat on the option holds here too:
+	 * best-effort, not durable.
+	 */
+	onMutationRejected(cb: (info: RejectionInfo) => void): () => void {
+		this.rejectionListeners.add(cb);
+		return () => {
+			this.rejectionListeners.delete(cb);
+		};
+	}
+
+	private ownScopes(): Map<string, Subscription[]> {
+		const out = new Map<string, Subscription[]>();
+		for (const [ ws, scope ] of this.scopes) out.set(ws, scope.subscriptions);
+		return out;
+	}
+
+	/**
+	 * Answers how much of an entity the local store provably holds, from this
+	 * tab's own declared scope and from what the coordinator is still
+	 * downloading. Read live rather than snapshotted, so a setSubscriptions() is
+	 * reflected by the next read — and so is an entity finishing its first
+	 * snapshot. Before start() there is no coordinator and nothing is hydrating:
+	 * a client that never syncs holds whatever it holds.
+	 */
+	private readonly coverage = new CoverageResolver(
+		() => this.ownScopes(),
+		(workspaceId) => this.coordinator?.hydrationOf(workspaceId),
+	);
+
+	/**
+	 * Replaces the subscription set of EVERY workspace at runtime. The next sync
+	 * cycle carries the new set; the server detects the mismatch against each
+	 * cursor and delta-resyncs the difference (rows entering scope arrive, rows
+	 * leaving scope drop), falling back to a re-bootstrap when it cannot
+	 * reconstruct the old scope. Throws on unknown entities or invalid predicates.
+	 */
+	setSubscriptions(specs: SubscriptionSpec[]): void {
+		this.assertOpen();
+		const compiled = this.compileSubscriptions(specs);
+		for (const [ ws, scope ] of this.scopes) {
+			scope.subscriptions = compiled;
+			this.coordinator?.setSubscriptions(ws, compiled);
+		}
+	}
+
+	/** @internal backs WorkspaceClient.setSubscriptions. */
+	setWorkspaceSubscriptions(workspaceId: string, specs: SubscriptionSpec[]): void {
+		this.assertOpen();
+		const scope = this.scopes.get(workspaceId);
+		if (!scope) return;
+		scope.subscriptions = this.compileSubscriptions(specs);
+		this.coordinator?.setSubscriptions(workspaceId, scope.subscriptions);
+	}
+
+	private compileSubscriptions(specs: SubscriptionSpec[]): Subscription[] {
+		return specs.map((spec) => {
+			const def = this.entityRegistry.bySchema(spec.schema);
+			// The predicate and the window ordering go through the same
+			// compile → prepare → wire-path pipeline a query does, so a
+			// subscription and the equivalent query agree on what they name.
+			const wire = toWirePaths(
+				spec.schema,
+				prepareQuery(spec.schema, compileQuery({ where: spec.where, orderBy: spec.orderBy })),
+			);
+			return create(SubscriptionSchema, {
+				entity: def.name,
+				predicate: wire.where ? condToProto(wire.where) : undefined,
+				follow: spec.follow ? compileFollow(spec.follow, spec.followDepth) : undefined,
+				window: compileWindow(spec, wire.orderBy),
+			});
+		});
+	}
+
+	/** Current sync status snapshot (works before start()). */
+	status(): SyncStatus {
+		return this.statusTracker.current();
+	}
+
+	/** @internal backs WorkspaceClient.status. */
+	workspaceStatus(workspaceId: string): WorkspaceStatus {
+		return this.statusTracker.current().workspaces[workspaceId]
+			?? { workspaceId, pendingMutations: 0 };
+	}
+
+	/** Subscribes to sync status changes; returns an unsubscribe function. */
+	onStatusChange(cb: (status: SyncStatus) => void): () => void {
+		return this.statusTracker.onChange(cb);
+	}
+
+	/**
+	 * The transport, memoized so every caller shares one. The configuration
+	 * check is synchronous — a client with neither url nor transport fails out
+	 * of start() before it has touched anything — and a REJECTED attempt (the
+	 * connect-web import failing) is dropped rather than cached, so the failure
+	 * is not baked into the client for good.
+	 *
+	 * Not validated in the constructor: a client with no transport at all is a
+	 * usable local-only store, as long as it is never start()ed.
+	 *
+	 * useBinaryFormat is passed explicitly because connect-web defaults it to
+	 * false — its default suits a hand-inspected API, not a sync engine shipping
+	 * base64'd entity bytes by the thousand. See SyncClientOptions.wireFormat.
+	 */
+	private resolveTransport(): Promise<Transport> {
+		if (!this.transportPromise) {
+			if (this.opts.transport) {
+				this.transportPromise = Promise.resolve(this.opts.transport);
+			} else {
+				const url = this.opts.url;
+				if (!url) throw new Error('SyncClient needs url or transport');
+				const useBinaryFormat = this.opts.wireFormat !== 'json';
+				const promise = (async () => {
+					const { createConnectTransport } = await import('@connectrpc/connect-web');
+					return createConnectTransport({ baseUrl: url, useBinaryFormat });
+				})();
+				this.transportPromise = promise;
+				promise.catch(() => {
+					if (this.transportPromise === promise) this.transportPromise = undefined;
+				});
+			}
+		}
+		return this.transportPromise;
+	}
+
+	/**
+	 * Verifies the local KV layout version before sync starts. A mismatch
+	 * (this build expects a different layout than the store carries) salvages
+	 * the pending queues with one best-effort push, then wipes everything
+	 * except the clientId and the per-workspace mutation-id counters and stamps
+	 * the new version — the missing cursors make the first sync re-bootstrap.
+	 * Mutations that could not be pushed are dropped and reported both as a count
+	 * on the status surface and one by one through onMutationRejected, under code
+	 * "format_upgraded"; in that case the clientId
+	 * and counters go too, since the server's watermarks no longer line up
+	 * with the local counters and a fresh identity avoids a mutation-id gap.
+	 */
+	private async ensureFormatVersion(transport: Transport): Promise<void> {
+		const kv = await this.kv();
+
+		// Phase 1 — under the cross-tab lock, decide what to do and snapshot the
+		// queues. The fast paths (version already matches, or a fresh/pre-versioning
+		// store) finish here without ever touching the network. Only a genuine
+		// mismatch returns queues to salvage, and the lock is dropped before the
+		// push: holding the Web Lock across the network would let a server that
+		// accepts the connection then stalls wedge every tab's KV writes.
+		const snapshot = await this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const stored = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
+				if (stored === FORMAT_VERSION) {
+					tx.release();
+					return null;
+				}
+				if (stored === undefined) {
+					// Fresh (or pre-versioning) store: stamp and carry on.
+					await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
+					await tx.commit();
+					return null;
+				}
+
+				// Queues are per workspace, and the workspace of a queued mutation is
+				// only recoverable from its key — the Mutation envelope does not carry
+				// one. A store written by a layout that predates the per-workspace
+				// queue has keys this parse does not recognize; those mutations count
+				// as undecodable and are reported as dropped rather than pushed into
+				// the wrong partition.
+				const pending = new Map<string, Mutation[]>();
+				let undecodable = 0;
+				let total = 0;
+				for await (const [ k, v ] of tx.scan(PENDING_ROOT)) {
+					let workspaceId: string;
+					try {
+						workspaceId = workspaceOfPendingKey(k);
+					} catch {
+						undecodable++;
+						continue;
+					}
+					if (!workspaceId) {
+						undecodable++;
+						continue;
+					}
+					try {
+						const list = pending.get(workspaceId) ?? [];
+						list.push(fromBinary(MutationSchema, v as Uint8Array));
+						pending.set(workspaceId, list);
+						total++;
+					} catch {
+						undecodable++; // undecodable under this build — part of why we wipe
+					}
+				}
+				tx.release(); // read-only so far; the wipe runs in its own transaction.
+				return { pending, undecodable, total };
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+		if (!snapshot) return;
+
+		// Phase 2 — best-effort salvage push, OUTSIDE the lock. Chunk to the same
+		// per-push cap the coordinator uses: the server rejects an over-limit push
+		// outright (counting across workspaces), so a long offline backlog must be
+		// split or it would all be rejected and dropped. Each chunk is bounded by a
+		// timeout so a half-open connection cannot hang start() forever. Mutation
+		// ids are monotonic PER WORKSPACE, so the first failed chunk stops that
+		// workspace's salvage — pushing later chunks past the resulting gap would
+		// only have the server reject them — while the other workspaces carry on.
+		// Mutations that could not be salvaged, kept so each one can be reported
+		// individually afterwards rather than as a bare count. The undecodable ones
+		// are not among them: nothing decoded them, so there is nothing to report
+		// beyond the total.
+		const lost: DiscardedMutation[] = [];
+		if (snapshot.total > 0) {
+			const rpc = createClient(SyncService, transport);
+			const cap = Math.max(1, this.opts.maxMutationsPerPush ?? DEFAULT_MAX_MUTATIONS_PER_PUSH);
+			for (const [ workspaceId, mutations ] of snapshot.pending) {
+				let sent = 0;
+				const abandon = () => {
+					for (const m of mutations.slice(sent)) {
+						lost.push({ workspaceId, mutationId: m.mutationId, mutation: m });
+					}
+				};
+				for (const chunk of chunkBySize(mutations, cap)) {
+					try {
+						const resp = await rpc.push(
+							{ batches: [ { workspaceId, mutations: chunk } ] },
+							{ timeoutMs: SALVAGE_PUSH_TIMEOUT_MS },
+						);
+						// A batch-level refusal (gap, revoked workspace) is not an RPC
+						// error any more, so it has to be read off the result or the
+						// salvage would count unapplied mutations as sent.
+						if (resp.results[0]?.errorCode) {
+							abandon();
+							break;
+						}
+						sent += chunk.length;
+					} catch {
+						abandon();
+						break;
+					}
+				}
+			}
+		}
+		const dropped = snapshot.undecodable + lost.length;
+
+		// Phase 3 — under the lock again, wipe everything but (when the salvage was
+		// clean) the identity, and stamp the new version. Another tab may have
+		// completed the same upgrade while we were pushing; if the version is
+		// already current, leave its result untouched.
+		await this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const now = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
+				if (now === FORMAT_VERSION) {
+					tx.release();
+					return;
+				}
+
+				// The mutation-id counters must survive with the clientId: the
+				// server's per-(workspace, client) watermarks do not reset on a local
+				// format upgrade, and minting ids below them would get fresh mutations
+				// dropped as already-acked. That only holds when the salvage was
+				// clean — a dropped mutation leaves a watermark behind its counter,
+				// and new ids would gap past it (the server rejects gapped pushes), so
+				// in that case start over as a fresh client.
+				const keepIdentity = dropped === 0;
+				const doomed: string[] = [];
+				for await (const [ k ] of tx.scan('')) {
+					if (keepIdentity && (k === META_CLIENT_ID || isMutationCounterKey(k))) continue;
+					doomed.push(k);
+				}
+				for (const k of doomed) await tx.del(k);
+				await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
+				await tx.commit();
+				// The stored identity is gone, so the memo of it must go too —
+				// a mutation issued before start() has already taken the old id,
+				// and keeping it cached would hand the rest of the session the
+				// very identity whose watermarks this wipe exists to escape.
+				if (!keepIdentity) this.clientIdPromise = undefined;
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+		if (dropped > 0) {
+			this.statusTracker.update({
+				lastError: {
+					code: CodeFormatUpgraded,
+					message: `local format upgrade dropped ${dropped} unsynced mutation(s)`,
+				},
+			});
+			// The status line carries the count; the dead-letter surface carries the
+			// mutations, so an app already handling rejections needs no second code
+			// path to learn which edits died here.
+			for (const m of lost) {
+				this.reportRejection({
+					workspaceId: m.workspaceId,
+					mutationId: m.mutationId,
+					errorCode: CodeFormatUpgraded,
+					errorMessage: 'dropped by a local store format upgrade',
+					...describeMutation(m.mutation),
+				});
+			}
+		}
+	}
+
+	/**
+	 * Records this build's entities in the store and reports whether any of them
+	 * were new to it — which means their rows are missing locally and only a
+	 * snapshot can supply them, so the caller starts the coordinator with a
+	 * forced resync. See entities.ts for the whole rule; local-only, so unlike
+	 * the format check it never touches the network.
+	 */
+	private async reconcileEntities(): Promise<boolean> {
+		const kv = await this.kv();
+		return this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const added = await reconcileStoreEntities(tx, this.entityRegistry);
+				await tx.commit();
+				return added.length > 0;
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+	}
+
+	/** Forces one push+pull cycle across every workspace (mostly for tests). */
+	async syncNow(): Promise<void> {
+		this.assertOpen();
+		if (!this.coordinator) throw new Error('start() first');
+		await this.coordinator.syncNow();
+	}
+
+	/**
+	 * Stops sync, drops watchers and closes the KV store. Idempotent. A
+	 * closed client cannot be reopened — create a new SyncClient instead.
+	 */
+	async close(): Promise<void> {
+		if (this.closed) return;
+		this.closed = true;
+		await this.coordinator?.stop();
+		this.changeShare?.stop();
+		this.hubInstance?.close();
+		if (this.kvPromise) {
+			await (await this.kvPromise).close();
+		}
+	}
+
+	/**
+	 * Stable per-device client id, persisted in the KV store. Account-wide: the
+	 * server's watermarks are keyed (workspace, client_id), so one handle covers
+	 * every workspace without any two of them sharing a counter.
+	 *
+	 * Every tab on the device reads the same value, which is what makes it a
+	 * device handle — and why it is NOT a text writer identity on its own. Text
+	 * peers are leased from it per document instance (see text/peer.ts).
+	 *
+	 * Memoized by PROMISE: the stored id never changes under a running client,
+	 * and every mutation needs it — reading it back per enqueue would put a
+	 * second cross-tab lock acquisition and an extra KV write transaction on the
+	 * write path, for a value that cannot have moved. A failed mint is not
+	 * cached (minting touches the store and can fail transiently), and the one
+	 * path that does invalidate the id — a format upgrade that discards the
+	 * identity — drops the memo with it.
+	 */
+	clientId(): Promise<string> {
+		if (!this.clientIdPromise) {
+			const promise = this.mintClientId();
+			this.clientIdPromise = promise;
+			promise.catch(() => {
+				if (this.clientIdPromise === promise) this.clientIdPromise = undefined;
+			});
+		}
+		return this.clientIdPromise;
+	}
+
+	private async mintClientId(): Promise<string> {
+		const kv = await this.kv();
+		return this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const existing = (await tx.get(META_CLIENT_ID)) as string | undefined;
+				if (existing) {
+					tx.release();
+					return existing;
+				}
+				const id = crypto.randomUUID();
+				await tx.put(META_CLIENT_ID, id);
+				await tx.commit();
+				return id;
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+	}
+
+	watch<D extends DescMessage>(
+		schema: D,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void {
+		return this.registerWatch(
+			this.defaultScope().workspaceId,
+			schema,
+			cb,
+			undefined,
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	/**
+	 * Shared registration for watch()/watchQuery(). Registration is deferred
+	 * until the hub resolves, but the returned unsubscribe is synchronous — so
+	 * any error on the deferred path has no promise to reject and would escape
+	 * as an unhandledrejection. Two guards close that gap: the schema is
+	 * validated synchronously here (an unregistered entity throws to the caller,
+	 * exactly as scan/get/query do), and a store/hub failure on the deferred
+	 * path (e.g. kv.open) is surfaced on the status channel callers observe
+	 * rather than left to escape globally — and, when the caller asked for it,
+	 * on its own `onError`, since an account-wide status field cannot say WHICH
+	 * watch is the one that will now never fire.
+	 *
+	 * `workspaceId` undefined watches every workspace at once.
+	 * @internal
+	 */
+	registerWatch<D extends DescMessage>(
+		workspaceId: string | undefined,
+		schema: D,
+		cb: WatchCallback<MessageShape<D>>,
+		compiled?: CompiledQuery,
+		include?: IncludeSpec,
+		onError?: (error: unknown) => void,
+	): () => void {
+		if (this.closed) return () => {};
+		this.entityRegistry.bySchema(schema);
+		let unsub: (() => void) | undefined;
+		let cancelled = false;
+		void this.hub().then((hub) => {
+			if (cancelled) return;
+			unsub = hub.watch(schema, workspaceId, cb, compiled, include);
+		}).catch((err) => {
+			this.statusTracker.update({
+				lastError: {
+					code: CodeWatchFailed,
+					message: err instanceof Error ? err.message : String(err),
+				},
+			});
+			// Isolated for the same reason every app callback is: this runs on a
+			// promise with nothing to reject into.
+			if (!cancelled && onError) safeInvoke(onError, err, 'watch onError callback');
+		});
+		return () => {
+			cancelled = true;
+			unsub?.();
+		};
+	}
+
+	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>> {
+		return this.scanIn(this.defaultScope().workspaceId, schema);
+	}
+
+	/**
+	 * Scans an entity across EVERY workspace this store holds, in
+	 * (workspace, key) order. One prefix scan — the entity-first key layout puts
+	 * all workspaces' rows of an entity together — so a unified view costs the
+	 * same as a per-workspace scan of the same rows. Each row names its
+	 * `workspaceId`, which is also what routes a write back through
+	 * `client.ws(row.workspaceId)`.
+	 */
+	scanAll<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>> {
+		return this.scanIn(undefined, schema);
+	}
+
+	/** @internal */
+	async scanIn<D extends DescMessage>(
+		workspaceId: string | undefined,
+		schema: D,
+	): Promise<RowSet<MessageShape<D>>> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const kv = await this.kv();
+		const rows = await this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				return await scanDecoded(tx, this.entityRegistry, def, schema, workspaceId);
+			} finally {
+				tx.release();
+			}
+		});
+		return withCoverage(rows, this.coverage.coverageOf(def.name, workspaceId));
+	}
+
+	/**
+	 * Runs a typed query against the local merged view of the default workspace.
+	 * With `opts.include`, each result row is hydrated: its references resolve to
+	 * live rows from the merged store, attached under `row.refs` (orphan-tolerant
+	 * — a missing target resolves to undefined/empty). Hydration runs after the
+	 * scan, under its own shared reads, so it never nests inside the query's read
+	 * tx.
+	 */
+	query<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>> {
+		return this.queryIn(this.defaultScope().workspaceId, schema, q, opts);
+	}
+
+	/**
+	 * Like query(), but over every workspace at once. Ordering and limits apply
+	 * to the merged result — the evaluation is exact, not a per-workspace
+	 * fan-out-and-merge, because all the rows live in one store under one prefix.
+	 * References still resolve within each row's own workspace.
+	 */
+	queryAll<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>> {
+		return this.queryIn(undefined, schema, q, opts);
+	}
+
+	/** @internal */
+	async queryIn<D extends DescMessage>(
+		workspaceId: string | undefined,
+		schema: D,
+		q: Query<MessageShape<D>>,
+		opts?: { include?: IncludeSpec },
+	): Promise<RowSet<MessageShape<D>>> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const compiled = prepareQuery(schema, compileQuery(q));
+		const kv = await this.kv();
+		const rows = await this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				// An index narrows which rows are read; it never changes which
+				// match, so a decline here is not a fallback in the apologetic
+				// sense — the scan below IS the definition, and the index has to
+				// reproduce it exactly or decline.
+				const planned = await queryByIndex(
+					tx,
+					this.entityRegistry,
+					def,
+					schema,
+					this.indexes.for(def.name),
+					compiled,
+					workspaceId,
+				);
+				const scan = async () =>
+					runQuery(
+						await scanDecoded(tx, this.entityRegistry, def, schema, workspaceId),
+						compiled,
+						schema,
+					);
+				if (planned === undefined) return await scan();
+				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
+				// This is the same net the watch hub uses for its incremental
+				// snapshots, pointed at the other place a cheap answer stands in
+				// for an expensive one: nothing else would notice an index and a
+				// scan drifting apart, because both look like perfectly ordinary
+				// results.
+				if (this.verifyIndexReads) assertSameResult(planned, await scan(), def.name);
+				return planned;
+			} finally {
+				tx.release();
+			}
+		});
+		// Coverage is the BASE entity's: a query answers from what synced, and
+		// hydration only decorates the rows it found.
+		const coverage = this.coverage.coverageOf(def.name, workspaceId);
+		if (!opts?.include) return withCoverage(rows, coverage);
+		const hydrated = (await hydrate(
+			this.refClient(),
+			this.entityRegistry,
+			def.name,
+			rows as Row<Message>[],
+			opts.include,
+		)) as unknown as HydratedRow<MessageShape<D>>[];
+		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage);
+	}
+
+	/**
+	 * Resolves a forward reference of a holder value to its live target row(s):
+	 * the target row for a to-one ref (undefined when unset or orphaned), or the
+	 * resolving rows for a to-many ref (orphans dropped). Backs the generated
+	 * `db.<entity>.refs.<field>.load(holder)` accessor.
+	 */
+	resolveRef<D extends DescMessage>(
+		holderSchema: D,
+		fieldLocalName: string,
+		holder: MessageShape<D>,
+	): Promise<Row<Message> | Row<Message>[] | undefined> {
+		return this.resolveRefIn(
+			this.defaultScope().workspaceId,
+			holderSchema,
+			fieldLocalName,
+			holder,
+		);
+	}
+
+	/** @internal */
+	async resolveRefIn<D extends DescMessage>(
+		workspaceId: string,
+		holderSchema: D,
+		fieldLocalName: string,
+		holder: MessageShape<D>,
+	): Promise<Row<Message> | Row<Message>[] | undefined> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(holderSchema);
+		return loadForward(
+			this.refClient(),
+			this.entityRegistry,
+			def.name,
+			workspaceId,
+			fieldLocalName,
+			holder as Message,
+		);
+	}
+
+	/**
+	 * Resolves a reverse relation: the rows of the source entity whose forward
+	 * reference points at `target`, optionally narrowed by `q`. Backs the
+	 * generated `db.<entity>.refs.<reverseRel>(target, q?)` accessor.
+	 */
+	resolveReverseRef<D extends DescMessage>(
+		targetSchema: D,
+		relationName: string,
+		target: MessageShape<D>,
+		q?: Query<Message>,
+	): Promise<Row<Message>[]> {
+		return this.resolveReverseRefIn(
+			this.defaultScope().workspaceId,
+			targetSchema,
+			relationName,
+			target,
+			q,
+		);
+	}
+
+	/** @internal */
+	async resolveReverseRefIn<D extends DescMessage>(
+		workspaceId: string,
+		targetSchema: D,
+		relationName: string,
+		target: MessageShape<D>,
+		q?: Query<Message>,
+	): Promise<Row<Message>[]> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(targetSchema);
+		return resolveReverse(
+			this.refClient(),
+			this.entityRegistry,
+			def.name,
+			workspaceId,
+			relationName,
+			target as Message,
+			q,
+		);
+	}
+
+	/**
+	 * Runs a typed query AGAINST THE SERVER — the push-down path for data
+	 * outside the synced subset. Results are server-state snapshots: they are
+	 * not merged with the optimistic overlay, not stored locally, and never
+	 * feed watchers. Works before start() (the transport resolves lazily);
+	 * requires connectivity. Ordering matches the local evaluator exactly.
+	 *
+	 * Single-workspace by construction: a query is one predicate against one
+	 * partition, so there is no cross-workspace form of it on the wire.
+	 */
+	queryServer<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+	): Promise<RowSet<MessageShape<D>>> {
+		return this.queryServerIn(this.defaultScope().workspaceId, schema, q);
+	}
+
+	/** @internal */
+	async queryServerIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		q: Query<MessageShape<D>>,
+	): Promise<RowSet<MessageShape<D>>> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const compiled = prepareQuery(schema, compileQuery(q));
+		const wire = toWirePaths(schema, compiled);
+		const rpc = createClient(SyncService, await this.resolveTransport());
+		const resp = await rpc.query({
+			workspaceId,
+			entity: def.name,
+			predicate: wire.where ? condToProto(wire.where) : undefined,
+			orderBy: (wire.orderBy ?? []).map(orderKeyToProto),
+			limit: compiled.limit ?? 0,
+			offset: compiled.offset ?? 0,
+		});
+		// The query rode its own RPC, outside the sync cycle, so this is the only
+		// place its revision reaches the skew handshake.
+		this.coordinator?.observeServerRevision(resp.schemaRevision);
+		const rows: Row<MessageShape<D>>[] = [];
+		for (const rc of resp.rows) {
+			if (rc.body.case === 'value') {
+				const value = fromBinary(schema, rc.body.value);
+				sortOrderedFields(schema, value);
+				rows.push({ key: rc.key, value, workspaceId, version: rc.version });
+			}
+		}
+		// A server query sees the whole entity, so the only thing that can make
+		// it partial is its own limit truncating the result. A short page proves
+		// it did not.
+		const requested = compiled.limit ?? 0;
+		return withCoverage(
+			rows,
+			requested > 0 && rows.length >= requested
+				? { complete: false, bounds: [ 'window' ], limit: requested }
+				: COMPLETE,
+		);
+	}
+
+	/**
+	 * Live query: emits the query result after every commit that touches the
+	 * entity, suppressing callbacks when the result is unchanged.
+	 */
+	watchQuery<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void {
+		if (this.closed) return () => {};
+		return this.registerWatch(
+			this.defaultScope().workspaceId,
+			schema,
+			cb,
+			prepareQuery(schema, compileQuery(q)),
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	/**
+	 * Like watchQuery(), but live across every workspace. The result set is
+	 * re-emitted after any commit touching the entity in any workspace.
+	 */
+	watchQueryAll<D extends DescMessage>(
+		schema: D,
+		q: Query<MessageShape<D>>,
+		cb: WatchCallback<MessageShape<D>>,
+		opts?: WatchOptions,
+	): () => void {
+		if (this.closed) return () => {};
+		return this.registerWatch(
+			undefined,
+			schema,
+			cb,
+			prepareQuery(schema, compileQuery(q)),
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined> {
+		return this.getIn(this.defaultScope().workspaceId, schema, key);
+	}
+
+	/** @internal */
+	async getIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+	): Promise<MessageShape<D> | undefined> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
+				if (bytes === undefined) return undefined;
+				const value = fromBinary(schema, bytes);
+				sortOrderedFields(schema, value);
+				return value;
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * Like get(), but returns the row's key/value together with its confirmed
+	 * base version (see Row.version) — the value to pass as `expectedVersion`
+	 * for a compare-and-swap mutate. Returns undefined for an absent or
+	 * locally-deleted row.
+	 */
+	getRow<D extends DescMessage>(
+		schema: D,
+		key: string,
+	): Promise<Row<MessageShape<D>> | undefined> {
+		return this.getRowIn(this.defaultScope().workspaceId, schema, key);
+	}
+
+	/** @internal */
+	async getRowIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+	): Promise<Row<MessageShape<D>> | undefined> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				const row = await readMergedRowWithVersion(
+					tx,
+					this.entityRegistry,
+					def.name,
+					workspaceId,
+					key,
+				);
+				if (row === undefined) return undefined;
+				const value = fromBinary(schema, row.v);
+				sortOrderedFields(schema, value);
+				return { key, value, workspaceId, version: row.version };
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/** Number of locally queued, not-yet-acked mutations in the default workspace. */
+	pendingCount(): Promise<number> {
+		return this.pendingCountIn(this.defaultScope().workspaceId);
+	}
+
+	/** @internal */
+	async pendingCountIn(workspaceId: string): Promise<number> {
+		this.assertOpen();
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				return (await readPending(tx, workspaceId)).length;
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * Writes the pending-queue entry and the optimistic overlay in one KV
+	 * transaction (crash-safe), then nudges the push loop. Both are scoped to
+	 * `workspaceId`: the queue, the mutation-id counter and the overlay all
+	 * partition by workspace. A batch payload applies its sub-mutations in order
+	 * so the optimistic overlay matches the server's sequential, single-savepoint
+	 * apply. With undo enabled, each sub-mutation's inverse is captured (against
+	 * the overlay as it was before that sub-mutation applied) and recorded as one
+	 * undo group once the commit succeeds — so undoing a batch replays atomically
+	 * and a rejection (which shares the batch's mutation_id) drops the whole
+	 * group.
+	 * @internal
+	 */
+	async enqueue(
+		workspaceId: string,
+		payload: Mutation['payload'],
+		captureStack?: StackName,
+		undoOpts?: {
+			/**
+			 * Per-crud inverse overrides, aligned with the payload's CRUD list.
+			 * Set for text-field edits, whose snapshot inverse would merge to a
+			 * no-op — the override carries the symbolic op-level inverse instead.
+			 */
+			overrides?: (Inverse | undefined)[];
+			/** Join the previous undo group (typing coalescence). */
+			coalesce?: boolean;
+		},
+	): Promise<void> {
+		this.assertOpen();
+		const scope = this.scopes.get(workspaceId);
+		if (!scope) throw new Error(`workspace "${workspaceId}" is not held by this client`);
+		const undoMgr = scope.undoMgr;
+		const kv = await this.kv();
+		const clientId = await this.clientId();
+		const touched = new TouchSet();
+		let undoBarrier = false;
+		let capturedId: bigint | undefined;
+		const capturedInverses: (Inverse | undefined)[] = [];
+		const payloadCruds = payload.case === 'crud'
+			? [ payload.value ]
+			: payload.case === 'batch'
+			? payload.value.mutations
+			: undefined;
+		// String-valued text fields convert to document bytes inside the KV
+		// transaction below. The writer peer must be leased BEFORE the
+		// transaction opens: a Web-Lock await inside an IndexedDB transaction
+		// would let it auto-commit under us. One lease covers the whole
+		// payload — conversion is serialized here, so one identity is sound.
+		const crudTexts = payloadCruds?.map((crud) => takeTextStrings(crud));
+		let peerLease: PeerLease | undefined;
+		if (crudTexts?.some((t) => t !== undefined)) {
+			peerLease = await (await this.textPeerLeases()).acquire();
+		}
+		try {
+			await this.kvMutex.run(async () => {
+				const tx = await kv.write();
+				try {
+					const lastRaw = (await tx.get(metaLastMutationId(workspaceId))) as string | undefined;
+					const mutationId = (lastRaw ? BigInt(lastRaw) : 0n) + 1n;
+					const mutation = create(MutationSchema, { clientId, mutationId });
+					mutation.payload = payload;
+					const cruds = payloadCruds;
+					if (cruds) {
+						// Capture-then-apply each sub-mutation in turn: a later inverse (and
+						// a later expansion's `prev`) must see the overlay left by earlier
+						// sub-mutations of the same batch.
+						if (undoMgr) capturedId = mutationId;
+						let crudIndex = -1;
+						for (const crud of cruds) {
+							crudIndex++;
+							const def = this.entityRegistry.get(crud.entity);
+							// Read on first use, not up front. Every branch below can decline
+							// to look at the prior row, and for a collaborative-text keystroke
+							// all of them do — reading it would mean folding the row's text log
+							// back into a whole document (read.ts), which is the O(document)
+							// cost this path exists to stop paying per edit.
+							let priorRead = false;
+							let priorBytes: Uint8Array | undefined;
+							const priorRow = async (): Promise<Uint8Array | undefined> => {
+								if (!priorRead) {
+									priorRead = true;
+									priorBytes = def === undefined ? undefined : await readMergedRow(
+										tx,
+										this.entityRegistry,
+										def.name,
+										workspaceId,
+										crud.key,
+									);
+								}
+								return priorBytes;
+							};
+							// Convert pending text strings into full-document bytes,
+							// diffed against the merged row under the leased peer.
+							// Mutates crud.value (and, for PATCH, the mask) in place;
+							// mutation.payload shares the crud, so what persists and
+							// pushes is the converted, full-state form.
+							const texts = crudTexts?.[crudIndex];
+							let textEdits: TextStringEdits | undefined;
+							if (def && texts !== undefined) {
+								textEdits = applyTextStringsToCrud(
+									def,
+									crud,
+									await priorRow(),
+									texts,
+									peerLease!.peer,
+								);
+							}
+							// Expand bare collection masks into per-item paths so concurrent
+							// adds/edits merge instead of whole-replacing. Mutates the crud's
+							// mask in place; mutation.payload shares the crud, so the
+							// persisted+pushed mask is the expanded one. Skipped when the prior
+							// row is absent/deleted (a PATCH there is a delete-wins no-op), and
+							// when the mask names no collection at all — the schema alone
+							// settles that, so a text edit pays neither decode.
+							if (
+								def && crud.op === CrudOp.PATCH && crud.fieldMask
+								&& maskNeedsExpansion(def.schema, crud.fieldMask.paths)
+								&& (await priorRow()) !== undefined
+							) {
+								const base = fromBinary(def.schema, priorBytes!);
+								const next = fromBinary(def.schema, crud.value);
+								crud.fieldMask.paths = expandCollectionMask(
+									def.schema,
+									base,
+									next,
+									crud.fieldMask.paths,
+								);
+							}
+							// Reuse the one `prev`: invert against it (undo) and apply locally.
+							// A caller-provided override (symbolic text inverse) replaces the
+							// snapshot inverse for its crud.
+							if (undoMgr) {
+								const override = undoOpts?.overrides?.[crudIndex]
+									?? this.textStringInverse(crud, textEdits);
+								if (override !== undefined) {
+									capturedInverses.push(override);
+								} else {
+									const inv = invertCrud(crud, await priorRow());
+									capturedInverses.push(inv && { kind: 'crud', crud: inv });
+								}
+							}
+							// Hand over the prior row only if something above actually read
+							// it: nothing since has written the row, so it is still current,
+							// and the apply reuses it rather than reading and decoding a
+							// second time. Left unread, the apply decides for itself — its
+							// text-log fast path never needs it.
+							await applyCrudLocally(
+								tx,
+								this.entityRegistry,
+								workspaceId,
+								crud,
+								touched,
+								priorRead ? { bytes: priorBytes } : undefined,
+								{ mutationId, index: crudIndex },
+							);
+						}
+						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
+						await enqueuePending(tx, workspaceId, mutation);
+					} else {
+						// Custom mutation: an undo barrier, applied in one shot.
+						if (undoMgr) undoBarrier = true;
+						await enqueuePending(tx, workspaceId, mutation);
+						await applyMutationLocally(
+							tx,
+							this.entityRegistry,
+							this.mirrors,
+							workspaceId,
+							mutation,
+							touched,
+						);
+					}
+					if (this.intentReg && undoMgr) {
+						// Persist the PREDICTED post-commit fold-barrier set in this same
+						// transaction: recordGroup below only runs after the commit, so
+						// the intent record is computed from the inputs it will receive
+						// (see UndoManager.predictedBarrierIds). Keeps a peer tab's
+						// compaction from ever folding a mutation these stacks pin.
+						await this.intentReg.writeRefs(
+							tx,
+							workspaceId,
+							undoMgr.predictedBarrierIds(
+								mutationId,
+								capturedInverses.some((i) => i !== undefined && i.kind !== 'text'),
+								captureStack,
+								undoBarrier,
+							),
+						);
+					}
+					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
+					await tx.commit();
+				} catch (err) {
+					tx.release();
+					throw err;
+				}
+			});
+		} finally {
+			peerLease?.release();
+		}
+		if (undoMgr) {
+			if (undoBarrier) {
+				undoMgr.barrier();
+			} else if (capturedId !== undefined) {
+				undoMgr.recordGroup(capturedId, capturedInverses, captureStack, undoOpts?.coalesce);
+			}
+		}
+		this.statusTracker.incrementPending(workspaceId);
+		await this.notifyChange(touched);
+		this.coordinator?.syncSoon();
+	}
+
+	/**
+	 * Synthesizes a symbolic undo inverse for a text-string PATCH: enqueue
+	 * converted the string itself, so no caller-side override exists, but a
+	 * snapshot inverse would merge the old document back in — a silent no-op
+	 * for a state CRDT. Only the expressible case is covered: a PATCH whose
+	 * mask names exactly one (top-level) text field, which is what
+	 * `db.x.mutate.patch(key, { body: '...' })` produces. Anything wider (a
+	 * PUT, or a mixed mask) keeps the snapshot inverse: non-text fields still
+	 * restore, and the text field's restore degrades to a no-op union.
+	 */
+	private textStringInverse(
+		crud: CrudMutation,
+		edits: TextStringEdits | undefined,
+	): Inverse | undefined {
+		if (edits === undefined || edits.size !== 1 || crud.op !== CrudOp.PATCH) return undefined;
+		const [ path, result ] = [ ...edits.entries() ][0]!;
+		if (path.includes('.')) return undefined;
+		const maskPaths = crud.fieldMask?.paths ?? [];
+		if (maskPaths.length !== 1 || maskPaths[0] !== path) return undefined;
+		const ops: TextInverseOp[] = [];
+		for (const range of result.inserted) {
+			if (range.count > 0) {
+				ops.push({ type: 'deleteItems', peer: range.peer, start: range.start, count: range.count });
+			}
+		}
+		for (const seg of result.deleted) ops.push(reinsertOp(seg));
+		return { kind: 'text', entity: crud.entity, key: crud.key, field: path, ops };
+	}
+
+	/**
+	 * Runs fn as an atomic transaction in the default workspace. CRUD writes
+	 * issued through the handle `tx` (`tx.mutate.put`, `tx.db.x.mutate.put`) are
+	 * collected and applied as ONE all-or-nothing BatchMutation — one optimistic
+	 * overlay update, one queue entry, one push, one server savepoint, one
+	 * ack-or-rejection, and (with undo enabled) one undo step. The sub-mutations
+	 * apply in order, so a later one observes earlier ones; but the batch is not
+	 * visible to get/scan/watch until fn returns, and if fn throws the whole batch
+	 * is discarded (nothing applies).
+	 *
+	 * Scoping is by handle, not by time: writes issued through the client
+	 * itself (`client.mutate.*`) while fn is suspended on an await are NOT part
+	 * of the batch — they queue independently. Custom mutations cannot batch and
+	 * are not on the handle; issue them through the client. Because each call's
+	 * buffer is local, a `transact()` nested inside another's fn simply commits
+	 * its own independent batch.
+	 *
+	 * A batch is one savepoint in one workspace's sequence, so it cannot span
+	 * workspaces; use `client.ws(id).transact(...)` for another one.
+	 */
+	transact(fn: (tx: Transaction<E>) => Promise<void>): Promise<void> {
+		return this.transactIn(this.defaultScope(), fn);
+	}
+
+	/** @internal */
+	async transactIn(
+		scope: WorkspaceScope<E>,
+		fn: (tx: Transaction<E>) => Promise<void>,
+	): Promise<void> {
+		this.assertOpen();
+		// The buffer lives in this call's closure, not on the client: only writes
+		// issued through the handle land here, so a concurrent client.mutate.*
+		// running during one of fn's awaits is not swept in.
+		const buffer: CrudMutation[] = [];
+		const tx: Transaction<E> = {
+			workspaceId: scope.workspaceId,
+			get: (schema, key) => scope.get(schema, key),
+			getRow: (schema, key) => scope.getRow(schema, key),
+			scan: (schema) => scope.scan(schema),
+			query: (schema, q, opts) => scope.query(schema, q, opts),
+			watch: (schema, cb) => scope.watch(schema, cb),
+			watchQuery: (schema, q, cb, opts) => scope.watchQuery(schema, q, cb, opts),
+			resolveRef: (schema, field, holder) => scope.resolveRef(schema, field, holder),
+			resolveReverseRef: (schema, rel, target, q) => scope.resolveReverseRef(schema, rel, target, q),
+			// Reads go to the scope, so `update` diffs against the pre-batch row —
+			// the same state every other read on the handle sees.
+			mutate: this.crudMutateApi((crud) => {
+				buffer.push(crud);
+			}, (schema, key) => scope.get(schema, key)),
+			db: undefined as unknown as EntityApis<E>,
+		};
+		tx.db = buildEntityApis(this.opts.entities, tx, this.entityRegistry);
+		await fn(tx);
+		// fn threw → we never reach here (the buffer is dropped, nothing applied).
+		if (buffer.length === 0) return;
+		if (buffer.length === 1) {
+			await this.enqueue(scope.workspaceId, { case: 'crud', value: buffer[0]! });
+		} else {
+			await this.enqueue(scope.workspaceId, { case: 'batch', value: buildBatch(buffer) });
+		}
+	}
+
+	/**
+	 * Re-applies the inverse of the default workspace's most recent undo group as
+	 * real mutations. Returns false when there is nothing to undo. A
+	 * multi-mutation group (a transact() batch) replays atomically as one batch.
+	 * Concurrent remote edits to fields named by the inverse get clobbered —
+	 * accepted per-field LWW.
+	 */
+	undo(): Promise<boolean> {
+		return this.undoIn(this.defaultScope());
+	}
+
+	/** @internal */
+	async undoIn(scope: WorkspaceScope<E>): Promise<boolean> {
+		this.assertOpen();
+		const mgr = requireUndo(scope);
+		const group = mgr.takeUndoGroup();
+		if (group.length === 0) return false;
+		// The group is claimed (popped) up front so two racing undo() calls take
+		// distinct groups; if the replay never commits we put it back rather than
+		// lose the step. Routing to 'redo' is passed into this one enqueue, not set
+		// on the manager, so a user mutation committing during the await below is
+		// recorded as a normal edit instead of being misrouted onto the redo stack.
+		try {
+			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'redo');
+		} catch (err) {
+			mgr.restoreUndoGroup(group);
+			throw err;
+		}
+		return true;
+	}
+
+	/** Inverse of undo(). Returns false when there is nothing to redo. */
+	redo(): Promise<boolean> {
+		return this.redoIn(this.defaultScope());
+	}
+
+	/** @internal */
+	async redoIn(scope: WorkspaceScope<E>): Promise<boolean> {
+		this.assertOpen();
+		const mgr = requireUndo(scope);
+		const group = mgr.takeRedoGroup();
+		if (group.length === 0) return false;
+		try {
+			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'undo');
+		} catch (err) {
+			mgr.restoreRedoGroup(group);
+			throw err;
+		}
+		return true;
+	}
+
+	/**
+	 * Enqueues a taken undo/redo group: a lone inverse as a CRUD, several as a
+	 * batch. CRUD inverses replay verbatim; symbolic text inverses
+	 * materialise here against the row's CURRENT document — deleting exactly
+	 * the recorded item ids, re-inserting recorded content at its anchors,
+	 * restoring prior mark values — so only this client's edits revert and a
+	 * peer's concurrent work survives. Each materialised patch carries its
+	 * own symbolic inverse (captured during the apply) for the opposite stack.
+	 */
+	private async enqueueInverses(
+		scope: WorkspaceScope<E>,
+		inverses: Inverse[],
+		captureStack: StackName,
+	): Promise<void> {
+		// Re-inserting deleted content and restoring marks mint new items, so a
+		// replay carrying text needs a writer identity of its own — held until the
+		// replay's mutation is in the store, so the slot cannot be recycled onto a
+		// document that has not seen these items yet.
+		const lease = inverses.some((i) => i.kind === 'text')
+			? await (await this.textPeerLeases()).acquire()
+			: undefined;
+		try {
+			await this.replayInverses(scope, inverses, captureStack, lease?.peer ?? '');
+		} finally {
+			lease?.release();
+		}
+	}
+
+	private async replayInverses(
+		scope: WorkspaceScope<E>,
+		inverses: Inverse[],
+		captureStack: StackName,
+		peer: string,
+	): Promise<void> {
+		const cruds: CrudMutation[] = [];
+		const overrides: (Inverse | undefined)[] = [];
+		// One document per (entity, key, field) for the whole group. A coalesced
+		// group holds several inverses over the same field (a run of backspaces is
+		// one undo step), and each has to continue from the document the previous
+		// one produced — re-decoding the unchanged row for each would allocate the
+		// same counters twice for different content.
+		const docs = new Map<string, TextDoc>();
+		for (const inverse of inverses) {
+			if (inverse.kind === 'crud') {
+				cruds.push(inverse.crud);
+				overrides.push(undefined);
+				continue;
+			}
+			const materialised = await this.materialiseTextInverse(scope, inverse, docs, peer);
+			if (materialised) {
+				cruds.push(materialised.crud);
+				overrides.push(materialised.opposite);
+			}
+		}
+		if (cruds.length === 0) {
+			// Every entry evaporated (e.g. the text rows were deleted since);
+			// the step is consumed with nothing to replay.
+			return;
+		}
+		if (cruds.length === 1) {
+			await this.enqueue(scope.workspaceId, { case: 'crud', value: cruds[0]! }, captureStack, {
+				overrides,
+			});
+		} else {
+			await this.enqueue(
+				scope.workspaceId,
+				{ case: 'batch', value: buildBatch(cruds) },
+				captureStack,
+				{ overrides },
+			);
+		}
+	}
+
+	/**
+	 * Turns a symbolic text inverse into a concrete PATCH against the row's
+	 * current document, returning the patch plus the inverse of the inverse
+	 * (what the opposite stack records). Returns undefined when the row (or
+	 * the field/entity) no longer exists — delete-wins, nothing to undo.
+	 * `docs` carries the group's in-progress documents and `peer` its leased
+	 * writer identity (see enqueueInverses).
+	 */
+	private async materialiseTextInverse(
+		scope: WorkspaceScope<E>,
+		inverse: Extract<Inverse, { kind: 'text' }>,
+		docs: Map<string, TextDoc>,
+		peer: string,
+	): Promise<{ crud: CrudMutation; opposite: Inverse } | undefined> {
+		const def = this.entityRegistry.get(inverse.entity);
+		if (!def) return undefined;
+		const field = def.schema.fields.find((f) => f.name === inverse.field);
+		if (!field) return undefined;
+		const cacheKey = `${inverse.entity}\u0000${inverse.key}\u0000${inverse.field}`;
+		let doc = docs.get(cacheKey);
+		if (doc === undefined) {
+			const row = await this.getIn(scope.workspaceId, def.schema, inverse.key);
+			if (row === undefined) return undefined;
+			const bytes = (row as Record<string, unknown>)[field.localName] as Uint8Array | undefined;
+			doc = decodeTextDoc(bytes, peer);
+			docs.set(cacheKey, doc);
+		}
+		const oppositeOps = applyTextInverse(doc, inverse.ops);
+		const crud = buildPatch(
+			def,
+			def.schema,
+			inverse.key,
+			{ [field.localName]: encodeTextDoc(doc) } as MessageInitShape<typeof def.schema>,
+		);
+		return {
+			crud,
+			opposite: {
+				kind: 'text',
+				entity: inverse.entity,
+				key: inverse.key,
+				field: inverse.field,
+				ops: oppositeOps,
+			},
+		};
+	}
+
+	canUndo(): boolean {
+		return this.defaultScope().canUndo();
+	}
+
+	canRedo(): boolean {
+		return this.defaultScope().canRedo();
+	}
+
+	/**
+	 * Subscribes to the default workspace's undo/redo availability changes; the
+	 * callback fires after any mutation, undo, redo, rejection or compaction that
+	 * may have changed what canUndo()/canRedo() return. Returns an unsubscribe
+	 * function. A no-op (returns an inert unsubscribe) when undo is not enabled.
+	 */
+	onUndoChange(cb: () => void): () => void {
+		return this.defaultScope().onUndoChange(cb);
+	}
+}
+
+function requireUndo(scope: { undoMgr?: UndoManager }): UndoManager {
+	if (!scope.undoMgr) {
+		throw new Error('undo is not enabled: pass the `undo` option to SyncClient');
+	}
+	return scope.undoMgr;
+}
+
+/** Reads the workspace set out of the options, rejecting contradictory input. */
+function resolveWorkspaces(opts: { workspaceId?: string; workspaces?: string[] }): string[] {
+	const list = opts.workspaces ?? (opts.workspaceId ? [ opts.workspaceId ] : []);
+	if (opts.workspaceId && opts.workspaces && !opts.workspaces.includes(opts.workspaceId)) {
+		throw new Error('workspaceId must be one of workspaces');
+	}
+	if (list.length === 0) throw new Error('workspaceId or workspaces is required');
+	if (list.some((ws) => !ws)) throw new Error('workspace ids must be non-empty');
+	if (new Set(list).size !== list.length) throw new Error('workspaces contains duplicates');
+	return list;
+}
+
+/**
+ * Picks the store partition. A single-workspace client falls back to its
+ * workspace id, which keeps its database exactly where it was; a multi-workspace
+ * client must say which account the store belongs to, because no one workspace
+ * can stand for it (and picking one would silently move the store whenever that
+ * workspace was removed).
+ */
+function resolveAccountId(opts: { accountId?: string }, workspaces: string[]): string {
+	if (opts.accountId) return opts.accountId;
+	if (workspaces.length === 1) return workspaces[0]!;
+	throw new Error('accountId is required when the client holds more than one workspace');
+}
+
+/** True for a `meta/ws/<ws>/lastMutationId` key. */
+function isMutationCounterKey(key: string): boolean {
+	return key.startsWith(META_WS_PREFIX) && key.endsWith('/lastMutationId');
+}

@@ -1,0 +1,11 @@
+[tools]
+go = "1.26"
+node = "26"
+pnpm = "11"
+buf = "1.70.0"
+task = "3.51.1"
+# Also pinned as a go.mod tool; Taskfile runs `go tool ginkgo`.
+"go:github.com/onsi/ginkgo/v2/ginkgo" = "2.29.0"
+# Also pinned as a go.mod tool; Taskfile runs `go tool templ generate`.
+"go:github.com/a-h/templ/cmd/templ" = "0.3.857"
+dprint = "latest"

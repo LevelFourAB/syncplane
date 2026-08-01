@@ -1,0 +1,3 @@
+# Settings only — not a multi-package workspace.
+allowBuilds:
+  esbuild: true

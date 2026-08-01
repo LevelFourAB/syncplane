@@ -1,0 +1,120 @@
+syntax = "proto3";
+
+// Package syncplane.cursor.v1 holds the server's pull-position types — what is
+// inside the opaque `bytes` cursor of Pull/Bootstrap/Subscribe.
+//
+// It is a SERVER-PRIVATE package. It lives apart from syncplane.v1 and is
+// deliberately excluded from TypeScript generation (see buf.gen.ts.yaml), so
+// "wire cursors are opaque tokens" holds because the client package has no
+// cursor schema to import — not merely because the docs ask nicely. Nothing
+// outside the engine should depend on these types.
+//
+// Only the engine encodes and decodes them. Changing them is a server-side
+// change, but a cursor already held by a client must still decode: treat field
+// numbers as permanent and add fields rather than repurposing them.
+package syncplane.cursor.v1;
+
+import "syncplane/v1/patch.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1;syncplanecursorv1";
+
+// Cursor is the server's pull-position state.
+message Cursor {
+	// Workspace sequence the client has seen through.
+	uint64 seq = 1;
+	// Hash of the subscription set the cursor was issued under; 0 = full sync.
+	// A mismatch on the next pull starts a delta resync into the new set (or
+	// forces reset when the old set cannot be reconstructed).
+	fixed64 sub_hash = 2;
+	// Permissions filter epoch the cursor was issued under. A mismatch starts
+	// a delta resync (apps implementing EpochReadFilters) or forces reset, so
+	// visibility changes outside row edits propagate to clients.
+	uint64 filter_epoch = 3;
+	// The subscription set the cursor was issued under (the set sub_hash
+	// hashes). Lets the server reconstruct the client's old scope and resync
+	// only the visible-set difference after a subscription change.
+	repeated syncplane.v1.Subscription subscriptions = 4;
+	// Present while a delta resync is paging; absent on a settled cursor.
+	ResyncState resync = 5;
+	// Sub-position inside a same-version group when a pull page splits one.
+	// Multiple rows can share one workspace sequence (a BatchMutation, a
+	// multi-row custom mutator, Server.Mutate/Invoke). When a page boundary
+	// lands inside such a group, seq names that version and these name the
+	// last row already delivered within it (in (entity, key) order), so the
+	// next pull resumes at the remaining rows instead of skipping them.
+	// Empty on a clean version boundary (the common case).
+	string partial_entity = 6;
+	string partial_key = 7;
+	// A random per-workspace identity, minted when the workspace is first
+	// written and stable for its lifetime. It pins a cursor to the store
+	// lineage that issued it: a cursor stamped with one epoch presented to a
+	// store carrying a different one cannot have come from this store (the URL
+	// now serves a swapped, recreated, or restored database), so pull resets
+	// rather than splicing two lineages' histories together. 0 = a pre-write
+	// cursor that carries no epoch; the server stamps the current one onto
+	// every cursor it issues going forward.
+	fixed64 store_epoch = 8;
+	// The reference-following closure the cursor was issued under: the exact
+	// set of (entity, key) rows the client holds via `follow` beyond its base
+	// scope. The next pull rebuilds the closure against current data and diffs
+	// it against this set, emitting rows that entered and tombstoning rows that
+	// left (and are not otherwise base-visible). Absent on non-following
+	// subscriptions ⇒ empty. Bounded by the server's MaxClosureSize, so the
+	// cursor stays bounded.
+	ClosureSet closure = 9;
+	// The windowed membership the cursor was issued under: the exact rows the
+	// client holds via a Subscription.window. The next pull recomputes each
+	// window and diffs it against this set, so rows that fell off the tail are
+	// dropped precisely rather than lingering. Absent on non-windowed
+	// subscriptions ⇒ empty. Bounded by the server's MaxWindowSize per
+	// windowed subscription.
+	ClosureSet window = 10;
+}
+
+// ClosureSet records a bounded membership set as a per-entity list of row
+// keys. Two features ride on it — the reference-following closure and the
+// windowed subscription set — because both are memberships that cannot be
+// derived per row and so must be STORED to be diffed. Keeping the prior set
+// (rather than reconstructing it from a spec) is what makes drops exact.
+message ClosureSet {
+	message Entry {
+		string entity = 1;
+		repeated string keys = 2;
+	}
+	repeated Entry entries = 1;
+}
+
+// ResyncState marks a cursor mid delta-resync: the difference between the
+// client's old visible set (under the Cursor's seq / sub_hash / filter_epoch
+// / subscriptions) and its new one is streaming out in (entity, key) scan
+// order. Rows written after the Cursor's seq are not part of the scan; the
+// catch-up pull that follows the resync delivers them under the new scope.
+message ResyncState {
+	// Scan position: the next page resumes at the first subscribed entity
+	// >= entity, skipping keys <= after_key within it.
+	string entity = 1;
+	string after_key = 2;
+	// The scope the resync converges on. Each resync pull must still carry a
+	// subscription set hashing to to_sub_hash and find the workspace at
+	// to_filter_epoch; any further change mid-resync falls back to reset.
+	fixed64 to_sub_hash = 3;
+	uint64 to_filter_epoch = 4;
+}
+
+// BootstrapPosition is how far an interrupted Bootstrap got: what rides inside
+// the opaque BootstrapResume.token. It records the delivered set by NAME rather
+// than as a position in the delivery order, because that order is not stable
+// across attempts — a client may ask for different priority entities, and the
+// catalog may gain an entity between attempts. A resumed scan then skips
+// exactly what already shipped and covers everything else in full, whatever
+// order the resumed stream delivers it in.
+message BootstrapPosition {
+	// Entities whose scan ran to completion, in no particular order. Every row
+	// of these that the snapshot ships has been delivered.
+	repeated string done = 1;
+	// The entity that was mid-scan, and the last row key delivered within it.
+	// The resumed scan restarts this entity after that key. Empty when the
+	// interruption fell on an entity boundary.
+	string entity = 2;
+	string after_key = 3;
+}

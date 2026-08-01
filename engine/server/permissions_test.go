@@ -1,0 +1,208 @@
+package server_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+
+	"connectrpc.com/connect"
+	. "github.com/onsi/ginkgo/v2"
+	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/types/known/anypb"
+
+	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
+	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/internal/exampleapp"
+)
+
+var _ = Describe("Permissions and custom mutations", func() {
+	var (
+		ctx    context.Context
+		client syncplanev1connect.SyncServiceClient
+	)
+
+	start := func(srv *server.Server) {
+		path, handler := srv.Handler()
+		mux := http.NewServeMux()
+		mux.Handle(path, handler)
+		ts := httptest.NewServer(mux)
+		DeferCleanup(ts.Close)
+		client = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+	}
+
+	push := func(mutations ...*syncplanev1.Mutation) []*syncplanev1.MutationResult {
+		GinkgoHelper()
+		resp, err := client.Push(ctx, connect.NewRequest(pushOf(
+			ws,
+			mutations)))
+		Expect(err).NotTo(HaveOccurred())
+		return pushResults(resp.Msg)
+	}
+
+	pull := func() *syncplanev1.PullResponse {
+		GinkgoHelper()
+		resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+			WorkspaceId: ws,
+			ClientId:    "c1",
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		return resp.Msg
+	}
+
+	titles := func(changes []*syncplanev1.RowChange) []string {
+		var out []string
+		for _, rc := range changes {
+			if rc.GetTombstone() {
+				continue
+			}
+			var todo todov1.Todo
+			Expect(proto.Unmarshal(rc.GetValue(), &todo)).To(Succeed())
+			out = append(out, todo.GetTitle())
+		}
+		return out
+	}
+
+	BeforeEach(func() {
+		ctx = context.Background()
+	})
+
+	Describe("CanMutate write hook", func() {
+		BeforeEach(func() {
+			srv := newTestServer(server.WithPermissions(exampleapp.NewPermissions()))
+			start(srv)
+		})
+
+		It("turns business rejections into REJECTED results, not RPC errors", func() {
+			resp := push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}))
+			result := resp[0]
+			Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(result.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+			Expect(result.GetErrorMessage()).NotTo(BeEmpty())
+
+			Expect(pull().GetPatch().GetChanges()).To(BeEmpty(), "rejected mutation must not write")
+		})
+
+		It("acks rejections: the watermark advances and the queue continues", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "forbidden fruit"}))
+
+			// Retry of the rejected id is ALREADY_APPLIED, and the next id applies.
+			resp := push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "forbidden fruit"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}),
+			)
+			Expect(resp[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			Expect(resp[1].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+
+			Expect(pull().GetLastAckedMutationId()).To(BeEquivalentTo(2))
+			Expect(titles(pull().GetPatch().GetChanges())).To(Equal([]string{"fine"}))
+		})
+
+		It("enforces the policy on a write buried inside a batch and rolls the batch back", func() {
+			resp := push(batchMutation("c1", 1,
+				crudPut("todo", "t1", &todov1.Todo{Id: "t1", Title: "fine"}),
+				crudPut("todo", "t2", &todov1.Todo{Id: "t2", Title: "very forbidden"}),
+			))
+			result := resp[0]
+			Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(result.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+
+			Expect(pull().GetPatch().GetChanges()).To(BeEmpty(),
+				"rejecting any sub-mutation rolls back the whole batch, including the allowed write")
+		})
+	})
+
+	Describe("ReadFilter hook", func() {
+		BeforeEach(func() {
+			srv := newTestServer(server.WithPermissions(exampleapp.NewPermissions()))
+			start(srv)
+		})
+
+		It("filters rows out of pull responses", func() {
+			push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "top secret plans"}),
+			)
+			Expect(titles(pull().GetPatch().GetChanges())).To(Equal([]string{"public"}))
+		})
+
+		It("filters rows out of bootstrap streams", func() {
+			push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret stash"}),
+			)
+
+			stream, err := client.Bootstrap(ctx, connect.NewRequest(&syncplanev1.BootstrapRequest{
+				WorkspaceId: ws,
+				ClientId:    "c1",
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			var rows []*syncplanev1.RowChange
+			for stream.Receive() {
+				if chunk := stream.Msg().GetChunk(); chunk != nil {
+					rows = append(rows, chunk.GetRows()...)
+				}
+			}
+			Expect(stream.Err()).NotTo(HaveOccurred())
+			Expect(titles(rows)).To(Equal([]string{"public"}))
+		})
+	})
+
+	Describe("custom mutators", func() {
+		BeforeEach(func() {
+			start(newTestServer(exampleapp.MutatorOptions(nil)...))
+		})
+
+		It("applies a registered mutator transactionally", func() {
+			push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two", Completed: true}),
+				customMutation("c1", 3, "complete_all", &todov1.CompleteAllArgs{}),
+			)
+
+			changes := pull().GetPatch().GetChanges()
+			Expect(changes).To(HaveLen(2))
+			for _, rc := range changes {
+				var todo todov1.Todo
+				Expect(proto.Unmarshal(rc.GetValue(), &todo)).To(Succeed())
+				Expect(todo.GetCompleted()).To(BeTrue())
+			}
+		})
+
+		It("rejects unknown mutators as invalid argument", func() {
+			// Deterministic: an unknown mutator (e.g. an older server that
+			// lacks one a newer client uses) acks via rejection so it cannot
+			// wedge the queue.
+			result := push(customMutation("c1", 1, "no_such_mutator", &todov1.CompleteAllArgs{}))[0]
+			Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(result.GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+		})
+
+		It("lets mutators reject with business errors", func() {
+			start(newTestServer(server.WithMutator("always_no", &todov1.CompleteAllArgs{},
+				func(context.Context, *server.EntityTx, proto.Message) error {
+					return server.Reject("nope", "always rejected")
+				})))
+
+			resp := push(customMutation("c1", 1, "always_no", &todov1.CompleteAllArgs{}))
+			result := resp[0]
+			Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(result.GetErrorCode()).To(Equal("nope"))
+		})
+	})
+})
+
+func customMutation(clientID string, mutationID uint64, name string, args proto.Message) *syncplanev1.Mutation {
+	anyArgs, err := anypb.New(args)
+	Expect(err).NotTo(HaveOccurred())
+	return &syncplanev1.Mutation{
+		ClientId:   clientID,
+		MutationId: mutationID,
+		Payload: &syncplanev1.Mutation_Custom{Custom: &syncplanev1.CustomMutation{
+			Name: name,
+			Args: anyArgs,
+		}},
+	}
+}

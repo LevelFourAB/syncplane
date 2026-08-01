@@ -1,0 +1,258 @@
+syntax = "proto3";
+
+// Entities used only by the engine and client test suites.
+package syncplane.testdata.v1;
+
+import "syncplane/v1/options.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1";
+
+message Widget {
+	option (syncplane.v1.entity) = {
+		name: "widget"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string label = 2;
+	int32 count = 3;
+	Settings settings = 4;
+	// Opaque: replaced whole during merges even when a mask names sub-fields.
+	Blob doc = 5 [(syncplane.v1.field_behavior) = { opaque: true }];
+	// Scalar set: merge by value, dups collapse, order not preserved.
+	repeated string tags = 6;
+	// int64 surfaces as bigint in TS — exercises number/bigint coercion.
+	int64 big = 7;
+	// Explicit presence — exercises isSet/isNotSet vs implicit fields.
+	optional string maybe = 8;
+	bool flag = 9;
+	// Opaque bytes — exercises bytes-kind merge hooks.
+	bytes raw = 10 [(syncplane.v1.field_behavior) = { opaque: true }];
+	// Map with a string key — per-item merge by map key.
+	map<string, string> attrs = 11;
+	// Map with a non-string key — exercises int64 key encode/decode.
+	map<int64, string> by_id = 12;
+	// Keyed message list — identity is the explicit "uid" field.
+	repeated Member members = 13
+		[(syncplane.v1.field_behavior) = { key_field: "uid" }];
+	// Keyed message list — identity inferred from the element entity's
+	// key_fields.
+	repeated Pair refs = 14;
+	// Atomic list: opt out of set/keyed merge, replaced whole.
+	repeated string atomic_tags = 15
+		[(syncplane.v1.field_behavior) = { opaque: true }];
+	// Movable list — keyed by "id", ordered by the fractional "pos" field.
+	repeated Item items = 16 [
+		(syncplane.v1.field_behavior) = { key_field: "id" order_field: "pos" }
+	];
+	// Collaborative text — the engine auto-installs the text CRDT merger, so
+	// concurrent PATCHes to this field converge without interleaving.
+	bytes body = 17 [(syncplane.v1.field_behavior) = { text: true }];
+	// Floating point — the only field that can hold NaN or ±Inf, which both
+	// evaluators rank apart from every real value rather than tying.
+	double ratio = 18;
+	// Unsigned 64-bit — the counterpart to `big`. The two surface identically
+	// as bigints but index differently (unsigned bytes are already in order,
+	// signed ones are biased), so both branches need a field.
+	uint64 ubig = 19;
+	// Oneof group. One field for merge purposes: a mask names the GROUP
+	// ("choice"), never a member, and the group is replaced whole — including
+	// the message member, which is why no sub-path into it is accepted. Members
+	// stay individually addressable for reading (queries, indexes), where
+	// presence means "this case is active".
+	oneof choice {
+		string choice_text = 20;
+		int32 choice_number = 21;
+		Settings choice_settings = 22;
+	}
+}
+
+// Registration-rejection fixtures. Each carries a construct that may not cross
+// a oneof, because the group is replaced whole: the merge core never descends
+// into a member, so nothing below one can be keyed, merged or projected.
+// Registering any of these must fail.
+
+// A key field inside a oneof: the row key would vanish whenever a sibling case
+// won.
+message OneofKeyEntity {
+	option (syncplane.v1.entity) = {
+		name: "oneof_key"
+		key_fields: [ "id" ]
+	};
+
+	oneof which {
+		string id = 1;
+		string other = 2;
+	}
+}
+
+// A text field inside a oneof: the CRDT merger could never run, because the
+// group replaces whole.
+message OneofTextEntity {
+	option (syncplane.v1.entity) = {
+		name: "oneof_text"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	oneof which {
+		bytes body = 2 [(syncplane.v1.field_behavior) = { text: true }];
+		string plain = 3;
+	}
+}
+
+// A text field one level BELOW a oneof member: same reason, one indirection
+// further out.
+message OneofNestedTextEntity {
+	option (syncplane.v1.entity) = {
+		name: "oneof_nested_text"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	oneof which {
+		TextHolder holder = 2;
+		string plain = 3;
+	}
+}
+
+message TextHolder {
+	bytes body = 1 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// A reference inside a oneof. Polymorphic targets are a real modelling wish,
+// but the reference graph (accessor naming, include/follow, reverse pushdown)
+// addresses a ref by a stable field of the row; a member that is only
+// sometimes there needs its own design pass, so it is refused rather than
+// half-supported.
+message OneofRefEntity {
+	option (syncplane.v1.entity) = {
+		name: "oneof_ref"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	oneof target {
+		Project project = 2;
+		User user = 3;
+	}
+}
+
+// Element of a keyed message list (Widget.members). Not a registered entity;
+// identity comes from the field's explicit key_field.
+message Member {
+	string uid = 1;
+	string name = 2;
+	int32 role = 3;
+	// A list inside a list element — the shape an index component may not
+	// descend into (one repeated field per component) and a nested any() can.
+	repeated string tags = 4;
+}
+
+// Element of a movable list (Widget.items). "id" is the stable identity,
+// "pos" is the framework-managed fractional order key.
+message Item {
+	string id = 1;
+	string pos = 2;
+	string text = 3;
+}
+
+// Composite key entity — exercises multi-field key derivation and separator
+// escaping (distinct field tuples must not collide into one row key).
+message Pair {
+	option (syncplane.v1.entity) = {
+		name: "pair"
+		key_fields: [ "ns", "id" ]
+	};
+
+	string ns = 1;
+	string id = 2;
+	string label = 3;
+}
+
+// Reference fixtures. A field whose message type is a registered entity is a
+// first-class typed reference: the stored row keeps only the target's key
+// fields, the live target is resolved on read. Project/User are to-one targets;
+// Issue exercises to-one (project, assignee, reporter), to-many self-ref
+// (blocked_by) and a composite-key ref (pair).
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string name = 2;
+}
+
+message User {
+	option (syncplane.v1.entity) = {
+		name: "user"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string name = 2;
+}
+
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		// Exercises the composite surface: a filter on `state` combined with an
+		// ordering by `rank`, which is the shape a single-field index can only
+		// serve by re-checking every candidate.
+		index: {
+			name: "by_state_rank"
+			key: [ { path: "state" }, { path: "rank" desc: true } ]
+		}
+		// Fan-out: `labels` is repeated, so a row takes one position per
+		// element. Pinned by the equality prefix it still supplies the ordering
+		// that follows it, which is the shape "labelled X, newest first" needs.
+		index: {
+			name: "by_label_rank"
+			key: [ { path: "labels" }, { path: "rank" desc: true } ]
+		}
+	};
+
+	string id = 1;
+	string title = 2;
+	// To-one ref: stores only project.id, resolved on read.
+	Project project = 3;
+	// To-many self-ref: each element stores only its id.
+	repeated Issue blocked_by = 4;
+	// Two refs to the same target — reverse accessor names disambiguate to
+	// issuesByAssignee / issuesByReporter (the source entity pluralizes when a
+	// single field targets it, else <source>By<Field>).
+	User assignee = 5;
+	User reporter = 6;
+	// Composite-key ref: incomparable in queries except isSet/isNotSet.
+	Pair pair = 7;
+	// Field-level index mark — the single-field surface, desugared to a
+	// one-component index.
+	string state = 8 [(syncplane.v1.field_behavior) = { indexed: true }];
+	// Second component of the composite index above; not marked itself, so it
+	// exercises a component that only a declared index reaches.
+	int32 rank = 9;
+	// Repeated scalar with a field-level mark — the multi-entry surface, where
+	// membership is a range read and one row occupies several positions.
+	repeated string labels = 10
+		[(syncplane.v1.field_behavior) = { indexed: true }];
+}
+
+message Settings {
+	string color = 1;
+	int32 size = 2;
+	// Nested opaque field — exercises merge hooks under a path prefix.
+	Blob inner = 3 [(syncplane.v1.field_behavior) = { opaque: true }];
+	// Floating point behind a message that can be unset — the only way to put
+	// a NaN and a MISSING value on the same order key, which is what pins
+	// their relative rank.
+	double ratio = 4;
+}
+
+// Stands in for a future CRDT blob (e.g. Loro).
+message Blob {
+	bytes data = 1;
+	string note = 2;
+}

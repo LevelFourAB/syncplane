@@ -1,0 +1,3693 @@
+{
+	"comment": "Shared conformance vectors for the Go (engine/text) and TS (client/src/text) text CRDTs. Each case runs a script of steps over named replicas, then asserts checks. Indices count Unicode code points over visible text. encodedHex pins the canonical encoding, fragmentHex the canonical delta-state fragment encoding (format version 2) — both languages must produce identical bytes. Harnesses must verify every merge step both ways (merge(a,b) == merge(b,a) byte-for-byte), the same for mergeFragments, and that fragments re-encode stably through decode.",
+	"rejectComment": "rejects lists documents both decoders must refuse, with the exact error each must produce — the two are only interchangeable if they accept the same set of bytes. hex is the payload (empty means empty input); kind is \"doc\" (default, run through the document decoder) or \"anchor\" (through the standalone anchor decoder).",
+	"cases": [
+		{
+			"name": "empty document canonical encoding",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": ""
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "01000000"
+				}
+			]
+		},
+		{
+			"name": "linear typing is one run",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello"
+				},
+				{
+					"check": "len",
+					"doc": "a",
+					"value": 5
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 5
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650501000105060568656c6c6f00"
+				}
+			]
+		},
+		{
+			"name": "mid and prepend inserts",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 5,
+					"text": ","
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": ">> "
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": ">> hello, world"
+				}
+			]
+		},
+		{
+			"name": "multi-byte code points with delete",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "p1"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "héllo 🎉!"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 6,
+					"len": 1
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "héllo !"
+				},
+				{
+					"check": "len",
+					"doc": "a",
+					"value": 7
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "01010270310803000106060768c3a96c6c6f2000070105000604f09f8e89000801040007012100"
+				}
+			]
+		},
+		{
+			"name": "tombstones split runs canonically",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 5,
+					"len": 6
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650b02000105060568656c6c6f0006060500050620776f726c6400"
+				}
+			]
+		},
+		{
+			"name": "fugue: concurrent forward typing does not interleave",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "[]"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 1,
+					"text": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 1,
+					"text": "bob"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "[alicebob]"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010305616c69636503626f6204736565640705020300030500020205616c69636501030300020203626f6202010206025b5d00"
+				}
+			]
+		},
+		{
+			"name": "fugue: concurrent backward typing does not interleave",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "e"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "c"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "i"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "l"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "a"
+				},
+				{
+					"op": "new",
+					"doc": "b",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 0,
+					"text": "b"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 0,
+					"text": "o"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 0,
+					"text": "b"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "alicebob"
+				}
+			]
+		},
+		{
+			"name": "concurrent prepend and append",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"from": "a",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": ">> "
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 11,
+					"text": " <<"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": ">> hello world <<"
+				}
+			]
+		},
+		{
+			"name": "concurrent delete and append",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 0,
+					"len": 6
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 11,
+					"text": "!"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "world!"
+				}
+			]
+		},
+		{
+			"name": "concurrent delete-everything and insert",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 0,
+					"len": 3
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 3,
+					"text": "d"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "d"
+				}
+			]
+		},
+		{
+			"name": "mark canonical encoding (bool value, expand none)",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 5,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 5,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650601000105060568656c6c6f01000604626f6c640202000103000500"
+				}
+			]
+		},
+		{
+			"name": "mark value types encode canonically",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "p"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 2,
+					"key": "s",
+					"value": "red",
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 4,
+					"key": "n",
+					"value": 1.5,
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 4,
+					"end": 6,
+					"key": "f",
+					"value": false,
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 2,
+							"key": "s",
+							"value": "red"
+						},
+						{
+							"start": 2,
+							"end": 4,
+							"key": "n",
+							"value": 1.5
+						},
+						{
+							"start": 4,
+							"end": 6,
+							"key": "f",
+							"value": false
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010101700901000106060661626364656603000701730303726564020001030002000008016e043ff800000000000002000303000400000901660102000503000600"
+				}
+			]
+		},
+		{
+			"name": "same-key overlap resolves by highest op id",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 6,
+					"key": "color",
+					"value": "red",
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 4,
+					"key": "color",
+					"value": "blue",
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 2,
+							"key": "color",
+							"value": "red"
+						},
+						{
+							"start": 2,
+							"end": 4,
+							"key": "color",
+							"value": "blue"
+						},
+						{
+							"start": 4,
+							"end": 6,
+							"key": "color",
+							"value": "red"
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "overlapping comment keys coexist",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 8,
+					"key": "comment:c1",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 3,
+					"end": 11,
+					"key": "comment:c2",
+					"value": true,
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 8,
+							"key": "comment:c1",
+							"value": true
+						},
+						{
+							"start": 3,
+							"end": 11,
+							"key": "comment:c2",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "unmark removes the middle of a mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 5,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "unmark",
+					"doc": "a",
+					"start": 1,
+					"end": 4,
+					"key": "bold",
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 1,
+							"key": "bold",
+							"value": true
+						},
+						{
+							"start": 4,
+							"end": 5,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010101610701000105060568656c6c6f02000604626f6c640202000103000500000704626f6c640002000203000400"
+				}
+			]
+		},
+		{
+			"name": "two marks of one key separated only by tombstones resolve as one span",
+			"comment": "Deleting the text between two same-value marks of the same key joins them: resolution walks visible characters, so a gap made entirely of tombstones does not interrupt the run. Mark resolution confines each key to the stretches its own ops cover, and this is the case where those stretches must still be treated as contiguous.",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 2,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 4,
+					"end": 6,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 2,
+					"len": 2
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 4,
+							"key": "bold",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "two marks of one key separated by visible text stay two spans",
+			"comment": "The counterpart of the case above: a live character between the two stretches does break the run, so they must not be joined.",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 2,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 4,
+					"end": 6,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 2,
+					"len": 1
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abdef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 2,
+							"key": "bold",
+							"value": true
+						},
+						{
+							"start": 3,
+							"end": 5,
+							"key": "bold",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "mark survives a concurrent insert into the marked range",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 6,
+					"end": 11,
+					"key": "comment:c1",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 6,
+					"text": "big "
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello big world"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 10,
+							"end": 15,
+							"key": "comment:c1",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "expand none: boundary inserts stay outside",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 1,
+					"end": 2,
+					"key": "m",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 2,
+					"text": "xy"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 1,
+					"text": "q"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "aqbxyc"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 2,
+							"end": 3,
+							"key": "m",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "expand after: end-boundary inserts join the mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 1,
+					"end": 2,
+					"key": "m",
+					"value": true,
+					"expand": "after"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 2,
+					"text": "xy"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 1,
+							"end": 4,
+							"key": "m",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "expand both: inserts at either boundary join the mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcd"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 1,
+					"end": 3,
+					"key": "m",
+					"value": true,
+					"expand": "both"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 3,
+					"text": "y"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 1,
+					"text": "x"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "axbcyd"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 1,
+							"end": 5,
+							"key": "m",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "concurrent mark and unmark: higher lamport wins",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 6,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "fork",
+					"from": "a",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "unmark",
+					"doc": "b",
+					"start": 0,
+					"end": 3,
+					"key": "bold",
+					"expand": "none"
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 3,
+							"end": 6,
+							"key": "bold",
+							"value": true
+						}
+					]
+				}
+			]
+		},
+		{
+			"name": "anchors resolve across deletions",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "anchor",
+					"doc": "a",
+					"name": "x",
+					"index": 3,
+					"kind": "before"
+				},
+				{
+					"op": "anchor",
+					"doc": "a",
+					"name": "y",
+					"index": 4,
+					"kind": "after"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 2,
+					"len": 2
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abef"
+				},
+				{
+					"check": "resolve",
+					"doc": "a",
+					"anchor": "x",
+					"value": 2
+				},
+				{
+					"check": "resolve",
+					"doc": "a",
+					"anchor": "y",
+					"value": 2
+				},
+				{
+					"check": "anchorHex",
+					"anchor": "x",
+					"value": "02016104"
+				},
+				{
+					"check": "anchorHex",
+					"anchor": "y",
+					"value": "03016104"
+				}
+			]
+		},
+		{
+			"name": "anchors survive inserts before them",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "anchor",
+					"doc": "a",
+					"name": "w",
+					"index": 6,
+					"kind": "before"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": ">> "
+				}
+			],
+			"checks": [
+				{
+					"check": "resolve",
+					"doc": "a",
+					"anchor": "w",
+					"value": 9
+				}
+			]
+		},
+		{
+			"name": "document edge anchors",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "anchor",
+					"doc": "a",
+					"name": "s",
+					"index": 0,
+					"kind": "after"
+				},
+				{
+					"op": "anchor",
+					"doc": "a",
+					"name": "e",
+					"index": 3,
+					"kind": "before"
+				}
+			],
+			"checks": [
+				{
+					"check": "resolve",
+					"doc": "a",
+					"anchor": "s",
+					"value": 0
+				},
+				{
+					"check": "resolve",
+					"doc": "a",
+					"anchor": "e",
+					"value": 3
+				},
+				{
+					"check": "anchorHex",
+					"anchor": "s",
+					"value": "00"
+				},
+				{
+					"check": "anchorHex",
+					"anchor": "e",
+					"value": "01"
+				}
+			]
+		},
+		{
+			"name": "diff reports retain, insert and delete against retained items",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "p",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "p",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"from": "p",
+					"doc": "n",
+					"peer": "b"
+				},
+				{
+					"op": "insert",
+					"doc": "n",
+					"index": 5,
+					"text": ","
+				},
+				{
+					"op": "delete",
+					"doc": "n",
+					"index": 7,
+					"len": 5
+				},
+				{
+					"op": "insert",
+					"doc": "n",
+					"index": 7,
+					"text": "there"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "n",
+					"value": "hello, there"
+				},
+				{
+					"check": "diff",
+					"prev": "p",
+					"next": "n",
+					"ops": [
+						{
+							"retain": 5
+						},
+						{
+							"insert": ","
+						},
+						{
+							"retain": 1
+						},
+						{
+							"insert": "there"
+						},
+						{
+							"delete": 5
+						}
+					],
+					"marksChanged": false
+				}
+			]
+		},
+		{
+			"name": "diff flags mark changes",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "p",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "p",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "fork",
+					"from": "p",
+					"doc": "n",
+					"peer": "b"
+				},
+				{
+					"op": "mark",
+					"doc": "n",
+					"start": 0,
+					"end": 2,
+					"key": "m",
+					"value": true,
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "diff",
+					"prev": "p",
+					"next": "n",
+					"ops": [],
+					"marksChanged": true
+				}
+			]
+		},
+		{
+			"name": "diff flags a span the insert moved, with the mark set unchanged",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "p",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "p",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "p",
+					"start": 1,
+					"end": 4,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "fork",
+					"from": "p",
+					"doc": "n",
+					"peer": "b"
+				},
+				{
+					"op": "insert",
+					"doc": "n",
+					"index": 2,
+					"text": "X"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "p",
+					"value": [
+						{
+							"start": 1,
+							"end": 4,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "marks",
+					"doc": "n",
+					"value": [
+						{
+							"start": 1,
+							"end": 5,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "diff",
+					"prev": "p",
+					"next": "n",
+					"ops": [
+						{
+							"retain": 2
+						},
+						{
+							"insert": "X"
+						}
+					],
+					"marksChanged": true
+				}
+			]
+		},
+		{
+			"name": "diff flags a swapped mark op at an unchanged count",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "s",
+					"peer": "a"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "p",
+					"peer": "b"
+				},
+				{
+					"op": "mark",
+					"doc": "p",
+					"start": 0,
+					"end": 2,
+					"key": "m",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "n",
+					"peer": "c"
+				},
+				{
+					"op": "mark",
+					"doc": "n",
+					"start": 1,
+					"end": 3,
+					"key": "m",
+					"value": true,
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "diff",
+					"prev": "p",
+					"next": "n",
+					"ops": [],
+					"marksChanged": true
+				}
+			]
+		},
+		{
+			"name": "setString merges a two-ended save with a concurrent middle edit",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "Groceries: milk, eggs, bread"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "connector"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "client"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "* Groceries: milk, eggs, bread."
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 17,
+					"text": "cheese, "
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "* Groceries: milk, cheese, eggs, bread."
+				}
+			]
+		},
+		{
+			"name": "three-way merge is associative and canonical",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "a",
+					"peer": "a"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "b",
+					"peer": "b"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "c",
+					"peer": "c"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "x"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 3,
+					"text": "y"
+				},
+				{
+					"op": "delete",
+					"doc": "c",
+					"index": 1,
+					"len": 1
+				},
+				{
+					"op": "fork",
+					"from": "a",
+					"doc": "m1",
+					"peer": ""
+				},
+				{
+					"op": "merge",
+					"doc": "m1",
+					"from": "b"
+				},
+				{
+					"op": "merge",
+					"doc": "m1",
+					"from": "c"
+				},
+				{
+					"op": "fork",
+					"from": "c",
+					"doc": "m2",
+					"peer": ""
+				},
+				{
+					"op": "merge",
+					"doc": "m2",
+					"from": "a"
+				},
+				{
+					"op": "merge",
+					"doc": "m2",
+					"from": "b"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "m1",
+					"value": "xacy"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "m1",
+					"other": "m2"
+				}
+			]
+		},
+		{
+			"name": "fragment: insert-only delta applies like a full merge",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "l",
+					"index": 5,
+					"text": " world"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 0,
+					"text": ">> "
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f1"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f1"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f1",
+					"value": "020205616c69636504736565640b05010006060401050620776f726c6400"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": ">> hello world"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: tombstone flips travel as deleted items with content",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "delete",
+					"doc": "l",
+					"index": 0,
+					"len": 6
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 11,
+					"text": "!"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "020104736565640b01000106070668656c6c6f2000"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": "world!"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: mark-only delta anchors to absent items",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "mark",
+					"doc": "l",
+					"start": 0,
+					"end": 5,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "020205616c696365047365656406050001000604626f6c640202010103010500"
+				},
+				{
+					"check": "marks",
+					"doc": "s",
+					"value": [
+						{
+							"start": 0,
+							"end": 5,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: multi-peer delta",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "ab"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "l",
+					"index": 2,
+					"text": "cd"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "k",
+					"peer": "carol"
+				},
+				{
+					"op": "insert",
+					"doc": "k",
+					"index": 0,
+					"text": "!"
+				},
+				{
+					"op": "merge",
+					"doc": "l",
+					"from": "k"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 1,
+					"text": "-"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "020305616c696365056361726f6c047365656404030202000302040202026364010301000201012100"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": "!a-bcd"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: empty base is self-contained",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "l",
+					"index": 0,
+					"text": "hi"
+				},
+				{
+					"op": "mark",
+					"doc": "l",
+					"start": 0,
+					"end": 2,
+					"key": "b",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "new",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"as": "f"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "020105616c69636503010001020602686901000301620202000103000200"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": "hi"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: unchanged doc yields a vv-only no-op fragment",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "abc"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 3,
+					"text": "d"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "02010473656564030000"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": "abcd"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "fragment: mergeFragments folds sequential deltas",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "l",
+					"index": 5,
+					"text": " there"
+				},
+				{
+					"op": "fork",
+					"from": "l",
+					"doc": "snap",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f1"
+				},
+				{
+					"op": "delete",
+					"doc": "l",
+					"index": 0,
+					"len": 1
+				},
+				{
+					"op": "mark",
+					"doc": "l",
+					"start": 0,
+					"end": 3,
+					"key": "b",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "snap",
+					"as": "f2"
+				},
+				{
+					"op": "mergeFragments",
+					"a": "f1",
+					"b": "f2",
+					"as": "f12"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 0,
+					"text": "!"
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "applyFragment",
+					"doc": "s",
+					"frag": "f12"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "fragmentHex",
+					"frag": "f1",
+					"value": "020205616c69636504736565640b05010006060401050620746865726500"
+				},
+				{
+					"check": "fragmentHex",
+					"frag": "f2",
+					"value": "020205616c69636504736565640c050101010107016801000c01620202010203010400"
+				},
+				{
+					"check": "fragmentHex",
+					"frag": "f12",
+					"value": "020205616c69636504736565640c05020006060401050620746865726501010107016801000c01620202010203010400"
+				},
+				{
+					"check": "text",
+					"doc": "s",
+					"value": "!ello there"
+				},
+				{
+					"check": "marks",
+					"doc": "s",
+					"value": [
+						{
+							"start": 1,
+							"end": 4,
+							"key": "b",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "setString: disjoint edits keep the middle and its mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "one two three four five"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 8,
+					"end": 13,
+					"key": "comment:c1",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "one TWO three FOUR five"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "one TWO three FOUR five"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 8,
+							"end": 13,
+							"key": "comment:c1",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963651f0700010406046f6e65200005030500040374776f0008070400070720746872656520000f0405000e04666f757200130504001205206669766500190400000f04464f5552001d030000050354574f0100180a636f6d6d656e743a63310202000903000d00"
+				}
+			]
+		},
+		{
+			"name": "setString: edits at both ends leave the middle alone",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "start middle end"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 6,
+					"end": 12,
+					"key": "m",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "begin middle stop"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "begin middle stop"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 6,
+							"end": 12,
+							"key": "m",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963651a050001050705737461727400060804000508206d6964646c6520000e0305000d03656e6400120400000e0473746f7000160500000105626567696e010011016d0202000703000c00"
+				}
+			]
+		},
+		{
+			"name": "setString: interleaved hunks",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "p"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "a1 b2 c3 d4"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "a9 b8 c7 d6"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "a9 b8 c7 d6"
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"p": 15
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010101700f0c000101060161000201050001013100030204000202206200050105000401320006020400050220630008010500070133000902040008022064000b0105000a0134000c0100000b0136000d010000080137000e010000050138000f01000002013900"
+				}
+			]
+		},
+		{
+			"name": "setString: past the diff bound falls back to a single replacement hunk",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaammmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 257,
+					"end": 260,
+					"key": "keep",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccmmmddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccmmmddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 1035
+					}
+				}
+			]
+		},
+		{
+			"name": "setString: at the diff bound the middle and its mark survive",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaammmbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 256,
+					"end": 259,
+					"key": "keep",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccmmmdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "ccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccmmmdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 256,
+							"end": 259,
+							"key": "keep",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 1028
+					}
+				}
+			]
+		},
+		{
+			"name": "fragment: the merger seam routes delta state like a full merge",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "base",
+					"peer": "seed"
+				},
+				{
+					"op": "insert",
+					"doc": "base",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "l",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "l",
+					"index": 5,
+					"text": " world"
+				},
+				{
+					"op": "fork",
+					"from": "base",
+					"doc": "s",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "s",
+					"index": 0,
+					"text": ">> "
+				},
+				{
+					"op": "fork",
+					"from": "s",
+					"doc": "s2",
+					"peer": ""
+				},
+				{
+					"op": "fragment",
+					"of": "l",
+					"base": "base",
+					"as": "f1"
+				},
+				{
+					"op": "mergeFragment",
+					"doc": "s",
+					"frag": "f1"
+				},
+				{
+					"op": "merge",
+					"doc": "s2",
+					"from": "l"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "s",
+					"value": ">> hello world"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "s",
+					"value": "010305616c69636503626f6204736565640b0805030006060402050620776f726c64010603000201033e3e20020105060568656c6c6f00"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "s",
+					"other": "s2"
+				}
+			]
+		},
+		{
+			"name": "compaction collapses a run that was typed and then deleted",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 5,
+					"len": 6
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 6
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello"
+				},
+				{
+					"check": "len",
+					"doc": "a",
+					"value": 5
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 11
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650b01000105060568656c6c6f00"
+				}
+			]
+		},
+		{
+			"name": "compaction keeps deleted items that still position live text",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "fork",
+					"doc": "b",
+					"from": "a",
+					"peer": "bob"
+				},
+				{
+					"op": "insert",
+					"doc": "b",
+					"index": 7,
+					"text": "X"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 5,
+					"len": 6
+				},
+				{
+					"op": "merge",
+					"doc": "a",
+					"from": "b"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 3
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "helloX"
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 11,
+						"bob": 12
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010205616c69636503626f620b0c03000105060568656c6c6f0006030500050320776f010c01000008015800"
+				}
+			]
+		},
+		{
+			"name": "compaction keeps a deleted item a mark anchors to",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 6,
+					"end": 11,
+					"key": "bold",
+					"value": true,
+					"expand": "before"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 5,
+					"len": 1
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 0
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "helloworld"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 5,
+							"end": 10,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650c03000105060568656c6c6f000601050005012000070504000605776f726c6401000c04626f6c640203000603000b01"
+				}
+			]
+		},
+		{
+			"name": "replicas that compact independently stay byte-identical",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 3,
+					"len": 3
+				},
+				{
+					"op": "fork",
+					"doc": "b",
+					"from": "a",
+					"peer": "bob"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 3
+				},
+				{
+					"op": "compact",
+					"doc": "b",
+					"purged": 3
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abc"
+				},
+				{
+					"check": "sameEncoding",
+					"doc": "a",
+					"other": "b"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650601000103060361626300"
+				}
+			]
+		},
+		{
+			"name": "a collapsed mark covers nothing until text is typed at the caret",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 3,
+					"end": 3,
+					"key": "bold",
+					"value": true,
+					"expand": "both"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "marksAt",
+					"doc": "a",
+					"at": 3,
+					"value": [
+						{
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "marksAt",
+					"doc": "a",
+					"at": 2,
+					"value": []
+				},
+				{
+					"check": "marksAt",
+					"doc": "a",
+					"at": 4,
+					"value": []
+				},
+				{
+					"check": "points",
+					"doc": "a",
+					"value": [
+						{
+							"index": 3,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650701000106060661626364656601000704626f6c640203000302000403"
+				}
+			]
+		},
+		{
+			"name": "a collapsed mark becomes an ordinary span on the character typed at the caret",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 3,
+					"end": 3,
+					"key": "bold",
+					"value": true,
+					"expand": "both"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 3,
+					"text": "X"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abcXdef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 3,
+							"end": 4,
+							"key": "bold",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "points",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636508020001060606616263646566000801000004015801000704626f6c640203000302000403"
+				}
+			]
+		},
+		{
+			"name": "an unmark at the same caret cancels a collapsed mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 3,
+					"end": 3,
+					"key": "bold",
+					"value": true,
+					"expand": "both"
+				},
+				{
+					"op": "unmark",
+					"doc": "a",
+					"start": 3,
+					"end": 3,
+					"key": "bold",
+					"expand": "both"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 3,
+					"text": "X"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abcXdef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "marksAt",
+					"doc": "a",
+					"at": 3,
+					"value": []
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636509020001060606616263646566000901000004015802000704626f6c640203000302000403000804626f6c640003000302000403"
+				}
+			]
+		},
+		{
+			"name": "a point annotation resolves at its position and takes in no typed text",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 2,
+					"key": "note:n1",
+					"value": "look here",
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "points",
+					"doc": "a",
+					"value": [
+						{
+							"index": 2,
+							"key": "note:n1",
+							"value": "look here"
+						}
+					]
+				},
+				{
+					"check": "marksAt",
+					"doc": "a",
+					"at": 2,
+					"value": []
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636507010001060606616263646566010007076e6f74653a6e3103096c6f6f6b206865726503000203000200"
+				}
+			]
+		},
+		{
+			"name": "a point annotation stays zero-width when text is typed at its position",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 2,
+					"key": "note:n1",
+					"value": "look here",
+					"expand": "none"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 2,
+					"text": "XY"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abXYcdef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "points",
+					"doc": "a",
+					"value": [
+						{
+							"index": 2,
+							"key": "note:n1",
+							"value": "look here"
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636509020001060606616263646566000802000003025859010007076e6f74653a6e3103096c6f6f6b206865726503000203000200"
+				}
+			]
+		},
+		{
+			"name": "compaction reclaims a mark and the unmark that turned it off",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 5,
+					"key": "bold",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "unmark",
+					"doc": "a",
+					"start": 0,
+					"end": 5,
+					"key": "bold",
+					"expand": "none"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 0,
+					"purgedMarks": 2
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 7
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650701000105060568656c6c6f00"
+				}
+			]
+		},
+		{
+			"name": "compaction keeps a point annotation, which covers nothing by design",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 2,
+					"key": "note:n1",
+					"value": true,
+					"expand": "none"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 0,
+					"purgedMarks": 0
+				}
+			],
+			"checks": [
+				{
+					"check": "points",
+					"doc": "a",
+					"value": [
+						{
+							"index": 2,
+							"key": "note:n1",
+							"value": true
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650601000105060568656c6c6f010006076e6f74653a6e310203000203000200"
+				}
+			]
+		},
+		{
+			"name": "compaction keeps a shadowed mark whose boundaries expand differently",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "abcdef"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 4,
+					"key": "bold",
+					"value": true,
+					"expand": "both"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 2,
+					"end": 4,
+					"key": "bold",
+					"value": false,
+					"expand": "none"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 0,
+					"purgedMarks": 0
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 2,
+					"text": "X"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "abXcdef"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 2,
+							"end": 3,
+							"key": "bold",
+							"value": true
+						},
+						{
+							"start": 3,
+							"end": 5,
+							"key": "bold",
+							"value": false
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636509020001060606616263646566000901000003015802000704626f6c640203000202000503000804626f6c640102000303000400"
+				}
+			]
+		},
+		{
+			"name": "compaction reclaims a cancelled pending format and the tombstone it pinned",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello world"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 5,
+					"len": 6
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 5,
+					"end": 5,
+					"key": "bold",
+					"value": true,
+					"expand": "both"
+				},
+				{
+					"op": "unmark",
+					"doc": "a",
+					"start": 5,
+					"end": 5,
+					"key": "bold",
+					"expand": "both"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 6,
+					"purgedMarks": 2
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hello"
+				},
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "points",
+					"doc": "a",
+					"value": []
+				},
+				{
+					"check": "vv",
+					"doc": "a",
+					"value": {
+						"alice": 13
+					}
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650d01000105060568656c6c6f00"
+				}
+			]
+		}
+	],
+	"rejects": [
+		{
+			"name": "unsupported format version",
+			"hex": "03",
+			"error": "text: unsupported format version 3"
+		},
+		{
+			"name": "fragment bytes fed to the document decoder",
+			"hex": "02",
+			"error": "text: fragment where full document expected"
+		},
+		{
+			"name": "document bytes fed to the fragment decoder",
+			"kind": "fragment",
+			"hex": "01",
+			"error": "text: full document where fragment expected"
+		},
+		{
+			"name": "unsupported fragment format version",
+			"kind": "fragment",
+			"hex": "03",
+			"error": "text: unsupported format version 3"
+		},
+		{
+			"name": "trailing bytes after a fragment",
+			"kind": "fragment",
+			"hex": "020105616c69636501000000",
+			"error": "text: 1 trailing bytes"
+		},
+		{
+			"name": "fragment vv not covering an item counter",
+			"kind": "fragment",
+			"hex": "020105616c696365010100020106016100",
+			"error": "text: fragment vv does not cover item alice:2"
+		},
+		{
+			"name": "fragment varint above the safe-integer ceiling",
+			"kind": "fragment",
+			"hex": "02808080808080808040",
+			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "fragment applied where its parent cannot resolve",
+			"kind": "applyFragment",
+			"docHex": "",
+			"hex": "020205616c6963650473656564010101000101040101016100",
+			"error": "text: item alice:1 references unknown parent seed:1"
+		},
+		{
+			"name": "fragment applied where its anchor cannot resolve",
+			"kind": "applyFragment",
+			"docHex": "",
+			"hex": "020205616c696365047365656401010001000101620202010103010100",
+			"error": "text: anchor references unknown item seed:1"
+		},
+		{
+			"name": "fragment item content disagrees with the receiver",
+			"kind": "applyFragment",
+			"docHex": "010105616c696365010100010106017800",
+			"hex": "020105616c696365010100010106017900",
+			"error": "text: merge conflict: item alice:1 has different content on each side"
+		},
+		{
+			"name": "fragment item placement disagrees with the receiver",
+			"kind": "applyFragment",
+			"docHex": "010105616c69636502010001020602787900",
+			"hex": "020105616c696365020100020106017900",
+			"error": "text: merge conflict: item alice:2 has different placement on each side"
+		},
+		{
+			"name": "mergeFragments with disagreeing item content",
+			"kind": "mergeFragments",
+			"hex": "020105616c696365010100010106017800",
+			"otherHex": "020105616c696365010100010106017900",
+			"error": "text: merge conflict: item alice:1 has different content on each side"
+		},
+		{
+			"name": "truncated before the peer count",
+			"hex": "01",
+			"error": "text: truncated document"
+		},
+		{
+			"name": "peer count the body cannot back",
+			"hex": "01808080100000",
+			"error": "text: peer count 33554432 exceeds the 2 bytes remaining"
+		},
+		{
+			"name": "run count the body cannot back",
+			"hex": "010105616c6963650580808010",
+			"error": "text: run count 33554432 exceeds the 0 bytes remaining"
+		},
+		{
+			"name": "mark count the body cannot back",
+			"hex": "010105616c6963650501000105060568656c6c6f80808010",
+			"error": "text: mark count 33554432 exceeds the 0 bytes remaining"
+		},
+		{
+			"name": "varint above the safe-integer ceiling",
+			"hex": "01808080808080808040",
+			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "version vector counter above the ceiling",
+			"hex": "010105616c6963658080808080808010",
+			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "item counter above the ceiling",
+			"hex": "010105616c696365050100808080808080801001060161",
+			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "varint longer than ten bytes",
+			"hex": "01ffffffffffffffffffff",
+			"error": "text: malformed varint"
+		},
+		{
+			"name": "peer index out of range",
+			"hex": "010105616c6963650501010101060161",
+			"error": "text: peer index 1 out of range"
+		},
+		{
+			"name": "empty run",
+			"hex": "010105616c6963650501000100060161",
+			"error": "text: empty run"
+		},
+		{
+			"name": "run content longer than the item count",
+			"hex": "010105616c696365050100010106026162",
+			"error": "text: run content longer than item count"
+		},
+		{
+			"name": "run content shorter than the item count",
+			"hex": "010105616c696365050100010306026162",
+			"error": "text: run content shorter than item count"
+		},
+		{
+			"name": "invalid UTF-8 in run content",
+			"hex": "010105616c69636505010001010601ff",
+			"error": "text: invalid UTF-8 in run content"
+		},
+		{
+			"name": "invalid UTF-8 in a peer name",
+			"hex": "010101ff010000",
+			"error": "text: invalid UTF-8 string"
+		},
+		{
+			"name": "truncated inside a run",
+			"hex": "010105616c696365050100010506056869",
+			"error": "text: truncated document"
+		},
+		{
+			"name": "duplicate item id",
+			"hex": "010105616c6963650502000101060161000101060162",
+			"error": "text: duplicate item alice:1"
+		},
+		{
+			"name": "item with an unknown parent",
+			"hex": "010105616c69636505010001010400630161",
+			"error": "text: item alice:1 references unknown parent alice:99"
+		},
+		{
+			"name": "parent cycle",
+			"hex": "010105616c696365050200010104000201610002010400010162",
+			"error": "text: 2 of 2 items unreachable from the root (parent cycle)"
+		},
+		{
+			"name": "mark anchored to an unknown item",
+			"hex": "010105616c6963650501000105060568656c6c6f01000604626f6c640202006303000500",
+			"error": "text: anchor references unknown item alice:99"
+		},
+		{
+			"name": "invalid anchor kind",
+			"hex": "010105616c6963650501000105060568656c6c6f01000604626f6c64020703000500",
+			"error": "text: invalid anchor kind 7"
+		},
+		{
+			"name": "invalid mark value tag",
+			"hex": "010105616c6963650501000105060568656c6c6f01000604626f6c640902000103000500",
+			"error": "text: invalid mark value tag 9"
+		},
+		{
+			"name": "NaN mark value",
+			"hex": "010105616c6963650501000105060568656c6c6f0100060473697a65047ff800000000000102000103000500",
+			"error": "text: non-finite mark value"
+		},
+		{
+			"name": "infinite mark value",
+			"hex": "010105616c6963650501000105060568656c6c6f0100060473697a65047ff000000000000002000103000500",
+			"error": "text: non-finite mark value"
+		},
+		{
+			"name": "invalid expand",
+			"hex": "010105616c6963650501000105060568656c6c6f01000604626f6c640202000103000504",
+			"error": "text: invalid expand 4"
+		},
+		{
+			"name": "duplicate mark op id",
+			"hex": "010105616c6963650501000105060568656c6c6f02000604626f6c640202000103000500000604626f6c640202000103000500",
+			"error": "text: duplicate mark op alice:6"
+		},
+		{
+			"name": "trailing bytes",
+			"hex": "010105616c6963650501000105060568656c6c6f0000",
+			"error": "text: 1 trailing bytes"
+		},
+		{
+			"name": "empty anchor",
+			"kind": "anchor",
+			"hex": "",
+			"error": "text: empty anchor"
+		},
+		{
+			"name": "invalid standalone anchor kind",
+			"kind": "anchor",
+			"hex": "09",
+			"error": "text: invalid anchor kind 9"
+		},
+		{
+			"name": "standalone anchor counter above the ceiling",
+			"kind": "anchor",
+			"hex": "0205616c6963658080808080808010",
+			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "trailing bytes after a standalone anchor",
+			"kind": "anchor",
+			"hex": "0000",
+			"error": "text: trailing bytes in anchor"
+		},
+		{
+			"name": "invalid UTF-8 in a standalone anchor peer",
+			"kind": "anchor",
+			"hex": "0201ff01",
+			"error": "text: invalid UTF-8 string"
+		},
+		{
+			"name": "merge with a fragment as the stored base",
+			"kind": "merge",
+			"docHex": "020105616c696365010100010106017800",
+			"hex": "010105616c696365010100010106017900",
+			"error": "text: merge base is a fragment; stored state is always a full document"
+		}
+	]
+}

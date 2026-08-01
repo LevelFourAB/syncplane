@@ -1,0 +1,176 @@
+# Storage adapter contract
+
+`storage.Adapter` is the persistence seam; SQLite (`engine/storage/sqlitestore`)
+is the only implementation today. The full contract lives in the `storage`
+package docs — this is the part an implementer must not get wrong.
+
+## Invariants
+
+- **Write mutual exclusion per workspace.** `WithWriteTx` must lock the
+  workspace for the _entire_ closure, including reads before the first write.
+  Under MVCC (Postgres) that means locking the workspace row before invoking the
+  closure.
+- **Write closures may be retried**; read closures run at most once. The
+  engine's closures are written to be re-runnable.
+- **Scans must tolerate re-entrant reads.** A scan callback may issue any read
+  on the transaction that is scanning, and it must see the same snapshot as the
+  scan. The engine does this on its hot paths: `ScanIndex`'s callback re-reads
+  each candidate row to apply read filters, and `ScanChanges`'s callback reads
+  `FieldDeltas` to ship a text delta instead of a whole document. SQLite allows
+  several open statements per connection, so it satisfies this for free; a
+  driver that cannot interleave statements on one connection (pgx with a result
+  set still open, a single-stream remote protocol) must **buffer or page the
+  scan** instead of holding one result set open across the callback. Writes are
+  the opposite: the engine collects a scan's rows and rewrites them after it
+  returns, so an adapter need not tolerate a write during iteration.
+- **The text delta log** (`PutFieldDelta` / `FieldDeltas` / `PruneFieldDeltas`)
+  is an append-only side table keyed by `(entity, key, field, seq)`, read back
+  oldest-first over a sequence span. It is an optimization, so an adapter is
+  free to report every span incomplete — pulls then ship whole documents — but
+  it must **never report an under-covered span as complete**.
+- **Text compaction floors** (`TextFloor` / `PutTextFloor`), keyed by
+  `(entity, key, field)`, are the opposite: not an optimization. Losing one lets
+  a replica holding pre-compaction state put purged tombstones back, so they must
+  be **as durable as the row**.
+- **Write attribution.** `PutRow` and `DeleteRow` take a `storage.Actor` — who
+  the write is attributed to — which is stored with the row and returned by
+  **every** read that yields a `Row`: `GetRow`, `ScanEntity`, `ScanEntityAfter`,
+  `ScanChanges`. Store it as given; a zero `Actor` means "unattributed" and must
+  not be filled in from anything the adapter knows. Populating it on some read
+  paths and not others is the one failure that misleads silently, because a
+  missing actor is indistinguishable from an unattributed write.
+
+  A row holds one actor, replaced on each write, so only its **last** writer is
+  recoverable. Adapters need no history table.
+- **Secondary index entries** (`PutIndexEntries` / `DeleteIndexEntries` /
+  `ScanIndex` / `IndexState` / `SetIndexState`) map an opaque sort key to a row
+  key, per workspace and per **(entity, index name)** pair. Four rules:
+
+  - **Key entries by entity as well as by index name.** An index name is derived
+    from a field name, so two entities routinely claim the same one, and an entry
+    carries a bare row key that means nothing outside its own entity. An adapter
+    that scans by name alone hands one entity's row keys to the other's reader,
+    which then reads live rows of its own that the query never matched — a wrong
+    answer, not a slow one. `IndexState` and `SetIndexState` are per pair for the
+    same reason: two entities sharing a name have separate entries, built
+    separately, and one shared flag would let either claim the other's coverage.
+  - **Compare the keys bytewise.** They are `[]byte`, and the engine builds them
+    so that byte order _is_ the row order the index serves. An adapter that
+    stores them as text or applies a collation answers ordered queries wrongly
+    with no error anywhere. `ScanIndex` takes `lo` inclusive and `hi` exclusive;
+    a nil bound is open on that end.
+  - **`PutIndexEntries` replaces the row's whole entry set**, across every
+    index — not just the ones named in the call. The caller has no previous row
+    value in hand (a PATCH merges into stored bytes, a DELETE has only a key), so
+    it cannot compute a diff, which is why a by-row lookup is what makes this
+    affordable. An empty slice is the same as `DeleteIndexEntries`.
+  - **Entries exist for live rows only.** The engine pairs every `DeleteRow` with
+    a `DeleteIndexEntries`, so a tombstone holds none, and `CollectTombstones` —
+    a bulk delete of rows already gone from the index — needs no index work.
+
+  Entries are **derived and disposable**: losing them costs a rebuild, never
+  correctness, and nothing in a request or response mentions an index. An adapter
+  under storage pressure may drop the table. `IndexState` reports the spec
+  fingerprint entries were built under and whether the build finished; a missing
+  index reads as `("", false, nil)`, which is the normal state after
+  registration, not an error.
+- **`ScanEntityByVersionDesc`** yields one entity's live rows newest first,
+  ties broken by key **ascending**. The tie-break is load-bearing: a recency
+  window takes the first `limit` rows, so two rows sharing a version must order
+  here exactly as the engine's own comparator orders them, or the window's
+  contents depend on where a page happened to end.
+- **`ListPendingWorkspaceIDs`** answers "which workspaces owe this consumer
+  work", paged by workspace id from an exclusive cursor. It is the one
+  cross-workspace read in the interface, and it exists so that a background
+  consumer's idle cost is one query rather than a read transaction per
+  workspace. Three rules:
+
+  - **It may be optimistic, never short.** Listing a workspace whose pending
+    changes the consumer filters out costs a wasted pass; omitting one whose
+    position is behind is an effect that never fires.
+  - **A position naming an entity or key is pending** whatever its sequence
+    says. That is a sub-position inside a same-sequence group — where a failed
+    pass committed the prefix it delivered — so the group has changes after it
+    even once the sequence has reached the head.
+  - **A workspace with no position for the consumer is pending.** Having acted
+    on nothing is a first run, which is how a newly registered consumer
+    discovers the history it has to catch up on.
+
+  An adapter with a cheaper answer (a dirty set maintained on write) may
+  substitute one, as long as it stays complete.
+
+## Conformance
+
+`storagetest.Conformance` and `storagetest.ConformanceNamespaced` encode the
+contract. New adapters must pass both.
+
+Two of those specs are worth knowing about before you write an adapter, because
+they fail late and for reasons that do not look like storage bugs:
+
+- **Byte order.** Keys compare bytewise, the order Go's `<` gives, and the
+  engine shares that order with the adapter across page boundaries. Under a
+  locale collation an `afterKey` scan silently drops or repeats rows instead of
+  failing. The specs use a key set (`A Z _ a z é`) whose byte order disagrees
+  with a typical locale's — which is also why the suite's Postgres container is
+  the glibc image and not `-alpine`, whose musl sorts UTF-8 byte-for-byte and so
+  would let the bug through.
+- **Re-entrant reads inside scan callbacks.** A scan callback may issue any
+  read on the transaction it is scanning. One spec scans further than any
+  plausible internal page size, so an adapter that reads its result set in
+  batches has to serve callbacks _between_ batches, not merely within one.
+
+## Namespaces
+
+An adapter partitions workspaces, rows and client watermarks by namespace so one
+database can back several apps. Both adapters expose this as `root.Namespace(id)`
+and a `WithNamespace(id)` option; `Close` on a derived store is a no-op, because
+the root owns the handle.
+
+## Adapters
+
+- **`sqlitestore`** — the default, and the one that needs no infrastructure. A
+  single writer connection serializes every workspace against every other, and
+  the file cannot be shared between processes.
+- **`pgstore`** — PostgreSQL over pgx v5, for deployments that outgrow one
+  process. Several nodes share one database and different workspaces commit
+  concurrently. Its three non-obvious choices are documented at the point of
+  code: `pg_advisory_xact_lock` for write exclusion (a row lock cannot work,
+  because lazy registration means a first write has no row to lock), `REPEATABLE
+  READ READ ONLY` reads, and server-side cursors so a scan's callback can read
+  on the same connection.
+
+Choosing `pgstore` is necessary but not sufficient for multi-node: pokes still
+need a shared notifier (`pgnotify`), and effects still fire once per node. See
+[Run more than one node](../how-to/run-multiple-nodes.md).
+
+### Tuning `sqlitestore`
+
+`Open` picks server-shaped defaults rather than SQLite's library-shaped ones.
+Each is an `Option`; zero means "leave the default underneath" — SQLite's for
+the cache and WAL limit, an unbounded pool for the reader count.
+
+| Option                    | Default                       | What it controls                                                                                                                                                                     |
+| ------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WithCacheSize(bytes)`    | 8 MiB                         | Page cache. Charged **per connection**, so the store's ceiling is this times one writer plus every reader — raise it together with the next row, not alone.                          |
+| `WithReadConnections(n)`  | `GOMAXPROCS`, clamped to 4..8 | Reader pool size, which bounds read concurrency, the memory above, and how deeply reads may nest — a nested read holds its outer read's connection while waiting for one of its own. |
+| `WithWALSizeLimit(bytes)` | 64 MiB                        | How large the `-wal` sidecar is left after a checkpoint. Unlimited, it stays at its high-water mark for the life of the file.                                                        |
+| `WithOptimizeInterval(d)` | 1 hour                        | How often the writer refreshes query-planner statistics (`PRAGMA optimize`). Zero disables the loop; `Open` and `Close` still run a pass.                                            |
+
+The statistics pass matters more here than in a typical SQLite application:
+indexes are created at runtime, when an entity registers one, so the moment a
+schema-time `ANALYZE` would have covered never arrives. It is advisory — stale
+statistics cost plan quality, never correctness — so its failures are not
+reported.
+
+Everything else is fixed. `journal_mode` is WAL, writes take the write lock at
+`BEGIN` (`BEGIN IMMEDIATE`) so contention waits out `busy_timeout` instead of
+failing with `SQLITE_BUSY_SNAPSHOT`, the reader pool is `query_only`, and
+`synchronous` is `NORMAL` — the WAL default, which trades the last commits
+before a power loss or kernel panic (not a process crash) for not paying an
+fsync per transaction. A client whose mutation is acked and then lost that way
+will not resend it, since an ack retires the pending entry.
+
+## Deferred, by design
+
+Multi-node GC coordination. The pass is idempotent, so every node may run it;
+an advisory lock would only avoid the duplicate work.

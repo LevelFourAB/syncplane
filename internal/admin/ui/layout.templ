@@ -1,0 +1,153 @@
+package ui
+
+import "fmt"
+
+// Layout is the app shell shared by every full page: a fixed sidebar plus the
+// scrollable main region. It pulls in the vendored htmx and the plain CSS/JS
+// (all served locally — no CDN, local-first). #panel-root is the slide-over
+// mount point htmx swaps detail panels into.
+templ Layout(nav Nav, title string) {
+	<!DOCTYPE html>
+	<html lang="en">
+		<head>
+			<meta charset="utf-8"/>
+			<meta name="viewport" content="width=device-width, initial-scale=1"/>
+			<title>{ title }</title>
+			// Apply a saved theme choice before the stylesheet paints, so an
+			// explicit light/dark pick doesn't flash the OS default first.
+			<script>
+				(function () {
+					try {
+						var t = localStorage.getItem('admin-theme');
+						if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t);
+					} catch (e) {}
+				})();
+			</script>
+			<link rel="stylesheet" href="/static/admin.css"/>
+			<script src="/static/htmx.min.js"></script>
+			<script src="/static/admin.js" defer></script>
+		</head>
+		<body>
+			<div class="shell">
+				@Sidebar(nav)
+				<main class="main">
+					{ children... }
+				</main>
+			</div>
+			<div id="panel-root"></div>
+		</body>
+	</html>
+}
+
+// Sidebar renders the brand, app + workspace switchers, the entity nav with
+// live counts, and the status footer.
+templ Sidebar(nav Nav) {
+	<aside class="sidebar">
+		<div class="brand">
+			<div class="mark">↻</div>
+			<div>
+				<div class="name">{ nav.Brand }</div>
+				<div class="tagline">{ nav.Tagline }</div>
+			</div>
+		</div>
+		if nav.AppID != "" {
+			<div class="switcher">
+				<div class="badge app">{ initialOf(nav.AppLabel) }</div>
+				<div class="lines">
+					<div class="title">{ nav.AppLabel }</div>
+					if nav.AppSub != "" {
+						<div class="sub">{ nav.AppSub }</div>
+					}
+				</div>
+				if len(nav.AppOptions) > 1 {
+					@switcherSelect(nav.AppOptions)
+				}
+			</div>
+			if len(nav.WSOptions) > 0 {
+				<div class="switcher compact">
+					<div class="badge ws">WS</div>
+					<div class="lines">
+						<div class="title">{ nav.Workspace }</div>
+					</div>
+					if len(nav.WSOptions) > 1 {
+						@switcherSelect(nav.WSOptions)
+					}
+				</div>
+			}
+			if len(nav.Entities) > 0 {
+				<div class="nav-head">Entities</div>
+				<nav class="nav-list">
+					for _, e := range nav.Entities {
+						@navItem(e)
+					}
+				</nav>
+			}
+		}
+		<div class="foot">
+			<span class="live">{ nav.Status }</span>
+			<div class="foot-right">
+				<span>{ fmt.Sprintf("%d apps", nav.AppCount) }</span>
+				<button type="button" class="theme-toggle" data-theme-toggle aria-label="Toggle dark mode" title="Toggle dark mode">
+					<span data-theme-icon>◐</span>
+				</button>
+			</div>
+		</div>
+	</aside>
+}
+
+// switcherSelect is the invisible <select> overlaying a switcher card; admin.js
+// navigates to the chosen option's value (a URL) on change.
+templ switcherSelect(opts []NavOption) {
+	<select data-nav aria-label="switch">
+		for _, o := range opts {
+			<option value={ o.URL } selected?={ o.Selected }>{ o.Label }</option>
+		}
+	</select>
+	<span class="chev">▾</span>
+}
+
+templ navItem(e NavEntity) {
+	<a class={ "nav-item", templ.KV("active", e.Active), slotClass(e.Color) } href={ templ.SafeURL(e.URL) }>
+		<span class="dot"></span>
+		<span class="label">{ e.Label }</span>
+		<span class="count">{ countLabel(e.Count, e.More) }</span>
+	</a>
+}
+
+// AppsPage lists every hosted app as a card grid (shown when no app is
+// selected). Each card links into the app.
+templ AppsPage(nav Nav, apps []AppRow) {
+	@Layout(nav, "Apps") {
+		<div class="page-head">
+			<div class="page-title"><h1>Apps</h1><span class="records">{ fmt.Sprintf("%d", len(apps)) }</span></div>
+		</div>
+		if len(apps) == 0 {
+			<div class="table-wrap"><div class="empty">No apps registered.</div></div>
+		}
+		<div class="table-wrap">
+			<table class="grid">
+				<thead><tr><th>App</th><th>Revision</th><th>Entities</th></tr></thead>
+				<tbody>
+					for _, a := range apps {
+						<tr>
+							<td class="primary"><a href={ templ.SafeURL("/apps/" + a.AppID) }>{ a.AppID }</a></td>
+							<td><span class="muted">{ a.Revision }</span></td>
+							<td><span class="muted">{ joinStrings(a.Entities) }</span></td>
+						</tr>
+					}
+				</tbody>
+			</table>
+		</div>
+	}
+}
+
+// AppPage is shown for an app that has no workspace data yet (otherwise the app
+// route redirects straight to the first entity).
+templ AppPage(nav Nav, appID string) {
+	@Layout(nav, "App "+appID) {
+		<div class="page-head">
+			<div class="page-title"><h1>{ appID }</h1></div>
+		</div>
+		<div class="table-wrap"><div class="empty">No workspaces have data yet. Write a row to get started.</div></div>
+	}
+}

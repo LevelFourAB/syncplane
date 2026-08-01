@@ -1,0 +1,124 @@
+// testserver runs the sync engine with the test entities (Todo, Widget),
+// the complete_all mutator and a deny-rule permission hook. The integration
+// suites spawn it on port 0 and read the address from stdout.
+//
+// It also serves permissive CORS and a /debug/rpc counter endpoint so the
+// browser e2e suite can reach it from the harness origin and assert what did
+// (and did not) reach the server; see debug.go.
+package main
+
+import (
+	"flag"
+	"fmt"
+	"net"
+	"net/http"
+	"os"
+	"path/filepath"
+	"time"
+
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
+	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
+	"github.com/levelfourab/syncplane/internal/clilog"
+	"github.com/levelfourab/syncplane/internal/exampleapp"
+)
+
+func main() {
+	var (
+		dbPath       = flag.String("db", "", "SQLite database path (default: temp file)")
+		addr         = flag.String("addr", "127.0.0.1:0", "listen address")
+		heartbeat    = flag.Duration("heartbeat", 30*time.Second, "Subscribe stream heartbeat interval")
+		notifyWindow = flag.Duration("notify-window", 50*time.Millisecond, "change-notification coalescing window (0 disables)")
+		chunkSize    = flag.Int("chunk-size", 256, "bootstrap chunk size in rows")
+		gcRetention  = flag.Duration("gc-retention", 0, "tombstone retention (used with -gc-interval)")
+		gcInterval   = flag.Duration("gc-interval", 0, "tombstone GC interval (0 disables GC)")
+		gcTextDelta  = flag.Duration("gc-text-delta-retention", time.Millisecond,
+			"collaborative-text delta log retention; the default makes a write compactable as soon as a suite asks")
+		gcTextPurge = flag.Int("gc-text-compaction", 1,
+			"items a text field must give up before compaction rewrites its row (0 disables)")
+	)
+	buildLogger := clilog.Flags(flag.CommandLine)
+	flag.Parse()
+	logger := buildLogger()
+
+	if *dbPath == "" {
+		dir, err := os.MkdirTemp("", "synctest-*")
+		if err != nil {
+			clilog.Fatal(logger, "create temp dir", err)
+		}
+		defer os.RemoveAll(dir)
+		*dbPath = filepath.Join(dir, "sync.db")
+	}
+
+	store, err := sqlitestore.Open(*dbPath)
+	if err != nil {
+		clilog.Fatal(logger, "open store", err)
+	}
+	defer store.Close()
+
+	perms := exampleapp.NewPermissions()
+	opts := append(exampleapp.Options(perms),
+		server.WithHeartbeat(*heartbeat),
+		server.WithNotifyCoalescing(*notifyWindow),
+		server.WithPermissions(perms),
+		server.WithChunkSize(*chunkSize),
+		server.WithLogger(logger),
+		server.WithEntities(
+			// Widget.body carries (syncplane.v1.field_behavior).text, so
+			// registration auto-installs the convergent text merger —
+			// integration tests verify that concurrent PATCHes to the same text
+			// field merge without interleaving instead of last-writer-wins
+			// clobbering.
+			&testdatav1.Widget{},
+			// Composite-key entity: integration tests verify both sides derive
+			// the same escaped row key when key fields contain the "/" separator.
+			&testdatav1.Pair{},
+			// Reference entities: integration tests verify typed-reference
+			// projection and reference-following subscriptions (issue→project,
+			// project→issues).
+			&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{},
+		),
+	)
+	if *gcInterval > 0 || *gcRetention > 0 {
+		opts = append(opts, server.WithGC(*gcRetention, *gcInterval))
+	} else {
+		// Nothing collects on its own (interval 0), but /debug/gc can run a pass
+		// when a suite asks; the retention is short so the suite's own writes are
+		// in reach of it.
+		opts = append(opts, server.WithGC(time.Millisecond, 0))
+	}
+	opts = append(opts,
+		server.WithTextDeltaRetention(*gcTextDelta),
+		server.WithTextCompaction(*gcTextPurge),
+	)
+	srv, err := server.New(store, opts...)
+	if err != nil {
+		clilog.Fatal(logger, "create server", err)
+	}
+	defer srv.Close()
+
+	path, handler := srv.Handler()
+	stats := newRPCStats()
+	mux := http.NewServeMux()
+	mux.Handle(path, stats.wrap(handler))
+	// Server-side view of what the clients are doing, for the multi-tab e2e
+	// suite; see rpcStats.
+	mux.Handle("/debug/rpc", stats)
+	// Trusted server-side string writes to Widget text fields, so the
+	// integration suite can exercise cross-language convergence of the
+	// string-boundary write path.
+	mux.Handle("/debug/textstring", textStringHandler(srv))
+	// One garbage-collection pass on demand, so suites can decide when
+	// collaborative-text compaction happens.
+	mux.Handle("/debug/gc", gcHandler(srv))
+
+	ln, err := net.Listen("tcp", *addr)
+	if err != nil {
+		clilog.Fatal(logger, "listen", err)
+	}
+	// Parseable by the integration harness; keep the format stable.
+	fmt.Printf("LISTENING http://%s\n", ln.Addr().String())
+	os.Stdout.Sync()
+
+	clilog.Fatal(logger, "http server stopped", http.Serve(ln, cors(mux)))
+}

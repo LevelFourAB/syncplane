@@ -1,0 +1,97 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>sync · todos</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Hanken+Grotesk:wght@400;500;600;700&family=Martian+Mono:wght@300;400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <div class="bg-grid" aria-hidden="true"></div>
+
+    <main id="app">
+      <section class="instrument">
+        <!-- legends sit on the top frame line, like an instrument case -->
+        <span class="legend legend--left">SYNC<span class="legend__rev">v1</span></span>
+        <span class="legend legend--right" id="telemetry" title="">
+          <span class="dot" id="status-dot"></span>
+          <span id="status-text" class="mono">connecting</span>
+        </span>
+
+        <header>
+          <h1>todos</h1>
+          <!-- undo/redo anchored to the right, after the live status, so the
+               status text changing width can never shove them around -->
+          <div id="toolbar">
+            <button id="undo" type="button" title="Undo (⌘Z)" aria-label="Undo" disabled>↩</button>
+            <button id="redo" type="button" title="Redo (⇧⌘Z)" aria-label="Redo" disabled>↪</button>
+          </div>
+        </header>
+
+        <form id="new-todo-form">
+          <input
+            id="new-todo"
+            type="text"
+            placeholder="what needs syncing?  (try two tabs)"
+            autocomplete="off"
+            autofocus
+          />
+          <span class="enter-hint mono" aria-hidden="true">↵</span>
+        </form>
+
+        <nav id="filters">
+          <button type="button" data-filter="all" class="active">All</button>
+          <button type="button" data-filter="active">Active</button>
+          <button type="button" data-filter="completed">Completed</button>
+        </nav>
+
+        <ul id="list"></ul>
+        <p id="empty" class="mono" hidden></p>
+
+        <footer>
+          <span id="count" class="mono">0 active</span>
+          <button id="complete-all" type="button" title="One undo step (transact)">
+            Complete all
+          </button>
+          <label id="sync-active-label" title="Partial sync: only open todos sync to this tab">
+            <input id="sync-active" type="checkbox" />
+            <span>sync only active</span>
+          </label>
+        </footer>
+        <p id="scope-note" class="mono" hidden></p>
+      </section>
+
+      <section class="instrument" id="notes-panel">
+        <span class="legend legend--left">NOTES<span class="legend__rev">crdt</span></span>
+        <span class="legend legend--right mono" id="notes-hint">select text → comment</span>
+        <div id="notes-wrap">
+          <textarea
+            id="notes"
+            spellcheck="false"
+            placeholder="shared notes — type here in two tabs at once; edits merge, never interleave"
+          ></textarea>
+        </div>
+        <div id="notes-footer">
+          <button id="comment-btn" type="button" disabled>Comment on selection</button>
+        </div>
+        <ul id="comments"></ul>
+        <p id="comments-empty" class="mono" hidden>no comments — select some text above</p>
+      </section>
+
+      <p id="hint" class="mono">
+        drag <span aria-hidden="true">⠿</span> to reorder · double-click to edit ·
+        <span class="hint__reject">forbidden</span> titles are rejected
+      </p>
+
+      <div id="toast" hidden></div>
+    </main>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

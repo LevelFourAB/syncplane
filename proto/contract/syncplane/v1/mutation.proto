@@ -1,0 +1,87 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+import "google/protobuf/any.proto";
+import "google/protobuf/field_mask.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// Mutation is the envelope for a single client-originated write.
+message Mutation {
+	// Stable identifier for the originating client (device/tab).
+	string client_id = 1;
+	// Per-client monotonically increasing id, starting at 1. The server tracks
+	// the last applied id per client for idempotency and gap detection.
+	uint64 mutation_id = 2;
+	// Extensible payload: future variants (e.g. CRDT deltas) get new branches.
+	oneof payload {
+		CrudMutation crud = 3;
+		CustomMutation custom = 4;
+		BatchMutation batch = 5;
+	}
+}
+
+enum CrudOp {
+	CRUD_OP_UNSPECIFIED = 0;
+	CRUD_OP_PUT = 1;
+	CRUD_OP_PATCH = 2;
+	CRUD_OP_DELETE = 3;
+}
+
+// CrudMutation is a generated CRUD write against a registered entity.
+// Because the server linearizes mutations per workspace, applying PATCH
+// field masks in sequence order yields per-field LWW semantics without
+// per-field timestamps.
+message CrudMutation {
+	// Entity name as declared via EntityOptions.
+	string entity = 1;
+	// Row key (derived from EntityOptions.key_fields).
+	string key = 2;
+	CrudOp op = 3;
+	// Serialized entity message. Empty for DELETE. For PATCH only the fields
+	// named in field_mask are read.
+	//
+	// One exception to "this is a whole value": a collaborative-text field
+	// (FieldBehavior.text) named outright by a PATCH mask may carry a
+	// delta-state fragment instead of a whole document — only what the writer
+	// holds beyond the state the server last confirmed to it. The server
+	// unfolds it through the same merge, so the stored row and everything read
+	// out of it are unaffected. A fragment the server cannot apply is rejected
+	// with `text_full_state_required` and the client re-sends the whole
+	// document; full state is always accepted, so nothing has to negotiate.
+	// Anywhere else — a PUT, a field the mask does not name — delta state is
+	// refused, because the value would be copied through without merging.
+	bytes value = 4;
+	// PATCH only: the set of fields to merge. This mask IS the LWW mechanism.
+	google.protobuf.FieldMask field_mask = 5;
+	// Optional compare-and-swap guard. When set, the server applies this
+	// mutation only if the target row's current version equals this value,
+	// otherwise it rejects with `conflict` (an ack: the client rolls the
+	// optimistic edit back and fires onMutationRejected). The version is the
+	// workspace sequence that last wrote the row (RowChange.version, surfaced
+	// client-side as Row.version); an absent or deleted row reads as version 0,
+	// so expected_version = 0 means "apply only if the row does not exist".
+	// Opt-in escape from silent per-field LWW for the cases where a concurrent
+	// edit must be noticed rather than merged.
+	optional uint64 expected_version = 6;
+}
+
+// BatchMutation applies several CRUD writes as one atomic unit. The whole
+// batch shares the envelope's single mutation_id and one workspace sequence,
+// applies inside one server savepoint, and commits all-or-nothing: any
+// sub-mutation rejected rolls the entire batch back and yields one rejection.
+// Sub-mutations apply in order, so a later op observes earlier ops in the
+// same batch (e.g. PATCH after PUT of the same key). A batch must be
+// non-empty.
+message BatchMutation {
+	repeated CrudMutation mutations = 1;
+}
+
+// CustomMutation invokes a named server-registered mutator. Clients may run
+// a best-effort local mirror for optimism; the server is authoritative and
+// divergence self-heals on rebase.
+message CustomMutation {
+	string name = 1;
+	google.protobuf.Any args = 2;
+}

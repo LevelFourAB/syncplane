@@ -1,0 +1,2550 @@
+{
+	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, and whether anything is left to re-check. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it.",
+	"encodeCases": [
+		{
+			"name": "ascending string",
+			"row": {
+				"label": "hi"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"016869000077310000"
+			]
+		},
+		{
+			"name": "descending string inverts the payload but not the tag",
+			"row": {
+				"label": "hi"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label_desc",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"019796ffff77310000"
+			]
+		},
+		{
+			"name": "empty string still terminates",
+			"row": {
+				"label": ""
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01000077310000"
+			]
+		},
+		{
+			"name": "a prefix sorts before what extends it",
+			"row": {
+				"label": "ab"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"016162000077310000"
+			]
+		},
+		{
+			"name": "an embedded NUL escapes above the terminator",
+			"row": {
+				"label": "a\u0000b"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"016100ff62000077310000"
+			]
+		},
+		{
+			"name": "astral characters encode as CESU-8 surrogate pairs",
+			"row": {
+				"label": "𝄞"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01eda0b4edb49e000077310000"
+			]
+		},
+		{
+			"name": "two-byte code units",
+			"row": {
+				"label": "é"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01c3a9000077310000"
+			]
+		},
+		{
+			"name": "missing value takes the missing tag and no payload",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_size",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"size"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"ff77310000"
+			]
+		},
+		{
+			"name": "missing value takes the same tag under desc",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_size_desc",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"size"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"ff77310000"
+			]
+		},
+		{
+			"name": "NaN takes the NaN tag and no payload",
+			"row": {
+				"ratio": "NaN"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"fd77310000"
+			]
+		},
+		{
+			"name": "NaN takes the same tag under desc",
+			"row": {
+				"ratio": "NaN"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio_desc",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"fd77310000"
+			]
+		},
+		{
+			"name": "zero sets the sign bit",
+			"row": {
+				"ratio": 0
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01800000000000000077310000"
+			]
+		},
+		{
+			"name": "negative zero encodes exactly like zero",
+			"row": {
+				"ratio": -0.0
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01800000000000000077310000"
+			]
+		},
+		{
+			"name": "a negative double inverts whole",
+			"row": {
+				"ratio": -1
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01400fffffffffffff77310000"
+			]
+		},
+		{
+			"name": "positive infinity",
+			"row": {
+				"ratio": "Infinity"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01fff000000000000077310000"
+			]
+		},
+		{
+			"name": "negative infinity",
+			"row": {
+				"ratio": "-Infinity"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01000fffffffffffff77310000"
+			]
+		},
+		{
+			"name": "an int32 field encodes as a double",
+			"row": {
+				"count": 5
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_count",
+				"key": [
+					{
+						"path": [
+							"count"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01c01400000000000077310000"
+			]
+		},
+		{
+			"name": "bool false",
+			"row": {
+				"flag": false
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_flag",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"010077310000"
+			]
+		},
+		{
+			"name": "bool true",
+			"row": {
+				"flag": true
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_flag",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"010177310000"
+			]
+		},
+		{
+			"name": "bool true under desc",
+			"row": {
+				"flag": true
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_flag_desc",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"01fe77310000"
+			]
+		},
+		{
+			"name": "a signed 64-bit field biases by 2^63",
+			"row": {
+				"big": "1"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01800000000000000177310000"
+			]
+		},
+		{
+			"name": "a negative signed 64-bit value",
+			"row": {
+				"big": "-1"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"017fffffffffffffff77310000"
+			]
+		},
+		{
+			"name": "a signed 64-bit value above 2^53",
+			"row": {
+				"big": "9007199254740993"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01802000000000000177310000"
+			]
+		},
+		{
+			"name": "an unsigned 64-bit field is already in order",
+			"row": {
+				"ubig": "1"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ubig",
+				"key": [
+					{
+						"path": [
+							"ubig"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01000000000000000177310000"
+			]
+		},
+		{
+			"name": "the top of the unsigned 64-bit range",
+			"row": {
+				"ubig": "18446744073709551615"
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_ubig",
+				"key": [
+					{
+						"path": [
+							"ubig"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01ffffffffffffffff77310000"
+			]
+		},
+		{
+			"name": "a composite index concatenates its components",
+			"row": {
+				"label": "hi",
+				"count": 5
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label_count",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					},
+					{
+						"path": [
+							"count"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"0168690000013febffffffffffff77310000"
+			]
+		},
+		{
+			"name": "an index with no components is the row key alone",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_key",
+				"key": []
+			},
+			"want": [
+				"77310000"
+			]
+		},
+		{
+			"name": "the row key escapes and terminates like any string",
+			"row": {},
+			"rowKey": "a\u0000b",
+			"spec": {
+				"name": "by_key",
+				"key": []
+			},
+			"want": [
+				"6100ff620000"
+			]
+		},
+		{
+			"name": "an astral row key encodes as CESU-8 too",
+			"row": {},
+			"rowKey": "𝄞",
+			"spec": {
+				"name": "by_key",
+				"key": []
+			},
+			"want": [
+				"eda0b4edb49e0000"
+			]
+		},
+		{
+			"name": "a reference component indexes the target key",
+			"row": {
+				"id": "i1",
+				"project": {
+					"id": "p1"
+				}
+			},
+			"rowKey": "i1",
+			"spec": {
+				"name": "by_project",
+				"key": [
+					{
+						"path": [
+							"project",
+							"id"
+						],
+						"desc": false
+					}
+				]
+			},
+			"type": "issue",
+			"want": [
+				"017031000069310000"
+			]
+		},
+		{
+			"name": "a repeated scalar takes one entry per element, in element order",
+			"row": {
+				"tags": [
+					"b",
+					"a"
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_tags",
+				"key": [
+					{
+						"path": [
+							"tags"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"0162000077310000",
+				"0161000077310000"
+			]
+		},
+		{
+			"name": "an empty repeated field still takes one entry, tagged missing",
+			"row": {},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_tags",
+				"key": [
+					{
+						"path": [
+							"tags"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"ff77310000"
+			]
+		},
+		{
+			"name": "duplicate elements collapse, since an entry is a position and not a count",
+			"row": {
+				"tags": [
+					"a",
+					"a"
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_tags",
+				"key": [
+					{
+						"path": [
+							"tags"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"0161000077310000"
+			]
+		},
+		{
+			"name": "a path through a repeated message field fans out per element",
+			"row": {
+				"members": [
+					{
+						"uid": "u1"
+					},
+					{
+						"uid": "u2"
+					}
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_member",
+				"key": [
+					{
+						"path": [
+							"members",
+							"uid"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"017531000077310000",
+				"017532000077310000"
+			]
+		},
+		{
+			"name": "two components on one list stay paired per element, never crossed",
+			"row": {
+				"members": [
+					{
+						"uid": "u1",
+						"role": 1
+					},
+					{
+						"uid": "u2",
+						"role": 2
+					}
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_member_role",
+				"key": [
+					{
+						"path": [
+							"members",
+							"uid"
+						],
+						"desc": false
+					},
+					{
+						"path": [
+							"members",
+							"role"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"017531000001bff000000000000077310000",
+				"017532000001c00000000000000077310000"
+			]
+		},
+		{
+			"name": "a plain component repeats unchanged across a fan-out",
+			"row": {
+				"label": "hi",
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_label_tags",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					},
+					{
+						"path": [
+							"tags"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"01686900000161000077310000",
+				"01686900000162000077310000"
+			]
+		},
+		{
+			"name": "a to-many reference component indexes each target key",
+			"type": "issue",
+			"row": {
+				"id": "i1",
+				"blockedBy": [
+					{
+						"id": "i2"
+					},
+					{
+						"id": "i3"
+					}
+				]
+			},
+			"rowKey": "i1",
+			"spec": {
+				"name": "__ref_blocked_by",
+				"key": [
+					{
+						"path": [
+							"blocked_by"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"016932000069310000",
+				"016933000069310000"
+			]
+		},
+		{
+			"name": "a descending fan-out component inverts each element payload",
+			"row": {
+				"tags": [
+					"a",
+					"b"
+				]
+			},
+			"rowKey": "w1",
+			"spec": {
+				"name": "by_tags_desc",
+				"key": [
+					{
+						"path": [
+							"tags"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"019effff77310000",
+				"019dffff77310000"
+			]
+		}
+	],
+	"orderCases": [
+		{
+			"name": "strings ascending, with missing values last",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"settings": {
+							"color": "b"
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"color": "a"
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"color": "ab"
+						}
+					}
+				}
+			],
+			"spec": {
+				"name": "by_color",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"color"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r3",
+				"r4",
+				"r1",
+				"r2"
+			]
+		},
+		{
+			"name": "strings descending keep missing values last",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"settings": {
+							"color": "b"
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"color": "a"
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"color": "ab"
+						}
+					}
+				}
+			],
+			"spec": {
+				"name": "by_color_desc",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"color"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"r1",
+				"r4",
+				"r3",
+				"r2"
+			]
+		},
+		{
+			"name": "real, then NaN, then missing under asc",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "-Infinity"
+						}
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"settings": {
+							"ratio": "Infinity"
+						}
+					}
+				}
+			],
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r4",
+				"r3",
+				"r5",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "real, then NaN, then missing under desc",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "-Infinity"
+						}
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"settings": {
+							"ratio": "Infinity"
+						}
+					}
+				}
+			],
+			"spec": {
+				"name": "by_ratio_desc",
+				"key": [
+					{
+						"path": [
+							"settings",
+							"ratio"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"r5",
+				"r3",
+				"r4",
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "negative and positive doubles interleave correctly",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 1
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": -1
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 0
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -0.5
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": 1e+308
+					}
+				}
+			],
+			"spec": {
+				"name": "by_ratio",
+				"key": [
+					{
+						"path": [
+							"ratio"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r2",
+				"r4",
+				"r3",
+				"r1",
+				"r5"
+			]
+		},
+		{
+			"name": "signed 64-bit values order across zero and 2^53",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"big": "9007199254740993"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"big": "-9007199254740993"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"big": "0"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"big": "9007199254740992"
+					}
+				}
+			],
+			"spec": {
+				"name": "by_big",
+				"key": [
+					{
+						"path": [
+							"big"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r2",
+				"r3",
+				"r4",
+				"r1"
+			]
+		},
+		{
+			"name": "unsigned 64-bit values order above 2^63",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ubig": "1"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ubig": "18446744073709551615"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ubig": "0"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ubig": "9223372036854775808"
+					}
+				}
+			],
+			"spec": {
+				"name": "by_ubig",
+				"key": [
+					{
+						"path": [
+							"ubig"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r3",
+				"r1",
+				"r4",
+				"r2"
+			]
+		},
+		{
+			"name": "astral labels order by UTF-16 code unit, not UTF-8 byte",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "𝄞"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "�"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "z"
+					}
+				}
+			],
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r3",
+				"r1",
+				"r2"
+			]
+		},
+		{
+			"name": "bools order false before true",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"flag": true
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"flag": false
+					}
+				}
+			],
+			"spec": {
+				"name": "by_flag",
+				"key": [
+					{
+						"path": [
+							"flag"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "a composite index falls through to its second component",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a",
+						"count": 2
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "a",
+						"count": 1
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b",
+						"count": 9
+					}
+				}
+			],
+			"spec": {
+				"name": "by_label_count",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					},
+					{
+						"path": [
+							"count"
+						],
+						"desc": true
+					}
+				]
+			},
+			"want": [
+				"r1",
+				"r2",
+				"r3"
+			]
+		},
+		{
+			"name": "ties fall through to the row key ascending",
+			"rows": [
+				{
+					"key": "z",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "a",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "m",
+					"row": {
+						"label": "a"
+					}
+				}
+			],
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"a",
+				"m",
+				"z"
+			]
+		},
+		{
+			"name": "an embedded NUL sorts above the string that stops there",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a\u0000"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "ab"
+					}
+				}
+			],
+			"spec": {
+				"name": "by_label",
+				"key": [
+					{
+						"path": [
+							"label"
+						],
+						"desc": false
+					}
+				]
+			},
+			"want": [
+				"r2",
+				"r1",
+				"r3"
+			]
+		}
+	],
+	"probeCases": [
+		{
+			"name": "equality on the leading component",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "the composite index wins when it also supplies the ordering",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": {
+				"index": "by_label_count",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
+			"name": "an ordering the index stores the other way is not served",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_label_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a term outside the index stays residual",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"flag"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"boolValue": true
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": true
+			}
+		},
+		{
+			"name": "in becomes one range per value",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"in": {
+					"path": [
+						"label"
+					],
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "b"
+						},
+						{
+							"stringValue": "c"
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 3,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "in is unordered, since several ranges need a merge",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"in": {
+					"path": [
+						"label"
+					],
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 2,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "gt bounds the range",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"stringValue": "m"
+					}
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "gte bounds the range",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"stringValue": "m"
+					}
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "lt bounds the range",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"stringValue": "m"
+					}
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "lte bounds the range",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_LTE",
+					"value": {
+						"stringValue": "m"
+					}
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an inequality on a descending component still bounds it",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GT",
+								"value": {
+									"doubleValue": 3
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_label_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "startsWith is a prefix and so contiguous",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "ab"
+				}
+			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an ordering with no predicate",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
+			"name": "contains is never servable",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_CONTAINS",
+					"value": "x"
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "endsWith is never servable",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_ENDS_WITH",
+					"value": "x"
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "or is not servable in v1",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "a predicate on a field no index covers",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"flag"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": true
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "an ordering no index covers",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"big"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a bare full scan, which the row keyspace already serves",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"want": "scan"
+		},
+		{
+			"name": "no candidates at all",
+			"indexes": [],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "a"
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "a literal of a kind the column cannot hold",
+			"indexes": [
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "text"
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "a NaN literal, which matches nothing and bounds nothing",
+			"indexes": [
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": "NaN"
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "a negated term stays residual and pins nothing",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"not": {
+					"cmp": {
+						"path": [
+							"label"
+						],
+						"op": "CMP_OP_EQ",
+						"value": {
+							"stringValue": "a"
+						}
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "has over a repeated scalar pins the fan-out component",
+			"indexes": [
+				{
+					"name": "by_tags",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "a"
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_tags",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "hasAny becomes one range per value",
+			"indexes": [
+				{
+					"name": "by_tags",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ANY",
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_tags",
+				"ranges": 2,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "hasAll pins the first value and stays residual, since the range is a superset",
+			"indexes": [
+				{
+					"name": "by_tags",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "a"
+						},
+						{
+							"stringValue": "b"
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_tags",
+				"ranges": 1,
+				"ordered": false,
+				"residual": true
+			}
+		},
+		{
+			"name": "a pinned fan-out component still supplies the ordering",
+			"indexes": [
+				{
+					"name": "by_tags_label",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"rep": {
+					"path": [
+						"tags"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "a"
+						}
+					]
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_tags_label",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
+			"name": "any() on a message list pins the element field",
+			"indexes": [
+				{
+					"name": "by_member",
+					"key": [
+						{
+							"path": [
+								"members",
+								"uid"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"uid"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "u1"
+							}
+						}
+					}
+				}
+			},
+			"want": {
+				"index": "by_member",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "any() with more than one condition pins one and stays residual",
+			"indexes": [
+				{
+					"name": "by_member",
+					"key": [
+						{
+							"path": [
+								"members",
+								"uid"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"uid"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "u1"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"role"
+										],
+										"op": "CMP_OP_GT",
+										"value": {
+											"doubleValue": 1
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": {
+				"index": "by_member",
+				"ranges": 1,
+				"ordered": false,
+				"residual": true
+			}
+		},
+		{
+			"name": "any() whose condition names no indexed field is not servable",
+			"indexes": [
+				{
+					"name": "by_member",
+					"key": [
+						{
+							"path": [
+								"members",
+								"uid"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"exists": {
+					"path": [
+						"members"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "membership in a to-many reference probes its derived index",
+			"type": "issue",
+			"indexes": [
+				{
+					"name": "__ref_blocked_by",
+					"key": [
+						{
+							"path": [
+								"blocked_by",
+								"id"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"exists": {
+					"path": [
+						"blocked_by"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"id"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "i2"
+							}
+						}
+					}
+				}
+			},
+			"want": {
+				"index": "__ref_blocked_by",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		}
+	]
+}

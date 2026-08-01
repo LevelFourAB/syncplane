@@ -1,0 +1,18 @@
+# Go generation covers every module, including proto/private. The TypeScript
+# half is generated separately (buf.gen.ts.yaml) because it must NOT see
+# syncplane/cursor.
+version: v2
+clean: true
+inputs:
+  - directory: proto/contract
+  - directory: proto/private
+  - directory: proto/examples
+plugins:
+  # Go message types
+  - remote: buf.build/protocolbuffers/go:v1.36.11
+    out: engine/gen
+    opt: paths=source_relative
+  # Go ConnectRPC handlers/clients
+  - remote: buf.build/connectrpc/go:v1.20.0
+    out: engine/gen
+    opt: paths=source_relative

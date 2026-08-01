@@ -1,0 +1,25 @@
+version: v2
+
+# The workspace is split into three modules so that "what is published" is a
+# property of where a file sits, not of an exclude list someone has to remember
+# to extend. Only `proto/contract` carries a `name`, and `task push` passes
+# --exclude-unnamed, so the other two cannot reach the registry.
+modules:
+  # The published wire contract: the RPC surface and the entity annotations
+  # third parties compile against. This directory is the module root, so
+  # anything added under it ships to buf.build/levelfourab/syncplane.
+  - path: proto/contract
+    name: buf.build/levelfourab/syncplane
+  # Repo-private: the server's cursor types (what is inside the opaque `bytes`
+  # cursor) and the entities the engine and client test suites register.
+  - path: proto/private
+  # Demo schemas for examples/ and the tutorials. Read by users, but never
+  # resolved as a dependency, so they stay out of the registry too.
+  - path: proto/examples
+
+lint:
+  use:
+    - STANDARD
+breaking:
+  use:
+    - FILE

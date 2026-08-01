@@ -1,0 +1,117 @@
+{
+	"typescript": {
+		"lineWidth": 100,
+		"indentWidth": 1,
+		"useTabs": true,
+		"semiColons": "prefer",
+		"quoteStyle": "preferSingle",
+		"quoteProps": "preserve",
+		"newLineKind": "lf",
+		"useBraces": "whenNotSingleLine",
+		"bracePosition": "sameLineUnlessHanging",
+		"singleBodyPosition": "maintain",
+		"nextControlFlowPosition": "nextLine",
+		"trailingCommas": "onlyMultiLine",
+		"operatorPosition": "nextLine",
+		"preferHanging": false,
+		"preferSingleLine": false,
+		"arrowFunction.useParentheses": "maintain",
+		"binaryExpression.linePerExpression": false,
+		"jsx.quoteStyle": "preferDouble",
+		"jsx.multiLineParens": "never",
+		"memberExpression.linePerExpression": false,
+		"typeLiteral.separatorKind": "semiColon",
+		"enumDeclaration.memberSpacing": "maintain",
+		"ifStatement.nextControlFlowPosition": "sameLine",
+		"tryStatement.nextControlFlowPosition": "sameLine",
+		"spaceAround": false,
+		"arrayExpression.spaceAround": true,
+		"arrayPattern.spaceAround": true,
+		"spaceSurroundingProperties": true,
+		"objectExpression.spaceSurroundingProperties": true,
+		"objectPattern.spaceSurroundingProperties": true,
+		"typeLiteral.spaceSurroundingProperties": true,
+		"binaryExpression.spaceSurroundingBitwiseAndArithmeticOperator": true,
+		"commentLine.forceSpaceAfterSlashes": true,
+		"constructor.spaceBeforeParentheses": false,
+		"constructorType.spaceAfterNewKeyword": false,
+		"constructSignature.spaceAfterNewKeyword": false,
+		"doWhileStatement.spaceAfterWhileKeyword": true,
+		"exportDeclaration.spaceSurroundingNamedExports": true,
+		"forInStatement.spaceAfterForKeyword": true,
+		"forOfStatement.spaceAfterForKeyword": true,
+		"forStatement.spaceAfterForKeyword": true,
+		"forStatement.spaceAfterSemiColons": true,
+		"functionDeclaration.spaceBeforeParentheses": false,
+		"functionExpression.spaceBeforeParentheses": false,
+		"functionExpression.spaceAfterFunctionKeyword": false,
+		"getAccessor.spaceBeforeParentheses": false,
+		"ifStatement.spaceAfterIfKeyword": true,
+		"importDeclaration.spaceSurroundingNamedImports": true,
+		"jsxSelfClosingElement.spaceBeforeSlash": true,
+		"jsxExpressionContainer.spaceSurroundingExpression": true,
+		"method.spaceBeforeParentheses": false,
+		"setAccessor.spaceBeforeParentheses": false,
+		"taggedTemplate.spaceBeforeLiteral": false,
+		"typeAnnotation.spaceBeforeColon": false,
+		"typeAssertion.spaceBeforeExpression": false,
+		"whileStatement.spaceAfterWhileKeyword": true,
+		"ignoreNodeCommentText": "dprint-ignore",
+		"ignoreFileCommentText": "dprint-ignore-file"
+	},
+	"markdown": {
+		"lineWidth": 80,
+		"newLineKind": "lf",
+		"textWrap": "maintain",
+		"emphasisKind": "underscores",
+		"strongKind": "asterisks",
+		"ignoreDirective": "dprint-ignore",
+		"ignoreFileDirective": "dprint-ignore-file",
+		"ignoreStartDirective": "dprint-ignore-start",
+		"ignoreEndDirective": "dprint-ignore-end"
+	},
+	"json": {
+		"lineWidth": 100,
+		"useTabs": true,
+		"newLineKind": "lf",
+		"commentLine.forceSpaceAfterSlashes": true,
+		"preferSingleLine": false,
+		"ignoreNodeCommentText": "dprint-ignore"
+	},
+	"exec": {
+		"commands": [
+			{
+				"command": "clang-format --assume-filename={{file_path}}",
+				"exts": [
+					"proto"
+				]
+			}
+		]
+	},
+	"includes": [
+		"**/*.{md}",
+		"**/*.{ts,tsx,js,jsx,mjs,cjs}",
+		"**/*.css",
+		"**/*.{json}",
+		"**/*.proto"
+	],
+	"excludes": [
+		"**/node_modules",
+		"**/package.json",
+		"**/package-lock.json",
+		"**/.react-router",
+		// Emitted by `buf generate`; formatting it here only fights the next
+		// regeneration.
+		"client/src/gen",
+		"engine/gen",
+		// Vendored third party — keep it byte-identical to upstream so an
+		// upgrade is a clean replacement rather than a reformat diff.
+		"internal/admin/static/htmx.min.js"
+	],
+	"plugins": [
+		"https://plugins.dprint.dev/typescript-0.95.13.wasm",
+		"https://plugins.dprint.dev/json-0.21.0.wasm",
+		"https://plugins.dprint.dev/markdown-0.20.0.wasm",
+		"https://plugins.dprint.dev/exec-0.6.2.json@df98f54ffd3092b8a841aedd6d098a2651f16d0a796a40535774f1a8b4b9d463"
+	]
+}

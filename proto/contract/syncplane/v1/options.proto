@@ -1,0 +1,98 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+import "google/protobuf/descriptor.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// EntityOptions declares a message as a syncable entity.
+message EntityOptions {
+	// Logical entity name used on the wire and in storage (e.g. "todo").
+	string name = 1;
+	// Field names (in order) whose values form the row key.
+	repeated string key_fields = 2;
+	// Composite secondary indexes over this entity's fields. Declare one when a
+	// single indexed field is not enough — specifically when a query FILTERS on
+	// one field and ORDERS by another, which a single-field index can only
+	// serve by walking the sort order and re-checking every candidate.
+	//
+	// An index is invisible: nothing in a request or response names one, and a
+	// query returns the same rows in the same order whether or not one served
+	// it. Adding or removing one is never a breaking change, and losing the
+	// stored entries costs a rebuild rather than correctness.
+	//
+	// The cost is on writes: every write to this entity re-encodes and
+	// re-stores the row's position in EVERY index declared here.
+	repeated IndexSpec index = 3;
+}
+
+// IndexKey is one component of an index, in the order it sorts.
+message IndexKey {
+	// Dotted proto field path, e.g. "settings.size". A path ending at a
+	// single-key reference extends to that reference's key field, so an index
+	// and a query on the same reference agree.
+	string path = 1;
+	// Sort this component descending. Missing and NaN values sort last whatever
+	// this says — the index reproduces the query ordering exactly, and there
+	// they rank ahead of the direction.
+	bool desc = 2;
+}
+
+// IndexSpec is one declared secondary index: a name unique within the entity,
+// and the components it sorts by.
+message IndexSpec {
+	// Unique within the entity. Names beginning "__" are reserved for indexes
+	// the engine derives for itself (one per reference field).
+	string name = 1;
+	// At least one component, in sort order. A query is servable when its
+	// equality terms are a PREFIX of this list and its ordering is what follows
+	// them — the classic rule, and the reason component order matters.
+	repeated IndexKey key = 2;
+}
+
+// FieldBehavior tunes how a field participates in merges and queries.
+message FieldBehavior {
+	// Replaced whole, never merged structurally. Escape hatch for CRDT blobs
+	// AND for any list/field you want treated as one atomic value (e.g. an
+	// order-sensitive or duplicate-bearing list that should not
+	// set/keyed-merge).
+	bool opaque = 1;
+	// List-of-message identity field(s); composite allowed. Empty + element is
+	// a registered entity => reuse its EntityOptions.key_fields. Ignored for
+	// maps (keyed by map key) and scalar lists (keyed by value).
+	repeated string key_field = 2;
+	// Names the position field on the element that orders this keyed list
+	// (movable list). The framework manages it as a fractional index. Requires
+	// a keyed message list.
+	string order_field = 3;
+	// Collaborative text: the field holds an encoded convergent text document
+	// (engine/text in Go, client/src/text in TS) with Peritext-style marks and
+	// anchors. Requires a singular bytes field; implies opaque; the engine
+	// auto-installs the text merger so concurrent PATCHes merge without
+	// interleaving. Incompatible with key_field/order_field.
+	bool text = 4;
+	// Maintain a single-component secondary index over this field, so filtering
+	// or ordering by it costs O(result) instead of a scan of the entity.
+	//
+	// This is the surface to reach for first: it says "this field is worth
+	// looking up by" without coupling the schema to any particular query. What
+	// it cannot do at O(limit) is serve a filter on one field combined with an
+	// ordering by ANOTHER — a sorted key-value store has no posting lists to
+	// intersect, so that degrades to walking the sort order and re-checking the
+	// predicate per candidate. Declare an EntityOptions.index when that shape
+	// is the hot one.
+	//
+	// Rejected on a text field: every keystroke changes the value, so the entry
+	// would be rewritten with it. Full-text search is a different mechanism.
+	bool indexed = 5;
+}
+
+extend google.protobuf.MessageOptions {
+	// Field numbers 50100/50101 are unregistered; fine for internal use.
+	EntityOptions entity = 50100;
+}
+
+extend google.protobuf.FieldOptions {
+	FieldBehavior field_behavior = 50101;
+}
