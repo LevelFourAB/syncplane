@@ -10,3 +10,5 @@ test-results/
 playwright-report/
 client/test/perf/results/
 client/test/perf/.corpus/
+CLAUDE.local.md
+.claude/issues
