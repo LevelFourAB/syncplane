@@ -148,6 +148,17 @@ export function describeMutation(
 const DEFAULT_POISON_THRESHOLD = 5;
 
 /**
+ * Default write-to-push coalescing window, and the ceiling on it under an
+ * unbroken run of writes. Deliberately short: they exist to keep a burst
+ * (typing, a drag) from spending one push per event, not to batch on a human
+ * timescale. At the defaults an isolated write leaves 50ms after it lands —
+ * under the round trip that follows it — and a sustained burst still ships four
+ * times a second.
+ */
+const DEFAULT_PUSH_DEBOUNCE_MS = 50;
+const DEFAULT_PUSH_MAX_DELAY_MS = 250;
+
+/**
  * Default per-push mutation cap. Matches the engine's default
  * Limits.MaxMutationsPerPush so a long offline burst is shipped in several
  * within-limit RPCs instead of one oversized push the server rejects. The
@@ -228,6 +239,24 @@ export interface CoordinatorOptions {
 	onSyncEvent?: SyncEventHandler;
 	/** Fallback poll interval; 0 disables polling. Default 60s. */
 	pollIntervalMs?: number;
+	/**
+	 * How long a local write waits before it triggers a sync cycle, restarted by
+	 * each further write. Only writes are held; every other trigger (poke, poll,
+	 * reconnect, scope change) still cycles at once, so this never delays
+	 * INBOUND changes. Default 50ms; 0 pushes on every write.
+	 *
+	 * The point is not saving round trips so much as compaction: doPush squashes
+	 * the never-pushed tail first, so edits that land inside one window fold into
+	 * a single mutation instead of shipping one per keystroke.
+	 */
+	pushDebounceMs?: number;
+	/**
+	 * Ceiling on that wait, measured from the first write of a burst and NOT
+	 * restarted by later ones. Without it, an unbroken stream of writes (someone
+	 * typing) would defer the push indefinitely. Default 250ms; 0 removes the
+	 * ceiling.
+	 */
+	pushMaxDelayMs?: number;
 	/** Hold the live change stream open. Default true. */
 	streamEnabled?: boolean;
 	/** Max changes per pull page; 0 = server default. Pages loop until drained. */
@@ -375,6 +404,9 @@ export class Coordinator {
 	private stopped = false;
 	private syncing = false;
 	private syncAgain = false;
+	/** Armed by syncAfterWrite; see there for why there are two of them. */
+	private writeDebounceTimer?: ReturnType<typeof setTimeout>;
+	private writeMaxDelayTimer?: ReturnType<typeof setTimeout>;
 	private retryBackoff = new Backoff();
 	/** Per-workspace state, in the order the workspaces were added. */
 	private workspaces = new Map<string, WorkspaceSync>();
@@ -644,6 +676,7 @@ export class Coordinator {
 
 	async stop(): Promise<void> {
 		this.stopped = true;
+		this.clearWriteWindow();
 		this.abort.abort();
 		this.leadership?.stop();
 		if (this.onPageHide && typeof window !== 'undefined') {
@@ -712,8 +745,58 @@ export class Coordinator {
 		void this.syncCycle();
 	}
 
+	/**
+	 * Schedules a cycle for a local write, coalescing a burst of writes into one
+	 * push (pushDebounceMs, restarted per write) while still shipping within a
+	 * bound (pushMaxDelayMs, armed once per burst). Two timers rather than one
+	 * because neither alone is enough: the restarting one alone never fires
+	 * under continuous typing, and the bounding one alone makes an isolated
+	 * write wait out the whole ceiling.
+	 *
+	 * Only local writes come through here. Deferring one is safe because it is
+	 * already durable in the pending queue before this is called — what the
+	 * delay costs is how soon a PEER sees the edit, never the edit itself. That
+	 * is also why stop() may simply drop an armed window: the queue outlives the
+	 * session and the next start() pushes it.
+	 */
+	syncAfterWrite(): void {
+		const debounce = this.opts.pushDebounceMs ?? DEFAULT_PUSH_DEBOUNCE_MS;
+		if (debounce <= 0) {
+			this.syncSoon();
+			return;
+		}
+		clearTimeout(this.writeDebounceTimer);
+		this.writeDebounceTimer = setTimeout(() => this.flushWriteWindow(), debounce);
+		const cap = this.opts.pushMaxDelayMs ?? DEFAULT_PUSH_MAX_DELAY_MS;
+		if (cap > 0 && this.writeMaxDelayTimer === undefined) {
+			this.writeMaxDelayTimer = setTimeout(() => this.flushWriteWindow(), cap);
+		}
+	}
+
+	private flushWriteWindow(): void {
+		this.clearWriteWindow();
+		if (!this.stopped) this.syncSoon();
+	}
+
+	/**
+	 * Disarms the coalescing window. Called both when it fires and whenever a
+	 * cycle starts for any other reason: that cycle pushes the same queue the
+	 * window was waiting to push, so leaving it armed would only buy a second,
+	 * redundant cycle right behind it.
+	 */
+	private clearWriteWindow(): void {
+		clearTimeout(this.writeDebounceTimer);
+		clearTimeout(this.writeMaxDelayTimer);
+		this.writeDebounceTimer = undefined;
+		this.writeMaxDelayTimer = undefined;
+	}
+
 	/** Runs one push+pull cycle and resolves when it completes (or fails). */
 	syncNow(): Promise<void> {
+		// Synchronously, before the chain: a write landing while this cycle runs
+		// must arm a FRESH window (this cycle may already have snapshotted the
+		// queue past it), whereas one that arrived before it is subsumed.
+		this.clearWriteWindow();
 		return this.run(async () => {
 			const intent = this.opts.intent;
 			void intent?.heartbeatIfStale();

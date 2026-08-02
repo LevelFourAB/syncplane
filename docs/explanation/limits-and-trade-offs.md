@@ -201,6 +201,26 @@ merger satisfies the contract by construction.
 A TypeScript mirror of a Go mutator exists to keep the UI responsive. Divergence
 is expected and self-heals on rebase; never rely on mirror output as truth.
 
+## A local write is not pushed immediately
+
+A write waits `pushDebounceMs` (default 50ms, restarted by each further write and
+capped by `pushMaxDelayMs`, default 250ms) before the client pushes. Without it,
+a burst of edits — typing into a text field, dragging a sort handle — spends one
+push per event, and the server linearizes each one separately.
+
+The delay buys more than round trips. The push path compacts the never-pushed
+tail of the queue first, so writes that land inside one window fold into a single
+mutation: a keystroke burst reaches the server as one PATCH rather than as one
+per character.
+
+What it costs is how soon a _peer_ sees the edit — up to the ceiling, on top of
+the round trip. It costs nothing in durability: the write is committed to the
+local store and the pending queue before the window opens, so a tab that closes
+mid-window pushes on its next start. Inbound changes are never delayed; only
+writes wait, and every other trigger (poke, poll, reconnect, scope change) cycles
+at once. Call `syncNow()` for the moments where the wait is wrong anyway — a
+submit, a blur, a tab going hidden.
+
 ## Wire cursors are opaque
 
 Clients must not interpret them.

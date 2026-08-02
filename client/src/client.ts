@@ -423,6 +423,18 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	onSyncEvent?: SyncEventHandler;
 	/** Fallback poll interval in ms; 0 disables. Default 60s. */
 	pollIntervalMs?: number;
+	/**
+	 * How long a local write waits before it is pushed, restarted by each
+	 * further write, so a burst of edits ships as one compacted push instead of
+	 * one push per edit. Only outbound writes wait — inbound changes are never
+	 * delayed. Default 50ms; 0 pushes on every write.
+	 */
+	pushDebounceMs?: number;
+	/**
+	 * Ceiling on that wait, from the first write of a burst, so continuous
+	 * writing still pushes regularly. Default 250ms; 0 removes the ceiling.
+	 */
+	pushMaxDelayMs?: number;
 	/** Hold the live change stream open. Default true. */
 	streamEnabled?: boolean;
 	/** Max row changes per pull page; 0 = server default. Pages loop until drained. */
@@ -1622,6 +1634,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			onMutationRejected: (info) => this.reportRejection(info),
 			onSyncEvent: this.opts.onSyncEvent,
 			pollIntervalMs: this.opts.pollIntervalMs,
+			pushDebounceMs: this.opts.pushDebounceMs,
+			pushMaxDelayMs: this.opts.pushMaxDelayMs,
 			streamEnabled: this.opts.streamEnabled,
 			pullLimit: this.opts.pullLimit,
 			poisonThreshold: this.opts.poisonThreshold,
@@ -2817,7 +2831,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		this.statusTracker.incrementPending(workspaceId);
 		await this.notifyChange(touched);
-		this.coordinator?.syncSoon();
+		this.coordinator?.syncAfterWrite();
 	}
 
 	/**
