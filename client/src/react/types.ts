@@ -53,10 +53,47 @@ export interface EntityMutate<D extends DescMessage> {
 }
 
 /**
- * Result of `useRow`. `patch`/`update`/`del` bind the row's current `version` as
- * the default `expectedVersion` — a local-first compare-and-swap for free —
- * which a caller-supplied `opts.expectedVersion` overrides. They are no-ops
- * (reject with a clear error) while `row` is undefined.
+ * Opts a `useRow` write into a compare-and-swap on the row the hook is holding.
+ *
+ * The guard is NOT the default. `Row.version` is the SERVER-confirmed version:
+ * the optimistic overlay does not advance it, so it stands still from the
+ * moment an edit is enqueued until a pull brings the row back down. A guard cut
+ * from it therefore describes the row as it was before this client's own
+ * unacked writes, and a second edit issued inside that window conflicts with
+ * nothing but its own predecessor — which the server reports as a conflict and
+ * the client resolves by DROPPING the edit. A field being typed into produces
+ * exactly that pattern.
+ *
+ * The engine's own answer to concurrent edits is per-field last-writer-wins, and
+ * an unguarded PATCH is what asks for it. Reach for `cas` where a concurrent
+ * edit must be noticed rather than merged — a considered, one-shot write — and
+ * bear in mind that the guard covers the whole ROW: there are no per-field
+ * versions, so it also fires when someone else changed a field yours does not
+ * touch.
+ */
+export interface RowCasOptions {
+	/**
+	 * Guard the write on the row's current `version` (see `Row.version`). An
+	 * explicit `expectedVersion` takes precedence.
+	 */
+	cas?: boolean;
+}
+
+/** `useRow`'s PATCH options: the entity mutate options plus the CAS opt-in. */
+export type UseRowPatchOptions = PatchOptions & RowCasOptions;
+/** `useRow`'s masked-PATCH options (see MaskedPatchOptions). */
+export type UseRowMaskedPatchOptions = MaskedPatchOptions & RowCasOptions;
+/** `useRow`'s update options: the mask comes from the diff. */
+export type UseRowUpdateOptions = UpdateOptions & RowCasOptions;
+/** `useRow`'s delete options. */
+export type UseRowCasOptions = CasOptions & RowCasOptions;
+
+/**
+ * Result of `useRow`. `patch`/`update`/`del` write through per-field LWW like
+ * every other mutate call; pass `{ cas: true }` to guard one on the row's
+ * current `version` (see RowCasOptions), or `opts.expectedVersion` for a guard
+ * of your own. They are no-ops (reject with a clear error) while `row` is
+ * undefined.
  *
  * `loading` distinguishes the two ways `row` can be undefined: the entity has
  * not been read yet, or it has and this key is not in it. `error` reports a
@@ -68,10 +105,10 @@ export interface EntityMutate<D extends DescMessage> {
  */
 export interface UseRowResult<T> extends WatchState {
 	row: Row<T> | undefined;
-	patch(init: PatchInit<DescMessage>, opts?: PatchOptions): Promise<void>;
-	patch(init: MessageInitShape<DescMessage>, opts: MaskedPatchOptions): Promise<void>;
-	update(recipe: (draft: T) => void, opts?: UpdateOptions): Promise<void>;
-	del(opts?: CasOptions): Promise<void>;
+	patch(init: PatchInit<DescMessage>, opts?: UseRowPatchOptions): Promise<void>;
+	patch(init: MessageInitShape<DescMessage>, opts: UseRowMaskedPatchOptions): Promise<void>;
+	update(recipe: (draft: T) => void, opts?: UseRowUpdateOptions): Promise<void>;
+	del(opts?: UseRowCasOptions): Promise<void>;
 }
 
 /** Schema-bound React hooks for one entity, mirroring `client.db[key]`. */
@@ -103,10 +140,10 @@ export interface ReactEntityApi<D extends DescMessage> {
 /** `UseRowResult` specialized to an entity's message shape. */
 export interface UseRowResultFor<D extends DescMessage> extends WatchState {
 	row: Row<MessageShape<D>> | undefined;
-	patch(init: PatchInit<D>, opts?: PatchOptions): Promise<void>;
-	patch(init: MessageInitShape<D>, opts: MaskedPatchOptions): Promise<void>;
-	update(recipe: UpdateRecipe<D>, opts?: UpdateOptions): Promise<void>;
-	del(opts?: CasOptions): Promise<void>;
+	patch(init: PatchInit<D>, opts?: UseRowPatchOptions): Promise<void>;
+	patch(init: MessageInitShape<D>, opts: UseRowMaskedPatchOptions): Promise<void>;
+	update(recipe: UpdateRecipe<D>, opts?: UseRowUpdateOptions): Promise<void>;
+	del(opts?: UseRowCasOptions): Promise<void>;
 }
 
 /** Per-entity hook map keyed exactly like `client.db` (no pluralization). */

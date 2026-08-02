@@ -100,9 +100,20 @@ Read the base version from `Row.version` (`scan` / `query` / `watch`) or
 exist" — create-if-absent. The version is the workspace sequence that last wrote
 the row, so an absent or deleted row reads as 0 regardless of tombstone GC.
 
-In React, `useRow` binds the row's current version as the default
-`expectedVersion`, which makes compare-and-swap the local-first default rather
-than something you have to remember.
+A guard is worth reaching for when a concurrent edit must be **noticed** rather
+than merged, and it is worth knowing what it costs before you do. It covers the
+whole row — there are no per-field versions — so it also fires on a change to a
+field yours does not touch. And `Row.version` only ever advances on a pull, so
+every write a client issues between two pulls names the same version: the first
+to reach the server moves the row past it and the rest are rejected against
+their own predecessor. A burst of edits on one row therefore wants plain
+last-writer-wins, not a guard.
+
+The client folds a burst that shares one guard into a single guarded mutation,
+which applies or rejects as a unit — but only while the burst is still
+un-pushed, so this narrows the window rather than closing it. In React,
+`useRow`'s writers take `{ cas: true }` to bind the row's current version; they
+are unguarded otherwise, for the reason above.
 
 ## Rejections are results, not errors
 

@@ -106,11 +106,13 @@ with no default throws a hook-level error naming the fix.
   is folded into the subscription identity.
 
 - **`useRow(key, opts?)`** — `{ row, loading, hydrating, error, patch, update,
-  del }`, where the writers bind the row's current `version` as the default
-  `expectedVersion`: a local-first compare-and-swap for free. They reject with a
-  clear error while the row is undefined, and `loading`/`hydrating` separate the
-  reasons it can be undefined — the entity has not been read yet, its rows are
-  still arriving, or it has all of them and this key is not one.
+  del }`, where the writers go through per-field last-writer-wins like every
+  other mutate call. Pass `{ cas: true }` to guard one on the row's current
+  `version` (see [compare-and-swap](#compare-and-swap-from-a-row-hook)). They
+  reject with a clear error while the row is undefined, and
+  `loading`/`hydrating` separate the reasons it can be undefined — the entity
+  has not been read yet, its rows are still arriving, or it has all of them and
+  this key is not one.
 
   Every `useRow` on the same workspace, entity and `include` shares **one**
   subscription with a key index in front of it, so a list of row hooks costs one
@@ -172,6 +174,47 @@ with no default throws a hook-level error naming the fix.
 All of them are built on `useSyncExternalStore` with an SSR snapshot, and
 nothing hands out a mutable row: results are readonly, which is what makes the
 snapshot stable and tearing-free.
+
+## Compare-and-swap from a row hook
+
+`useRow`'s writers take `{ cas: true }`, which binds the row's current
+`version` as `expectedVersion` so the write applies only if nobody else has
+moved the row:
+
+```tsx
+const { row, update } = db.issue.useRow(id);
+
+// Merges. Two people editing different fields both keep their edit.
+const rename = (title: string) =>
+	update((d) => {
+		d.title = title;
+	});
+
+// Refuses. Rejected as `conflict` if the row moved at all since it was read.
+const archive = () =>
+	update((d) => {
+		d.archived = true;
+	}, { cas: true });
+```
+
+Reach for it where a concurrent edit must be **noticed** rather than merged, and
+only for a considered, one-shot write. Two things make it the wrong tool for a
+field being typed into:
+
+- `Row.version` is the SERVER-confirmed version. The optimistic overlay does not
+  advance it, so it stands still from the moment an edit is enqueued until a
+  pull brings the row back down. Every edit issued in that window carries the
+  same guard, and the first to reach the server pushes the row past it — so the
+  rest conflict with nothing but their own predecessor, and a conflict is
+  resolved by dropping the edit. Typing produces exactly that pattern.
+- The guard covers the whole **row**. There are no per-field versions
+  ([the convergence model](../explanation/convergence-model.md) explains why),
+  so a guarded `title` edit also fails when someone else changed `status`.
+
+An unguarded write is what asks for per-field last-writer-wins, which is the
+engine's own answer to concurrent edits. For text two people edit at once, a
+[collaborative text field](use-collaborative-text.md) merges instead of
+choosing.
 
 ## Server components and SSR
 

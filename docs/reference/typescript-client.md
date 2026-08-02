@@ -863,10 +863,14 @@ interface WatchState {
   `loading || hydrating` — under suspense, which never reports `loading`, with
   `hydrating` alone.
 - `useRow` returns `{ row, loading, hydrating, error, patch(init, opts?), update(recipe, opts?),
-  del(opts?) }`, where the writers **bind the row's current `version` as default
-  `expectedVersion`** (free CAS) and no-op while `row` is undefined. Reach for
-  `update` to save an edit to the row the hook just handed back — patching `row`
-  itself is a compile error, for the reason in
+  del(opts?) }`. The writers go through per-field LWW and no-op while `row` is
+  undefined; **`{ cas: true }`** binds the row's current `version` as
+  `expectedVersion` (an explicit `expectedVersion` wins over it). It is opt-in
+  because `Row.version` is confirmed-only, so a guard bound to it makes a burst
+  of edits on one row conflict with its own unacked writes — see
+  [Compare-and-swap from a row hook](../how-to/react.md#compare-and-swap-from-a-row-hook).
+  Reach for `update` to save an edit to the row the hook just handed back —
+  patching `row` itself is a compile error, for the reason in
   [Which write verb](#which-write-verb).
 - Every `useRow` on one (workspace, entity, include) shares a single subscription
   and a key index; a commit re-renders only the hooks whose own row moved.

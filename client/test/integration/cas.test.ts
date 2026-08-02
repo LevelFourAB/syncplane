@@ -99,6 +99,29 @@ describe('expected-version CAS', () => {
 		await b.close();
 	});
 
+	it('applies an unguarded burst on one key without conflicting with itself', async () => {
+		// What a text input does: one PATCH per keystroke, none of them awaited.
+		// Per-field LWW is the whole contract here, and no edit in the burst is
+		// concurrent with anything but this client's own earlier edits.
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(TodoSchema, { id: 't1', title: '' });
+		await a.syncNow();
+
+		const titles = [ 'f', 'fi', 'fix', 'fix ', 'fix i', 'fix it' ];
+		await Promise.all(titles.map((title) => a.mutate.patch(TodoSchema, 't1', { title })));
+		await a.syncNow();
+		await a.syncNow();
+
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+		expect((await a.get(TodoSchema, 't1'))?.title).toBe('fix it');
+
+		await a.close();
+	});
+
 	it('folds a guarded burst enqueued in one cycle into a single guarded mutation', async () => {
 		const ws = freshWorkspace();
 		const rejections: RejectionInfo[] = [];

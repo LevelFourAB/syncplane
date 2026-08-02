@@ -156,7 +156,7 @@ describe('createReactSync hooks', () => {
 		await client.close();
 	});
 
-	it('useRow binds the row version as the default expectedVersion', async () => {
+	it('useRow does not guard writes unless asked, and binds the version when it is', async () => {
 		const client = newClient();
 		await client.mutate.put(TodoSchema, { id: 't1', title: 'one' });
 		const spy = vi.spyOn(client.mutate, 'patch');
@@ -166,17 +166,32 @@ describe('createReactSync hooks', () => {
 		await flush();
 		expect(result.current.row?.value.id).toBe('t1');
 		const version = result.current.row!.version;
+
+		// Plain LWW by default: row.version is confirmed-only, so a guard cut from
+		// it would make a burst of edits conflict with its own earlier writes.
 		await act(async () => {
 			await result.current.patch({ title: 'two' });
 		});
-		expect(spy).toHaveBeenCalledWith(
-			TodoSchema,
-			't1',
-			{ title: 'two' },
-			expect.objectContaining({ expectedVersion: version }),
-		);
+		expect(spy).toHaveBeenLastCalledWith(TodoSchema, 't1', { title: 'two' }, undefined);
+
+		// `cas: true` binds the hook's version, and does not leak to the mutate call.
+		await act(async () => {
+			await result.current.patch({ title: 'three' }, { cas: true });
+		});
+		expect(spy).toHaveBeenLastCalledWith(TodoSchema, 't1', { title: 'three' }, {
+			expectedVersion: version,
+		});
+
+		// An explicit guard wins over `cas`.
+		await act(async () => {
+			await result.current.patch({ title: 'four' }, { cas: true, expectedVersion: 99n });
+		});
+		expect(spy).toHaveBeenLastCalledWith(TodoSchema, 't1', { title: 'four' }, {
+			expectedVersion: 99n,
+		});
+
 		await flush();
-		expect(result.current.row?.value.title).toBe('two');
+		expect(result.current.row?.value.title).toBe('four');
 		await client.close();
 	});
 
