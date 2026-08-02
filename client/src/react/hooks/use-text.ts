@@ -69,7 +69,7 @@ export function useTextHook<D extends DescMessage>(
 	field: string,
 	opts?: UseWorkspaceOptions,
 ): UseTextResult {
-	const scope = useWorkspaceScope(opts?.workspaceId);
+	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
 	const identity = `${scope.workspaceId}\u0000${schema.typeName}\u0000${key}\u0000${field}`;
 	const [ state, setState ] = useState<TextState>(() => loading(identity));
 	const handleRef = useRef<TextHandle>(undefined);

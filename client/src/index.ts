@@ -18,6 +18,7 @@ export type {
 	SyncScopeInfo,
 	SyncStatus,
 	Transaction,
+	UndoScope,
 	WorkspaceAccess,
 	WorkspaceClient,
 	WorkspaceStatus,
@@ -131,6 +132,6 @@ export type {
 export { applyTextInverse } from './text/undo-ops.js';
 export type { TextInverseOp } from './text/undo-ops.js';
 // Undo is driven through the client (undo/redo/canUndo) — the manager and the
-// inversion it runs on are not part of the surface; only the option type is.
-export type { UndoOptions } from './undo.js';
+// inversion it runs on are not part of the surface; only the option types are.
+export type { UndoOptions, UndoScopeOptions } from './undo.js';
 export type { WatchCallback, WatchOptions } from './watch.js';

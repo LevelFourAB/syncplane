@@ -21,9 +21,15 @@ import { useUndo } from './hooks/use-undo.js';
 import { useWorkspaceStatus } from './hooks/use-workspace-status.js';
 import { SyncProvider } from './provider.js';
 import type { ReactEntityApis } from './types.js';
+import { UndoScopeProvider, useUndoScope } from './undo-scope.js';
 import { WorkspaceProvider } from './workspace.js';
 
-export { useSyncClient, useWorkspaceId, useWorkspaceScope } from './context.js';
+export {
+	useNearestUndoScope,
+	useSyncClient,
+	useWorkspaceId,
+	useWorkspaceScope,
+} from './context.js';
 export { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
 export { useSyncStatus } from './hooks/use-sync-status.js';
 export { useTextHook } from './hooks/use-text.js';
@@ -40,6 +46,7 @@ export type {
 	ReactEntityApi,
 	ReactEntityApis,
 	RowCasOptions,
+	UndoTarget,
 	UseQueryOptions,
 	UseRowCasOptions,
 	UseRowMaskedPatchOptions,
@@ -51,6 +58,8 @@ export type {
 	UseWatchOptions,
 	UseWorkspaceOptions,
 } from './types.js';
+export { UndoScopeProvider, useUndoScope } from './undo-scope.js';
+export type { UndoScopeProviderProps } from './undo-scope.js';
 export { WorkspaceProvider } from './workspace.js';
 export type { WorkspaceProviderProps } from './workspace.js';
 
@@ -60,11 +69,14 @@ export interface ReactSync<E extends readonly DescMessage[]> {
 	SyncProvider: typeof SyncProvider;
 	/** Re-scopes the hooks below it to one workspace of that client. */
 	WorkspaceProvider: typeof WorkspaceProvider;
+	/** Gives the subtree below it its own undo stack (a dialog, an editor). */
+	UndoScopeProvider: typeof UndoScopeProvider;
 	/** Per-entity hooks keyed exactly like `client.db` (`db.todo.useQuery(...)`). */
 	db: ReactEntityApis<E>;
 	useSyncStatus: typeof useSyncStatus;
 	useWorkspaceStatus: typeof useWorkspaceStatus;
 	useUndo: typeof useUndo;
+	useUndoScope: typeof useUndoScope;
 	useOnMutationRejected: typeof useOnMutationRejected;
 }
 
@@ -83,10 +95,12 @@ export function createReactSync<const E extends readonly DescMessage[]>(
 	return {
 		SyncProvider,
 		WorkspaceProvider,
+		UndoScopeProvider,
 		db: buildReactDb(entities),
 		useSyncStatus,
 		useWorkspaceStatus,
 		useUndo,
+		useUndoScope,
 		useOnMutationRejected,
 	};
 }

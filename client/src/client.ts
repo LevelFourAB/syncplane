@@ -133,7 +133,14 @@ import { openTextHandle, type TextHandle } from './text/handle.js';
 import { createPeerLeases, type PeerLease, type PeerLeases } from './text/peer.js';
 import { applyTextInverse, reinsertOp, type TextInverseOp } from './text/undo-ops.js';
 import { TouchSet } from './touch.js';
-import { type Inverse, invertCrud, type StackName, UndoManager, type UndoOptions } from './undo.js';
+import {
+	type Inverse,
+	invertCrud,
+	type StackName,
+	UndoManager,
+	type UndoOptions,
+	type UndoScopeOptions,
+} from './undo.js';
 import { type WatchCallback, WatcherHub, type WatchOptions } from './watch.js';
 
 export type { MirrorTx, MutatorMirror } from './optimistic/rebase.js';
@@ -809,44 +816,148 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	canUndo(): boolean;
 	canRedo(): boolean;
 	onUndoChange(cb: () => void): () => void;
+	/**
+	 * Opens a nested undo scope: a view of this workspace whose writes record
+	 * their inverses on a private stack instead of this one's. Reads,
+	 * subscriptions, the pending queue and the push are all shared and
+	 * unchanged — only undo bookkeeping forks.
+	 *
+	 * What it is for: a dialog, an inline editor, any UI whose Cmd+Z must not
+	 * reach back into what the surrounding view did. Writes issued through the
+	 * returned object (its `db`, `mutate`, `text()`, `transact()`) land on its
+	 * stack; writes issued through the workspace keep landing on the
+	 * workspace's.
+	 *
+	 * Close it when that UI goes away — the stack is dropped, not merged into
+	 * the parent.
+	 */
+	undoScope(opts?: UndoScopeOptions): UndoScope<E>;
+}
+
+/**
+ * A nested undo scope (see WorkspaceClient.undoScope): the full workspace
+ * surface, plus a lifetime. Everything but undo behaves exactly as it does on
+ * the workspace it was forked from.
+ */
+export interface UndoScope<E extends readonly DescMessage[] = readonly DescMessage[]>
+	extends WorkspaceClient<E>
+{
+	/**
+	 * Drops both stacks and detaches the scope from the workspace. Idempotent,
+	 * and safe to call with writes still in flight: the mutations themselves are
+	 * already queued and unaffected — only their inverses go away.
+	 *
+	 * The object stays usable afterwards (reads and writes still work), it
+	 * simply records nothing and reports `canUndo()`/`canRedo()` false, so a
+	 * late callback firing after teardown is not an error.
+	 */
+	close(): void;
+	readonly closed: boolean;
 }
 
 /**
  * One workspace's view of a SyncClient: every read, write, transaction and undo
- * step scoped to a single partition. Holds the workspace's undo stacks, since
- * mutation ids — which the stacks reference — are counted per workspace.
+ * step scoped to a single partition. Holds an undo stack, since mutation ids —
+ * which the stacks reference — are counted per workspace.
+ *
+ * A workspace has one ROOT scope (the object `client.ws(id)` hands back) and any
+ * number of nested undo scopes forked off it (see undoScope). They differ in
+ * exactly one thing: which UndoManager a write records into. Everything else —
+ * reads, the subscription set, the pending queue — is the root's, reached
+ * through `root`, so forking is free and no read path has to know scopes exist.
+ * The client's scope map holds roots only; the root holds its live children, and
+ * that set is what every workspace-wide undo action (rejection, compaction,
+ * barrier) fans out over.
  */
 class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClient<E> {
 	readonly mutate: MutateApi;
 	private dbApi?: EntityApis<E>;
-	/** In-memory undo/redo over this workspace's local CRUD mutations. */
-	readonly undoMgr?: UndoManager;
-	/** This workspace's compiled subscription set (wire form). */
-	subscriptions: Subscription[];
+	/**
+	 * In-memory undo/redo over the mutations issued through THIS scope. Cleared
+	 * again when a nested scope closes, which is what makes a closed scope inert.
+	 */
+	protected mgr?: UndoManager;
+	/** This workspace's root scope; `this` for a root. */
+	readonly root: WorkspaceScope<E>;
+	/** The root's compiled subscription set (wire form); unused on a fork. */
+	private subs: Subscription[] = [];
+	/** Open nested undo scopes (root only). */
+	private readonly forks = new Set<WorkspaceScope<E>>();
 
 	constructor(
-		private client: SyncClient<E>,
+		/** @internal the owning client; also read by a fork of this scope. */
+		readonly client: SyncClient<E>,
 		readonly workspaceId: string,
 		subscriptions: Subscription[],
 		undoOpts?: UndoOptions,
+		root?: WorkspaceScope<E>,
 	) {
-		this.subscriptions = subscriptions;
+		this.root = root ?? this;
+		this.subs = subscriptions;
 		if (undoOpts && undoOpts.enabled !== false) {
-			this.undoMgr = new UndoManager(undoOpts.maxDepth ?? 100);
+			this.mgr = new UndoManager(undoOpts.maxDepth ?? 100);
 		}
+		if (root) root.forks.add(this);
 		this.mutate = {
 			...this.client.crudMutateApi(
-				(crud) => this.client.enqueue(this.workspaceId, { case: 'crud', value: crud }),
+				(crud) => this.client.enqueue(this, { case: 'crud', value: crud }),
 				(schema, key) => this.get(schema, key),
 			),
 			custom: async (name, argsSchema, args) => {
-				await this.client.enqueue(this.workspaceId, {
+				await this.client.enqueue(this, {
 					case: 'custom',
 					value: buildCustom(name, argsSchema, args),
 				});
 			},
 			list: (schema, rowKey, field) => this.client.listHandle(this, schema, rowKey, field),
 		};
+	}
+
+	/** The undo stack writes through this scope record into, if any. */
+	get undoMgr(): UndoManager | undefined {
+		return this.mgr;
+	}
+
+	/** Only a nested undo scope can close; a workspace's own scope never does. */
+	get closed(): boolean {
+		return false;
+	}
+
+	/**
+	 * The subscription set is the workspace's, not the scope's: a fork reads
+	 * exactly what its root is subscribed to, and re-pointing one re-points all
+	 * of them.
+	 */
+	get subscriptions(): Subscription[] {
+		return this.root.subs;
+	}
+
+	set subscriptions(next: Subscription[]) {
+		this.root.subs = next;
+	}
+
+	/**
+	 * Every live undo stack in this workspace: the root's own plus one per open
+	 * fork. This is the fan-out a rejection, a compaction or a barrier walks —
+	 * all of them are workspace-wide events, and a fork that missed one would
+	 * keep replaying inverses of mutations that are gone or renumbered.
+	 */
+	undoManagers(): UndoManager[] {
+		const out: UndoManager[] = [];
+		if (this.root.mgr) out.push(this.root.mgr);
+		for (const fork of this.root.forks) {
+			if (fork.mgr) out.push(fork.mgr);
+		}
+		return out;
+	}
+
+	undoScope(opts?: UndoScopeOptions): UndoScope<E> {
+		return new NestedUndoScope<E>(this, opts);
+	}
+
+	/** @internal detaches a closing fork; see NestedUndoScope.close. */
+	dropFork(fork: WorkspaceScope<E>): void {
+		this.root.forks.delete(fork);
 	}
 
 	get db(): EntityApis<E> {
@@ -983,6 +1094,50 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 
 	onUndoChange(cb: () => void): () => void {
 		return this.undoMgr?.onChange(cb) ?? (() => {});
+	}
+}
+
+/**
+ * A scope forked off a workspace for its own undo stack (see
+ * WorkspaceClient.undoScope). Adds nothing to the workspace surface but a
+ * lifetime: everything else it inherits, and its reads go to the same root.
+ *
+ * It carries a stack only when the client enabled undo at all; otherwise it is
+ * the same inert thing `client.ws(id)` is, so a UI can open one unconditionally.
+ */
+class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E>
+	implements UndoScope<E>
+{
+	private closedFlag = false;
+
+	constructor(parent: WorkspaceScope<E>, opts?: UndoScopeOptions) {
+		const base = parent.client.undoOptions;
+		super(
+			parent.client,
+			parent.workspaceId,
+			parent.subscriptions,
+			// Depth is the scope's own business; whether undo runs at all is the
+			// client's, so a fork of an undo-less client stays undo-less.
+			base && base.enabled !== false
+				? { enabled: true, maxDepth: opts?.maxDepth ?? base.maxDepth }
+				: undefined,
+			parent.root,
+		);
+	}
+
+	get closed(): boolean {
+		return this.closedFlag;
+	}
+
+	close(): void {
+		if (this.closedFlag) return;
+		this.closedFlag = true;
+		this.root.dropFork(this);
+		// Clear before dropping the manager so subscribers still attached to it
+		// see the stacks empty out — a toolbar rendered during teardown disables
+		// itself rather than holding a stale "can undo".
+		this.mgr?.barrier();
+		this.mgr = undefined;
 	}
 }
 
@@ -1227,6 +1382,21 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return scope;
 	}
 
+	/**
+	 * Every live undo stack in a workspace: its own plus one per open undo scope
+	 * (see WorkspaceScope.undoManagers). Empty for a workspace this client no
+	 * longer holds, which is what makes the workspace-wide fan-outs — rejection,
+	 * compaction, intent refs — safe to call unconditionally.
+	 */
+	private undoManagersOf(workspaceId: string): UndoManager[] {
+		return this.scopes.get(workspaceId)?.undoManagers() ?? [];
+	}
+
+	/** @internal the client-wide undo settings a nested scope inherits. */
+	get undoOptions(): UndoOptions | undefined {
+		return this.opts.undo;
+	}
+
 	/** The default workspace's scope, or a clear error explaining what to do. */
 	private defaultScope(): WorkspaceScope<E> {
 		const id = this.defaultWorkspaceId;
@@ -1408,7 +1578,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					field: field.name,
 					ops: inverseOps,
 				};
-				return this.enqueue(scope.workspaceId, { case: 'crud', value: crud }, undefined, {
+				return this.enqueue(scope, { case: 'crud', value: crud }, undefined, {
 					overrides: [ override ],
 					coalesce,
 				});
@@ -1647,10 +1817,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// whose inverse is a snapshot of one specific mutation, and remap them
 			// all, so squashing a queue never corrupts that workspace's undo stacks.
 			undoRefIds: this.opts.undo
-				? (ws) => this.scopes.get(ws)?.undoMgr?.foldBarrierIds() ?? new Set<bigint>()
+				? (ws) => unionOf(this.undoManagersOf(ws).map((m) => m.foldBarrierIds()))
 				: undefined,
 			onCompacted: this.opts.undo
-				? (ws, remap) => this.scopes.get(ws)?.undoMgr?.remapIds(remap)
+				? (ws, remap) => {
+					for (const mgr of this.undoManagersOf(ws)) mgr.remapIds(remap);
+				}
 				: undefined,
 			clientRevision: this.opts.schemaRevision,
 			onSchemaSkew: this.opts.onSchemaSkew,
@@ -1745,15 +1917,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private reportRejection(info: RejectionInfo): void {
 		// The undo stacks must not replay state that builds on the dead mutation.
+		// Every stack in the workspace, not just the workspace's own: an open
+		// dialog's scope can hold a group built on the very mutation that died.
 		// A purge removes the scope first, so its stacks are gone already.
-		const scope = this.scopes.get(info.workspaceId);
-		scope?.undoMgr?.onRejected(info.mutationId);
+		const managers = this.undoManagersOf(info.workspaceId);
+		for (const mgr of managers) mgr.onRejected(info.mutationId);
 		// Refresh this tab's intent record from the trimmed stacks. Own-tab
 		// only: a peer tab whose stacks reference the rejected mutation never
 		// hears about it (documented follow-up in issue 023 — needs a
 		// broadcast channel; its record merely over-protects until then).
-		if (scope?.undoMgr) {
-			void this.intentReg?.updateRefs(info.workspaceId, scope.undoMgr.foldBarrierIds());
+		if (managers.length > 0) {
+			void this.intentReg?.updateRefs(
+				info.workspaceId,
+				unionOf(managers.map((m) => m.foldBarrierIds())),
+			);
 		}
 		// Isolated: the rollback has already landed, and the coordinator reports a
 		// batch of rejections in a loop — a throwing app handler must not skip the
@@ -2637,10 +2814,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * undo group once the commit succeeds — so undoing a batch replays atomically
 	 * and a rejection (which shares the batch's mutation_id) drops the whole
 	 * group.
+	 *
+	 * The caller passes the SCOPE it wrote through, not just a workspace id.
+	 * Every scope of a workspace shares this one queue, counter and overlay;
+	 * they differ only in which undo stack the inverses land on, and only the
+	 * scope knows which one that is (see WorkspaceScope).
 	 * @internal
 	 */
 	async enqueue(
-		workspaceId: string,
+		scope: WorkspaceScope<E>,
 		payload: Mutation['payload'],
 		captureStack?: StackName,
 		undoOpts?: {
@@ -2655,8 +2837,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		},
 	): Promise<void> {
 		this.assertOpen();
-		const scope = this.scopes.get(workspaceId);
-		if (!scope) throw new Error(`workspace "${workspaceId}" is not held by this client`);
+		const workspaceId = scope.workspaceId;
+		// Checked against the live scope map rather than trusted: a scope (or a
+		// fork of it) outlives removeWorkspace, and writing through one after the
+		// workspace is gone would resurrect its keys behind the coordinator's back.
+		if (this.scopes.get(workspaceId) !== scope.root) {
+			throw new Error(`workspace "${workspaceId}" is not held by this client`);
+		}
 		const undoMgr = scope.undoMgr;
 		const kv = await this.kv();
 		const clientId = await this.clientId();
@@ -2786,7 +2973,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						await enqueuePending(tx, workspaceId, mutation);
 					} else {
 						// Custom mutation: an undo barrier, applied in one shot.
-						if (undoMgr) undoBarrier = true;
+						undoBarrier = true;
 						await enqueuePending(tx, workspaceId, mutation);
 						await applyMutationLocally(
 							tx,
@@ -2797,22 +2984,34 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							touched,
 						);
 					}
-					if (this.intentReg && undoMgr) {
+					if (this.intentReg && this.opts.undo) {
 						// Persist the PREDICTED post-commit fold-barrier set in this same
 						// transaction: recordGroup below only runs after the commit, so
 						// the intent record is computed from the inputs it will receive
 						// (see UndoManager.predictedBarrierIds). Keeps a peer tab's
 						// compaction from ever folding a mutation these stacks pin.
-						await this.intentReg.writeRefs(
-							tx,
-							workspaceId,
-							undoMgr.predictedBarrierIds(
-								mutationId,
-								capturedInverses.some((i) => i !== undefined && i.kind !== 'text'),
-								captureStack,
-								undoBarrier,
-							),
-						);
+						//
+						// The record covers the whole workspace, so the writing scope's
+						// prediction is unioned with what every OTHER live scope already
+						// pins — a mutation an open dialog's stack depends on has to
+						// survive compaction just as much as one the workspace's does.
+						const refs = undoBarrier
+							// A barrier clears every stack in the workspace, so nothing is
+							// pinned afterwards, not even a sibling scope's entries.
+							? new Set<bigint>()
+							: unionOf(
+								scope.undoManagers().map((m) =>
+									m === undoMgr
+										? m.predictedBarrierIds(
+											mutationId,
+											capturedInverses.some((i) => i !== undefined && i.kind !== 'text'),
+											captureStack,
+											false,
+										)
+										: m.foldBarrierIds()
+								),
+							);
+						await this.intentReg.writeRefs(tx, workspaceId, refs);
 					}
 					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
 					await tx.commit();
@@ -2824,12 +3023,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		} finally {
 			peerLease?.release();
 		}
-		if (undoMgr) {
-			if (undoBarrier) {
-				undoMgr.barrier();
-			} else if (capturedId !== undefined) {
-				undoMgr.recordGroup(capturedId, capturedInverses, captureStack, undoOpts?.coalesce);
-			}
+		if (undoBarrier) {
+			// Workspace-wide: a custom mutation is opaque and may have touched
+			// anything, so no stack in this workspace can claim to invert what came
+			// before it — not the one that issued it, and not a dialog's.
+			for (const mgr of scope.undoManagers()) mgr.barrier();
+		} else if (undoMgr && capturedId !== undefined) {
+			undoMgr.recordGroup(capturedId, capturedInverses, captureStack, undoOpts?.coalesce);
 		}
 		this.statusTracker.incrementPending(workspaceId);
 		await this.notifyChange(touched);
@@ -2921,9 +3121,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// fn threw → we never reach here (the buffer is dropped, nothing applied).
 		if (buffer.length === 0) return;
 		if (buffer.length === 1) {
-			await this.enqueue(scope.workspaceId, { case: 'crud', value: buffer[0]! });
+			await this.enqueue(scope, { case: 'crud', value: buffer[0]! });
 		} else {
-			await this.enqueue(scope.workspaceId, { case: 'batch', value: buildBatch(buffer) });
+			await this.enqueue(scope, { case: 'batch', value: buildBatch(buffer) });
 		}
 	}
 
@@ -2941,6 +3141,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** @internal */
 	async undoIn(scope: WorkspaceScope<E>): Promise<boolean> {
 		this.assertOpen();
+		// A closed undo scope has nothing to replay rather than being an error:
+		// a keybinding can fire while the dialog that owned it is unmounting.
+		if (scope.closed) return false;
 		const mgr = requireUndo(scope);
 		const group = mgr.takeUndoGroup();
 		if (group.length === 0) return false;
@@ -2966,6 +3169,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** @internal */
 	async redoIn(scope: WorkspaceScope<E>): Promise<boolean> {
 		this.assertOpen();
+		if (scope.closed) return false;
 		const mgr = requireUndo(scope);
 		const group = mgr.takeRedoGroup();
 		if (group.length === 0) return false;
@@ -3038,12 +3242,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			return;
 		}
 		if (cruds.length === 1) {
-			await this.enqueue(scope.workspaceId, { case: 'crud', value: cruds[0]! }, captureStack, {
+			await this.enqueue(scope, { case: 'crud', value: cruds[0]! }, captureStack, {
 				overrides,
 			});
 		} else {
 			await this.enqueue(
-				scope.workspaceId,
+				scope,
 				{ case: 'batch', value: buildBatch(cruds) },
 				captureStack,
 				{ overrides },
@@ -3097,6 +3301,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		};
 	}
 
+	/**
+	 * Opens a nested undo scope on the default workspace (see
+	 * WorkspaceClient.undoScope).
+	 */
+	undoScope(opts?: UndoScopeOptions): UndoScope<E> {
+		return this.defaultScope().undoScope(opts);
+	}
+
 	canUndo(): boolean {
 		return this.defaultScope().canUndo();
 	}
@@ -3116,11 +3328,21 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 }
 
-function requireUndo(scope: { undoMgr?: UndoManager }): UndoManager {
-	if (!scope.undoMgr) {
+function requireUndo<E extends readonly DescMessage[]>(scope: WorkspaceScope<E>): UndoManager {
+	const mgr = scope.undoMgr;
+	if (!mgr) {
 		throw new Error('undo is not enabled: pass the `undo` option to SyncClient');
 	}
-	return scope.undoMgr;
+	return mgr;
+}
+
+/** Flattens sets of pinned mutation ids into one. */
+function unionOf(sets: Iterable<ReadonlySet<bigint>>): Set<bigint> {
+	const out = new Set<bigint>();
+	for (const set of sets) {
+		for (const id of set) out.add(id);
+	}
+	return out;
 }
 
 /** Reads the workspace set out of the options, rejecting contradictory input. */

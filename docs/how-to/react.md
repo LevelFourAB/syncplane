@@ -7,9 +7,10 @@ app never pulls it in.
 ```tsx
 import { createReactSync } from 'syncplane/react';
 
-const { SyncProvider, db, useSyncStatus, useUndo } = createReactSync([
-	TodoSchema,
-]);
+const { SyncProvider, UndoScopeProvider, db, useSyncStatus, useUndo } =
+	createReactSync([
+		TodoSchema,
+	]);
 
 // The provider builds the client, start()s it, and close()s it when the tree
 // unmounts.
@@ -168,12 +169,52 @@ with no default throws a hook-level error naming the fix.
   ```
 
 - **`useUndo(opts?)`** — `{ canUndo, canRedo, undo, redo }` over the resolved
-  workspace's undo stacks; they are per workspace, because the mutation ids they
-  reference are.
+  scope's undo stacks: the nearest `<UndoScopeProvider>`'s if there is one, else
+  the workspace's. Stacks never span workspaces, because the mutation ids they
+  reference do not.
 
 All of them are built on `useSyncExternalStore` with an SSR snapshot, and
 nothing hands out a mutable row: results are readonly, which is what makes the
 snapshot stable and tearing-free.
+
+## A dialog with its own undo history
+
+A workspace has one undo stack, so by default the Cmd+Z inside a task dialog
+would walk back out into whatever the board behind it did. Wrap the dialog in an
+`<UndoScopeProvider>` and it gets a stack of its own:
+
+```tsx
+function TaskDialog({ id }: { id: string }) {
+	return (
+		<UndoScopeProvider>
+			<TaskDialogBody id={ id } />
+		</UndoScopeProvider>
+	);
+}
+
+function TaskDialogBody({ id }: { id: string }) {
+	// This useUndo drives the dialog's stack; the board's useUndo, outside the
+	// provider, still drives the workspace's.
+	const { canUndo, undo } = useUndo();
+	const title = db.task.useText(id, 'title');
+	const { update } = db.task.useRow(id);
+	// …and so does the delete, unless it says otherwise:
+	const { del } = db.task.useMutate({ undo: 'workspace' });
+}
+```
+
+Every write below the provider — the mutate hooks, `useText`, transactions —
+records there instead, including the per-keystroke text edits that would
+otherwise flood the board's history. Reads are untouched: a scope shares the
+workspace's subscriptions, store and queue, so nothing re-subscribes and nothing
+syncs twice.
+
+The scope lives exactly as long as the subtree. Closing the dialog drops its
+stack rather than merging it into the workspace's — the board's Cmd+Z picks up
+where it left off, and does not replay someone's typing. Outside React (an
+editor instance, an imperative modal controller) the same thing is
+`useUndoScope()`, or `client.ws(id).undoScope()` with a `close()` you call
+yourself.
 
 ## Compare-and-swap from a row hook
 

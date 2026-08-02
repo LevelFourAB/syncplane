@@ -519,6 +519,36 @@ whole group. Undo is driven entirely through the client — `undo()`, `redo()`,
 `canUndo`, `canRedo`, `onUndoChange` and the `useUndo` hook; the manager behind
 them is internal.
 
+### Nested undo scopes
+
+A workspace's stack is shared by everything writing to it. For UI whose undo must
+stay local — a task dialog, an inline editor — fork a scope:
+
+```ts
+const dialog = client.ws('w1').undoScope({ maxDepth: 200 }); // or client.undoScope()
+
+await dialog.db.task.mutate.patch(id, { priority: 2 }); // recorded on the dialog's stack
+const title = await dialog.text(TaskSchema, id, 'title'); // so are its text edits
+await dialog.undo(); // undoes the dialog's last step only
+
+dialog.close(); // drops the stack; the workspace's is untouched
+```
+
+`UndoScope` is a full `WorkspaceClient` plus `close()` and `closed`, so every
+write verb routes by which object issued it — no per-call option to thread.
+Everything else is shared: one store, one subscription set, one pending queue,
+one push.
+
+|                             |                                                                                                                                                   |
+| --------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Nesting                     | Innermost wins; a scope forked off a scope forks the workspace, it does not chain.                                                                |
+| Custom mutation             | Clears **every** stack in the workspace — it is opaque and may have touched anything.                                                             |
+| Rejection / compaction      | Reach every live stack in the workspace, the scopes' included.                                                                                    |
+| `close()`                   | Drops both stacks; NOT merged into the parent. The object stays usable and records nothing, so a callback firing during teardown is not an error. |
+| `undo()` after close        | Resolves `false` (nothing to undo) rather than throwing.                                                                                          |
+| Undo disabled on the client | A scope is inert, exactly like the workspace it forked.                                                                                           |
+| `maxDepth`                  | Per scope; defaults to the client's `undo.maxDepth`.                                                                                              |
+
 ---
 
 ## 8. Sync status
@@ -879,8 +909,9 @@ interface WatchState {
 - The `useSuspense*` variants wait for the first callback rather than reporting
   `loading`, and throw a failed subscription for an error boundary. Suspense is a
   separate hook, not an option, because it selects a fixed hook path.
-- `UseWorkspaceOptions`: `{ workspaceId?: string }` — every hook accepts it.
-  `UseWatchOptions`/`UseQueryOptions`/`UseRowOptions` add `{ include?: IncludeSpec }`.
+- `UseWorkspaceOptions`: `{ workspaceId?: string; undo?: 'nearest' | 'workspace' }` —
+  every hook accepts it. `UseWatchOptions`/`UseQueryOptions`/`UseRowOptions` add
+  `{ include?: IncludeSpec }`.
 
 ### Workspace resolution
 
@@ -899,10 +930,27 @@ useWorkspaceId(): string | undefined              // what WorkspaceProvider set,
 useSyncStatus(): SyncStatus                       // reactive, account-wide
 useWorkspaceStatus(opts?): WorkspaceStatus        // reactive, one workspace
 useUndo(opts?): { canUndo, canRedo, undo(), redo() }
+useUndoScope(opts?): UndoScope                    // a scope with the component's lifetime
+useNearestUndoScope(): UndoScope | undefined      // what UndoScopeProvider set, if anything
 useOnMutationRejected(handler: (info: RejectionInfo) => void, opts?): void
 <SyncProvider options={SyncClientOptions}>        // provider constructs, starts and closes it
 <SyncProvider client={SyncClient}>                // caller-built; caller keeps the lifecycle
 <WorkspaceProvider workspaceId={string}>          // re-scopes the hooks below it
+<UndoScopeProvider maxDepth?={number}>            // gives the subtree its own undo stack
+```
+
+`<UndoScopeProvider>` opens a [nested undo scope](#nested-undo-scopes) for its
+subtree: writes below it (mutate hooks, `useText`, transactions) record there,
+and `useUndo()` below it drives that stack. The scope's lifetime is the
+subtree's — mounting opens it, unmounting closes it and drops the stack. One
+write can opt back out with `{ undo: 'workspace' }`, for the action inside a
+dialog that belongs to the view behind it. Reads are unaffected either way: a
+scope and its workspace share one subscription.
+
+```tsx
+<UndoScopeProvider>
+	<TaskDialogBody id={ id } /> // its useUndo() is the dialog's history
+</UndoScopeProvider>;
 ```
 
 `useOnMutationRejected` is the React face of the dead-letter surface (also

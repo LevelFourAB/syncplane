@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
 describe('undo/redo over sync', () => {
@@ -121,6 +122,60 @@ describe('undo/redo over sync', () => {
 		await a.syncNow();
 		expect(await a.get(TodoSchema, 't2')).toBeUndefined();
 
+		await a.close();
+	});
+
+	it("a rejection drops the group from an undo SCOPE's stack too", async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws, { undo: {} });
+		await a.start();
+
+		await a.mutate.put(TodoSchema, { id: 'ok', title: 'fine' });
+		await a.syncNow();
+
+		// The dead mutation is issued through a nested scope, so the stack that
+		// has to hear about the rejection is the scope's, not the workspace's.
+		const dialog = a.undoScope();
+		await dialog.mutate.put(TodoSchema, { id: 'bad', title: 'forbidden fruit' });
+		expect(dialog.canUndo()).toBe(true);
+		await a.syncNow(); // server rejects; rollback + undo-group drop
+
+		expect(dialog.canUndo()).toBe(false);
+		expect(await dialog.undo()).toBe(false);
+		// The workspace's own step is untouched by a rejection it had no part in.
+		expect(a.canUndo()).toBe(true);
+
+		await a.close();
+	});
+
+	it("undoes a scope's text edit without touching the workspace's stack", async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws, { undo: {} });
+		await a.start();
+
+		await a.mutate.put(WidgetSchema, { id: 'w1', label: 'widget' });
+		await a.syncNow();
+		// The view renames the row; the dialog edits its collaborative body.
+		await a.mutate.patch(WidgetSchema, 'w1', { label: 'renamed' });
+		const dialog = a.undoScope();
+		const body = await dialog.text(WidgetSchema, 'w1', 'body');
+		await body.insert(0, 'hello');
+		await a.syncNow();
+		expect(body.value).toBe('hello');
+
+		// Undo in the dialog replays the symbolic text inverse and nothing else:
+		// the rename stays, and it is still the view's to undo.
+		expect(await dialog.undo()).toBe(true);
+		await a.syncNow();
+		expect(body.value).toBe('');
+		expect((await a.get(WidgetSchema, 'w1'))?.label).toBe('renamed');
+		expect(await dialog.undo()).toBe(false);
+
+		expect(await a.undo()).toBe(true);
+		await a.syncNow();
+		expect((await a.get(WidgetSchema, 'w1'))?.label).toBe('widget');
+
+		body.close();
 		await a.close();
 	});
 });

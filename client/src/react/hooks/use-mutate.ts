@@ -18,7 +18,7 @@ export function useMutateHook<D extends DescMessage>(
 	schema: D,
 	opts?: UseWorkspaceOptions,
 ): EntityMutate<D> {
-	const scope = useWorkspaceScope(opts?.workspaceId);
+	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
 	return useMemo<EntityMutate<D>>(
 		() => ({
 			put: (value, o) => scope.mutate.put(schema, value, o),

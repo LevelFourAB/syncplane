@@ -50,7 +50,7 @@ export function useRowHook<D extends DescMessage>(
 	suspense?: boolean,
 ): UseRowResultFor<D> {
 	const client = useSyncClient();
-	const scope = useWorkspaceScope(opts?.workspaceId);
+	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
 	const include = opts?.include;
 	// Identity of the SHARED watch: the row key is deliberately absent, since
 	// every key on this entity is served from one subscription. Distinct

@@ -23,7 +23,20 @@ import type { WatchResult, WatchState } from './result.js';
  */
 export interface UseWorkspaceOptions {
 	workspaceId?: string;
+	/**
+	 * Which undo stack this hook's writes record on. 'nearest' (the default)
+	 * uses the enclosing `<UndoScopeProvider>` if there is one; 'workspace'
+	 * skips every enclosing scope and records on the workspace's own stack — for
+	 * the write inside a dialog that belongs to the view behind it (deleting the
+	 * row being edited, say), not to the dialog's local history.
+	 *
+	 * Reads are unaffected: a scope and its workspace share one subscription.
+	 */
+	undo?: UndoTarget;
 }
+
+/** See UseWorkspaceOptions.undo. */
+export type UndoTarget = 'nearest' | 'workspace';
 
 /** Options shared by the watch-backed hooks. */
 export interface UseWatchOptions extends UseWorkspaceOptions {

@@ -44,6 +44,16 @@ export interface UndoOptions {
 	maxDepth?: number;
 }
 
+/** Options for a nested undo scope (see WorkspaceClient.undoScope). */
+export interface UndoScopeOptions {
+	/**
+	 * Maximum undo groups this scope keeps; oldest evict first. Defaults to the
+	 * client's `undo.maxDepth`. A dialog usually wants a deeper stack than the
+	 * view around it — it collects one group per keystroke burst.
+	 */
+	maxDepth?: number;
+}
+
 interface UndoEntry {
 	groupId: number;
 	/** Id of the forward mutation this entry inverts (rejection wiring). */
