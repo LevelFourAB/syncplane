@@ -45,6 +45,11 @@ type entityInfo struct {
 	// this is the ONE list that decides an entity's index write cost.
 	indexes []compiledIndex
 	mergers lww.Mergers
+	// deletePolicy is the entity's (syncplane.v1.entity).delete_policy. The
+	// engine checks it alongside CanMutate (see Server.authorizeWrite); it is
+	// held here rather than re-read from the descriptor because it is consulted
+	// once per authorized write.
+	deletePolicy syncplanev1.DeletePolicy
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -726,7 +731,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if len(eo.GetKeyFields()) == 0 {
 		return nil, fmt.Errorf("server: entity %q declares no key_fields", eo.GetName())
 	}
-	info := &entityInfo{name: eo.GetName(), msgType: mt}
+	info := &entityInfo{name: eo.GetName(), msgType: mt, deletePolicy: eo.GetDeletePolicy()}
 	for _, kf := range eo.GetKeyFields() {
 		fd := desc.Fields().ByName(protoreflect.Name(kf))
 		if fd == nil {

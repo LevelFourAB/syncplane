@@ -2,6 +2,7 @@ import { create, fromBinary, getOption, hasOption, toBinary } from '@bufbuild/pr
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
+	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
 } from '../../src/gen/syncplane/v1/options_pb.js';
@@ -73,6 +74,15 @@ describe('schema builder', () => {
 		const blob = bundle.descMessage('todo').fields.find((f) => f.name === 'blob')!;
 		expect(hasOption(blob, fieldBehaviorExt)).toBe(true);
 		expect(getOption(blob, fieldBehaviorExt).opaque).toBe(true);
+	});
+
+	it('defaults delete_policy to ALLOW and carries trustedOnly through to the option', () => {
+		expect(getOption(bundle.descMessage('todo'), entityExt).deletePolicy)
+			.toBe(DeletePolicy.ALLOW);
+
+		const ledger = entity('ledger', { id: text().key() }, { deletePolicy: 'trustedOnly' });
+		const desc = defineSchema(ledger).descMessage('ledger');
+		expect(getOption(desc, entityExt).deletePolicy).toBe(DeletePolicy.TRUSTED_ONLY);
 	});
 
 	it('round-trips a value through the runtime descriptor', () => {

@@ -31,7 +31,7 @@ func TestServer(t *testing.T) {
 // testEntities are the entities every spec's server declares.
 func testEntities() server.Option {
 	return server.WithEntities(&todov1.Todo{}, &testdatav1.Widget{}, &testdatav1.Pair{},
-		&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{})
+		&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{}, &testdatav1.Ledger{})
 }
 
 // newTestServer builds a server on a fresh SQLite store with the test

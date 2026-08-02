@@ -530,16 +530,16 @@ func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteT
 func (s *Server) authorize(ctx context.Context, p Principal, workspaceID string, m *syncplanev1.Mutation) error {
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
-		return s.perms.CanMutate(ctx, p, workspaceID, Write{
+		return s.authorizeWrite(ctx, p, workspaceID, Write{
 			ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: payload.Crud,
 		})
 	case *syncplanev1.Mutation_Custom:
-		return s.perms.CanMutate(ctx, p, workspaceID, Write{
+		return s.authorizeWrite(ctx, p, workspaceID, Write{
 			ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Custom: payload.Custom,
 		})
 	case *syncplanev1.Mutation_Batch:
 		for _, crud := range payload.Batch.GetMutations() {
-			if err := s.perms.CanMutate(ctx, p, workspaceID, Write{
+			if err := s.authorizeWrite(ctx, p, workspaceID, Write{
 				ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: crud,
 			}); err != nil {
 				return err

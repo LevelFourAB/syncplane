@@ -16,19 +16,65 @@ message Todo {
 }
 ```
 
-| Field        | Meaning                                                                                             |
-| ------------ | --------------------------------------------------------------------------------------------------- |
-| `name`       | Logical entity name used on the wire and in storage (e.g. `"todo"`).                                |
-| `key_fields` | Field names, in order, whose values form the row key. Singular scalars.                             |
-| `index`      | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
+| Field           | Meaning                                                                                             |
+| --------------- | --------------------------------------------------------------------------------------------------- |
+| `name`          | Logical entity name used on the wire and in storage (e.g. `"todo"`).                                |
+| `key_fields`    | Field names, in order, whose values form the row key. Singular scalars.                             |
+| `index`         | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
+| `delete_policy` | Who may DELETE rows of this entity. See [Delete policy](#delete-policy).                            |
 
-Both are constrained: the name must be an identifier, and a key field must be a
-singular string, integer, bool or enum. See [Naming rules](naming.md) for the
-full set and for what a derived row key may contain.
+The first two are constrained: the name must be an identifier, and a key field
+must be a singular string, integer, bool or enum. See [Naming rules](naming.md)
+for the full set and for what a derived row key may contain.
 
 A message carrying this option is an **entity**. That is also what makes a
 message-typed field elsewhere a _reference_ to it — reference detection is
 annotation-free.
+
+### Delete policy
+
+`delete_policy` decides who may issue a `DELETE` against the entity. Unset (or
+`DELETE_POLICY_ALLOW`) allows anyone the app's permission policy admits, which
+is how every entity behaves that says nothing.
+
+```proto
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		delete_policy: DELETE_POLICY_TRUSTED_ONLY
+	};
+	string id = 1;
+}
+```
+
+`DELETE_POLICY_TRUSTED_ONLY` refuses the DELETE to every caller the server
+authorizes, with a `permission_denied` rejection. That includes the in-process
+API — `Apply` and `Mutate` from an app handler are held to the same policy as a
+sync client — and leaves only writes made under the `Trusted` bypass: a
+connector, a migration, a cron job.
+
+The engine checks it before the app's `Permissions.CanMutate` hook runs, on
+every path that authorizes a write, so the rule is stated once in the schema
+rather than restated in each deployment's policy.
+
+It governs the DELETE _primitive_, not deletion as an outcome. A custom
+mutator's rows are covered by the verdict on its invocation rather than
+authorized one by one, so an app that wants a client-initiated delete of a
+protected entity writes a mutator, puts the cascade handling and checks it needs
+in the body, and authorizes the invocation by name:
+
+```go
+server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
+	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+		// … whatever must happen first …
+		return tx.Delete(&appv1.Project{}, args.(*appv1.ArchiveArgs).GetId())
+	})
+```
+
+Reach for this on the rows a cascade hangs off. It removes the only
+irreversible verb the wire has, rather than making its damage recoverable after
+the fact.
 
 ## `(syncplane.v1.field_behavior)` — on a field
 

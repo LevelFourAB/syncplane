@@ -759,6 +759,25 @@ What the client index does and does not cover:
 Set `debugVerifyIndexReads` (or `SYNC_DEBUG_VERIFY_TOUCHES=1`) to run both paths
 on every query and throw if they disagree.
 
+### Delete policy
+
+The same options object carries `deletePolicy`, which decides who may delete
+rows of the entity. It defaults to `'allow'`:
+
+```ts
+const project = schema.entity('project', {
+	id: schema.text().key(),
+	name: schema.text(),
+}, { deletePolicy: 'trustedOnly' });
+```
+
+`'trustedOnly'` takes the DELETE primitive away from clients entirely: a
+`del()` on such an entity comes back as a `permission_denied` rejection, which
+the client acks and drops like any other. Deletion stays reachable through a
+custom mutator, whose rows are covered by the verdict on the invocation, and
+through trusted server-side writes. See
+[Delete policy](proto-options.md#delete-policy) for the full semantics.
+
 > **Field order is significant** — fields get proto numbers 1..N in declaration order.
 > Evolution is append-only; reordering/removing breaks wire compatibility.
 

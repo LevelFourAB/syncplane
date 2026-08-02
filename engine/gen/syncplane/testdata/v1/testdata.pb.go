@@ -1264,6 +1264,61 @@ func (x *Blob) GetNote() string {
 	return ""
 }
 
+// Delete-policy fixture: an entity whose rows only a trusted write may delete.
+// Stands in for the root objects a cascade hangs off, where deletion is meant
+// to be a considered server-side act rather than a verb clients hold.
+type Ledger struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Label         string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ledger) Reset() {
+	*x = Ledger{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ledger) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ledger) ProtoMessage() {}
+
+func (x *Ledger) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ledger.ProtoReflect.Descriptor instead.
+func (*Ledger) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *Ledger) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Ledger) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
 var File_syncplane_testdata_v1_testdata_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
@@ -1382,7 +1437,11 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x05ratio\x18\x04 \x01(\x01R\x05ratio\".\n" +
 	"\x04Blob\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x12\n" +
-	"\x04note\x18\x02 \x01(\tR\x04noteBNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
+	"\x04note\x18\x02 \x01(\tR\x04note\"B\n" +
+	"\x06Ledger\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label:\x12\xa2\xbb\x18\x0e\n" +
+	"\x06ledger\x12\x02id \x02BNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
 
 var (
 	file_syncplane_testdata_v1_testdata_proto_rawDescOnce sync.Once
@@ -1396,7 +1455,7 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                // 0: syncplane.testdata.v1.Widget
 	(*OneofKeyEntity)(nil),        // 1: syncplane.testdata.v1.OneofKeyEntity
@@ -1412,14 +1471,15 @@ var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Issue)(nil),                 // 11: syncplane.testdata.v1.Issue
 	(*Settings)(nil),              // 12: syncplane.testdata.v1.Settings
 	(*Blob)(nil),                  // 13: syncplane.testdata.v1.Blob
-	nil,                           // 14: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                           // 15: syncplane.testdata.v1.Widget.ByIdEntry
+	(*Ledger)(nil),                // 14: syncplane.testdata.v1.Ledger
+	nil,                           // 15: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                           // 16: syncplane.testdata.v1.Widget.ByIdEntry
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	12, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
 	13, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	14, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	15, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	15, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	16, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
 	6,  // 4: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
 	8,  // 5: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
 	7,  // 6: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
@@ -1472,7 +1532,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   16,
+			NumMessages:   17,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

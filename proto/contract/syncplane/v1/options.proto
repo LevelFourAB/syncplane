@@ -25,6 +25,31 @@ message EntityOptions {
 	// The cost is on writes: every write to this entity re-encodes and
 	// re-stores the row's position in EVERY index declared here.
 	repeated IndexSpec index = 3;
+	// Who may DELETE rows of this entity. Unset allows anyone the app's
+	// permission policy admits, which is the behaviour of every other entity.
+	DeletePolicy delete_policy = 4;
+}
+
+// DeletePolicy says which callers may DELETE rows of an entity. The engine
+// enforces it before the app's permission policy runs, on every path that
+// authorizes a write, so a schema states the rule once instead of every
+// deployment restating it in a hook where a missing branch fails open.
+//
+// It governs the DELETE primitive, not deletion as an outcome: a custom
+// mutator's rows are covered by the verdict on its invocation rather than
+// authorized one by one, so an app that wants a client-initiated delete of a
+// protected entity writes a mutator, puts the cascade handling and the checks
+// it needs in the body, and authorizes the invocation by name.
+enum DeletePolicy {
+	// Any caller the permission policy admits may delete.
+	DELETE_POLICY_UNSPECIFIED = 0;
+	// Same as unset, for schemas that prefer to say so.
+	DELETE_POLICY_ALLOW = 1;
+	// Only writes made under the engine's Trusted bypass may delete — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	DELETE_POLICY_TRUSTED_ONLY = 2;
 }
 
 // IndexKey is one component of an index, in the order it sorts.

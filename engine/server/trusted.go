@@ -80,7 +80,7 @@ func (s *Server) writeAuthorizer(ctx context.Context, p Principal, workspaceID s
 		return nil
 	}
 	return func(w Write) error {
-		return s.perms.CanMutate(ctx, p, workspaceID, w)
+		return s.authorizeWrite(ctx, p, workspaceID, w)
 	}
 }
 

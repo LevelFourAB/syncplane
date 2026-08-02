@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"google.golang.org/protobuf/proto"
 
@@ -192,6 +193,11 @@ type Permissions interface {
 	// Write{Custom} on its name and args; the rows its body writes are not
 	// authorized individually, on either path.
 	//
+	// It is not the only thing that can refuse a write. The engine enforces the
+	// schema's own rules first — today (syncplane.v1.entity).delete_policy — so a
+	// write this hook never sees has already been rejected. A policy therefore
+	// cannot widen what a schema forbids, only narrow it further.
+	//
 	// Runs before the push write transaction opens, and between Apply's read and
 	// write transactions — but INSIDE the transaction on Server.Mutate. Keep it
 	// fast and side-effect free; see the interface doc for details.
@@ -292,3 +298,46 @@ func (AllowAll) ReadFilter(context.Context, Principal, string, string) (RowFilte
 	return nil, nil
 }
 func (AllowAll) FilterEpoch(context.Context, Principal, string) (uint64, error) { return 0, nil }
+
+// authorizeWrite is the single gate an enforced write passes through: the
+// engine's own schema-level rules first, then the app's policy. Push, Apply,
+// Mutate and the mutator API call this instead of Permissions.CanMutate
+// directly, so a rule a schema states cannot end up enforced on some write
+// paths and not others.
+//
+// Trusted callers never reach it — every call site sits behind the same
+// `enforced` check that skips CanMutate — which is what lets
+// DELETE_POLICY_TRUSTED_ONLY be defined in terms of that bypass.
+func (s *Server) authorizeWrite(ctx context.Context, p Principal, workspaceID string, w Write) error {
+	if err := s.checkDeletePolicy(w); err != nil {
+		return err
+	}
+	return s.perms.CanMutate(ctx, p, workspaceID, w)
+}
+
+// checkDeletePolicy enforces (syncplane.v1.entity).delete_policy on a CRUD
+// DELETE.
+//
+// It runs BEFORE the app's policy so a schema-level "no" does not depend on
+// that policy having an opinion, and it refuses with a Rejection because the
+// answer is deterministic: the client should ack and drop the mutation rather
+// than back off and retry a write that can never land.
+//
+// Two things deliberately pass. An unknown entity does — applyCrud rejects it
+// with a message about the entity, and re-deciding that here would only give
+// the two paths a chance to disagree. So does a custom mutation: a mutator
+// body's rows are covered by the Write{Custom} verdict on its invocation rather
+// than authorized one by one, which is the escape hatch the option is designed
+// around (see DeletePolicy).
+func (s *Server) checkDeletePolicy(w Write) error {
+	if w.Crud.GetOp() != syncplanev1.CrudOp_CRUD_OP_DELETE {
+		return nil
+	}
+	info, ok := s.catalogPtr().entities[w.Crud.GetEntity()]
+	if !ok || info.deletePolicy != syncplanev1.DeletePolicy_DELETE_POLICY_TRUSTED_ONLY {
+		return nil
+	}
+	return Reject(CodePermissionDenied, fmt.Sprintf(
+		"entity %q declares delete_policy TRUSTED_ONLY, so only a trusted write may delete its rows",
+		info.name))
+}

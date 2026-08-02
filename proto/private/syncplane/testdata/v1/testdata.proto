@@ -256,3 +256,17 @@ message Blob {
 	bytes data = 1;
 	string note = 2;
 }
+
+// Delete-policy fixture: an entity whose rows only a trusted write may delete.
+// Stands in for the root objects a cascade hangs off, where deletion is meant
+// to be a considered server-side act rather than a verb clients hold.
+message Ledger {
+	option (syncplane.v1.entity) = {
+		name: "ledger"
+		key_fields: [ "id" ]
+		delete_policy: DELETE_POLICY_TRUSTED_ONLY
+	};
+
+	string id = 1;
+	string label = 2;
+}

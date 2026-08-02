@@ -93,6 +93,25 @@ the two.
 > `type X = Infer<typeof x>` escape hatch you would use for "excessively deep"
 > errors.
 
+## Per-entity options
+
+The third argument to `entity()` carries what is not a field. `indexes`
+declares composite secondary indexes; `deletePolicy` decides who may delete
+rows:
+
+```ts
+const project = schema.entity('project', {
+	id: schema.text().key(),
+	name: schema.text(),
+}, { deletePolicy: 'trustedOnly' });
+```
+
+`'trustedOnly'` lowers to `delete_policy: DELETE_POLICY_TRUSTED_ONLY`, so a
+runtime-registered entity is protected exactly as a compiled one is — clients
+get a `permission_denied` rejection for a DELETE, and deletion is left to
+trusted server-side writes and custom mutators. See
+[Delete policy](../reference/proto-options.md#delete-policy).
+
 ## The same power from Go
 
 `server.DynamicField` (`Message`, `Ref`, `KeyField`/`OrderField`,

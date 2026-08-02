@@ -22,6 +22,71 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// DeletePolicy says which callers may DELETE rows of an entity. The engine
+// enforces it before the app's permission policy runs, on every path that
+// authorizes a write, so a schema states the rule once instead of every
+// deployment restating it in a hook where a missing branch fails open.
+//
+// It governs the DELETE primitive, not deletion as an outcome: a custom
+// mutator's rows are covered by the verdict on its invocation rather than
+// authorized one by one, so an app that wants a client-initiated delete of a
+// protected entity writes a mutator, puts the cascade handling and the checks
+// it needs in the body, and authorizes the invocation by name.
+type DeletePolicy int32
+
+const (
+	// Any caller the permission policy admits may delete.
+	DeletePolicy_DELETE_POLICY_UNSPECIFIED DeletePolicy = 0
+	// Same as unset, for schemas that prefer to say so.
+	DeletePolicy_DELETE_POLICY_ALLOW DeletePolicy = 1
+	// Only writes made under the engine's Trusted bypass may delete — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	DeletePolicy_DELETE_POLICY_TRUSTED_ONLY DeletePolicy = 2
+)
+
+// Enum value maps for DeletePolicy.
+var (
+	DeletePolicy_name = map[int32]string{
+		0: "DELETE_POLICY_UNSPECIFIED",
+		1: "DELETE_POLICY_ALLOW",
+		2: "DELETE_POLICY_TRUSTED_ONLY",
+	}
+	DeletePolicy_value = map[string]int32{
+		"DELETE_POLICY_UNSPECIFIED":  0,
+		"DELETE_POLICY_ALLOW":        1,
+		"DELETE_POLICY_TRUSTED_ONLY": 2,
+	}
+)
+
+func (x DeletePolicy) Enum() *DeletePolicy {
+	p := new(DeletePolicy)
+	*p = x
+	return p
+}
+
+func (x DeletePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (DeletePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_syncplane_v1_options_proto_enumTypes[0].Descriptor()
+}
+
+func (DeletePolicy) Type() protoreflect.EnumType {
+	return &file_syncplane_v1_options_proto_enumTypes[0]
+}
+
+func (x DeletePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use DeletePolicy.Descriptor instead.
+func (DeletePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{0}
+}
+
 // EntityOptions declares a message as a syncable entity.
 type EntityOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -41,7 +106,10 @@ type EntityOptions struct {
 	//
 	// The cost is on writes: every write to this entity re-encodes and
 	// re-stores the row's position in EVERY index declared here.
-	Index         []*IndexSpec `protobuf:"bytes,3,rep,name=index,proto3" json:"index,omitempty"`
+	Index []*IndexSpec `protobuf:"bytes,3,rep,name=index,proto3" json:"index,omitempty"`
+	// Who may DELETE rows of this entity. Unset allows anyone the app's
+	// permission policy admits, which is the behaviour of every other entity.
+	DeletePolicy  DeletePolicy `protobuf:"varint,4,opt,name=delete_policy,json=deletePolicy,proto3,enum=syncplane.v1.DeletePolicy" json:"delete_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -95,6 +163,13 @@ func (x *EntityOptions) GetIndex() []*IndexSpec {
 		return x.Index
 	}
 	return nil
+}
+
+func (x *EntityOptions) GetDeletePolicy() DeletePolicy {
+	if x != nil {
+		return x.DeletePolicy
+	}
+	return DeletePolicy_DELETE_POLICY_UNSPECIFIED
 }
 
 // IndexKey is one component of an index, in the order it sorts.
@@ -357,12 +432,13 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"q\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xb2\x01\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
 	"key_fields\x18\x02 \x03(\tR\tkeyFields\x12-\n" +
-	"\x05index\x18\x03 \x03(\v2\x17.syncplane.v1.IndexSpecR\x05index\"2\n" +
+	"\x05index\x18\x03 \x03(\v2\x17.syncplane.v1.IndexSpecR\x05index\x12?\n" +
+	"\rdelete_policy\x18\x04 \x01(\x0e2\x1a.syncplane.v1.DeletePolicyR\fdeletePolicy\"2\n" +
 	"\bIndexKey\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
@@ -375,7 +451,11 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\vorder_field\x18\x03 \x01(\tR\n" +
 	"orderField\x12\x12\n" +
 	"\x04text\x18\x04 \x01(\bR\x04text\x12\x18\n" +
-	"\aindexed\x18\x05 \x01(\bR\aindexed:V\n" +
+	"\aindexed\x18\x05 \x01(\bR\aindexed*f\n" +
+	"\fDeletePolicy\x12\x1d\n" +
+	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
+	"\x1aDELETE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
 	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
@@ -391,27 +471,30 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_options_proto_rawDescData
 }
 
+var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
 var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
 var file_syncplane_v1_options_proto_goTypes = []any{
-	(*EntityOptions)(nil),               // 0: syncplane.v1.EntityOptions
-	(*IndexKey)(nil),                    // 1: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 2: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 3: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 4: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 5: google.protobuf.FieldOptions
+	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
+	(*EntityOptions)(nil),               // 1: syncplane.v1.EntityOptions
+	(*IndexKey)(nil),                    // 2: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 3: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 4: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 5: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 6: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	2, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
-	1, // 1: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	4, // 2: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	5, // 3: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	0, // 4: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	3, // 5: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	4, // [4:6] is the sub-list for extension type_name
-	2, // [2:4] is the sub-list for extension extendee
-	0, // [0:2] is the sub-list for field type_name
+	3, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	0, // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
+	2, // 2: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	5, // 3: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	6, // 4: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	1, // 5: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	4, // 6: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	7, // [7:7] is the sub-list for method output_type
+	7, // [7:7] is the sub-list for method input_type
+	5, // [5:7] is the sub-list for extension type_name
+	3, // [3:5] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -424,13 +507,14 @@ func file_syncplane_v1_options_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
-			NumEnums:      0,
+			NumEnums:      1,
 			NumMessages:   4,
 			NumExtensions: 2,
 			NumServices:   0,
 		},
 		GoTypes:           file_syncplane_v1_options_proto_goTypes,
 		DependencyIndexes: file_syncplane_v1_options_proto_depIdxs,
+		EnumInfos:         file_syncplane_v1_options_proto_enumTypes,
 		MessageInfos:      file_syncplane_v1_options_proto_msgTypes,
 		ExtensionInfos:    file_syncplane_v1_options_proto_extTypes,
 	}.Build()

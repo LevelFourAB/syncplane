@@ -223,7 +223,7 @@ var _ = Describe("Server entity introspection", func() {
 		for _, e := range srv.Entities() {
 			names = append(names, e.Name)
 		}
-		Expect(names).To(Equal([]string{"issue", "pair", "project", "todo", "user", "widget"}))
+		Expect(names).To(Equal([]string{"issue", "ledger", "pair", "project", "todo", "user", "widget"}))
 
 		meta, ok := srv.Entity("issue")
 		Expect(ok).To(BeTrue())

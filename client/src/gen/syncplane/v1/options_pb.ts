@@ -2,8 +2,8 @@
 // @generated from file syncplane/v1/options.proto (package syncplane.v1, syntax proto3)
 /* eslint-disable */
 
-import type { GenExtension, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
-import { extDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
+import type { GenEnum, GenExtension, GenFile, GenMessage } from "@bufbuild/protobuf/codegenv2";
+import { enumDesc, extDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { FieldOptions, MessageOptions } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_descriptor } from "@bufbuild/protobuf/wkt";
 import type { Message } from "@bufbuild/protobuf";
@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIlkKDUVudGl0eU9wdGlvbnMSDAoEbmFtZRgBIAEoCRISCgprZXlfZmllbGRzGAIgAygJEiYKBWluZGV4GAMgAygLMhcuc3luY3BsYW5lLnYxLkluZGV4U3BlYyImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5ImYKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAg6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5OmMKDmZpZWxkX2JlaGF2aW9yEh0uZ29vZ2xlLnByb3RvYnVmLkZpZWxkT3B0aW9ucxi1hwMgASgLMhsuc3luY3BsYW5lLnYxLkZpZWxkQmVoYXZpb3JSDWZpZWxkQmVoYXZpb3JCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIowBCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSJmCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5OmMKDmZpZWxkX2JlaGF2aW9yEh0uZ29vZ2xlLnByb3RvYnVmLkZpZWxkT3B0aW9ucxi1hwMgASgLMhsuc3luY3BsYW5lLnYxLkZpZWxkQmVoYXZpb3JSDWZpZWxkQmVoYXZpb3JCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -51,6 +51,14 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: repeated syncplane.v1.IndexSpec index = 3;
    */
   index: IndexSpec[];
+
+  /**
+   * Who may DELETE rows of this entity. Unset allows anyone the app's
+   * permission policy admits, which is the behaviour of every other entity.
+   *
+   * @generated from field: syncplane.v1.DeletePolicy delete_policy = 4;
+   */
+  deletePolicy: DeletePolicy;
 };
 
 /**
@@ -195,6 +203,52 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 3);
+
+/**
+ * DeletePolicy says which callers may DELETE rows of an entity. The engine
+ * enforces it before the app's permission policy runs, on every path that
+ * authorizes a write, so a schema states the rule once instead of every
+ * deployment restating it in a hook where a missing branch fails open.
+ *
+ * It governs the DELETE primitive, not deletion as an outcome: a custom
+ * mutator's rows are covered by the verdict on its invocation rather than
+ * authorized one by one, so an app that wants a client-initiated delete of a
+ * protected entity writes a mutator, puts the cascade handling and the checks
+ * it needs in the body, and authorizes the invocation by name.
+ *
+ * @generated from enum syncplane.v1.DeletePolicy
+ */
+export enum DeletePolicy {
+  /**
+   * Any caller the permission policy admits may delete.
+   *
+   * @generated from enum value: DELETE_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Same as unset, for schemas that prefer to say so.
+   *
+   * @generated from enum value: DELETE_POLICY_ALLOW = 1;
+   */
+  ALLOW = 1,
+
+  /**
+   * Only writes made under the engine's Trusted bypass may delete — a
+   * connector, a migration, a cron job. Everything holding a caller to
+   * authorize is refused, including the in-process API, which is deliberately
+   * held to the same policy as a sync client.
+   *
+   * @generated from enum value: DELETE_POLICY_TRUSTED_ONLY = 2;
+   */
+  TRUSTED_ONLY = 2,
+}
+
+/**
+ * Describes the enum syncplane.v1.DeletePolicy.
+ */
+export const DeletePolicySchema: GenEnum<DeletePolicy> = /*@__PURE__*/
+  enumDesc(file_syncplane_v1_options, 0);
 
 /**
  * Field numbers 50100/50101 are unregistered; fine for internal use.

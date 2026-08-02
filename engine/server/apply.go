@@ -183,7 +183,7 @@ func (s *Server) apply(
 	// rejection here means nothing is applied — the writes were never opened.
 	if enforced {
 		for _, in := range atx.intents {
-			if err := s.perms.CanMutate(ctx, p, workspaceID, Write{Crud: in.crud()}); err != nil {
+			if err := s.authorizeWrite(ctx, p, workspaceID, Write{Crud: in.crud()}); err != nil {
 				return WriteOutcome{}, err
 			}
 		}

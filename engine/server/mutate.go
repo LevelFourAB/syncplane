@@ -157,7 +157,7 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 		}
 		custom.Args = packed
 	}
-	return s.perms.CanMutate(ctx, p, workspaceID, Write{Custom: custom})
+	return s.authorizeWrite(ctx, p, workspaceID, Write{Custom: custom})
 }
 
 // mutatorFor resolves a registered mutator and returns the args its body is to

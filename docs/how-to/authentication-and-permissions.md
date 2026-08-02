@@ -145,6 +145,19 @@ with what was authorized.
 `Invoke` authorizes once on the verb (`Write{Custom}`); the rows the mutator
 body writes are not authorized individually, exactly as on the push path.
 
+## Some rules belong in the schema, not the policy
+
+`(syncplane.v1.entity).delete_policy` says who may delete rows of an entity, and
+the engine enforces it before `CanMutate` runs, on every path that authorizes a
+write. `DELETE_POLICY_TRUSTED_ONLY` refuses the DELETE to every caller the
+server authorizes — sync clients and the in-process API alike — leaving it to
+trusted writes and to custom mutators.
+
+Prefer it over the equivalent branch in `CanMutate` for entities that should
+never be deleted by a client. It states the rule once, next to the entity it
+protects, rather than in each deployment's policy where a forgotten branch fails
+open. See [Delete policy](../reference/proto-options.md#delete-policy).
+
 ## What is not gated
 
 The change feed and the admin service do not authenticate and do not consult

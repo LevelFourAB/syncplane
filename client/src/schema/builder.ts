@@ -55,6 +55,7 @@ import {
 } from '@bufbuild/protobuf/wkt';
 
 import {
+	DeletePolicy,
 	entity as entityExt,
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
@@ -409,9 +410,22 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly fields: F;
 	/** Composite secondary indexes declared on the entity, in declaration order. */
 	readonly indexes: readonly IndexDecl[];
+	/** Who may delete rows of this entity; see {@link EntityOptions.deletePolicy}. */
+	readonly deletePolicy: DeletePolicyDecl;
 	/** @internal synthesized proto full name, e.g. "sync.dynamic.Todo". */
 	readonly typeName: string;
 }
+
+/**
+ * Who may DELETE rows of an entity, mirroring syncplane.v1.DeletePolicy.
+ *
+ * `'allow'` is the default and the behaviour of every other entity: anyone the
+ * app's permission policy admits may delete. `'trustedOnly'` refuses the DELETE
+ * primitive to every caller the server authorizes — sync clients and the
+ * in-process API alike — leaving deletion to trusted server-side writes and to
+ * custom mutators, whose rows are covered by the verdict on the invocation.
+ */
+export type DeletePolicyDecl = 'allow' | 'trustedOnly';
 
 /**
  * One composite secondary index, mirroring syncplane.v1.IndexSpec. Declare one
@@ -489,7 +503,13 @@ export function entity<F extends Fields>(
 
 	const indexes = options?.indexes ?? [];
 	assertIndexes(name, indexes);
-	return { name, fields, indexes, typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}` };
+	return {
+		name,
+		fields,
+		indexes,
+		deletePolicy: options?.deletePolicy ?? 'allow',
+		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
+	};
 }
 
 /** Optional per-entity settings, beyond the fields themselves. */
@@ -500,6 +520,16 @@ export interface EntityOptions {
 	 * surface and desugars to the same thing.
 	 */
 	indexes?: IndexDecl[];
+	/**
+	 * Who may delete rows of this entity. Defaults to `'allow'`.
+	 *
+	 * `'trustedOnly'` takes DELETE away from clients entirely, which is worth
+	 * doing for the rows a cascade hangs off: it removes the only irreversible
+	 * verb the wire has, rather than making its damage recoverable after the
+	 * fact. Deletion stays reachable through a custom mutator, where the app
+	 * can put the cascade handling and checks it wants.
+	 */
+	deletePolicy?: DeletePolicyDecl;
 }
 
 /**
@@ -668,6 +698,9 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 		create(EntityOptionsSchema, {
 			name: e.name,
 			keyFields: keyFieldNames,
+			deletePolicy: e.deletePolicy === 'trustedOnly'
+				? DeletePolicy.TRUSTED_ONLY
+				: DeletePolicy.ALLOW,
 			// Paths are written in accessor names and lowered to proto names
 			// here, which is the same translation a query path takes on the way
 			// to the wire — so an index and a query naming one field agree.
