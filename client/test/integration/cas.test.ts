@@ -98,4 +98,52 @@ describe('expected-version CAS', () => {
 		await a.close();
 		await b.close();
 	});
+
+	it('folds a guarded burst enqueued in one cycle into a single guarded mutation', async () => {
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await a.mutate.put(TodoSchema, { id: 't1', title: '' });
+		await a.syncNow();
+
+		// Every edit in the burst names the same base: only a pull moves the
+		// confirmed version, and none can run between these enqueues. Unfolded,
+		// the first to reach the server would bump the row past the guard and
+		// every later one would conflict with its own predecessor.
+		const base = (await a.getRow(TodoSchema, 't1'))!.version;
+		await Promise.all(
+			[ 'f', 'fi', 'fix' ].map((title) =>
+				a.mutate.patch(TodoSchema, 't1', { title }, { expectedVersion: base })
+			),
+		);
+		await a.syncNow();
+		await a.syncNow();
+
+		expect(rejections).toEqual([]);
+		expect(await a.pendingCount()).toBe(0);
+		expect((await a.get(TodoSchema, 't1'))?.title).toBe('fix');
+
+		// The fold keeps the guard rather than dropping it: a foreign write still
+		// defeats the whole burst, as one rejection covering one mutation.
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		await b.mutate.patch(TodoSchema, 't1', { completed: true });
+		await b.syncNow();
+
+		const stale = (await a.getRow(TodoSchema, 't1'))!.version;
+		await Promise.all(
+			[ 'x', 'xy' ].map((title) =>
+				a.mutate.patch(TodoSchema, 't1', { title }, { expectedVersion: stale })
+			),
+		);
+		await a.syncNow();
+		expect(rejections).toHaveLength(1);
+		expect(rejections[0]?.errorCode).toBe(CodeConflict);
+		expect((await a.get(TodoSchema, 't1'))?.title).toBe('fix');
+
+		await a.close();
+		await b.close();
+	});
 });

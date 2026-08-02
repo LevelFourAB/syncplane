@@ -283,15 +283,69 @@ describe('planCompaction', () => {
 		expect(ids(plan.mutations)).toEqual([ 1n, 2n, 3n ]);
 	});
 
-	it('treats a compare-and-swap guard as a barrier', () => {
+	it('folds same-key mutations that carry the SAME compare-and-swap guard', async () => {
+		// The typing case: every edit is cut against the same confirmed version,
+		// because only a pull can move it. Unfolded, the second would reach the
+		// server after the first had already bumped the row past the guard.
 		const original = [
-			patch(1n, 't1', { title: 'a' }, [ 'title' ]),
-			patch(2n, 't1', { completed: true }, [ 'completed' ], 5n), // expectedVersion set
-			patch(3n, 't1', { title: 'c' }, [ 'title' ]),
+			patch(1n, 't1', { title: 'a' }, [ 'title' ], 5n),
+			patch(2n, 't1', { completed: true }, [ 'completed' ], 5n),
+			patch(3n, 't1', { title: 'c' }, [ 'title' ], 5n),
+		];
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+		expect(plan.mutations).toHaveLength(1);
+		const folded = plan.mutations[0]!.payload.value as CrudMutation;
+		expect(folded.expectedVersion).toBe(5n);
+		expect(folded.fieldMask?.paths.sort()).toEqual([ 'completed', 'title' ]);
+		await expectSameOverlay(registry, original, plan.mutations);
+	});
+
+	it('keeps same-key mutations with DIFFERENT guards separate', () => {
+		// Distinct guards are distinct intents — the caller learned a new version
+		// between the two — and only one of them can be the folded slot's.
+		const original = [
+			patch(1n, 't1', { title: 'a' }, [ 'title' ], 5n),
+			patch(2n, 't1', { completed: true }, [ 'completed' ], 6n),
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		expect(plan.changed).toBe(false);
-		expect(ids(plan.mutations)).toEqual([ 1n, 2n, 3n ]);
+		expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+	});
+
+	it('keeps a guarded and an unguarded mutation on one key separate', () => {
+		// Folding either way rewrites what the caller asked for: onto the guard,
+		// and the unguarded write gains a rejection it never had; off it, and an
+		// explicit guard is silently dropped.
+		const guardedFirst = [
+			patch(1n, 't1', { title: 'a' }, [ 'title' ], 5n),
+			patch(2n, 't1', { completed: true }, [ 'completed' ]),
+		];
+		expect(planCompaction(registry, guardedFirst, 0n, NO_PROTECTED).changed).toBe(false);
+
+		const unguardedFirst = [
+			patch(1n, 't1', { title: 'a' }, [ 'title' ]),
+			patch(2n, 't1', { completed: true }, [ 'completed' ], 5n),
+		];
+		expect(planCompaction(registry, unguardedFirst, 0n, NO_PROTECTED).changed).toBe(false);
+	});
+
+	it('carries the guard through a fold that changes op', async () => {
+		const original = [
+			put(1n, { id: 't1', title: 'x' }, 5n),
+			patch(2n, 't1', { title: 'y' }, [ 'title' ], 5n),
+		];
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+		expect(plan.mutations).toHaveLength(1);
+		expect((plan.mutations[0]!.payload.value as CrudMutation).expectedVersion).toBe(5n);
+		await expectSameOverlay(registry, original, plan.mutations);
+
+		const toDelete = [
+			patch(1n, 't1', { title: 'x' }, [ 'title' ], 5n),
+			del(2n, 't1', 5n),
+		];
+		const deletePlan = planCompaction(registry, toDelete, 0n, NO_PROTECTED);
+		expect(deletePlan.mutations).toHaveLength(1);
+		expect((deletePlan.mutations[0]!.payload.value as CrudMutation).expectedVersion).toBe(5n);
 	});
 
 	it('treats undo-referenced mutations as barriers (but still renumbers them)', () => {

@@ -39,9 +39,19 @@ import { enqueuePending, readPending } from './queue.js';
  *  - The server requires per-client mutation ids to arrive gap-free, so the
  *    surviving tail is RENUMBERED contiguously from pushedThrough+1. Undo
  *    bookkeeping references ids, so a remap of old→new id is returned.
- *  - custom/batch mutations, compare-and-swap (expected_version) guards, and
- *    mutations an undo/redo entry still references act as barriers: they are
- *    never merged away, so undo stays exact (its ids are merely remapped).
+ *  - custom/batch mutations and mutations an undo/redo entry still references
+ *    act as barriers: they are never merged away, so undo stays exact (its ids
+ *    are merely remapped).
+ *  - Successive ops on one key fold only when their compare-and-swap guards
+ *    AGREE — both absent, or both naming the same version, in which case the
+ *    folded slot keeps that guard. Folding across disagreeing guards would
+ *    rewrite what the caller asked for: onto a guard, and an unguarded write
+ *    gains a rejection it never had; off one, and an explicit guard is silently
+ *    dropped. Equal guards are the case that matters, because only a pull moves
+ *    the confirmed version a caller reads — so a burst of edits between two
+ *    pulls all name the same one. Folding them is what keeps the second from
+ *    reaching the server after the first has already pushed the row past the
+ *    guard, which is a conflict the client raised against nobody but itself.
  */
 export interface CompactionPlan {
 	/** New queue in id order: the untouched pushed prefix + renumbered tail. */
@@ -56,7 +66,7 @@ export interface CompactionPlan {
 interface Slot {
 	/** The folded CRUD when this slot can still absorb ops; undefined for a barrier. */
 	crud?: CrudMutation;
-	/** A passthrough mutation (custom/batch/guarded CRUD) reused verbatim. */
+	/** A passthrough mutation (custom/batch/undo-referenced) reused verbatim. */
 	passthrough?: Mutation;
 	clientId: string;
 	/** Old ids folded into this slot (all remap to the slot's new id). */
@@ -93,16 +103,21 @@ export function planCompaction(
 		const crud = m.payload.value;
 		const def = registry.get(crud.entity);
 		const keyStr = `${crud.entity}\u0000${crud.key}`;
-		// A compare-and-swap guard, an undo-referenced edit, or an unknown entity
-		// is a single-key barrier: kept distinct so its semantics (and any undo
-		// inverse computed against it) survive untouched.
-		if (crud.expectedVersion !== undefined || protectedIds.has(m.mutationId) || !def) {
+		// An undo-referenced edit or an unknown entity is a single-key barrier:
+		// kept distinct so its semantics (and any undo inverse computed against
+		// it) survive untouched.
+		if (protectedIds.has(m.mutationId) || !def) {
 			openByKey.delete(keyStr);
 			slots.push({ passthrough: m, clientId: m.clientId, sources: [ m.mutationId ] });
 			continue;
 		}
 		const open = openByKey.get(keyStr);
-		const folded = open?.crud ? foldCrud(registry, def, open.crud, crud) : undefined;
+		// Guards must agree to fold; see the safety rails above. Disagreement is
+		// not a barrier, though — the incoming op opens a fresh slot that later
+		// ops sharing ITS guard can still extend.
+		const foldable = open?.crud !== undefined
+			&& open.crud.expectedVersion === crud.expectedVersion;
+		const folded = foldable ? foldCrud(registry, def, open!.crud!, crud) : undefined;
 		if (open?.crud && folded && folded !== 'barrier') {
 			open.crud = folded;
 			open.sources.push(m.mutationId);
@@ -143,6 +158,11 @@ export function planCompaction(
  * "barrier" when the two must stay separate (the caller then opens a fresh
  * slot). Mirrors the server's apply order so the merged result yields the same
  * row state — and the same optimistic overlay — as applying both in sequence.
+ *
+ * The caller only folds ops whose compare-and-swap guards are equal, so the
+ * result carries `base.expectedVersion` and that is `incoming`'s too: one
+ * guarded mutation replaces a chain that named the same version throughout, and
+ * it applies or rejects as a unit.
  */
 function foldCrud(
 	registry: EntityRegistry,
@@ -161,6 +181,7 @@ function foldCrud(
 				entity: incoming.entity,
 				key: incoming.key,
 				op: CrudOp.DELETE,
+				expectedVersion: base.expectedVersion,
 			});
 		case CrudOp.PATCH: {
 			if (base.op === CrudOp.DELETE) {
@@ -183,6 +204,7 @@ function foldCrud(
 					key: base.key,
 					op: CrudOp.PUT,
 					value: toBinary(def.schema, merged),
+					expectedVersion: base.expectedVersion,
 				});
 			}
 			// base.op === PATCH. Chaining two patches through a merger needs the
@@ -204,6 +226,7 @@ function foldCrud(
 				op: CrudOp.PATCH,
 				value: toBinary(def.schema, merged),
 				fieldMask: { paths: unionPaths(base.fieldMask?.paths ?? [], incoming.fieldMask?.paths ?? []) },
+				expectedVersion: base.expectedVersion,
 			});
 		}
 		default:
