@@ -2,13 +2,13 @@ package server
 
 import (
 	"context"
-	"fmt"
 	"log/slog"
 
 	"connectrpc.com/connect"
 
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -51,8 +51,8 @@ import (
 // actually shipped.
 func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1.BootstrapRequest], stream *connect.ServerStream[syncplanev1.BootstrapResponse]) error {
 	msg := req.Msg
-	if msg.GetWorkspaceId() == "" {
-		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("workspace_id is required"))
+	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
 	if err != nil {

@@ -7,10 +7,12 @@ import { buildDelete, buildPut, entityDefOf } from '../../src/mutations.js';
 import {
 	MAX_ENTITY_NAME_LENGTH,
 	MAX_ROW_KEY_BYTES,
+	MAX_WORKSPACE_ID_BYTES,
 	rowKey,
 	validateEntityName,
 	validateKeyField,
 	validateRowKey,
+	validateWorkspaceId,
 } from '../../src/naming.js';
 import { bytes, double, entity, text } from '../../src/schema/builder.js';
 
@@ -43,6 +45,61 @@ describe('validateEntityName', () => {
 	it('caps the length', () => {
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH))).not.toThrow();
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH + 1)))
+			.toThrow(/the limit is/);
+	});
+});
+
+describe('validateWorkspaceId', () => {
+	it('accepts the id shapes apps actually use', () => {
+		for (
+			const id of [
+				'w1',
+				'acme',
+				'acme-corp',
+				'team_1',
+				'user:xB12dL',
+				'org:acme:team:eng',
+				'550e8400-e29b-41d4-a716-446655440000',
+				'01ARZ3NDEKTSV4RRFFQ69G5FAV',
+				'42',
+			]
+		) {
+			expect(() => validateWorkspaceId(id)).not.toThrow();
+		}
+	});
+
+	it('rejects an empty id', () => {
+		expect(() => validateWorkspaceId('')).toThrow(/empty/);
+	});
+
+	// Each of these corrupts one consumer that parses the id back out; see the
+	// doc comment on WORKSPACE_ID for which.
+	it('rejects the characters its consumers cannot round-trip', () => {
+		for (
+			const id of [
+				'a\u001fb', // shifts the fields of a cross-tab change token
+				'*', // the "every workspace" scan sentinel
+				'a/b', // forges a segment in the KV key layout
+				'..', // a path traversal in the admin UI's URLs
+				'a.b',
+				'a b',
+				'a\u0000b',
+				'åäö',
+			]
+		) {
+			expect(() => validateWorkspaceId(id), id).toThrow(/is not valid/);
+		}
+	});
+
+	it('rejects punctuation in the first position', () => {
+		for (const id of [ '-a', '_a', ':a' ]) {
+			expect(() => validateWorkspaceId(id), id).toThrow(/starting with a letter or digit/);
+		}
+	});
+
+	it('caps the length', () => {
+		expect(() => validateWorkspaceId('a'.repeat(MAX_WORKSPACE_ID_BYTES))).not.toThrow();
+		expect(() => validateWorkspaceId('a'.repeat(MAX_WORKSPACE_ID_BYTES + 1)))
 			.toThrow(/the limit is/);
 	});
 });

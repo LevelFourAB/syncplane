@@ -273,23 +273,25 @@ describe('multi-workspace client', () => {
 		await client.close();
 	});
 
-	it('keeps workspace ids containing slashes in their own partition', async () => {
+	// `:` is legal in a workspace id but is percent-encoded by wsSegment, so this
+	// covers a key segment that is not the id verbatim.
+	it('keeps namespaced workspace ids in their own partition', async () => {
 		const client = new SyncClient({
 			accountId: 'acct',
-			workspaces: [ 'org/one', 'org/two' ],
-			defaultWorkspace: 'org/one',
+			workspaces: [ 'org:one', 'org:two' ],
+			defaultWorkspace: 'org:one',
 			kvStore: new MemoryKVStore(),
 			entities: [ TodoSchema ],
 			streamEnabled: false,
 			pollIntervalMs: 0,
 		});
-		await client.ws('org/one').mutate.put(TodoSchema, { id: 't1', title: 'one' });
-		await client.ws('org/two').mutate.put(TodoSchema, { id: 't1', title: 'two' });
-		expect((await client.ws('org/one').get(TodoSchema, 't1'))?.title).toBe('one');
-		expect((await client.ws('org/two').get(TodoSchema, 't1'))?.title).toBe('two');
+		await client.ws('org:one').mutate.put(TodoSchema, { id: 't1', title: 'one' });
+		await client.ws('org:two').mutate.put(TodoSchema, { id: 't1', title: 'two' });
+		expect((await client.ws('org:one').get(TodoSchema, 't1'))?.title).toBe('one');
+		expect((await client.ws('org:two').get(TodoSchema, 't1'))?.title).toBe('two');
 		// A row key may itself contain slashes; it is always the last segment.
-		await client.ws('org/one').mutate.put(TodoSchema, { id: 'a/b', title: 'nested' });
-		expect((await client.ws('org/one').get(TodoSchema, 'a/b'))?.title).toBe('nested');
+		await client.ws('org:one').mutate.put(TodoSchema, { id: 'a/b', title: 'nested' });
+		expect((await client.ws('org:one').get(TodoSchema, 'a/b'))?.title).toBe('nested');
 		await client.close();
 	});
 });

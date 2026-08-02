@@ -547,7 +547,11 @@ function suffixOf(watcher: Watcher, workspaceId: string, key: string): string {
 
 /**
  * Identity of a scan a watcher needs: its entity plus its workspace scope
- * (`*` for the cross-workspace scan). Two watchers sharing this share a scan.
+ * (`*` for the cross-workspace scan). Two watchers sharing this share a scan —
+ * which is why `*` is not a legal workspace id (see naming.ts): a workspace
+ * named `*` would collide with the cross-workspace scope of the same entity,
+ * and whichever watcher was sampled first would decide the scan both are then
+ * served from.
  */
 function scanScope(watcher: Watcher): string {
 	return `${watcher.entity}\u001f${watcher.workspaceId ?? '*'}`;

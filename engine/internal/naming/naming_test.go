@@ -49,6 +49,51 @@ var _ = Describe("ValidateEntityName", func() {
 	})
 })
 
+var _ = Describe("ValidateWorkspaceID", func() {
+	It("accepts the id shapes apps actually use", func() {
+		for _, id := range []string{
+			"w1", "acme", "acme-corp", "team_1", "user:xB12dL", "org:acme:team:eng",
+			"550e8400-e29b-41d4-a716-446655440000", "01ARZ3NDEKTSV4RRFFQ69G5FAV", "42",
+		} {
+			Expect(naming.ValidateWorkspaceID(id)).To(Succeed(), id)
+		}
+	})
+
+	It("rejects an empty id", func() {
+		Expect(naming.ValidateWorkspaceID("")).To(MatchError(ContainSubstring("empty")))
+	})
+
+	// Each of these corrupts one consumer that parses the id back out; see the
+	// doc comment on ValidateWorkspaceID for which.
+	It("rejects the characters its consumers cannot round-trip", func() {
+		for _, id := range []string{
+			"a\x1fb", // shifts the fields of a cross-tab change token
+			"*",      // the client's "every workspace" scan sentinel
+			"a/b",    // forges a segment in the KV key layout
+			"..",     // a path traversal in the admin UI's URLs
+			"a.b",
+			"a b",
+			"a\x00b",
+			"åäö",
+		} {
+			Expect(naming.ValidateWorkspaceID(id)).To(MatchError(ContainSubstring("is not valid")), id)
+		}
+	})
+
+	It("rejects punctuation in the first position", func() {
+		for _, id := range []string{"-a", "_a", ":a"} {
+			Expect(naming.ValidateWorkspaceID(id)).
+				To(MatchError(ContainSubstring("starting with a letter or digit")), id)
+		}
+	})
+
+	It("caps the length", func() {
+		Expect(naming.ValidateWorkspaceID(strings.Repeat("a", naming.MaxWorkspaceIDBytes))).To(Succeed())
+		Expect(naming.ValidateWorkspaceID(strings.Repeat("a", naming.MaxWorkspaceIDBytes+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
 var _ = Describe("ValidateKeyFieldKind", func() {
 	It("accepts strings, integers and bools", func() {
 		for _, f := range []string{"id", "count", "big", "flag"} {

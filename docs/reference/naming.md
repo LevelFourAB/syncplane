@@ -1,10 +1,10 @@
 # Naming rules
 
-Entity names and row keys are part of the wire contract: they travel in
-mutations, address rows in server storage, and are pasted into the client's
-local key layout. Both implementations enforce the same rules — Go in
-`engine/internal/naming`, TypeScript in `client/src/naming.ts` — so a write the
-server would refuse never lands in the local store first.
+Entity names, workspace ids and row keys are part of the wire contract: they
+travel in mutations, scope every RPC, address rows in server storage, and are
+pasted into the client's local key layout. Both implementations enforce the same
+rules — Go in `engine/internal/naming`, TypeScript in `client/src/naming.ts` —
+so a write the server would refuse never lands in the local store first.
 
 ## Entity names
 
@@ -77,7 +77,42 @@ written as one code point and as `e` plus a combining accent are different rows.
 
 ## Workspace ids
 
-Workspace ids are **not** covered by these rules: they are app-supplied strings
-that may contain anything, and the client percent-encodes them where they appear
-as a key segment. They are a hard partition key everywhere — see
-[the convergence model](../explanation/convergence-model.md).
+`workspace_id` is a hard partition key everywhere — see
+[the convergence model](../explanation/convergence-model.md). Apps mint it
+themselves, but it is not free-form:
+
+| Rule                                                                                          |
+| --------------------------------------------------------------------------------------------- |
+| Non-empty                                                                                     |
+| ASCII letter or digit, then letters, digits, `_`, `-` or `:` (`^[A-Za-z0-9][A-Za-z0-9_:-]*$`) |
+| At most 128 bytes                                                                             |
+
+So `acme`, `acme-corp`, `user:xB12dL`, `org:acme:team:eng` and a bare UUID all
+work; a space, `.`, `/` or `*` does not. An app whose natural id does not fit —
+an email address, a domain — slugifies or hashes it into one.
+
+Checked on the client when a workspace is opened (`new SyncClient({ workspaces })`,
+`addWorkspace`) and on the server at the RPC boundary, where a violation is
+`invalid_argument` for the whole request rather than a per-workspace result: the
+id names no partition to report against.
+
+The set is an allowlist because the id is pasted into places that later parse it
+back out, and each excluded character breaks one of them:
+
+- `U+001F` separates the fields of the client's cross-tab change tokens, and the
+  workspace is the first field — an id holding one shifts every later field and
+  the notification wakes the wrong watchers.
+- `*` is the sentinel the client's watch layer uses for "every workspace", so a
+  workspace named `*` would share a scan with the cross-workspace watchers of
+  the same entity.
+- `/` forges an extra segment in the client's `c/<entity>/<ws>/<key>` layout.
+- `.` reaches the admin UI as a URL path segment, where an id of `..` reads as a
+  path traversal.
+
+Restricting the first character keeps an id from being pure punctuation. Like
+row keys, ids compare bytewise: no case folding and no normalization, so `Acme`
+and `acme` are two different workspaces.
+
+The in-process server API (`Mutate`, and the connector and effect paths that
+reach it) does not enforce this — those ids come from application code, at the
+same trust level as the schema it registers.

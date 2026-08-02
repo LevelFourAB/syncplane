@@ -1,18 +1,20 @@
 /**
- * The naming rules of the sync engine: what an entity may be called, which
- * fields may form a row key, how their values render into one, and what the
- * resulting key may contain.
+ * The naming rules of the sync engine: what an entity may be called, what a
+ * workspace may be identified by, which fields may form a row key, how their
+ * values render into one, and what the resulting key may contain.
  *
  * The rules are a wire contract, not an implementation detail. Entity names and
- * row keys travel in CrudMutation, address rows in server storage, and are
- * pasted into this client's KV key layout (`c/<entity>/<ws>/<key>` and friends,
- * see keys.ts) and its cross-tab change tokens. Both implementations therefore
- * have to agree character for character: the Go mirror is
- * engine/internal/naming, and docs/reference/naming.md states the rules once for
- * both. A change here is a change to all three.
+ * row keys travel in CrudMutation, workspace ids scope every RPC, all three
+ * address rows in server storage, and all three are pasted into this client's
+ * KV key layout (`c/<entity>/<ws>/<key>` and friends, see keys.ts) and its
+ * cross-tab change tokens. Both implementations therefore have to agree
+ * character for character: the Go mirror is engine/internal/naming, and
+ * docs/reference/naming.md states the rules once for both. A change here is a
+ * change to all three.
  *
  * Validation runs where a mistake is still cheap to explain — registration for
- * names and key fields, mutation-build time for row keys — because the failure
+ * names and key fields, mutation-build time for row keys, the moment a
+ * workspace is opened for its id — because the failure
  * modes it prevents are otherwise silent. An unset key field derives the empty
  * key, whose KV key is the entity's own prefix, so the row round-trips locally
  * and is only refused once it reaches the server; a slash in an entity name
@@ -37,6 +39,57 @@ export const MAX_ENTITY_NAME_LENGTH = 64;
  * only works while both sides hold the same number.
  */
 export const MAX_ROW_KEY_BYTES = 512;
+
+/**
+ * Caps a workspace id. The id is the partition key, so it repeats in every KV
+ * key segment, every server storage row and every notification payload. 128
+ * holds a UUID or a namespaced id like `org:acme:team:eng` with room to spare,
+ * while staying far below the 8000-byte ceiling on a Postgres NOTIFY payload —
+ * past which the server drops the notification instead of waking this
+ * workspace's clients. Characters equal bytes here: the rule below admits only
+ * ASCII.
+ */
+export const MAX_WORKSPACE_ID_BYTES = 128;
+
+/**
+ * A workspace id must start with an ASCII letter or digit and continue with
+ * letters, digits, `_`, `-` or `:`.
+ *
+ * The set is an allowlist rather than a ban on the characters known to hurt,
+ * because the id is pasted into places that later parse it back out and each
+ * exclusion answers one of them. `\u001f` separates the fields of the cross-tab
+ * change tokens and the workspace is the FIRST field, so an id holding one
+ * shifts every field after it and the notification wakes the wrong watchers
+ * (see parseTouchKey in keys.ts). `*` is the sentinel the watch layer uses for
+ * "every workspace", so a workspace named `*` shares a scan with the
+ * cross-workspace watchers of the same entity and one of the two is served the
+ * other's rows (see scanScope in watch.ts). `/` forges an extra segment in the
+ * `c/<entity>/<ws>/<key>` layout. `.` would be harmless there, but reaches the
+ * server's admin UI as a URL path segment, where an id of `..` reads as a path
+ * traversal.
+ *
+ * Restricting the first character keeps an id from being pure punctuation:
+ * `-x` reads as a flag in a shell or a log line, and `.`/`..` cannot be spelled
+ * at all. Comparison is bytewise, with no case folding and no normalization, so
+ * `Acme` and `acme` are two workspaces — the same rule row keys follow.
+ */
+const WORKSPACE_ID = /^[A-Za-z0-9][A-Za-z0-9_:-]*$/;
+
+/** Throws unless `id` satisfies the workspace-id rule. */
+export function validateWorkspaceId(id: string): void {
+	if (id === '') throw new Error('workspace id is empty');
+	if (id.length > MAX_WORKSPACE_ID_BYTES) {
+		throw new Error(
+			`workspace id "${id}" is ${id.length} bytes, the limit is ${MAX_WORKSPACE_ID_BYTES}`,
+		);
+	}
+	if (!WORKSPACE_ID.test(id)) {
+		throw new Error(
+			`workspace id "${id}" is not valid: use letters, digits, "_", "-" and ":", `
+				+ 'starting with a letter or digit',
+		);
+	}
+}
 
 /**
  * An entity's wire name — (syncplane.v1.entity).name, and CrudMutation.entity —

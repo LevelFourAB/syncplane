@@ -426,10 +426,16 @@ export function workspaceOfPendingKey(key: string): string {
 }
 
 /**
- * Separator inside a touch token. A unit separator cannot occur in a workspace
- * id or an entity name that came off the wire as a proto string, so splitting
- * on the first two occurrences is unambiguous — and everything after the second
- * is a row key verbatim, which may itself contain anything at all.
+ * Separator inside a touch token. Splitting on the first two occurrences is
+ * unambiguous because neither of the two fields before them can contain one:
+ * the workspace id and the entity name are both validated identifiers (see
+ * naming.ts). Everything after the second separator is a row key verbatim,
+ * which may itself contain anything printable.
+ *
+ * The workspace id is the FIRST field, so this rests on its rule specifically —
+ * an id holding a unit separator would shift every field after it and
+ * parseTouchKey would hand back a different (workspace, entity, key) triple
+ * than the one touchKey was given, waking the wrong watchers.
  */
 const TOUCH_SEP = '\u001f';
 

@@ -92,6 +92,43 @@ var _ = Describe("Naming rules", func() {
 		})
 	})
 
+	// A workspace id is a property of the REQUEST, not of one mutation, so a bad
+	// one fails the RPC rather than becoming a per-workspace result: there is no
+	// partition to report it against.
+	Describe("on the workspace id", func() {
+		var srv *server.Server
+		ctx := context.Background()
+
+		BeforeEach(func() { srv = newTestServer() })
+
+		It("rejects a push batch scoped to an unusable workspace", func() {
+			// U+001F is the separator in the client's cross-tab change tokens and
+			// the workspace is the first field, so an id holding one misroutes
+			// every notification derived from it.
+			_, err := srv.Push(ctx, connect.NewRequest(pushOf("ws\x1fa", nil)))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			Expect(err).To(MatchError(ContainSubstring("is not valid")))
+		})
+
+		It("rejects a pull of an unusable workspace", func() {
+			// `*` is the client's "every workspace" scan sentinel.
+			_, err := srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: "*"}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			Expect(err).To(MatchError(ContainSubstring("is not valid")))
+		})
+
+		It("still rejects a missing workspace id", func() {
+			_, err := srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{}))
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			Expect(err).To(MatchError(ContainSubstring("empty")))
+		})
+
+		It("accepts the namespaced ids apps use", func() {
+			_, err := srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: "user:xB12dL"}))
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	Describe("on a trusted write", func() {
 		It("rejects a key a mutator derived or supplied", func() {
 			srv := newTestServer(server.WithMutator("bad_key", &todov1.Todo{},

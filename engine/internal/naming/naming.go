@@ -1,18 +1,20 @@
 // Package naming holds the naming rules of the sync engine: what an entity may
-// be called, which fields may form a row key, how their values render into one,
-// and what the resulting key may contain.
+// be called, what a workspace may be identified by, which fields may form a row
+// key, how their values render into one, and what the resulting key may
+// contain.
 //
 // The rules are a wire contract, not an implementation detail. Entity names and
-// row keys travel in CrudMutation, address rows in storage, and are pasted into
-// the client's KV key layout (`c/<entity>/<ws>/<key>` and friends) and its
-// cross-tab change tokens. Both implementations therefore have to agree
-// character for character: the TS mirror is client/src/naming.ts, and
-// docs/reference/naming.md states the rules once for both. A change here is a
-// change to all three.
+// row keys travel in CrudMutation, workspace ids scope every RPC, all three
+// address rows in storage, and all three are pasted into the client's KV key
+// layout (`c/<entity>/<ws>/<key>` and friends) and its cross-tab change tokens.
+// Both implementations therefore have to agree character for character: the TS
+// mirror is client/src/naming.ts, and docs/reference/naming.md states the rules
+// once for both. A change here is a change to all three.
 //
 // Validation runs where a mistake is still cheap to explain — registration for
-// names and key fields, mutate time for row keys — because the failure modes it
-// prevents are otherwise silent. An unset key field derives the empty key,
+// names and key fields, mutate time for row keys, the RPC boundary for
+// workspace ids — because the failure modes it prevents are otherwise silent.
+// An unset key field derives the empty key,
 // which is the entity prefix itself; a slash in an entity name forges an extra
 // key segment, so entity `a` row `b/x` and entity `a/b` row `x` land on one KV
 // key; a control character collides with the change-token separator. None of
@@ -38,6 +40,13 @@ const (
 	// limit: the client derives keys locally and must be able to reject one
 	// without asking, which only works while both sides hold the same number.
 	MaxRowKeyBytes = 512
+	// MaxWorkspaceIDBytes caps a workspace id. The id is the partition key, so
+	// it repeats in every KV key segment, every storage row and every
+	// notification payload. 128 holds a UUID or a namespaced id like
+	// `org:acme:team:eng` with room to spare, while staying far below the
+	// 8000-byte ceiling on a Postgres NOTIFY payload — past which pgnotify drops
+	// the notification instead of waking the workspace's clients.
+	MaxWorkspaceIDBytes = 128
 )
 
 // ValidateEntityName checks an entity's wire name — (syncplane.v1.entity).name,
@@ -66,6 +75,57 @@ func ValidateEntityName(name string) error {
 			return fmt.Errorf(
 				"entity name %q is not an identifier: use letters, digits and underscores, starting with a letter or underscore",
 				name)
+		}
+	}
+	return nil
+}
+
+// ValidateWorkspaceID checks the workspace id every workspace-scoped RPC
+// carries. It must start with an ASCII letter or digit and continue with
+// letters, digits, `_`, `-` or `:`, at most MaxWorkspaceIDBytes of them.
+//
+// The set is an allowlist rather than a ban on the characters known to hurt,
+// because the id is pasted into places that later parse it back out and each
+// exclusion answers one of them. U+001F separates the fields of the client's
+// cross-tab change tokens and the workspace is the FIRST field, so an id
+// holding one shifts every field after it and the notification wakes the wrong
+// watchers (client/src/keys.ts parseTouchKey). `*` is the sentinel the client's
+// watch layer uses for "every workspace", so a workspace named `*` shares a
+// scan with the cross-workspace watchers of the same entity and one of the two
+// is served the other's rows (client/src/watch.ts scanScope). `/` forges an
+// extra segment in the `c/<entity>/<ws>/<key>` layout. `.` would be harmless
+// there, but reaches the admin UI unescaped by url.PathEscape, where an id of
+// `..` reads as a path traversal.
+//
+// Restricting the first character keeps an id from being pure punctuation: `-x`
+// reads as a flag in a shell or a log line, and `.`/`..` cannot be spelled at
+// all. Comparison is bytewise, with no case folding and no normalization, so
+// `Acme` and `acme` are two workspaces — the same rule row keys follow.
+//
+// Widening this set later is safe; narrowing it is not, because the id is the
+// partition key and stored data cannot be renamed into a new rule. An app whose
+// ids do not fit — an email address, a domain — slugifies or hashes them into
+// one.
+//
+// The in-process API (server.Mutate and the connect/effects paths that reach
+// it) does not run this: those ids come from application code, at the same
+// trust level as the schema it registers.
+func ValidateWorkspaceID(id string) error {
+	if id == "" {
+		return fmt.Errorf("workspace id is empty")
+	}
+	if len(id) > MaxWorkspaceIDBytes {
+		return fmt.Errorf("workspace id %q is %d bytes, the limit is %d", id, len(id), MaxWorkspaceIDBytes)
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case (c == '_' || c == '-' || c == ':') && i > 0:
+		default:
+			return fmt.Errorf(
+				"workspace id %q is not valid: use letters, digits, `_`, `-` and `:`, starting with a letter or digit",
+				id)
 		}
 	}
 	return nil

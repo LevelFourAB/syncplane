@@ -11,6 +11,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -22,8 +23,8 @@ import (
 // UTF-16 code-unit order — exactly the client evaluator's compareRows).
 func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.QueryRequest]) (*connect.Response[syncplanev1.QueryResponse], error) {
 	msg := req.Msg
-	if msg.GetWorkspaceId() == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("workspace_id is required"))
+	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	if _, err := s.enterWorkspace(ctx, msg.GetWorkspaceId()); err != nil {
 		return nil, err

@@ -17,6 +17,7 @@ import (
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/lww"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/internal/telemetry"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -393,8 +394,8 @@ func (s *Server) validatePush(batches []*syncplanev1.WorkspaceBatch) error {
 	total := 0
 	seen := make(map[string]struct{}, len(batches))
 	for _, b := range batches {
-		if b.GetWorkspaceId() == "" {
-			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("batch is missing workspace_id"))
+		if err := naming.ValidateWorkspaceID(b.GetWorkspaceId()); err != nil {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("batch: %w", err))
 		}
 		// Two batches for one workspace would race each other's watermarks and
 		// make the per-workspace result ambiguous.

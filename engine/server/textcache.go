@@ -95,9 +95,10 @@ func newTextDocCache(budget int64) *textDocCache {
 func textCacheKey(workspace, entity, key, field string) string {
 	var b strings.Builder
 	b.Grow(len(workspace) + len(entity) + len(key) + len(field) + 3)
-	// Field paths and entity names cannot contain a NUL, and neither can a
-	// workspace id or row key (both are validated UTF-8 identifiers), so this
-	// separator cannot be forged into a collision between two different rows.
+	// None of the four can contain a NUL: entity names and workspace ids are
+	// validated identifiers, row keys reject control characters, and a field
+	// path is a proto field name (see engine/internal/naming). So the separator
+	// cannot be forged into a collision between two different rows.
 	b.WriteString(workspace)
 	b.WriteByte(0)
 	b.WriteString(entity)

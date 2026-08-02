@@ -77,6 +77,7 @@ import {
 	type TextStringEdits,
 } from './mutations.js';
 import { createKvMutex, type Mutex } from './mutex.js';
+import { validateWorkspaceId } from './naming.js';
 import { buildIndexes } from './optimistic/index-build.js';
 import { IndexCache } from './optimistic/index-maintain.js';
 import { enqueuePending, readPending } from './optimistic/queue.js';
@@ -1120,6 +1121,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	addWorkspace(workspaceId: string, specs?: SubscriptionSpec[]): WorkspaceClient<E> {
 		this.assertOpen();
+		validateWorkspaceId(workspaceId);
 		const compiled = this.compileSubscriptions(specs ?? this.opts.subscriptions ?? []);
 		const existing = this.scopes.get(workspaceId);
 		if (existing) {
@@ -3128,7 +3130,10 @@ function resolveWorkspaces(opts: { workspaceId?: string; workspaces?: string[] }
 		throw new Error('workspaceId must be one of workspaces');
 	}
 	if (list.length === 0) throw new Error('workspaceId or workspaces is required');
-	if (list.some((ws) => !ws)) throw new Error('workspace ids must be non-empty');
+	// Checked here rather than at first use: an id the server will refuse would
+	// otherwise reach the KV layout and the change tokens first, where a bad one
+	// misroutes reads and notifications long before any RPC says so.
+	for (const ws of list) validateWorkspaceId(ws);
 	if (new Set(list).size !== list.length) throw new Error('workspaces contains duplicates');
 	return list;
 }

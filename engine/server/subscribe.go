@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -218,8 +219,8 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 	}
 	seen := make(map[string]struct{}, len(scopes))
 	for _, sc := range scopes {
-		if sc.GetWorkspaceId() == "" {
-			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("scope is missing workspace_id"))
+		if err := naming.ValidateWorkspaceID(sc.GetWorkspaceId()); err != nil {
+			return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("scope: %w", err))
 		}
 		// Two scopes for one workspace would interleave two cursors over one
 		// partition and leave the client unable to tell the pages apart.
