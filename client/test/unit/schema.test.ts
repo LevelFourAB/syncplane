@@ -18,6 +18,7 @@ import {
 	bool,
 	bytes,
 	defineSchema,
+	double,
 	entitiesFromDescriptorSet,
 	entity,
 	type EntitySchema,
@@ -209,6 +210,46 @@ describe('schema builder — full parity', () => {
 		const intMap = entity('intmap', { id: text().key(), m: map('int64', text()) });
 		const desc = defineSchema(intMap).descMessage('intmap');
 		expect(desc.fields.find((f) => f.name === 'm')!.fieldKind).toBe('map');
+	});
+
+	it('synthesizes a message-valued map, the shape custom fields take', () => {
+		// The value message is a SIBLING nested type of the entry, not a child:
+		// a map_entry message is a synthetic shape both descriptor layers
+		// pattern-match on.
+		const withCustom = entity('withcustom', {
+			id: text().key(),
+			custom: map('string', message({ text: text(), number: double() })),
+		});
+		const desc = defineSchema(withCustom).descMessage('withcustom');
+		const custom = desc.fields.find((f) => f.name === 'custom')!;
+		if (custom.fieldKind !== 'map') throw new Error('custom should be a map field');
+		expect(custom.mapKind).toBe('message');
+		expect(custom.message!.typeName).toBe('sync.dynamic.Withcustom.CustomValue');
+		expect(custom.message!.fields.map((f) => f.name)).toEqual([ 'text', 'number' ]);
+	});
+
+	it('carries a map fan-out path through the accessor→proto translation', () => {
+		// `*` and the `key`/`value` after it are not field names, so they must
+		// survive untouched — the engine would otherwise look for a field
+		// literally called "*". Everything else still snake_cases, which is what
+		// `sortKey` is here to show.
+		const withCustom = entity('withfan', {
+			id: text().key(),
+			custom: map('string', message({ sortKey: text() })),
+		}, {
+			indexes: [ {
+				name: 'by_value',
+				key: [
+					{ path: 'custom.*.value.sortKey' },
+					{ path: 'custom.*.key' },
+				],
+			} ],
+		});
+		const desc = defineSchema(withCustom).descMessage('withfan');
+		expect(getOption(desc, entityExt).index[0]!.key.map((k) => k.path)).toEqual([
+			'custom.*.value.sort_key',
+			'custom.*.key',
+		]);
 	});
 
 	it('drops only the entities (not nested types) into EntityRegistry', () => {

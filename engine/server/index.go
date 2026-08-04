@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
@@ -226,6 +227,45 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 			info.name, key, len(entries), max)
 	}
 	return tx.PutIndexEntries(info.name, key, entries)
+}
+
+// maskTouchesIndexes reports whether any path of a field mask could change any
+// index entry of a row of this entity. It is the guard that lets a PATCH skip
+// updateRowIndexes: a mask naming only fields no index reads produces the exact
+// same entry set it already has, and rewriting it is pure write amplification.
+//
+// The cost of asking is a path comparison per (mask path, component) pair
+// against descriptors resolved at registration — no decode, no read, no encode
+// — against the cost of a delete-and-reinsert of every entry the row occupies.
+// That trade is what makes an EAV-shaped index affordable: an entity with 20
+// indexed custom fields writes ~47 entries per row, and an edit to its title
+// touches none of them.
+//
+// It is deliberately CONSERVATIVE (see IndexComponent.MaskTouches): every case
+// it cannot decide without looking at the data answers "yes, rewrite". A false
+// positive costs the rewrite that would have happened anyway; a false negative
+// would leave an index disagreeing with the scan it must be indistinguishable
+// from, which is a wrong query result rather than a slow one.
+//
+// PUT does not get this guard, and cannot: it replaces the whole row, and the
+// entries it must replace are those of a PREVIOUS value the write path does not
+// hold. That asymmetry is fine in practice because the TS client derives a mask
+// from a diff, so ordinary edits arrive as PATCH.
+func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
+	if len(info.indexes) == 0 {
+		return false
+	}
+	for _, path := range paths {
+		segs := lww.SplitPath(path)
+		for i := range info.indexes {
+			for _, c := range info.indexes[i].encoder.Components() {
+				if c.MaskTouches(segs) {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // clearRowIndexes drops every index entry of a row. Called when the row is

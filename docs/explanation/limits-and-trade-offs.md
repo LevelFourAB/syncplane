@@ -51,15 +51,110 @@ pure optimization, and the indexed and scanning paths must produce identical
 results.** `Limits.DisableIndexes` forces the fallback, which is how the property
 is tested rather than assumed.
 
-The cost is paid on writes, on both sides. Every write to an entity with indexes
-re-encodes and re-stores that row's whole entry set — neither side has the
-previous row value in hand on a PATCH or a DELETE, so both replace rather than
-diff. An index over a repeated field makes that cost grow with the data rather
-than with the schema — one entry per element — so `MaxIndexEntriesPerRow` stops
-being a formality: it is the ceiling on how long an indexed list may get, and a
-write that would exceed it fails rather than storing a truncated set, because a
-partial index would disagree with the scan it is meant to be indistinguishable
-from.
+The cost is paid on writes, on both sides. A write that maintains indexes
+re-encodes and re-stores that row's whole entry set rather than diffing it —
+neither side has the previous row value in hand on a PATCH or a DELETE, so
+computing a diff would put a read and a decode on every write path.
+
+**PUT and PATCH are not symmetric here.** A PUT replaces the whole row, so it
+always replaces the whole entry set. A PATCH carries a field mask, and a mask
+naming only fields no index reads cannot move the row in any of them — so the
+rewrite is skipped, and the write costs what it would on an entity with no
+indexes at all. The test is a path comparison against the compiled components,
+so it costs nothing to ask, and it is conservative in the safe direction: a mask
+it cannot account for (one naming a oneof group, or addressing one item of a
+collection) rewrites. This is why the TS client's `update()` deriving its mask
+from a diff matters beyond bandwidth — an edit to a title stops paying for the
+index on a field it did not touch.
+
+An index over a repeated field, or over every entry of a map, makes the
+remaining cost grow with the data rather than with the schema — one entry per
+element or per entry — so `MaxIndexEntriesPerRow` (default 1024) stops being a
+formality: it is the ceiling on how many positions one row may occupy, and a
+write that would exceed it **fails** rather than storing a truncated set,
+because a partial index would disagree with the scan it is meant to be
+indistinguishable from.
+
+### What an EAV index over user-defined fields costs
+
+An index over `custom.*` stores one entry per map ENTRY, so a row's cost scales
+with the number of custom fields that row **uses**, not with the number the app
+has defined. A field-definition table with 200 fields costs nothing on a row that
+fills in three of them.
+
+The write cost is linear in entries per row, and it is paid as a
+delete-and-reinsert of that row's whole entry set. Three things decide whether
+that matters to you:
+
+- **How many entries a row occupies.** Every fan-out multiplies: N custom fields
+  is N entries per `*` index, and a multi-select field's entries multiply again
+  by its selected values. `MaxIndexEntriesPerRow` is the ceiling, and exceeding
+  it fails the write.
+- **Whether your writes touch an indexed field at all.** They mostly do not, and
+  the PATCH mask guard above is what turns that into no cost: an edit to a title
+  writes exactly what it would on an entity with no indexes. This is the single
+  biggest lever, and it is free as long as writes arrive as PATCH with an honest
+  mask — which is what the TS client's `update()` produces.
+- **How fast your storage is.** The index term is roughly constant per entry, so
+  it is a small fraction of a slow write and a large multiple of a fast one. The
+  ratio on a laptop with a local database flatters what you will see on
+  production hardware, so measure the shape rather than trusting a number.
+
+#### One index or two
+
+A map index declares which side of the entry each component stores, so there are
+two layouts and they answer different questions:
+
+| Layout         | Serves                                                                 |
+| -------------- | ---------------------------------------------------------------------- |
+| `[key, value]` | equality, ranges **and** ordering — within one named field             |
+| `[value, key]` | equality only — cross-key _or_ named-key (pin the value, then the key) |
+
+`[value, key]` is the more capable of the two **for equality**: it answers both
+"does `priority` hold 5" and "which field holds 5". So an app whose custom-field
+queries are all equality declares one index, not two — and the second layout is
+what you add when you need a range inside one field (`priority > 3`) or an
+ordering by one.
+
+What the second index costs, in shape:
+
+- **Entries per row double, exactly.** A row with N filled custom fields occupies
+  N entries per map index, so declaring both layouts makes it 2N — and 2N is what
+  `MaxIndexEntriesPerRow` is spent against.
+- **PUT cost follows the entry count**, roughly linearly once the entry set
+  dominates the write.
+- **A PATCH that touches no indexed field pays nothing either way.** The mask
+  guard is unaffected by how many indexes exist, which is why a wide EAV entity
+  stays cheap to edit.
+- **Equality query latency does not change.** Either layout pins both components
+  from one predicate, so the second index buys the shapes equality cannot express
+  — a range inside one named field, an ordering by it — and not a faster
+  equality.
+
+And what a map index buys the query it exists for: the scan is linear in the
+entity, the index is flat in it, with the crossover well below any corpus worth
+indexing. `engine/server/index_bench_test.go` measures both —
+`BenchmarkIndexedWrite/eav` for the write side and entries per row,
+`BenchmarkCustomFieldQuery` for the read side. Run them on the hardware you care
+about rather than trusting a ratio measured on someone else's:
+
+```sh
+go test ./engine/server/... -bench 'BenchmarkIndexedWrite/eav' -run '^$'
+go test ./engine/server/... -bench BenchmarkCustomFieldQuery -run '^$'
+```
+
+#### Deployment notes
+
+- **Declaring both surfaces over one collection doubles its entries.** A field
+  that carries `indexed: true` AND appears as a component of a declared index
+  writes one set of entries for each. Pick one unless both shapes are actually
+  queried.
+- **On PostgreSQL, every write leaves one dead tuple per entry it replaced.** A
+  row with a dozen custom fields churns a dozen tuples on each edit that touches
+  one. If custom fields are your write shape, tune autovacuum for the
+  `index_entries` table specifically — `autovacuum_vacuum_scale_factor` at the
+  table level is the lever — rather than relying on the cluster default, which
+  is sized for tables that do not rewrite a row's worth of tuples per edit.
 
 The client indexes **confirmed rows only**. The optimistic overlay is bounded by
 the pending queue, so a query scans all of it and merges — which keeps the

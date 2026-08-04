@@ -49,6 +49,27 @@ import (
 // row key, and an ordering can only be served from components the equality
 // prefix has already passed (see orderServedBy).
 //
+// A MAP fan-out plans the same way with one addition: an index may carry the
+// entry KEY as its own component (`custom.*.key`) beside a value component
+// (`custom.*.value.number`), in whichever order it declared them. Two rules keep
+// the pair honest, and both live in planAgainst:
+//
+//   - Components of one map fan must pin from the SAME term. Pinning `team` and
+//     ranging on `priority`'s value would answer a question nobody asked, so the
+//     first component of a fan to pin fixes the term the rest must use (`only`).
+//     A term may only pin a key if it IMPLIES that entry is present: isNotSet is
+//     satisfied by rows with no such entry, which sit outside the range entirely.
+//   - A range on a VALUE component only answers a term that named an entry key
+//     if a key component pinned that key too. On its own the range spans the
+//     value under EVERY key, so the term stays residual rather than returning
+//     rows where a different field holds the value. That is why exactness is
+//     decided after the walk (see mapKeysPinned) rather than at the reduction.
+//
+// The two layouts are complementary. `[key, value]` clusters one field's values,
+// so it serves equality, ranges and an ordering within that field. `[value, key]`
+// clusters one value, so it serves "which field holds X" — cross-key or, with
+// the key pinned second, one named field — but equality only.
+//
 // A single-component index still serves an ordering plus a limit: walk it in
 // order, re-check the residual per candidate, stop once the limit is filled.
 // That is bounded by how many candidates the residual rejects, not by the
@@ -131,21 +152,45 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	}
 
 	// Walk the components left to right, consuming equality terms while they
-	// keep pinning. `used` marks the terms the range accounts for, so whatever
-	// is left becomes the residual.
-	used := make([]bool, len(terms))
+	// keep pinning.
+	//
+	// Two bookkeeping arrays, because "the walk has consumed this term" and "the
+	// range answers this term" are no longer the same thing. `taken` stops a term
+	// being reused by a later component; `answered` is what drops it from the
+	// residual, and for a term that named a map entry key it cannot be decided
+	// until the whole prefix is known.
+	taken := make([]bool, len(terms))
+	exact := make([]bool, len(terms))
+	// needKeys[ti] are the entry keys an exact reduction of term ti depends on
+	// the prefix pinning. Nil for a key-agnostic term, which is answered outright.
+	needKeys := make([][]condValue, len(terms))
+	// covered[ti] are the conjuncts of term ti's any() the range has consumed, and
+	// conjuncts[ti] how many there are. Zero means the term is not a conjunction
+	// and `exact` decides on its own.
+	covered := make([]map[int]bool, len(terms))
+	conjuncts := make([]int, len(terms))
 	prefixes := [][]byte{nil} // the equality prefixes built so far (>1 for `in`)
 	pinned := 0
+	// The term the components of THIS index's map fan are restricted to. The
+	// first such component to pin fixes it; every later one must reduce the same
+	// term, so `custom.a.number` and `custom.b.text` can never be read as one
+	// pinned pair. It is deliberately coarse — one map fan per index — which can
+	// decline a plan a finer rule would allow (two value components of the same
+	// entry, pinned by two terms naming the same key) but can never accept a
+	// wrong one. pinnedKeys records what each key component chose, which is what
+	// lets an ordering trust a value component of the same fan.
+	mapFanTerm := -1
+	pinnedKeys := map[int]condValue{}
 
-	for _, c := range comps {
-		vals, ti, exact := equalityValuesFor(c, terms, used)
-		if vals == nil {
+	for ci, c := range comps {
+		red, found := equalityValuesFor(c, terms, taken, onlyFor(c, mapFanTerm))
+		if !found {
 			break
 		}
-		next := make([][]byte, 0, len(prefixes)*len(vals))
+		next := make([][]byte, 0, len(prefixes)*len(red.values))
 		ok := true
 		for _, p := range prefixes {
-			for _, v := range vals {
+			for _, v := range red.values {
 				buf, appended := appendLiteral(append([]byte(nil), p...), c, v)
 				if !appended {
 					ok = false
@@ -160,10 +205,32 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		if !ok {
 			break
 		}
+		if hasMapFan(c) && mapFanTerm < 0 {
+			mapFanTerm = red.term
+		}
+		if c.isEntryKey() {
+			pinnedKeys[ci] = red.values[0]
+		}
 		// A term that only PARTLY reduces to this component (an any() with more
 		// than one condition inside, a hasAll) still bounds the range, but the
-		// range does not answer it — so it bounds and stays in the residual.
-		used[ti] = exact
+		// range does not answer it — so it bounds and stays in the residual. A
+		// term that named an entry key is left available too, because the key
+		// component of the same fan still has to consume it.
+		taken[red.term] = red.exact && len(red.keys) == 0
+		switch {
+		case red.conjuncts > 0:
+			if covered[red.term] == nil {
+				covered[red.term] = make(map[int]bool, red.conjuncts)
+			}
+			covered[red.term][red.conjunct] = true
+			conjuncts[red.term] = red.conjuncts
+			if len(red.keys) > 0 {
+				needKeys[red.term] = red.keys
+			}
+		case red.exact:
+			exact[red.term] = true
+			needKeys[red.term] = red.keys
+		}
 		prefixes = next
 		pinned++
 		// An `in` fans the prefix set out multiplicatively; stop pinning before
@@ -179,9 +246,11 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	rangedComp := -1
 	if pinned < len(comps) {
 		c := comps[pinned]
-		lo, hi, ti, found := inequalityBoundsFor(c, terms, used)
+		lo, hi, ti, keys, found := inequalityBoundsFor(c, terms, taken, onlyFor(c, mapFanTerm))
 		if found {
-			used[ti] = true
+			taken[ti] = true
+			exact[ti] = true
+			needKeys[ti] = keys
 			rangedComp = pinned
 			ranges = make([]Range, 0, len(prefixes))
 			for _, p := range prefixes {
@@ -191,6 +260,20 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 				})
 			}
 		}
+	}
+
+	// Exactness, now that the prefix is known: a reduction onto a map-fan value
+	// component only answers its term if the keys that term named are pinned too.
+	used := make([]bool, len(terms))
+	for ti := range terms {
+		answered := exact[ti]
+		if conjuncts[ti] > 0 {
+			// A conjunction is answered only when every conjunct is: the rest
+			// would otherwise have to be re-checked against the same element, and
+			// the range cannot say which element it matched.
+			answered = len(covered[ti]) == conjuncts[ti]
+		}
+		used[ti] = answered && mapKeysPinned(needKeys[ti], pinnedKeys)
 	}
 	if ranges == nil {
 		ranges = make([]Range, 0, len(prefixes))
@@ -202,7 +285,7 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	ordered := orderServedBy(comps, pinned, order)
+	ordered := orderServedBy(comps, pinned, order, pinnedKeys)
 	if pinned == 0 && rangedComp < 0 && !ordered {
 		return nil, 0
 	}
@@ -221,6 +304,90 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 // it the probes cost more than the scan they replace, and the plan is declined.
 const maxIndexProbes = 64
 
+// onlyFor is the term this component is restricted to, or -1 for no restriction.
+// Only a component that fans out over a map is restricted, and only once some
+// other component of that fan has already pinned: the two read one entry, so
+// they have to describe the same one.
+func onlyFor(c IndexComponent, mapFanTerm int) int {
+	if hasMapFan(c) {
+		return mapFanTerm
+	}
+	return -1
+}
+
+// hasMapFan reports whether the component takes one value per ENTRY of a map,
+// as opposed to per element of a list or one value per row.
+func hasMapFan(c IndexComponent) bool {
+	_, ok := mapFanPrefix(c.fields)
+	return ok
+}
+
+// mapFanPrefix is the path up to and including the INNERMOST map fan step — the
+// scope a key component of the same fan stores the key of.
+func mapFanPrefix(fields []pathStep) ([]pathStep, bool) {
+	for i := len(fields) - 1; i >= 0; i-- {
+		if fields[i].fan && fields[i].fd.IsMap() {
+			return fields[:i+1], true
+		}
+	}
+	return nil, false
+}
+
+// sameMapFan reports whether two components read the same map entry: the same
+// chain of collections up to and including the innermost map. It is what pairs a
+// key component with the value components of its own fan, now that a declaration
+// may put them in either order and other components between them.
+//
+// The entry-key selector is ignored in the comparison — it is precisely what
+// differs between the two — as is `keyed`, which an index path never has.
+func sameMapFan(a, b IndexComponent) bool {
+	pa, oka := mapFanPrefix(a.fields)
+	pb, okb := mapFanPrefix(b.fields)
+	return oka && okb && sameFanSteps(pa, pb)
+}
+
+// mapKeysPinned reports whether every entry key a term named is also fixed by a
+// key component of the equality prefix.
+//
+// This is the condition under which a range on a map-fan VALUE component answers
+// its term outright. Without it the range spans that value under every key, so
+// rows where a DIFFERENT field holds the value fall inside it — and marking the
+// term exact would return them. A term that named no key (an any() over the map,
+// which asks about entries rather than one of them) needs nothing pinned.
+func mapKeysPinned(keys []condValue, pinnedKeys map[int]condValue) bool {
+	for _, k := range keys {
+		found := false
+		for _, got := range pinnedKeys {
+			if equalsScalar(got, k) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// reduction is what one term contributes to one component: the values that pin
+// it, which term they came from, whether the range then answers that term, and
+// the map entry keys the term named — which mapKeysPinned turns into the final
+// exactness verdict once the whole prefix is known.
+type reduction struct {
+	values []condValue
+	term   int
+	exact  bool
+	keys   []condValue
+	// conjunct is which sub-condition of an any() this reduction consumed, and
+	// conjuncts how many there are in all. A conjunction is answered only once
+	// EVERY conjunct is consumed — by whichever components happen to consume
+	// them, since components of one fan read a single element position and so
+	// describe one element between them.
+	conjunct  int
+	conjuncts int
+}
+
 // orderServedBy reports whether reading the index in order yields the query's
 // requested order. The equality prefix contributes nothing to the ordering —
 // every row in the range agrees on those components — so the order keys must
@@ -230,7 +397,7 @@ const maxIndexProbes = 64
 // would "serve" an empty order trivially, but this answer is also what decides
 // whether supplying the ordering is reason enough to use an index that pins and
 // bounds nothing — and for a caller that wanted no order it is not.
-func orderServedBy(comps []IndexComponent, pinned int, order *Order) bool {
+func orderServedBy(comps []IndexComponent, pinned int, order *Order, pinnedKeys map[int]condValue) bool {
 	if order == nil || len(order.keys) == 0 {
 		return false
 	}
@@ -238,67 +405,212 @@ func orderServedBy(comps []IndexComponent, pinned int, order *Order) bool {
 		return false
 	}
 	for i, k := range order.keys {
-		c := comps[pinned+i]
-		if c.desc != k.desc || !sameFields(c.fields, k.fields) {
+		j := pinned + i
+		c := comps[j]
+		if c.desc != k.desc {
 			return false
 		}
-		if c.Multi() {
-			// A fan-out component holds one entry per element, so a row sits at
-			// several places in this stretch of the index at once and walking it
-			// yields no row order at all. Pinned it is harmless — the prefix has
-			// already chosen the element — but past the prefix it is not an
-			// ordering, and an order key can never name a repeated path anyway.
+		keys, ok := matchFanPath(c.fields, k.fields)
+		if !ok {
+			return false
+		}
+		if len(keys) == 0 {
+			if c.Multi() {
+				// A LIST fan-out component holds one entry per element, so a row
+				// sits at several places in this stretch of the index at once and
+				// walking it yields no row order at all. Pinned it is harmless —
+				// the prefix has already chosen the element — but past the prefix
+				// it is not an ordering.
+				return false
+			}
+			continue
+		}
+		// A MAP fan is different, and this is the whole reason the two cases are
+		// distinguished: a map holds AT MOST ONE value per key, so once the entry
+		// key is pinned the row occupies exactly one position here and the
+		// component IS an ordering. Unpinned it is not — and neither is a leaf
+		// that also fans out over a list inside the entry.
+		if !mapLeafPinned(comps, pinned, j, keys, pinnedKeys) {
 			return false
 		}
 	}
 	return true
 }
 
-func sameFields(a, b []protoreflect.FieldDescriptor) bool {
-	if len(a) != len(b) {
+// mapLeafPinned reports whether comps[j] is the leaf of a map fan whose entry
+// key the equality prefix has already fixed to the key the order path names.
+//
+// The key component is looked up BY FAN among the pinned prefix rather than
+// assumed to sit at j-1: one declared path is one component now, so an index may
+// put its key component anywhere — before the value, after it, or with other
+// components in between.
+func mapLeafPinned(
+	comps []IndexComponent,
+	pinned, j int,
+	keys []condValue,
+	pinnedKeys map[int]condValue,
+) bool {
+	levels := fanLevels(comps[j].fields)
+	if len(levels) != 1 || !levels[0].isMap || len(keys) != 1 {
 		return false
 	}
-	for i := range a {
-		if a[i].FullName() != b[i].FullName() {
-			return false
+	for i := 0; i < pinned; i++ {
+		if !comps[i].isEntryKey() || !sameMapFan(comps[i], comps[j]) {
+			continue
+		}
+		if got, ok := pinnedKeys[i]; ok && equalsScalar(got, keys[0]) {
+			return true
 		}
 	}
-	return true
+	return false
 }
 
 // equalityValuesFor finds a term pinning this component to one or more exact
-// values, returning them, the term's position, and whether the range then
-// answers the term outright. nil values mean nothing pins it.
+// values. The second result is false when nothing pins it.
 //
 // A term that is not exact still narrows: the values it yields are a superset
 // of what it matches, so the range is a superset of the rows, and the term
 // stays in the residual to reject the rest. That is what lets a hasAll or a
 // multi-condition any() use an index at all.
-func equalityValuesFor(c IndexComponent, terms []node, used []bool) ([]condValue, int, bool) {
+func equalityValuesFor(c IndexComponent, terms []node, taken []bool, only int) (reduction, bool) {
 	for i, t := range terms {
-		if used[i] {
+		if taken[i] || (only >= 0 && i != only) {
+			continue
+		}
+		if n, ok := t.(*mapExistsNode); ok {
+			// An any() over a map reduces onto EITHER side of the entry, so it is
+			// dispatched before the key/value split below rather than inside it.
+			if red, ok := mapExistsEqualityFor(c, n); ok {
+				red.term = i
+				return red, true
+			}
+			continue
+		}
+		if c.isEntryKey() {
+			if vals, ok := mapKeyEqualityFor(c, t); ok {
+				// The key is pinned by the term but NOT answered by it — the term
+				// still has to constrain the value beside it — so it is left
+				// untaken and falls to the residual if nothing consumes it.
+				return reduction{values: vals, term: i}, true
+			}
 			continue
 		}
 		switch n := t.(type) {
 		case *cmpNode:
-			if n.op == syncplanev1.CmpOp_CMP_OP_EQ && sameFields(n.fields, c.fields) {
-				return []condValue{n.value}, i, true
+			if keys, ok := matchFanPath(c.fields, n.fields); ok && n.op == syncplanev1.CmpOp_CMP_OP_EQ {
+				return reduction{values: []condValue{n.value}, term: i, exact: true, keys: keys}, true
 			}
 		case *inNode:
-			if len(n.values) > 0 && sameFields(n.fields, c.fields) {
-				return n.values, i, true
+			if keys, ok := matchFanPath(c.fields, n.fields); ok && len(n.values) > 0 {
+				return reduction{values: n.values, term: i, exact: true, keys: keys}, true
 			}
 		case *repNode:
-			if vals, exact, ok := repEqualityFor(c, n); ok {
-				return vals, i, exact
+			if red, ok := repEqualityFor(c, n); ok {
+				red.term = i
+				return red, true
 			}
 		case *existsNode:
-			if vals, exact, ok := existsEqualityFor(c, n); ok {
-				return vals, i, exact
+			if red, ok := existsEqualityFor(c, n); ok {
+				red.term = i
+				return red, true
 			}
 		}
 	}
-	return nil, -1, false
+	return reduction{}, false
+}
+
+// fanPathEq reports whether a condition path addresses exactly what this
+// component stores — the same fields, with a literal key wherever the component
+// fans out over a map.
+func fanPathEq(c IndexComponent, term []pathStep) bool {
+	_, ok := matchFanPath(c.fields, term)
+	return ok
+}
+
+// mapKeyEqualityFor pins a map's entry-key component from any term that
+// addresses one entry of it.
+//
+// The rule that makes this sound is that the term must IMPLY THE KEY IS PRESENT:
+// a range pinned to key k contains only rows holding an entry at k, so a term
+// that some row without that entry could satisfy would have its rows dropped.
+// Every operator qualifies except isNotSet, which is exactly the one satisfied by
+// a row that has no such entry.
+func mapKeyEqualityFor(c IndexComponent, t node) ([]condValue, bool) {
+	p, ok := termPath(t)
+	if !ok {
+		return nil, false
+	}
+	keys, ok := matchFanPrefix(c.fields, p)
+	if !ok || len(keys) == 0 {
+		return nil, false
+	}
+	// The component ends AT its map fan, so the key it stores is the last one
+	// the prefix captured.
+	return []condValue{keys[len(keys)-1]}, true
+}
+
+// termPath is the row path a term addresses, or false for a term that has none
+// (and/or/not, which never bound a range on their own) or that a row lacking the
+// addressed value could satisfy.
+func termPath(t node) ([]pathStep, bool) {
+	switch n := t.(type) {
+	case *cmpNode:
+		return n.fields, true
+	case *inNode:
+		return n.fields, true
+	case *strNode:
+		return n.fields, true
+	case *repNode:
+		return n.fields, true
+	case *existsNode:
+		return n.fields, true
+	case *mapExistsNode:
+		// The path ends at the MAP, with no key — which is what makes it a
+		// question about entries rather than about one of them — so it cannot pin
+		// a key component from here. mapExistsEqualityFor is what reads it.
+		return n.fields, true
+	case *presentNode:
+		// isNotSet is true for a row with no such entry at all, so it cannot pin
+		// the key: the range would drop exactly the rows it matches.
+		return n.fields, n.op == syncplanev1.PresentOp_PRESENT_OP_IS_SET
+	}
+	return nil, false
+}
+
+// matchFanPath reports whether a condition path addresses the same values a
+// component path fans out over, returning the map keys it named. `*` steps in
+// the component match a keyed step in the term; everything else must be equal.
+func matchFanPath(comp, term []pathStep) ([]condValue, bool) {
+	if len(comp) != len(term) {
+		return nil, false
+	}
+	return matchFanPrefix(comp, term)
+}
+
+// matchFanPrefix is matchFanPath where the component may stop short — which is
+// how an entry-key component, whose path ends at the map, matches a term that
+// continues into the entry's value.
+func matchFanPrefix(comp, term []pathStep) ([]condValue, bool) {
+	if len(term) < len(comp) {
+		return nil, false
+	}
+	var keys []condValue
+	for i := range comp {
+		if comp[i].fd.FullName() != term[i].fd.FullName() {
+			return nil, false
+		}
+		if comp[i].fan && comp[i].fd.IsMap() {
+			if !term[i].keyed {
+				return nil, false
+			}
+			keys = append(keys, extractSingular(comp[i].fd.MapKey(), term[i].mapKey.Value()))
+			continue
+		}
+		if term[i].keyed {
+			return nil, false
+		}
+	}
+	return keys, true
 }
 
 // repEqualityFor reads membership over a repeated scalar as a probe on a
@@ -308,25 +620,34 @@ func equalityValuesFor(c IndexComponent, terms []node, used []bool) ([]condValue
 // hasAll pins on the FIRST value only. The rows holding all of the values are a
 // subset of the rows holding that one, so one narrow range plus a residual
 // beats a union of ranges over every value.
-func repEqualityFor(c IndexComponent, n *repNode) (vals []condValue, exact, ok bool) {
-	if !c.Multi() || c.multiAt != len(c.fields)-1 || !sameFields(n.fields, c.fields) {
-		return nil, false, false
+func repEqualityFor(c IndexComponent, n *repNode) (reduction, bool) {
+	// The component's value must BE the fanned element (a repeated scalar), and
+	// the term must name the same path — with a literal key wherever the
+	// component fans out over a map, so `custom.<key>.value.labels.values`
+	// matches `custom.*.value.labels.values` only for the entry the range has
+	// pinned.
+	if len(fanRest(c.fields)) != 0 || c.isEntryKey() || !c.Multi() {
+		return reduction{}, false
+	}
+	keys, ok := matchFanPath(c.fields, n.fields)
+	if !ok {
+		return reduction{}, false
 	}
 	switch n.op {
 	case syncplanev1.RepOp_REP_OP_HAS:
-		return n.values[:1], true, true
+		return reduction{values: n.values[:1], exact: true, keys: keys}, true
 	case syncplanev1.RepOp_REP_OP_HAS_ANY:
 		if len(n.values) == 0 {
-			return nil, false, false
+			return reduction{}, false
 		}
-		return n.values, true, true
+		return reduction{values: n.values, exact: true, keys: keys}, true
 	case syncplanev1.RepOp_REP_OP_HAS_ALL:
 		if len(n.values) == 0 {
-			return nil, false, false
+			return reduction{}, false
 		}
-		return n.values[:1], false, true
+		return reduction{values: n.values[:1], keys: keys}, true
 	}
-	return nil, false, false
+	return reduction{}, false
 }
 
 // existsEqualityFor reads an any() as a probe on a component that fans out over
@@ -337,40 +658,135 @@ func repEqualityFor(c IndexComponent, n *repNode) (vals []condValue, exact, ok b
 // range pins one conjunct and the whole any() stays residual, because the rest
 // has to be re-checked against the SAME element and the range cannot say which
 // element it matched.
-func existsEqualityFor(c IndexComponent, n *existsNode) (vals []condValue, exact, ok bool) {
-	if !c.Multi() || !sameFields(c.fields[:c.multiAt+1], n.fields) {
-		return nil, false, false
+func existsEqualityFor(c IndexComponent, n *existsNode) (reduction, bool) {
+	levels := fanLevels(c.fields)
+	if len(levels) == 0 || c.isEntryKey() {
+		return reduction{}, false
 	}
-	rest := c.fields[c.multiAt+1:]
+	last := levels[len(levels)-1]
+	if last.isMap {
+		// any() scopes an element of a LIST; a map fan has no element scope of
+		// its own, and its entries are addressed by key instead.
+		return reduction{}, false
+	}
+	keys, ok := matchFanPath(c.fields[:len(c.fields)-len(fanRest(c.fields))], n.fields)
+	if !ok {
+		return reduction{}, false
+	}
+	rest := fanRest(c.fields)
 	if len(rest) == 0 {
 		// The component stores the elements themselves, so there is no sub-path
 		// for a condition on element fields to match.
-		return nil, false, false
+		return reduction{}, false
 	}
 	switch inner := n.cond.(type) {
 	case *cmpNode:
-		if inner.op == syncplanev1.CmpOp_CMP_OP_EQ && sameFields(inner.fields, rest) {
-			return []condValue{inner.value}, true, true
+		if inner.op == syncplanev1.CmpOp_CMP_OP_EQ && samePath(inner.fields, rest) {
+			return reduction{values: []condValue{inner.value}, exact: true, keys: keys}, true
 		}
 	case *inNode:
-		if len(inner.values) > 0 && sameFields(inner.fields, rest) {
-			return inner.values, true, true
+		if len(inner.values) > 0 && samePath(inner.fields, rest) {
+			return reduction{values: inner.values, exact: true, keys: keys}, true
 		}
 	case *andNode:
-		for _, sub := range inner.conds {
+		for j, sub := range inner.conds {
 			switch s := sub.(type) {
 			case *cmpNode:
-				if s.op == syncplanev1.CmpOp_CMP_OP_EQ && sameFields(s.fields, rest) {
-					return []condValue{s.value}, false, true
+				if s.op == syncplanev1.CmpOp_CMP_OP_EQ && samePath(s.fields, rest) {
+					return reduction{
+						values: []condValue{s.value}, keys: keys,
+						conjunct: j, conjuncts: len(inner.conds),
+					}, true
 				}
 			case *inNode:
-				if len(s.values) > 0 && sameFields(s.fields, rest) {
-					return s.values, false, true
+				if len(s.values) > 0 && samePath(s.fields, rest) {
+					return reduction{
+						values: s.values, keys: keys,
+						conjunct: j, conjuncts: len(inner.conds),
+					}, true
 				}
 			}
 		}
 	}
-	return nil, false, false
+	return reduction{}, false
+}
+
+// mapExistsEqualityFor reads an any() over a MAP as a probe on the components
+// that fan out over that map.
+//
+// The entry is ONE position, so a sub-condition on `value…` reduces onto a value
+// component of that fan and one on `key` onto its key component. When the
+// sub-condition conjoins both, the two components together answer the whole
+// existential — because they read one entry rather than two, which is exactly
+// what makes the explicit entry scope worth having.
+//
+// This is the cross-key case the `[value, key]` layout exists for: with no key
+// constraint at all, a value component alone answers "some entry holds X", so
+// the reduction names no keys and the exactness guard has nothing to require.
+func mapExistsEqualityFor(c IndexComponent, n *mapExistsNode) (reduction, bool) {
+	if !mapFanMatches(c, n.fields) {
+		return reduction{}, false
+	}
+	// What this component reads, stated as a path from the entry.
+	side := mapEntryValueNumber
+	rest := fanRest(c.fields)
+	if c.isEntryKey() {
+		side, rest = mapEntryKeyNumber, nil
+	}
+	if red, ok := reduceEntryCond(n.cond, side, rest); ok {
+		return red, true
+	}
+	if and, ok := n.cond.(*andNode); ok {
+		for j, sub := range and.conds {
+			if red, ok := reduceEntryCond(sub, side, rest); ok {
+				red.exact = false
+				red.conjunct, red.conjuncts = j, len(and.conds)
+				return red, true
+			}
+		}
+	}
+	return reduction{}, false
+}
+
+// mapFanMatches reports whether a component fans out over exactly the map an
+// any() addresses. The term's path ends AT the map with no key — that is what
+// makes it a question about entries rather than about one of them — so the
+// comparison is against the component's fan prefix, descriptor for descriptor.
+func mapFanMatches(c IndexComponent, term []pathStep) bool {
+	prefix, ok := mapFanPrefix(c.fields)
+	if !ok || len(prefix) != len(term) {
+		return false
+	}
+	for i := range prefix {
+		if prefix[i].fd.FullName() != term[i].fd.FullName() || term[i].keyed {
+			return false
+		}
+	}
+	return true
+}
+
+// reduceEntryCond reduces one sub-condition of an any() over a map onto a
+// component, given which side of the entry that component stores and the path
+// below it.
+//
+// The sub-condition compiled against the map's synthetic entry type, so its
+// first step is that type's key or value field — matched by number, the same way
+// the evaluator resolves it.
+func reduceEntryCond(sub node, side protoreflect.FieldNumber, rest []pathStep) (reduction, bool) {
+	match := func(fields []pathStep) bool {
+		return len(fields) > 0 && fields[0].fd.Number() == side && samePath(fields[1:], rest)
+	}
+	switch inner := sub.(type) {
+	case *cmpNode:
+		if inner.op == syncplanev1.CmpOp_CMP_OP_EQ && match(inner.fields) {
+			return reduction{values: []condValue{inner.value}, exact: true}, true
+		}
+	case *inNode:
+		if len(inner.values) > 0 && match(inner.fields) {
+			return reduction{values: inner.values, exact: true}, true
+		}
+	}
+	return reduction{}, false
 }
 
 // inequalityBoundsFor finds a term bounding this component from one or both
@@ -381,21 +797,27 @@ func existsEqualityFor(c IndexComponent, n *existsNode) (vals []condValue, exact
 // startsWith is an inequality in disguise: every string with a given prefix
 // occupies one contiguous range, which is exactly what the encoding's
 // terminator guarantees.
-func inequalityBoundsFor(c IndexComponent, terms []node, used []bool) (lo, hi []byte, idx int, found bool) {
+//
+// The map entry keys the bounding term named come back with the bounds, for the
+// same reason an equality reduction returns them: a range over one custom
+// field's values only answers the term if the key is pinned as well.
+func inequalityBoundsFor(c IndexComponent, terms []node, taken []bool, only int) (lo, hi []byte, idx int, keys []condValue, found bool) {
 	for i, t := range terms {
-		if used[i] {
+		if taken[i] || (only >= 0 && i != only) {
 			continue
 		}
 		switch n := t.(type) {
 		case *cmpNode:
-			if !sameFields(n.fields, c.fields) {
+			named, ok := matchFanPath(c.fields, n.fields)
+			if !ok {
 				continue
 			}
 			if lo, hi, ok := cmpBounds(c, n); ok {
-				return lo, hi, i, true
+				return lo, hi, i, named, true
 			}
 		case *strNode:
-			if n.op != syncplanev1.StrOp_STR_OP_STARTS_WITH || !sameFields(n.fields, c.fields) {
+			named, ok := matchFanPath(c.fields, n.fields)
+			if !ok || n.op != syncplanev1.StrOp_STR_OP_STARTS_WITH {
 				continue
 			}
 			// The prefix's own encoding is not a bound — it carries a
@@ -411,12 +833,12 @@ func inequalityBoundsFor(c IndexComponent, terms []node, used []bool) (lo, hi []
 				invert(inv)
 				lo := append([]byte{tagPresent}, UpperBound(inv)...)
 				hi := append([]byte{tagPresent}, inv...)
-				return lo, UpperBound(hi), i, true
+				return lo, UpperBound(hi), i, named, true
 			}
-			return pre, UpperBound(pre), i, true
+			return pre, UpperBound(pre), i, named, true
 		}
 	}
-	return nil, nil, -1, false
+	return nil, nil, -1, nil, false
 }
 
 // cmpBounds turns one inequality into encoded bounds on the component.
@@ -485,7 +907,7 @@ func literalBytes(c IndexComponent, v condValue) ([]byte, bool) {
 // tag included and inversion applied, matching what the encoder writes for a
 // row holding that value.
 func appendLiteral(dst []byte, c IndexComponent, v condValue) ([]byte, bool) {
-	leaf := c.fields[len(c.fields)-1]
+	leaf := c.leafField()
 	want := singularKind(leaf)
 	rv, ok := coerceLiteral(want, leaf, v)
 	if !ok {

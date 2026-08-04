@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating.",
+	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating. A path segment that follows a MAP field is the entry KEY, not a field name — the same convention an lww field-mask path uses, so there is one rule rather than two. Because a map entry has explicit presence, a query that names one variant of an app-defined oneof value simply reads as NOT FOUND for a row whose entry holds a different variant: the condition is false and the ordering ranks it last, and no cross-variant comparison ever has to be defined. That is what lets the value type be app-defined rather than an engine-canonical one.",
 	"evalCases": [
 		{
 			"name": "eq string match",
@@ -2168,6 +2168,1622 @@
 				}
 			},
 			"want": true
+		},
+		{
+			"name": "map entry addressed by key matches",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "red"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "map entry addressed by key mismatches",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "blue"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "an absent map key is not found, so every comparison is false",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"attrs",
+						"size"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"stringValue": "large"
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "isSet on a present map key",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "isNotSet on an absent map key",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"attrs",
+						"size"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a map key is found even when its value is the zero value",
+			"row": {
+				"attrs": {
+					"color": ""
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a non-string map key parses to the key type",
+			"row": {
+				"byId": {
+					"7": "seven"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"7"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "seven"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a non-canonical spelling of a numeric map key reaches the same entry",
+			"row": {
+				"byId": {
+					"7": "seven"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"007"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "seven"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "startsWith on a map-addressed string",
+			"row": {
+				"attrs": {
+					"color": "crimson"
+				}
+			},
+			"cond": {
+				"str": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "crim"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "in over a map-addressed value",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"in": {
+					"path": [
+						"attrs",
+						"color"
+					],
+					"values": [
+						{
+							"stringValue": "red"
+						},
+						{
+							"stringValue": "green"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "isEmpty on a map with no entries",
+			"row": {
+				"id": "w1"
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"attrs"
+					],
+					"op": "REP_OP_IS_EMPTY"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "isEmpty on a map with entries",
+			"row": {
+				"attrs": {
+					"color": "red"
+				}
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"attrs"
+					],
+					"op": "REP_OP_IS_EMPTY"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "a named variant of a map entry compares as its own type",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 3
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "the variant the entry does not hold reads as not found",
+			"row": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 3
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "neq on the variant the entry does not hold is false too",
+			"row": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "CMP_OP_NEQ",
+					"value": {
+						"doubleValue": 3
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "isNotSet names the variant an entry does not hold",
+			"row": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"cond": {
+				"present": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a string variant of a map entry",
+			"row": {
+				"custom": {
+					"team": {
+						"text": "platform"
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"team",
+						"text"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "platform"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a bool variant of a map entry",
+			"row": {
+				"custom": {
+					"billable": {
+						"checked": true
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"billable",
+						"checked"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"boolValue": true
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a variant of a map key the row does not hold at all",
+			"row": {
+				"custom": {
+					"team": {
+						"text": "platform"
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "a variant of a map field the row leaves empty",
+			"row": {
+				"id": "w1"
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"doubleValue": 0
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "hasAny over a repeated scalar wrapped in a map entry's variant",
+			"row": {
+				"custom": {
+					"tags": {
+						"labels": {
+							"values": [
+								"ui",
+								"bug"
+							]
+						}
+					}
+				}
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"custom",
+						"tags",
+						"labels",
+						"values"
+					],
+					"op": "REP_OP_HAS_ANY",
+					"values": [
+						{
+							"stringValue": "bug"
+						},
+						{
+							"stringValue": "perf"
+						}
+					]
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "hasAll over a repeated scalar wrapped in a map entry's variant",
+			"row": {
+				"custom": {
+					"tags": {
+						"labels": {
+							"values": [
+								"ui",
+								"bug"
+							]
+						}
+					}
+				}
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"custom",
+						"tags",
+						"labels",
+						"values"
+					],
+					"op": "REP_OP_HAS_ALL",
+					"values": [
+						{
+							"stringValue": "bug"
+						},
+						{
+							"stringValue": "perf"
+						}
+					]
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "isEmpty over a wrapped list the entry does not hold",
+			"row": {
+				"custom": {
+					"tags": {
+						"text": "none"
+					}
+				}
+			},
+			"cond": {
+				"rep": {
+					"path": [
+						"custom",
+						"tags",
+						"labels",
+						"values"
+					],
+					"op": "REP_OP_IS_EMPTY"
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a map finds an entry by its value, across keys",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 5
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map is false when no entry holds the value",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 9
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a map finds an entry by its key",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"key"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "team"
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map takes in() over keys",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"in": {
+							"path": [
+								"key"
+							],
+							"values": [
+								{
+									"stringValue": "nope"
+								},
+								{
+									"stringValue": "priority"
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map takes startsWith over keys",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"key"
+							],
+							"op": "STR_OP_STARTS_WITH",
+							"value": "pri"
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map: startsWith over keys that matches nothing",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"key"
+							],
+							"op": "STR_OP_STARTS_WITH",
+							"value": "zz"
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a map describes ONE entry when key and value are conjoined",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "priority"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"value",
+											"number"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"doubleValue": 5
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map: key and value from different entries do not match one entry",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "team"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"value",
+											"number"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"doubleValue": 5
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a map reads a wrong-variant entry as not found",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "priority"
+										}
+									}
+								},
+								{
+									"present": {
+										"path": [
+											"value",
+											"text"
+										],
+										"op": "PRESENT_OP_IS_SET"
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a map matches the variant an entry does hold",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"text"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "platform"
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map reaches a list nested inside one entry",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"rep": {
+							"path": [
+								"value",
+								"labels",
+								"values"
+							],
+							"op": "REP_OP_HAS_ANY",
+							"values": [
+								{
+									"stringValue": "ui"
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a map: nested list membership that matches nothing",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"rep": {
+							"path": [
+								"value",
+								"labels",
+								"values"
+							],
+							"op": "REP_OP_HAS_ANY",
+							"values": [
+								{
+									"stringValue": "zzz"
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a scalar-valued map compares the value itself",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"attrs"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "red"
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a scalar-valued map pairs key and value in one entry",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"attrs"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "size"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"value"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "L"
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a scalar-valued map does not pair across entries",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"attrs"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "size"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"value"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "red"
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a non-string-keyed map compares keys as the declared type",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"by_id"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"key"
+							],
+							"op": "CMP_OP_GT",
+							"value": {
+								"intValue": "10"
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over a non-string-keyed map: no key above the bound",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"by_id"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"key"
+							],
+							"op": "CMP_OP_GT",
+							"value": {
+								"intValue": "100"
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over a non-string-keyed map pairs a numeric key with its value",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"by_id"
+					],
+					"cond": {
+						"and": {
+							"conds": [
+								{
+									"cmp": {
+										"path": [
+											"key"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"intValue": "7"
+										}
+									}
+								},
+								{
+									"cmp": {
+										"path": [
+											"value"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "seven"
+										}
+									}
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "any over an absent map matches nothing",
+			"row": {},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 5
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "any over an empty map matches nothing",
+			"row": {
+				"custom": {}
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 5
+							}
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "not(any) over a map reads as \"no entry matches\"",
+			"row": {
+				"custom": {
+					"priority": {
+						"number": 5
+					},
+					"team": {
+						"text": "platform"
+					},
+					"labels": {
+						"labels": {
+							"values": [
+								"ui",
+								"api"
+							]
+						}
+					}
+				},
+				"attrs": {
+					"color": "red",
+					"size": "L"
+				},
+				"byId": {
+					"7": "seven",
+					"42": "forty-two"
+				}
+			},
+			"cond": {
+				"not": {
+					"exists": {
+						"path": [
+							"custom"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"value",
+									"number"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 9
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "not(any) over an absent map is true, since nothing matches",
+			"row": {},
+			"cond": {
+				"not": {
+					"exists": {
+						"path": [
+							"custom"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"value",
+									"number"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 5
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": true
 		}
 	],
 	"compareCases": [
@@ -2585,6 +4201,126 @@
 				}
 			],
 			"want": 1
+		},
+		{
+			"name": "map-addressed variant asc",
+			"a": {
+				"custom": {
+					"priority": {
+						"number": 1
+					}
+				}
+			},
+			"b": {
+				"custom": {
+					"priority": {
+						"number": 2
+					}
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "a row holding another variant ranks after every real value, asc",
+			"a": {
+				"custom": {
+					"priority": {
+						"number": 1
+					}
+				}
+			},
+			"b": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "a row holding another variant ranks after every real value, desc too",
+			"a": {
+				"custom": {
+					"priority": {
+						"number": 1
+					}
+				}
+			},
+			"b": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"want": -1
+		},
+		{
+			"name": "two rows holding another variant tie and fall through to the row key",
+			"a": {
+				"custom": {
+					"priority": {
+						"text": "high"
+					}
+				}
+			},
+			"b": {
+				"custom": {
+					"priority": {
+						"text": "low"
+					}
+				}
+			},
+			"keyA": "a",
+			"keyB": "b",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": -1
 		}
 	],
 	"orderCases": [
@@ -2888,6 +4624,63 @@
 				"r1",
 				"r4"
 			]
+		},
+		{
+			"name": "ordering by one variant of a map entry",
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"custom": {
+							"priority": {
+								"number": 3
+							}
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"custom": {
+							"priority": {
+								"text": "urgent"
+							}
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"custom": {
+							"priority": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"id": "w4"
+					}
+				}
+			],
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": [
+				"r3",
+				"r1",
+				"r2",
+				"r4"
+			]
 		}
 	],
 	"compileErrorCases": [
@@ -3153,6 +4946,183 @@
 							"stringValue": "u1"
 						}
 					]
+				}
+			}
+		},
+		{
+			"name": "cmp on a map entry whose value is a message",
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"priority"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "cmp on a variant no comparison can reach",
+			"cond": {
+				"cmp": {
+					"path": [
+						"custom",
+						"file",
+						"attachment"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "has on a map, which has no elements to compare",
+			"cond": {
+				"rep": {
+					"path": [
+						"attrs"
+					],
+					"op": "REP_OP_HAS",
+					"values": [
+						{
+							"stringValue": "x"
+						}
+					]
+				}
+			}
+		},
+		{
+			"name": "orderBy a map entry whose value is a message",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			]
+		},
+		{
+			"name": "descending past a map entry whose value is a scalar",
+			"cond": {
+				"cmp": {
+					"path": [
+						"attrs",
+						"color",
+						"deeper"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "a map key its key type could never hold",
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"not-a-number"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "any() over a map with a sub-path that is neither key nor value",
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"priority",
+								"number"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"doubleValue": 5
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "any() over a map with a path continuing past the entry key",
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"key",
+								"nope"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "any() over a map comparing the whole message-valued entry value",
+			"cond": {
+				"exists": {
+					"path": [
+						"custom"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "any() over a map descending into a scalar entry value",
+			"cond": {
+				"exists": {
+					"path": [
+						"attrs"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"value",
+								"nope"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
 				}
 			}
 		}

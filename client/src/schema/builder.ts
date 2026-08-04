@@ -139,8 +139,11 @@ interface FieldSpec {
 	ref?: () => EntitySchema;
 	/** kind 'map' — the key kind. */
 	mapKey?: MapKeyKind;
-	/** kind 'map' — the (scalar) value kind. */
+	/** kind 'map' — the scalar value kind, when the value is a scalar. */
 	mapValue?: ProtoScalar;
+	/** kind 'map' — the value's fields, when the value is a message. Exactly one
+	 * of mapValue/mapMessage is set. */
+	mapMessage?: Fields;
 	/** kind 'message' + repeated — keyed message-list identity field(s). */
 	keyField?: string[];
 	/** kind 'message' + repeated — movable-list position field. */
@@ -233,7 +236,13 @@ export class Field<T> {
 	 */
 	indexed(): Field<T> {
 		if (this.spec.kind === 'map') {
-			throw new Error('indexed() is not valid on a map() field: a map cannot be compared');
+			// A mark has no room to say WHICH entry, or which variant of an
+			// app-defined value — and an index over "every entry" is a shape, so
+			// it belongs in an entity index where the path can spell it out.
+			throw new Error(
+				'indexed() is not valid on a map() field: name the entries in an entity index '
+					+ 'instead, e.g. { path: "custom.*.number" }',
+			);
 		}
 		if (this.spec.repeated && this.spec.kind === 'message') {
 			// A message element has no single value to key by, so the index needs
@@ -374,9 +383,16 @@ type MapKeyTs<K extends MapKeyKind> = K extends 'string' ? string
 	: string;
 
 /**
- * A scalar-valued map (`map<key, value>`), merged per entry by map key. The key
- * is one of the integral/string/bool proto key kinds; the value is a scalar
- * field. Maps are never keys, opaque, or repeated.
+ * A map (`map<key, value>`), merged per entry by map key. The key is one of the
+ * integral/string/bool proto key kinds; the value is a scalar or a `message()`.
+ * Maps are never keys, opaque, or repeated.
+ *
+ * A MESSAGE value is what user-defined ("custom") fields are declared with: the
+ * app states its own value type, typically a message whose fields are the
+ * variants a custom field may hold, and a query names the variant it means
+ * (`i.custom.at('priority')…`). The engine needs no value type of its own for
+ * this — see MapOps in query/types.ts for what that buys and the one thing it
+ * costs.
  */
 export const map = <K extends MapKeyKind, V>(
 	keyType: K,
@@ -385,7 +401,9 @@ export const map = <K extends MapKeyKind, V>(
 	if (!Object.hasOwn(MAP_KEY_TO_TYPE, keyType)) {
 		throw new Error(`map() key type "${keyType}" is not a valid map key kind`);
 	}
-	if (value.spec.kind !== 'scalar') throw new Error('map() value must be a scalar field');
+	if (value.spec.kind !== 'scalar' && value.spec.kind !== 'message') {
+		throw new Error('map() value must be a scalar or a message() field');
+	}
 	if (value.spec.repeated) throw new Error('map() value cannot be repeated');
 	if (value.spec.key) throw new Error('map() value cannot be a key field');
 	if (value.spec.opaque) throw new Error('map() value cannot be opaque');
@@ -393,6 +411,7 @@ export const map = <K extends MapKeyKind, V>(
 		kind: 'map',
 		mapKey: keyType,
 		mapValue: value.spec.scalar,
+		mapMessage: value.spec.message,
 		repeated: false,
 		key: false,
 		opaque: false,
@@ -709,7 +728,17 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 					name: idx.name,
 					key: idx.key.map((k) =>
 						create(IndexKeySchema, {
-							path: k.path.split('.').map(snakeCase).join('.'),
+							// `*` is the map fan-out marker and `key`/`value` are the
+							// selectors after it — none is a field name, so all three must
+							// survive the accessor→proto translation untouched or the
+							// engine would look for a field literally called "*".
+							// `snakeCase` happens to be the identity on `key` and `value`,
+							// but they are listed rather than relied on: they are not
+							// field names, and a field named `key` next to one of these is
+							// a different segment that DOES translate.
+							path: k.path.split('.').map((seg, i, segs) =>
+								seg === '*' || (i > 0 && segs[i - 1] === '*') ? seg : snakeCase(seg)
+							).join('.'),
 							desc: k.desc ?? false,
 						})
 					),
@@ -789,7 +818,17 @@ function fieldProtoOf(
 		case 'map': {
 			const entrySimple = `${pascalCase(name)}Entry`;
 			const entryFull = `${parentFullName}.${entrySimple}`;
-			nestedTypes.push(mapEntryOf(entrySimple, spec));
+			// A message value gets its own nested type, a SIBLING of the entry
+			// rather than a child of it: a map_entry message is a synthetic shape
+			// both protodesc and protobuf-es pattern-match on, and hanging
+			// unrelated nested types off it is asking for trouble.
+			let valueFull: string | undefined;
+			if (spec.mapMessage) {
+				const valueSimple = `${pascalCase(name)}Value`;
+				valueFull = `${parentFullName}.${valueSimple}`;
+				nestedTypes.push(buildMessage(valueSimple, valueFull, spec.mapMessage));
+			}
+			nestedTypes.push(mapEntryOf(entrySimple, spec, valueFull));
 			field.label = FieldDescriptorProto_Label.REPEATED;
 			field.type = FieldDescriptorProto_Type.MESSAGE;
 			field.typeName = `.${entryFull}`;
@@ -804,8 +843,23 @@ function fieldProtoOf(
  * value=2. protobuf-es and protodesc recognize exactly this shape as a map; a
  * repeated field referencing it then reports `fieldKind === 'map'`.
  */
-function mapEntryOf(simpleName: string, spec: FieldSpec): DescriptorProto {
+function mapEntryOf(
+	simpleName: string,
+	spec: FieldSpec,
+	valueTypeFullName?: string,
+): DescriptorProto {
 	const options = create(MessageOptionsSchema, { mapEntry: true });
+	const value = create(FieldDescriptorProtoSchema, {
+		name: 'value',
+		number: 2,
+		label: FieldDescriptorProto_Label.OPTIONAL,
+	});
+	if (valueTypeFullName) {
+		value.type = FieldDescriptorProto_Type.MESSAGE;
+		value.typeName = `.${valueTypeFullName}`;
+	} else {
+		value.type = SCALAR_TO_TYPE[spec.mapValue!];
+	}
 	return create(DescriptorProtoSchema, {
 		name: simpleName,
 		options,
@@ -816,12 +870,7 @@ function mapEntryOf(simpleName: string, spec: FieldSpec): DescriptorProto {
 				label: FieldDescriptorProto_Label.OPTIONAL,
 				type: MAP_KEY_TO_TYPE[spec.mapKey!],
 			}),
-			create(FieldDescriptorProtoSchema, {
-				name: 'value',
-				number: 2,
-				label: FieldDescriptorProto_Label.OPTIONAL,
-				type: SCALAR_TO_TYPE[spec.mapValue!],
-			}),
+			value,
 		],
 	});
 }

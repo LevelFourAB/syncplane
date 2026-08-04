@@ -39,12 +39,34 @@
 // key, and an ordering can only be served from components the equality prefix
 // has already passed (see orderServedBy).
 //
+// A MAP fan-out plans the same way with one addition: an index may carry the
+// entry KEY as its own component (`custom.*.key`) beside a value component
+// (`custom.*.value.number`), in whichever order it declared them. Two rules keep
+// the pair honest, and both live in planAgainst:
+//
+// - Components of one map fan must pin from the SAME term. Pinning `team` and
+//   ranging on `priority`'s value would answer a question nobody asked, so the
+//   first component of a fan to pin fixes the term the rest must use (`onlyFor`).
+//   A term may only pin a key if it IMPLIES that entry is present: isNotSet is
+//   satisfied by rows with no such entry, which sit outside the range entirely.
+// - A range on a VALUE component only answers a term that named an entry key if
+//   a key component pinned that key too. On its own the range spans the value
+//   under EVERY key, so the term stays residual rather than returning rows where
+//   a different field holds the value. That is why exactness is decided after
+//   the walk (see mapKeysPinned) rather than at the reduction.
+//
+// The two layouts are complementary. `[key, value]` clusters one field's values,
+// so it serves equality, ranges and an ordering within that field. `[value, key]`
+// clusters one value, so it serves "which field holds X" — cross-key or, with
+// the key pinned second, one named field — but equality only.
+//
 // The shared vectors in testdata/indexkey (`probeCases`) pin the decisions
 // against the Go planner, because a planner that chose differently would still
 // return correct rows — just at a different cost — and nothing else would
 // notice the divergence.
 
 import type { Cond, OrderKey, Path, Scalar } from './ast.js';
+import { equalsScalar } from './evaluate.js';
 import { type IndexComponent, IndexEncoder, upperBound } from './indexkey.js';
 
 /** A byte range over an index: `lo` inclusive, `hi` exclusive. An undefined
@@ -90,6 +112,70 @@ export interface PlannableIndex {
 const MAX_INDEX_PROBES = 64;
 
 /**
+ * The term this component is restricted to, or -1 for no restriction. Only a
+ * component that fans out over a map is restricted, and only once some other
+ * component of that fan has pinned: the two read one entry, so they have to
+ * describe the same one.
+ */
+function onlyFor(c: IndexComponent, mapFanTerm: number): number {
+	return hasMapFan(c) ? mapFanTerm : -1;
+}
+
+/** Whether the component takes one value per ENTRY of a map, as opposed to per
+ * element of a list or one value per row. */
+function hasMapFan(c: IndexComponent): boolean {
+	return c.fans.some((f) => f.isMap);
+}
+
+/**
+ * Whether comps[i] and comps[j] read the same map entry: the same chain of
+ * collections up to and including the innermost map. It is what pairs a key
+ * component with the value components of its own fan, now that a declaration may
+ * put them in either order and other components between them.
+ */
+function sameMapFan(a: IndexComponent, b: IndexComponent): boolean {
+	const ma = a.fans.filter((f) => f.isMap).at(-1);
+	const mb = b.fans.filter((f) => f.isMap).at(-1);
+	if (ma === undefined || mb === undefined) return false;
+	return a.path.slice(0, ma.at + 1).join('.') === b.path.slice(0, mb.at + 1).join('.');
+}
+
+/**
+ * Whether every entry key a term named is also fixed by a key component of the
+ * equality prefix.
+ *
+ * This is the condition under which a range on a map-fan VALUE component answers
+ * its term outright. Without it the range spans that value under every key, so
+ * rows where a DIFFERENT field holds the value fall inside it — and marking the
+ * term exact would return them. A term that named no key (an any() over the map,
+ * which asks about entries rather than one of them) needs nothing pinned.
+ */
+function mapKeysPinned(keys: Scalar[], pinnedKeys: Map<number, Scalar>): boolean {
+	return keys.every((k) => [ ...pinnedKeys.values() ].some((got) => equalsScalar(got, k)));
+}
+
+/**
+ * What one term contributes to one component: the values that pin it, which term
+ * they came from, whether the range then answers that term, and the map entry
+ * keys the term named — which mapKeysPinned turns into the final exactness
+ * verdict once the whole prefix is known.
+ */
+interface Reduction {
+	values: Scalar[];
+	index: number;
+	exact: boolean;
+	keys: Scalar[];
+	/**
+	 * Which sub-condition of an any() this reduction consumed, and how many there
+	 * are in all. A conjunction is answered only once EVERY conjunct is consumed
+	 * — by whichever components happen to consume them, since components of one
+	 * fan read a single element position and so describe one element between them.
+	 */
+	conjunct?: number;
+	conjuncts?: number;
+}
+
+/**
  * Picks an index for a predicate plus an ordering, or returns undefined to mean
  * "scan". Candidates are considered in order; the first exact-ordered match
  * wins, failing that the one that narrows the most.
@@ -131,14 +217,37 @@ function planAgainst(
 	if (comps.length === 0) return undefined;
 
 	// Walk the components left to right, consuming equality terms while they
-	// keep pinning. `used` marks the terms the range accounts for, so whatever
-	// is left becomes the residual.
-	const used = new Array<boolean>(terms.length).fill(false);
+	// keep pinning.
+	//
+	// Two bookkeeping arrays, because "the walk has consumed this term" and "the
+	// range answers this term" are no longer the same thing. `taken` stops a term
+	// being reused by a later component; `used` is what drops it from the
+	// residual, and for a term that named a map entry key it cannot be decided
+	// until the whole prefix is known.
+	const taken = new Array<boolean>(terms.length).fill(false);
+	const exact = new Array<boolean>(terms.length).fill(false);
+	// The entry keys an exact reduction depends on the prefix pinning. Absent for
+	// a key-agnostic term, which the range answers outright.
+	const needKeys = new Map<number, Scalar[]>();
+	// The conjuncts of a term's any() the range has consumed, and how many there
+	// are. Absent means the term is not a conjunction and `exact` decides alone.
+	const covered = new Map<number, Set<number>>();
+	const conjuncts = new Map<number, number>();
 	let prefixes: string[] = [ '' ];
 	let pinned = 0;
+	// The term the components of this index's map fan are restricted to. The
+	// first such component to pin fixes it; every later one must reduce the same
+	// term, so `custom.a.number` and `custom.b.text` can never be read as one
+	// pinned pair. Deliberately coarse — one map fan per index — which can
+	// decline a plan a finer rule would allow but can never accept a wrong one.
+	// pinnedKeys records what each key component chose, which is what lets an
+	// ordering trust a value component of the same fan.
+	let mapFanTerm = -1;
+	const pinnedKeys = new Map<number, Scalar>();
 
-	for (const c of comps) {
-		const found = equalityValuesFor(c, terms, used);
+	for (let ci = 0; ci < comps.length; ci++) {
+		const c = comps[ci]!;
+		const found = equalityValuesFor(c, terms, taken, onlyFor(c, mapFanTerm));
 		if (!found) break;
 		const next: string[] = [];
 		let ok = true;
@@ -154,10 +263,24 @@ function planAgainst(
 			if (!ok) break;
 		}
 		if (!ok) break;
+		if (hasMapFan(c) && mapFanTerm < 0) mapFanTerm = found.index;
+		if (c.keyComponent) pinnedKeys.set(ci, found.values[0]!);
 		// A term that only PARTLY reduces to this component (an any() with more
 		// than one condition inside, a hasAll) still bounds the range, but the
-		// range does not answer it — so it bounds and stays in the residual.
-		used[found.index] = found.exact;
+		// range does not answer it — so it bounds and stays in the residual. A
+		// term that named an entry key is left available too, because the key
+		// component of the same fan still has to consume it.
+		taken[found.index] = found.exact && found.keys.length === 0;
+		if (found.conjuncts !== undefined) {
+			const seen = covered.get(found.index) ?? new Set<number>();
+			seen.add(found.conjunct!);
+			covered.set(found.index, seen);
+			conjuncts.set(found.index, found.conjuncts);
+			if (found.keys.length > 0) needKeys.set(found.index, found.keys);
+		} else if (found.exact) {
+			exact[found.index] = true;
+			needKeys.set(found.index, found.keys);
+		}
 		prefixes = next;
 		pinned++;
 		// An `in` fans the prefix set out multiplicatively; stop pinning before
@@ -170,9 +293,17 @@ function planAgainst(
 	let ranges: IndexRange[] | undefined;
 	let ranged = false;
 	if (pinned < comps.length) {
-		const bounds = inequalityBoundsFor(idx, pinned, terms, used);
+		const bounds = inequalityBoundsFor(
+			idx,
+			pinned,
+			terms,
+			taken,
+			onlyFor(comps[pinned]!, mapFanTerm),
+		);
 		if (bounds) {
-			used[bounds.index] = true;
+			taken[bounds.index] = true;
+			exact[bounds.index] = true;
+			needKeys.set(bounds.index, bounds.keys);
 			ranged = true;
 			ranges = prefixes.map((p) => ({
 				lo: bounds.lo === undefined ? p : p + bounds.lo,
@@ -184,10 +315,21 @@ function planAgainst(
 		ranges = prefixes.map((p) => ({ lo: p, hi: upperBound(p) }));
 	}
 
+	// Exactness, now that the prefix is known: a reduction onto a map-fan value
+	// component only answers its term if the keys that term named are pinned too.
+	const used = exact.map((e, ti) => {
+		// A conjunction is answered only when every conjunct is: the rest would
+		// otherwise have to be re-checked against the same element, and the range
+		// cannot say which element it matched.
+		const total = conjuncts.get(ti);
+		const answered = total === undefined ? e : (covered.get(ti)?.size ?? 0) === total;
+		return answered && mapKeysPinned(needKeys.get(ti) ?? [], pinnedKeys);
+	});
+
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	let ordered = orderServedBy(comps, pinned, orderBy);
+	let ordered = orderServedBy(comps, pinned, orderBy, pinnedKeys);
 	if (pinned === 0 && !ranged && !ordered) return undefined;
 
 	// Several ranges cannot be read in order without a merge, so a caller that
@@ -210,23 +352,121 @@ function orderServedBy(
 	comps: IndexComponent[],
 	pinned: number,
 	orderBy: OrderKey[] | undefined,
+	pinnedKeys: Map<number, Scalar>,
 ): boolean {
 	if (orderBy === undefined || orderBy.length === 0) return false;
 	if (pinned + orderBy.length > comps.length) return false;
 	return orderBy.every((k, i) => {
-		const c = comps[pinned + i]!;
-		// A fan-out component holds one entry per element, so a row sits at
-		// several places in this stretch of the index at once and walking it
-		// yields no row order at all. Pinned it is harmless — the prefix has
-		// already chosen the element — but past the prefix it is not an ordering,
-		// and an order key can never name a repeated path anyway.
-		if (c.multiAt >= 0) return false;
-		return c.desc === (k.dir === 'desc') && samePath(c.path, k.path);
+		const j = pinned + i;
+		const c = comps[j]!;
+		if (c.desc !== (k.dir === 'desc')) return false;
+		const keys = matchFanPath(c, k.path);
+		if (keys === undefined) return false;
+		if (keys.length === 0) {
+			// A LIST fan-out component holds one entry per element, so a row sits
+			// at several places in this stretch of the index at once and walking
+			// it yields no row order at all. Pinned it is harmless — the prefix
+			// has already chosen the element — but past the prefix it is not an
+			// ordering.
+			return c.fans.length === 0;
+		}
+		// A MAP fan is different, and this is the whole reason the two cases are
+		// distinguished: a map holds AT MOST ONE value per key, so once the entry
+		// key is pinned the row occupies exactly one position here and the
+		// component IS an ordering.
+		return mapLeafPinned(comps, pinned, j, keys, pinnedKeys);
 	});
+}
+
+/**
+ * Whether comps[j] is the leaf of a map fan whose entry key the equality prefix
+ * has already fixed to the key the order path names.
+ *
+ * The key component is looked up BY FAN among the pinned prefix rather than
+ * assumed to sit at j-1: one declared path is one component now, so an index may
+ * put its key component anywhere — before the value, after it, or with other
+ * components in between.
+ */
+function mapLeafPinned(
+	comps: IndexComponent[],
+	pinned: number,
+	j: number,
+	keys: Scalar[],
+	pinnedKeys: Map<number, Scalar>,
+): boolean {
+	const c = comps[j]!;
+	if (c.fans.length !== 1 || !c.fans[0]!.isMap || keys.length !== 1) return false;
+	for (let i = 0; i < pinned; i++) {
+		if (!comps[i]!.keyComponent || !sameMapFan(comps[i]!, c)) continue;
+		const got = pinnedKeys.get(i);
+		if (got !== undefined && equalsScalar(got, keys[0]!)) return true;
+	}
+	return false;
 }
 
 const samePath = (a: Path, b: Path): boolean =>
 	a.length === b.length && a.every((seg, i) => seg === b[i]);
+
+/**
+ * Whether a condition path addresses the same values a component fans out over,
+ * returning the map keys it named. A `*` step in the component matches whatever
+ * key the term spelled; everything else must be equal.
+ *
+ * The two paths are walked with SEPARATE cursors: a `*` is one segment of the
+ * component but two of the term (the map, then the key), so the indices are
+ * only aligned until the first fan.
+ */
+function matchFanPath(c: IndexComponent, term: Path): Scalar[] | undefined {
+	return matchFan(c, term, c.path.length, true);
+}
+
+/**
+ * matchFanPath where the term may continue past where the component stops —
+ * which is how an entry-key component, whose path ends at the map, matches a
+ * term that goes on into the entry's value.
+ */
+function matchFanPrefix(c: IndexComponent, term: Path, upto: number): Scalar[] | undefined {
+	return matchFan(c, term, upto, false);
+}
+
+function matchFan(
+	c: IndexComponent,
+	term: Path,
+	upto: number,
+	exact: boolean,
+): Scalar[] | undefined {
+	const mapFans = new Map(c.fans.filter((f) => f.isMap).map((f) => [ f.at, f.keyKind ]));
+	const keys: Scalar[] = [];
+	let t = 0;
+	for (let i = 0; i < upto; i++) {
+		if (t >= term.length || c.path[i] !== term[t]) return undefined;
+		t++;
+		if (!mapFans.has(i)) continue;
+		// The key is the NEXT term segment; the component has none, because `*`
+		// is the shape and the key is the data.
+		const raw = term[t];
+		if (raw === undefined) return undefined;
+		keys.push(typedMapKey(mapFans.get(i), raw));
+		t++;
+	}
+	if (exact && t !== term.length) return undefined;
+	return keys;
+}
+
+/** A record key as the value the encoder stores, so a probe encodes what a row
+ * wrote. Mirrors sortedMapKeys in indexkey.ts. */
+function typedMapKey(kind: string | undefined, raw: string): Scalar {
+	switch (kind) {
+		case 'bigint':
+			return BigInt(raw);
+		case 'number':
+			return Number(raw);
+		case 'bool':
+			return raw === 'true';
+		default:
+			return raw;
+	}
+}
 
 /**
  * A term pinning this component to one or more values, and whether the range
@@ -240,16 +480,34 @@ const samePath = (a: Path, b: Path): boolean =>
 function equalityValuesFor(
 	c: IndexComponent,
 	terms: Cond[],
-	used: boolean[],
-): { values: Scalar[]; index: number; exact: boolean } | undefined {
+	taken: boolean[],
+	only: number,
+): Reduction | undefined {
 	for (let i = 0; i < terms.length; i++) {
-		if (used[i]) continue;
+		if (taken[i] || (only >= 0 && i !== only)) continue;
 		const t = terms[i]!;
-		if (t.kind === 'cmp' && t.op === 'eq' && samePath(t.path, c.path)) {
-			return { values: [ t.value ], index: i, exact: true };
+		if (t.kind === 'exists' && mapFanMatches(c, t.path)) {
+			// An any() over a map reduces onto EITHER side of the entry, so it is
+			// dispatched before the key/value split below rather than inside it.
+			const got = mapExistsEqualityFor(c, t);
+			if (got) return { ...got, index: i };
+			continue;
 		}
-		if (t.kind === 'in' && t.values.length > 0 && samePath(t.path, c.path)) {
-			return { values: t.values, index: i, exact: true };
+		if (c.keyComponent) {
+			const key = mapKeyEqualityFor(c, t);
+			// The key is pinned by the term but NOT answered by it — the term
+			// still has to constrain the value beside it — so it is left untaken
+			// and falls to the residual if nothing consumes it.
+			if (key !== undefined) return { values: [ key ], index: i, exact: false, keys: [] };
+			continue;
+		}
+		if (t.kind === 'cmp' && t.op === 'eq') {
+			const keys = matchFanPath(c, t.path);
+			if (keys !== undefined) return { values: [ t.value ], index: i, exact: true, keys };
+		}
+		if (t.kind === 'in' && t.values.length > 0) {
+			const keys = matchFanPath(c, t.path);
+			if (keys !== undefined) return { values: t.values, index: i, exact: true, keys };
 		}
 		if (t.kind === 'rep') {
 			const got = repEqualityFor(c, t);
@@ -261,6 +519,49 @@ function equalityValuesFor(
 		}
 	}
 	return undefined;
+}
+
+/** Whether a condition path addresses exactly what this component stores. */
+function fanPathEq(c: IndexComponent, term: Path): boolean {
+	return matchFanPath(c, term) !== undefined;
+}
+
+/**
+ * Pins a map's entry-key component from any term that addresses one entry of it.
+ *
+ * The rule that makes this sound is that the term must IMPLY THE KEY IS PRESENT:
+ * a range pinned to key k contains only rows holding an entry at k, so a term
+ * that some row without that entry could satisfy would have its rows dropped.
+ * Every operator qualifies except isNotSet, which is exactly the one satisfied
+ * by a row that has no such entry.
+ */
+function mapKeyEqualityFor(c: IndexComponent, t: Cond): Scalar | undefined {
+	const path = termPath(t);
+	if (path === undefined) return undefined;
+	const keys = matchFanPrefix(c, path, c.path.length);
+	if (keys === undefined || keys.length === 0) return undefined;
+	// The component ends AT its map fan, so the key it stores is the last one
+	// the prefix captured.
+	return keys[keys.length - 1];
+}
+
+/** The row path a term addresses, or undefined for a term that has none
+ * (and/or/not) or that a row lacking the addressed value could satisfy. */
+function termPath(t: Cond): Path | undefined {
+	switch (t.kind) {
+		case 'cmp':
+		case 'in':
+		case 'str':
+		case 'rep':
+		case 'exists':
+			return t.path;
+		case 'present':
+			// isNotSet is true for a row with no such entry at all, so it cannot
+			// pin the key: the range would drop exactly the rows it matches.
+			return t.op === 'isSet' ? t.path : undefined;
+		default:
+			return undefined;
+	}
 }
 
 /**
@@ -275,15 +576,26 @@ function equalityValuesFor(
 function repEqualityFor(
 	c: IndexComponent,
 	t: Extract<Cond, { kind: 'rep' }>,
-): { values: Scalar[]; exact: boolean } | undefined {
-	if (c.multiAt !== c.path.length - 1 || !samePath(t.path, c.path)) return undefined;
+): Omit<Reduction, 'index'> | undefined {
+	// The component's value must BE the fanned element (a repeated scalar), and
+	// the term must name the same path — with a literal key wherever the
+	// component fans out over a map.
+	const innermost = c.fans.at(-1);
+	if (
+		c.keyComponent || innermost === undefined || innermost.isMap
+		|| innermost.at !== c.path.length - 1
+	) {
+		return undefined;
+	}
+	const keys = matchFanPath(c, t.path);
+	if (keys === undefined) return undefined;
 	switch (t.op) {
 		case 'has':
-			return { values: [ t.value ], exact: true };
+			return { values: [ t.value ], exact: true, keys };
 		case 'hasAny':
-			return t.values.length > 0 ? { values: t.values, exact: true } : undefined;
+			return t.values.length > 0 ? { values: t.values, exact: true, keys } : undefined;
 		case 'hasAll':
-			return t.values.length > 0 ? { values: [ t.values[0]! ], exact: false } : undefined;
+			return t.values.length > 0 ? { values: [ t.values[0]! ], exact: false, keys } : undefined;
 		default:
 			return undefined;
 	}
@@ -302,28 +614,102 @@ function repEqualityFor(
 function existsEqualityFor(
 	c: IndexComponent,
 	t: Extract<Cond, { kind: 'exists' }>,
-): { values: Scalar[]; exact: boolean } | undefined {
-	if (c.multiAt < 0 || !samePath(c.path.slice(0, c.multiAt + 1), t.path)) return undefined;
-	const rest = c.path.slice(c.multiAt + 1);
+): Omit<Reduction, 'index'> | undefined {
+	const innermost = c.fans.at(-1);
+	// any() scopes an element of a LIST; a map fan has no element scope of its
+	// own, and its entries are addressed by key instead.
+	if (c.keyComponent || innermost === undefined || innermost.isMap) return undefined;
+	const keys = matchFan(c, t.path, innermost.at + 1, true);
+	if (keys === undefined) return undefined;
+	const rest = c.path.slice(innermost.at + 1);
 	// A component storing the elements themselves has no sub-path for a
 	// condition on element fields to match.
 	if (rest.length === 0) return undefined;
-	const reduce = (sub: Cond, exact: boolean): { values: Scalar[]; exact: boolean } | undefined => {
+	const reduce = (sub: Cond, exact: boolean): Omit<Reduction, 'index'> | undefined => {
 		if (sub.kind === 'cmp' && sub.op === 'eq' && samePath(sub.path, rest)) {
-			return { values: [ sub.value ], exact };
+			return { values: [ sub.value ], exact, keys };
 		}
 		if (sub.kind === 'in' && sub.values.length > 0 && samePath(sub.path, rest)) {
-			return { values: sub.values, exact };
+			return { values: sub.values, exact, keys };
 		}
 		return undefined;
 	};
 	const direct = reduce(t.cond, true);
 	if (direct) return direct;
 	if (t.cond.kind === 'and') {
-		for (const sub of t.cond.conds) {
-			const got = reduce(sub, false);
-			if (got) return got;
+		const conds = t.cond.conds;
+		for (let j = 0; j < conds.length; j++) {
+			const got = reduce(conds[j]!, false);
+			if (got) return { ...got, conjunct: j, conjuncts: conds.length };
 		}
+	}
+	return undefined;
+}
+
+/** The two segments a sub-condition inside a map entry may start at. They are
+ * the same words an index component's `*` selector uses. */
+const ENTRY_KEY = 'key';
+const ENTRY_VALUE = 'value';
+
+/**
+ * Whether a component fans out over exactly the map an any() addresses. The
+ * term's path ends AT the map with no key — that is what makes it a question
+ * about entries rather than about one of them — so the comparison is against the
+ * component's fan prefix.
+ */
+function mapFanMatches(c: IndexComponent, term: Path): boolean {
+	const m = c.fans.filter((f) => f.isMap).at(-1);
+	if (m === undefined) return false;
+	return samePath(c.path.slice(0, m.at + 1), term);
+}
+
+/**
+ * Reads an any() over a MAP as a probe on the components that fan out over that
+ * map.
+ *
+ * The entry is ONE position, so a sub-condition on `value…` reduces onto a value
+ * component of that fan and one on `key` onto its key component. When the
+ * sub-condition conjoins both, the two components together answer the whole
+ * existential — because they read one entry rather than two, which is exactly
+ * what makes the explicit entry scope worth having.
+ *
+ * This is the cross-key case the `[value, key]` layout exists for: with no key
+ * constraint at all, a value component alone answers "some entry holds X", so
+ * the reduction names no keys and the exactness guard has nothing to require.
+ */
+function mapExistsEqualityFor(
+	c: IndexComponent,
+	t: Extract<Cond, { kind: 'exists' }>,
+): Omit<Reduction, 'index'> | undefined {
+	const m = c.fans.filter((f) => f.isMap).at(-1)!;
+	// What this component reads, stated as a path from the entry.
+	const want: Path = c.keyComponent
+		? [ ENTRY_KEY ]
+		: [ ENTRY_VALUE, ...c.path.slice(m.at + 1) ];
+	const direct = reduceEntryCond(t.cond, want, true);
+	if (direct) return direct;
+	if (t.cond.kind === 'and') {
+		const conds = t.cond.conds;
+		for (let j = 0; j < conds.length; j++) {
+			const got = reduceEntryCond(conds[j]!, want, false);
+			if (got) return { ...got, conjunct: j, conjuncts: conds.length };
+		}
+	}
+	return undefined;
+}
+
+/** Reduces one sub-condition of an any() over a map onto the entry path a
+ * component reads. */
+function reduceEntryCond(
+	sub: Cond,
+	want: Path,
+	exact: boolean,
+): Omit<Reduction, 'index'> | undefined {
+	if (sub.kind === 'cmp' && sub.op === 'eq' && samePath(sub.path, want)) {
+		return { values: [ sub.value ], exact, keys: [] };
+	}
+	if (sub.kind === 'in' && sub.values.length > 0 && samePath(sub.path, want)) {
+		return { values: sub.values, exact, keys: [] };
 	}
 	return undefined;
 }
@@ -336,24 +722,35 @@ function existsEqualityFor(
  * `startsWith` is an inequality in disguise: every string with a given prefix
  * occupies one contiguous range, which is what the encoding's terminator
  * guarantees.
+ *
+ * The map entry keys the bounding term named come back with the bounds, for the
+ * same reason an equality reduction returns them: a range over one custom
+ * field's values only answers the term if the key is pinned as well.
  */
 function inequalityBoundsFor(
 	idx: PlannableIndex,
 	compIndex: number,
 	terms: Cond[],
-	used: boolean[],
-): { lo?: string; hi?: string; index: number } | undefined {
+	taken: boolean[],
+	only: number,
+): { lo?: string; hi?: string; index: number; keys: Scalar[] } | undefined {
 	const c = idx.encoder.components[compIndex]!;
 	for (let i = 0; i < terms.length; i++) {
-		if (used[i]) continue;
+		if (taken[i] || (only >= 0 && i !== only)) continue;
 		const t = terms[i]!;
-		if (t.kind === 'cmp' && samePath(t.path, c.path)) {
-			const bounds = cmpBounds(idx, compIndex, t.op, t.value);
-			if (bounds) return { ...bounds, index: i };
+		if (t.kind === 'cmp') {
+			const keys = matchFanPath(c, t.path);
+			if (keys !== undefined) {
+				const bounds = cmpBounds(idx, compIndex, t.op, t.value);
+				if (bounds) return { ...bounds, index: i, keys };
+			}
 		}
-		if (t.kind === 'str' && t.op === 'startsWith' && samePath(t.path, c.path)) {
-			const bounds = prefixBounds(c, t.value);
-			if (bounds) return { ...bounds, index: i };
+		if (t.kind === 'str' && t.op === 'startsWith') {
+			const keys = matchFanPath(c, t.path);
+			if (keys !== undefined) {
+				const bounds = prefixBounds(c, t.value);
+				if (bounds) return { ...bounds, index: i, keys };
+			}
 		}
 	}
 	return undefined;

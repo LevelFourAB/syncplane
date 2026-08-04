@@ -2,9 +2,9 @@ package query
 
 import (
 	"reflect"
-	"strings"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/lww"
 )
 
 // Spec is a whole query: an optional predicate, an optional ordering, and a
@@ -69,8 +69,19 @@ func valueOf[T Value](v T) *syncplanev1.QueryValue {
 // Segments are PROTO field names ("created_at_ms"), not Go struct field names
 // — the same names a client sends. Compile rejects a path that names an
 // unknown field, so a typo fails at compile time, not silently at match time.
+//
+// A segment following a MAP field is the entry key rather than a field name
+// ("custom_fields.priority.number"), and a key is arbitrary data, so a dot
+// inside one is escaped with a backslash: `custom_fields.due\.date.text`
+// addresses the key "due.date". The escaping is only needed here — the wire
+// form is already a list of segments, so a key travels verbatim in it — and it
+// is the same rule an lww field-mask path uses for the same reason.
 func Path(path string) []string {
-	return strings.Split(path, ".")
+	segs := lww.SplitPath(path)
+	for i, s := range segs {
+		segs[i] = lww.UnescapeSegment(s)
+	}
+	return segs
 }
 
 func cmp[T Value](path string, op syncplanev1.CmpOp, v T) *syncplanev1.Condition {
@@ -187,6 +198,18 @@ func HasAll[T Value](path string, vs ...T) *syncplanev1.Condition {
 // element scope is what lets two conditions describe the SAME element —
 // And(Any(…eq…), Any(…gt…)) is a different, weaker question. Over a repeated
 // single-key reference, Has is the shorter spelling of the same thing.
+//
+// Over a MAP the element is one ENTRY, whose sides the sub-condition addresses
+// as `key` and `value` — the same two words an index component's `*` selector
+// uses:
+//
+//	query.Any("custom", query.Eq("value.number", 5))              // which field holds 5
+//	query.Any("custom", query.And(
+//		query.StartsWith("key", "cf_"), query.Eq("value.checked", true)))
+//
+// That is the mirror of addressing one entry by key: Eq("custom.priority.number",
+// 5) asks whether THIS field holds 5, and this asks whether ANY does. It is a
+// predicate, not a projection — the answer never says which entry matched.
 func Any(path string, cond *syncplanev1.Condition) *syncplanev1.Condition {
 	return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Exists{Exists: &syncplanev1.ExistsCond{
 		Path: Path(path),
@@ -194,7 +217,9 @@ func Any(path string, cond *syncplanev1.Condition) *syncplanev1.Condition {
 	}}}
 }
 
-// IsEmpty matches rows whose repeated field has no elements.
+// IsEmpty matches rows whose repeated field has no elements, or whose MAP field
+// has no entries — it asks about the collection itself, so both answer it, and
+// on a map it is the one thing isSet cannot say (a map is always set).
 func IsEmpty(path string) *syncplanev1.Condition {
 	return rep[string](path, syncplanev1.RepOp_REP_OP_IS_EMPTY, nil)
 }

@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"fmt"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
 
@@ -235,6 +237,17 @@ var _ = Describe("Secondary indexes", func() {
 		seed := func(srv *server.Server) {
 			GinkgoHelper()
 			ctx := context.Background()
+			num := func(v float64) *testdatav1.FieldValue {
+				return &testdatav1.FieldValue{Kind: &testdatav1.FieldValue_Number{Number: v}}
+			}
+			str := func(v string) *testdatav1.FieldValue {
+				return &testdatav1.FieldValue{Kind: &testdatav1.FieldValue_Text{Text: v}}
+			}
+			tags := func(vs ...string) *testdatav1.FieldValue {
+				return &testdatav1.FieldValue{Kind: &testdatav1.FieldValue_Labels{
+					Labels: &testdatav1.StringList{Values: vs},
+				}}
+			}
 			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
 				for _, r := range []struct {
 					id      string
@@ -242,20 +255,38 @@ var _ = Describe("Secondary indexes", func() {
 					rank    int32
 					labels  []string
 					blocked []string
+					custom  map[string]*testdatav1.FieldValue
 				}{
-					{"i1", "open", 5, []string{"bug", "ui"}, []string{"i2", "i3"}},
-					{"i2", "open", 9, []string{"ui"}, nil},
-					{"i3", "done", 3, []string{"bug"}, nil},
+					{"i1", "open", 5, []string{"bug", "ui"}, []string{"i2", "i3"}, map[string]*testdatav1.FieldValue{
+						"priority": num(5), "team": str("platform"), "tags": tags("ui", "bug"),
+					}},
+					// priority holds ANOTHER variant, so custom.priority.number is
+					// not found — the case that makes an app-defined value type
+					// need no cross-variant comparison.
+					{"i2", "open", 9, []string{"ui"}, nil, map[string]*testdatav1.FieldValue{
+						"priority": str("urgent"),
+					}},
+					{"i3", "done", 3, []string{"bug"}, nil, map[string]*testdatav1.FieldValue{
+						"priority": num(1),
+					}},
 					// No labels: still reachable through by_label_rank, which is
-					// what the missing tag on an empty list is for.
-					{"i4", "open", 1, nil, nil},
+					// what the missing tag on an empty list is for. No custom
+					// fields either, which is the same story for cf_number.
+					{"i4", "open", 1, nil, nil, nil},
 					// A duplicate element collapses to one entry, so this row must
 					// come back once and not twice.
-					{"i5", "done", 7, []string{"ui", "ui"}, []string{"i2"}},
-					{"i6", "", 4, []string{"bug", "ui"}, nil}, // implicit-presence empty string, not missing
+					// `size` holds the same number i1's `priority` does, under a
+					// DIFFERENT key — which is what makes "which custom field
+					// holds 5" a question with two answers where "does priority
+					// hold 5" has one.
+					{"i5", "done", 7, []string{"ui", "ui"}, []string{"i2"}, map[string]*testdatav1.FieldValue{
+						"tags": tags("ui"), "size": num(5),
+					}},
+					{"i6", "", 4, []string{"bug", "ui"}, nil, nil}, // implicit-presence empty string, not missing
 				} {
 					row := &testdatav1.Issue{
 						Id: r.id, Title: r.id, State: r.state, Rank: r.rank, Labels: r.labels,
+						Custom: r.custom,
 					}
 					for _, id := range r.blocked {
 						row.BlockedBy = append(row.BlockedBy, &testdatav1.Issue{Id: id})
@@ -428,6 +459,273 @@ var _ = Describe("Secondary indexes", func() {
 		same("a negated term stays residual",
 			query.Spec{Where: query.Not(query.Eq("state", "open"))},
 			[]string{"i3", "i5", "i6"})
+
+		// Map fan-out. `cf_number` stores (entry key, number) per entry, so a
+		// predicate naming one custom field is a contiguous range — and every
+		// case here is a place that range could drop a row it should not.
+		same("equality on one variant of one custom field",
+			query.Spec{Where: query.Eq("custom.priority.number", 5)},
+			[]string{"i1"})
+
+		same("an inequality inside one pinned custom field",
+			query.Spec{
+				Where:   query.Gt("custom.priority.number", 0),
+				OrderBy: []*syncplanev1.OrderKey{query.Asc("custom.priority.number")},
+			},
+			[]string{"i3", "i1"})
+
+		same("the entry holding another variant is not in the range",
+			// i2's priority is text, so `custom.priority.number` is not found —
+			// false for the predicate, and last for the ordering.
+			query.Spec{Where: query.Gte("custom.priority.number", 0)},
+			[]string{"i1", "i3"})
+
+		same("a custom field no row holds",
+			query.Spec{Where: query.Eq("custom.absent.number", 1)},
+			nil)
+
+		same("two custom fields at once, only one of which the range pins",
+			query.Spec{Where: query.And(
+				query.Eq("custom.priority.number", 5),
+				query.Eq("custom.team.text", "platform"),
+			)},
+			[]string{"i1"})
+
+		same("isSet on one custom field's variant",
+			query.Spec{Where: query.IsSet("custom.priority.number")},
+			[]string{"i1", "i3"})
+
+		same("isNotSet must not be answered from a key-pinned range",
+			// Every row lacking a `priority.number` matches, including rows with
+			// no custom fields at all — which sit outside any key-pinned range, so
+			// a planner that pinned the key here would drop them.
+			query.Spec{Where: query.IsNotSet("custom.priority.number")},
+			[]string{"i2", "i4", "i5", "i6"})
+
+		same("multi-select through a wrapped repeated scalar",
+			query.Spec{Where: query.Has("custom.tags.labels.values", "ui")},
+			[]string{"i1", "i5"})
+
+		same("hasAll over the wrapped list re-checks what the range cannot pin",
+			query.Spec{Where: query.HasAll("custom.tags.labels.values", "ui", "bug")},
+			[]string{"i1"})
+
+		same("ordering by one custom field with no predicate falls back to the scan",
+			// Nothing pins the entry key, so the index cannot be walked in this
+			// order — rows lacking the key sit outside any range and must sort
+			// last. The answer still has to be the scan's.
+			query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Asc("custom.priority.number")}},
+			[]string{"i3", "i1", "i2", "i4", "i5", "i6"})
+
+		same("a custom-field predicate with an ordering on an ordinary field",
+			query.Spec{
+				Where:   query.Gte("custom.priority.number", 0),
+				OrderBy: []*syncplanev1.OrderKey{query.Desc("rank")},
+			},
+			[]string{"i1", "i3"})
+
+		// Cross-key: the mirror axis, served by cf_by_number's [value, key]
+		// layout. No addressed path can ask these — they name a VALUE and leave
+		// the field open.
+		same("which custom field holds a value, across keys",
+			query.Spec{Where: query.Any("custom", query.Eq("value.number", 5))},
+			[]string{"i1", "i5"})
+
+		same("a value no custom field holds",
+			query.Spec{Where: query.Any("custom", query.Eq("value.number", 99))},
+			nil)
+
+		same("key and value conjoined describe ONE entry",
+			query.Spec{Where: query.Any("custom", query.And(
+				query.Eq("key", "priority"), query.Eq("value.number", 5)))},
+			[]string{"i1"})
+
+		same("key and value from different entries do not describe one",
+			query.Spec{Where: query.Any("custom", query.And(
+				query.Eq("key", "team"), query.Eq("value.number", 5)))},
+			nil)
+
+		same("which rows have any of these custom fields set",
+			query.Spec{Where: query.Any("custom", query.In("key", "size", "absent"))},
+			[]string{"i5"})
+
+		same("a prefix over entry keys, which an addressed path cannot ask",
+			query.Spec{Where: query.Any("custom", query.StartsWith("key", "t"))},
+			[]string{"i1", "i5"})
+
+		same("not(any) over a map reads as \"no entry matches\"",
+			// Rows with no custom fields at all match, and they sit outside every
+			// value range — the same trap isNotSet sets for a key-pinned range.
+			query.Spec{Where: query.Not(query.Any("custom", query.Eq("value.number", 5)))},
+			[]string{"i2", "i3", "i4", "i6"})
+
+		same("cross-key with an ordering the index does not supply",
+			query.Spec{
+				Where:   query.Any("custom", query.Eq("value.number", 5)),
+				OrderBy: []*syncplanev1.OrderKey{query.Desc("rank")},
+			},
+			[]string{"i5", "i1"})
+
+		same("both axes at once: one entry pinned by key, another found by value",
+			query.Spec{Where: query.And(
+				query.Eq("custom.priority.number", 5),
+				query.Any("custom", query.Eq("value.text", "platform")),
+			)},
+			[]string{"i1"})
+
+		It("answers randomized custom-field queries exactly as the scan does", func() {
+			// The load-bearing invariant of the whole EAV index: an indexed query
+			// and a scanning query return identical rows in identical order. The
+			// hand-written cases above pin the shapes that were reasoned about;
+			// this covers the ones that were not, over data whose entries, keys and
+			// variants vary independently.
+			//
+			// Seeded from a fixed value so a failure is reproducible; Ginkgo's own
+			// randomization only reorders specs, it does not vary this.
+			rnd := rand.New(rand.NewSource(20260804))
+			keys := []string{"priority", "team", "size", "tags"}
+			rows := make([]*testdatav1.Issue, 0, 40)
+			for i := 0; i < 40; i++ {
+				row := &testdatav1.Issue{
+					Id:     fmt.Sprintf("r%02d", i),
+					Title:  fmt.Sprintf("r%02d", i),
+					Rank:   int32(rnd.Intn(10)),
+					Custom: map[string]*testdatav1.FieldValue{},
+				}
+				for _, k := range keys {
+					switch rnd.Intn(4) {
+					case 0: // absent, which is what makes "not found" common
+					case 1:
+						row.Custom[k] = &testdatav1.FieldValue{
+							Kind: &testdatav1.FieldValue_Number{Number: float64(rnd.Intn(6))},
+						}
+					case 2:
+						row.Custom[k] = &testdatav1.FieldValue{
+							Kind: &testdatav1.FieldValue_Text{Text: fmt.Sprintf("t%d", rnd.Intn(4))},
+						}
+					case 3:
+						vals := []string{}
+						for _, l := range []string{"ui", "bug", "perf"} {
+							if rnd.Intn(2) == 0 {
+								vals = append(vals, l)
+							}
+						}
+						row.Custom[k] = &testdatav1.FieldValue{Kind: &testdatav1.FieldValue_Labels{
+							Labels: &testdatav1.StringList{Values: vals},
+						}}
+					}
+				}
+				rows = append(rows, row)
+			}
+			load := func(srv *server.Server) {
+				GinkgoHelper()
+				Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+					for _, r := range rows {
+						if err := tx.Put(proto.Clone(r).(*testdatav1.Issue)); err != nil {
+							return err
+						}
+					}
+					return nil
+				})).To(Succeed())
+			}
+
+			scanning, _ := newTestServerStore(server.WithLimits(server.Limits{DisableIndexes: true}))
+			load(scanning)
+			indexed, _ := newTestServerStore()
+			load(indexed)
+			Expect(indexed.BuildIndexes(ctx, ws)).To(Succeed())
+
+			run := func(srv *server.Server, spec query.Spec) []string {
+				GinkgoHelper()
+				var out []string
+				Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+					return tx.Query(&testdatav1.Issue{}, spec, func(msg proto.Message, _ uint64) error {
+						out = append(out, msg.(*testdatav1.Issue).GetId())
+						return nil
+					})
+				})).To(Succeed())
+				return out
+			}
+
+			var specs []query.Spec
+			for _, k := range keys {
+				num := "custom." + k + ".number"
+				txt := "custom." + k + ".text"
+				lbl := "custom." + k + ".labels.values"
+				specs = append(specs,
+					query.Spec{Where: query.Eq(num, 3)},
+					query.Spec{Where: query.Gt(num, 2)},
+					query.Spec{Where: query.Lte(num, 4)},
+					query.Spec{Where: query.In(num, 1, 5)},
+					query.Spec{Where: query.Eq(txt, "t1")},
+					query.Spec{Where: query.StartsWith(txt, "t")},
+					query.Spec{Where: query.IsSet(num)},
+					query.Spec{Where: query.IsNotSet(num)},
+					query.Spec{Where: query.Has(lbl, "ui")},
+					query.Spec{Where: query.HasAny(lbl, "ui", "perf")},
+					query.Spec{Where: query.HasAll(lbl, "ui", "bug")},
+					query.Spec{Where: query.IsEmpty(lbl)},
+					query.Spec{
+						Where:   query.Gte(num, 0),
+						OrderBy: []*syncplanev1.OrderKey{query.Asc(num)},
+					},
+					query.Spec{
+						Where:   query.Gte(num, 0),
+						OrderBy: []*syncplanev1.OrderKey{query.Desc("rank"), query.Asc(num)},
+						Limit:   5,
+					},
+					query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Asc(num)}, Limit: 7},
+					query.Spec{Where: query.And(query.Eq(num, 3), query.Gt("rank", 4))},
+					// The CROSS-KEY axis, which the [value, key] layout serves
+					// and the [key, value] one cannot. The key is named inside
+					// the ENTRY scope rather than in the path, so both spellings
+					// have to pick the same rows.
+					query.Spec{Where: query.Any("custom", query.And(
+						query.Eq("key", k), query.Eq("value.number", 3)))},
+					query.Spec{Where: query.Any("custom", query.And(
+						query.Eq("key", k), query.Eq("value.text", "t1")))},
+					query.Spec{Where: query.Any("custom", query.And(
+						query.Eq("key", k), query.Gt("value.number", 2)))},
+				)
+			}
+			// Two custom fields at once: the shape where pinning the wrong key
+			// would answer a question nobody asked.
+			specs = append(specs, query.Spec{Where: query.And(
+				query.Eq("custom.priority.number", 3),
+				query.Eq("custom.team.text", "t1"),
+			)})
+			// Cross-key without naming a key at all — "which custom field holds
+			// this", the question no addressed path can ask.
+			for _, n := range []float64{0, 3, 5} {
+				specs = append(specs,
+					query.Spec{Where: query.Any("custom", query.Eq("value.number", n))},
+					query.Spec{Where: query.Not(query.Any("custom", query.Eq("value.number", n)))},
+					query.Spec{
+						Where:   query.Any("custom", query.Eq("value.number", n)),
+						OrderBy: []*syncplanev1.OrderKey{query.Desc("rank")},
+						Limit:   5,
+					},
+				)
+			}
+			specs = append(specs,
+				query.Spec{Where: query.Any("custom", query.In("value.number", 1, 5))},
+				query.Spec{Where: query.Any("custom", query.Eq("value.text", "t2"))},
+				query.Spec{Where: query.Any("custom", query.StartsWith("key", "t"))},
+				query.Spec{Where: query.Any("custom", query.In("key", "priority", "size"))},
+				query.Spec{Where: query.Any("custom", query.Has("value.labels.values", "ui"))},
+				// Both axes in one predicate: one entry pinned by key, another
+				// found by value. Nothing may fold the two into one entry.
+				query.Spec{Where: query.And(
+					query.Eq("custom.priority.number", 3),
+					query.Any("custom", query.Eq("value.text", "t1")),
+				)},
+			)
+
+			for i, spec := range specs {
+				Expect(run(indexed, spec)).To(Equal(run(scanning, spec)),
+					"spec %d: the index and the scan must agree exactly", i)
+			}
+		})
 
 		It("gives up on the candidate budget without emitting what the scan re-emits", func() {
 			// The budget can only be exceeded by a walk that has already offered
@@ -632,6 +930,200 @@ var _ = Describe("Secondary indexes", func() {
 			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
 			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
 			Expect(entriesOf(store, "issue", "__ref_project")).To(Equal([]string{"i1"}))
+		})
+
+		Describe("a PATCH whose mask reaches no index", func() {
+			// Maintenance replaces a row's WHOLE entry set, which for an entity
+			// with a fanned-out index is a delete-and-reinsert of one row per
+			// element. A mask that names nothing any index reads produces the
+			// set already stored, so the rewrite is amplification for nothing.
+			//
+			// "Did it rewrite?" cannot be answered from the entries alone — a
+			// rewrite of an unchanged row yields the same bytes. So each spec
+			// first replaces the row's entries with a set the encoder would
+			// never produce: surviving the PATCH means maintenance was skipped,
+			// being corrected means it ran.
+			const planted = "planted"
+
+			plantEntries := func(key string) {
+				GinkgoHelper()
+				Expect(store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+					return tx.PutIndexEntries("issue", key, []storage.IndexEntry{
+						{Index: "__field_state", Key: []byte(planted)},
+					})
+				})).To(Succeed())
+				Expect(indexKeysOf(store, "issue", "__field_state")).To(Equal([]string{planted}))
+			}
+
+			seedRow := func() {
+				GinkgoHelper()
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "before", State: "open", Rank: 3,
+					Labels:  []string{"bug"},
+					Project: &testdatav1.Project{Id: "p1"},
+				}))
+				plantEntries("i1")
+			}
+
+			patch := func(id uint64, row *testdatav1.Issue, paths ...string) {
+				GinkgoHelper()
+				push(patchMutation("c1", id, "issue", "i1", row, paths...))
+			}
+
+			It("leaves every entry exactly as it found it", func() {
+				seedRow()
+				patch(2, &testdatav1.Issue{Id: "i1", Title: "after"}, "title")
+				Expect(indexKeysOf(store, "issue", "__field_state")).To(Equal([]string{planted}))
+			})
+
+			It("still rewrites when the mask names an indexed field", func() {
+				seedRow()
+				patch(2, &testdatav1.Issue{Id: "i1", State: "done"}, "state")
+				Expect(indexKeysOf(store, "issue", "__field_state")).NotTo(ContainElement(planted))
+			})
+
+			It("still rewrites when the mask names a component of a declared index", func() {
+				// `rank` carries no mark of its own; only by_state_rank reads it,
+				// which is why the guard has to consider every component of every
+				// index rather than the marked fields.
+				seedRow()
+				patch(2, &testdatav1.Issue{Id: "i1", Rank: 9}, "rank")
+				Expect(indexKeysOf(store, "issue", "__field_state")).NotTo(ContainElement(planted))
+			})
+
+			It("still rewrites when the mask stops above a component's path", func() {
+				// __ref_project's component resolves to project.id, so the mask
+				// is a PREFIX of the path the index reads.
+				seedRow()
+				patch(2, &testdatav1.Issue{
+					Id: "i1", Project: &testdatav1.Project{Id: "p2"},
+				}, "project")
+				Expect(indexKeysOf(store, "issue", "__field_state")).NotTo(ContainElement(planted))
+			})
+
+			It("still rewrites when the mask addresses one element of an indexed list", func() {
+				// A scalar-set element is masked by its VALUE ("labels.bug"), so
+				// the segment after the field is an item key and not a field name.
+				seedRow()
+				patch(2, &testdatav1.Issue{Id: "i1", Labels: []string{"bug"}}, "labels.bug")
+				Expect(indexKeysOf(store, "issue", "__field_state")).NotTo(ContainElement(planted))
+			})
+
+			// The two map layouts occupy one entry per ENTRY of the map, and the
+			// entry counts below are the whole reason the "one declared path is
+			// one component" change is entry-count-neutral: swapping the
+			// components around reorders bytes and changes nothing else.
+			It("writes one entry per map entry under either layout", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+					Custom: map[string]*testdatav1.FieldValue{
+						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+						"size":     {Kind: &testdatav1.FieldValue_Number{Number: 9}},
+						// A different variant, so this entry takes the missing tag
+						// rather than dropping out — every entry is a position.
+						"team": {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
+					},
+				}))
+				for _, name := range []string{"cf_number", "cf_by_number", "cf_number_only"} {
+					Expect(indexKeysOf(store, "issue", name)).To(HaveLen(3), name)
+					Expect(entriesOf(store, "issue", name)).To(
+						Equal([]string{"i1", "i1", "i1"}), name)
+				}
+			})
+
+			It("collapses two entries a value-only index cannot tell apart", func() {
+				// cf_number_only stores the VALUE alone, so two entries holding
+				// the same number are one position — an entry is a position, not
+				// a count. With the key beside it they stay two.
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+					Custom: map[string]*testdatav1.FieldValue{
+						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+						"size":     {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+					},
+				}))
+				Expect(indexKeysOf(store, "issue", "cf_number_only")).To(HaveLen(1))
+				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(HaveLen(2))
+			})
+
+			It("replaces the whole entry set when a PATCH touches the map", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+					Custom: map[string]*testdatav1.FieldValue{
+						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+						"team":     {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
+					},
+				}))
+				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(HaveLen(2))
+				// One entry added by key, so the set is rewritten and grows by
+				// exactly one position.
+				patch(2, &testdatav1.Issue{
+					Id: "i1",
+					Custom: map[string]*testdatav1.FieldValue{
+						"size": {Kind: &testdatav1.FieldValue_Number{Number: 9}},
+					},
+				}, "custom.size")
+				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(HaveLen(3))
+			})
+
+			It("leaves the map indexes alone when the mask reaches none of them", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+					Custom: map[string]*testdatav1.FieldValue{
+						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+					},
+				}))
+				before := indexKeysOf(store, "issue", "cf_by_number")
+				patch(2, &testdatav1.Issue{Id: "i1", Title: "after"}, "title")
+				Expect(indexKeysOf(store, "issue", "cf_by_number")).To(Equal(before))
+			})
+
+			It("drops every entry of both layouts when the row is deleted", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "t", State: "open",
+					Custom: map[string]*testdatav1.FieldValue{
+						"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+						"team":     {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
+					},
+				}))
+				push(deleteMutation("c1", 2, "issue", "i1"))
+				for _, name := range []string{"cf_number", "cf_by_number", "cf_number_only"} {
+					Expect(entriesOf(store, "issue", name)).To(BeEmpty(), name)
+				}
+			})
+
+			It("leaves the entries byte-identical without the planting trick", func() {
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "before", State: "open", Labels: []string{"bug", "ui"},
+				}))
+				before := indexKeysOf(store, "issue", "by_label_rank")
+				Expect(before).To(HaveLen(2))
+				patch(2, &testdatav1.Issue{Id: "i1", Title: "after"}, "title")
+				Expect(indexKeysOf(store, "issue", "by_label_rank")).To(Equal(before))
+			})
+
+			It("keeps answering the query the skipped index serves", func() {
+				// The guard is only sound if the entries it declined to rewrite
+				// were already right, so the differential rule applies to it too.
+				push(putMutation("c1", 1, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "before", State: "open",
+				}))
+				Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+				patch(2, &testdatav1.Issue{Id: "i1", Title: "after"}, "title")
+
+				var keys []string
+				Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+					return tx.Query(
+						&testdatav1.Issue{},
+						query.Spec{Where: query.Eq("state", "open")},
+						func(msg proto.Message, _ uint64) error {
+							keys = append(keys, msg.(*testdatav1.Issue).GetTitle())
+							return nil
+						},
+					)
+				})).To(Succeed())
+				Expect(keys).To(Equal([]string{"after"}))
+			})
 		})
 	})
 

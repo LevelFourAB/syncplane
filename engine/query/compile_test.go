@@ -263,10 +263,25 @@ var _ = Describe("Compile", func() {
 		Expect(err).To(MatchError(ContainSubstring("use has/hasAny/hasAll/isEmpty")))
 	})
 
-	It("does not offer isSet for a map, which is always set", func() {
+	It("points a comparison on a bare map at one of its entries", func() {
+		// A whole map compares against nothing, but one ENTRY is an ordinary
+		// value — so the hint names the key form rather than declaring maps
+		// unqueryable. isSet stays off the list: on a map it is
+		// constitutionally true (implicit presence), so it would be a false lead.
 		_, err := query.Compile(widgetDesc, cmpCond([]string{"attrs"}))
-		Expect(err).To(MatchError(ContainSubstring("map fields cannot be queried")))
+		Expect(err).To(MatchError(ContainSubstring("address one entry by key instead, e.g. attrs.<key>")))
 		Expect(err).NotTo(MatchError(ContainSubstring("isSet")))
+	})
+
+	It("reports a map key that does not parse as its key type", func() {
+		_, err := query.Compile(widgetDesc, cmpCond([]string{"by_id", "not-a-number"}))
+		Expect(err).To(MatchError(ContainSubstring("invalid int64 map key")))
+	})
+
+	It("names the entry, not the map, when a map value is incomparable", func() {
+		_, err := query.Compile(widgetDesc, cmpCond([]string{"custom", "priority"}))
+		Expect(err).To(MatchError(ContainSubstring(
+			"the syncplane.testdata.v1.FieldValue value of map field custom is not comparable")))
 	})
 
 	It("allows a comparison against a collaborative text field", func() {
@@ -305,6 +320,99 @@ var _ = Describe("Compile", func() {
 		_, err := query.Compile(widgetDesc, query.Any("tags", query.Eq("uid", "u1")))
 		Expect(err).To(MatchError(ContainSubstring("repeated message field")))
 		Expect(err).To(MatchError(ContainSubstring("has/hasAny/hasAll")))
+	})
+
+	Describe("any() over a map", func() {
+		// The element is the ENTRY, so a sub-condition names `key` or `value` —
+		// which is what makes "which custom field holds X" expressible at all.
+		// Addressing one entry by key answers the other question, "does THIS
+		// field hold X".
+		row := &testdatav1.Widget{
+			Attrs: map[string]string{"color": "red", "size": "L"},
+			Custom: map[string]*testdatav1.FieldValue{
+				"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+				"team":     {Kind: &testdatav1.FieldValue_Text{Text: "platform"}},
+				"labels":   {Kind: &testdatav1.FieldValue_Labels{Labels: &testdatav1.StringList{Values: []string{"ui", "api"}}}},
+			},
+		}
+		matches := func(cond *syncplanev1.Condition) bool {
+			GinkgoHelper()
+			compiled, err := query.Compile(widgetDesc, cond)
+			Expect(err).NotTo(HaveOccurred())
+			return compiled.Eval(row.ProtoReflect())
+		}
+
+		It("finds an entry by its value, across keys", func() {
+			Expect(matches(query.Any("custom", query.Eq("value.number", 5)))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.Eq("value.number", 9)))).To(BeFalse())
+		})
+
+		It("finds an entry by its key", func() {
+			Expect(matches(query.Any("custom", query.Eq("key", "team")))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.In("key", "nope", "priority")))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.StartsWith("key", "pri")))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.StartsWith("key", "zz")))).To(BeFalse())
+		})
+
+		It("describes ONE entry when key and value are conjoined", func() {
+			// The whole reason the entry scope is explicit: this is true only
+			// because one entry satisfies both halves.
+			Expect(matches(query.Any("custom", query.And(
+				query.Eq("key", "priority"), query.Eq("value.number", 5))))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.And(
+				query.Eq("key", "team"), query.Eq("value.number", 5))))).To(BeFalse())
+		})
+
+		It("reads a wrong-variant entry as not found, exactly as an addressed path does", func() {
+			Expect(matches(query.Any("custom", query.Eq("value.text", "platform")))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.And(
+				query.Eq("key", "priority"), query.IsSet("value.text"))))).To(BeFalse())
+		})
+
+		It("reaches a list nested inside one entry", func() {
+			Expect(matches(query.Any("custom", query.HasAny("value.labels.values", "ui")))).To(BeTrue())
+			Expect(matches(query.Any("custom", query.HasAny("value.labels.values", "zzz")))).To(BeFalse())
+		})
+
+		It("works over a scalar-valued map, where both sides are plain values", func() {
+			Expect(matches(query.Any("attrs", query.Eq("value", "red")))).To(BeTrue())
+			Expect(matches(query.Any("attrs", query.And(
+				query.Eq("key", "size"), query.Eq("value", "L"))))).To(BeTrue())
+			Expect(matches(query.Any("attrs", query.And(
+				query.Eq("key", "size"), query.Eq("value", "red"))))).To(BeFalse())
+		})
+
+		It("matches nothing on an absent or empty map, so not(any(…)) reads as none", func() {
+			bare := &testdatav1.Widget{}
+			compiled, err := query.Compile(widgetDesc, query.Any("custom", query.Eq("value.number", 5)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(compiled.Eval(bare.ProtoReflect())).To(BeFalse())
+			Expect(matches(query.Not(query.Any("custom", query.Eq("value.number", 9))))).To(BeTrue())
+		})
+
+		It("rejects a sub-path that is neither key nor value", func() {
+			// Compiling against the synthetic entry type would reject it too, but
+			// the error would name a message the schema author never wrote.
+			_, err := query.Compile(widgetDesc, query.Any("custom", query.Eq("priority.number", 5)))
+			Expect(err).To(MatchError(ContainSubstring("scopes one ENTRY")))
+			Expect(err).To(MatchError(ContainSubstring(`"key" or "value"`)))
+		})
+
+		It("rejects a path continuing past the entry key", func() {
+			_, err := query.Compile(widgetDesc, query.Any("custom", query.Eq("key.nope", "x")))
+			Expect(err).To(MatchError(ContainSubstring("cannot descend into")))
+		})
+
+		It("rejects a comparison against the whole value of a message-valued map", func() {
+			_, err := query.Compile(widgetDesc, query.Any("custom", query.Eq("value", "x")))
+			Expect(err).To(MatchError(ContainSubstring("not comparable")))
+		})
+
+		It("points a comparison against a whole map at both entry forms", func() {
+			_, err := query.Compile(widgetDesc, query.Eq("attrs", "x"))
+			Expect(err).To(MatchError(ContainSubstring("address one entry by key")))
+			Expect(err).To(MatchError(ContainSubstring("any(attrs,")))
+		})
 	})
 
 	It("rejects any() over a singular message field", func() {

@@ -29,11 +29,23 @@
 //
 // A mismatch between a condition's LITERAL and the field's value is a
 // legitimate no-match and evaluates false here. A field that could never take
-// part in the comparison at all (bytes, message, map, repeated) never reaches
-// this file: prepareQuery rejects it against the schema first, so nothing
-// below has to decide what "eq against a map" means.
+// part in the comparison at all (bytes, message, a whole map, repeated) never
+// reaches this file: prepareQuery rejects it against the schema first, so
+// nothing below has to decide what "eq against a map" means.
+//
+// A path segment following a MAP field is the entry KEY — the convention lww
+// mask paths already use, so there is one rule rather than two — and one entry
+// is an ordinary value. Because an entry has explicit presence, a path naming
+// one variant of an app-defined oneof value ("custom.priority.number") reads as
+// NOT FOUND on a row whose entry holds another variant, which is what lets the
+// value type be app-defined: no cross-variant comparison ever has to exist.
+//
+// The mirror question — "which entry holds X" rather than "does THIS entry hold
+// X" — is an `exists` over the map, whose element is the ENTRY and whose
+// sub-condition addresses `key` and `value`. It answers whether some entry
+// matched, never which one; nothing here projects.
 
-import type { DescField, DescMessage } from '@bufbuild/protobuf';
+import { type DescField, type DescMessage, ScalarType } from '@bufbuild/protobuf';
 
 import { isTextField } from '../mutations.js';
 import type { Row } from '../read.js';
@@ -85,17 +97,45 @@ export function resolveWithField(
 	let current: unknown = row;
 	let desc: DescMessage | undefined = schema;
 	let field: DescField | undefined;
+	// Set on the step after a map field: the next segment is the entry KEY, and
+	// this carries whether that key is a string (used verbatim) and the value's
+	// message type (so a path may continue into it).
+	let mapAt: { stringKey: boolean; valueOf: DescMessage | undefined } | undefined;
 	for (const segment of path) {
 		if (current === null || current === undefined || typeof current !== 'object') {
 			return { found: false };
 		}
 		const rec = current as Record<string, unknown>;
+		if (mapAt) {
+			// protobuf-es represents a map as a plain object, so an entry is a
+			// property lookup — but a non-string key is stored under its CANONICAL
+			// decimal form, and a path may spell it any way the parser accepts
+			// ("007"). Normalizing is what makes both spellings reach the same
+			// entry, which is what the Go side does by parsing the segment to the
+			// key type.
+			const key = mapAt.stringKey ? segment : normalizeNumericKey(segment);
+			current = Object.hasOwn(rec, key) ? rec[key] : undefined;
+			desc = mapAt.valueOf;
+			field = undefined;
+			mapAt = undefined;
+			continue;
+		}
 		field = desc?.fields.find((f) => f.localName === segment);
 		if (field?.oneof) {
 			const group = rec[field.oneof.localName] as { case?: string; value?: unknown } | undefined;
 			current = group?.case === segment ? group.value : undefined;
 		} else {
 			current = rec[segment];
+		}
+		if (field?.fieldKind === 'map') {
+			mapAt = {
+				// ScalarType.STRING === 9 — the proto field-type number, which
+				// protobuf-es reuses verbatim.
+				stringKey: field.mapKey === 9,
+				valueOf: field.mapKind === 'message' ? field.message : undefined,
+			};
+			desc = undefined;
+			continue;
 		}
 		desc = field?.fieldKind === 'message' ? field.message : undefined;
 	}
@@ -110,8 +150,105 @@ export function resolveWithField(
 	return { found: true, value: current, field };
 }
 
+/**
+ * Canonicalizes a non-string map key so a path finds the entry however it was
+ * spelled. protobuf-es stores an integral key under its own decimal form, so
+ * "007" would miss an entry keyed 7 — while the Go side parses the segment to
+ * the key type and finds it. Bool keys are already canonical.
+ *
+ * An unparseable key is left as it is and simply matches nothing; the schema
+ * resolution (wire.ts) is what rejects one outright, so this is the fallback for
+ * an AST that never went through it.
+ */
+function normalizeNumericKey(segment: string): string {
+	if (segment === 'true' || segment === 'false') return segment;
+	try {
+		return BigInt(segment).toString();
+	} catch {
+		return segment;
+	}
+}
+
+/** A map field, narrowed. */
+type MapField = Extract<DescField, { fieldKind: 'map' }>;
+
+/**
+ * One ENTRY of a map, as an `exists` over that map scopes it.
+ *
+ * protobuf-es surfaces no message type for a map entry — proto's synthetic entry
+ * type is not part of the generated shapes — so the entry travels as the
+ * (key, value) pair it is, and the first segment of a sub-condition path picks
+ * the side it means. The Go evaluator carries the same pair for the same reason.
+ */
+interface EntryScope {
+	map: MapField;
+	key: Scalar;
+	value: unknown;
+}
+
+/** The two segments a sub-condition inside a map entry may start at. They are
+ * the same words an index component's `*` selector uses. */
+const ENTRY_KEY = 'key';
+const ENTRY_VALUE = 'value';
+
+/**
+ * A map's property key as the value its declared key type gives it.
+ *
+ * protobuf-es stores every key as a property STRING, so an int-keyed map would
+ * otherwise compare its keys as strings and `e.key.gt(5)` would see "5". This is
+ * the inverse of {@link normalizeNumericKey}, which converts the other way for
+ * an entry addressed by key.
+ */
+function typedMapKey(field: MapField, raw: string): Scalar {
+	switch (field.mapKey) {
+		case ScalarType.STRING:
+			return raw;
+		case ScalarType.BOOL:
+			return raw === 'true';
+		case ScalarType.INT64:
+		case ScalarType.UINT64:
+		case ScalarType.SINT64:
+		case ScalarType.FIXED64:
+		case ScalarType.SFIXED64:
+			return BigInt(raw);
+		default:
+			return Number(raw);
+	}
+}
+
+/**
+ * Walks a path through whatever scope a condition is being evaluated in.
+ *
+ * A MESSAGE scope is resolveWithField unchanged. An ENTRY scope resolves the
+ * first segment against the pair itself — `key` or `value` — and everything
+ * below `value` is an ordinary path through the value's message type, which is
+ * what makes `value.number` inside an any() mean exactly what
+ * `custom.<key>.number` means from the row.
+ */
+function resolveIn(
+	row: unknown,
+	path: Path,
+	schema: DescMessage | undefined,
+	entry: EntryScope | undefined,
+): ResolvedWithField {
+	if (!entry) return resolveWithField(row, path, schema);
+	const [ head, ...rest ] = path;
+	if (head === ENTRY_KEY) {
+		// A key is a scalar, so nothing can follow it; prepareQuery rejects such
+		// a path before this is reached.
+		return rest.length > 0 ? { found: false } : { found: true, value: entry.key };
+	}
+	if (head !== ENTRY_VALUE) return { found: false };
+	if (rest.length === 0) {
+		// An entry always HAS a value, whatever it holds.
+		return { found: true, value: entry.value };
+	}
+	if (entry.map.mapKind !== 'message') return { found: false };
+	return resolveWithField(entry.value, rest, entry.map.message);
+}
+
 /** `===` with number/bigint normalization. */
-function equalsScalar(a: unknown, b: Scalar): boolean {
+export function equalsScalar(a: unknown, b: Scalar): boolean {
 	if (typeof a === 'bigint' && typeof b === 'number') {
 		return Number.isInteger(b) ? a === BigInt(b) : Number(a) === b;
 	}
@@ -161,6 +298,11 @@ function isNaNValue(v: unknown): boolean {
 	return typeof v === 'number' && Number.isNaN(v);
 }
 
+/** A map, as protobuf-es represents one: a plain object of entries. */
+function isPlainMap(v: unknown): boolean {
+	return typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof Uint8Array);
+}
+
 /**
  * Order ranks, the coarse bucket a resolved value falls into before its value
  * is looked at. The rank is compared BEFORE the key's direction is applied,
@@ -177,21 +319,32 @@ function orderRank(r: Resolved): number {
 	return isNaNValue(r.value) ? RANK_NAN : RANK_REAL;
 }
 
-/** Evaluates a condition against one decoded row value. */
-export function evalCond(row: unknown, cond: Cond, schema?: DescMessage): boolean {
+/**
+ * Evaluates a condition against one decoded row value.
+ *
+ * `entry` scopes the condition to one map ENTRY instead of a message — what an
+ * `exists` over a map gives its sub-condition. It is internal to this recursion;
+ * every caller outside starts from a message.
+ */
+export function evalCond(
+	row: unknown,
+	cond: Cond,
+	schema?: DescMessage,
+	entry?: EntryScope,
+): boolean {
 	switch (cond.kind) {
 		case 'and':
-			return cond.conds.every((c) => evalCond(row, c, schema));
+			return cond.conds.every((c) => evalCond(row, c, schema, entry));
 		case 'or':
-			return cond.conds.some((c) => evalCond(row, c, schema));
+			return cond.conds.some((c) => evalCond(row, c, schema, entry));
 		case 'not':
-			return !evalCond(row, cond.cond, schema);
+			return !evalCond(row, cond.cond, schema, entry);
 		case 'present': {
-			const { found } = resolvePath(row, cond.path, schema);
+			const { found } = resolveIn(row, cond.path, schema, entry);
 			return cond.op === 'isSet' ? found : !found;
 		}
 		case 'cmp': {
-			const { found, value } = resolvePath(row, cond.path, schema);
+			const { found, value } = resolveIn(row, cond.path, schema, entry);
 			if (!found) return false;
 			if (cond.op === 'eq') return equalsScalar(value, cond.value);
 			if (cond.op === 'neq') return !equalsScalar(value, cond.value);
@@ -210,12 +363,12 @@ export function evalCond(row: unknown, cond: Cond, schema?: DescMessage): boolea
 			return false;
 		}
 		case 'in': {
-			const { found, value } = resolvePath(row, cond.path, schema);
+			const { found, value } = resolveIn(row, cond.path, schema, entry);
 			if (!found) return false;
 			return cond.values.some((v) => equalsScalar(value, v));
 		}
 		case 'str': {
-			const { found, value } = resolvePath(row, cond.path, schema);
+			const { found, value } = resolveIn(row, cond.path, schema, entry);
 			if (!found || typeof value !== 'string') return false;
 			switch (cond.op) {
 				case 'startsWith':
@@ -228,8 +381,15 @@ export function evalCond(row: unknown, cond: Cond, schema?: DescMessage): boolea
 			return false;
 		}
 		case 'rep': {
-			const { found, value } = resolvePath(row, cond.path, schema);
-			if (!found || !Array.isArray(value)) return false;
+			const { found, value } = resolveIn(row, cond.path, schema, entry);
+			if (!found) return false;
+			if (!Array.isArray(value)) {
+				// prepareQuery admits a map for isEmpty alone, so this is the only
+				// operator that can reach one. A map is a plain object here, which
+				// is why the array check cannot stand in for the collection check.
+				return cond.op === 'isEmpty' && isPlainMap(value)
+					&& Object.keys(value as object).length === 0;
+			}
 			switch (cond.op) {
 				case 'isEmpty':
 					return value.length === 0;
@@ -243,15 +403,29 @@ export function evalCond(row: unknown, cond: Cond, schema?: DescMessage): boolea
 			return false;
 		}
 		case 'exists': {
-			const { found, value, field } = resolveWithField(row, cond.path, schema);
-			// An unset or empty list matches nothing, like every other condition
-			// on a missing value — which also makes not(any(…)) read as "no
-			// element matches".
-			if (!found || !Array.isArray(value)) return false;
-			const element = field?.fieldKind === 'list' && field.listKind === 'message'
-				? field.message
-				: undefined;
-			return value.some((e) => evalCond(e, cond.cond, element));
+			const { found, value, field } = resolveIn(row, cond.path, schema, entry);
+			// An unset or empty collection matches nothing, like every other
+			// condition on a missing value — which also makes not(any(…)) read as
+			// "no element matches".
+			if (!found) return false;
+			if (Array.isArray(value)) {
+				const element = field?.fieldKind === 'list' && field.listKind === 'message'
+					? field.message
+					: undefined;
+				return value.some((e) => evalCond(e, cond.cond, element));
+			}
+			// A MAP: the element is one ENTRY, and the sub-condition addresses
+			// its two sides. The key comes back typed, because protobuf-es stores
+			// it as a property string and `e.key.gt(5)` has to see a number.
+			if (field?.fieldKind !== 'map' || !isPlainMap(value)) return false;
+			const map = field;
+			return Object.entries(value as Record<string, unknown>).some(([ raw, v ]) =>
+				evalCond(undefined, cond.cond, undefined, {
+					map,
+					key: typedMapKey(map, raw),
+					value: v,
+				})
+			);
 		}
 	}
 }

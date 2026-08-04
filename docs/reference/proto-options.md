@@ -151,10 +151,14 @@ instead of scans. Three rules come with it:
   serves "labelled X, newest first" at O(limit); nothing can order **by** a
   repeated path, since a row has many values there.
 
+A path may also fan out over a **map**, written `*` — see
+[Maps and user-defined fields](#maps-and-user-defined-fields) below.
+
 **Not indexable:** a collaborative-text field (every keystroke would rewrite the
-entry — full-text search is a different mechanism), a map, or a repeated message
-field named on its own — index a scalar field of the elements instead. All are
-rejected at registration.
+entry — full-text search is a different mechanism), or a repeated message field
+named on its own — index a scalar field of the elements instead. A map is not
+indexable through a field mark either; it needs the `*` syntax, which says which
+entries and which leaf. All are rejected at registration.
 
 Indexes are **invisible and additive**. Nothing in a request or response names
 one, a query returns the same rows in the same order whether or not one served
@@ -165,13 +169,14 @@ has, bounded by `MaxIndexEntriesPerRow`.
 
 ## Merge behaviour by field kind
 
-| Kind                 | On PATCH with the field in the mask        | On PUT                    |
-| -------------------- | ------------------------------------------ | ------------------------- |
-| Scalar, message, map | Last writer wins for that field            | Replaced                  |
-| Keyed list           | Merged by element key                      | Replaced                  |
-| `opaque`             | Replaced whole (or your registered merger) | Replaced                  |
-| `text`               | Unioned with the stored document           | **Unioned**, not replaced |
-| `oneof`              | Whole group replaced; mask names the group | Replaced                  |
+| Kind            | On PATCH with the field in the mask        | On PUT                    |
+| --------------- | ------------------------------------------ | ------------------------- |
+| Scalar, message | Last writer wins for that field            | Replaced                  |
+| Map             | Merged by map key; a mask may name one key | Replaced                  |
+| Keyed list      | Merged by element key                      | Replaced                  |
+| `opaque`        | Replaced whole (or your registered merger) | Replaced                  |
+| `text`          | Unioned with the stored document           | **Unioned**, not replaced |
+| `oneof`         | Whole group replaced; mask names the group | Replaced                  |
 
 The `text` row of that table is the one exception to "PUT replaces the whole
 row" — see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#put-replaces-the-whole-row).
@@ -194,6 +199,10 @@ const withValue = { where: (w) => w.choice.choiceText.eq('hit') }; // value of o
 const anyText = { where: (w) => w.choice.choiceText.isSet() }; // which case is active
 ```
 
+That rule is load-bearing beyond oneofs themselves: it is what lets a map of
+user-defined fields hold an **app-defined** value type instead of an engine one.
+See below.
+
 ### What a oneof cannot hold
 
 Because the group is replaced whole, nothing below it is ever addressed on its
@@ -213,6 +222,187 @@ The last one rules out polymorphic targets
 `include`/follow segments and the reverse push-down all key off a ref field
 being in a fixed place; making them handle a sometimes-absent one is a design
 question of its own rather than a missing branch.
+
+## Maps and user-defined fields
+
+A `map` is merged per entry by map key, and every entry is addressable — in a
+field mask, in a query, in an ordering. That is what an issue tracker's
+user-defined ("custom") fields are made of:
+
+```proto
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		index: { name: "cf_number" key: [ { path: "custom.*.number" } ] }
+	};
+
+	string id = 1;
+	map<string, FieldValue> custom = 2;
+}
+
+// The value type is YOURS. The engine never interprets it.
+message FieldValue {
+	oneof kind {
+		string text = 1;
+		double number = 2;
+		bool checked = 3;
+		// Multi-select needs no engine concept: wrap a repeated scalar, and
+		// `custom.<key>.labels.values` is an ordinary repeated leaf.
+		StringList labels = 4;
+	}
+}
+```
+
+### Addressing one entry
+
+**The path segment after a map field is the entry KEY**, not a field name — the
+same convention a field-mask path already uses, so there is one rule rather than
+two:
+
+```
+custom.priority.number      the `number` variant of the entry keyed "priority"
+custom.priority             the whole entry (isSet / isNotSet)
+custom                      the whole map (isEmpty)
+```
+
+A key that contains a dot is escaped with a backslash where a path is written as
+one string — `custom.due\.date.text` — which is only needed in the Go builders
+and in field masks. On the wire a path is already a list of segments, so a key
+travels verbatim.
+
+A query names the VARIANT it means. Because a oneof member has explicit
+presence, an entry holding a different variant simply reads as **not found**:
+the condition is false and the ordering ranks it last, exactly as for any unset
+field. That is why the engine needs no canonical value type, no cross-variant
+sort order, and no rule for comparing a number against an attachment — no path
+ever asks it to.
+
+The one consequence to accept: **there is no ordering by "whatever the value
+is"** across variants. `order by custom.priority` is not a thing;
+`order by custom.priority.number` is. Since a custom field has one declared type
+in your own field-definition table, that is a non-loss in practice — but it does
+follow directly from choosing an app-defined value type.
+
+Comparing a whole map, or a whole entry whose value is a message, is rejected at
+compile time with an error naming the key form. `isSet` on a map is not offered:
+a map has implicit presence, so it is constitutionally true. `isEmpty` is what
+asks whether it holds anything.
+
+### Searching across keys: `any()`
+
+The mirror question — "**which** custom field holds X", rather than "does THIS
+one" — is an `any()` over the map. Its element is one **entry**, whose two sides
+the sub-condition addresses as `key` and `value`:
+
+```go
+query.Any("custom", query.Eq("value.number", 5))            // which field holds 5
+query.Any("custom", query.And(
+	query.StartsWith("key", "cf_"), query.Eq("value.checked", true)))
+query.Any("custom", query.In("key", "priority", "severity"))  // any of these set
+```
+
+```ts
+w.custom.any((e) => e.value.kind.number.eq(5));
+w.custom.any((e) =>
+	and(e.key.startsWith('cf_'), e.value.kind.checked.eq(true))
+);
+```
+
+The entry scope is explicit for the same reason it is on a repeated message
+field: it is what lets two conditions be said to describe the **same** entry.
+`any(and(key == "priority", value.number == 5))` is "the field named priority
+holds 5"; `and(any(key == "priority"), any(value.number == 5))` is the weaker
+"priority is set AND something holds 5".
+
+Two things follow, and both are worth knowing before you reach for it:
+
+- **Comparing the key as a value** costs no escaping — an entry key containing a
+  dot needs none here — and gives `in` and `startsWith` over keys for free.
+- **There is no projection.** The answer is a predicate: some entry matched. It
+  never says _which_ one. An app that needs the field's name reads it off the
+  row's map after the query returns.
+
+### Indexing every entry: `*`
+
+A `*` segment in an `IndexKey.path` means **fan out over every entry of this
+map**, and the segment after it — `key` or `value` — says which side of the
+entry the component stores. **One declared path is one component**, so an index
+states its own layout:
+
+```proto
+// One custom field, addressed by key: equality, ranges and an ordering within it.
+index {
+	name: "cf_number"
+	key: [ { path: "custom.*.key" }, { path: "custom.*.value.number" } ]
+}
+// The same, with a second sort key.
+index {
+	name: "cf_num_recent"
+	key: [
+		{ path: "custom.*.key" },
+		{ path: "custom.*.value.number" },
+		{ path: "updated_at" desc: true }
+	]
+}
+// Which custom field holds X: equality only, cross-key or named-key.
+index {
+	name: "cf_by_number"
+	key: [ { path: "custom.*.value.number" }, { path: "custom.*.key" } ]
+}
+// Multi-select, one entry per (key, element).
+index {
+	name: "cf_labels"
+	key: [ { path: "custom.*.key" }, { path: "custom.*.value.labels.values" } ]
+}
+```
+
+The two layouts are complementary, and the choice between them is the one real
+decision here:
+
+| Layout         | Serves                                                                 |
+| -------------- | ---------------------------------------------------------------------- |
+| `[key, value]` | equality, ranges **and** ordering — within one named field             |
+| `[value, key]` | equality only — cross-key _or_ named-key (pin the value, then the key) |
+
+An app that only does equality probes declares **one** index, `[value, key]`, and
+gets both axes from it. Declaring both layouts doubles the entries a row
+occupies; see [limits and trade-offs](../explanation/limits-and-trade-offs.md)
+for what that costs and how to measure it.
+
+The selector is required rather than defaulted because a bare trailing `*` would
+be genuinely ambiguous: for `map<string, string> attrs`, `attrs.*` could mean
+either side of the entry. `key` and `value` are the same two words the `any()`
+entry scope uses, so one concept has one spelling in a declaration and in a
+query. Neither `*` nor a selector can collide with a field name in a condition
+path — there, the segment after a map is an entry key, and these would simply be
+that key.
+
+Three properties follow:
+
+- A `*` may be followed by a repeated field **inside one entry**
+  (`custom.*.value.labels.values`), which stores one entry per (key, element).
+  That is not a cross product: the second fan lives inside one position of the
+  first.
+- Once the entry key is pinned by a predicate, the value **is** an ordering — a
+  map holds at most one value per key, so the row occupies exactly one position.
+  A list fan-out never gets this, which is why the two are distinguished.
+- An ordering by a custom field that no predicate pins **declines to the scan**.
+  Rows lacking that key sit outside every key range and have to sort last, and
+  the executor has no second pass to append them.
+
+A value component with **no key component beside it** is legal and useful — it is
+what serves a cross-key `any()` — but a predicate naming one field then stays in
+the residual: the range spans that value under every key, so the key constraint
+has to be re-checked per row rather than dropped.
+
+`indexed: true` on a map is refused: a field mark has no room to say which side,
+which entry or which variant. The error points at the `*` form.
+
+### Not there yet
+
+- **The admin UI** renders and filters scalar-valued maps only; a message-valued
+  one is skipped in the row view, the edit form and the filter bar.
 
 ## Custom mergers for opaque fields
 

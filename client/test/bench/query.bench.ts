@@ -39,7 +39,7 @@ import { queryByIndex } from '../../src/query/execute.js';
 import { compileQuery } from '../../src/query/index.js';
 import { prepareQuery } from '../../src/query/wire.js';
 import { scanDecoded } from '../../src/read.js';
-import { entity, type Infer, int32, text } from '../../src/schema/builder.js';
+import { double, entity, type Infer, int32, map, text } from '../../src/schema/builder.js';
 import { defineSchema } from '../../src/schema/builder.js';
 import { TouchSet } from '../../src/touch.js';
 
@@ -139,6 +139,121 @@ for (const n of SIZES) {
 			}
 		});
 	});
+}
+
+// The EAV shape: the indexed collection is a MAP of user-defined fields, and the
+// question is the one no addressed path can ask — "which custom field holds X".
+// Only a `[value, key]` layout serves it as a range.
+//
+// The Go mirror is BenchmarkCustomFieldQuery, and the same caveat applies twice
+// over here: MemoryKVStore's scanRange is O(store), so the index column is a
+// floor on the benefit rather than the asymptotic story. What these numbers DO
+// show is the decode-and-evaluate work the index avoids, which on an EAV row is
+// larger than on a scalar one because every entry of every row is walked.
+const record = entity('record', {
+	id: text().key(),
+	title: text(),
+	custom: map('string', double()),
+}, {
+	indexes: [
+		// One index, both axes: `[value, key]` answers "which field holds X" AND
+		// "does f00 hold X", which is why an equality-only app declares one.
+		{
+			name: 'cf_by_value',
+			key: [ { path: 'custom.*.value' }, { path: 'custom.*.key' } ],
+		},
+	],
+});
+
+type Record_ = Infer<typeof record>;
+const RecordSchema = defineSchema(record).descMessage('record');
+const recordRegistry = new EntityRegistry([ RecordSchema ]);
+
+/** How many custom fields each row carries. */
+const EAV_WIDTH = 20;
+const EAV_HIT = 42;
+
+const CROSS_KEY = prepareQuery(
+	RecordSchema,
+	compileQuery<Record_>({ where: (r) => r.custom.any((e) => e.value.eq(EAV_HIT)) }),
+);
+const NAMED_KEY = prepareQuery(
+	RecordSchema,
+	compileQuery<Record_>({ where: (r) => r.custom.at('f00').eq(EAV_HIT) }),
+);
+
+/** A store of n confirmed EAV rows, MATCHES of which hold EAV_HIT at `f00`. */
+async function seededEav(n: number, built: boolean) {
+	const kv = new MemoryKVStore();
+	const indexes = new IndexCache(recordRegistry);
+	for (let start = 0; start < n; start += 1000) {
+		const tx = await kv.write();
+		const changes = [];
+		for (let i = start; i < Math.min(start + 1000, n); i++) {
+			const custom: { [k: string]: number } = {};
+			for (let f = 0; f < EAV_WIDTH; f++) custom[`f${String(f).padStart(2, '0')}`] = f % 7;
+			// The matching rows are spread across the key space rather than
+			// clustered, so the scan cannot get lucky and stop early.
+			if (i % Math.floor(n / MATCHES) === 0) custom.f00 = EAV_HIT;
+			changes.push(create(RowChangeSchema, {
+				entity: 'record',
+				key: `r${String(i).padStart(7, '0')}`,
+				version: BigInt(i + 1),
+				body: {
+					case: 'value',
+					value: toBinary(
+						RecordSchema,
+						create(RecordSchema, { id: `r${i}`, title: 'record', custom }),
+					),
+				},
+			}));
+		}
+		await applyServerChanges(tx, recordRegistry, WS, changes, new TouchSet(), indexes);
+		await tx.commit();
+	}
+	if (built) {
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), recordRegistry, indexes, WS);
+	}
+	return { kv, indexes };
+}
+
+for (const n of SIZES) {
+	for (const [ shape, q ] of [ [ 'cross-key', CROSS_KEY ], [ 'named-key', NAMED_KEY ] ] as const) {
+		describe(`custom-field ${shape} query over ${n} rows`, () => {
+			let scanStore: Awaited<ReturnType<typeof seededEav>>;
+			let indexStore: Awaited<ReturnType<typeof seededEav>>;
+
+			bench('scan', async () => {
+				scanStore ??= await seededEav(n, false);
+				const tx = await scanStore.kv.read();
+				try {
+					const def = recordRegistry.get('record')!;
+					runQuery(await scanDecoded(tx, recordRegistry, def, RecordSchema, WS), q, RecordSchema);
+				} finally {
+					tx.release();
+				}
+			});
+
+			bench('index', async () => {
+				indexStore ??= await seededEav(n, true);
+				const tx = await indexStore.kv.read();
+				try {
+					await queryByIndex(
+						tx,
+						recordRegistry,
+						recordRegistry.get('record')!,
+						RecordSchema,
+						indexStore.indexes.for('record'),
+						q,
+						WS,
+					);
+				} finally {
+					tx.release();
+				}
+			});
+		});
+	}
 }
 
 describe('confirmed row write', () => {

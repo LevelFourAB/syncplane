@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/testdata/v1/testdata.proto.
  */
 export const file_syncplane_testdata_v1_testdata: GenFile = /*@__PURE__*/
-  fileDesc("CiRzeW5jcGxhbmUvdGVzdGRhdGEvdjEvdGVzdGRhdGEucHJvdG8SFXN5bmNwbGFuZS50ZXN0ZGF0YS52MSK4BgoGV2lkZ2V0EgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg0KBWNvdW50GAMgASgFEjEKCHNldHRpbmdzGAQgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzEjAKA2RvYxgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDAoEdGFncxgGIAMoCRILCgNiaWcYByABKAMSEgoFbWF5YmUYCCABKAlIAYgBARIMCgRmbGFnGAkgASgIEhMKA3JhdxgKIAEoDEIGqrsYAggBEjcKBWF0dHJzGAsgAygLMiguc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5BdHRyc0VudHJ5EjYKBWJ5X2lkGAwgAygLMicuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5CeUlkRW50cnkSOQoHbWVtYmVycxgNIAMoCzIdLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5NZW1iZXJCCaq7GAUSA3VpZBIpCgRyZWZzGA4gAygLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlBhaXISGwoLYXRvbWljX3RhZ3MYDyADKAlCBqq7GAIIARI5CgVpdGVtcxgQIAMoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5JdGVtQg2quxgJEgJpZBoDcG9zEhQKBGJvZHkYESABKAxCBqq7GAIgARINCgVyYXRpbxgSIAEoARIMCgR1YmlnGBMgASgEEhUKC2Nob2ljZV90ZXh0GBQgASgJSAASFwoNY2hvaWNlX251bWJlchgVIAEoBUgAEjoKD2Nob2ljZV9zZXR0aW5ncxgWIAEoCzIfLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5TZXR0aW5nc0gAGiwKCkF0dHJzRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ARorCglCeUlkRW50cnkSCwoDa2V5GAEgASgDEg0KBXZhbHVlGAIgASgJOgI4AToQorsYDAoGd2lkZ2V0EgJpZEIICgZjaG9pY2VCCAoGX21heWJlIk0KDk9uZW9mS2V5RW50aXR5EgwKAmlkGAEgASgJSAASDwoFb3RoZXIYAiABKAlIADoTorsYDwoJb25lb2Zfa2V5EgJpZEIHCgV3aGljaCJlCg9PbmVvZlRleHRFbnRpdHkSCgoCaWQYASABKAkSFgoEYm9keRgCIAEoDEIGqrsYAiABSAASDwoFcGxhaW4YAyABKAlIADoUorsYEAoKb25lb2ZfdGV4dBICaWRCBwoFd2hpY2gijwEKFU9uZW9mTmVzdGVkVGV4dEVudGl0eRIKCgJpZBgBIAEoCRIzCgZob2xkZXIYAiABKAsyIS5zeW5jcGxhbmUudGVzdGRhdGEudjEuVGV4dEhvbGRlckgAEg8KBXBsYWluGAMgASgJSAA6G6K7GBcKEW9uZW9mX25lc3RlZF90ZXh0EgJpZEIHCgV3aGljaCIiCgpUZXh0SG9sZGVyEhQKBGJvZHkYASABKAxCBqq7GAIgASKbAQoOT25lb2ZSZWZFbnRpdHkSCgoCaWQYASABKAkSMQoHcHJvamVjdBgCIAEoCzIeLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Qcm9qZWN0SAASKwoEdXNlchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VySAA6E6K7GA8KCW9uZW9mX3JlZhICaWRCCAoGdGFyZ2V0Ij8KBk1lbWJlchILCgN1aWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRyb2xlGAMgASgFEgwKBHRhZ3MYBCADKAkiLQoESXRlbRIKCgJpZBgBIAEoCRILCgNwb3MYAiABKAkSDAoEdGV4dBgDIAEoCSJBCgRQYWlyEgoKAm5zGAEgASgJEgoKAmlkGAIgASgJEg0KBWxhYmVsGAMgASgJOhKiuxgOCgRwYWlyEgJucxICaWQiNgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOhGiuxgNCgdwcm9qZWN0EgJpZCIwCgRVc2VyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6DqK7GAoKBHVzZXISAmlkIqUDCgVJc3N1ZRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIvCgdwcm9qZWN0GAMgASgLMh4uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlByb2plY3QSMAoKYmxvY2tlZF9ieRgEIAMoCzIcLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Jc3N1ZRItCghhc3NpZ25lZRgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VyEi0KCHJlcG9ydGVyGAYgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlVzZXISKQoEcGFpchgHIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5QYWlyEhUKBXN0YXRlGAggASgJQgaquxgCKAESDAoEcmFuaxgJIAEoBRIWCgZsYWJlbHMYCiADKAlCBqq7GAIoATpYorsYVAoFaXNzdWUSAmlkGiIKDWJ5X3N0YXRlX3JhbmsSBwoFc3RhdGUSCAoEcmFuaxABGiMKDWJ5X2xhYmVsX3JhbmsSCAoGbGFiZWxzEggKBHJhbmsQASJqCghTZXR0aW5ncxINCgVjb2xvchgBIAEoCRIMCgRzaXplGAIgASgFEjIKBWlubmVyGAMgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkJsb2JCBqq7GAIIARINCgVyYXRpbxgEIAEoASIiCgRCbG9iEgwKBGRhdGEYASABKAwSDAoEbm90ZRgCIAEoCSI3CgZMZWRnZXISCgoCaWQYASABKAkSDQoFbGFiZWwYAiABKAk6EqK7GA4KBmxlZGdlchICaWQgAkJOWkxnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS90ZXN0ZGF0YS92MTt0ZXN0ZGF0YXYxYgZwcm90bzM", [file_syncplane_v1_options]);
+  fileDesc("CiRzeW5jcGxhbmUvdGVzdGRhdGEvdjEvdGVzdGRhdGEucHJvdG8SFXN5bmNwbGFuZS50ZXN0ZGF0YS52MSLFBwoGV2lkZ2V0EgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg0KBWNvdW50GAMgASgFEjEKCHNldHRpbmdzGAQgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzEjAKA2RvYxgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDAoEdGFncxgGIAMoCRILCgNiaWcYByABKAMSEgoFbWF5YmUYCCABKAlIAYgBARIMCgRmbGFnGAkgASgIEhMKA3JhdxgKIAEoDEIGqrsYAggBEjcKBWF0dHJzGAsgAygLMiguc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5BdHRyc0VudHJ5EjYKBWJ5X2lkGAwgAygLMicuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5CeUlkRW50cnkSOQoGY3VzdG9tGBcgAygLMikuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5DdXN0b21FbnRyeRI5CgdtZW1iZXJzGA0gAygLMh0uc3luY3BsYW5lLnRlc3RkYXRhLnYxLk1lbWJlckIJqrsYBRIDdWlkEikKBHJlZnMYDiADKAsyGy5zeW5jcGxhbmUudGVzdGRhdGEudjEuUGFpchIbCgthdG9taWNfdGFncxgPIAMoCUIGqrsYAggBEjkKBWl0ZW1zGBAgAygLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkl0ZW1CDaq7GAkSAmlkGgNwb3MSFAoEYm9keRgRIAEoDEIGqrsYAiABEg0KBXJhdGlvGBIgASgBEgwKBHViaWcYEyABKAQSFQoLY2hvaWNlX3RleHQYFCABKAlIABIXCg1jaG9pY2VfbnVtYmVyGBUgASgFSAASOgoPY2hvaWNlX3NldHRpbmdzGBYgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzSAAaLAoKQXR0cnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGisKCUJ5SWRFbnRyeRILCgNrZXkYASABKAMSDQoFdmFsdWUYAiABKAk6AjgBGlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4AToQorsYDAoGd2lkZ2V0EgJpZEIICgZjaG9pY2VCCAoGX21heWJlIrEBCgpGaWVsZFZhbHVlEg4KBHRleHQYASABKAlIABIQCgZudW1iZXIYAiABKAFIABIRCgdjaGVja2VkGAMgASgISAASMwoGbGFiZWxzGAQgASgLMiEuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlN0cmluZ0xpc3RIABIxCgphdHRhY2htZW50GAUgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkJsb2JIAEIGCgRraW5kIhwKClN0cmluZ0xpc3QSDgoGdmFsdWVzGAEgAygJIk0KDk9uZW9mS2V5RW50aXR5EgwKAmlkGAEgASgJSAASDwoFb3RoZXIYAiABKAlIADoTorsYDwoJb25lb2Zfa2V5EgJpZEIHCgV3aGljaCJlCg9PbmVvZlRleHRFbnRpdHkSCgoCaWQYASABKAkSFgoEYm9keRgCIAEoDEIGqrsYAiABSAASDwoFcGxhaW4YAyABKAlIADoUorsYEAoKb25lb2ZfdGV4dBICaWRCBwoFd2hpY2gijwEKFU9uZW9mTmVzdGVkVGV4dEVudGl0eRIKCgJpZBgBIAEoCRIzCgZob2xkZXIYAiABKAsyIS5zeW5jcGxhbmUudGVzdGRhdGEudjEuVGV4dEhvbGRlckgAEg8KBXBsYWluGAMgASgJSAA6G6K7GBcKEW9uZW9mX25lc3RlZF90ZXh0EgJpZEIHCgV3aGljaCIiCgpUZXh0SG9sZGVyEhQKBGJvZHkYASABKAxCBqq7GAIgASKbAQoOT25lb2ZSZWZFbnRpdHkSCgoCaWQYASABKAkSMQoHcHJvamVjdBgCIAEoCzIeLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Qcm9qZWN0SAASKwoEdXNlchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VySAA6E6K7GA8KCW9uZW9mX3JlZhICaWRCCAoGdGFyZ2V0Ij8KBk1lbWJlchILCgN1aWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRyb2xlGAMgASgFEgwKBHRhZ3MYBCADKAkiLQoESXRlbRIKCgJpZBgBIAEoCRILCgNwb3MYAiABKAkSDAoEdGV4dBgDIAEoCSJBCgRQYWlyEgoKAm5zGAEgASgJEgoKAmlkGAIgASgJEg0KBWxhYmVsGAMgASgJOhKiuxgOCgRwYWlyEgJucxICaWQiNgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOhGiuxgNCgdwcm9qZWN0EgJpZCIwCgRVc2VyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6DqK7GAoKBHVzZXISAmlkIu8HCgVJc3N1ZRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIvCgdwcm9qZWN0GAMgASgLMh4uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlByb2plY3QSMAoKYmxvY2tlZF9ieRgEIAMoCzIcLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Jc3N1ZRItCghhc3NpZ25lZRgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VyEi0KCHJlcG9ydGVyGAYgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlVzZXISKQoEcGFpchgHIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5QYWlyEhUKBXN0YXRlGAggASgJQgaquxgCKAESDAoEcmFuaxgJIAEoBRIWCgZsYWJlbHMYCiADKAlCBqq7GAIoARI4CgZjdXN0b20YCyADKAsyKC5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuQ3VzdG9tRW50cnkSOwoIdGFnc19tYXAYDCADKAsyKS5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuVGFnc01hcEVudHJ5GlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4ARouCgxUYWdzTWFwRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ATqoA6K7GKMDCgVpc3N1ZRICaWQaIgoNYnlfc3RhdGVfcmFuaxIHCgVzdGF0ZRIICgRyYW5rEAEaIwoNYnlfbGFiZWxfcmFuaxIICgZsYWJlbHMSCAoEcmFuaxABGjQKCWNmX251bWJlchIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyGjcKDGNmX2J5X251bWJlchIXChVjdXN0b20uKi52YWx1ZS5udW1iZXISDgoMY3VzdG9tLioua2V5GikKDmNmX251bWJlcl9vbmx5EhcKFWN1c3RvbS4qLnZhbHVlLm51bWJlchpACgtjZl9udW1fcmFuaxIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyEggKBHJhbmsQARo7CgljZl9sYWJlbHMSDgoMY3VzdG9tLioua2V5Eh4KHGN1c3RvbS4qLnZhbHVlLmxhYmVscy52YWx1ZXMaNAoMdGFnX2J5X3ZhbHVlEhIKEHRhZ3NfbWFwLioudmFsdWUSEAoOdGFnc19tYXAuKi5rZXkiagoIU2V0dGluZ3MSDQoFY29sb3IYASABKAkSDAoEc2l6ZRgCIAEoBRIyCgVpbm5lchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDQoFcmF0aW8YBCABKAEiIgoEQmxvYhIMCgRkYXRhGAEgASgMEgwKBG5vdGUYAiABKAkiNwoGTGVkZ2VyEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJOhKiuxgOCgZsZWRnZXISAmlkIAJCTlpMZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdGVzdGRhdGEvdjE7dGVzdGRhdGF2MWIGcHJvdG8z", [file_syncplane_v1_options]);
 
 /**
  * @generated from message syncplane.testdata.v1.Widget
@@ -92,6 +92,17 @@ export type Widget = Message<"syncplane.testdata.v1.Widget"> & {
    * @generated from field: map<int64, string> by_id = 12;
    */
   byId: { [key: string]: string };
+
+  /**
+   * Message-valued map: the shape an app declares for user-defined fields.
+   * The value is an APP-defined oneof, so a query names the variant it means
+   * (`custom.priority.number`) and the engine never has to rank two variants
+   * against each other — a member has explicit presence, so the wrong variant
+   * simply reads as not found.
+   *
+   * @generated from field: map<string, syncplane.testdata.v1.FieldValue> custom = 23;
+   */
+  custom: { [key: string]: FieldValue };
 
   /**
    * Keyed message list — identity is the explicit "uid" field.
@@ -185,6 +196,80 @@ export const WidgetSchema: GenMessage<Widget> = /*@__PURE__*/
   messageDesc(file_syncplane_testdata_v1_testdata, 0);
 
 /**
+ * Value of Widget.custom — what an app declares when its users define their
+ * own fields. The engine knows nothing about this type: the oneof, its members
+ * and their names all belong to the app, and a query addresses one member by
+ * name. `labels` is how multi-select is expressed without an engine concept for
+ * it — a message wrapping a repeated scalar, so `custom.<key>.labels.values` is
+ * an ordinary repeated leaf that hasAny/hasAll already understand.
+ *
+ * @generated from message syncplane.testdata.v1.FieldValue
+ */
+export type FieldValue = Message<"syncplane.testdata.v1.FieldValue"> & {
+  /**
+   * @generated from oneof syncplane.testdata.v1.FieldValue.kind
+   */
+  kind: {
+    /**
+     * @generated from field: string text = 1;
+     */
+    value: string;
+    case: "text";
+  } | {
+    /**
+     * @generated from field: double number = 2;
+     */
+    value: number;
+    case: "number";
+  } | {
+    /**
+     * @generated from field: bool checked = 3;
+     */
+    value: boolean;
+    case: "checked";
+  } | {
+    /**
+     * @generated from field: syncplane.testdata.v1.StringList labels = 4;
+     */
+    value: StringList;
+    case: "labels";
+  } | {
+    /**
+     * Deliberately incomparable: no path ever asks the engine to rank two
+     * attachments, so a member no comparison can reach costs nothing.
+     *
+     * @generated from field: syncplane.testdata.v1.Blob attachment = 5;
+     */
+    value: Blob;
+    case: "attachment";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.FieldValue.
+ * Use `create(FieldValueSchema)` to create a new message.
+ */
+export const FieldValueSchema: GenMessage<FieldValue> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 1);
+
+/**
+ * @generated from message syncplane.testdata.v1.StringList
+ */
+export type StringList = Message<"syncplane.testdata.v1.StringList"> & {
+  /**
+   * @generated from field: repeated string values = 1;
+   */
+  values: string[];
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.StringList.
+ * Use `create(StringListSchema)` to create a new message.
+ */
+export const StringListSchema: GenMessage<StringList> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 2);
+
+/**
  * A key field inside a oneof: the row key would vanish whenever a sibling case
  * won.
  *
@@ -214,7 +299,7 @@ export type OneofKeyEntity = Message<"syncplane.testdata.v1.OneofKeyEntity"> & {
  * Use `create(OneofKeyEntitySchema)` to create a new message.
  */
 export const OneofKeyEntitySchema: GenMessage<OneofKeyEntity> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 1);
+  messageDesc(file_syncplane_testdata_v1_testdata, 3);
 
 /**
  * A text field inside a oneof: the CRDT merger could never run, because the
@@ -251,7 +336,7 @@ export type OneofTextEntity = Message<"syncplane.testdata.v1.OneofTextEntity"> &
  * Use `create(OneofTextEntitySchema)` to create a new message.
  */
 export const OneofTextEntitySchema: GenMessage<OneofTextEntity> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 2);
+  messageDesc(file_syncplane_testdata_v1_testdata, 4);
 
 /**
  * A text field one level BELOW a oneof member: same reason, one indirection
@@ -288,7 +373,7 @@ export type OneofNestedTextEntity = Message<"syncplane.testdata.v1.OneofNestedTe
  * Use `create(OneofNestedTextEntitySchema)` to create a new message.
  */
 export const OneofNestedTextEntitySchema: GenMessage<OneofNestedTextEntity> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 3);
+  messageDesc(file_syncplane_testdata_v1_testdata, 5);
 
 /**
  * @generated from message syncplane.testdata.v1.TextHolder
@@ -305,7 +390,7 @@ export type TextHolder = Message<"syncplane.testdata.v1.TextHolder"> & {
  * Use `create(TextHolderSchema)` to create a new message.
  */
 export const TextHolderSchema: GenMessage<TextHolder> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 4);
+  messageDesc(file_syncplane_testdata_v1_testdata, 6);
 
 /**
  * A reference inside a oneof. Polymorphic targets are a real modelling wish,
@@ -345,7 +430,7 @@ export type OneofRefEntity = Message<"syncplane.testdata.v1.OneofRefEntity"> & {
  * Use `create(OneofRefEntitySchema)` to create a new message.
  */
 export const OneofRefEntitySchema: GenMessage<OneofRefEntity> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 5);
+  messageDesc(file_syncplane_testdata_v1_testdata, 7);
 
 /**
  * Element of a keyed message list (Widget.members). Not a registered entity;
@@ -383,7 +468,7 @@ export type Member = Message<"syncplane.testdata.v1.Member"> & {
  * Use `create(MemberSchema)` to create a new message.
  */
 export const MemberSchema: GenMessage<Member> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 6);
+  messageDesc(file_syncplane_testdata_v1_testdata, 8);
 
 /**
  * Element of a movable list (Widget.items). "id" is the stable identity,
@@ -413,7 +498,7 @@ export type Item = Message<"syncplane.testdata.v1.Item"> & {
  * Use `create(ItemSchema)` to create a new message.
  */
 export const ItemSchema: GenMessage<Item> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 7);
+  messageDesc(file_syncplane_testdata_v1_testdata, 9);
 
 /**
  * Composite key entity — exercises multi-field key derivation and separator
@@ -443,7 +528,7 @@ export type Pair = Message<"syncplane.testdata.v1.Pair"> & {
  * Use `create(PairSchema)` to create a new message.
  */
 export const PairSchema: GenMessage<Pair> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 8);
+  messageDesc(file_syncplane_testdata_v1_testdata, 10);
 
 /**
  * Reference fixtures. A field whose message type is a registered entity is a
@@ -471,7 +556,7 @@ export type Project = Message<"syncplane.testdata.v1.Project"> & {
  * Use `create(ProjectSchema)` to create a new message.
  */
 export const ProjectSchema: GenMessage<Project> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 9);
+  messageDesc(file_syncplane_testdata_v1_testdata, 11);
 
 /**
  * @generated from message syncplane.testdata.v1.User
@@ -493,7 +578,7 @@ export type User = Message<"syncplane.testdata.v1.User"> & {
  * Use `create(UserSchema)` to create a new message.
  */
 export const UserSchema: GenMessage<User> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 10);
+  messageDesc(file_syncplane_testdata_v1_testdata, 12);
 
 /**
  * @generated from message syncplane.testdata.v1.Issue
@@ -567,6 +652,25 @@ export type Issue = Message<"syncplane.testdata.v1.Issue"> & {
    * @generated from field: repeated string labels = 10;
    */
   labels: string[];
+
+  /**
+   * User-defined fields, the shape an app declares for them: an app-defined
+   * oneof per entry, addressed by key and variant. The indexes above fan out
+   * over it.
+   *
+   * @generated from field: map<string, syncplane.testdata.v1.FieldValue> custom = 11;
+   */
+  custom: { [key: string]: FieldValue };
+
+  /**
+   * A SCALAR-valued map. Both sides of an entry are ordinary values here, so
+   * it is what pins that `key` and `value` are both nameable — for a
+   * map<string, string> a bare `*` could mean either, which is why the
+   * selector is required rather than defaulted.
+   *
+   * @generated from field: map<string, string> tags_map = 12;
+   */
+  tagsMap: { [key: string]: string };
 };
 
 /**
@@ -574,7 +678,7 @@ export type Issue = Message<"syncplane.testdata.v1.Issue"> & {
  * Use `create(IssueSchema)` to create a new message.
  */
 export const IssueSchema: GenMessage<Issue> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 11);
+  messageDesc(file_syncplane_testdata_v1_testdata, 13);
 
 /**
  * @generated from message syncplane.testdata.v1.Settings
@@ -612,7 +716,7 @@ export type Settings = Message<"syncplane.testdata.v1.Settings"> & {
  * Use `create(SettingsSchema)` to create a new message.
  */
 export const SettingsSchema: GenMessage<Settings> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 12);
+  messageDesc(file_syncplane_testdata_v1_testdata, 14);
 
 /**
  * Stands in for a future CRDT blob (e.g. Loro).
@@ -636,7 +740,7 @@ export type Blob = Message<"syncplane.testdata.v1.Blob"> & {
  * Use `create(BlobSchema)` to create a new message.
  */
 export const BlobSchema: GenMessage<Blob> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 13);
+  messageDesc(file_syncplane_testdata_v1_testdata, 15);
 
 /**
  * Delete-policy fixture: an entity whose rows only a trusted write may delete.
@@ -662,5 +766,5 @@ export type Ledger = Message<"syncplane.testdata.v1.Ledger"> & {
  * Use `create(LedgerSchema)` to create a new message.
  */
 export const LedgerSchema: GenMessage<Ledger> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_v1_testdata, 14);
+  messageDesc(file_syncplane_testdata_v1_testdata, 16);
 

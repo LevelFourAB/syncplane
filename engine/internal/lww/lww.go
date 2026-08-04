@@ -331,6 +331,26 @@ func listRemoveAt(l protoreflect.List, idx int) {
 	l.Truncate(n - 1)
 }
 
+// SplitPath splits a mask path into the segments mergePath would walk. Segments
+// keep their escape sequences intact, exactly as the merge sees them: a field
+// name never carries one, and an item key is decoded by whoever consumes it.
+//
+// Exported for callers that need to reason about where a mask POINTS without
+// applying it — index maintenance skips a row rewrite when no mask path can
+// reach an index component (server.entityInfo.maskTouchesIndexes), and that
+// comparison is only sound if it segments a path the same way the merge does.
+func SplitPath(path string) []string {
+	segs := make([]string, 0, 4)
+	for {
+		seg, rest := splitSeg(path)
+		segs = append(segs, seg)
+		if rest == "" {
+			return segs
+		}
+		path = rest
+	}
+}
+
 // splitSeg splits path at the first unescaped '.'. The returned segment keeps
 // its escape sequences intact (decode separately); rest is everything after the
 // dot. A backslash escapes the following byte. Mirrors the TS splitter.
@@ -452,6 +472,22 @@ func escapeKeySegment(s string, alsoSlash bool) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// UnescapeSegment reverses the escaping SplitPath leaves intact: a backslash
+// before any byte protects it, so `a\.b` is one segment holding "a.b".
+//
+// Exported for the query builders, which take a whole dotted path as one string
+// and therefore have to undo the escaping the wire form does not need — a wire
+// path is already a list of segments (query.Path).
+func UnescapeSegment(s string) string { return decodeStringKey(s) }
+
+// DecodeMapKey decodes an ESCAPED mask segment into a typed map key per the
+// field's key kind. Exported for the query package, which addresses a map entry
+// by key and must parse the non-string kinds exactly as the merge does — two
+// spellings of the same int64 key would otherwise reach two different entries.
+func DecodeMapKey(fd protoreflect.FieldDescriptor, seg string) (protoreflect.MapKey, error) {
+	return decodeMapKey(fd, seg)
 }
 
 // decodeStringKey reverses escapeKeySegment for a single-part string key.

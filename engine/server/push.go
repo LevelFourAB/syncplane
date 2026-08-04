@@ -760,8 +760,13 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {
 			return err
 		}
-		if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), base); err != nil {
-			return err
+		// Only when the mask can reach one: the entries are derived from the row,
+		// so a mask that changed nothing an index reads produces the set already
+		// stored, and replacing it would be write amplification for nothing.
+		if info.maskTouchesIndexes(crud.GetFieldMask().GetPaths()) {
+			if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), base); err != nil {
+				return err
+			}
 		}
 		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
 

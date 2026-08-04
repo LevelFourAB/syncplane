@@ -166,6 +166,11 @@ extend them when touching the semantics they pin, and update **both** sides
 together:
 
 - `testdata/queryeval/` — query-evaluation vectors.
+- `testdata/indexkey/` — index-entry encoding (`encodeCases` pin the bytes),
+  entry-vs-comparator agreement (`orderCases`) and the planner's decisions
+  (`probeCases`). The planner half is the one nothing else would notice: a
+  planner that chose differently still returns the right rows, just at a
+  different cost.
 - `testdata/text/` — text-CRDT vectors. The `encodedHex` checks pin the canonical
   encoding byte-for-byte, so any change to `engine/text` or `client/src/text`
   must land in the other implementation and the vectors in one change.

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -53,25 +54,42 @@ import (
 //
 // One row, several entries
 //
-// A component whose path runs through a repeated field has no single value per
-// row, so such a row takes one POSITION PER ELEMENT — the posting list that
-// makes "some assignee is Maya" a range read instead of a scan. Three rules
-// keep that honest:
+// A component whose path FANS OUT has no single value per row, so such a row
+// takes one POSITION PER ELEMENT — the posting list that makes "some assignee is
+// Maya" a range read instead of a scan. Two things fan out, and they compose:
 //
-//   - Every component that fans out must fan out over the SAME repeated field,
-//     and they fan out together, element by element. A cross product would pair
-//     one element's id with another's role, and a query meant to describe one
-//     element would match rows where no element does.
-//   - A row whose list is empty or unset still writes exactly one entry, with
-//     the missing tag at each fan-out component. Every live row occupies at
+//   - a repeated field, one position per element; and
+//   - a map, written `*` in the declared path, one position per ENTRY. That is
+//     the shape user-defined ("custom") fields take. The `*` is followed by
+//     `key` or `value`, naming the side of the entry the component stores, so an
+//     index over custom fields declares the components it wants in the order it
+//     wants them: `[custom.*.key, custom.*.value.number]` makes a probe on ONE
+//     custom field a contiguous range, and `[custom.*.value.number,
+//     custom.*.key]` makes "which custom field holds 5" one.
+//
+// Four rules keep it honest:
+//
+//   - Every component that fans out must fan out over the SAME chain, and they
+//     fan out together, position by position. A cross product would pair one
+//     element's id with another's role, and a query meant to describe one
+//     element would match rows where no element does. A SHORTER chain is fine:
+//     an entry-key component stops at the map and repeats across the positions
+//     below it.
+//   - A `*` may be followed by a repeated field INSIDE one entry
+//     (custom.*.labels.values, the multi-select shape). That is not a cross
+//     product either: the second fan lives inside one position of the first.
+//   - A row whose collection is empty or unset still writes exactly one entry,
+//     with the missing tag at each fan-out component. Every live row occupies at
 //     least one position in every index, which is what lets a range that does
 //     NOT constrain the fan-out component still see every row.
-//   - Duplicate elements collapse: they would produce identical bytes, and an
+//   - Duplicate positions collapse: they would produce identical bytes, and an
 //     entry is a position, not a count.
 //
-// An ordering cannot be read off a fan-out component — a row sits at several
-// places at once — so the planner only trusts one that the equality prefix has
-// already pinned to a single element value.
+// An ordering cannot be read off a LIST fan-out component — a row sits at
+// several places at once — so the planner only trusts one that the equality
+// prefix has already pinned to a single element value. A MAP fan-out is
+// different: a map holds at most one value per key, so once the entry key is
+// pinned the row occupies exactly one position and the leaf IS an ordering.
 
 // The tags double as the encoded order ranks: 0x01 < 0xfd < 0xff is
 // rankReal < rankNaN < rankMissing, so a byte comparison of two entries
@@ -89,32 +107,191 @@ const indexEncodingVersion = 1
 
 // IndexComponent is one resolved component of an index key: a path through
 // the message, and the direction its values are stored in.
+//
+// A path may FAN OUT: a step marked `fan` is a repeated field the component
+// takes one value per element of, or — written `*` in the declared path — a map
+// it takes one value per ENTRY of. Fan steps nest:
+// `custom.*.value.labels.values` fans over every entry of `custom` and, within
+// each entry, over every element of that entry's `labels.values`. There is no
+// cross product in that, because the second fan lives inside one element of the
+// first.
 type IndexComponent struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	desc   bool
-	// multiAt is the position in fields of the repeated field this component
-	// fans out over, or -1 when the component yields one value per row. When it
-	// is the last position the elements themselves are the values (a repeated
-	// scalar); otherwise the rest of the path resolves against each element.
-	multiAt int
+}
+
+// isEntryKey reports that this component stores the KEY of the map entry its
+// path fans out over, rather than any value below it — the `key` selector,
+// written `custom.*.key`. It is a property of the path rather than a flag beside
+// it, so a component's meaning is fully determined by its fields.
+func (c IndexComponent) isEntryKey() bool {
+	if len(c.fields) == 0 {
+		return false
+	}
+	return c.fields[len(c.fields)-1].entryKey
 }
 
 // Multi reports whether a row can occupy several positions because of this
 // component.
-func (c IndexComponent) Multi() bool { return c.multiAt >= 0 }
+func (c IndexComponent) Multi() bool {
+	for _, st := range c.fields {
+		if st.fan {
+			return true
+		}
+	}
+	return false
+}
 
-// CompileIndexComponent resolves an index component's path against the
-// message descriptor. It rejects the same leaves CompileOrder does — an
-// index whose component could never take part in a comparison would sort
-// every row into one bucket — plus collaborative text, which is comparable
-// but would rewrite its entry on every keystroke.
+// fanLevel is one scope a component's path fans out over: the steps from the
+// enclosing scope down to and including the collection itself.
+type fanLevel struct {
+	steps []pathStep
+	isMap bool
+}
+
+func (f fanLevel) field() protoreflect.FieldDescriptor { return f.steps[len(f.steps)-1].fd }
+
+// fanLevels splits a component path at its fan steps. The result describes how
+// to enumerate the positions the component occupies; what is left after the last
+// fan step (see fanRest) is resolved against each of them.
+func fanLevels(fields []pathStep) []fanLevel {
+	var out []fanLevel
+	start := 0
+	for i, st := range fields {
+		if !st.fan {
+			continue
+		}
+		out = append(out, fanLevel{steps: fields[start : i+1], isMap: st.fd.IsMap()})
+		start = i + 1
+	}
+	return out
+}
+
+// fanRest is the path from the innermost fanned scope to the component's value.
+// Empty means the fanned element (or map value) IS the value.
+func fanRest(fields []pathStep) []pathStep {
+	for i := len(fields) - 1; i >= 0; i-- {
+		if fields[i].fan {
+			return fields[i+1:]
+		}
+	}
+	return fields
+}
+
+// leafField is the descriptor whose values this component stores. Everything
+// that classifies or encodes a payload reads it rather than the path's last
+// field, because for a map fan those differ: the key component stores the map's
+// KEY type and a component ending at the fan step stores its VALUE type.
+func (c IndexComponent) leafField() protoreflect.FieldDescriptor {
+	levels := fanLevels(c.fields)
+	rest := fanRest(c.fields)
+	if len(levels) == 0 {
+		return pathLeaf(rest)
+	}
+	last := levels[len(levels)-1]
+	if c.isEntryKey() {
+		return last.field().MapKey()
+	}
+	if len(rest) > 0 {
+		return pathLeaf(rest)
+	}
+	if last.isMap {
+		return last.field().MapValue()
+	}
+	// A repeated field's own descriptor: its Kind is the element kind, which is
+	// what extractSingular converts an element with.
+	return last.field()
+}
+
+// MaskTouches reports whether a field-mask path could change the value this
+// component reads, given the path split into segments the way lww splits a mask
+// (lww.SplitPath). It is what lets a PATCH whose mask reaches no index skip the
+// entry rewrite entirely — a pure descriptor-and-name comparison, with no
+// decode, no read and no encode.
 //
-// Unlike a condition path, this one may descend through a repeated field (and
-// may end at one): that is what an index over "some element's value" is made
-// of. At most one repeated field per component, since a second would need a
-// cross product within the component itself.
-func CompileIndexComponent(desc protoreflect.MessageDescriptor, path []string, descending bool) (IndexComponent, error) {
-	fields, multiAt, err := resolveIndexFields(desc, path)
+// Two paths interact when either is a PREFIX of the other: a mask that stops
+// above the component replaces the subtree the component reads through, and one
+// that continues below it writes inside the value the component reads. Three
+// cases make the comparison conservative where a bare name comparison would be
+// wrong, and every one of them answers TRUE:
+//
+//   - A mask segment may name a ONEOF group rather than a field (lww merges a
+//     oneof whole, by group name), so it changes any member the component reads.
+//   - A mask may address one ITEM of a map or keyed list ("tags.red"), so a
+//     segment following a repeated or map field is an item key, not a field
+//     name, and lands inside the collection the component fans out over.
+//   - A path that runs out mid-comparison is a prefix, whichever side it was.
+//
+// Anything else is a genuine divergence at a field the component does not read,
+// and only that returns false.
+func (c IndexComponent) MaskTouches(segs []string) bool {
+	for i := 0; ; i++ {
+		if i == len(segs) || i == len(c.fields) {
+			// One path is a prefix of the other, which is the whole test.
+			return true
+		}
+		fd := c.fields[i].fd
+		if segs[i] == string(fd.Name()) {
+			if fd.IsList() || fd.IsMap() {
+				// Whatever follows addresses an item of this collection, so it
+				// is inside what the component reads either way.
+				return true
+			}
+			continue
+		}
+		if od := lww.OneofOf(fd); od != nil && segs[i] == string(od.Name()) {
+			return true
+		}
+		return false
+	}
+}
+
+// mapFanSegment is the segment that means "fan out over every entry of this
+// map" in an index component's path. It cannot collide with a field name — no
+// proto identifier is `*` — and it is only special HERE: in a condition path the
+// segment after a map is an entry key, and `*` would simply be that key.
+const mapFanSegment = "*"
+
+// The selectors that may follow a `*`: which side of the map entry the
+// component stores. They are the same two names the entry scope of an any()
+// over a map offers, so one concept has one spelling in a declaration and in a
+// query.
+const (
+	mapKeySegment   = "key"
+	mapValueSegment = "value"
+)
+
+// CompileIndexComponent resolves one declared index key into the ONE component
+// it contributes. It rejects the same leaves CompileOrder does — an index whose
+// component could never take part in a comparison would sort every row into one
+// bucket — plus collaborative text, which is comparable but would rewrite its
+// entry on every keystroke.
+//
+// Unlike a condition path, this one may FAN OUT: through a repeated field (and
+// may end at one), which is what an index over "some element's value" is made
+// of, and through `*` after a map, which is what an index over user-defined
+// fields is made of. At most one repeated field per component, since a second
+// list would need a cross product within the component itself; a `*` nests
+// inside one entry rather than crossing with it, so it composes with a list.
+//
+// A `*` is followed by `key` or `value`, so one declared path is one component
+// and an index states its own layout:
+//
+//	[ custom.*.key, custom.*.value.number ]   one custom field: equality, ranges
+//	                                          and an ordering within it
+//	[ custom.*.value.number, custom.*.key ]   which custom field holds 5:
+//	                                          equality, cross-key or named-key
+//
+// The two are complementary and neither subsumes the other, which is why the
+// order is declared rather than fixed here: `[key, value]` clusters one field's
+// values so they can be ranged and ordered, `[value, key]` clusters one VALUE so
+// the fields holding it can be found.
+func CompileIndexComponent(
+	desc protoreflect.MessageDescriptor,
+	path []string,
+	descending bool,
+) (IndexComponent, error) {
+	fields, err := resolveIndexFields(desc, path)
 	if err != nil {
 		return IndexComponent{}, err
 	}
@@ -122,26 +299,36 @@ func CompileIndexComponent(desc protoreflect.MessageDescriptor, path []string, d
 	// as a comparison on the reference does, so an index and a query on the same
 	// reference agree on what they are keyed by. For a to-many reference that
 	// makes the component fan out over the stored target keys.
-	if refKeys := lww.RefKeyFields(fields[len(fields)-1]); len(refKeys) == 1 {
-		fields = append(fields, refKeys[0])
+	if refKeys := lww.RefKeyFields(pathLeaf(fields)); len(refKeys) == 1 {
+		fields = append(fields, pathStep{fd: refKeys[0]})
 	}
-	leaf := fields[len(fields)-1]
-	if multiAt == len(fields)-1 {
+	c := IndexComponent{fields: fields, desc: descending}
+	leaf := c.leafField()
+	if len(fanRest(fields)) == 0 && !fields[len(fields)-1].fd.IsMap() {
 		// The leaf IS the repeated field, so the stored values are its elements
 		// and it is the element kind that has to be comparable.
 		if !comparableKind(singularKind(leaf)) {
 			return IndexComponent{}, fmt.Errorf("path %v: %s cannot be indexed; %s",
-				path, describeLeaf(leaf), indexListHint(path, leaf))
+				path, describeField(leaf), indexListHint(path, leaf))
 		}
-	} else if err := requireComparable(path, fields); err != nil {
-		return IndexComponent{}, err
+	} else if !comparableKind(singularKind(leaf)) {
+		return IndexComponent{}, fmt.Errorf("path %v: %s is not comparable; %s",
+			path, describeField(leaf), indexLeafHint(path, leaf))
 	}
 	if lww.IsText(leaf) {
 		return IndexComponent{}, fmt.Errorf(
 			"path %v: a collaborative text field cannot be indexed; every keystroke rewrites its value, so the entry would be rewritten with it",
 			path)
 	}
-	return IndexComponent{fields: fields, desc: descending, multiAt: multiAt}, nil
+	return c, nil
+}
+
+// indexLeafHint names what to index instead of a leaf no comparison reaches.
+func indexLeafHint(path []string, leaf protoreflect.FieldDescriptor) string {
+	if leaf.Kind() == protoreflect.MessageKind {
+		return fmt.Sprintf("index a scalar field inside it instead, e.g. %s.<field>", strings.Join(path, "."))
+	}
+	return "it is not comparable"
 }
 
 // indexListHint points a component ending at a list of messages at the path
@@ -156,39 +343,61 @@ func indexListHint(path []string, leaf protoreflect.FieldDescriptor) string {
 	return fmt.Sprintf("index a scalar field of the elements instead, e.g. %s.<field>", strings.Join(path, "."))
 }
 
-// resolveIndexFields is resolveFields with one extra power: it may descend
-// through a repeated message field, reporting where. The reference rule is
-// unchanged — a to-many reference stores only its target's key fields, so those
-// are the only ones addressable under it.
-func resolveIndexFields(desc protoreflect.MessageDescriptor, path []string) ([]protoreflect.FieldDescriptor, int, error) {
+// resolveIndexFields is resolveFields with one extra power: it may FAN OUT,
+// over a repeated field or — with a `*` segment — over every entry of a map,
+// marking each such step. The reference rule is unchanged — a to-many reference
+// stores only its target's key fields, so those are the only ones addressable
+// under it.
+//
+// A map must be followed by `*`, and the `*` by `key` or `value`. An index
+// component names a SHAPE, so a literal key in one would declare an index over a
+// single entry, which is a different feature and not this one; the error points
+// at the syntax that is meant. The selector is required rather than defaulted
+// because a bare trailing `*` would be genuinely ambiguous — for
+// `map<string, string> attrs`, `attrs.*` could mean either side of the entry.
+func resolveIndexFields(desc protoreflect.MessageDescriptor, path []string) ([]pathStep, error) {
 	if len(path) == 0 {
-		return nil, -1, fmt.Errorf("index component path is empty")
+		return nil, fmt.Errorf("index component path is empty")
 	}
 	cur := desc
-	multiAt := -1
-	fields := make([]protoreflect.FieldDescriptor, 0, len(path))
-	for i, seg := range path {
+	listFans := 0
+	fields := make([]pathStep, 0, len(path))
+	for i := 0; i < len(path); i++ {
+		seg := path[i]
 		if cur == nil {
-			return nil, -1, fmt.Errorf("path %v: %q is not a message field, cannot descend into %q", path, path[i-1], seg)
+			return nil, fmt.Errorf("path %v: %q is not a message field, cannot descend into %q", path, path[i-1], seg)
 		}
 		fd := cur.Fields().ByName(protoreflect.Name(seg))
 		if fd == nil {
-			return nil, -1, fmt.Errorf("path %v: %s has no field %q", path, cur.FullName(), seg)
+			return nil, fmt.Errorf("path %v: %s has no field %q", path, cur.FullName(), seg)
+		}
+		if fd.IsMap() {
+			st, next, err := resolveMapFan(path, i, fd)
+			if err != nil {
+				return nil, err
+			}
+			fields = append(fields, st)
+			cur = next
+			i += 2
+			continue
 		}
 		if i < len(path)-1 {
 			if refKeys := lww.RefKeyFields(fd); refKeys != nil && !isKeyField(refKeys, path[i+1]) {
-				return nil, -1, fmt.Errorf("path %v: cannot descend through reference %q into %q; only its key fields are addressable", path, seg, path[i+1])
+				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only its key fields are addressable", path, seg, path[i+1])
 			}
 		}
+		st := pathStep{fd: fd}
 		switch {
-		case fd.IsMap():
-			cur = nil
 		case fd.IsList():
-			if multiAt >= 0 {
-				return nil, -1, fmt.Errorf("path %v: %q is a second repeated field on one index component; index a path through one list at a time",
+			// A `*` nests inside ONE entry of the map above it, so it composes
+			// with a list. Two lists do not: the second would have to be crossed
+			// with the first, pairing values that never belonged together.
+			if listFans > 0 {
+				return nil, fmt.Errorf("path %v: %q is a second repeated field on one index component; index a path through one list at a time",
 					path, seg)
 			}
-			multiAt = i
+			listFans++
+			st.fan = true
 			if fd.Kind() == protoreflect.MessageKind {
 				cur = fd.Message()
 			} else {
@@ -199,75 +408,191 @@ func resolveIndexFields(desc protoreflect.MessageDescriptor, path []string) ([]p
 		default:
 			cur = nil
 		}
-		fields = append(fields, fd)
+		fields = append(fields, st)
 	}
-	return fields, multiAt, nil
+	return fields, nil
+}
+
+// resolveMapFan consumes the three segments a map contributes to an index path —
+// the field, the `*`, and the `key`/`value` selector — and returns the fan step
+// plus the descriptor the rest of the path resolves against (nil when nothing
+// may follow).
+//
+// The selector is what makes one declared path one component. `key` ends the
+// component at the entry's key; `value` continues into the entry's value, which
+// a message value may be descended into and a scalar value may not.
+func resolveMapFan(
+	path []string,
+	i int,
+	fd protoreflect.FieldDescriptor,
+) (pathStep, protoreflect.MessageDescriptor, error) {
+	seg := path[i]
+	shapes := fmt.Sprintf("%s.%s.%s or %s.%s.%s.<field>",
+		seg, mapFanSegment, mapKeySegment, seg, mapFanSegment, mapValueSegment)
+	if i+1 >= len(path) || path[i+1] != mapFanSegment {
+		return pathStep{}, nil, fmt.Errorf(
+			"path %v: %s must be followed by %q in an index path; an index over a map fans out over every entry, so write %s",
+			path, describeField(fd), mapFanSegment, shapes)
+	}
+	if i+2 >= len(path) {
+		return pathStep{}, nil, fmt.Errorf(
+			"path %v: %q must be followed by %q or %q; a bare %q does not say which side of the entry the component stores, so write %s",
+			path, mapFanSegment, mapKeySegment, mapValueSegment, mapFanSegment, shapes)
+	}
+	st := pathStep{fd: fd, fan: true}
+	switch path[i+2] {
+	case mapKeySegment:
+		if i+3 < len(path) {
+			return pathStep{}, nil, fmt.Errorf(
+				"path %v: %q is the entry key of %s, a %s, so %q cannot follow it",
+				path, mapKeySegment, describeField(fd), kindName(fd.MapKey()), path[i+3])
+		}
+		st.entryKey = true
+		return st, nil, nil
+	case mapValueSegment:
+		vfd := fd.MapValue()
+		if vfd.Kind() == protoreflect.MessageKind {
+			return st, vfd.Message(), nil
+		}
+		if i+3 < len(path) {
+			return pathStep{}, nil, fmt.Errorf(
+				"path %v: %s has a %s value, so %q cannot be descended into",
+				path, describeField(fd), kindName(vfd), path[i+2])
+		}
+		return st, nil, nil
+	default:
+		return pathStep{}, nil, fmt.Errorf(
+			"path %v: %q after %q must be %q or %q, naming the side of the entry the component stores; write %s",
+			path, path[i+2], mapFanSegment, mapKeySegment, mapValueSegment, shapes)
+	}
 }
 
 // IndexEncoder turns rows into the entries of one index. It is immutable and
 // safe to share across goroutines.
 type IndexEncoder struct {
 	comps []IndexComponent
-	// fanFields is the path to the repeated field every fan-out component
-	// descends through, or nil when no component does. Holding it once is what
-	// makes the components fan out TOGETHER: the list is resolved a single time
-	// and every component reads the same element.
-	fanFields []protoreflect.FieldDescriptor
+	// fan is the chain of scopes the components fan out over, outermost first.
+	// Holding it once is what makes the components fan out TOGETHER: each
+	// collection is resolved a single time and every component reads the same
+	// position of it.
+	//
+	// It is a CHAIN rather than a single field because a `*` over a map may be
+	// followed by a repeated field inside one entry — the multi-select shape,
+	// `custom.*.labels.values` — and each level lives inside one position of the
+	// level above it, so nothing is crossed with anything.
+	fan []fanLevel
 }
 
 // NewIndexEncoder builds an encoder over already-compiled components. An
 // encoder with no components is legal and yields entries that are the row
 // key alone.
 //
-// It fails when two components fan out over different repeated fields. Their
-// cross product would be the only way to store both, and a cross product pairs
-// values that never belonged to the same element — so such an index is refused
-// at declaration rather than answering a subtly wrong question at read time.
+// It fails when two components fan out over different chains. Their cross
+// product would be the only way to store both, and a cross product pairs values
+// that never belonged to the same element — so such an index is refused at
+// declaration rather than answering a subtly wrong question at read time. A
+// SHORTER chain is fine, and is the normal case: the entry-key component of a
+// `custom.*.labels.values` index stops at the map, and its value simply repeats
+// across the positions below it.
 func NewIndexEncoder(comps []IndexComponent) (*IndexEncoder, error) {
-	var fan []protoreflect.FieldDescriptor
+	var fan []fanLevel
 	for _, c := range comps {
-		if !c.Multi() {
+		levels := fanLevels(c.fields)
+		if len(levels) == 0 {
 			continue
 		}
-		path := c.fields[:c.multiAt+1]
-		if fan == nil {
-			fan = path
-			continue
-		}
-		if !sameFields(fan, path) {
+		if !compatibleFan(fan, levels) {
 			return nil, fmt.Errorf(
-				"an index cannot fan out over both %s and %s; one repeated field per index",
-				fieldPathString(fan), fieldPathString(path))
+				"an index cannot fan out over both %s and %s; one fan-out chain per index",
+				fanPathString(fan), fanPathString(levels))
+		}
+		if len(levels) > len(fan) {
+			fan = levels
 		}
 	}
-	return &IndexEncoder{comps: comps, fanFields: fan}, nil
+	return &IndexEncoder{comps: comps, fan: fan}, nil
 }
 
-// Components exposes the compiled components, for a planner deciding whether
-// this index serves a query.
-func (e *IndexEncoder) Components() []IndexComponent { return e.comps }
+// compatibleFan reports whether two chains describe the same nesting, one being
+// a prefix of the other.
+func compatibleFan(a, b []fanLevel) bool {
+	n := len(a)
+	if len(b) < n {
+		n = len(b)
+	}
+	for i := 0; i < n; i++ {
+		if a[i].isMap != b[i].isMap || !sameFanSteps(a[i].steps, b[i].steps) {
+			return false
+		}
+	}
+	return true
+}
 
-// Encode produces the entries msg occupies in this index — one per element of
-// the fanned-out list, or a single entry when no component fans out. rowKey is
-// the row's storage key, which terminates every entry so that entries are
-// unique and tie exactly the way Order.Compare does.
+// sameFanSteps compares two fan-chain paths for describing the same nesting.
 //
-// The result is never empty: a row whose list is empty or unset still takes one
-// position, with the missing tag at each fan-out component, so every live row
-// is reachable through every index.
+// It ignores the entry-key selector, unlike samePath, and that is the whole
+// reason it exists: a `custom.*.key` component and a `custom.*.value.number`
+// component fan out over the SAME map and read one position of it. The selector
+// says which half of that position each stores, not where either one is, so
+// treating the two chains as different would refuse the very pairing the layout
+// is made of.
+func sameFanSteps(a, b []pathStep) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].fd.FullName() != b[i].fd.FullName() || a[i].fan != b[i].fan {
+			return false
+		}
+	}
+	return true
+}
+
+func fanPathString(levels []fanLevel) string {
+	parts := make([]string, 0, len(levels))
+	for _, l := range levels {
+		p := fieldPathString(l.steps)
+		if l.isMap {
+			p += "." + mapFanSegment
+		}
+		parts = append(parts, p)
+	}
+	if len(parts) == 0 {
+		return "(nothing)"
+	}
+	return strings.Join(parts, " → ")
+}
+
+// position is one place a row occupies in the index: one entry per level of the
+// fan chain, outermost first. A position SHORTER than the chain means the
+// collection at that depth was empty or absent, so every component reading below
+// it takes the missing tag.
+type position []posLevel
+
+type posLevel struct {
+	// key is the map entry's key; only set for a map level.
+	key    protoreflect.MapKey
+	hasKey bool
+	// val is the element (a list level) or the entry's value (a map level).
+	val protoreflect.Value
+}
+
+// Encode produces the entries msg occupies in this index — one per position of
+// the fan chain, or a single entry when no component fans out. rowKey is the
+// row's storage key, which terminates every entry so that entries are unique and
+// tie exactly the way Order.Compare does.
+//
+// The result is never empty: a row whose collection is empty or unset still
+// takes one position, with the missing tag at each fan-out component, so every
+// live row is reachable through every index.
 func (e *IndexEncoder) Encode(msg protoreflect.Message, rowKey string) [][]byte {
-	if e.fanFields == nil {
-		return [][]byte{e.encodeAt(msg, rowKey, nil, 0)}
-	}
-	v, found := resolveValue(msg, e.fanFields)
-	if !found || v.kind != rvList || v.list.Len() == 0 {
-		return [][]byte{e.encodeAt(msg, rowKey, nil, 0)}
-	}
-	out := make([][]byte, 0, v.list.Len())
-	seen := make(map[string]struct{}, v.list.Len())
-	for i := 0; i < v.list.Len(); i++ {
-		entry := e.encodeAt(msg, rowKey, v.list, i)
-		// Duplicate elements encode identically. An entry is a position, not a
+	positions := e.positions(msg)
+	out := make([][]byte, 0, len(positions))
+	seen := make(map[string]struct{}, len(positions))
+	for _, p := range positions {
+		entry := e.encodeAt(msg, rowKey, p)
+		// Two positions can encode identically — duplicate list elements, or two
+		// map entries no component distinguishes. An entry is a position, not a
 		// count, so the second one would be a no-op write in one adapter and a
 		// primary-key conflict in another.
 		if _, dup := seen[string(entry)]; dup {
@@ -279,34 +604,132 @@ func (e *IndexEncoder) Encode(msg protoreflect.Message, rowKey string) [][]byte 
 	return out
 }
 
-// encodeAt builds one entry, reading fan-out components from element i of list.
-// A nil list means "no element", which is how a row with an empty list still
-// gets its single entry.
-func (e *IndexEncoder) encodeAt(msg protoreflect.Message, rowKey string, list protoreflect.List, i int) []byte {
+// positions enumerates the fan chain against one row, depth first.
+func (e *IndexEncoder) positions(msg protoreflect.Message) []position {
+	if len(e.fan) == 0 {
+		return []position{nil}
+	}
+	var out []position
+	var walk func(scope protoreflect.Message, level int, cur position)
+	walk = func(scope protoreflect.Message, level int, cur position) {
+		if level == len(e.fan) || scope == nil {
+			out = append(out, append(position(nil), cur...))
+			return
+		}
+		fl := e.fan[level]
+		v, found := resolveValue(scope, fl.steps)
+		if !found {
+			out = append(out, append(position(nil), cur...))
+			return
+		}
+		if fl.isMap {
+			if v.kind != rvMap || v.mapv.Len() == 0 {
+				out = append(out, append(position(nil), cur...))
+				return
+			}
+			// Sorted rather than in map order: Go randomizes map iteration, and
+			// the entries a row writes have to be the same list every time or a
+			// rewrite would churn storage for nothing.
+			for _, k := range sortedMapKeys(fl.field(), v.mapv) {
+				val := v.mapv.Get(k)
+				walk(messageScope(fl.field().MapValue(), val), level+1,
+					append(cur, posLevel{key: k, hasKey: true, val: val}))
+			}
+			return
+		}
+		if v.kind != rvList || v.list.Len() == 0 {
+			out = append(out, append(position(nil), cur...))
+			return
+		}
+		for i := 0; i < v.list.Len(); i++ {
+			el := v.list.Get(i)
+			walk(messageScope(fl.field(), el), level+1, append(cur, posLevel{val: el}))
+		}
+	}
+	walk(msg, 0, nil)
+	return out
+}
+
+// messageScope is the message a deeper fan level resolves against, or nil when
+// the value is not a message (a scalar collection ends the chain).
+func messageScope(fd protoreflect.FieldDescriptor, v protoreflect.Value) protoreflect.Message {
+	if fd.Kind() != protoreflect.MessageKind && fd.Kind() != protoreflect.GroupKind {
+		return nil
+	}
+	return v.Message()
+}
+
+// sortedMapKeys returns a map's keys in the order the KEY COMPONENT stores them,
+// so the entries of one row come out in a stable order.
+func sortedMapKeys(fd protoreflect.FieldDescriptor, m protoreflect.Map) []protoreflect.MapKey {
+	keys := make([]protoreflect.MapKey, 0, m.Len())
+	m.Range(func(k protoreflect.MapKey, _ protoreflect.Value) bool {
+		keys = append(keys, k)
+		return true
+	})
+	kfd := fd.MapKey()
+	sort.Slice(keys, func(i, j int) bool {
+		a := extractSingular(kfd, keys[i].Value())
+		b := extractSingular(kfd, keys[j].Value())
+		c, ok := compareScalar(a, b)
+		if !ok {
+			return false
+		}
+		return c < 0
+	})
+	return keys
+}
+
+// encodeAt builds one entry, reading each component from the position it belongs
+// to. A position shorter than a component's fan depth means "no element there",
+// which is how a row with an empty collection still gets its single entry.
+func (e *IndexEncoder) encodeAt(msg protoreflect.Message, rowKey string, pos position) []byte {
 	buf := make([]byte, 0, 16+8*len(e.comps))
 	for _, c := range e.comps {
-		var v rowValue
-		var found bool
-		switch {
-		case !c.Multi():
-			v, found = resolveValue(msg, c.fields)
-		case list == nil:
-			found = false
-		case c.multiAt == len(c.fields)-1:
-			// The leaf is the list itself, so the element IS the value.
-			v, found = extractSingular(c.fields[c.multiAt], list.Get(i)), true
-		default:
-			v, found = resolveValue(list.Get(i).Message(), c.fields[c.multiAt+1:])
-		}
+		v, found := c.valueAt(msg, pos)
 		buf = appendComponent(buf, c, v, found)
 	}
 	return appendIndexString(buf, rowKey)
 }
 
-func fieldPathString(fields []protoreflect.FieldDescriptor) string {
+// valueAt resolves this component against one position of the encoder's fan
+// chain.
+func (c IndexComponent) valueAt(msg protoreflect.Message, pos position) (rowValue, bool) {
+	levels := fanLevels(c.fields)
+	if len(levels) == 0 {
+		return resolveValue(msg, c.fields)
+	}
+	depth := len(levels)
+	if depth > len(pos) {
+		// The collection this component reads from was empty or absent.
+		return rowValue{}, false
+	}
+	at := pos[depth-1]
+	last := levels[depth-1]
+	if c.isEntryKey() {
+		return extractSingular(last.field().MapKey(), at.key.Value()), true
+	}
+	if rest := fanRest(c.fields); len(rest) > 0 {
+		if last.isMap && last.field().MapValue().Kind() != protoreflect.MessageKind {
+			return rowValue{}, false
+		}
+		return resolveValue(at.val.Message(), rest)
+	}
+	if last.isMap {
+		return extractSingular(last.field().MapValue(), at.val), true
+	}
+	// The leaf is the repeated field itself, so the element IS the value.
+	return extractSingular(last.field(), at.val), true
+}
+
+// Components exposes the compiled components, for a planner deciding whether
+// this index serves a query.
+func (e *IndexEncoder) Components() []IndexComponent { return e.comps }
+
+func fieldPathString(fields []pathStep) string {
 	parts := make([]string, len(fields))
-	for i, fd := range fields {
-		parts[i] = string(fd.Name())
+	for i, st := range fields {
+		parts[i] = string(st.fd.Name())
 	}
 	return strings.Join(parts, ".")
 }
@@ -325,7 +748,7 @@ func (e *IndexEncoder) EncodePrefix(values []protoreflect.Value) ([]byte, error)
 	buf := make([]byte, 0, 8*len(values))
 	for i, v := range values {
 		c := e.comps[i]
-		buf = appendComponent(buf, c, extractSingular(c.fields[len(c.fields)-1], v), true)
+		buf = appendComponent(buf, c, extractSingular(c.leafField(), v), true)
 	}
 	return buf, nil
 }
@@ -353,6 +776,12 @@ func UpperBound(prefix []byte) []byte {
 // longer matches its declaration is stale, not wrong — its entries are simply
 // not readable under the current spec, and the index rebuilds.
 //
+// The map-fan additions are APPENDED rather than folded into the existing
+// fields, so an index shape that predates them fingerprints byte for byte as it
+// did: the entries already stored for every reference, field mark and list
+// index stay valid instead of all rebuilding at once for a feature they do not
+// use.
+//
 // It is deliberately written in terms both languages state identically (proto
 // field names, a payload-shape word) rather than in each language's own type
 // enum, so client/src/query/indexkey.ts is a literal mirror. Nothing requires
@@ -365,16 +794,49 @@ func SpecHash(comps []IndexComponent) string {
 	fmt.Fprintf(&b, "v%d", indexEncodingVersion)
 	for _, c := range comps {
 		b.WriteByte('|')
-		for i, fd := range c.fields {
+		for i, st := range c.fields {
 			if i > 0 {
 				b.WriteByte('.')
 			}
-			b.WriteString(string(fd.Name()))
+			b.WriteString(string(st.fd.Name()))
+			if st.fan && st.fd.IsMap() {
+				b.WriteByte('.')
+				b.WriteString(mapFanSegment)
+			}
 		}
-		leaf := c.fields[len(c.fields)-1]
-		fmt.Fprintf(&b, ":%s:%t:%t:%d", payloadShape(leaf), isUnsigned64(leaf), c.desc, c.multiAt)
+		leaf := c.leafField()
+		fans := fanPositions(c.fields)
+		first := -1
+		if len(fans) > 0 {
+			first = fans[0]
+		}
+		fmt.Fprintf(&b, ":%s:%t:%t:%d", payloadShape(leaf), isUnsigned64(leaf), c.desc, first)
+		if len(fans) > 1 {
+			for _, at := range fans[1:] {
+				fmt.Fprintf(&b, ":+%d", at)
+			}
+		}
+		if c.isEntryKey() {
+			// The selector is NOT rendered into the path above, so a `[key,
+			// value]` layout fingerprints exactly as it did before the selector
+			// was spelled out and its stored entries stay valid. The suffix is
+			// still what tells `attrs.*.key` apart from `attrs.*.value`, which
+			// have the same path and, on a map<string,string>, the same shape.
+			b.WriteString(":key")
+		}
 	}
 	return fingerprint(b.String())
+}
+
+// fanPositions lists the indices in fields that fan out, outermost first.
+func fanPositions(fields []pathStep) []int {
+	var out []int
+	for i, st := range fields {
+		if st.fan {
+			out = append(out, i)
+		}
+	}
+	return out
 }
 
 // payloadShape names the encoding a leaf's values take. Two proto kinds that
@@ -439,7 +901,7 @@ func appendComponent(dst []byte, c IndexComponent, v rowValue, found bool) []byt
 	case rvNumber:
 		dst = appendIndexFloat(dst, v.num)
 	case rvBigint:
-		dst = appendIndexBig(dst, v.big, isUnsigned64(c.fields[len(c.fields)-1]))
+		dst = appendIndexBig(dst, v.big, isUnsigned64(c.leafField()))
 	}
 	if c.desc {
 		invert(dst[start:])

@@ -14,6 +14,7 @@ import (
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/query"
 )
 
@@ -180,9 +181,70 @@ var _ = Describe("CompileIndexComponent", func() {
 		Expect(err).To(MatchError(ContainSubstring("collaborative text field cannot be indexed")))
 	})
 
-	It("rejects a leaf that could never take part in a comparison", func() {
+	It("points a bare map at the fan-out syntax", func() {
+		// An index component names a SHAPE, so a map means "every entry" and has
+		// to say so; a literal key would declare an index over one entry, which
+		// is a different feature.
 		_, err := query.CompileIndexComponent(widget, []string{"attrs"}, false)
-		Expect(err).To(MatchError(ContainSubstring("not comparable")))
+		Expect(err).To(MatchError(ContainSubstring(`must be followed by "*"`)))
+		Expect(err).To(MatchError(ContainSubstring("attrs.*.key or attrs.*.value.<field>")))
+	})
+
+	It("rejects a literal map key in an index path", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"attrs", "color"}, false)
+		Expect(err).To(MatchError(ContainSubstring(`must be followed by "*"`)))
+	})
+
+	It("rejects a bare trailing `*`, which does not say which side of the entry it means", func() {
+		// map<string, string>: both sides are strings, so a default would be a
+		// coin flip with no error to notice — which is why the selector is
+		// required rather than inferred.
+		_, err := query.CompileIndexComponent(widget, []string{"attrs", "*"}, false)
+		Expect(err).To(MatchError(ContainSubstring(`must be followed by "key" or "value"`)))
+	})
+
+	It("rejects an unknown selector after `*`", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"attrs", "*", "entry"}, false)
+		Expect(err).To(MatchError(ContainSubstring(`"entry" after "*" must be "key" or "value"`)))
+	})
+
+	It("indexes the entry key of a map", func() {
+		c, err := query.CompileIndexComponent(widget, []string{"attrs", "*", "key"}, false)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Multi()).To(BeTrue())
+	})
+
+	It("indexes the entry value of a scalar-valued map", func() {
+		c, err := query.CompileIndexComponent(widget, []string{"attrs", "*", "value"}, false)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Multi()).To(BeTrue())
+	})
+
+	It("rejects a path continuing past the entry key, which is a scalar", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"attrs", "*", "key", "nope"}, false)
+		Expect(err).To(MatchError(ContainSubstring(`"key" is the entry key`)))
+	})
+
+	It("rejects descending into the value of a scalar-valued map", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"attrs", "*", "value", "nope"}, false)
+		Expect(err).To(MatchError(ContainSubstring("cannot be descended into")))
+	})
+
+	It("points a component ending at a message-valued entry at a field inside it", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"custom", "*", "value"}, false)
+		Expect(err).To(MatchError(ContainSubstring("custom.*.value.<field>")))
+	})
+
+	It("rejects `*` after a field that is not a map", func() {
+		_, err := query.CompileIndexComponent(widget, []string{"tags", "*"}, false)
+		Expect(err).To(MatchError(ContainSubstring(`"tags" is not a message field`)))
+	})
+
+	It("descends into a message-valued entry, and on through a list inside it", func() {
+		c, err := query.CompileIndexComponent(
+			widget, []string{"custom", "*", "value", "labels", "values"}, false)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(c.Multi()).To(BeTrue())
 	})
 
 	It("rejects an unknown field", func() {
@@ -219,6 +281,74 @@ var _ = Describe("CompileIndexComponent", func() {
 	})
 })
 
+var _ = Describe("IndexComponent.MaskTouches", func() {
+	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
+	issue := (&testdatav1.Issue{}).ProtoReflect().Descriptor()
+
+	// touches compiles a component and asks whether a mask path — split the way
+	// lww splits one — could move a row in it.
+	touches := func(desc protoreflect.MessageDescriptor, path []string, mask string) bool {
+		GinkgoHelper()
+		c, err := query.CompileIndexComponent(desc, path, false)
+		Expect(err).NotTo(HaveOccurred())
+		return c.MaskTouches(lww.SplitPath(mask))
+	}
+
+	It("says no for a mask that diverges at the first segment", func() {
+		Expect(touches(widget, []string{"label"}, "count")).To(BeFalse())
+	})
+
+	It("says no for a mask that diverges below a shared prefix", func() {
+		Expect(touches(widget, []string{"settings", "color"}, "settings.size")).To(BeFalse())
+	})
+
+	It("says yes for the component's own path", func() {
+		Expect(touches(widget, []string{"label"}, "label")).To(BeTrue())
+	})
+
+	It("says yes for a mask that stops above the component", func() {
+		// "settings" replaces the whole submessage, colour included.
+		Expect(touches(widget, []string{"settings", "color"}, "settings")).To(BeTrue())
+	})
+
+	It("says yes for a mask that descends past the component's leaf", func() {
+		// Nothing well-formed produces this — a leaf a component can read has no
+		// sub-path — so it is the defensive half of the prefix rule: a mask this
+		// code cannot account for rewrites rather than skips.
+		Expect(touches(issue, []string{"project"}, "project.id.deeper")).To(BeTrue())
+	})
+
+	It("says yes for a mask naming the oneof group a member belongs to", func() {
+		// A oneof is merged whole, by GROUP name, so a mask never spells the
+		// member the component reads — the one case a bare name comparison gets
+		// wrong, and the reason this walks descriptors rather than strings.
+		Expect(touches(widget, []string{"choice_number"}, "choice")).To(BeTrue())
+		Expect(touches(widget, []string{"choice_number"}, "label")).To(BeFalse())
+	})
+
+	It("says yes for a mask addressing one item of a collection", func() {
+		// "tags.red" writes one element of the set; the segment after a repeated
+		// field is an item key, not a field name.
+		Expect(touches(widget, []string{"tags"}, "tags.red")).To(BeTrue())
+		Expect(touches(widget, []string{"members", "uid"}, "members.u1")).To(BeTrue())
+		Expect(touches(widget, []string{"members", "uid"}, "members.u1.name")).To(BeTrue())
+	})
+
+	It("is not fooled by an escaped dot inside an item key", func() {
+		// One segment, "a.b", not two — the split has to match the merge's or
+		// the comparison is against a path the merge never walks.
+		Expect(touches(widget, []string{"label"}, `attrs.a\.b`)).To(BeFalse())
+	})
+
+	It("follows the key field a reference component is extended with", func() {
+		// The component compiled from "project" resolves to project.id, so a
+		// mask naming the reference itself still reaches it.
+		Expect(touches(issue, []string{"project"}, "project")).To(BeTrue())
+		Expect(touches(issue, []string{"project"}, "project.id")).To(BeTrue())
+		Expect(touches(issue, []string{"project"}, "title")).To(BeFalse())
+	})
+})
+
 var _ = Describe("NewIndexEncoder", func() {
 	widget := (&testdatav1.Widget{}).ProtoReflect().Descriptor()
 
@@ -240,7 +370,7 @@ var _ = Describe("NewIndexEncoder", func() {
 		_, err := query.NewIndexEncoder([]query.IndexComponent{
 			comp("members", "uid"), comp("tags"),
 		})
-		Expect(err).To(MatchError(ContainSubstring("one repeated field per index")))
+		Expect(err).To(MatchError(ContainSubstring("one fan-out chain per index")))
 	})
 })
 
@@ -344,6 +474,25 @@ var _ = Describe("SpecHash", func() {
 	It("changes when signedness changes, since the payload does", func() {
 		Expect(query.SpecHash(comps([][]string{{"big"}}, []bool{false}))).
 			NotTo(Equal(query.SpecHash(comps([][]string{{"ubig"}}, []bool{false}))))
+	})
+
+	It("tells the two sides of one entry apart", func() {
+		// On a map<string, string> both sides have the same path and the same
+		// payload shape, so nothing but the selector distinguishes them — and an
+		// index whose entries hold keys must not be read as one holding values.
+		key := [][]string{{"attrs", "*", "key"}}
+		value := [][]string{{"attrs", "*", "value"}}
+		Expect(query.SpecHash(comps(key, []bool{false}))).
+			NotTo(Equal(query.SpecHash(comps(value, []bool{false}))))
+	})
+
+	It("does not change with the order the two sides are declared in beyond position", func() {
+		// Sanity check on the layout being part of the fingerprint: swapping the
+		// components is a different index, not the same one.
+		both := [][]string{{"attrs", "*", "key"}, {"attrs", "*", "value"}}
+		swapped := [][]string{{"attrs", "*", "value"}, {"attrs", "*", "key"}}
+		Expect(query.SpecHash(comps(both, []bool{false, false}))).
+			NotTo(Equal(query.SpecHash(comps(swapped, []bool{false, false}))))
 	})
 })
 

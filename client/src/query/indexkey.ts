@@ -45,32 +45,48 @@
 //
 // One row, several entries
 //
-// A component whose path runs through a repeated field has no single value per
-// row, so such a row takes one POSITION PER ELEMENT — the posting list that
-// makes "some assignee is Maya" a range read instead of a scan. Three rules
-// keep that honest:
+// A component whose path FANS OUT has no single value per row, so such a row
+// takes one POSITION PER ELEMENT — the posting list that makes "some assignee is
+// Maya" a range read instead of a scan. Two things fan out, and they compose:
 //
-// - Every component that fans out must fan out over the SAME repeated field,
-//   and they fan out together, element by element. A cross product would pair
-//   one element's id with another's role, and a query meant to describe one
-//   element would match rows where no element does.
-// - A row whose list is empty or unset still writes exactly one entry, with the
-//   missing tag at each fan-out component. Every live row occupies at least one
-//   position in every index, which is what lets a range that does NOT constrain
-//   the fan-out component still see every row.
-// - Duplicate elements collapse: they would produce identical keys, and an
+// - a repeated field, one position per element; and
+// - a map, written `*` in the declared path, one position per ENTRY. That is the
+//   shape user-defined ("custom") fields take. The `*` is followed by `key` or
+//   `value`, naming the side of the entry the component stores, so an index over
+//   custom fields declares the components it wants in the order it wants them:
+//   `[custom.*.key, custom.*.value.number]` makes a probe on ONE custom field a
+//   contiguous range, and `[custom.*.value.number, custom.*.key]` makes "which
+//   custom field holds 5" one.
+//
+// Four rules keep it honest:
+//
+// - Every component that fans out must fan out over the SAME chain, and they
+//   fan out together, position by position. A cross product would pair one
+//   element's id with another's role, and a query meant to describe one element
+//   would match rows where no element does. A SHORTER chain is fine: an
+//   entry-key component stops at the map and repeats across the positions below.
+// - A `*` may be followed by a repeated field INSIDE one entry
+//   (custom.*.value.labels.values, the multi-select shape). That is not a cross
+//   product either: the second fan lives inside one position of the first.
+// - A row whose collection is empty or unset still writes exactly one entry,
+//   with the missing tag at each fan-out component. Every live row occupies at
+//   least one position in every index, which is what lets a range that does NOT
+//   constrain the fan-out component still see every row.
+// - Duplicate positions collapse: they would produce identical keys, and an
 //   entry is a position, not a count.
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
 import { isTextField } from '../mutations.js';
 import type { Path, Scalar } from './ast.js';
-import { resolvePath, resolveWithField } from './evaluate.js';
+import { compareValues, resolvePath, resolveWithField } from './evaluate.js';
 import {
 	elementKind,
+	type FanStep,
 	type LeafKind,
 	leafKind,
 	localPathOf,
+	MAP_FAN_SEGMENT,
 	requireComparable,
 	requireComparableElement,
 	resolveLeafRef,
@@ -96,7 +112,8 @@ export type IndexKind = 'string' | 'number' | 'bigint' | 'bool';
 
 /** One resolved component of an index key. */
 export interface IndexComponent {
-	/** localName path segments — what the value is resolved through. */
+	/** localName path segments — what the value is resolved through. A map fan
+	 * is ONE segment (the field); the `*` is implicit in `fans`. */
 	path: Path;
 	/** The same segments as PROTO field names, which is what specHash reads so
 	 * the fingerprint matches the Go side's. */
@@ -107,28 +124,47 @@ export interface IndexComponent {
 	/** A 64-bit unsigned leaf is already in order; a signed one is biased. */
 	unsigned: boolean;
 	/**
-	 * Position in `path` of the repeated field this component fans out over, or
-	 * -1 when it yields one value per row. When it is the last position the
-	 * elements themselves are the values (a repeated scalar); otherwise the rest
-	 * of the path resolves against each element.
+	 * The scopes this component fans out over, outermost first. Empty when it
+	 * yields one value per row. When the innermost fan is the LAST segment of
+	 * `path` the elements themselves are the values (a repeated scalar);
+	 * otherwise what follows resolves against each of them.
 	 */
-	multiAt: number;
+	fans: FanStep[];
+	/**
+	 * True when the value is the KEY of the entry the innermost map fan is at,
+	 * rather than anything below it — the `key` selector, written
+	 * `custom.*.key`.
+	 */
+	keyComponent: boolean;
 }
 
 /**
- * Resolves an index component's path against the schema. It rejects the same
- * leaves an order key rejects — a component that could never take part in a
- * comparison would sort every row into one bucket — plus collaborative text,
- * which is comparable but would rewrite its entry on every keystroke.
+ * Resolves one declared index key into the ONE component it contributes. It
+ * rejects the same leaves an order key rejects — a component that could never
+ * take part in a comparison would sort every row into one bucket — plus
+ * collaborative text, which is comparable but would rewrite its entry on every
+ * keystroke.
  *
  * A path ending at a single-key reference extends to that key field, exactly
  * as prepareQuery does, so an index and a query on the same reference agree —
  * including a to-many one, whose row then holds one entry per referenced key.
  *
- * Unlike a condition path, this one may descend through a repeated field (and
- * may end at one): that is what an index over "some element's value" is made
- * of. At most one repeated field per component, since a second would need a
- * cross product within the component itself.
+ * Unlike a condition path, this one may FAN OUT: through a repeated field (and
+ * may end at one), which is what an index over "some element's value" is made
+ * of, and through `*` after a map, which is what an index over user-defined
+ * fields is made of. At most one repeated field per component, since a second
+ * list would need a cross product within the component itself; a `*` nests
+ * inside one entry rather than crossing with it, so it composes with a list.
+ *
+ * A `*` is followed by `key` or `value`, so one declared path is one component
+ * and an index states its own layout:
+ *
+ * ```
+ * [ custom.*.key, custom.*.value.number ]   one custom field: equality, ranges
+ *                                           and an ordering within it
+ * [ custom.*.value.number, custom.*.key ]   which custom field holds 5:
+ *                                           equality, cross-key or named-key
+ * ```
  *
  * `path` is in PROTO field names — the form an index spec is stated in on both
  * sides of the wire contract — and is translated to localNames here, because
@@ -142,13 +178,47 @@ export function compileIndexComponent(
 	desc: boolean,
 ): IndexComponent {
 	const leaf = resolveLeafRef(schema, localPathOf(schema, path), true, true);
-	const leafIsList = leaf.multiAt === leaf.path.length - 1;
-	if (leafIsList) {
+	const innermost = leaf.fans.at(-1);
+	const leafIsElement = innermost !== undefined && innermost.at === leaf.path.length - 1;
+	if (leaf.entryKey) {
+		// A map key is a proto scalar — string, integral or bool — so it is
+		// always comparable and there is nothing to reject.
+		return {
+			path: leaf.path,
+			protoPath: leaf.protoPath,
+			desc,
+			kind: indexKindOf(innermost?.keyKind ?? 'other', leaf.path),
+			// A map KEY carries the signedness of its own type, not the field's:
+			// an unsigned 64-bit key is already in byte order where a signed one
+			// is biased, and the Go encoder reads it off the same descriptor.
+			unsigned: isUnsigned64Key(leaf.field),
+			fans: leaf.fans,
+			keyComponent: true,
+		};
+	}
+	if (
+		leafIsElement && innermost.isMap && leaf.field.fieldKind === 'map'
+		&& leaf.field.mapKind === 'message'
+	) {
+		// The component stops at `value` on a message-valued map, so it would
+		// store something no comparison reaches. Point at the shape that works
+		// rather than at isSet, which an index path cannot use.
+		throw new Error(
+			`index path ${path.join('.')}: map field "${
+				leaf.path.at(-1)
+			}" has a ${leaf.field.message.typeName} value, which is not comparable; index a scalar field inside it instead, e.g. ${
+				path.join('.')
+			}.<field>`,
+		);
+	}
+	if (leafIsElement && !innermost.isMap) {
 		// The leaf IS the repeated field, so the stored values are its elements
 		// and it is the element kind that has to be comparable.
 		requireComparableElement(leaf.path, leaf.field);
 	} else {
-		requireComparable(leaf.path, leaf.field);
+		// A component ending at a map fan stores the entry's VALUE, which is what
+		// a keyed leaf is; anything else is an ordinary singular leaf.
+		requireComparable(leaf.path, { field: leaf.field, keyed: leafIsElement });
 	}
 	if (leaf.field.fieldKind === 'scalar' && isTextField(leaf.field)) {
 		throw new Error(
@@ -157,18 +227,27 @@ export function compileIndexComponent(
 			}: a collaborative text field cannot be indexed; every keystroke rewrites its value, so the entry would be rewritten with it`,
 		);
 	}
+	const kind = indexKindOf(
+		leafIsElement
+			? (innermost.isMap
+				? leafKind({ field: leaf.field, keyed: true })
+				: elementKind(leaf.field))
+			: leafKind({ field: leaf.field, keyed: false }),
+		leaf.path,
+	);
 	return {
 		path: leaf.path,
 		protoPath: leaf.protoPath,
 		desc,
-		kind: indexKindOf(leafIsList ? elementKind(leaf.field) : leafKind(leaf.field), leaf.path),
+		kind,
 		unsigned: isUnsigned64(leaf.field),
-		multiAt: leaf.multiAt,
+		fans: leaf.fans,
+		keyComponent: false,
 	};
 }
 
 function indexKindOf(kind: LeafKind, path: Path): IndexKind {
-	if (kind === 'list' || kind === 'other') {
+	if (kind === 'list' || kind === 'map' || kind === 'other') {
 		// Unreachable: requireComparable has already rejected both.
 		throw new Error(`index path ${path.join('.')}: ${kind} leaves cannot be indexed`);
 	}
@@ -181,67 +260,93 @@ function isUnsigned64(field: { fieldKind: string; scalar?: number }): boolean {
 	return field.fieldKind === 'scalar' && (field.scalar === 4 || field.scalar === 6);
 }
 
+/** isUnsigned64 for the KEY type of a map field. */
+function isUnsigned64Key(field: { fieldKind: string; mapKey?: number }): boolean {
+	return field.fieldKind === 'map' && (field.mapKey === 4 || field.mapKey === 6);
+}
+
+/**
+ * One place a row occupies in the index: one entry per level of the encoder's
+ * fan chain, outermost first. A position SHORTER than the chain means the
+ * collection at that depth was empty or absent, so every component reading below
+ * it takes the missing tag.
+ */
+type Position = PosLevel[];
+
+interface PosLevel {
+	/** The entry's typed key; only set for a map level. */
+	key?: Scalar;
+	/** The element (a list level) or the entry's value (a map level). */
+	val: unknown;
+	/** The value's schema, when it is a message — what a deeper level resolves
+	 * against. */
+	schema: DescMessage | undefined;
+}
+
 /** Turns rows into the entries of one index. */
 export class IndexEncoder {
 	/**
-	 * The path to the repeated field every fan-out component descends through,
-	 * or undefined when none does. Holding it once is what makes the components
-	 * fan out TOGETHER: the list is resolved a single time and every component
-	 * reads the same element.
+	 * The chain of scopes the components fan out over, outermost first. Holding
+	 * it once is what makes the components fan out TOGETHER: each collection is
+	 * resolved a single time and every component reads the same position of it.
+	 *
+	 * It is a CHAIN rather than a single path because a `*` over a map may be
+	 * followed by a repeated field inside one entry — the multi-select shape,
+	 * `custom.*.labels.values` — and each level lives inside one position of the
+	 * level above it, so nothing is crossed with anything.
 	 */
-	private readonly fanPath: Path | undefined;
+	private readonly fan: FanLevel[] = [];
 
 	/**
-	 * Throws when two components fan out over different repeated fields. Their
-	 * cross product would be the only way to store both, and a cross product
-	 * pairs values that never belonged to the same element — so such an index is
+	 * Throws when two components fan out over different chains. Their cross
+	 * product would be the only way to store both, and a cross product pairs
+	 * values that never belonged to the same element — so such an index is
 	 * refused at declaration rather than answering a subtly wrong question at
-	 * read time.
+	 * read time. A SHORTER chain is fine, and is the normal case: the entry-key
+	 * component of a `custom.*.labels.values` index stops at the map, and its
+	 * value simply repeats across the positions below it.
 	 */
 	constructor(readonly components: IndexComponent[]) {
 		for (const c of components) {
-			if (c.multiAt < 0) continue;
-			const path = c.path.slice(0, c.multiAt + 1);
-			if (this.fanPath === undefined) {
-				this.fanPath = path;
-			} else if (this.fanPath.join('.') !== path.join('.')) {
-				throw new Error(
-					`an index cannot fan out over both ${this.fanPath.join('.')} and ${
-						path.join('.')
-					}; one repeated field per index`,
-				);
+			const levels = fanLevelsOf(c);
+			if (levels.length === 0) continue;
+			const n = Math.min(levels.length, this.fan.length);
+			for (let i = 0; i < n; i++) {
+				const a = this.fan[i]!;
+				const b = levels[i]!;
+				if (a.isMap !== b.isMap || a.steps.join('.') !== b.steps.join('.')) {
+					throw new Error(
+						`an index cannot fan out over both ${fanPathString(this.fan)} and ${
+							fanPathString(levels)
+						}; one fan-out chain per index`,
+					);
+				}
+			}
+			if (levels.length > this.fan.length) {
+				this.fan.length = 0;
+				this.fan.push(...levels);
 			}
 		}
 	}
 
 	/**
-	 * The entries `row` occupies in this index — one per element of the fanned-
-	 * out list, or a single entry when no component fans out. `rowKey` is the
-	 * row's KV key, which terminates every entry so entries are unique and tie
-	 * exactly the way compareRows does.
+	 * The entries `row` occupies in this index — one per position of the fan
+	 * chain, or a single entry when no component fans out. `rowKey` is the row's
+	 * KV key, which terminates every entry so entries are unique and tie exactly
+	 * the way compareRows does.
 	 *
-	 * Never empty: a row whose list is empty or unset still takes one position,
-	 * with the missing tag at each fan-out component, so every live row is
-	 * reachable through every index.
+	 * Never empty: a row whose collection is empty or unset still takes one
+	 * position, with the missing tag at each fan-out component, so every live row
+	 * is reachable through every index.
 	 */
 	encode(row: unknown, rowKey: string, schema?: DescMessage): string[] {
-		if (this.fanPath === undefined) {
-			return [ this.encodeAt(row, rowKey, schema, undefined, undefined) ];
-		}
-		const r = resolveWithField(row, this.fanPath, schema);
-		const list = Array.isArray(r.value) ? r.value : undefined;
-		if (!r.found || list === undefined || list.length === 0) {
-			return [ this.encodeAt(row, rowKey, schema, undefined, undefined) ];
-		}
-		const element = r.field?.fieldKind === 'list' && r.field.listKind === 'message'
-			? r.field.message
-			: undefined;
 		const out: string[] = [];
 		const seen = new Set<string>();
-		for (const e of list) {
-			const entry = this.encodeAt(row, rowKey, schema, e, element);
-			// Duplicate elements encode identically. An entry is a position, not
-			// a count, so the second one would just overwrite the first.
+		for (const pos of this.positions(row, schema)) {
+			const entry = this.encodeAt(row, rowKey, schema, pos);
+			// Two positions can encode identically — duplicate list elements, or
+			// two map entries no component distinguishes. An entry is a position,
+			// not a count, so the second one would just overwrite the first.
 			if (seen.has(entry)) continue;
 			seen.add(entry);
 			out.push(entry);
@@ -249,30 +354,97 @@ export class IndexEncoder {
 		return out;
 	}
 
-	/** One entry, reading fan-out components from `element`. An undefined
-	 * element means "no element", which is how a row with an empty list still
-	 * gets its single entry. */
+	/** Enumerates the fan chain against one row, depth first. */
+	private positions(row: unknown, schema: DescMessage | undefined): Position[] {
+		if (this.fan.length === 0) return [ [] ];
+		const out: Position[] = [];
+		const walk = (
+			scope: unknown,
+			scopeSchema: DescMessage | undefined,
+			level: number,
+			cur: Position,
+		) => {
+			if (level === this.fan.length) {
+				out.push(cur.slice());
+				return;
+			}
+			const fl = this.fan[level]!;
+			const r = resolveWithField(scope, fl.steps, scopeSchema);
+			const valueSchema = r.field?.fieldKind === 'map'
+				? (r.field.mapKind === 'message' ? r.field.message : undefined)
+				: r.field?.fieldKind === 'list' && r.field.listKind === 'message'
+				? r.field.message
+				: undefined;
+			if (!r.found) {
+				out.push(cur.slice());
+				return;
+			}
+			if (fl.isMap) {
+				const rec = isRecord(r.value) ? r.value : undefined;
+				const keys = rec ? sortedMapKeys(rec, fl.keyKind) : [];
+				if (!rec || keys.length === 0) {
+					out.push(cur.slice());
+					return;
+				}
+				for (const [ raw, typed ] of keys) {
+					cur.push({ key: typed, val: rec[raw], schema: valueSchema });
+					walk(rec[raw], valueSchema, level + 1, cur);
+					cur.pop();
+				}
+				return;
+			}
+			const list = Array.isArray(r.value) ? r.value : undefined;
+			if (!list || list.length === 0) {
+				out.push(cur.slice());
+				return;
+			}
+			for (const el of list) {
+				cur.push({ val: el, schema: valueSchema });
+				walk(el, valueSchema, level + 1, cur);
+				cur.pop();
+			}
+		};
+		walk(row, schema, 0, []);
+		return out;
+	}
+
+	/**
+	 * One entry, reading each component from the position it belongs to. A
+	 * position shorter than a component's fan depth means "no element there",
+	 * which is how a row with an empty collection still gets its single entry.
+	 */
 	private encodeAt(
 		row: unknown,
 		rowKey: string,
 		schema: DescMessage | undefined,
-		element: unknown,
-		elementSchema: DescMessage | undefined,
+		pos: Position,
 	): string {
 		const out: number[] = [];
 		for (const c of this.components) {
-			if (c.multiAt < 0) {
+			const depth = c.fans.length;
+			if (depth === 0) {
 				const r = resolvePath(row, c.path, schema);
 				appendComponent(out, c, r.found, r.value);
-			} else if (element === undefined) {
-				appendComponent(out, c, false, undefined);
-			} else if (c.multiAt === c.path.length - 1) {
-				// The leaf is the list itself, so the element IS the value.
-				appendComponent(out, c, true, element);
-			} else {
-				const r = resolvePath(element, c.path.slice(c.multiAt + 1), elementSchema);
-				appendComponent(out, c, r.found, r.value);
+				continue;
 			}
+			if (depth > pos.length) {
+				appendComponent(out, c, false, undefined);
+				continue;
+			}
+			const at = pos[depth - 1]!;
+			const innermost = c.fans[depth - 1]!;
+			if (c.keyComponent) {
+				appendComponent(out, c, true, at.key);
+				continue;
+			}
+			const rest = c.path.slice(innermost.at + 1);
+			if (rest.length === 0) {
+				// The fanned element (or map value) IS the value.
+				appendComponent(out, c, true, at.val);
+				continue;
+			}
+			const r = resolvePath(at.val, rest, at.schema);
+			appendComponent(out, c, r.found, r.value);
 		}
 		appendIndexString(out, rowKey);
 		return bytesToKey(out);
@@ -294,6 +466,62 @@ export class IndexEncoder {
 		values.forEach((v, i) => appendComponent(out, this.components[i]!, true, v));
 		return bytesToKey(out);
 	}
+}
+
+/** One scope a component fans out over: the segments from the enclosing scope
+ * down to and including the collection itself. */
+interface FanLevel {
+	steps: Path;
+	isMap: boolean;
+	keyKind: IndexKind | undefined;
+}
+
+function fanLevelsOf(c: IndexComponent): FanLevel[] {
+	let start = 0;
+	return c.fans.map((f) => {
+		const steps = c.path.slice(start, f.at + 1);
+		start = f.at + 1;
+		return { steps, isMap: f.isMap, keyKind: f.keyKind as IndexKind | undefined };
+	});
+}
+
+function fanPathString(levels: FanLevel[]): string {
+	if (levels.length === 0) return '(nothing)';
+	return levels
+		.map((l) => l.steps.join('.') + (l.isMap ? `.${MAP_FAN_SEGMENT}` : ''))
+		.join(' → ');
+}
+
+function isRecord(v: unknown): v is Record<string, unknown> {
+	return typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof Uint8Array);
+}
+
+/**
+ * A map's entries in the order the KEY COMPONENT stores them, as (record key,
+ * typed key) pairs. Sorted rather than taken in property order: a JS object
+ * orders integer-like keys ahead of the rest, Go randomizes map iteration, and
+ * the entries a row writes have to be the same list in the same order on both
+ * sides or the shared vectors could not pin them.
+ */
+function sortedMapKeys(
+	rec: Record<string, unknown>,
+	keyKind: IndexKind | undefined,
+): [string, Scalar][] {
+	const typed = (raw: string): Scalar => {
+		switch (keyKind) {
+			case 'bigint':
+				return BigInt(raw);
+			case 'number':
+				return Number(raw);
+			case 'bool':
+				return raw === 'true';
+			default:
+				return raw;
+		}
+	};
+	return Object.keys(rec)
+		.map((raw): [string, Scalar] => [ raw, typed(raw) ])
+		.sort((a, b) => compareValues(a[1], b[1]) ?? 0);
 }
 
 /**
@@ -332,7 +560,18 @@ export function upperBound(prefix: string): string | undefined {
 export function specHash(comps: IndexComponent[]): string {
 	let s = `v${ENCODING_VERSION}`;
 	for (const c of comps) {
-		s += `|${c.protoPath.join('.')}:${c.kind}:${c.unsigned}:${c.desc}:${c.multiAt}`;
+		// A map fan renders as `<field>.*`, matching how the path is declared.
+		const mapFans = new Set(c.fans.filter((f) => f.isMap).map((f) => f.at));
+		const path = c.protoPath
+			.map((seg, i) => (mapFans.has(i) ? `${seg}.${MAP_FAN_SEGMENT}` : seg))
+			.join('.');
+		// The map-fan additions are APPENDED rather than folded in, so an index
+		// shape that predates them fingerprints byte for byte as it did and its
+		// stored entries stay valid.
+		const first = c.fans.length > 0 ? c.fans[0]!.at : -1;
+		s += `|${path}:${c.kind}:${c.unsigned}:${c.desc}:${first}`;
+		for (const f of c.fans.slice(1)) s += `:+${f.at}`;
+		if (c.keyComponent) s += ':key';
 	}
 	return fingerprint(s);
 }

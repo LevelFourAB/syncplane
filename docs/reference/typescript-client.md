@@ -316,20 +316,102 @@ cannot be filtered or ordered on; registering such a schema logs a warning
 naming the field. **Enums arrive as numbers**, so it is `t.status.eq(2)`, not
 `t.status.eq(Status.DONE)`.
 
-| Field type                                      | Operators                                                       |
-| ----------------------------------------------- | --------------------------------------------------------------- |
-| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains` + order |
-| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte` + order             |
-| `boolean` (`BoolOps`)                           | `eq`, `neq` + order                                             |
-| `Uint8Array` & singular message (`PresenceOps`) | `isSet`, `isNotSet`                                             |
-| repeated scalar (`RepeatedScalarOps`)           | `has`, `hasAny`, `hasAll`, `isEmpty`                            |
-| repeated message (`RepeatedMessageOps`)         | `any(cb)`, `isEmpty`                                            |
-| singular message                                | drillable (`t.settings.color.eq(...)`) + `isSet`/`isNotSet`     |
-| oneof group (`OneofRef`)                        | one entry per case: the member's operators + `isSet`/`isNotSet` |
+| Field type                                      | Operators                                                                    |
+| ----------------------------------------------- | ---------------------------------------------------------------------------- |
+| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains` + order              |
+| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte` + order                          |
+| `boolean` (`BoolOps`)                           | `eq`, `neq` + order                                                          |
+| `Uint8Array` & singular message (`PresenceOps`) | `isSet`, `isNotSet`                                                          |
+| repeated scalar (`RepeatedScalarOps`)           | `has`, `hasAny`, `hasAll`, `isEmpty`                                         |
+| repeated message (`RepeatedMessageOps`)         | `any(cb)`, `isEmpty`                                                         |
+| singular message                                | drillable (`t.settings.color.eq(...)`) + `isSet`/`isNotSet`                  |
+| oneof group (`OneofRef`)                        | one entry per case: the member's operators + `isSet`/`isNotSet`              |
+| map (`MapOps`)                                  | `at(key)` → the value's operators + `isSet`/`isNotSet`; `any(cb)`; `isEmpty` |
 
 Order: every orderable field exposes `.asc()` / `.desc()` → `OrderKey`.
 
 Boolean combinators (top-level exports): `and(...conds)`, `or(...conds)`, `not(cond)`.
+
+#### Asking about one entry of a map
+
+`at(key)` addresses one entry. What it returns is the operator surface of the
+map's **value** type, so an entry behaves exactly like a field of that type:
+
+```ts
+await client.db.issue.query({ where: (i) => i.attrs.at('color').eq('red') });
+await client.db.issue.query({
+	where: (i) => i.custom.at('priority').kind.number.gt(3),
+});
+await client.db.issue.query({
+	where: (i) => i.custom.at('team').kind.text.eq('platform'),
+});
+// multi-select: a repeated scalar wrapped in one variant
+await client.db.issue.query({
+	where: (i) => i.custom.at('labels').kind.tags.values.hasAny([ 'ui', 'bug' ]),
+});
+```
+
+`at()` rather than property access, for two reasons. A key that happens to
+collide with an operator name (`eq`, `in`, `has`, `isSet`, …) would be silently
+swallowed by the proxy — a trap that depends on the DATA rather than on the
+schema. And `Record<string, V>` is structurally permissive enough that plain
+property access would type-check against surfaces it should not.
+
+When the value is an app-defined oneof — the usual shape for user-defined
+fields — a query names the **variant** it means, through the group exactly as
+anywhere else. An entry holding a different variant reads as not found: the
+condition is false and the ordering ranks it last. The consequence is that there
+is no ordering by "whatever the value is" across variants; `orderBy` names one.
+See [proto options](proto-options.md#maps-and-user-defined-fields).
+
+`isSet()` on the ENTRY (`i.custom.at('priority').isSet()`) asks whether the key
+is there at all. `isSet()` on the map itself is not offered — a map has implicit
+presence, so it is always set; `isEmpty()` is what asks whether it holds
+anything.
+
+#### Asking about ANY entry of a map
+
+`any(cb)` is the mirror of `at()`: where `at('priority')` names the field and
+asks about its value, `any()` asks about the value and leaves the field open. The
+element it scopes is one **entry** (`MapEntryRef`), whose two sides are `key` and
+`value`:
+
+```ts
+// Which custom field holds 5 — a question no addressed path can ask.
+await client.db.issue.query({
+	where: (i) => i.custom.any((e) => e.value.kind.number.eq(5)),
+});
+// One entry satisfying BOTH halves.
+await client.db.issue.query({
+	where: (i) =>
+		i.custom.any((e) =>
+			and(e.key.startsWith('cf_'), e.value.kind.checked.eq(true))
+		),
+});
+// Which rows have any of these fields set at all.
+await client.db.issue.query({
+	where: (i) => i.custom.any((e) => e.key.in([ 'priority', 'severity' ])),
+});
+```
+
+The entry scope is explicit for the same reason it is on a message list: it is
+what lets two conditions describe the **same** entry.
+`any((e) => and(e.key.eq('priority'), e.value.kind.number.eq(5)))` is "the field
+named priority holds 5"; `and(m.any(…key…), m.any(…value…))` is the weaker
+"priority is set AND something holds 5".
+
+Two consequences:
+
+- **The key is a value here**, not a path segment, so a key containing a dot
+  needs no escaping and `in`/`startsWith` over keys come for free. Its operator
+  surface is `MapKeyOps` rather than a derived one: a generated map types its
+  keys as `string` whatever the .proto declared, so the surface cannot be read
+  off the row shape. The value that reaches the evaluator IS the declared type —
+  on a `map<int64, V>` the entry key is a bigint, so `e.key.gte(5n)` is the
+  spelling that matches.
+- **There is no projection.** A match says some entry satisfied the condition,
+  never which one. Read the field's name off the row's map after the query
+  returns.
 
 #### Asking about the elements of a message list
 
@@ -364,8 +446,8 @@ reads as "no element matches".
 ### Rejected and surprising cases
 
 - Comparing or ordering by a leaf that can never satisfy it — bytes, a message,
-  a map, a repeated field — **throws when the query is compiled**, naming the
-  operator that does work instead. It does not quietly match nothing (or, for an
+  a whole map, a repeated field — **throws when the query is compiled**, naming
+  the operator that does work instead (for a map, the `at(key)` form). It does not quietly match nothing (or, for an
   ordering, tie every pair and fall back to row-key order).
 - A mismatch between the literal and the field (`t.count.eq('x')` via an untyped
   path) is a legitimate no-match and evaluates false. Only the leaf itself being
@@ -687,7 +769,7 @@ const client = new SyncClient({ entities: bundle.descMessages(), ... });
 | `ref(() => target)`             | `Field<Infer<E>>`    | typed to-one reference (thunk → self/forward refs)                  |
 | `refList(() => target)`         | `Field<Infer<E>[]>`  | to-many reference                                                   |
 | `keyedList(elem, ...keyFields)` | `KeyedListField`     | repeated message merged per item; `.order(posField)` → movable list |
-| `map(keyType, value)`           | `Field<Record<...>>` | scalar-valued map                                                   |
+| `map(keyType, value)`           | `Field<Record<...>>` | map; the value is a scalar or a `message()`                         |
 
 Field modifiers: `.key()` (singular `text`/`bool`/int scalar only; ≥1 required per
 entity — see [Naming rules](naming.md)), `.opaque()`, `.indexed()`,
@@ -727,22 +809,78 @@ is reserved for indexes the engine derives for itself.
 position per element, which is what makes `has`/`hasAny` a range read. The write
 cost grows with the list, since every write re-stores every element's position.
 
-`.indexed()` is rejected on a map or a message list (no comparison reaches
-them) and on a `ref()` (the engine maintains one over every reference field
-already, which is what makes a reverse lookup a range probe). Registration
-additionally rejects a collaborative-text field, whose entry every keystroke
-would rewrite.
+`.indexed()` is rejected on a message list (no comparison reaches it) and on a
+`ref()` (the engine maintains one over every reference field already, which is
+what makes a reverse lookup a range probe). It is rejected on a `map()` too, but
+for a different reason: a field mark has no room to say which entry or which
+leaf, so a map is indexed through the `*` form below. Registration additionally
+rejects a collaborative-text field, whose entry every keystroke would rewrite.
 
 A fan-out component serves an ordering only where the equality prefix has
 already pinned it — `{ key: [{ path: 'labels' }, { path: 'rank', desc: true }] }`
 serves "labelled X, newest first" at O(limit), because each matching row sits at
 exactly one position under that label.
 
+A `*` segment fans out over every entry of a **map**, which is how user-defined
+fields are indexed, and the segment after it — `key` or `value` — says which side
+of the entry the component stores. One declared path is one component, so an
+index states its own layout:
+
+```ts
+indexes: [
+	// One named custom field: equality, ranges and an ordering within it.
+	{
+		name: 'cf_number',
+		key: [ { path: 'custom.*.key' }, { path: 'custom.*.value.number' } ],
+	},
+	{
+		name: 'cf_num_rank',
+		key: [
+			{ path: 'custom.*.key' },
+			{ path: 'custom.*.value.number' },
+			{ path: 'rank', desc: true },
+		],
+	},
+	// The mirror layout: which custom field holds X. Equality only.
+	{
+		name: 'cf_by_number',
+		key: [ { path: 'custom.*.value.number' }, { path: 'custom.*.key' } ],
+	},
+	// nested: one entry per (key, element) — multi-select
+	{
+		name: 'cf_labels',
+		key: [ { path: 'custom.*.key' }, { path: 'custom.*.value.labels.values' } ],
+	},
+];
+```
+
+`[key, value]` clusters one field's values, so it serves equality, ranges and an
+ordering within that field. `[value, key]` clusters one value, so it serves the
+cross-key `any()` above — and a named-key equality too, by pinning the value and
+then the key. An app that only does equality probes declares **one** index, the
+value-first one. Declaring both roughly doubles the entries a row occupies; see
+[limits and trade-offs](../explanation/limits-and-trade-offs.md).
+
+The selector is required rather than defaulted: for a `map<string, string>` a
+bare `attrs.*` could mean either side of the entry, with no error to notice.
+
+Unlike a list fan-out, the value under a **pinned** entry key IS an ordering: a
+map holds at most one value per key, so the row sits at exactly one position
+there. An ordering by a custom field that no predicate pins declines to the
+scan, because rows lacking that key sit outside every key range and must sort
+last. A literal key in an index path is rejected — an index names a shape, and
+indexing one entry is a different feature.
+
+A value component with no key component beside it is legal, and is what serves a
+cross-key `any()`; a predicate naming one field then stays in the residual, since
+the range spans that value under every key.
+
 Indexes are invisible: no request or response names one, a query returns the
 same rows in the same order whether or not one served it, and adding or removing
 one is never a breaking change. A new index is unusable until a background pass
 has walked the entity, during which queries scan. The cost is on writes — every
-write to the entity re-stores that row's position in every index it has.
+write to the entity re-stores that row's position in every index it has, unless
+its field mask cannot reach any of them.
 
 What the client index does and does not cover:
 

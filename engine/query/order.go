@@ -15,7 +15,7 @@ type Order struct {
 }
 
 type orderKey struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	desc   bool
 }
 

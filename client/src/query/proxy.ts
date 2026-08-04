@@ -32,11 +32,20 @@ OPERATORS.isEmpty = (path) => (): Cond => ({ kind: 'rep', path, op: 'isEmpty' })
 // records paths relative to it — which is the form the AST, the wire and both
 // evaluators expect. Nesting works for free: an any() inside an any() starts a
 // fresh empty root against its own element.
+//
+// A map needs nothing extra here: its element is the ENTRY, whose two sides are
+// ordinary first segments, so `e.key` and `e.value.number` record ['key'] and
+// ['value', 'number'] through the same empty root a list element uses.
 OPERATORS.any = (path) => (build: (element: unknown) => Cond): Cond => ({
 	kind: 'exists',
 	path,
 	cond: build(fieldProxy([])),
 });
+// One entry of a map. It appends the key as an ordinary path segment, which is
+// exactly what the segment after a map field means to both evaluators — an
+// explicit accessor rather than property access so that a key colliding with an
+// operator name cannot be silently swallowed by the `get` trap below.
+OPERATORS.at = (path) => (key: string) => fieldProxy([ ...path, key ]);
 OPERATORS.isSet = (path) => (): Cond => ({ kind: 'present', path, op: 'isSet' });
 OPERATORS.isNotSet = (path) => (): Cond => ({ kind: 'present', path, op: 'isNotSet' });
 OPERATORS.asc = (path) => () => ({ path, dir: 'asc' as const });

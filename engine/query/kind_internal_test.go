@@ -4,7 +4,6 @@ import (
 	"testing"
 
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 )
@@ -23,10 +22,21 @@ func TestLeafKindMatchesExtract(t *testing.T) {
 		desc := msg.Descriptor()
 		for i := 0; i < desc.Fields().Len(); i++ {
 			fd := desc.Fields().Get(i)
-			static := leafKind([]protoreflect.FieldDescriptor{fd})
+			static := leafKind([]pathStep{{fd: fd}})
 			runtime := extract(fd, msg.Get(fd)).kind
 			if static != runtime {
 				t.Errorf("%s: leafKind = %v, extract = %v", fd.FullName(), static, runtime)
+			}
+			if fd.IsMap() {
+				// A keyed step yields the map's VALUE, and resolveValue converts
+				// it with extractSingular over that same descriptor — the second
+				// pairing this test exists to pin.
+				keyed := leafKind([]pathStep{{fd: fd, keyed: true}})
+				val := extractSingular(fd.MapValue(), msg.Mutable(fd).Map().NewValue()).kind
+				if keyed != val {
+					t.Errorf("%s value: leafKind = %v, extractSingular = %v", fd.FullName(), keyed, val)
+				}
+				continue
 			}
 			if !fd.IsList() {
 				continue

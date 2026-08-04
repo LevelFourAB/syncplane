@@ -8,14 +8,16 @@
 // whether or not an index does.
 //
 // Issue carries every declaration surface — a `state` field mark, the
-// `by_state_rank` composite, the `labels` fan-out and the to-many `blocked_by`
-// reference the engine indexes on its own — so a handful of queries exercise
-// all of them. The fan-out cases are also the wire test for `any()`: the
-// condition only means anything if both compilers read the same ExistsCond.
+// `by_state_rank` composite, the `labels` fan-out, the `custom` map in both
+// layouts, and the to-many `blocked_by` reference the engine indexes on its own
+// — so a handful of queries exercise all of them. The fan-out cases are also the
+// wire test for `any()`: the condition only means anything if both compilers
+// read the same ExistsCond, and over a MAP the two resolve its `key`/`value`
+// through different machinery, so agreeing is not automatic.
 
 import { describe, expect, it } from 'vitest';
 
-import type { MessageShape } from '@bufbuild/protobuf';
+import type { MessageInitShape, MessageShape } from '@bufbuild/protobuf';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import {
 	IssueSchema,
@@ -24,12 +26,12 @@ import {
 	UserSchema,
 	WidgetSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
-import { not, type Query } from '../../src/query/index.js';
+import { and, not, type Query } from '../../src/query/index.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
 type IssueQuery = Query<MessageShape<typeof IssueSchema>>;
 
-const SEED = [
+const SEED: MessageInitShape<typeof IssueSchema>[] = [
 	{
 		id: 'i1',
 		title: 'one',
@@ -37,8 +39,21 @@ const SEED = [
 		rank: 5,
 		labels: [ 'bug', 'ui' ],
 		blockedBy: [ { id: 'i2' } ],
+		custom: {
+			priority: { kind: { case: 'number', value: 5 } },
+			team: { kind: { case: 'text', value: 'platform' } },
+		},
 	},
-	{ id: 'i2', title: 'two', state: 'open', rank: 9, labels: [ 'ui' ] },
+	{
+		id: 'i2',
+		title: 'two',
+		state: 'open',
+		rank: 9,
+		labels: [ 'ui' ],
+		// A DIFFERENT key holding the number i1's `priority` does, which is what
+		// makes "which custom field holds 5" a question with two answers.
+		custom: { size: { kind: { case: 'number', value: 5 } } },
+	},
 	{ id: 'i3', title: 'three', state: 'done', rank: 3, labels: [ 'bug' ] },
 	// No labels at all: still reachable through by_label_rank, which is what
 	// the missing tag on an empty list is for.
@@ -151,6 +166,47 @@ describe('secondary index parity between client and server', () => {
 		where: (i) => not(i.blockedBy.any((b) => b.id.eq('i2'))),
 		orderBy: (i) => [ i.rank.asc() ],
 	}, [ 'i4', 'i3', 'i2' ]);
+
+	// The map axes. `custom.at(k)` names the field and asks about its value;
+	// `custom.any(e => …)` asks about the value and leaves the field open. The
+	// entity declares an index for each — [key, value] and [value, key] — so both
+	// are served rather than scanned, on both sides.
+	parity('a predicate on one named custom field', {
+		where: (i) => i.custom.at('priority').kind.number.eq(5),
+	}, [ 'i1' ]);
+
+	parity('which custom field holds a value, across keys', {
+		where: (i) => i.custom.any((e) => e.value.kind.number.eq(5)),
+		orderBy: (i) => [ i.rank.asc() ],
+	}, [ 'i1', 'i2' ]);
+
+	parity('key and value conjoined describe ONE entry', {
+		where: (i) => i.custom.any((e) => and(e.key.eq('priority'), e.value.kind.number.eq(5))),
+	}, [ 'i1' ]);
+
+	parity('key and value from different entries describe none', {
+		where: (i) => i.custom.any((e) => and(e.key.eq('size'), e.value.kind.number.eq(1))),
+	}, []);
+
+	parity('which rows have any of these custom fields set', {
+		where: (i) => i.custom.any((e) => e.key.in([ 'size', 'absent' ])),
+	}, [ 'i2' ]);
+
+	parity('not(any()) over a map means no entry matches', {
+		where: (i) => not(i.custom.any((e) => e.value.kind.number.eq(5))),
+		orderBy: (i) => [ i.rank.asc() ],
+	}, [ 'i4', 'i3', 'i5' ]);
+
+	it('agrees on a cross-key any() before either side has built an index', async () => {
+		// The scan-vs-scan baseline for the new axis: whatever the planners do
+		// later, this is the answer they have to reproduce.
+		const { local, server } = await bothSides({
+			where: (i) => i.custom.any((e) => e.value.kind.number.eq(5)),
+			orderBy: (i) => [ i.rank.asc() ],
+		});
+		expect(server).toEqual(local);
+		expect(local).toEqual([ 'i1', 'i2' ]);
+	});
 
 	it('agrees before either side has built an index', async () => {
 		// Neither the server's background pass nor the client's has necessarily

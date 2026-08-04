@@ -32,6 +32,12 @@ message Widget {
 	map<string, string> attrs = 11;
 	// Map with a non-string key — exercises int64 key encode/decode.
 	map<int64, string> by_id = 12;
+	// Message-valued map: the shape an app declares for user-defined fields.
+	// The value is an APP-defined oneof, so a query names the variant it means
+	// (`custom.priority.number`) and the engine never has to rank two variants
+	// against each other — a member has explicit presence, so the wrong variant
+	// simply reads as not found.
+	map<string, FieldValue> custom = 23;
 	// Keyed message list — identity is the explicit "uid" field.
 	repeated Member members = 13
 		[(syncplane.v1.field_behavior) = { key_field: "uid" }];
@@ -65,6 +71,28 @@ message Widget {
 		int32 choice_number = 21;
 		Settings choice_settings = 22;
 	}
+}
+
+// Value of Widget.custom — what an app declares when its users define their
+// own fields. The engine knows nothing about this type: the oneof, its members
+// and their names all belong to the app, and a query addresses one member by
+// name. `labels` is how multi-select is expressed without an engine concept for
+// it — a message wrapping a repeated scalar, so `custom.<key>.labels.values` is
+// an ordinary repeated leaf that hasAny/hasAll already understand.
+message FieldValue {
+	oneof kind {
+		string text = 1;
+		double number = 2;
+		bool checked = 3;
+		StringList labels = 4;
+		// Deliberately incomparable: no path ever asks the engine to rank two
+		// attachments, so a member no comparison can reach costs nothing.
+		Blob attachment = 5;
+	}
+}
+
+message StringList {
+	repeated string values = 1;
 }
 
 // Registration-rejection fixtures. Each carries a construct that may not cross
@@ -213,6 +241,55 @@ message Issue {
 			name: "by_label_rank"
 			key: [ { path: "labels" }, { path: "rank" desc: true } ]
 		}
+		// Map fan-out: `*` means "every entry of this map", and the selector
+		// after it names the side of the entry the component stores. Key first,
+		// so a probe on ONE user-defined field is a contiguous range.
+		index: {
+			name: "cf_number"
+			key: [ { path: "custom.*.key" }, { path: "custom.*.value.number" } ]
+		}
+		// The mirror layout: value first, so a probe on a VALUE is contiguous
+		// and "which custom field holds 5" is a range read rather than a scan.
+		// Equality only — a range on the value would spread the keys out.
+		index: {
+			name: "cf_by_number"
+			key: [ { path: "custom.*.value.number" }, { path: "custom.*.key" } ]
+		}
+		// A value component with NO key component beside it. The exactness
+		// guard is what this exists for: a predicate naming one custom field
+		// must stay in the residual against it, because the range spans that
+		// value under every key.
+		index: {
+			name: "cf_number_only"
+			key: [ { path: "custom.*.value.number" } ]
+		}
+		// The same fan-out with a second sort key: "custom field X, highest
+		// rank first", which is what an ordering inside one custom field needs.
+		index: {
+			name: "cf_num_rank"
+			key: [
+				{ path: "custom.*.key" },
+				{ path: "custom.*.value.number" },
+				{ path: "rank" desc: true }
+			]
+		}
+		// Nested fan-out: one entry per (entry key, list element). Multi-select
+		// needs no engine concept — the app wraps a repeated scalar in a
+		// variant.
+		index: {
+			name: "cf_labels"
+			key: [
+				{ path: "custom.*.key" },
+				{ path: "custom.*.value.labels.values" }
+			]
+		}
+		// A scalar-valued map, where both sides have to be nameable: `value` is
+		// the entry's string, `key` its name. Cross-key over a plain
+		// map<string, string>.
+		index: {
+			name: "tag_by_value"
+			key: [ { path: "tags_map.*.value" }, { path: "tags_map.*.key" } ]
+		}
 	};
 
 	string id = 1;
@@ -238,6 +315,15 @@ message Issue {
 	// membership is a range read and one row occupies several positions.
 	repeated string labels = 10
 		[(syncplane.v1.field_behavior) = { indexed: true }];
+	// User-defined fields, the shape an app declares for them: an app-defined
+	// oneof per entry, addressed by key and variant. The indexes above fan out
+	// over it.
+	map<string, FieldValue> custom = 11;
+	// A SCALAR-valued map. Both sides of an entry are ordinary values here, so
+	// it is what pins that `key` and `value` are both nameable — for a
+	// map<string, string> a bare `*` could mean either, which is why the
+	// selector is required rather than defaulted.
+	map<string, string> tags_map = 12;
 }
 
 message Settings {

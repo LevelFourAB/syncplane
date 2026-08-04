@@ -8,6 +8,9 @@ export { and, compileQuery, not, or, rootRef } from './proxy.js';
 export type {
 	BoolOps,
 	FieldOps,
+	MapEntryRef,
+	MapKeyOps,
+	MapOps,
 	MsgRef,
 	NumericOps,
 	OrderOps,

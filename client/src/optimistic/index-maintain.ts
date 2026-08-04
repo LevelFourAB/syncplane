@@ -109,6 +109,9 @@ export function compileIndexes(schema: DescMessage, defs: {
 	const compiled: CompiledIndex[] = [];
 	for (const def of defs) {
 		try {
+			// One declared key is one component: a `*` fan-out over a map names the
+			// side of the entry it stores (`custom.*.key`, `custom.*.value.number`),
+			// so the layout is declared rather than derived here.
 			const comps = def.key.map((k) => compileIndexComponent(schema, k.path, k.desc));
 			compiled.push({
 				name: def.name,
@@ -143,10 +146,13 @@ export function compileIndexes(schema: DescMessage, defs: {
  * also order within it — which is why this is worth doing rather than a schema
  * smell to leave alone. On the benchmark corpus it removes 42% of the entries.
  *
- * Components match on resolved proto path AND direction. Agreeing on the path
- * but not on `desc` is not a prefix: the encoding inverts the payload, so the
- * entries interleave differently and the longer index does not reproduce the
- * shorter one's order.
+ * Components match on resolved proto path, direction AND which side of a map
+ * entry they store. Agreeing on the path but not on `desc` is not a prefix: the
+ * encoding inverts the payload, so the entries interleave differently and the
+ * longer index does not reproduce the shorter one's order. The entry side has to
+ * be in the signature for a blunter reason — `attrs.*.key` and `attrs.*.value`
+ * resolve to the same path, and reading one index's entries as the other's would
+ * answer with keys where values were asked for.
  *
  * Two lists that are EQUAL subsume each other, so the tie-break keeps the first
  * — otherwise a duplicated declaration would drop both and leave the queries
@@ -155,7 +161,9 @@ export function compileIndexes(schema: DescMessage, defs: {
  * earliest.
  */
 function subsumedBy(lists: IndexComponent[][]): boolean[] {
-	const sigs = lists.map((comps) => comps.map((c) => `${c.protoPath.join('.')}:${c.desc}`));
+	const sigs = lists.map((comps) =>
+		comps.map((c) => `${c.protoPath.join('.')}:${c.desc}:${c.keyComponent}`)
+	);
 	return sigs.map((sig, i) =>
 		sigs.some((other, j) =>
 			j !== i

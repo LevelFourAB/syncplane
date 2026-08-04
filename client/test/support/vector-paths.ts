@@ -10,9 +10,9 @@
 // typed DSL, so nothing needs this; a vector harness feeding the shared file
 // straight in does.
 
-import type { DescMessage } from '@bufbuild/protobuf';
+import type { DescField, DescMessage } from '@bufbuild/protobuf';
 
-import type { Cond } from '../../src/query/ast.js';
+import type { Cond, Path } from '../../src/query/ast.js';
 import { localPathOf, resolveLeafRef } from '../../src/query/wire.js';
 
 /**
@@ -20,7 +20,9 @@ import { localPathOf, resolveLeafRef } from '../../src/query/wire.js';
  *
  * An exists sub-condition is scoped to the ELEMENT, so it translates against
  * the element type rather than the row's — the one place where "which schema
- * does this path belong to" has more than one answer.
+ * does this path belong to" has more than one answer. Over a MAP the element is
+ * the ENTRY: `key` and `value` are not field names and travel verbatim, and
+ * anything below `value` translates against the map's value type.
  */
 export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 	switch (cond.kind) {
@@ -32,9 +34,12 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 			return { ...cond, path: localPathOf(schema, cond.path) };
 		case 'exists': {
 			const path = localPathOf(schema, cond.path);
-			const { field } = resolveLeafRef(schema, path, false, true);
+			const { field } = resolveLeafRef(schema, path, false);
+			if (field.fieldKind === 'map') {
+				return { kind: 'exists', path, cond: entryLocalNames(field, cond.cond) };
+			}
 			if (field.fieldKind !== 'list' || field.listKind !== 'message') {
-				throw new Error(`vector path ${cond.path.join('.')} is not a repeated message field`);
+				throw new Error(`vector path ${cond.path.join('.')} is not a repeated message field or a map`);
 			}
 			return { kind: 'exists', path, cond: toLocalNames(field.message, cond.cond) };
 		}
@@ -43,5 +48,32 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 			return { ...cond, conds: cond.conds.map((c) => toLocalNames(schema, c)) };
 		case 'not':
 			return { ...cond, cond: toLocalNames(schema, cond.cond) };
+	}
+}
+
+/** toLocalNames inside a map ENTRY scope. */
+function entryLocalNames(map: Extract<DescField, { fieldKind: 'map' }>, cond: Cond): Cond {
+	const translate = (path: Path): Path => {
+		const [ head, ...rest ] = path;
+		if (head !== 'value' || rest.length === 0 || map.mapKind !== 'message') return path;
+		return [ head, ...localPathOf(map.message, rest) ];
+	};
+	switch (cond.kind) {
+		case 'cmp':
+		case 'in':
+		case 'str':
+		case 'rep':
+		case 'present':
+			return { ...cond, path: translate(cond.path) };
+		case 'exists':
+			// A nested any() inside an entry: its own path translates here, its
+			// sub-condition against whatever that path resolves to. No vector needs
+			// it yet, so it is left to the resolver to reject if one ever does.
+			return { ...cond, path: translate(cond.path) };
+		case 'and':
+		case 'or':
+			return { ...cond, conds: cond.conds.map((c) => entryLocalNames(map, c)) };
+		case 'not':
+			return { ...cond, cond: entryLocalNames(map, cond.cond) };
 	}
 }

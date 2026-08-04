@@ -234,4 +234,222 @@ var _ = Describe("PlanQuery", func() {
 			Expect(p).To(BeNil())
 		})
 	})
+
+	Describe("map fan-out", func() {
+		// Serving one custom field means pinning the entry key and then ranging
+		// over the value inside it. Nothing else about the index is different,
+		// which is the point: an EAV index is an ordinary composite whose first
+		// column happens to be the entry key.
+		//
+		// One declared path is one component, so these go through the same
+		// `index` helper as everything above — the layout is stated, not derived.
+		cfNumber := index("cf_number", "custom.*.key", "custom.*.value.number")
+		cfNumRank := index("cf_num_rank", "custom.*.key", "custom.*.value.number", "-count")
+		cfLabels := index("cf_labels", "custom.*.key", "custom.*.value.labels.values")
+		// The mirror layout, and the one with no key component at all — the
+		// exactness guard's subject.
+		cfByNumber := index("cf_by_number", "custom.*.value.number", "custom.*.key")
+		cfNumberOnly := index("cf_number_only", "custom.*.value.number")
+
+		It("pins the entry key and the leaf from one predicate", func() {
+			p := query.PlanQuery([]query.Index{cfNumber}, compile(query.Eq("custom.priority.number", 5)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_number"))
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil(), "key plus leaf is the whole predicate")
+		})
+
+		It("takes a range on the leaf inside the pinned key", func() {
+			p := query.PlanQuery([]query.Index{cfNumber}, compile(query.Gt("custom.priority.number", 3)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("serves an ordering off the leaf once the key is pinned", func() {
+			// The relaxation a map needs and a list cannot have: a map holds at
+			// most ONE value per key, so a row pinned to a key occupies exactly
+			// one position and the leaf is a row ordering.
+			p := query.PlanQuery(
+				[]query.Index{cfNumber},
+				compile(query.Gt("custom.priority.number", 0)),
+				order(query.Asc("custom.priority.number")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ordered).To(BeTrue())
+		})
+
+		It("serves a second sort key after the pinned custom field", func() {
+			p := query.PlanQuery(
+				[]query.Index{cfNumRank},
+				compile(query.Eq("custom.priority.number", 5)),
+				order(query.Desc("count")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_num_rank"))
+			Expect(p.Ordered).To(BeTrue())
+		})
+
+		It("declines an ordering by a custom field no predicate pins", func() {
+			// Rows lacking the key sit outside every key range and must sort last,
+			// and the executor has no second pass to append them — so the honest
+			// answer is to scan.
+			p := query.PlanQuery(
+				[]query.Index{cfNumber}, compile(nil), order(query.Asc("custom.priority.number")))
+			Expect(p).To(BeNil())
+		})
+
+		It("does not read one custom field's range as another's", func() {
+			// The key component and the leaf come from ONE declared path and must
+			// describe the same entry: pinning `team` and then ranging on
+			// `priority`'s number would answer a question nobody asked.
+			p := query.PlanQuery([]query.Index{cfNumber}, compile(query.And(
+				query.Eq("custom.team.number", 1),
+				query.Eq("custom.priority.number", 5),
+			)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).NotTo(BeNil(), "one of the two terms is re-checked per row")
+		})
+
+		It("declines isNotSet, which a key-pinned range would answer by dropping rows", func() {
+			// Every row with no such entry matches, and those rows are not in the
+			// key's range at all.
+			p := query.PlanQuery(
+				[]query.Index{cfNumber}, compile(query.IsNotSet("custom.priority.number")), nil)
+			Expect(p).To(BeNil())
+		})
+
+		It("pins the key from isSet, which does imply the entry is there", func() {
+			p := query.PlanQuery(
+				[]query.Index{cfNumber}, compile(query.IsSet("custom.priority.number")), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).NotTo(BeNil(), "the range covers the key, the term re-checks the variant")
+		})
+
+		It("serves membership over a list nested inside one entry", func() {
+			p := query.PlanQuery(
+				[]query.Index{cfLabels}, compile(query.Has("custom.tags.labels.values", "ui")), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_labels"))
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("pins the value first and the key second under the mirror layout", func() {
+			// [value, key] answers the same named-field equality as [key, value]
+			// does, from the other end: pin the value, then the key beside it.
+			p := query.PlanQuery(
+				[]query.Index{cfByNumber}, compile(query.Eq("custom.priority.number", 5)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_by_number"))
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil(), "value plus key is the whole predicate")
+		})
+
+		It("keeps a named-field term residual against a value-only index", func() {
+			// THE exactness guard. The range covers `number == 5` under EVERY
+			// entry key, so it contains rows where a different custom field holds
+			// 5. Marking the term answered would return them.
+			p := query.PlanQuery(
+				[]query.Index{cfNumberOnly}, compile(query.Eq("custom.priority.number", 5)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_number_only"))
+			Expect(p.Residual).NotTo(BeNil(),
+				"the range drops the key constraint, so the term is re-checked per row")
+		})
+
+		It("keeps a named-field inequality residual against a value-only index", func() {
+			// Same guard on the range side: a bound on the value alone says
+			// nothing about which field carries it.
+			p := query.PlanQuery(
+				[]query.Index{cfNumberOnly}, compile(query.Gt("custom.priority.number", 3)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).NotTo(BeNil())
+		})
+
+		It("does not read one custom field's range as another's under the mirror layout", func() {
+			p := query.PlanQuery([]query.Index{cfByNumber}, compile(query.And(
+				query.Eq("custom.team.number", 1),
+				query.Eq("custom.priority.number", 5),
+			)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).NotTo(BeNil(), "one of the two terms is re-checked per row")
+		})
+
+		It("serves a cross-key any() off the mirror layout", func() {
+			// The point of [value, key]: "which custom field holds 5" pins the
+			// value and stops, and the range answers the existential outright —
+			// there is no key constraint to drop.
+			p := query.PlanQuery([]query.Index{cfByNumber},
+				compile(query.Any("custom", query.Eq("value.number", 5))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_by_number"))
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("serves a cross-key any() off a value-only index too", func() {
+			// No key component to pin, and none needed: the term names no key.
+			p := query.PlanQuery([]query.Index{cfNumberOnly},
+				compile(query.Any("custom", query.Eq("value.number", 5))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("pins both sides of one entry from an any() conjoining them", func() {
+			// key and value come from ONE entry position, so the two components
+			// together answer the whole existential rather than half of it.
+			both := query.Any("custom", query.And(
+				query.Eq("key", "priority"), query.Eq("value.number", 5)))
+			for _, idx := range []query.Index{cfNumber, cfByNumber} {
+				p := query.PlanQuery([]query.Index{idx}, compile(both), nil)
+				Expect(p).NotTo(BeNil(), idx.Name)
+				Expect(p.Ranges).To(HaveLen(1), idx.Name)
+				Expect(p.Residual).To(BeNil(), idx.Name)
+			}
+		})
+
+		It("keeps a conjunction residual when only one conjunct reduces", func() {
+			// The rest has to be re-checked against the SAME entry, and the range
+			// cannot say which entry it matched.
+			p := query.PlanQuery([]query.Index{cfNumberOnly}, compile(query.Any("custom", query.And(
+				query.Eq("key", "priority"), query.Eq("value.number", 5)))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).NotTo(BeNil())
+		})
+
+		It("serves an any() over the keys alone", func() {
+			p := query.PlanQuery([]query.Index{cfNumber},
+				compile(query.Any("custom", query.Eq("key", "priority"))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("cf_number"))
+			Expect(p.Residual).To(BeNil(), "the key range IS the question")
+		})
+
+		It("fans an in() over entry values into one probe per value", func() {
+			p := query.PlanQuery([]query.Index{cfByNumber},
+				compile(query.Any("custom", query.In("value.number", 1, 5))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(2))
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("declines an any() the index does not fan over", func() {
+			// cf_labels fans over the map AND a list inside one entry, so its
+			// value component reads label elements, not the entry's number.
+			p := query.PlanQuery([]query.Index{cfLabels},
+				compile(query.Any("custom", query.Eq("value.number", 5))), nil)
+			Expect(p).To(BeNil())
+		})
+
+		It("does not read a nested list's index as another custom field's", func() {
+			// cf_labels fans over the map AND over a list inside one entry, so a
+			// row occupies several positions even with the key pinned. Nothing can
+			// order by it — an order key may never name a repeated path, so
+			// CompileOrder rejects the spelling outright — and the index must not
+			// answer a predicate on a different field either.
+			p := query.PlanQuery(
+				[]query.Index{cfLabels}, compile(query.Eq("custom.tags.number", 1)), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).NotTo(BeNil(), "only the entry key is pinned; the leaf is re-checked")
+		})
+	})
 })

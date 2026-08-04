@@ -6,7 +6,7 @@ import {
 	type Widget,
 	WidgetSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
-import type { CompiledQuery } from '../../src/query/ast.js';
+import type { CompiledQuery, Cond } from '../../src/query/ast.js';
 import { and, compileQuery, not, or } from '../../src/query/proxy.js';
 import { prepareQuery, toWirePaths } from '../../src/query/wire.js';
 
@@ -167,10 +167,33 @@ describe('prepareQuery', () => {
 		expect(() => prepareQuery(WidgetSchema, bogus)).toThrow(/use has\/hasAny\/hasAll\/isEmpty/);
 	});
 
-	it('does not offer isSet for a map, which is always set', () => {
+	it('points a comparison on a bare map at one of its entries', () => {
+		// A whole map compares against nothing, but one ENTRY is an ordinary
+		// value — so the hint names the key form. isSet stays off the list: on a
+		// map it is constitutionally true (implicit presence), so it would be a
+		// false lead.
 		const bogus: CompiledQuery = { where: { kind: 'cmp', path: [ 'attrs' ], op: 'eq', value: 'x' } };
-		expect(() => prepareQuery(WidgetSchema, bogus)).toThrow(/map fields cannot be queried/);
+		expect(() => prepareQuery(WidgetSchema, bogus))
+			.toThrow(/address one entry by key instead, e\.g\. attrs\.<key>/);
 		expect(() => prepareQuery(WidgetSchema, bogus)).not.toThrow(/isSet/);
+	});
+
+	it('addresses one map entry, and one variant of its value', () => {
+		const q = (path: string[]): CompiledQuery => ({
+			where: { kind: 'cmp', path, op: 'gt', value: 3 },
+		});
+		expect(() => prepareQuery(WidgetSchema, q([ 'custom', 'priority', 'number' ]))).not.toThrow();
+		// The map's value type is a message, so the bare entry is incomparable
+		// and the error names the entry rather than the map.
+		expect(() => prepareQuery(WidgetSchema, q([ 'custom', 'priority' ])))
+			.toThrow(/syncplane\.testdata\.v1\.FieldValue value of map field custom is not comparable/);
+	});
+
+	it('rejects a map key its key type could never hold', () => {
+		const bogus: CompiledQuery = {
+			where: { kind: 'cmp', path: [ 'byId', 'not-a-number' ], op: 'eq', value: 'x' },
+		};
+		expect(() => prepareQuery(WidgetSchema, bogus)).toThrow(/invalid int64 map key "not-a-number"/);
 	});
 
 	it('points a comparison on a message leaf at its scalar fields', () => {
@@ -233,7 +256,7 @@ describe('prepareQuery', () => {
 		).toThrow(/has no field "label"/);
 	});
 
-	it('rejects any() over anything but a repeated message field', () => {
+	it('rejects any() over anything but a repeated message field or a map', () => {
 		expect(() =>
 			prepareQuery(WidgetSchema, {
 				where: {
@@ -243,6 +266,121 @@ describe('prepareQuery', () => {
 				},
 			})
 		).toThrow(/has\/hasAny\/hasAll for a repeated scalar/);
+	});
+
+	describe('any() over a map', () => {
+		// The element is the ENTRY. protobuf-es surfaces no message type for one,
+		// so both halves of prepare — validating the sub-condition and naming its
+		// leaf — resolve `key` and `value` against the map field itself.
+		const anyOver = (path: string[], cond: Cond) => ({
+			where: { kind: 'exists' as const, path, cond },
+		});
+
+		it('resolves both sides of the entry', () => {
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'custom' ], { kind: 'cmp', path: [ 'key' ], op: 'eq', value: 'priority' }),
+				)
+			).not.toThrow();
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'custom' ], {
+						kind: 'cmp',
+						path: [ 'value', 'number' ],
+						op: 'eq',
+						value: 5,
+					}),
+				)
+			).not.toThrow();
+			// A scalar-valued map: the value IS the leaf.
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'attrs' ], { kind: 'cmp', path: [ 'value' ], op: 'eq', value: 'red' }),
+				)
+			).not.toThrow();
+		});
+
+		it('drops the oneof group from an entry sub-path, as it does anywhere else', () => {
+			// The group sits BELOW `value`, so the path starts at the entry side
+			// and the group segment disappears the way it does from any path.
+			const out = prepareQuery(
+				WidgetSchema,
+				anyOver([ 'custom' ], {
+					kind: 'cmp',
+					path: [ 'value', 'kind', 'number' ],
+					op: 'eq',
+					value: 5,
+				}),
+			);
+			expect(out.where).toEqual({
+				kind: 'exists',
+				path: [ 'custom' ],
+				cond: { kind: 'cmp', path: [ 'value', 'number' ], op: 'eq', value: 5 },
+			});
+		});
+
+		it('rejects a sub-path that is neither key nor value', () => {
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'custom' ], {
+						kind: 'cmp',
+						path: [ 'priority', 'number' ],
+						op: 'eq',
+						value: 5,
+					}),
+				)
+			).toThrow(/scopes one ENTRY, so a sub-condition starts at "key" or "value"/);
+		});
+
+		it('rejects a path continuing past the entry key', () => {
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'custom' ], { kind: 'cmp', path: [ 'key', 'nope' ], op: 'eq', value: 'x' }),
+				)
+			).toThrow(/"key" is the entry key/);
+		});
+
+		it('rejects descending into a scalar entry value', () => {
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'attrs' ], { kind: 'cmp', path: [ 'value', 'nope' ], op: 'eq', value: 'x' }),
+				)
+			).toThrow(/cannot be descended into/);
+		});
+
+		it('rejects comparing a whole message-valued entry value', () => {
+			expect(() =>
+				prepareQuery(
+					WidgetSchema,
+					anyOver([ 'custom' ], { kind: 'cmp', path: [ 'value' ], op: 'eq', value: 'x' }),
+				)
+			).toThrow(/is not comparable/);
+		});
+
+		it('translates an entry sub-condition to proto names', () => {
+			// `key` and `value` are not field names, so they travel verbatim;
+			// anything below `value` translates against the map's value type.
+			const prepared = prepareQuery(
+				WidgetSchema,
+				anyOver([ 'custom' ], {
+					kind: 'rep',
+					path: [ 'value', 'labels', 'values' ],
+					op: 'hasAny',
+					values: [ 'ui' ],
+				}),
+			);
+			expect(toWirePaths(WidgetSchema, prepared).where).toEqual({
+				kind: 'exists',
+				path: [ 'custom' ],
+				cond: { kind: 'rep', path: [ 'value', 'labels', 'values' ], op: 'hasAny', values: [ 'ui' ] },
+			});
+		});
 	});
 
 	it('rewrites membership over a to-many reference into an any() on the target key', () => {

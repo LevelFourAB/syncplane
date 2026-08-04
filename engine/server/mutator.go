@@ -409,8 +409,12 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {
 		return err
 	}
-	if err := info.updateRowIndexes(e.tx, e.srv.limits, key, base); err != nil {
-		return err
+	// Same guard as the wire PATCH: a mask that reaches no index component
+	// leaves every entry of the row exactly as it is.
+	if info.maskTouchesIndexes(mask) {
+		if err := info.updateRowIndexes(e.tx, e.srv.limits, key, base); err != nil {
+			return err
+		}
 	}
 	return e.tx.PutRow(info.name, key, value, seq, e.actor)
 }

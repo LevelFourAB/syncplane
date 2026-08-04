@@ -225,6 +225,34 @@ describe('client index maintenance', () => {
 			)).toEqual([ 'first' ]);
 		});
 
+		it('keeps both sides of one map entry apart', () => {
+			// `attrs.*.key` and `attrs.*.value` resolve to the SAME path and the
+			// same direction, so a signature that read the path alone would call
+			// them one component — and drop one index, answering with keys where
+			// values were asked for.
+			const entryKey = { path: [ 'attrs', '*', 'key' ], desc: false };
+			const entryValue = { path: [ 'attrs', '*', 'value' ], desc: false };
+			expect(
+				of(
+					{ name: 'byKey', key: [ entryKey ] },
+					{ name: 'byValue', key: [ entryValue ] },
+				).sort(),
+			).toEqual([ 'byKey', 'byValue' ]);
+			// The two LAYOUTS are different indexes for the same reason: neither
+			// component list leads the other.
+			expect(
+				of(
+					{ name: 'keyFirst', key: [ entryKey, entryValue ] },
+					{ name: 'valueFirst', key: [ entryValue, entryKey ] },
+				).sort(),
+			).toEqual([ 'keyFirst', 'valueFirst' ]);
+			// A value-only index IS led by the value-first layout, so it goes.
+			expect(of(
+				{ name: 'valueOnly', key: [ entryValue ] },
+				{ name: 'valueFirst', key: [ entryValue, entryKey ] },
+			)).toEqual([ 'valueFirst' ]);
+		});
+
 		it('keeps only the longest of a chain of prefixes', () => {
 			expect(of(
 				{ name: 'a', key: [ label ] },

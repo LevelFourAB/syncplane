@@ -21,16 +21,68 @@ describe('compileIndexComponent', () => {
 		expect(() => comp([ 'body' ])).toThrow(/collaborative text field cannot be indexed/);
 	});
 
-	it('rejects a leaf that could never take part in a comparison', () => {
-		expect(() => comp([ 'attrs' ])).toThrow(/not comparable/);
+	it('points a bare map at the fan-out syntax', () => {
+		// An index component names a SHAPE, so a map means "every entry" and has
+		// to say so; a literal key would declare an index over one entry, which is
+		// a different feature.
+		expect(() => comp([ 'attrs' ])).toThrow(/must be followed by "\*"/);
+		expect(() => comp([ 'attrs', 'color' ])).toThrow(/must be followed by "\*"/);
+	});
+
+	it('rejects a bare trailing `*`, which does not say which side of the entry it means', () => {
+		// map<string, string>: both sides are strings, so a default would be a coin
+		// flip with no error to notice — which is why the selector is required.
+		expect(() => comp([ 'attrs', '*' ])).toThrow(/must be followed by "key" or "value"/);
+	});
+
+	it('rejects an unknown selector after `*`', () => {
+		expect(() => comp([ 'attrs', '*', 'entry' ]))
+			.toThrow(/"entry" after "\*" must be "key" or "value"/);
+	});
+
+	it('indexes either side of a scalar-valued map entry', () => {
+		const key = comp([ 'attrs', '*', 'key' ]);
+		expect(key.keyComponent).toBe(true);
+		expect(key.protoPath).toEqual([ 'attrs' ]);
+		expect(key.fans).toEqual([ { at: 0, isMap: true, keyKind: 'string' } ]);
+
+		const value = comp([ 'attrs', '*', 'value' ]);
+		expect(value.keyComponent).toBe(false);
+		expect(value.protoPath).toEqual([ 'attrs' ]);
+	});
+
+	it('rejects a path continuing past the entry key, which is a scalar', () => {
+		expect(() => comp([ 'attrs', '*', 'key', 'nope' ])).toThrow(/"key" is the entry key/);
+	});
+
+	it('rejects descending into the value of a scalar-valued map', () => {
+		expect(() => comp([ 'attrs', '*', 'value', 'nope' ])).toThrow(/cannot be descended into/);
+	});
+
+	it('points a component ending at a message-valued entry at a field inside it', () => {
+		expect(() => comp([ 'custom', '*', 'value' ]))
+			.toThrow(/index a scalar field inside it instead/);
+	});
+
+	it('rejects `*` after a field that is not a map', () => {
+		expect(() => comp([ 'tags', '*' ])).toThrow(/is not a message field/);
+	});
+
+	it('descends into a message-valued entry, and on through a list inside it', () => {
+		const c = comp([ 'custom', '*', 'value', 'labels', 'values' ]);
+		expect(c.protoPath).toEqual([ 'custom', 'labels', 'values' ]);
+		expect(c.fans).toEqual([
+			{ at: 0, isMap: true, keyKind: 'string' },
+			{ at: 2, isMap: false },
+		]);
 	});
 
 	it('accepts a repeated scalar, which fans out over its elements', () => {
-		expect(comp([ 'tags' ]).multiAt).toBe(0);
+		expect(comp([ 'tags' ]).fans).toEqual([ { at: 0, isMap: false } ]);
 	});
 
 	it('accepts a path through a repeated message field', () => {
-		expect(comp([ 'members', 'uid' ]).multiAt).toBe(0);
+		expect(comp([ 'members', 'uid' ]).fans).toEqual([ { at: 0, isMap: false } ]);
 	});
 
 	it('points a component ending at a message list at a field of the elements', () => {
@@ -40,7 +92,7 @@ describe('compileIndexComponent', () => {
 	it('extends a to-many single-key reference to its key field', () => {
 		const c = compileIndexComponent(IssueSchema, [ 'blocked_by' ], false);
 		expect(c.protoPath).toEqual([ 'blocked_by', 'id' ]);
-		expect(c.multiAt).toBe(0);
+		expect(c.fans).toEqual([ { at: 0, isMap: false } ]);
 	});
 
 	it('rejects two repeated fields on one component', () => {
@@ -56,7 +108,7 @@ describe('IndexEncoder fan-out', () => {
 
 	it('refuses to fan out over two different lists', () => {
 		expect(() => new IndexEncoder([ comp([ 'members', 'uid' ]), comp([ 'tags' ]) ]))
-			.toThrow(/one repeated field per index/);
+			.toThrow(/one fan-out chain per index/);
 	});
 
 	it('writes one entry per element and collapses duplicates', () => {
@@ -141,6 +193,31 @@ describe('specHash', () => {
 
 	it('changes when a component starts fanning out', () => {
 		expect(specHash([ comp([ 'tags' ]) ])).not.toBe(specHash([ comp([ 'label' ]) ]));
+	});
+
+	it('renders a map fan the way Go does, selector and all', () => {
+		// The `key`/`value` selector is NOT part of the rendered path — a `:key`
+		// suffix carries it instead — which is what keeps a `[key, value]` layout
+		// fingerprinting exactly as it did before the selector was spelled out.
+		expect(specHash([ comp([ 'attrs', '*', 'key' ]) ]))
+			.toBe(goSpecHash([ 'attrs.*:string:false:false:0:key' ]));
+		expect(specHash([ comp([ 'attrs', '*', 'value' ]) ]))
+			.toBe(goSpecHash([ 'attrs.*:string:false:false:0' ]));
+		expect(specHash([ comp([ 'custom', '*', 'value', 'number' ]) ]))
+			.toBe(goSpecHash([ 'custom.*.number:number:false:false:0' ]));
+	});
+
+	it('tells the two sides of one entry apart', () => {
+		// On a map<string, string> both sides have the same path and the same
+		// payload shape, so nothing but the selector distinguishes them.
+		expect(specHash([ comp([ 'attrs', '*', 'key' ]) ]))
+			.not.toBe(specHash([ comp([ 'attrs', '*', 'value' ]) ]));
+	});
+
+	it('makes the two layouts different indexes', () => {
+		const key = comp([ 'attrs', '*', 'key' ]);
+		const value = comp([ 'attrs', '*', 'value' ]);
+		expect(specHash([ key, value ])).not.toBe(specHash([ value, key ]));
 	});
 });
 

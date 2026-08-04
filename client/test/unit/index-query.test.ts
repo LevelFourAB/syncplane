@@ -20,7 +20,7 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import { queryByIndex } from '../../src/query/execute.js';
-import { and, compileQuery, type Query } from '../../src/query/index.js';
+import { and, compileQuery, not, type Query } from '../../src/query/index.js';
 import { prepareQuery } from '../../src/query/wire.js';
 import type { Row } from '../../src/read.js';
 import {
@@ -30,6 +30,8 @@ import {
 	type Infer,
 	int32,
 	list,
+	map,
+	message,
 	text,
 } from '../../src/schema/builder.js';
 import { TouchSet } from '../../src/touch.js';
@@ -49,12 +51,35 @@ const issue = entity('issue', {
 	rank: int32(),
 	done: bool(),
 	labels: list(text()).indexed(),
+	// User-defined fields: `custom.*.<side>` fans out over EVERY entry, which is
+	// the fourth shape — one entry per (key, value) pair rather than per element.
+	custom: map('string', message({ number: int32(), tag: text() })),
 }, {
 	indexes: [
 		{ name: 'by_state_rank', key: [ { path: 'state' }, { path: 'rank', desc: true } ] },
 		// A fan-out component pinned by the equality prefix, followed by an
 		// ordinary one: the shape that serves "labelled X, ordered by rank".
 		{ name: 'by_label_rank', key: [ { path: 'labels' }, { path: 'rank', desc: true } ] },
+		// The map fan-out, key first: a probe on ONE custom field is a
+		// contiguous range, and the value orders within it.
+		{
+			name: 'cf_number',
+			key: [ { path: 'custom.*.key' }, { path: 'custom.*.value.number' } ],
+		},
+		{
+			name: 'cf_num_rank',
+			key: [
+				{ path: 'custom.*.key' },
+				{ path: 'custom.*.value.number' },
+				{ path: 'rank', desc: true },
+			],
+		},
+		// The mirror layout: value first, so "which custom field holds 5" is a
+		// range read rather than a scan.
+		{
+			name: 'cf_by_number',
+			key: [ { path: 'custom.*.value.number' }, { path: 'custom.*.key' } ],
+		},
 	],
 });
 
@@ -65,17 +90,50 @@ const registry = new EntityRegistry([ IssueSchema ]);
 const WS = 'ws1';
 
 const SEED: Issue[] = [
-	{ id: 'i1', title: 'one', state: 'open', rank: 5, done: false, labels: [ 'bug', 'ui' ] },
-	{ id: 'i2', title: 'two', state: 'open', rank: 9, done: true, labels: [ 'ui' ] },
-	{ id: 'i3', title: 'three', state: 'done', rank: 3, done: true, labels: [ 'bug' ] },
+	{
+		id: 'i1',
+		title: 'one',
+		state: 'open',
+		rank: 5,
+		done: false,
+		labels: [ 'bug', 'ui' ],
+		custom: { priority: { number: 5, tag: 'hi' }, team: { number: 0, tag: 'platform' } },
+	},
+	{ id: 'i2', title: 'two', state: 'open', rank: 9, done: true, labels: [ 'ui' ], custom: {} },
+	{
+		id: 'i3',
+		title: 'three',
+		state: 'done',
+		rank: 3,
+		done: true,
+		labels: [ 'bug' ],
+		custom: { priority: { number: 1, tag: '' } },
+	},
 	// No labels at all: it must still be reachable through by_label_rank, which
-	// is what the missing tag on an empty list is for.
-	{ id: 'i4', title: 'four', state: 'open', rank: 1, done: false, labels: [] },
+	// is what the missing tag on an empty list is for. No custom fields either,
+	// which is the same story for cf_number.
+	{ id: 'i4', title: 'four', state: 'open', rank: 1, done: false, labels: [], custom: {} },
 	// A duplicate element collapses to one entry — the row must appear once.
-	{ id: 'i5', title: 'five', state: 'done', rank: 7, done: false, labels: [ 'ui', 'ui' ] },
+	{
+		id: 'i5',
+		title: 'five',
+		state: 'done',
+		rank: 7,
+		done: false,
+		labels: [ 'ui', 'ui' ],
+		custom: { size: { number: 5, tag: '' } },
+	},
 	// Implicit-presence empty string. Matching it is not the same as matching a
 	// missing value, and an index must not conflate the two.
-	{ id: 'i6', title: 'six', state: '', rank: 4, done: false, labels: [ 'bug', 'ui' ] },
+	{
+		id: 'i6',
+		title: 'six',
+		state: '',
+		rank: 4,
+		done: false,
+		labels: [ 'bug', 'ui' ],
+		custom: {},
+	},
 ];
 
 /** Plants rows as CONFIRMED state — the only state an index covers. */
@@ -234,6 +292,40 @@ describe('the index path is actually taken', () => {
 		).toBe(true);
 	});
 
+	it('serves a predicate on one custom field, and declines a bare ordering', async () => {
+		// Without this the differential cases above would pass trivially on a
+		// planner that never chose the map index at all.
+		expect(await served(true, { where: (i) => i.custom.at('priority').number.eq(5) }))
+			.toBe(true);
+		expect(
+			await served(true, {
+				where: (i) => i.custom.at('priority').number.gt(0),
+				orderBy: (i) => [ i.custom.at('priority').number.asc() ],
+			}),
+		).toBe(true);
+		// Nothing pins the entry key, so rows lacking it sit outside every range
+		// and must sort last — which the executor has no second pass to do.
+		expect(await served(true, { orderBy: (i) => [ i.custom.at('priority').number.asc() ] }))
+			.toBe(false);
+		expect(await served(true, { where: (i) => i.custom.at('priority').isNotSet() })).toBe(false);
+	});
+
+	it('serves a cross-key any() off the mirror layout', async () => {
+		// Without this the differential cases would pass trivially on a planner
+		// that never chose cf_by_number at all and scanned every time.
+		expect(await served(true, { where: (i) => i.custom.any((e) => e.value.number.eq(5)) }))
+			.toBe(true);
+		expect(
+			await served(true, {
+				where: (i) => i.custom.any((e) => and(e.key.eq('priority'), e.value.number.eq(5))),
+			}),
+		).toBe(true);
+		// startsWith over keys is not an equality, and no range bounds an
+		// existential from inside — so this one honestly falls back.
+		expect(await served(true, { where: (i) => i.custom.any((e) => e.key.startsWith('pri')) }))
+			.toBe(false);
+	});
+
 	it('declines a query no index covers', async () => {
 		expect(await served(true, { where: (i) => i.title.contains('x') })).toBe(false);
 		expect(await served(true, { where: (i) => i.done.eq(true) })).toBe(false);
@@ -333,6 +425,99 @@ describe('index-served local queries', () => {
 
 	same('no predicate and no ordering', {}, [ 'i1', 'i2', 'i3', 'i4', 'i5', 'i6' ]);
 
+	// Map fan-out. cf_number stores (entry key, number) per entry, so a
+	// predicate naming one custom field is a contiguous range — and every case
+	// here is a place that range could drop a row it should not.
+	same('equality on one custom field', {
+		where: (i) => i.custom.at('priority').number.eq(5),
+	}, [ 'i1' ]);
+
+	same('an inequality inside one pinned custom field', {
+		where: (i) => i.custom.at('priority').number.gt(0),
+		orderBy: (i) => [ i.custom.at('priority').number.asc() ],
+	}, [ 'i3', 'i1' ]);
+
+	same('a custom field on a different key does not answer this one', {
+		// i5 holds `size` = 5, not `priority` — the key component is what keeps
+		// the two apart.
+		where: (i) => i.custom.at('priority').number.eq(5),
+	}, [ 'i1' ]);
+
+	same('a custom field no row holds', {
+		where: (i) => i.custom.at('absent').number.eq(1),
+	}, []);
+
+	same('isNotSet must not be answered from a key-pinned range', {
+		// Every row lacking that entry matches, including rows with no custom
+		// fields at all — which sit outside any key-pinned range.
+		where: (i) => i.custom.at('priority').isNotSet(),
+		orderBy: (i) => [ i.rank.asc() ],
+	}, [ 'i4', 'i6', 'i5', 'i2' ]);
+
+	same('a custom-field predicate with an ordering on an ordinary field', {
+		where: (i) => i.custom.at('priority').number.gt(0),
+		orderBy: (i) => [ i.rank.desc() ],
+	}, [ 'i1', 'i3' ]);
+
+	same('ordering by a custom field with no predicate falls back to the scan', {
+		// Nothing pins the entry key, so the index cannot be walked in this
+		// order — rows lacking the key sit outside any range and must sort last.
+		orderBy: (i) => [ i.custom.at('priority').number.asc() ],
+	}, [ 'i3', 'i1', 'i2', 'i4', 'i5', 'i6' ]);
+
+	same('isEmpty over the whole map', {
+		where: (i) => i.custom.isEmpty(),
+	}, [ 'i2', 'i4', 'i6' ]);
+
+	// Cross-key: the mirror axis, served by cf_by_number's [value, key] layout.
+	// No addressed path can ask these — they name a VALUE and leave the field
+	// open, which is the whole point of the entry scope.
+	same('which custom field holds a value, across keys', {
+		where: (i) => i.custom.any((e) => e.value.number.eq(5)),
+	}, [ 'i1', 'i5' ]);
+
+	same('a value no custom field holds', {
+		where: (i) => i.custom.any((e) => e.value.number.eq(99)),
+	}, []);
+
+	same('key and value conjoined describe ONE entry', {
+		where: (i) => i.custom.any((e) => and(e.key.eq('priority'), e.value.number.eq(5))),
+	}, [ 'i1' ]);
+
+	same('key and value from different entries do not describe one', {
+		// i5 holds size = 5 and i1 priority = 5, so neither row has an entry
+		// keyed `team` holding 5 — a range that folded the two would return both.
+		where: (i) => i.custom.any((e) => and(e.key.eq('team'), e.value.number.eq(5))),
+	}, []);
+
+	same('which rows have any of these custom fields set', {
+		where: (i) => i.custom.any((e) => e.key.in([ 'size', 'absent' ])),
+	}, [ 'i5' ]);
+
+	same('a prefix over entry keys, which an addressed path cannot ask', {
+		where: (i) => i.custom.any((e) => e.key.startsWith('pri')),
+	}, [ 'i1', 'i3' ]);
+
+	same('not(any) over a map reads as "no entry matches"', {
+		// Rows with no custom fields at all match, and they sit outside every
+		// value range — the same trap isNotSet sets for a key-pinned range.
+		where: (i) => not(i.custom.any((e) => e.value.number.eq(5))),
+		orderBy: (i) => [ i.rank.asc() ],
+	}, [ 'i4', 'i3', 'i6', 'i2' ]);
+
+	same('cross-key with an ordering the index does not supply', {
+		where: (i) => i.custom.any((e) => e.value.number.eq(5)),
+		orderBy: (i) => [ i.rank.desc() ],
+	}, [ 'i5', 'i1' ]);
+
+	same('both axes at once: one entry pinned by key, another found by value', {
+		where: (i) =>
+			and(
+				i.custom.at('priority').number.eq(5),
+				i.custom.any((e) => e.value.tag.eq('platform')),
+			),
+	}, [ 'i1' ]);
+
 	describe('with an optimistic overlay', () => {
 		// The overlay is authoritative for a row it holds, so a confirmed row it
 		// shadows must drop out of the index stream and reappear — if it still
@@ -347,7 +532,7 @@ describe('index-served local queries', () => {
 			[ 'i1', 'i2', 'i4' ],
 			[
 				// i2 keeps matching but sorts below i1 now.
-				{ id: 'i2', title: 'two', state: 'open', rank: 2, done: true, labels: [ 'ui' ] },
+				{ id: 'i2', title: 'two', state: 'open', rank: 2, done: true, labels: [ 'ui' ], custom: {} },
 			],
 		);
 
@@ -359,7 +544,7 @@ describe('index-served local queries', () => {
 			},
 			[ 'i1', 'i4' ],
 			[
-				{ id: 'i2', title: 'two', state: 'done', rank: 9, done: true, labels: [ 'ui' ] },
+				{ id: 'i2', title: 'two', state: 'done', rank: 9, done: true, labels: [ 'ui' ], custom: {} },
 			],
 		);
 
@@ -371,7 +556,7 @@ describe('index-served local queries', () => {
 			},
 			[ 'i2', 'i3', 'i1', 'i4' ],
 			[
-				{ id: 'i3', title: 'three', state: 'open', rank: 6, done: true, labels: [ 'bug' ] },
+				{ id: 'i3', title: 'three', state: 'open', rank: 6, done: true, labels: [ 'bug' ], custom: {} },
 			],
 		);
 
@@ -383,7 +568,7 @@ describe('index-served local queries', () => {
 			},
 			[ 'i9', 'i2', 'i1', 'i4' ],
 			[
-				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ] },
+				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ], custom: {} },
 			],
 		);
 
@@ -394,7 +579,15 @@ describe('index-served local queries', () => {
 			[
 				// i2 gains "bug" only optimistically. The index covers confirmed
 				// rows alone, so this can only come from the overlay merge.
-				{ id: 'i2', title: 'two', state: 'open', rank: 9, done: true, labels: [ 'ui', 'bug' ] },
+				{
+					id: 'i2',
+					title: 'two',
+					state: 'open',
+					rank: 9,
+					done: true,
+					labels: [ 'ui', 'bug' ],
+					custom: {},
+				},
 			],
 		);
 
@@ -405,7 +598,7 @@ describe('index-served local queries', () => {
 			[
 				// i1's confirmed entry under "bug" is still there; the overlay
 				// shadows the row, so it must not come back from the range.
-				{ id: 'i1', title: 'one', state: 'open', rank: 5, done: false, labels: [ 'ui' ] },
+				{ id: 'i1', title: 'one', state: 'open', rank: 5, done: false, labels: [ 'ui' ], custom: {} },
 			],
 		);
 
@@ -418,7 +611,7 @@ describe('index-served local queries', () => {
 			},
 			[ 'i9', 'i2' ],
 			[
-				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ] },
+				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ], custom: {} },
 			],
 		);
 	});

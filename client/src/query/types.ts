@@ -81,11 +81,105 @@ export interface PresenceOps {
 }
 
 /**
+ * Map fields — the shape user-defined ("custom") fields take. One ENTRY is
+ * addressed by key, and is then an ordinary value with its own operators:
+ *
+ * ```ts
+ * i.custom.at('priority').kind.number.gt(3)
+ * i.custom.at('team').kind.text.eq('platform')
+ * i.custom.at('labels').kind.tags.values.hasAny([ 'ui' ])
+ * ```
+ *
+ * `at()` rather than property access, for two reasons. A key that collides with
+ * an operator name (`eq`, `in`, `has`, `isSet`, …) would be silently swallowed
+ * by the runtime proxy — a trap that depends on the DATA, not on the schema. And
+ * `Record<string, V>` is structurally permissive enough that plain property
+ * access would type-check against surfaces it should not.
+ *
+ * When the value is an app-defined oneof — the usual shape, because a custom
+ * field holds one of several types — a query names the VARIANT it means, exactly
+ * as it would for a oneof anywhere else. A member has explicit presence, so an
+ * entry holding a different variant simply reads as not found: the condition is
+ * false and the ordering ranks it last. The consequence to know is that there is
+ * no ordering by "whatever the value is" across variants — `orderBy` must name
+ * one — which is a non-loss when a custom field has one declared type in the
+ * app's own field-definition table.
+ */
+export interface MapOps<MV> {
+	/** One entry, by key. Absent keys are simply not found. */
+	at(key: string): FieldOps<MV> & PresenceOps;
+	/**
+	 * True when SOME entry satisfies the condition. The element is the ENTRY, so
+	 * the condition addresses its two sides:
+	 *
+	 * ```ts
+	 * i.custom.any((e) => e.value.kind.number.eq(5))     // which field holds 5
+	 * i.custom.any((e) => and(e.key.startsWith('cf_'), e.value.kind.checked.eq(true)))
+	 * i.custom.any((e) => e.key.in([ 'priority', 'severity' ]))  // any of these set
+	 * ```
+	 *
+	 * This is the mirror of `at()`: `at('priority').kind.number.eq(5)` asks
+	 * whether THAT field holds 5, and this asks whether ANY does. As with a
+	 * repeated message field the entry scope is explicit, so that two conditions
+	 * can be said to describe the same entry — `and(m.any(…key…), m.any(…value…))`
+	 * is a different, weaker question.
+	 *
+	 * Comparing the key as a VALUE also removes the dot-escaping `at()` needs for
+	 * a key containing a dot, and gives `in`/`startsWith` over keys for free.
+	 *
+	 * It is a predicate, not a projection: a match says some entry satisfied the
+	 * condition, never which one. An app that needs the name reads it off the
+	 * row's map.
+	 */
+	any(cond: (entry: MapEntryRef<MV>) => Cond): Cond;
+	/** True when the map holds no entries. `isSet` cannot say this: a map has
+	 * implicit presence, so it is always set. */
+	isEmpty(): Cond;
+}
+
+/** The two sides of one map entry, as {@link MapOps.any} scopes them. */
+export interface MapEntryRef<MV> {
+	key: MapKeyOps;
+	value: FieldOps<MV> & PresenceOps;
+}
+
+/**
+ * Operators on a map entry's KEY.
+ *
+ * The surface is stated rather than derived because a generated map types its
+ * keys as `string` whatever the .proto declared — protobuf-es keys the object by
+ * the key's string form — so the row shape cannot say what a key really is. The
+ * VALUE reaching the evaluator is the declared type: on a `map<int64, V>` the
+ * entry key is a bigint, so `e.key.gte(5n)` is the spelling that matches, and
+ * the string operators are only meaningful on a string-keyed map (they are
+ * rejected at prepare time on any other, like every other leaf/operator
+ * mismatch).
+ */
+export interface MapKeyOps {
+	eq(value: Scalar): Cond;
+	neq(value: Scalar): Cond;
+	in(values: Scalar[]): Cond;
+	gt(value: Scalar): Cond;
+	gte(value: Scalar): Cond;
+	lt(value: Scalar): Cond;
+	lte(value: Scalar): Cond;
+	startsWith(value: string): Cond;
+	endsWith(value: string): Cond;
+	contains(value: string): Cond;
+}
+
+/**
  * Maps a message field's value type to its operator surface. All checks are
  * non-distributive (`[X] extends [Y]`) so unions like `boolean` and
  * `Settings | undefined` resolve as a whole; `NonNullable` strips the
  * optionality so `settings?: Settings` can be both drilled into and tested
  * with isSet()/isNotSet().
+ *
+ * The MAP check has to come before the message ones and cannot be written as
+ * `extends [Record<string, unknown>]`: a map is generated as an index signature,
+ * and an index signature satisfies `{ $typeName: string }` structurally, so
+ * `map<string, string>` would otherwise be read as a message. `string extends
+ * keyof V` is the property only an index signature has.
  */
 export type FieldOps<V> = [NonNullable<V>] extends [string] ? StringOps
 	: [NonNullable<V>] extends [number] ? NumericOps<number>
@@ -94,9 +188,14 @@ export type FieldOps<V> = [NonNullable<V>] extends [string] ? StringOps
 	: [NonNullable<V>] extends [Uint8Array] ? PresenceOps
 	: [NonNullable<V>] extends [ReadonlyArray<infer E>] ? [E] extends [Scalar] ? RepeatedScalarOps<E>
 		: RepeatedMessageOps<E>
+	: string extends keyof NonNullable<V> ? MapOps<NonNullable<V>[string]>
 	: [NonNullable<V>] extends [{ case: string | undefined }] ? OneofRef<NonNullable<V>>
-	: [NonNullable<V>] extends [{ $typeName: string }] ? MsgRef<NonNullable<V>> & PresenceOps
-	: never; // maps and anything else: unsupported for now
+	// Whatever is left and is an object is a message. Matching on `object`
+	// rather than on `$typeName` is what makes a sub-message declared with the
+	// TS schema builder drillable too: its inferred row shape is a plain object,
+	// with no generated brand to key off.
+	: [NonNullable<V>] extends [object] ? MsgRef<NonNullable<V>> & PresenceOps
+	: never; // scalars no branch above claimed: unsupported for now
 
 /**
  * Operator surface of a oneof group: one entry per case, each carrying the

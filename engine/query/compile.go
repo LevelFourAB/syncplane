@@ -52,9 +52,19 @@
 //   - A mismatch between a condition's LITERAL and the field's value makes the
 //     condition false (orderings tie), never an error: eq("x") against an
 //     int32 field is a legitimate no-match. A field that could never take part
-//     in the comparison at all — bytes, message, map, repeated — is a
+//     in the comparison at all — bytes, message, a whole map, repeated — is a
 //     different thing and is rejected by Compile instead of quietly matching
 //     nothing (see requireComparable).
+//   - The path segment after a MAP field is the entry KEY, the same convention
+//     an lww field-mask path uses, so there is one rule rather than two. One
+//     entry is an ordinary value, and because an entry has explicit presence a
+//     path naming one variant of an app-defined oneof value reads as NOT FOUND
+//     on a row whose entry holds another variant. That is what lets the value
+//     type be app-defined: no cross-variant comparison ever has to exist.
+//   - The mirror question — "which entry holds X", rather than "does THIS entry
+//     hold X" — is an exists condition over the map, whose element is the ENTRY
+//     and whose sub-condition addresses `key` and `value`. It answers whether
+//     some entry matched, never which one; nothing here projects.
 package query
 
 import (
@@ -96,12 +106,47 @@ func (c *Compiled) Eval(msg protoreflect.Message) bool {
 	if c.root == nil {
 		return true
 	}
-	return c.root.eval(msg)
+	return c.root.eval(msgScope(msg))
 }
 
 type node interface {
-	eval(msg protoreflect.Message) bool
+	eval(s scope) bool
 }
+
+// scope is what a compiled condition evaluates against.
+//
+// Usually that is a MESSAGE — the row, or one element of a repeated message
+// field. An any() over a MAP scopes one ENTRY instead, and an entry is not a
+// message: proto models it as a synthetic entry type, but what a row stores is a
+// (key, value) pair, so the pair travels as itself and the first step of a
+// sub-condition path picks the side it means. Materializing an entry message
+// per entry would put an allocation on the scan path for every entry of every
+// row, which is the cost this shape exists to avoid.
+type scope struct {
+	msg protoreflect.Message
+	// entry is set when the scope is one map entry. It is a pointer so that the
+	// common message scope stays two words wide, and mapExistsNode reuses ONE
+	// per row rather than allocating per entry — safe because a sub-condition
+	// reads its scope synchronously and never retains it.
+	entry *mapEntry
+}
+
+// mapEntry is one entry of a map, as an any() over that map scopes it.
+type mapEntry struct {
+	fd  protoreflect.FieldDescriptor // the map field itself
+	key protoreflect.MapKey
+	val protoreflect.Value
+}
+
+func msgScope(msg protoreflect.Message) scope { return scope{msg: msg} }
+
+// The field numbers of a map entry's two sides. The proto language fixes them
+// for every map entry type, so resolving an entry-scoped path by NUMBER makes
+// the evaluator independent of what the synthetic entry type calls its fields.
+const (
+	mapEntryKeyNumber   protoreflect.FieldNumber = 1
+	mapEntryValueNumber protoreflect.FieldNumber = 2
+)
 
 func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Condition) (node, error) {
 	switch kind := cond.GetKind().(type) {
@@ -156,11 +201,15 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		if err != nil {
 			return nil, err
 		}
-		leaf := fields[len(fields)-1]
-		if leafKind(fields) != rvList {
+		lk := leafKind(fields)
+		isEmpty := c.GetOp() == syncplanev1.RepOp_REP_OP_IS_EMPTY
+		// isEmpty asks about a COLLECTION, which a map is as much as a list is;
+		// membership asks about elements, which only a list has.
+		if lk != rvList && !(isEmpty && lk == rvMap) {
 			return nil, fmt.Errorf("path %v: has/hasAny/hasAll/isEmpty need a repeated field, got %s",
-				c.GetPath(), describeLeaf(leaf))
+				c.GetPath(), describeLeaf(fields[len(fields)-1]))
 		}
+		leaf := pathLeaf(fields)
 		values, err := condValuesOf(c.GetValues())
 		if err != nil {
 			return nil, err
@@ -174,8 +223,8 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		default:
 			return nil, fmt.Errorf("rep condition needs an op")
 		}
-		// isEmpty asks about the list itself, so it works on any element type.
-		if c.GetOp() == syncplanev1.RepOp_REP_OP_IS_EMPTY {
+		// isEmpty works on any element type, so it needs nothing below.
+		if isEmpty {
 			return &repNode{fields: fields, op: c.GetOp(), values: values}, nil
 		}
 		// Membership compares elements. A repeated single-key reference has one
@@ -188,7 +237,7 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		}
 		if !comparableKind(singularKind(leaf)) {
 			return nil, fmt.Errorf("path %v: has/hasAny/hasAll need a repeated field with comparable elements, got %s; %s",
-				c.GetPath(), describeLeaf(leaf), membershipHint(c.GetPath(), leaf))
+				c.GetPath(), describeField(leaf), membershipHint(c.GetPath(), leaf))
 		}
 		return &repNode{fields: fields, op: c.GetOp(), values: values}, nil
 	case *syncplanev1.Condition_Exists:
@@ -226,24 +275,40 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 	}
 }
 
-// compileExists resolves an exists condition: a path to a repeated message
-// field, and a sub-condition whose own paths are relative to the ELEMENT.
+// compileExists resolves an exists condition: a path to a collection with
+// elements, and a sub-condition whose own paths are relative to the ELEMENT.
 //
 // The element type is where the sub-condition compiles, so every rule that
 // applies to a row — unknown fields, incomparable leaves, nested exists —
 // applies to it unchanged, one descriptor down.
+//
+// Two collections qualify. For a repeated message field the element is the
+// message. For a MAP the element is the ENTRY, whose two sides the sub-condition
+// addresses as `key` and `value` — the map's synthetic entry type is what those
+// compile against, so there is nothing to invent and both sides are ordinary
+// paths from there.
 func compileExists(desc protoreflect.MessageDescriptor, c *syncplanev1.ExistsCond) (node, error) {
 	fields, err := resolveFields(desc, c.GetPath())
 	if err != nil {
 		return nil, err
 	}
-	leaf := fields[len(fields)-1]
-	if !leaf.IsList() || leaf.Kind() != protoreflect.MessageKind {
-		return nil, fmt.Errorf("path %v: any() needs a repeated message field, got %s; %s",
-			c.GetPath(), describeLeaf(leaf), existsHint(leaf))
-	}
+	leaf := pathLeaf(fields)
 	if c.GetCond() == nil {
 		return nil, fmt.Errorf("path %v: any() needs a condition", c.GetPath())
+	}
+	if leaf.IsMap() {
+		if err := requireEntryPaths(c.GetPath(), leaf, c.GetCond()); err != nil {
+			return nil, err
+		}
+		inner, err := compileCond(leaf.Message(), c.GetCond())
+		if err != nil {
+			return nil, err
+		}
+		return &mapExistsNode{fields: fields, fd: leaf, cond: inner}, nil
+	}
+	if !leaf.IsList() || leaf.Kind() != protoreflect.MessageKind {
+		return nil, fmt.Errorf("path %v: any() needs a repeated message field or a map, got %s; %s",
+			c.GetPath(), describeLeaf(fields[len(fields)-1]), existsHint(leaf))
 	}
 	// A reference element stores only the target's key fields, so the same rule
 	// that stops a path descending through a reference stops a sub-condition
@@ -260,53 +325,87 @@ func compileExists(desc protoreflect.MessageDescriptor, c *syncplanev1.ExistsCon
 	return &existsNode{fields: fields, cond: inner}, nil
 }
 
+// requireEntryPaths rejects a sub-condition addressing anything but the two
+// sides of a map entry.
+//
+// Compiling against the synthetic entry type would reject such a path anyway,
+// but the error would name a message the schema author never wrote
+// ("Issue.CustomEntry has no field \"priority\""). Checking first lets it name
+// the map and the two words that work — and the words are `key` and `value`,
+// the same ones an index component's `*` selector uses.
+func requireEntryPaths(
+	path []string,
+	mapField protoreflect.FieldDescriptor,
+	cond *syncplanev1.Condition,
+) error {
+	entry := mapField.Message()
+	check := func(sub []string) error {
+		if len(sub) > 0 {
+			if fd := entry.Fields().ByName(protoreflect.Name(sub[0])); fd != nil {
+				return nil
+			}
+		}
+		return fmt.Errorf(
+			"path %v: any() over %s scopes one ENTRY, so a sub-condition starts at %q or %q, not %q",
+			path, describeField(mapField),
+			string(entry.Fields().ByNumber(mapEntryKeyNumber).Name()),
+			string(entry.Fields().ByNumber(mapEntryValueNumber).Name()),
+			strings.Join(sub, "."))
+	}
+	return walkSubPaths(cond, check)
+}
+
 // requireRefKeyPaths rejects a sub-condition that addresses anything but the
 // reference's key fields. Without it such a condition compiles and then matches
 // nothing, since a stored reference element carries the key fields alone.
 func requireRefKeyPaths(path []string, keyFields []protoreflect.FieldDescriptor, cond *syncplanev1.Condition) error {
-	var walk func(*syncplanev1.Condition) error
-	check := func(sub []string) error {
+	return walkSubPaths(cond, func(sub []string) error {
 		if len(sub) == 1 && isKeyField(keyFields, sub[0]) {
 			return nil
 		}
 		return fmt.Errorf("path %v: an element of a reference list holds only its key fields, so any() cannot ask about %q",
 			path, strings.Join(sub, "."))
-	}
-	walk = func(c *syncplanev1.Condition) error {
-		switch kind := c.GetKind().(type) {
-		case *syncplanev1.Condition_Cmp:
-			return check(kind.Cmp.GetPath())
-		case *syncplanev1.Condition_In:
-			return check(kind.In.GetPath())
-		case *syncplanev1.Condition_Str:
-			return check(kind.Str.GetPath())
-		case *syncplanev1.Condition_Rep:
-			return check(kind.Rep.GetPath())
-		case *syncplanev1.Condition_Present:
-			return check(kind.Present.GetPath())
-		case *syncplanev1.Condition_Exists:
-			return check(kind.Exists.GetPath())
-		case *syncplanev1.Condition_And:
-			for _, sub := range kind.And.GetConds() {
-				if err := walk(sub); err != nil {
-					return err
-				}
+	})
+}
+
+// walkSubPaths applies check to every ROW PATH a condition tree addresses,
+// stopping at the first error. Both any() scopes that restrict what their
+// sub-condition may ask about are written against it, so the two agree on what
+// counts as a path — a nested any()'s own path is checked, its sub-condition's
+// paths are not, since those belong to a scope one level further down.
+func walkSubPaths(cond *syncplanev1.Condition, check func([]string) error) error {
+	switch kind := cond.GetKind().(type) {
+	case *syncplanev1.Condition_Cmp:
+		return check(kind.Cmp.GetPath())
+	case *syncplanev1.Condition_In:
+		return check(kind.In.GetPath())
+	case *syncplanev1.Condition_Str:
+		return check(kind.Str.GetPath())
+	case *syncplanev1.Condition_Rep:
+		return check(kind.Rep.GetPath())
+	case *syncplanev1.Condition_Present:
+		return check(kind.Present.GetPath())
+	case *syncplanev1.Condition_Exists:
+		return check(kind.Exists.GetPath())
+	case *syncplanev1.Condition_And:
+		for _, sub := range kind.And.GetConds() {
+			if err := walkSubPaths(sub, check); err != nil {
+				return err
 			}
-			return nil
-		case *syncplanev1.Condition_Or:
-			for _, sub := range kind.Or.GetConds() {
-				if err := walk(sub); err != nil {
-					return err
-				}
-			}
-			return nil
-		case *syncplanev1.Condition_Not:
-			return walk(kind.Not)
-		default:
-			return fmt.Errorf("condition has no kind")
 		}
+		return nil
+	case *syncplanev1.Condition_Or:
+		for _, sub := range kind.Or.GetConds() {
+			if err := walkSubPaths(sub, check); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *syncplanev1.Condition_Not:
+		return walkSubPaths(kind.Not, check)
+	default:
+		return fmt.Errorf("condition has no kind")
 	}
-	return walk(cond)
 }
 
 // refMembershipNode rewrites membership over a repeated single-key reference
@@ -314,12 +413,12 @@ func requireRefKeyPaths(path []string, keyFields []protoreflect.FieldDescriptor,
 // rather than one pass: "holds all of these" is one existential per value, and
 // no single element satisfies more than one.
 func refMembershipNode(
-	fields []protoreflect.FieldDescriptor,
+	fields []pathStep,
 	keyField protoreflect.FieldDescriptor,
 	op syncplanev1.RepOp,
 	values []condValue,
 ) (node, error) {
-	key := []protoreflect.FieldDescriptor{keyField}
+	key := []pathStep{{fd: keyField}}
 	switch op {
 	case syncplanev1.RepOp_REP_OP_HAS:
 		return &existsNode{fields: fields, cond: &cmpNode{
@@ -356,7 +455,7 @@ func existsHint(leaf protoreflect.FieldDescriptor) string {
 	if leaf.IsList() {
 		return "use has/hasAny/hasAll for a repeated scalar"
 	}
-	return "any() asks about the elements of a list"
+	return "any() asks about the elements of a list, or the entries of a map"
 }
 
 func compileConds(desc protoreflect.MessageDescriptor, conds []*syncplanev1.Condition) ([]node, error) {
@@ -371,22 +470,126 @@ func compileConds(desc protoreflect.MessageDescriptor, conds []*syncplanev1.Cond
 	return out, nil
 }
 
-// resolveFields turns a path of proto field names into a descriptor chain.
+// pathStep is one resolved step of a path through a message.
+//
+// Usually that is just a field, but a MAP field consumes the segment after it
+// as the entry key, so a step is a field plus an optional key. Two things make
+// that unambiguous: a map field terminates the descriptor chain, so nothing
+// else could follow it, and it is the convention lww mask paths already use
+// (mergeMapItem) — one rule for addressing a map entry rather than two.
+//
+// A map key has no descriptor of its own, which is the whole reason a resolved
+// path is this rather than a chain of field descriptors.
+type pathStep struct {
+	fd     protoreflect.FieldDescriptor
+	mapKey protoreflect.MapKey
+	// keyed reports whether mapKey was consumed. Separate from mapKey because
+	// the zero MapKey is also a legal key ("", 0, false).
+	keyed bool
+	// fan marks a step an INDEX COMPONENT takes one value per element (a
+	// repeated field) or per entry (a map, written `*` in the declared path) of,
+	// rather than resolving to a single value. A condition path never has one:
+	// "some element" is spelled with an exists condition instead.
+	fan bool
+	// entryKey marks a map fan step whose component stores the entry's KEY
+	// rather than anything below it — the `key` selector, written
+	// `custom.*.key`. Only an index component ever has one, and it is always the
+	// last step of that component: a key is a scalar, so nothing can follow it.
+	entryKey bool
+}
+
+// leaf is the descriptor whose VALUES this step yields: the map's value field
+// once a key is consumed, the field itself otherwise. Everything that
+// classifies, compares or encodes a path's result reads this rather than fd, so
+// `custom_fields.priority.number` behaves exactly like a path ending at an
+// int32 field — which is what makes an app-defined map value need no engine
+// value type at all.
+func (s pathStep) leaf() protoreflect.FieldDescriptor {
+	if s.keyed {
+		return s.fd.MapValue()
+	}
+	return s.fd
+}
+
+// pathLeaf is the leaf descriptor of a whole resolved path.
+func pathLeaf(steps []pathStep) protoreflect.FieldDescriptor {
+	return steps[len(steps)-1].leaf()
+}
+
+// samePath reports whether two resolved paths address the same thing. Map keys
+// are part of the identity: custom_fields.a.number and custom_fields.b.number
+// share every descriptor and are different columns. So is the entry-key
+// selector: `attrs.*.key` and `attrs.*.value` end at the same field and store
+// different halves of the entry.
+func samePath(a, b []pathStep) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i].fd.FullName() != b[i].fd.FullName() || a[i].keyed != b[i].keyed {
+			return false
+		}
+		if a[i].entryKey != b[i].entryKey {
+			return false
+		}
+		if a[i].keyed && a[i].mapKey.Interface() != b[i].mapKey.Interface() {
+			return false
+		}
+	}
+	return true
+}
+
+// mapKeyOf parses one path segment as a key of fd.
+//
+// A wire path is ALREADY a list of segments, so a string key travels verbatim
+// and has no escaping to undo — unlike an lww mask path, which is one string.
+// The non-string kinds share lww's parser so that the same spelling reaches the
+// same entry from a query as from a merge.
+func mapKeyOf(fd protoreflect.FieldDescriptor, seg string) (protoreflect.MapKey, error) {
+	if fd.MapKey().Kind() == protoreflect.StringKind {
+		return protoreflect.ValueOfString(seg).MapKey(), nil
+	}
+	return lww.DecodeMapKey(fd, seg)
+}
+
+// resolveFields turns a path of proto field names into a chain of steps.
 // Mirrors the client's translatePath validation: every segment but the last
-// must be a singular message field.
-func resolveFields(desc protoreflect.MessageDescriptor, path []string) ([]protoreflect.FieldDescriptor, error) {
+// must be a singular message field, or a map key addressing one entry.
+func resolveFields(desc protoreflect.MessageDescriptor, path []string) ([]pathStep, error) {
 	if len(path) == 0 {
 		return nil, fmt.Errorf("condition path is empty")
 	}
 	cur := desc
-	fields := make([]protoreflect.FieldDescriptor, 0, len(path))
-	for i, seg := range path {
+	steps := make([]pathStep, 0, len(path))
+	for i := 0; i < len(path); i++ {
+		seg := path[i]
 		if cur == nil {
 			return nil, fmt.Errorf("path %v: %q is not a message field, cannot descend into %q", path, path[i-1], seg)
 		}
 		fd := cur.Fields().ByName(protoreflect.Name(seg))
 		if fd == nil {
 			return nil, fmt.Errorf("path %v: %s has no field %q", path, cur.FullName(), seg)
+		}
+		if fd.IsMap() {
+			if i == len(path)-1 {
+				// A bare map. Nothing can be compared against it, but isEmpty
+				// and presence still read it, so it resolves rather than failing
+				// here; requireComparable is what rejects the rest.
+				steps = append(steps, pathStep{fd: fd})
+				break
+			}
+			i++
+			mk, err := mapKeyOf(fd, path[i])
+			if err != nil {
+				return nil, fmt.Errorf("path %v: %w", path, err)
+			}
+			steps = append(steps, pathStep{fd: fd, mapKey: mk, keyed: true})
+			if vfd := fd.MapValue(); vfd.Kind() == protoreflect.MessageKind {
+				cur = vfd.Message()
+			} else {
+				cur = nil
+			}
+			continue
 		}
 		// A reference stores only its target's key fields, so only those are
 		// addressable: a path that descends through a ref into any other field
@@ -397,28 +600,34 @@ func resolveFields(desc protoreflect.MessageDescriptor, path []string) ([]protor
 				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only its key fields are addressable", path, seg, path[i+1])
 			}
 		}
-		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() {
+		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
 			cur = fd.Message()
 		} else {
 			cur = nil
 		}
-		fields = append(fields, fd)
+		steps = append(steps, pathStep{fd: fd})
 	}
-	return fields, nil
+	return steps, nil
 }
 
 // leafKind classifies the value a resolved path yields, from the descriptors
 // alone. It must agree with what extract produces at runtime (a consistency
 // test over every test-schema field pins that).
-func leafKind(fields []protoreflect.FieldDescriptor) rvKind {
-	fd := fields[len(fields)-1]
-	if fd.IsList() {
+func leafKind(steps []pathStep) rvKind {
+	st := steps[len(steps)-1]
+	if st.fd.IsMap() && !st.keyed {
+		return rvMap
+	}
+	// Once a key is consumed the step yields the map's VALUE, which is a
+	// singular value of the declared value type — never a list, since proto has
+	// no repeated map value.
+	if st.keyed {
+		return singularKind(st.fd.MapValue())
+	}
+	if st.fd.IsList() {
 		return rvList
 	}
-	if fd.IsMap() {
-		return rvOther
-	}
-	return singularKind(fd)
+	return singularKind(st.fd)
 }
 
 // singularKind is the static counterpart of extractSingular: for a repeated
@@ -463,27 +672,32 @@ func comparableKind(k rvKind) bool {
 // maps and repeated fields compile happily and then match nothing (or tie
 // every pair, so an ordering silently degrades to row-key order), leaving the
 // caller to guess why. The error names the operator that does work instead.
-func requireComparable(path []string, fields []protoreflect.FieldDescriptor) error {
-	if comparableKind(leafKind(fields)) {
+func requireComparable(path []string, steps []pathStep) error {
+	if comparableKind(leafKind(steps)) {
 		return nil
 	}
 	return fmt.Errorf("path %v: %s is not comparable; %s",
-		path, describeLeaf(fields[len(fields)-1]), comparableHint(path, fields[len(fields)-1]))
+		path, describeLeaf(steps[len(steps)-1]), comparableHint(path, steps[len(steps)-1]))
 }
 
 // comparableHint names the way to ask the question that WAS meant, since the
 // alternative differs by leaf kind.
-func comparableHint(path []string, fd protoreflect.FieldDescriptor) string {
+func comparableHint(path []string, st pathStep) string {
+	fd := st.leaf()
 	switch {
+	case st.fd.IsMap() && !st.keyed:
+		// A map itself compares against nothing, and isSet on one is
+		// constitutionally true (implicit presence), so neither is worth
+		// offering. What the caller almost always meant is one ENTRY — by key if
+		// they know which, with any() if the question is which one.
+		return fmt.Sprintf(
+			"address one entry by key instead, e.g. %s.<key>, ask about any entry with any(%s, <condition on key/value>), or use isEmpty",
+			strings.Join(path, "."), strings.Join(path, "."))
 	case fd.IsList():
 		if fd.Kind() == protoreflect.MessageKind {
 			return fmt.Sprintf("use isEmpty, or any(%s, <condition on an element>)", strings.Join(path, "."))
 		}
 		return "use has/hasAny/hasAll/isEmpty"
-	case fd.IsMap():
-		// isSet on a map is constitutionally true (implicit presence), so
-		// offering it would be a false lead.
-		return "map fields cannot be queried"
 	case fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind:
 		if refKeys := lww.RefKeyFields(fd); len(refKeys) == 1 {
 			return fmt.Sprintf("use isSet/isNotSet, or compare its key field %s.%s",
@@ -498,9 +712,19 @@ func comparableHint(path []string, fd protoreflect.FieldDescriptor) string {
 	}
 }
 
-// describeLeaf names a field the way the schema author wrote it, so the error
-// is recognizable against the .proto.
-func describeLeaf(fd protoreflect.FieldDescriptor) string {
+// describeLeaf names what a resolved path ends at, the way the schema author
+// wrote it, so the error is recognizable against the .proto.
+func describeLeaf(st pathStep) string {
+	if st.keyed {
+		return fmt.Sprintf("the %s value of map field %s",
+			kindName(st.fd.MapValue()), st.fd.Name())
+	}
+	return describeField(st.fd)
+}
+
+// describeField is describeLeaf for a bare descriptor, where no map key can be
+// involved (element types, index component leaves).
+func describeField(fd protoreflect.FieldDescriptor) string {
 	switch {
 	case fd.IsMap():
 		return fmt.Sprintf("map<%s, %s> field %s",
@@ -537,36 +761,92 @@ func isKeyField(keyFields []protoreflect.FieldDescriptor, name string) bool {
 	return false
 }
 
-// resolveValue walks the descriptor chain through msg. The boolean mirrors
+// resolveValue walks the resolved path through msg. The boolean mirrors
 // the client's "found": false on an unset intermediate message or an unset
 // explicit-presence leaf; implicit-presence leaves (including lists and
 // maps) are always found at their zero value, like the materialized
 // defaults on generated JS shapes.
-func resolveValue(msg protoreflect.Message, fields []protoreflect.FieldDescriptor) (rowValue, bool) {
+//
+// A map ENTRY has explicit presence whatever its value type: an absent key is
+// not found, which is what makes `custom_fields.priority.number` report "not
+// found" for a row whose priority holds a different variant — the condition is
+// false and the ordering ranks it last, with no cross-variant comparison to
+// define.
+func resolveValue(msg protoreflect.Message, steps []pathStep) (rowValue, bool) {
 	cur := msg
-	for i, fd := range fields {
-		if i == len(fields)-1 {
-			if fd.HasPresence() && !cur.Has(fd) {
+	for i, st := range steps {
+		last := i == len(steps)-1
+		if st.keyed {
+			m := cur.Get(st.fd).Map()
+			if !m.Has(st.mapKey) {
 				return rowValue{}, false
 			}
-			return extract(fd, cur.Get(fd)), true
+			v := m.Get(st.mapKey)
+			if last {
+				return extractSingular(st.fd.MapValue(), v), true
+			}
+			cur = v.Message()
+			continue
 		}
-		if !cur.Has(fd) {
+		if last {
+			if st.fd.HasPresence() && !cur.Has(st.fd) {
+				return rowValue{}, false
+			}
+			return extract(st.fd, cur.Get(st.fd)), true
+		}
+		if !cur.Has(st.fd) {
 			return rowValue{}, false
 		}
-		cur = cur.Get(fd).Message()
+		cur = cur.Get(st.fd).Message()
 	}
 	return rowValue{}, false // unreachable: paths are never empty
 }
 
+// resolveIn walks a resolved path through one scope.
+//
+// A MESSAGE scope is resolveValue unchanged. An ENTRY scope resolves the first
+// step against the pair itself: sub-condition paths are compiled against the
+// map's synthetic entry type, so that step is the entry's `key` or `value`
+// field, told apart by field number rather than by name. Everything below the
+// value is an ordinary path through the value's message, which is what makes
+// `value.number` inside an any() mean exactly what `custom.<key>.number` means
+// from the row.
+func resolveIn(s scope, steps []pathStep) (rowValue, bool) {
+	if s.entry == nil {
+		return resolveValue(s.msg, steps)
+	}
+	e := s.entry
+	switch steps[0].fd.Number() {
+	case mapEntryKeyNumber:
+		if len(steps) > 1 {
+			// A key is a scalar, so nothing can follow it; compileCond against
+			// the entry type rejects such a path before this is reached.
+			return rowValue{}, false
+		}
+		return extractSingular(e.fd.MapKey(), e.key.Value()), true
+	case mapEntryValueNumber:
+		vfd := e.fd.MapValue()
+		if len(steps) == 1 {
+			// An entry always HAS a value, so this is found whatever it holds —
+			// including a message, which is present and incomparable.
+			return extractSingular(vfd, e.val), true
+		}
+		if vfd.Kind() != protoreflect.MessageKind {
+			return rowValue{}, false
+		}
+		return resolveValue(e.val.Message(), steps[1:])
+	}
+	return rowValue{}, false
+}
+
 type cmpNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	op     syncplanev1.CmpOp
 	value  condValue
 }
 
-func (n *cmpNode) eval(msg protoreflect.Message) bool {
-	v, found := resolveValue(msg, n.fields)
+func (n *cmpNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
 	if !found {
 		return false
 	}
@@ -594,12 +874,12 @@ func (n *cmpNode) eval(msg protoreflect.Message) bool {
 }
 
 type inNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	values []condValue
 }
 
-func (n *inNode) eval(msg protoreflect.Message) bool {
-	v, found := resolveValue(msg, n.fields)
+func (n *inNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
 	if !found {
 		return false
 	}
@@ -612,13 +892,13 @@ func (n *inNode) eval(msg protoreflect.Message) bool {
 }
 
 type strNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	op     syncplanev1.StrOp
 	value  string
 }
 
-func (n *strNode) eval(msg protoreflect.Message) bool {
-	v, found := resolveValue(msg, n.fields)
+func (n *strNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
 	if !found || v.kind != rvString {
 		return false
 	}
@@ -636,14 +916,22 @@ func (n *strNode) eval(msg protoreflect.Message) bool {
 }
 
 type repNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	op     syncplanev1.RepOp
 	values []condValue
 }
 
-func (n *repNode) eval(msg protoreflect.Message) bool {
-	v, found := resolveValue(msg, n.fields)
-	if !found || v.kind != rvList {
+func (n *repNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
+	if !found {
+		return false
+	}
+	if v.kind == rvMap {
+		// Compile admits a map for isEmpty alone, so this is the only operator
+		// that can reach one.
+		return n.op == syncplanev1.RepOp_REP_OP_IS_EMPTY && v.mapv.Len() == 0
+	}
+	if v.kind != rvList {
 		return false
 	}
 	has := func(cv condValue) bool {
@@ -682,30 +970,66 @@ func (n *repNode) eval(msg protoreflect.Message) bool {
 // list matches nothing, like every other condition on a missing value — which
 // also makes not(any(…)) read as "no element matches".
 type existsNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	cond   node
 }
 
-func (n *existsNode) eval(msg protoreflect.Message) bool {
-	v, found := resolveValue(msg, n.fields)
+func (n *existsNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
 	if !found || v.kind != rvList {
 		return false
 	}
 	for i := 0; i < v.list.Len(); i++ {
-		if n.cond.eval(v.list.Get(i).Message()) {
+		if n.cond.eval(msgScope(v.list.Get(i).Message())) {
 			return true
 		}
 	}
 	return false
 }
 
+// mapExistsNode is existsNode over a MAP: the element is one ENTRY, and the
+// sub-condition addresses its two sides as `key` and `value`.
+//
+// It is what makes "which custom field holds X" askable, where addressing one
+// entry by key answers "does THIS field hold X". Being an existential it is a
+// predicate and not a projection: a match says some entry satisfied the
+// condition, never which one, and an app that needs the name reads it off the
+// row's map. An unset or empty map matches nothing, like every other condition
+// on a missing value — which also makes not(any(…)) read as "no entry matches".
+type mapExistsNode struct {
+	fields []pathStep
+	fd     protoreflect.FieldDescriptor // the map field the entries come from
+	cond   node
+}
+
+func (n *mapExistsNode) eval(s scope) bool {
+	v, found := resolveIn(s, n.fields)
+	if !found || v.kind != rvMap {
+		return false
+	}
+	// One entry struct for the whole map, rewritten per entry: the sub-condition
+	// reads its scope synchronously and never retains it, so reusing it keeps
+	// this to a single allocation per row instead of one per entry.
+	e := &mapEntry{fd: n.fd}
+	matched := false
+	v.mapv.Range(func(k protoreflect.MapKey, val protoreflect.Value) bool {
+		e.key, e.val = k, val
+		if n.cond.eval(scope{entry: e}) {
+			matched = true
+			return false
+		}
+		return true
+	})
+	return matched
+}
+
 type presentNode struct {
-	fields []protoreflect.FieldDescriptor
+	fields []pathStep
 	op     syncplanev1.PresentOp
 }
 
-func (n *presentNode) eval(msg protoreflect.Message) bool {
-	_, found := resolveValue(msg, n.fields)
+func (n *presentNode) eval(s scope) bool {
+	_, found := resolveIn(s, n.fields)
 	if n.op == syncplanev1.PresentOp_PRESENT_OP_IS_SET {
 		return found
 	}
@@ -714,9 +1038,9 @@ func (n *presentNode) eval(msg protoreflect.Message) bool {
 
 type andNode struct{ conds []node }
 
-func (n *andNode) eval(msg protoreflect.Message) bool {
+func (n *andNode) eval(s scope) bool {
 	for _, c := range n.conds {
-		if !c.eval(msg) {
+		if !c.eval(s) {
 			return false
 		}
 	}
@@ -725,9 +1049,9 @@ func (n *andNode) eval(msg protoreflect.Message) bool {
 
 type orNode struct{ conds []node }
 
-func (n *orNode) eval(msg protoreflect.Message) bool {
+func (n *orNode) eval(s scope) bool {
 	for _, c := range n.conds {
-		if c.eval(msg) {
+		if c.eval(s) {
 			return true
 		}
 	}
@@ -736,8 +1060,8 @@ func (n *orNode) eval(msg protoreflect.Message) bool {
 
 type notNode struct{ cond node }
 
-func (n *notNode) eval(msg protoreflect.Message) bool {
-	return !n.cond.eval(msg)
+func (n *notNode) eval(s scope) bool {
+	return !n.cond.eval(s)
 }
 
 // --- value model -----------------------------------------------------------
@@ -745,12 +1069,16 @@ func (n *notNode) eval(msg protoreflect.Message) bool {
 type rvKind int
 
 const (
-	rvOther rvKind = iota // messages, bytes, maps: present but incomparable
+	rvOther rvKind = iota // messages, bytes: present but incomparable
 	rvString
 	rvNumber // 32-bit ints, floats, doubles, enums — JS number
 	rvBigint // 64-bit ints — JS bigint
 	rvBool
 	rvList
+	// rvMap is a whole map, which no comparison reaches — address one ENTRY by
+	// key for that. It is a kind of its own rather than rvOther only because
+	// isEmpty asks about the collection itself and so needs to see it.
+	rvMap
 )
 
 // rowValue is a leaf value pulled out of a row message.
@@ -761,15 +1089,16 @@ type rowValue struct {
 	big  *big.Int
 	b    bool
 	list protoreflect.List
+	mapv protoreflect.Map
 	elem protoreflect.FieldDescriptor
 }
 
 func extract(fd protoreflect.FieldDescriptor, v protoreflect.Value) rowValue {
+	if fd.IsMap() {
+		return rowValue{kind: rvMap, mapv: v.Map()}
+	}
 	if fd.IsList() {
 		return rowValue{kind: rvList, list: v.List(), elem: fd}
-	}
-	if fd.IsMap() {
-		return rowValue{kind: rvOther}
 	}
 	return extractSingular(fd, v)
 }

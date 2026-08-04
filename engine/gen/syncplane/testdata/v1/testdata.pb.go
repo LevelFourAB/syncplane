@@ -45,6 +45,12 @@ type Widget struct {
 	Attrs map[string]string `protobuf:"bytes,11,rep,name=attrs,proto3" json:"attrs,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Map with a non-string key — exercises int64 key encode/decode.
 	ById map[int64]string `protobuf:"bytes,12,rep,name=by_id,json=byId,proto3" json:"by_id,omitempty" protobuf_key:"varint,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// Message-valued map: the shape an app declares for user-defined fields.
+	// The value is an APP-defined oneof, so a query names the variant it means
+	// (`custom.priority.number`) and the engine never has to rank two variants
+	// against each other — a member has explicit presence, so the wrong variant
+	// simply reads as not found.
+	Custom map[string]*FieldValue `protobuf:"bytes,23,rep,name=custom,proto3" json:"custom,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	// Keyed message list — identity is the explicit "uid" field.
 	Members []*Member `protobuf:"bytes,13,rep,name=members,proto3" json:"members,omitempty"`
 	// Keyed message list — identity inferred from the element entity's
@@ -194,6 +200,13 @@ func (x *Widget) GetById() map[int64]string {
 	return nil
 }
 
+func (x *Widget) GetCustom() map[string]*FieldValue {
+	if x != nil {
+		return x.Custom
+	}
+	return nil
+}
+
 func (x *Widget) GetMembers() []*Member {
 	if x != nil {
 		return x.Members
@@ -299,6 +312,188 @@ func (*Widget_ChoiceNumber) isWidget_Choice() {}
 
 func (*Widget_ChoiceSettings) isWidget_Choice() {}
 
+// Value of Widget.custom — what an app declares when its users define their
+// own fields. The engine knows nothing about this type: the oneof, its members
+// and their names all belong to the app, and a query addresses one member by
+// name. `labels` is how multi-select is expressed without an engine concept for
+// it — a message wrapping a repeated scalar, so `custom.<key>.labels.values` is
+// an ordinary repeated leaf that hasAny/hasAll already understand.
+type FieldValue struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Kind:
+	//
+	//	*FieldValue_Text
+	//	*FieldValue_Number
+	//	*FieldValue_Checked
+	//	*FieldValue_Labels
+	//	*FieldValue_Attachment
+	Kind          isFieldValue_Kind `protobuf_oneof:"kind"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FieldValue) Reset() {
+	*x = FieldValue{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FieldValue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FieldValue) ProtoMessage() {}
+
+func (x *FieldValue) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FieldValue.ProtoReflect.Descriptor instead.
+func (*FieldValue) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *FieldValue) GetKind() isFieldValue_Kind {
+	if x != nil {
+		return x.Kind
+	}
+	return nil
+}
+
+func (x *FieldValue) GetText() string {
+	if x != nil {
+		if x, ok := x.Kind.(*FieldValue_Text); ok {
+			return x.Text
+		}
+	}
+	return ""
+}
+
+func (x *FieldValue) GetNumber() float64 {
+	if x != nil {
+		if x, ok := x.Kind.(*FieldValue_Number); ok {
+			return x.Number
+		}
+	}
+	return 0
+}
+
+func (x *FieldValue) GetChecked() bool {
+	if x != nil {
+		if x, ok := x.Kind.(*FieldValue_Checked); ok {
+			return x.Checked
+		}
+	}
+	return false
+}
+
+func (x *FieldValue) GetLabels() *StringList {
+	if x != nil {
+		if x, ok := x.Kind.(*FieldValue_Labels); ok {
+			return x.Labels
+		}
+	}
+	return nil
+}
+
+func (x *FieldValue) GetAttachment() *Blob {
+	if x != nil {
+		if x, ok := x.Kind.(*FieldValue_Attachment); ok {
+			return x.Attachment
+		}
+	}
+	return nil
+}
+
+type isFieldValue_Kind interface {
+	isFieldValue_Kind()
+}
+
+type FieldValue_Text struct {
+	Text string `protobuf:"bytes,1,opt,name=text,proto3,oneof"`
+}
+
+type FieldValue_Number struct {
+	Number float64 `protobuf:"fixed64,2,opt,name=number,proto3,oneof"`
+}
+
+type FieldValue_Checked struct {
+	Checked bool `protobuf:"varint,3,opt,name=checked,proto3,oneof"`
+}
+
+type FieldValue_Labels struct {
+	Labels *StringList `protobuf:"bytes,4,opt,name=labels,proto3,oneof"`
+}
+
+type FieldValue_Attachment struct {
+	// Deliberately incomparable: no path ever asks the engine to rank two
+	// attachments, so a member no comparison can reach costs nothing.
+	Attachment *Blob `protobuf:"bytes,5,opt,name=attachment,proto3,oneof"`
+}
+
+func (*FieldValue_Text) isFieldValue_Kind() {}
+
+func (*FieldValue_Number) isFieldValue_Kind() {}
+
+func (*FieldValue_Checked) isFieldValue_Kind() {}
+
+func (*FieldValue_Labels) isFieldValue_Kind() {}
+
+func (*FieldValue_Attachment) isFieldValue_Kind() {}
+
+type StringList struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Values        []string               `protobuf:"bytes,1,rep,name=values,proto3" json:"values,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StringList) Reset() {
+	*x = StringList{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StringList) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StringList) ProtoMessage() {}
+
+func (x *StringList) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StringList.ProtoReflect.Descriptor instead.
+func (*StringList) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *StringList) GetValues() []string {
+	if x != nil {
+		return x.Values
+	}
+	return nil
+}
+
 // A key field inside a oneof: the row key would vanish whenever a sibling case
 // won.
 type OneofKeyEntity struct {
@@ -314,7 +509,7 @@ type OneofKeyEntity struct {
 
 func (x *OneofKeyEntity) Reset() {
 	*x = OneofKeyEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[1]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -326,7 +521,7 @@ func (x *OneofKeyEntity) String() string {
 func (*OneofKeyEntity) ProtoMessage() {}
 
 func (x *OneofKeyEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[1]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -339,7 +534,7 @@ func (x *OneofKeyEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OneofKeyEntity.ProtoReflect.Descriptor instead.
 func (*OneofKeyEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{1}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *OneofKeyEntity) GetWhich() isOneofKeyEntity_Which {
@@ -399,7 +594,7 @@ type OneofTextEntity struct {
 
 func (x *OneofTextEntity) Reset() {
 	*x = OneofTextEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[2]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -411,7 +606,7 @@ func (x *OneofTextEntity) String() string {
 func (*OneofTextEntity) ProtoMessage() {}
 
 func (x *OneofTextEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[2]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -424,7 +619,7 @@ func (x *OneofTextEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OneofTextEntity.ProtoReflect.Descriptor instead.
 func (*OneofTextEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *OneofTextEntity) GetId() string {
@@ -491,7 +686,7 @@ type OneofNestedTextEntity struct {
 
 func (x *OneofNestedTextEntity) Reset() {
 	*x = OneofNestedTextEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[3]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -503,7 +698,7 @@ func (x *OneofNestedTextEntity) String() string {
 func (*OneofNestedTextEntity) ProtoMessage() {}
 
 func (x *OneofNestedTextEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[3]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -516,7 +711,7 @@ func (x *OneofNestedTextEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OneofNestedTextEntity.ProtoReflect.Descriptor instead.
 func (*OneofNestedTextEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *OneofNestedTextEntity) GetId() string {
@@ -576,7 +771,7 @@ type TextHolder struct {
 
 func (x *TextHolder) Reset() {
 	*x = TextHolder{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[4]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -588,7 +783,7 @@ func (x *TextHolder) String() string {
 func (*TextHolder) ProtoMessage() {}
 
 func (x *TextHolder) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[4]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -601,7 +796,7 @@ func (x *TextHolder) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TextHolder.ProtoReflect.Descriptor instead.
 func (*TextHolder) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TextHolder) GetBody() []byte {
@@ -630,7 +825,7 @@ type OneofRefEntity struct {
 
 func (x *OneofRefEntity) Reset() {
 	*x = OneofRefEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -642,7 +837,7 @@ func (x *OneofRefEntity) String() string {
 func (*OneofRefEntity) ProtoMessage() {}
 
 func (x *OneofRefEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -655,7 +850,7 @@ func (x *OneofRefEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OneofRefEntity.ProtoReflect.Descriptor instead.
 func (*OneofRefEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *OneofRefEntity) GetId() string {
@@ -722,7 +917,7 @@ type Member struct {
 
 func (x *Member) Reset() {
 	*x = Member{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -734,7 +929,7 @@ func (x *Member) String() string {
 func (*Member) ProtoMessage() {}
 
 func (x *Member) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -747,7 +942,7 @@ func (x *Member) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Member.ProtoReflect.Descriptor instead.
 func (*Member) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Member) GetUid() string {
@@ -791,7 +986,7 @@ type Item struct {
 
 func (x *Item) Reset() {
 	*x = Item{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -803,7 +998,7 @@ func (x *Item) String() string {
 func (*Item) ProtoMessage() {}
 
 func (x *Item) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -816,7 +1011,7 @@ func (x *Item) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Item.ProtoReflect.Descriptor instead.
 func (*Item) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Item) GetId() string {
@@ -853,7 +1048,7 @@ type Pair struct {
 
 func (x *Pair) Reset() {
 	*x = Pair{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -865,7 +1060,7 @@ func (x *Pair) String() string {
 func (*Pair) ProtoMessage() {}
 
 func (x *Pair) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -878,7 +1073,7 @@ func (x *Pair) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pair.ProtoReflect.Descriptor instead.
 func (*Pair) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Pair) GetNs() string {
@@ -917,7 +1112,7 @@ type Project struct {
 
 func (x *Project) Reset() {
 	*x = Project{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[9]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -929,7 +1124,7 @@ func (x *Project) String() string {
 func (*Project) ProtoMessage() {}
 
 func (x *Project) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[9]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -942,7 +1137,7 @@ func (x *Project) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Project.ProtoReflect.Descriptor instead.
 func (*Project) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Project) GetId() string {
@@ -969,7 +1164,7 @@ type User struct {
 
 func (x *User) Reset() {
 	*x = User{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[10]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -981,7 +1176,7 @@ func (x *User) String() string {
 func (*User) ProtoMessage() {}
 
 func (x *User) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[10]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -994,7 +1189,7 @@ func (x *User) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use User.ProtoReflect.Descriptor instead.
 func (*User) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *User) GetId() string {
@@ -1034,14 +1229,23 @@ type Issue struct {
 	Rank int32 `protobuf:"varint,9,opt,name=rank,proto3" json:"rank,omitempty"`
 	// Repeated scalar with a field-level mark — the multi-entry surface, where
 	// membership is a range read and one row occupies several positions.
-	Labels        []string `protobuf:"bytes,10,rep,name=labels,proto3" json:"labels,omitempty"`
+	Labels []string `protobuf:"bytes,10,rep,name=labels,proto3" json:"labels,omitempty"`
+	// User-defined fields, the shape an app declares for them: an app-defined
+	// oneof per entry, addressed by key and variant. The indexes above fan out
+	// over it.
+	Custom map[string]*FieldValue `protobuf:"bytes,11,rep,name=custom,proto3" json:"custom,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	// A SCALAR-valued map. Both sides of an entry are ordinary values here, so
+	// it is what pins that `key` and `value` are both nameable — for a
+	// map<string, string> a bare `*` could mean either, which is why the
+	// selector is required rather than defaulted.
+	TagsMap       map[string]string `protobuf:"bytes,12,rep,name=tags_map,json=tagsMap,proto3" json:"tags_map,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Issue) Reset() {
 	*x = Issue{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[11]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1257,7 @@ func (x *Issue) String() string {
 func (*Issue) ProtoMessage() {}
 
 func (x *Issue) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[11]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1270,7 @@ func (x *Issue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Issue.ProtoReflect.Descriptor instead.
 func (*Issue) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *Issue) GetId() string {
@@ -1139,6 +1343,20 @@ func (x *Issue) GetLabels() []string {
 	return nil
 }
 
+func (x *Issue) GetCustom() map[string]*FieldValue {
+	if x != nil {
+		return x.Custom
+	}
+	return nil
+}
+
+func (x *Issue) GetTagsMap() map[string]string {
+	if x != nil {
+		return x.TagsMap
+	}
+	return nil
+}
+
 type Settings struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Color string                 `protobuf:"bytes,1,opt,name=color,proto3" json:"color,omitempty"`
@@ -1155,7 +1373,7 @@ type Settings struct {
 
 func (x *Settings) Reset() {
 	*x = Settings{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[12]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1167,7 +1385,7 @@ func (x *Settings) String() string {
 func (*Settings) ProtoMessage() {}
 
 func (x *Settings) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[12]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1180,7 +1398,7 @@ func (x *Settings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Settings.ProtoReflect.Descriptor instead.
 func (*Settings) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Settings) GetColor() string {
@@ -1222,7 +1440,7 @@ type Blob struct {
 
 func (x *Blob) Reset() {
 	*x = Blob{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[13]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1234,7 +1452,7 @@ func (x *Blob) String() string {
 func (*Blob) ProtoMessage() {}
 
 func (x *Blob) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[13]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1247,7 +1465,7 @@ func (x *Blob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Blob.ProtoReflect.Descriptor instead.
 func (*Blob) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Blob) GetData() []byte {
@@ -1277,7 +1495,7 @@ type Ledger struct {
 
 func (x *Ledger) Reset() {
 	*x = Ledger{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1289,7 +1507,7 @@ func (x *Ledger) String() string {
 func (*Ledger) ProtoMessage() {}
 
 func (x *Ledger) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[14]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1302,7 +1520,7 @@ func (x *Ledger) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ledger.ProtoReflect.Descriptor instead.
 func (*Ledger) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Ledger) GetId() string {
@@ -1323,7 +1541,7 @@ var File_syncplane_testdata_v1_testdata_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\n" +
-	"$syncplane/testdata/v1/testdata.proto\x12\x15syncplane.testdata.v1\x1a\x1asyncplane/v1/options.proto\"\xfa\a\n" +
+	"$syncplane/testdata/v1/testdata.proto\x12\x15syncplane.testdata.v1\x1a\x1asyncplane/v1/options.proto\"\x9b\t\n" +
 	"\x06Widget\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label\x12\x14\n" +
@@ -1337,7 +1555,8 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x03raw\x18\n" +
 	" \x01(\fB\x06\xaa\xbb\x18\x02\b\x01R\x03raw\x12>\n" +
 	"\x05attrs\x18\v \x03(\v2(.syncplane.testdata.v1.Widget.AttrsEntryR\x05attrs\x12<\n" +
-	"\x05by_id\x18\f \x03(\v2'.syncplane.testdata.v1.Widget.ByIdEntryR\x04byId\x12B\n" +
+	"\x05by_id\x18\f \x03(\v2'.syncplane.testdata.v1.Widget.ByIdEntryR\x04byId\x12A\n" +
+	"\x06custom\x18\x17 \x03(\v2).syncplane.testdata.v1.Widget.CustomEntryR\x06custom\x12B\n" +
 	"\amembers\x18\r \x03(\v2\x1d.syncplane.testdata.v1.MemberB\t\xaa\xbb\x18\x05\x12\x03uidR\amembers\x12/\n" +
 	"\x04refs\x18\x0e \x03(\v2\x1b.syncplane.testdata.v1.PairR\x04refs\x12'\n" +
 	"\vatomic_tags\x18\x0f \x03(\tB\x06\xaa\xbb\x18\x02\b\x01R\n" +
@@ -1356,10 +1575,26 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a7\n" +
 	"\tByIdEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\x03R\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01:\x10\xa2\xbb\x18\f\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\x1a\\\n" +
+	"\vCustomEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x127\n" +
+	"\x05value\x18\x02 \x01(\v2!.syncplane.testdata.v1.FieldValueR\x05value:\x028\x01:\x10\xa2\xbb\x18\f\n" +
 	"\x06widget\x12\x02idB\b\n" +
 	"\x06choiceB\b\n" +
-	"\x06_maybe\"X\n" +
+	"\x06_maybe\"\xdc\x01\n" +
+	"\n" +
+	"FieldValue\x12\x14\n" +
+	"\x04text\x18\x01 \x01(\tH\x00R\x04text\x12\x18\n" +
+	"\x06number\x18\x02 \x01(\x01H\x00R\x06number\x12\x1a\n" +
+	"\achecked\x18\x03 \x01(\bH\x00R\achecked\x12;\n" +
+	"\x06labels\x18\x04 \x01(\v2!.syncplane.testdata.v1.StringListH\x00R\x06labels\x12=\n" +
+	"\n" +
+	"attachment\x18\x05 \x01(\v2\x1b.syncplane.testdata.v1.BlobH\x00R\n" +
+	"attachmentB\x06\n" +
+	"\x04kind\"$\n" +
+	"\n" +
+	"StringList\x12\x16\n" +
+	"\x06values\x18\x01 \x03(\tR\x06values\"X\n" +
 	"\x0eOneofKeyEntity\x12\x10\n" +
 	"\x02id\x18\x01 \x01(\tH\x00R\x02id\x12\x16\n" +
 	"\x05other\x18\x02 \x01(\tH\x00R\x05other:\x13\xa2\xbb\x18\x0f\n" +
@@ -1409,7 +1644,7 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name:\x0e\xa2\xbb\x18\n" +
 	"\n" +
-	"\x04user\x12\x02id\"\xf3\x03\n" +
+	"\x04user\x12\x02id\"\xe6\b\n" +
 	"\x05Issue\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05title\x18\x02 \x01(\tR\x05title\x128\n" +
@@ -1422,14 +1657,40 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x05state\x18\b \x01(\tB\x06\xaa\xbb\x18\x02(\x01R\x05state\x12\x12\n" +
 	"\x04rank\x18\t \x01(\x05R\x04rank\x12\x1e\n" +
 	"\x06labels\x18\n" +
-	" \x03(\tB\x06\xaa\xbb\x18\x02(\x01R\x06labels:X\xa2\xbb\x18T\n" +
+	" \x03(\tB\x06\xaa\xbb\x18\x02(\x01R\x06labels\x12@\n" +
+	"\x06custom\x18\v \x03(\v2(.syncplane.testdata.v1.Issue.CustomEntryR\x06custom\x12D\n" +
+	"\btags_map\x18\f \x03(\v2).syncplane.testdata.v1.Issue.TagsMapEntryR\atagsMap\x1a\\\n" +
+	"\vCustomEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x127\n" +
+	"\x05value\x18\x02 \x01(\v2!.syncplane.testdata.v1.FieldValueR\x05value:\x028\x01\x1a:\n" +
+	"\fTagsMapEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01:\xa8\x03\xa2\xbb\x18\xa3\x03\n" +
 	"\x05issue\x12\x02id\x1a\"\n" +
 	"\rby_state_rank\x12\a\n" +
 	"\x05state\x12\b\n" +
 	"\x04rank\x10\x01\x1a#\n" +
 	"\rby_label_rank\x12\b\n" +
 	"\x06labels\x12\b\n" +
-	"\x04rank\x10\x01\"\x85\x01\n" +
+	"\x04rank\x10\x01\x1a4\n" +
+	"\tcf_number\x12\x0e\n" +
+	"\fcustom.*.key\x12\x17\n" +
+	"\x15custom.*.value.number\x1a7\n" +
+	"\fcf_by_number\x12\x17\n" +
+	"\x15custom.*.value.number\x12\x0e\n" +
+	"\fcustom.*.key\x1a)\n" +
+	"\x0ecf_number_only\x12\x17\n" +
+	"\x15custom.*.value.number\x1a@\n" +
+	"\vcf_num_rank\x12\x0e\n" +
+	"\fcustom.*.key\x12\x17\n" +
+	"\x15custom.*.value.number\x12\b\n" +
+	"\x04rank\x10\x01\x1a;\n" +
+	"\tcf_labels\x12\x0e\n" +
+	"\fcustom.*.key\x12\x1e\n" +
+	"\x1ccustom.*.value.labels.values\x1a4\n" +
+	"\ftag_by_value\x12\x12\n" +
+	"\x10tags_map.*.value\x12\x10\n" +
+	"\x0etags_map.*.key\"\x85\x01\n" +
 	"\bSettings\x12\x14\n" +
 	"\x05color\x18\x01 \x01(\tR\x05color\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x05R\x04size\x129\n" +
@@ -1455,49 +1716,61 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 17)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                // 0: syncplane.testdata.v1.Widget
-	(*OneofKeyEntity)(nil),        // 1: syncplane.testdata.v1.OneofKeyEntity
-	(*OneofTextEntity)(nil),       // 2: syncplane.testdata.v1.OneofTextEntity
-	(*OneofNestedTextEntity)(nil), // 3: syncplane.testdata.v1.OneofNestedTextEntity
-	(*TextHolder)(nil),            // 4: syncplane.testdata.v1.TextHolder
-	(*OneofRefEntity)(nil),        // 5: syncplane.testdata.v1.OneofRefEntity
-	(*Member)(nil),                // 6: syncplane.testdata.v1.Member
-	(*Item)(nil),                  // 7: syncplane.testdata.v1.Item
-	(*Pair)(nil),                  // 8: syncplane.testdata.v1.Pair
-	(*Project)(nil),               // 9: syncplane.testdata.v1.Project
-	(*User)(nil),                  // 10: syncplane.testdata.v1.User
-	(*Issue)(nil),                 // 11: syncplane.testdata.v1.Issue
-	(*Settings)(nil),              // 12: syncplane.testdata.v1.Settings
-	(*Blob)(nil),                  // 13: syncplane.testdata.v1.Blob
-	(*Ledger)(nil),                // 14: syncplane.testdata.v1.Ledger
-	nil,                           // 15: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                           // 16: syncplane.testdata.v1.Widget.ByIdEntry
+	(*FieldValue)(nil),            // 1: syncplane.testdata.v1.FieldValue
+	(*StringList)(nil),            // 2: syncplane.testdata.v1.StringList
+	(*OneofKeyEntity)(nil),        // 3: syncplane.testdata.v1.OneofKeyEntity
+	(*OneofTextEntity)(nil),       // 4: syncplane.testdata.v1.OneofTextEntity
+	(*OneofNestedTextEntity)(nil), // 5: syncplane.testdata.v1.OneofNestedTextEntity
+	(*TextHolder)(nil),            // 6: syncplane.testdata.v1.TextHolder
+	(*OneofRefEntity)(nil),        // 7: syncplane.testdata.v1.OneofRefEntity
+	(*Member)(nil),                // 8: syncplane.testdata.v1.Member
+	(*Item)(nil),                  // 9: syncplane.testdata.v1.Item
+	(*Pair)(nil),                  // 10: syncplane.testdata.v1.Pair
+	(*Project)(nil),               // 11: syncplane.testdata.v1.Project
+	(*User)(nil),                  // 12: syncplane.testdata.v1.User
+	(*Issue)(nil),                 // 13: syncplane.testdata.v1.Issue
+	(*Settings)(nil),              // 14: syncplane.testdata.v1.Settings
+	(*Blob)(nil),                  // 15: syncplane.testdata.v1.Blob
+	(*Ledger)(nil),                // 16: syncplane.testdata.v1.Ledger
+	nil,                           // 17: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                           // 18: syncplane.testdata.v1.Widget.ByIdEntry
+	nil,                           // 19: syncplane.testdata.v1.Widget.CustomEntry
+	nil,                           // 20: syncplane.testdata.v1.Issue.CustomEntry
+	nil,                           // 21: syncplane.testdata.v1.Issue.TagsMapEntry
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
-	12, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
-	13, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	15, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	16, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
-	6,  // 4: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
-	8,  // 5: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
-	7,  // 6: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
-	12, // 7: syncplane.testdata.v1.Widget.choice_settings:type_name -> syncplane.testdata.v1.Settings
-	4,  // 8: syncplane.testdata.v1.OneofNestedTextEntity.holder:type_name -> syncplane.testdata.v1.TextHolder
-	9,  // 9: syncplane.testdata.v1.OneofRefEntity.project:type_name -> syncplane.testdata.v1.Project
-	10, // 10: syncplane.testdata.v1.OneofRefEntity.user:type_name -> syncplane.testdata.v1.User
-	9,  // 11: syncplane.testdata.v1.Issue.project:type_name -> syncplane.testdata.v1.Project
-	11, // 12: syncplane.testdata.v1.Issue.blocked_by:type_name -> syncplane.testdata.v1.Issue
-	10, // 13: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
-	10, // 14: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
-	8,  // 15: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
-	13, // 16: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
-	17, // [17:17] is the sub-list for method output_type
-	17, // [17:17] is the sub-list for method input_type
-	17, // [17:17] is the sub-list for extension type_name
-	17, // [17:17] is the sub-list for extension extendee
-	0,  // [0:17] is the sub-list for field type_name
+	14, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
+	15, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
+	17, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	18, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	19, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
+	8,  // 5: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
+	10, // 6: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
+	9,  // 7: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
+	14, // 8: syncplane.testdata.v1.Widget.choice_settings:type_name -> syncplane.testdata.v1.Settings
+	2,  // 9: syncplane.testdata.v1.FieldValue.labels:type_name -> syncplane.testdata.v1.StringList
+	15, // 10: syncplane.testdata.v1.FieldValue.attachment:type_name -> syncplane.testdata.v1.Blob
+	6,  // 11: syncplane.testdata.v1.OneofNestedTextEntity.holder:type_name -> syncplane.testdata.v1.TextHolder
+	11, // 12: syncplane.testdata.v1.OneofRefEntity.project:type_name -> syncplane.testdata.v1.Project
+	12, // 13: syncplane.testdata.v1.OneofRefEntity.user:type_name -> syncplane.testdata.v1.User
+	11, // 14: syncplane.testdata.v1.Issue.project:type_name -> syncplane.testdata.v1.Project
+	13, // 15: syncplane.testdata.v1.Issue.blocked_by:type_name -> syncplane.testdata.v1.Issue
+	12, // 16: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
+	12, // 17: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
+	10, // 18: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
+	20, // 19: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
+	21, // 20: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
+	15, // 21: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
+	1,  // 22: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	1,  // 23: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_v1_testdata_proto_init() }
@@ -1511,18 +1784,25 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 		(*Widget_ChoiceSettings)(nil),
 	}
 	file_syncplane_testdata_v1_testdata_proto_msgTypes[1].OneofWrappers = []any{
+		(*FieldValue_Text)(nil),
+		(*FieldValue_Number)(nil),
+		(*FieldValue_Checked)(nil),
+		(*FieldValue_Labels)(nil),
+		(*FieldValue_Attachment)(nil),
+	}
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[3].OneofWrappers = []any{
 		(*OneofKeyEntity_Id)(nil),
 		(*OneofKeyEntity_Other)(nil),
 	}
-	file_syncplane_testdata_v1_testdata_proto_msgTypes[2].OneofWrappers = []any{
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[4].OneofWrappers = []any{
 		(*OneofTextEntity_Body)(nil),
 		(*OneofTextEntity_Plain)(nil),
 	}
-	file_syncplane_testdata_v1_testdata_proto_msgTypes[3].OneofWrappers = []any{
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[5].OneofWrappers = []any{
 		(*OneofNestedTextEntity_Holder)(nil),
 		(*OneofNestedTextEntity_Plain)(nil),
 	}
-	file_syncplane_testdata_v1_testdata_proto_msgTypes[5].OneofWrappers = []any{
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[7].OneofWrappers = []any{
 		(*OneofRefEntity_Project)(nil),
 		(*OneofRefEntity_User)(nil),
 	}
@@ -1532,7 +1812,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   17,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

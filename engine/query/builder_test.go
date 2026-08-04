@@ -89,6 +89,25 @@ var _ = Describe("Builder", func() {
 		Expect(query.Path("settings.color")).To(Equal([]string{"settings", "color"}))
 	})
 
+	It("addresses one map entry, and one variant of its value", func() {
+		w := &testdatav1.Widget{Custom: map[string]*testdatav1.FieldValue{
+			"priority": {Kind: &testdatav1.FieldValue_Number{Number: 5}},
+		}}
+		Expect(matches(query.Gt("custom.priority.number", 3), w)).To(BeTrue())
+		// The variant the entry does not hold is simply not there, so every
+		// comparison on it is false — no cross-variant order to define.
+		Expect(matches(query.Eq("custom.priority.text", "high"), w)).To(BeFalse())
+		Expect(matches(query.IsNotSet("custom.priority.text"), w)).To(BeTrue())
+	})
+
+	It("escapes a dot inside a map key, which a field name never needs", func() {
+		Expect(query.Path(`custom.due\.date.text`)).To(Equal([]string{"custom", "due.date", "text"}))
+		w := &testdatav1.Widget{Custom: map[string]*testdatav1.FieldValue{
+			"due.date": {Kind: &testdatav1.FieldValue_Text{Text: "friday"}},
+		}}
+		Expect(matches(query.Eq(`custom.due\.date.text`, "friday"), w)).To(BeTrue())
+	})
+
 	It("rejects a path that names no field, so a typo is not a silent no-match", func() {
 		_, err := query.Compile(widgetDesc, query.Eq("labl", "hello"))
 		Expect(err).To(MatchError(ContainSubstring(`no field "labl"`)))
