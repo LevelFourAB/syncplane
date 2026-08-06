@@ -693,21 +693,28 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
-			It("serves GetRow from inside a ScanIndex callback (the indexed-query shape)", func() {
-				eachTx(func(tx storage.ReadTx) {
-					var keys []string
-					Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, func(_ []byte, rowKey string) error {
-						keys = append(keys, rowKey)
-						row, err := tx.GetRow("widget", rowKey)
-						if err != nil {
-							return err
-						}
-						Expect(row.Value).To(Equal([]byte("v-" + rowKey)))
-						return nil
-					})).To(Succeed())
-					Expect(keys).To(Equal([]string{"k1", "k2", "k3"}))
-				})
-			})
+			DescribeTable("serves GetRow from inside a ScanIndex callback (the indexed-query shape)",
+				// Both directions, because a descending walk is a different
+				// statement in every adapter and pages a query back from a
+				// `before` cursor with the same re-read per candidate.
+				func(order storage.ScanOrder, want []string) {
+					eachTx(func(tx storage.ReadTx) {
+						var keys []string
+						Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, order, func(_ []byte, rowKey string) error {
+							keys = append(keys, rowKey)
+							row, err := tx.GetRow("widget", rowKey)
+							if err != nil {
+								return err
+							}
+							Expect(row.Value).To(Equal([]byte("v-" + rowKey)))
+							return nil
+						})).To(Succeed())
+						Expect(keys).To(Equal(want))
+					})
+				},
+				Entry("ascending", storage.ScanAsc, []string{"k1", "k2", "k3"}),
+				Entry("descending", storage.ScanDesc, []string{"k3", "k2", "k1"}),
+			)
 
 			It("serves re-entrant reads through a scan longer than one internal batch", func() {
 				// Every spec above scans three rows, which an adapter reading its
@@ -969,7 +976,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 				read("ws1", func(tx storage.ReadTx) {
 					var got []string
-					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0,
+					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0, storage.ScanAsc,
 						func(_ []byte, rowKey string) error {
 							got = append(got, rowKey)
 							return nil
@@ -978,7 +985,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					// An index name is per entity, so the other entity's
 					// identically-named index is untouched.
 					got = nil
-					Expect(tx.ScanIndex("widget", "by_source", nil, nil, 0,
+					Expect(tx.ScanIndex("widget", "by_source", nil, nil, 0, storage.ScanAsc,
 						func(_ []byte, rowKey string) error {
 							got = append(got, rowKey)
 							return nil
@@ -1101,7 +1108,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 						return fmt.Errorf("unexpected row")
 					})).To(Succeed())
 					var got []string
-					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0,
+					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0, storage.ScanAsc,
 						func(_ []byte, rowKey string) error {
 							got = append(got, rowKey)
 							return nil
@@ -2151,14 +2158,33 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			entry := func(idx string, k ...byte) storage.IndexEntry {
 				return storage.IndexEntry{Index: idx, Key: k}
 			}
-			scan := func(tx storage.ReadTx, entity, idx string, lo, hi []byte) []string {
+			scanOrdered := func(tx storage.ReadTx, entity, idx string, lo, hi []byte, order storage.ScanOrder) []string {
 				GinkgoHelper()
 				var got []string
-				Expect(tx.ScanIndex(entity, idx, lo, hi, 0, func(_ []byte, rowKey string) error {
+				Expect(tx.ScanIndex(entity, idx, lo, hi, 0, order, func(_ []byte, rowKey string) error {
 					got = append(got, rowKey)
 					return nil
 				})).To(Succeed())
 				return got
+			}
+			scan := func(tx storage.ReadTx, entity, idx string, lo, hi []byte) []string {
+				GinkgoHelper()
+				return scanOrdered(tx, entity, idx, lo, hi, storage.ScanAsc)
+			}
+			// reversed is what a descending walk of the same range must yield,
+			// element for element — the property the specs below assert rather
+			// than restating each expected list by hand.
+			reversed := func(in []string) []string {
+				if len(in) == 0 {
+					// The scan helper appends into a nil slice, so an empty
+					// range comes back nil and must be mirrored as nil.
+					return nil
+				}
+				out := make([]string, 0, len(in))
+				for i := len(in) - 1; i >= 0; i-- {
+					out = append(out, in[i])
+				}
+				return out
 			}
 
 			It("reads an index nobody has written as empty", func() {
@@ -2210,11 +2236,67 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 				read("ws1", func(tx storage.ReadTx) {
 					var got []string
-					Expect(tx.ScanIndex("widget", "by_label", nil, nil, 2, func(_ []byte, rowKey string) error {
+					Expect(tx.ScanIndex("widget", "by_label", nil, nil, 2, storage.ScanAsc, func(_ []byte, rowKey string) error {
 						got = append(got, rowKey)
 						return nil
 					})).To(Succeed())
 					Expect(got).To(Equal([]string{"k1", "k2"}))
+				})
+			})
+
+			Describe("descending", func() {
+				// A descending walk is what pages a query back from a `before`
+				// cursor. The bounds mean exactly what they mean ascending, so
+				// the only thing that moves is the yield order and the end the
+				// limit takes from.
+				BeforeEach(func() {
+					write("ws1", func(tx storage.WriteTx) {
+						for i, k := range []string{"k1", "k2", "k3", "k4"} {
+							Expect(tx.PutIndexEntries("widget", k, []storage.IndexEntry{
+								entry("by_label", byte(i+1)),
+							})).To(Succeed())
+						}
+						// Two entries at one key: reversing has to reverse the
+						// tiebreak too, or the walk is not a mirror.
+						Expect(tx.PutIndexEntries("widget", "k0", []storage.IndexEntry{
+							entry("by_label", 0x02),
+						})).To(Succeed())
+					})
+				})
+
+				It("yields the exact mirror of the ascending walk", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						asc := scan(tx, "widget", "by_label", nil, nil)
+						Expect(scanOrdered(tx, "widget", "by_label", nil, nil, storage.ScanDesc)).
+							To(Equal(reversed(asc)))
+					})
+				})
+
+				It("keeps lo inclusive and hi exclusive", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						for _, b := range [][2][]byte{
+							{{0x02}, {0x04}},
+							{{0x02}, nil},
+							{nil, {0x03}},
+							{{0x09}, nil},
+						} {
+							asc := scan(tx, "widget", "by_label", b[0], b[1])
+							Expect(scanOrdered(tx, "widget", "by_label", b[0], b[1], storage.ScanDesc)).
+								To(Equal(reversed(asc)), "lo=%v hi=%v", b[0], b[1])
+						}
+					})
+				})
+
+				It("takes the limit from the hi end", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						var got []string
+						Expect(tx.ScanIndex("widget", "by_label", nil, nil, 2, storage.ScanDesc,
+							func(_ []byte, rowKey string) error {
+								got = append(got, rowKey)
+								return nil
+							})).To(Succeed())
+						Expect(got).To(Equal([]string{"k4", "k3"}))
+					})
 				})
 			})
 
@@ -2407,7 +2489,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				read("ws1", func(tx storage.ReadTx) {
 					stop := errors.New("stop")
 					seen := 0
-					err := tx.ScanIndex("widget", "by_label", nil, nil, 0, func([]byte, string) error {
+					err := tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func([]byte, string) error {
 						seen++
 						return stop
 					})
@@ -2634,7 +2716,7 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 			})
 			readFrom(b, "ws1", func(tx storage.ReadTx) {
 				var got []string
-				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, func(_ []byte, rowKey string) error {
+				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
 					got = append(got, rowKey)
 					return nil
 				})).To(Succeed())
@@ -2650,7 +2732,7 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 			})
 			readFrom(a, "ws1", func(tx storage.ReadTx) {
 				var got []string
-				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, func(_ []byte, rowKey string) error {
+				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
 					got = append(got, rowKey)
 					return nil
 				})).To(Succeed())

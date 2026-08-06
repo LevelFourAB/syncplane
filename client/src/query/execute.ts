@@ -48,8 +48,10 @@ import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import { foldTextLog, type Row } from '../read.js';
-import type { CompiledQuery, Cond } from './ast.js';
+import type { CompiledQuery, Cond, PageWindow } from './ast.js';
 import { compareRows, evalCond } from './evaluate.js';
+import { upperBound } from './indexkey.js';
+import type { IndexRange, QueryPlan } from './plan.js';
 import { planQuery } from './plan.js';
 
 /**
@@ -78,8 +80,10 @@ export interface IndexedRow<T> {
 /** An index-served page, with the matches it was cut from. */
 export interface IndexedPage<T> {
 	rows: IndexedRow<T>[];
-	/** Matches before `offset` and `limit`; see RowSet.total. */
+	/** Matches before the page was cut; see RowSet.total. */
 	total: number;
+	/** Whether matches remain past the end `limit` counted from. */
+	hasMore: boolean;
 }
 
 /**
@@ -97,6 +101,7 @@ export async function queryByIndex<D extends DescMessage>(
 	indexes: CompiledIndex[],
 	compiled: CompiledQuery,
 	workspaceId: string | undefined,
+	window?: PageWindow,
 ): Promise<IndexedPage<MessageShape<D>> | undefined> {
 	// A cross-workspace query would need a k-way merge whose tie-break differs
 	// from the scan path's; see the header.
@@ -130,6 +135,7 @@ export async function queryByIndex<D extends DescMessage>(
 		if (record.del) continue; // a local tombstone: shadowed and gone
 		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
 		if (!matches(decoded.value, compiled.where, schema)) continue;
+		if (window && !window.within(decoded.value, key)) continue;
 		// The confirmed base version survives an optimistic edit — it is what a
 		// compare-and-swap writes back — so it is read rather than zeroed. A row
 		// that exists only optimistically has no base, hence 0n. The scan path
@@ -143,7 +149,7 @@ export async function queryByIndex<D extends DescMessage>(
 		});
 	}
 
-	const budget = candidateBudget(compiled, overlayRows.length);
+	const budget = candidateBudget(compiled, overlayRows.length, window);
 	const prefix = indexPositionPrefix(def.name, chosen.name, chosen.specHash, workspaceId);
 	// indexScan yields the KV keys of the records holding each position, which
 	// for an index position is always the c/ row it was computed from.
@@ -155,10 +161,11 @@ export async function queryByIndex<D extends DescMessage>(
 	let beyond = 0;
 
 	for (const range of plan.ranges) {
+		const seek = seekRange(plan, range, window);
 		for await (
 			const cKey of tx.indexScan(
-				range.lo === undefined ? prefix : prefix + range.lo,
-				range.hi === undefined ? successorOf(prefix) : prefix + range.hi,
+				seek.lo === undefined ? prefix : prefix + seek.lo,
+				seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi,
 			)
 		) {
 			if (++walked > MAX_INDEX_CANDIDATES) return undefined;
@@ -199,6 +206,10 @@ export async function queryByIndex<D extends DescMessage>(
 			// answering from a row that is not there would be silent and wrong.
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, plan.residual, schema)) continue;
+			// The seek bound deliberately drops the cursor's row-key half, so
+			// the boundary position is inside the range and this is what rejects
+			// it — the seek narrows, the comparison decides.
+			if (window && !window.within(entry.row.value, key)) continue;
 			if (settled) beyond++;
 			else confirmed.push(entry);
 		}
@@ -213,9 +224,56 @@ export async function queryByIndex<D extends DescMessage>(
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
 	const total = out.length + beyond;
+	if (compiled.limit !== undefined && window?.backward) {
+		// A backward page takes its limit from the END of the bounded range.
+		// `beyond` is always 0 here — candidateBudget declines to settle early
+		// for one — so `out` is the whole match set and the tail of it is the
+		// page.
+		return out.length > compiled.limit
+			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true }
+			: { rows: out, total, hasMore: false };
+	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
-	return { rows: start !== 0 || end !== undefined ? out.slice(start, end) : out, total };
+	return {
+		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+		total,
+		hasMore: end !== undefined && total > end,
+	};
+}
+
+/**
+ * Narrows one range of an ordered plan to the part of it the page's cursors can
+ * still contain. It returns the range unchanged for a plan that is not ordered,
+ * for a plan with several ranges (which have no shared prefix to compose with),
+ * and for a query with no cursors.
+ *
+ * The bound is the plan's equality prefix followed by the cursor's components,
+ * whose row-key half is dropped on purpose: an index may carry components past
+ * the order keys, and a bound running on into the row key would not be a prefix
+ * of any entry in such an index. The boundary position it therefore admits is
+ * rejected by the exact comparison in the walk.
+ */
+function seekRange(plan: QueryPlan, range: IndexRange, window?: PageWindow): IndexRange {
+	if (
+		!plan.ordered || plan.ranges.length !== 1 || plan.prefix === undefined || window === undefined
+	) {
+		return range;
+	}
+	let { lo, hi } = range;
+	if (window.seek.after !== undefined) {
+		// Inclusive, because rows tying with the cursor on every order key sit
+		// at exactly this position and some of them sort after it.
+		const at = plan.prefix + window.seek.after;
+		if (lo === undefined || lo < at) lo = at;
+	}
+	if (window.seek.before !== undefined) {
+		// upperBound rather than the position itself, for the mirror reason: the
+		// tie group at the boundary has to stay inside an exclusive end.
+		const at = upperBound(plan.prefix + window.seek.before);
+		if (at !== undefined && (hi === undefined || hi > at)) hi = at;
+	}
+	return { lo, hi };
 }
 
 /**
@@ -226,8 +284,16 @@ export async function queryByIndex<D extends DescMessage>(
  * `overlayCount` rows ahead of it disappear — and only the overlay can remove
  * one, by shadowing it. So that many is always enough.
  */
-function candidateBudget(compiled: CompiledQuery, overlayCount: number): number | undefined {
+function candidateBudget(
+	compiled: CompiledQuery,
+	overlayCount: number,
+	window: PageWindow | undefined,
+): number | undefined {
 	if (compiled.limit === undefined) return undefined;
+	// A backward page wants the LAST matches of the range, so the first ones the
+	// ordered walk produces are exactly the wrong ones to settle on. The seek
+	// still narrows the range; only the early stop is off.
+	if (window?.backward) return undefined;
 	return (compiled.offset ?? 0) + compiled.limit + overlayCount;
 }
 

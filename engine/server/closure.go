@@ -460,7 +460,9 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 	// de-dupe somewhere else.
 	if pred != nil {
 		discard := func() { seeds = nil }
-		served, err := queryByIndex(tx, info, pred, nil, e.srv.limits, consider, discard)
+		served, err := queryByIndex(tx, info, pred, nil, page{}, e.srv.limits, consider,
+			// No page, so nothing can fill and the walk runs the whole range.
+			func() bool { return false }, discard)
 		if err != nil {
 			return nil, err
 		}
@@ -745,7 +747,7 @@ func (e *rowEmitter) followReverseIndexed(
 	// answer.
 	seen := 0
 	overflow := errors.New("index candidate bound")
-	err = tx.ScanIndex(rr.sourceEntity, ci.name, lo, hi, 0, func(_ []byte, rowKey string) error {
+	err = tx.ScanIndex(rr.sourceEntity, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
 		seen++
 		if seen > limits.maxIndexScanCandidates() {
 			return overflow

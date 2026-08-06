@@ -95,6 +95,57 @@ var _ = Describe("ViewTx.Query", func() {
 		Expect(run(query.Spec{OrderBy: order, Offset: 5})).To(BeEmpty())
 	})
 
+	Describe("paging an ordering by cursor", func() {
+		order := []*syncplanev1.OrderKey{query.Asc("count")}
+
+		// cursorAt is the position of the row `spec` returns last, as the RPC
+		// would hand it back — the in-process caller's cursor comes from the
+		// same place.
+		cursorAt := func(spec query.Spec) []byte {
+			GinkgoHelper()
+			spec.OrderBy = order
+			resp, err := srv.Query(ctx, connect.NewRequest(&syncplanev1.QueryRequest{
+				WorkspaceId: ws,
+				Entity:      "widget",
+				OrderBy:     order,
+				Limit:       uint32(spec.Limit),
+				Offset:      uint32(spec.Offset),
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetEndCursor()).NotTo(BeEmpty())
+			return resp.Msg.GetEndCursor()
+		}
+
+		It("continues from an After cursor", func() {
+			Expect(run(query.Spec{OrderBy: order, After: cursorAt(query.Spec{Limit: 1})})).
+				To(Equal([]string{"c", "a"}))
+		})
+
+		It("takes the limit from the Before end", func() {
+			Expect(run(query.Spec{OrderBy: order, Limit: 1, Before: cursorAt(query.Spec{Limit: 3})})).
+				To(Equal([]string{"c"}))
+		})
+
+		It("refuses an Offset alongside a cursor", func() {
+			err := srv.View(ctx, ws, func(tx *server.ViewTx) error {
+				return tx.Query(&testdatav1.Widget{},
+					query.Spec{OrderBy: order, Offset: 1, After: cursorAt(query.Spec{Limit: 1})},
+					func(proto.Message, uint64) error { return nil })
+			})
+			Expect(err).To(MatchError(ContainSubstring("cannot be combined")))
+		})
+
+		It("refuses a cursor from a different ordering", func() {
+			err := srv.View(ctx, ws, func(tx *server.ViewTx) error {
+				return tx.Query(&testdatav1.Widget{},
+					query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Asc("label")},
+						After: cursorAt(query.Spec{Limit: 1})},
+					func(proto.Message, uint64) error { return nil })
+			})
+			Expect(err).To(MatchError(query.ErrCursorShape))
+		})
+	})
+
 	It("hands back the version a result was written at, for a CAS write", func() {
 		var got *testdatav1.Widget
 		var version uint64

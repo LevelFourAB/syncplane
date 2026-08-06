@@ -109,10 +109,15 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 //		Limit:   20,
 //	}, func(msg proto.Message, version uint64) error { … })
 //
-// The caller's read filter applies (a Trusted view sees every live row), so
-// Offset and Limit count only rows this caller may see. No engine limit caps
-// the result, though, so unlike the RPC a spec with no Limit returns — and
-// holds in memory — every match.
+// The caller's read filter applies (a Trusted view sees every live row), so the
+// page counts only rows this caller may see. No engine limit caps the result,
+// though, so unlike the RPC a spec with no Limit returns — and holds in memory —
+// every match.
+//
+// Page with Spec.After/Before rather than Offset: a cursor names a position in
+// the ordering, so the page is unaffected by rows inserted ahead of it and an
+// index-served ordered query seeks straight to it. A cursor from a different
+// entity or ordering fails with query.ErrCursorShape.
 //
 // A declared secondary index serves the query when one covers its predicate and
 // ordering, making it O(matches). With none — or while an index is still
@@ -145,8 +150,8 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 // result, unlike the Query RPC.
 //
 // visible is nil for a trusted read, in which case everything live matches.
-// Because it is applied inside queryRows, Offset and Limit count only rows the
-// caller may actually see — a filtered row consumes no page budget.
+// Because it is applied inside queryRows, the page counts only rows the caller
+// may actually see — a filtered row consumes no page budget.
 func runQuerySpec(tx storage.ReadTx, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error), limits Limits) ([]qrow, error) {
 	desc := info.msgType.Descriptor()
 	// engine/query writes for the wire, where an unprefixed message is right;
@@ -160,9 +165,16 @@ func runQuerySpec(tx storage.ReadTx, info *entityInfo, spec query.Spec, visible 
 	if err != nil {
 		return nil, fmt.Errorf("server: query %s order: %w", info.name, err)
 	}
-	offset := spec.Offset
-	if offset < 0 {
-		offset = 0
+	if spec.Offset > 0 && (spec.After != nil || spec.Before != nil) {
+		return nil, fmt.Errorf("server: query %s: Offset and After/Before mean different things by a page and cannot be combined", info.name)
+	}
+	after, err := decodeSpecCursor(order, info.name, "After", spec.After)
+	if err != nil {
+		return nil, err
+	}
+	before, err := decodeSpecCursor(order, info.name, "Before", spec.Before)
+	if err != nil {
+		return nil, err
 	}
 	if visible == nil {
 		visible = func(storage.Row) (bool, error) { return true, nil }
@@ -170,7 +182,22 @@ func runQuerySpec(tx storage.ReadTx, info *entityInfo, spec query.Spec, visible 
 	// No emitter: this is an in-process read, so a row that will not decode
 	// surfaces to the Go caller instead of being quarantined out of the result
 	// set.
-	return queryRows(tx, info, predicate, order, offset, spec.Limit, visible, nil, limits)
+	rows, _, err := queryRows(tx, info, predicate, order, pageFor(after, before, spec.Offset, spec.Limit), visible, nil, limits)
+	return rows, err
+}
+
+// decodeSpecCursor unwraps one of a Spec's cursors. Nothing bounds its length
+// here: an in-process caller supplies a cursor the engine itself minted, unlike
+// the RPC path, which caps it before decoding.
+func decodeSpecCursor(order *query.Order, entity, field string, cursor []byte) ([]byte, error) {
+	if len(cursor) == 0 {
+		return nil, nil
+	}
+	entry, err := order.DecodeCursor(entity, cursor)
+	if err != nil {
+		return nil, fmt.Errorf("server: query %s %s: %w", entity, field, err)
+	}
+	return entry, nil
 }
 
 // entityInfoFor resolves the registered entity for msg's descriptor type. It is

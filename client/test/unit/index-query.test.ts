@@ -21,7 +21,7 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import { queryByIndex } from '../../src/query/execute.js';
-import { and, compileQuery, not, type Query } from '../../src/query/index.js';
+import { and, compileQuery, not, type Query, type QueryCursor } from '../../src/query/index.js';
 import { prepareQuery } from '../../src/query/wire.js';
 import type { Row } from '../../src/read.js';
 import {
@@ -624,5 +624,69 @@ describe('index-served local queries', () => {
 				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ], custom: {} },
 			],
 		);
+	});
+
+	describe('keyset paging', () => {
+		// by_state_rank is [state, rank desc], so `state == open` pins the
+		// leading component and `rank desc` is served by the one after it — the
+		// shape that makes a plan ordered, which is the only shape the seek
+		// applies to. What the seek must not change is the answer, so both arms
+		// walk the same pages.
+		const open: Query<Issue> = {
+			where: (i) => i.state.eq('open'),
+			orderBy: (i) => [ i.rank.desc() ],
+			limit: 2,
+		};
+
+		/** Every page of `open`, walked forward with cursors. */
+		async function pageAll(built: boolean): Promise<string[]> {
+			const client = await clientWith(built);
+			try {
+				const keys: string[] = [];
+				let after: QueryCursor | undefined;
+				for (;;) {
+					const page = await run(client, { ...open, after });
+					keys.push(...page.map((r) => r.key));
+					if (!page.hasMore) break;
+					after = page.endCursor;
+				}
+				return keys;
+			} finally {
+				await client.close();
+			}
+		}
+
+		it('walks the same pages from the index as from the scan', async () => {
+			expect(await pageAll(true)).toEqual(await pageAll(false));
+			expect(await pageAll(true)).toEqual([ 'i2', 'i1', 'i4' ]);
+		});
+
+		it('pages backward the same way from both', async () => {
+			const back = async (built: boolean) => {
+				const client = await clientWith(built);
+				try {
+					const last = await run(client, { ...open, offset: 1 });
+					const prev = await run(client, { ...open, before: last.startCursor });
+					return { last: last.map((r) => r.key), prev: prev.map((r) => r.key) };
+				} finally {
+					await client.close();
+				}
+			};
+			expect(await back(true)).toEqual(await back(false));
+			expect(await back(true)).toEqual({ last: [ 'i1', 'i4' ], prev: [ 'i2' ] });
+		});
+
+		it('still serves the query from the index once a cursor is set', async () => {
+			// Without this the parity above would hold trivially, with the index
+			// path quietly declining every cursor query.
+			const client = await clientWith(true);
+			let after: QueryCursor | undefined;
+			try {
+				after = (await run(client, open)).endCursor;
+			} finally {
+				await client.close();
+			}
+			expect(await served(true, { ...open, after })).toBe(true);
+		});
 	});
 });

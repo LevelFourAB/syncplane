@@ -97,6 +97,17 @@ export interface QueryPlan {
 	 * narrower candidate set.
 	 */
 	ordered: boolean;
+	/**
+	 * The encoded equality-pinned components every entry in the range shares. A
+	 * range component is NOT part of it: only the components the range fixes to
+	 * a single value are.
+	 *
+	 * It is what an ordered plan composes a seek bound from — appending a
+	 * cursor's components to it names the position the page resumes at.
+	 * Undefined when the plan produced several ranges, which share no single
+	 * prefix.
+	 */
+	prefix?: string;
 }
 
 /** One candidate index: its name and the encoder over its components. */
@@ -337,7 +348,13 @@ function planAgainst(
 	if (ranges.length > 1 && orderBy !== undefined && orderBy.length > 0) ordered = false;
 
 	return {
-		plan: { index: idx.name, ranges, residual: residualOf(terms, used), ordered },
+		plan: {
+			index: idx.name,
+			ranges,
+			residual: residualOf(terms, used),
+			ordered,
+			...(prefixes.length === 1 ? { prefix: prefixes[0]! } : {}),
+		},
 		score: pinned,
 	};
 }

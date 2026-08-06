@@ -1204,7 +1204,7 @@ func entriesOf(store storage.Adapter, entity, index string) []string {
 	GinkgoHelper()
 	var out []string
 	Expect(store.WithReadTx(context.Background(), ws, func(tx storage.ReadTx) error {
-		return tx.ScanIndex(entity, index, nil, nil, 0, func(_ []byte, rowKey string) error {
+		return tx.ScanIndex(entity, index, nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
 			out = append(out, rowKey)
 			return nil
 		})
@@ -1217,7 +1217,7 @@ func indexKeysOf(store storage.Adapter, entity, index string) []string {
 	GinkgoHelper()
 	var out []string
 	Expect(store.WithReadTx(context.Background(), ws, func(tx storage.ReadTx) error {
-		return tx.ScanIndex(entity, index, nil, nil, 0, func(entry []byte, _ string) error {
+		return tx.ScanIndex(entity, index, nil, nil, 0, storage.ScanAsc, func(entry []byte, _ string) error {
 			out = append(out, string(entry))
 			return nil
 		})

@@ -22,6 +22,8 @@ export function toWirePaths(schema: DescMessage, compiled: CompiledQuery): Compi
 	}
 	if (compiled.limit !== undefined) out.limit = compiled.limit;
 	if (compiled.offset !== undefined) out.offset = compiled.offset;
+	if (compiled.after !== undefined) out.after = compiled.after;
+	if (compiled.before !== undefined) out.before = compiled.before;
 	return out;
 }
 
@@ -115,6 +117,17 @@ export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): Comp
 	}
 	if (compiled.limit !== undefined) out.limit = compiled.limit;
 	if (compiled.offset !== undefined) out.offset = compiled.offset;
+	if (compiled.after !== undefined) out.after = compiled.after;
+	if (compiled.before !== undefined) out.before = compiled.before;
+	if ((out.offset ?? 0) > 0 && (out.after !== undefined || out.before !== undefined)) {
+		// The two describe a page in incompatible terms — a rank and a position
+		// — so any resolution here would be an invention. Failing says which of
+		// them to drop.
+		throw new Error(
+			'query: offset cannot be combined with after/before; page with the cursors, '
+				+ 'or drop them to page by rank',
+		);
+	}
 	return out;
 }
 

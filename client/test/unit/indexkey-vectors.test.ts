@@ -17,6 +17,7 @@ import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/t
 import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import type { OrderKey, Path } from '../../src/query/ast.js';
+import { cursorToBytes, OrderCursors } from '../../src/query/cursor.js';
 import { compareRows } from '../../src/query/evaluate.js';
 import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
 import { planQuery } from '../../src/query/plan.js';
@@ -46,6 +47,23 @@ interface OrderCase {
 	want: string[];
 }
 
+/**
+ * A query cursor: its bytes, its shape, and the two properties after/before
+ * rest on. Unlike an index entry a cursor crosses the wire, so the Go loader
+ * (engine/query/indexkey_test.go) asserts the same literals against the same
+ * rows.
+ */
+interface CursorCase {
+	name: string;
+	type?: string;
+	entity: string;
+	orderBy: { path: Path; desc: boolean }[];
+	rows: { key: string; row: JsonValue }[];
+	shape: string;
+	cursors: Record<string, string>;
+	want: string[];
+}
+
 const vectorsPath = join(
 	dirname(fileURLToPath(import.meta.url)),
 	'../../../testdata/indexkey/vectors.json',
@@ -53,6 +71,7 @@ const vectorsPath = join(
 const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as {
 	encodeCases: EncodeCase[];
 	orderCases: OrderCase[];
+	cursorCases: CursorCase[];
 };
 
 // Planner vectors also cover FieldHistory, the engine's own history entity:
@@ -83,6 +102,7 @@ describe('indexkey conformance vectors', () => {
 	it('has cases', () => {
 		expect(vectors.encodeCases.length).toBeGreaterThan(0);
 		expect(vectors.orderCases.length).toBeGreaterThan(0);
+		expect(vectors.cursorCases.length).toBeGreaterThan(0);
 	});
 
 	describe('encode', () => {
@@ -131,7 +151,64 @@ describe('indexkey conformance vectors', () => {
 			});
 		}
 	});
+
+	describe('cursor', () => {
+		for (const tc of vectors.cursorCases) {
+			it(tc.name, () => {
+				const schema = schemaFor(tc.type);
+				// Vector paths are proto field names; an order key addresses
+				// localNames, which is what prepareQuery hands the evaluator.
+				const orderBy: OrderKey[] = tc.orderBy.map((k) => ({
+					path: localPathOf(schema, k.path),
+					dir: k.desc ? 'desc' : 'asc',
+				}));
+				const cursors = new OrderCursors(schema, orderBy);
+				expect(cursors.shape(tc.entity)).toBe(tc.shape);
+
+				const rows = tc.rows.map((r) => {
+					const value = fromJson(schema, r.row);
+					expect(toHex(fromBase64UrlForTest(cursors.encode(tc.entity, value, r.key))))
+						.toBe(tc.cursors[r.key]);
+					return {
+						key: r.key,
+						value,
+						version: 0n,
+						workspaceId: 'ws',
+						entry: cursors.entryOf(value, r.key),
+					};
+				});
+
+				const byCursor = [ ...rows ].sort((a, b) => a.entry < b.entry ? -1 : a.entry > b.entry ? 1 : 0);
+				expect(byCursor.map((r) => r.key)).toEqual(tc.want);
+
+				// after/before are a key comparison against one row's cursor, so
+				// each has to select exactly what the comparator ranks that way.
+				for (const pivot of byCursor) {
+					const after: string[] = [];
+					const before: string[] = [];
+					for (const r of byCursor) {
+						const c = compareRows(r, pivot, orderBy, schema);
+						if (c > 0) after.push(r.key);
+						else if (c < 0) before.push(r.key);
+					}
+					expect(byCursor.filter((r) => r.entry > pivot.entry).map((r) => r.key))
+						.toEqual(after);
+					expect(byCursor.filter((r) => r.entry < pivot.entry).map((r) => r.key))
+						.toEqual(before);
+				}
+			});
+		}
+	});
 });
+
+/** The framed cursor bytes behind a base64url token, for comparing against the
+ * hex the vectors pin. */
+function fromBase64UrlForTest(token: string): string {
+	const bytes = cursorToBytes(token as never);
+	let out = '';
+	for (const b of bytes) out += String.fromCharCode(b);
+	return out;
+}
 
 interface ProbeCase {
 	name: string;

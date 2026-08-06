@@ -13,6 +13,7 @@
 //     compiler checking that the number belongs to that enum.
 
 import type { Cond, OrderKey, Scalar } from './ast.js';
+import type { QueryCursor } from './cursor.js';
 
 /** Fields that can appear in orderBy. */
 export interface OrderOps {
@@ -227,5 +228,31 @@ export interface Query<M> {
 	where?: (w: QueryRef<M>) => Cond;
 	orderBy?: (w: QueryRef<M>) => OrderKey[];
 	limit?: number;
+	/**
+	 * Rows to skip after ordering — the way to jump to an arbitrary rank, which
+	 * a cursor structurally cannot do. For walking pages in sequence prefer
+	 * `after`/`before`: an offset re-does the work of every page before it, and
+	 * a row inserted ahead of the page shifts every later one. Setting it
+	 * alongside either cursor throws.
+	 */
 	offset?: number;
+	/**
+	 * Exclusive lower bound: only rows sorting strictly after this position are
+	 * returned. Take it from an earlier result of the SAME query — its
+	 * `endCursor` to step forward, its `startCursor` to bound the page below —
+	 * and `limit` then counts forward from it.
+	 *
+	 * A cursor is tied to the (entity, orderBy) pair it was issued under; one
+	 * replayed against a different entity or ordering throws CursorShapeError.
+	 */
+	after?: QueryCursor;
+	/**
+	 * Exclusive upper bound, with the same rules as `after`.
+	 *
+	 * With `before` alone, `limit` counts BACKWARD from it, so passing a
+	 * result's `startCursor` returns the page preceding it. With both bounds set
+	 * the query reads a bounded range and `limit` counts forward from `after`.
+	 * Rows come back in `orderBy` order whichever bounds are set.
+	 */
+	before?: QueryCursor;
 }

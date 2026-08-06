@@ -42,8 +42,27 @@ Nothing in the API hints at either:
   `Limit` holds every match in memory. Inside `EntityTx` the scan also runs
   while the workspace write lock is held.
 
+## Paging
+
+`Spec.After`/`Spec.Before` take the same opaque cursors the `Query` RPC issues —
+a position in the ordering rather than a count of rows to discard — so a page is
+stable while rows are inserted ahead of it and an index-served ordered query
+seeks to it instead of walking past everything before. `Limit` counts forward
+from `After`, and backward from `Before` when that is the only bound.
+
+```go
+spec := query.Spec{OrderBy: []*syncplanev1.OrderKey{query.Desc("created_at_ms")}, Limit: 50}
+spec.After = cursorFromTheLastPage // an earlier response's end_cursor
+```
+
+Mint one with `Order.EncodeCursor`, or take it off a `QueryResponse`. A cursor is
+tied to the `(entity, order_by)` pair it was issued under, and one replayed
+against a different pair fails with `query.ErrCursorShape`. `Offset` is still
+there for jumping to an arbitrary rank, which a cursor cannot name; setting it
+alongside either cursor is an error.
+
 `ViewTx` and `ApplyTx` apply the caller's `ReadFilter` — a filtered row is
-absent from the result, and `Offset`/`Limit` count only rows the caller
+absent from the result, and the page counts only rows the caller
 may see. `EntityTx` does not: its reads are server-authoritative, like a
 mutator's. A read marked `server.Trusted(ctx)` skips the filter everywhere.
 

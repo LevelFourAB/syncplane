@@ -6,6 +6,8 @@
 // be JSON-serializable, but `bigint` values need a JSON replacer (not
 // implemented yet).
 
+import type { QueryCursor } from './cursor.js';
+
 /** A nested field path as JS localName segments. */
 export type Path = string[];
 
@@ -42,4 +44,31 @@ export interface CompiledQuery {
 	orderBy?: OrderKey[];
 	limit?: number;
 	offset?: number;
+	after?: QueryCursor;
+	before?: QueryCursor;
+}
+
+/**
+ * A compiled query's cursor bounds, resolved against its schema and entity —
+ * what the evaluator and the index walk test rows against.
+ *
+ * It is stated here as a plain interface rather than as the class that builds
+ * it (see query/cursor.ts) so the evaluator needs no dependency on the cursor
+ * encoding, which is itself built on the evaluator.
+ */
+export interface PageWindow {
+	/** Whether the row at this value and key falls strictly inside the bounds. */
+	within(value: unknown, key: string): boolean;
+	/** Whether `limit` counts back from the `before` bound rather than forward
+	 * from `after` — what makes `before` alone mean "the page before this one". */
+	backward: boolean;
+	/**
+	 * Each bound as the encoded position it names, WITHOUT the row-key tiebreak
+	 * — what an index seek composes with the plan's equality prefix. Absent for
+	 * an open end.
+	 *
+	 * It is only ever a narrowing: `within` stays the definition, because a
+	 * bound that stopped before the row key admits the tie group at the boundary.
+	 */
+	seek: { after?: string; before?: string };
 }

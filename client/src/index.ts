@@ -66,13 +66,14 @@ export {
 	validateKeyField,
 	validateRowKey,
 } from './naming.js';
-export { and, not, or } from './query/index.js';
+export { and, CursorShapeError, not, or } from './query/index.js';
 export type {
 	CompiledQuery,
 	Cond,
 	OrderKey,
 	Path,
 	Query,
+	QueryCursor,
 	QueryRef,
 	Scalar,
 } from './query/index.js';

@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, and whether anything is left to re-check. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does, and only in the direction it declared — which is why the descending read claims the ordering and the ascending one merely narrows.",
+	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, and whether anything is left to re-check. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does, and only in the direction it declared — which is why the descending read claims the ordering and the ascending one merely narrows. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another.",
 	"encodeCases": [
 		{
 			"name": "ascending string",
@@ -1762,6 +1762,353 @@
 						"desc": false
 					}
 				]
+			},
+			"want": [
+				"r2",
+				"r1",
+				"r3"
+			]
+		}
+	],
+	"cursorCases": [
+		{
+			"name": "numbers ascending, with NaN then missing last under both directions",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"desc": false
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": -2
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				}
+			],
+			"shape": "a0ede347fbcf2a0c",
+			"cursors": {
+				"r1": "016130656465333437666263663261306301c01400000000000072310000",
+				"r2": "0161306564653334376662636632613063ff72320000",
+				"r3": "0161306564653334376662636632613063013fffffffffffffff72330000",
+				"r4": "0161306564653334376662636632613063fd72340000",
+				"r5": "016130656465333437666263663261306301c01400000000000072350000"
+			},
+			"want": [
+				"r3",
+				"r1",
+				"r5",
+				"r4",
+				"r2"
+			]
+		},
+		{
+			"name": "the same values descending, where the ranks still sort last",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"desc": true
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"settings": {
+							"ratio": 5
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"settings": {
+							"ratio": -2
+						}
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"settings": {
+							"ratio": "NaN"
+						}
+					}
+				}
+			],
+			"shape": "853d3ea12f89201e",
+			"cursors": {
+				"r1": "0138353364336561313266383932303165013febffffffffffff72310000",
+				"r2": "0138353364336561313266383932303165ff72320000",
+				"r3": "013835336433656131326638393230316501c00000000000000072330000",
+				"r4": "0138353364336561313266383932303165fd72340000"
+			},
+			"want": [
+				"r1",
+				"r3",
+				"r4",
+				"r2"
+			]
+		},
+		{
+			"name": "strings descending, ties broken by the row key ascending",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"desc": true
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				}
+			],
+			"shape": "343f990c931658e5",
+			"cursors": {
+				"r1": "0133343366393930633933313635386535019dffff72310000",
+				"r2": "0133343366393930633933313635386535019effff72320000",
+				"r3": "0133343366393930633933313635386535019dffff72330000"
+			},
+			"want": [
+				"r1",
+				"r3",
+				"r2"
+			]
+		},
+		{
+			"name": "two keys, the second only deciding a tie on the first",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"desc": false
+				},
+				{
+					"path": [
+						"label"
+					],
+					"desc": true
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"count": 1,
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"count": 1,
+						"label": "b"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"count": 2,
+						"label": "a"
+					}
+				}
+			],
+			"shape": "f1290a6f4302aa36",
+			"cursors": {
+				"r1": "016631323930613666343330326161333601bff0000000000000019effff72310000",
+				"r2": "016631323930613666343330326161333601bff0000000000000019dffff72320000",
+				"r3": "016631323930613666343330326161333601c000000000000000019effff72330000"
+			},
+			"want": [
+				"r2",
+				"r1",
+				"r3"
+			]
+		},
+		{
+			"name": "an unsigned 64-bit key encodes without the sign bias",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"ubig"
+					],
+					"desc": false
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ubig": "18446744073709551615"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ubig": "1"
+					}
+				}
+			],
+			"shape": "4c3ed9e522368f9c",
+			"cursors": {
+				"r1": "013463336564396535323233363866396301ffffffffffffffff72310000",
+				"r2": "013463336564396535323233363866396301000000000000000172320000"
+			},
+			"want": [
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "a collaborative text key, which an index may not carry",
+			"entity": "widget",
+			"orderBy": [
+				{
+					"path": [
+						"body"
+					],
+					"desc": false
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"body": "AQEBcAYBAAEGBgZiYW5hbmEA"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"body": "AQEBcAUBAAEFBgVhcHBsZQA="
+					}
+				}
+			],
+			"shape": "0cf001546d070acf",
+			"cursors": {
+				"r1": "01306366303031353436643037306163660162616e616e61000072310000",
+				"r2": "0130636630303135343664303730616366016170706c65000072320000"
+			},
+			"want": [
+				"r2",
+				"r1"
+			]
+		},
+		{
+			"name": "one entry of a map, addressed by key",
+			"type": "issue",
+			"entity": "issue",
+			"orderBy": [
+				{
+					"path": [
+						"custom",
+						"priority",
+						"number"
+					],
+					"desc": false
+				}
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"custom": {
+							"priority": {
+								"number": 3
+							}
+						}
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"custom": {
+							"priority": {
+								"number": 1
+							}
+						}
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"custom": {
+							"team": {
+								"number": 9
+							}
+						}
+					}
+				}
+			],
+			"shape": "f50d09c7c8ed3b0b",
+			"cursors": {
+				"r1": "016635306430396337633865643362306201c00800000000000072310000",
+				"r2": "016635306430396337633865643362306201bff000000000000072320000",
+				"r3": "0166353064303963376338656433623062ff72330000"
 			},
 			"want": [
 				"r2",

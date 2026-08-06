@@ -60,8 +60,49 @@ yet pushed comes back without that edit. It needs connectivity, and read filters
 always apply.
 
 Unless an index serves it, the query costs a full entity scan on the server
-(bounded in memory to `offset + limit`). Prefer a selective predicate over deep
+(bounded in memory to the page). Prefer a selective predicate over deep
 pagination.
+
+## Paging
+
+Page with `after`/`before` rather than `offset`. They are opaque cursors naming a
+POSITION in the ordering, so the next page is unaffected by rows inserted ahead
+of it — where an offset would repeat or skip a row — and the server can seek to
+that position instead of counting past everything before it.
+
+```ts
+let after: QueryCursor | undefined;
+for (;;) {
+	const page = await client.db.issue.query({
+		orderBy: (i) => [ i.createdAtMs.desc() ],
+		limit: 50,
+		after,
+	});
+	render(page);
+	if (!page.hasMore) break;
+	after = page.endCursor;
+}
+```
+
+Every result carries `startCursor`, `endCursor` and `hasMore` (all
+non-enumerable, like `coverage` and `total`). Pass `endCursor` back as `after`
+to step forward and `startCursor` as `before` to step back — with `before`
+alone, `limit` counts backward from it, so it returns the page preceding the one
+the cursor came from. Setting both reads a bounded range, and `total` then counts
+the matches inside it.
+
+A cursor is a base64url string: it survives `JSON.stringify` and drops into a
+URL, which is what a pager actually does with one. It is tied to the entity and
+the ordering it was issued under; replaying it against a different one is an
+error rather than a wrong page, so a query whose `orderBy` changed needs a fresh
+cursor. `queryServer` and `query` mint and accept the same cursors, so a page
+started against the server can continue locally and the other way round.
+
+`offset` stays for the one thing keyset paging structurally cannot do: jump to an
+arbitrary rank, which is what dragging a scrollbar into row 8000 asks for. It is
+capped by `MaxQueryOffset` on the server and costs what it says — the rows before
+the page are still scanned and compared. Setting it alongside `after` or `before`
+is rejected: the two describe a page in incompatible terms.
 
 ## Making a query cheap
 
@@ -142,6 +183,11 @@ onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
 The watch maintains the whole match set, so `setWindow` is a slice rather than a
 read, and `rows.total` reports how many rows the page was cut from. A move that
 lands on the same rows delivers nothing; `setWindow({})` delivers everything.
+
+This is a different mechanism from `after`/`before`, and they compose: a watch's
+cursors bound what it MATCHES, and the window then slices what is left by rank.
+So a live query with an `after` reports a `total` counting only the rows past
+that position, and `setWindow` moves inside them.
 
 ## Filtering on a list
 

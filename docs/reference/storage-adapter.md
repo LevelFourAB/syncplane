@@ -101,6 +101,13 @@ this is the part an implementer must not get wrong.
     stores them as text or applies a collation answers ordered queries wrongly
     with no error anywhere. `ScanIndex` takes `lo` inclusive and `hi` exclusive;
     a nil bound is open on that end.
+  - **`ScanIndex` walks in either direction.** Its `order` parameter is
+    `ScanAsc` or `ScanDesc`, and the bounds mean the same thing under both — so
+    a descending walk yields the exact reverse of the ascending one over the
+    same range, and only the end `limit` takes from moves: from `lo` ascending,
+    from `hi` descending. Reading backwards is how a query pages back from a
+    `before` cursor. An adapter that ignores `order` and always walks ascending
+    returns a page of the wrong rows, with no error anywhere.
   - **`PutIndexEntries` replaces the row's whole entry set**, across every
     index — not just the ones named in the call. The caller has no previous row
     value in hand (a PATCH merges into stored bytes, a DELETE has only a key), so

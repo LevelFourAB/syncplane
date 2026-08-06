@@ -50,7 +50,7 @@ import { type DescField, type DescMessage, ScalarType } from '@bufbuild/protobuf
 import { isTextField } from '../mutations.js';
 import type { Row } from '../read.js';
 import { plainTextOf } from '../text/index.js';
-import type { CompiledQuery, Cond, OrderKey, Path, Scalar } from './ast.js';
+import type { CompiledQuery, Cond, OrderKey, PageWindow, Path, Scalar } from './ast.js';
 
 interface Resolved {
 	found: boolean;
@@ -457,31 +457,62 @@ export function compareRows<T>(
 }
 
 /** filter → sort → slice. Input rows are already key-ordered. */
-export function runQuery<T>(rows: Row<T>[], q: CompiledQuery, schema?: DescMessage): Row<T>[] {
-	return runQueryPage(rows, q, schema).rows;
+export function runQuery<T>(
+	rows: Row<T>[],
+	q: CompiledQuery,
+	schema?: DescMessage,
+	window?: PageWindow,
+): Row<T>[] {
+	return runQueryPage(rows, q, schema, window).rows;
 }
 
 /**
- * `runQuery`, with the number of rows that matched before `offset` and `limit`
- * were applied — free here, because the whole match set exists either way.
+ * `runQuery`, with the number of rows that matched before the page was cut and
+ * whether any were left over — both free here, because the whole match set
+ * exists either way.
+ *
+ * `window` is the query's cursor bounds (see pageWindowOf). Rows outside them
+ * are not matches at all: `total` counts what is INSIDE the bounds, so a paged
+ * scroller sizes itself against the range it is walking.
  */
 export function runQueryPage<T>(
 	rows: Row<T>[],
 	q: CompiledQuery,
 	schema?: DescMessage,
-): { rows: Row<T>[]; total: number } {
+	window?: PageWindow,
+): { rows: Row<T>[]; total: number; hasMore: boolean } {
 	let out = q.where
 		? rows.filter((r) => evalCond(r.value, q.where as Cond, schema))
 		: rows.slice();
+	if (window) out = out.filter((r) => window.within(r.value, r.key));
 	if (q.orderBy && q.orderBy.length > 0) {
 		const orderBy = q.orderBy;
 		out = out.sort((a, b) => compareRows(a, b, orderBy, schema));
 	}
 	const total = out.length;
+	return { ...pageOf(out, q, window), total };
+}
+
+/**
+ * Cuts the sorted match set down to the page. A backward page — `before` with
+ * no `after` — takes its limit from the END of the range, which is what makes
+ * it the page PRECEDING the bound; every other page takes offset then limit
+ * from the start. The rows stay in the query's order either way.
+ */
+function pageOf<T>(
+	out: Row<T>[],
+	q: CompiledQuery,
+	window: PageWindow | undefined,
+): { rows: Row<T>[]; hasMore: boolean } {
+	if (q.limit !== undefined && window?.backward) {
+		return out.length > q.limit
+			? { rows: out.slice(out.length - q.limit), hasMore: true }
+			: { rows: out, hasMore: false };
+	}
 	const start = q.offset ?? 0;
 	const end = q.limit !== undefined ? start + q.limit : undefined;
-	if (start !== 0 || end !== undefined) {
-		out = out.slice(start, end);
-	}
-	return { rows: out, total };
+	return {
+		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+		hasMore: end !== undefined && out.length > end,
+	};
 }

@@ -1,4 +1,5 @@
 import type { Subscription } from './gen/syncplane/v1/patch_pb.js';
+import type { QueryCursor } from './query/cursor.js';
 import type { Row } from './read.js';
 
 /**
@@ -49,15 +50,30 @@ export interface Coverage {
 export type RowSet<T> = Row<T>[] & {
 	readonly coverage: Coverage;
 	/**
-	 * Matching rows in the LOCAL store before `offset` and `limit` — what
-	 * `length` would have been without them, and what sizes a scroller over a
+	 * Matching rows in the LOCAL store before the page was cut — what `length`
+	 * would have been without `offset`/`limit`, and what sizes a scroller over a
 	 * paged result. Equal to `length` when the read was not paged.
 	 *
 	 * Local is the operative word: it counts what `coverage` admits, not what
 	 * the server holds. A result bounded by a subscription reports the rows this
-	 * device could see, and reads that number as a workspace-wide total.
+	 * device could see, and reads that number as a workspace-wide total. A query
+	 * carrying `after`/`before` counts the matches INSIDE those bounds, since a
+	 * row outside them is not a match of that query at all.
 	 */
 	readonly total: number;
+	/**
+	 * Positions of the first and last row, for paging on: pass `endCursor` back
+	 * as `after` for the next page, `startCursor` as `before` for the previous
+	 * one. Both undefined when the result is empty.
+	 */
+	readonly startCursor?: QueryCursor;
+	readonly endCursor?: QueryCursor;
+	/**
+	 * Whether matches remain past the end `limit` counted from — after
+	 * `endCursor` for a forward page, before `startCursor` for a backward one.
+	 * False for a read with no limit, which returned everything it matched.
+	 */
+	readonly hasMore: boolean;
 };
 
 /** The coverage of a client that holds everything — full sync. */
@@ -77,23 +93,48 @@ export const UNKNOWN: Coverage = Object.freeze({ complete: false, bounds: [] });
 export type ReadonlyRowSet<T> = readonly Row<T>[] & {
 	readonly coverage: Coverage;
 	readonly total: number;
+	readonly startCursor?: QueryCursor;
+	readonly endCursor?: QueryCursor;
+	readonly hasMore: boolean;
 };
 
 /**
- * Attaches a coverage report and a match total to a result array without
- * disturbing it.
+ * What a read knows about the page it cut, beyond the rows themselves.
  *
- * @param total - Matches before paging. Defaults to `rows.length`, which is
- * correct for every unpaged read; a paged one must pass what it counted.
+ * `total` defaults to `rows.length`, which is correct for every unpaged read; a
+ * paged one passes what it counted. The cursors are omitted by a read that
+ * cannot mint them (a cross-workspace query, whose positions would not be
+ * comparable against one workspace's ordering).
+ */
+export interface PageInfo {
+	total?: number;
+	startCursor?: QueryCursor;
+	endCursor?: QueryCursor;
+	hasMore?: boolean;
+}
+
+/**
+ * Attaches a coverage report and the page's own metadata to a result array
+ * without disturbing it. Every added property is non-enumerable, so the array
+ * still behaves as one everywhere a caller uses it.
  */
 export function withCoverage<T>(
 	rows: Row<T>[],
 	coverage: Coverage,
-	total: number = rows.length,
+	page: PageInfo = {},
 ): RowSet<T> {
+	const hidden = (value: unknown) => ({
+		value,
+		enumerable: false,
+		writable: false,
+		configurable: true,
+	});
 	return Object.defineProperties(rows, {
-		coverage: { value: coverage, enumerable: false, writable: false, configurable: true },
-		total: { value: total, enumerable: false, writable: false, configurable: true },
+		coverage: hidden(coverage),
+		total: hidden(page.total ?? rows.length),
+		startCursor: hidden(page.startCursor),
+		endCursor: hidden(page.endCursor),
+		hasMore: hidden(page.hasMore ?? false),
 	}) as RowSet<T>;
 }
 

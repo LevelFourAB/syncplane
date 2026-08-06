@@ -544,7 +544,13 @@ func (t *pgTx) PutTextFloor(entity, key, field string, vv []byte) error {
 	return err
 }
 
-func (t *pgTx) ScanIndex(entity, index string, lo, hi []byte, limit int, fn func(entry []byte, rowKey string) error) error {
+func (t *pgTx) ScanIndex(
+	entity, index string,
+	lo, hi []byte,
+	limit int,
+	order storage.ScanOrder,
+	fn func(entry []byte, rowKey string) error,
+) error {
 	// The bounds are optional on both ends, and a "compare only if bound"
 	// predicate would defeat the index, so the WHERE clause is built to match
 	// what was given. k is BYTEA, which Postgres compares bytewise — the order
@@ -562,8 +568,15 @@ func (t *pgTx) ScanIndex(entity, index string, lo, hi []byte, limit int, fn func
 		fmt.Fprintf(&where, ` AND k < $%d`, len(args))
 	}
 	args = append(args, limitArg(limit))
+	// The row key is part of the sort so that two entries sharing a key come
+	// out in a fixed order; reversing the walk has to reverse it too, or the
+	// descending scan would not be the exact mirror of the ascending one.
+	orderBy := `k, key`
+	if order == storage.ScanDesc {
+		orderBy = `k DESC, key DESC`
+	}
 	query := fmt.Sprintf(
-		`SELECT k, key FROM index_entries WHERE %s ORDER BY k, key LIMIT $%d`, where.String(), len(args))
+		`SELECT k, key FROM index_entries WHERE %s ORDER BY %s LIMIT $%d`, where.String(), orderBy, len(args))
 
 	type indexRow struct {
 		entry  []byte

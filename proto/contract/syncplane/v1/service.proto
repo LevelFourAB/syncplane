@@ -56,8 +56,9 @@ service SyncService {
 	// merged with local optimistic state and not stored. A declared secondary
 	// index serves the query when one covers its predicate and ordering;
 	// without one it scans and decodes every visible row of the entity per
-	// request, O(entity) in time regardless of limit. Memory is bounded to
-	// offset+limit rows; prefer a selective predicate over deep pagination.
+	// request, O(entity) in time regardless of limit. Memory is bounded to the
+	// page; prefer a selective predicate over deep pagination, and page with
+	// after/before rather than offset.
 	rpc Query(QueryRequest) returns (QueryResponse);
 }
 
@@ -280,7 +281,29 @@ message QueryRequest {
 	// Rows to skip after ordering. The server retains offset+limit rows in
 	// memory, so offsets beyond the server's maximum are rejected (not clamped:
 	// a clamp would silently return the wrong page).
+	//
+	// It is the way to jump to an arbitrary rank, which `after`/`before` cannot
+	// do; for walking pages in sequence those are cheaper and stable, and
+	// setting an offset alongside either is rejected.
 	uint32 offset = 7;
+	// Exclusive lower bound: only rows sorting strictly after this position are
+	// returned. Opaque bytes from a prior QueryResponse of the SAME query — its
+	// end_cursor to step forward, its start_cursor to bound the page below.
+	//
+	// A cursor is tied to the (entity, order_by) pair it was issued under; one
+	// replayed against a different entity or ordering is INVALID_ARGUMENT, as
+	// is one sent alongside a non-zero offset. `limit` counts forward from this
+	// bound.
+	bytes after = 8;
+	// Exclusive upper bound: only rows sorting strictly before this position
+	// are returned. Same rules as `after`.
+	//
+	// With `before` alone, `limit` counts BACKWARD from this bound, so passing
+	// a page's start_cursor returns the page preceding it. With both bounds set
+	// the request reads a bounded range and `limit` counts forward from
+	// `after`. Rows always come back in order_by order whichever bounds are
+	// set.
+	bytes before = 9;
 
 	// Was client_id. Query is a read: it carries no idempotency and no
 	// watermark, and read filters key on workspace and entity, so the server
@@ -296,6 +319,18 @@ message QueryResponse {
 	// The server's schema revision; see PullResponse.schema_revision. A query
 	// answered by a skewed server is otherwise undetectable.
 	string schema_revision = 2;
+	// Positions of the first and last returned row, for paging on. Send
+	// end_cursor as `after` for the next page, start_cursor as `before` for the
+	// previous one. Both are empty when the page is.
+	//
+	// There is no has_previous: under `after` it is "the request had one",
+	// which the caller already knows.
+	bytes start_cursor = 3;
+	bytes end_cursor = 4;
+	// Whether rows remain past the end `limit` counted from — after end_cursor
+	// for a forward page, before start_cursor for a backward one. False for an
+	// unlimited query, which returns everything that matched.
+	bool has_more = 5;
 }
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to

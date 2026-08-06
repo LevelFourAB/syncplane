@@ -23,9 +23,23 @@ type Spec struct {
 	Limit int
 	// Offset drops the first Offset rows of the ordering. It costs what it
 	// says: the rows are still scanned, decoded and compared, so deep paging
-	// re-does the work of every page before it. Prefer a more selective
-	// predicate, or a range condition on the order key ("keyset pagination").
+	// re-does the work of every page before it, and a row inserted ahead of the
+	// page between two requests shifts every later one. Prefer After/Before,
+	// which have neither problem; reach for Offset only to jump to an arbitrary
+	// rank, which a cursor structurally cannot do.
+	//
+	// Setting it together with After or Before is an error.
 	Offset int
+	// After bounds the result to rows sorting strictly after this cursor, and
+	// Before to rows sorting strictly before it. Both are cursors an earlier
+	// run of the SAME query produced (Order.EncodeCursor, or a QueryResponse's
+	// start_cursor/end_cursor); one minted under a different entity or ordering
+	// is rejected with ErrCursorShape rather than answered wrongly.
+	//
+	// Limit counts from the After end, except when only Before is set, where it
+	// counts back from the Before end — so After pages forward and Before pages
+	// back. Both together read a bounded range, paged forward.
+	After, Before []byte
 }
 
 // Value is the set of Go types that can appear as a query literal. Constraining

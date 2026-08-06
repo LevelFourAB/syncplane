@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"strings"
@@ -316,13 +317,28 @@ func (ci *compiledIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
 // what discard is for, and why this function calls it rather than trusting
 // each caller to remember — a false return always leaves the caller exactly
 // where it started, whichever decline it was.
+//
+// # Ordered plans
+//
+// A plan the planner reports Ordered yields rows already in the query's order,
+// which buys two things nothing else can. The walk SEEKS to pg's cursor instead
+// of starting at the range's own bound, and it STOPS as soon as filled reports
+// the page can take no more — so an ordered query costs O(limit) rather than
+// O(range), cursor or not.
+//
+// Both are optimizations over a comparison that stays authoritative: the seek
+// bound deliberately drops the cursor's row-key half (see Order.CursorPrefix),
+// so it can admit rows the cursor excludes, and consider rejects those. The
+// planner has the same relationship with the scan.
 func queryByIndex(
 	tx storage.ReadTx,
 	info *entityInfo,
 	predicate *query.Compiled,
 	order *query.Order,
+	pg page,
 	limits Limits,
 	consider func(storage.Row, *query.Compiled) error,
+	filled func() bool,
 	discard func(),
 ) (bool, error) {
 	// Declining before consider ever ran discards nothing, so applying the rule
@@ -369,8 +385,22 @@ func queryByIndex(
 	seenRows := make(map[string]struct{})
 	seen := 0
 	budget := limits.maxIndexScanCandidates()
+	// A backward page wants the rows nearest its before bound, so an ordered
+	// walk has to come at the range from that end — otherwise stopping early
+	// would stop on the wrong rows.
+	scanOrder := storage.ScanAsc
+	if plan.Ordered && pg.backward {
+		scanOrder = storage.ScanDesc
+	}
 	for _, r := range plan.Ranges {
-		err := tx.ScanIndex(info.name, plan.Index, r.Lo, r.Hi, 0, func(_ []byte, rowKey string) error {
+		lo, hi, err := seekRange(plan, order, pg, r)
+		if err != nil {
+			return false, err
+		}
+		err = tx.ScanIndex(info.name, plan.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
+			if plan.Ordered && filled() {
+				return errPageFilled
+			}
 			seen++
 			if seen > budget {
 				return errIndexBudget
@@ -394,6 +424,9 @@ func queryByIndex(
 			}
 			return consider(row, residual)
 		})
+		if errors.Is(err, errPageFilled) {
+			return true, nil
+		}
 		if errors.Is(err, errIndexBudget) {
 			return decline()
 		}
@@ -404,10 +437,88 @@ func queryByIndex(
 	return true, nil
 }
 
+// seekRange narrows one range of an ordered plan to the part of it the page's
+// cursors can still contain. It returns r unchanged for a plan that is not
+// Ordered, for a plan with several ranges (which have no shared prefix to
+// compose with), and for a page with no cursors.
+//
+// The bound is the plan's equality prefix followed by the cursor's components.
+// Its row-key half is dropped on purpose: an index may carry components past
+// the order keys, and a bound running on into the row key would not be a prefix
+// of any entry in such an index. What that costs is the tie group at the
+// boundary, which the walk reads and consider rejects — the seek narrows, the
+// comparison decides.
+func seekRange(plan *query.Plan, order *query.Order, pg page, r query.Range) (lo, hi []byte, err error) {
+	lo, hi = r.Lo, r.Hi
+	if !plan.Ordered || len(plan.Ranges) != 1 || plan.Prefix == nil || !pg.bounded() {
+		return lo, hi, nil
+	}
+	bound := func(entry []byte) ([]byte, error) {
+		comps, err := order.CursorPrefix(entry)
+		if err != nil {
+			return nil, err
+		}
+		return append(append([]byte(nil), plan.Prefix...), comps...), nil
+	}
+	if pg.after != nil {
+		at, err := bound(pg.after)
+		if err != nil {
+			return nil, nil, err
+		}
+		// Inclusive, because rows tying with the cursor on every order key sit
+		// at exactly this position and some of them sort after it.
+		lo = maxBound(lo, at)
+	}
+	if pg.before != nil {
+		at, err := bound(pg.before)
+		if err != nil {
+			return nil, nil, err
+		}
+		// UpperBound rather than the position itself, for the mirror reason:
+		// the tie group at the boundary has to stay inside an exclusive end.
+		hi = minBound(hi, query.UpperBound(at))
+	}
+	return lo, hi, nil
+}
+
+// maxBound is the tighter of two inclusive lower bounds; nil means "no bound".
+func maxBound(a, b []byte) []byte {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case bytes.Compare(a, b) < 0:
+		return b
+	default:
+		return a
+	}
+}
+
+// minBound is the tighter of two exclusive upper bounds; nil means "no bound".
+func minBound(a, b []byte) []byte {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case bytes.Compare(a, b) > 0:
+		return b
+	default:
+		return a
+	}
+}
+
 // errIndexBudget unwinds a range walk that has considered more candidates than
 // the limit allows. It never escapes queryByIndex: it means "fall back", not
 // "fail".
 var errIndexBudget = errors.New("index candidate budget exhausted")
+
+// errPageFilled unwinds an ordered walk whose page is complete. Like
+// errIndexBudget it never escapes queryByIndex, but it means the opposite: the
+// index answered the query, and the rows past this point are ones the caller
+// would have discarded anyway.
+var errPageFilled = errors.New("query page filled")
 
 // probeRefIndex brackets the entries of a reference index whose target key
 // equals the given key-field values, in the target's declared key-field order.

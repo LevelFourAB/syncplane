@@ -8,11 +8,30 @@ Each of these is a consequence of [the convergence model](convergence-model.md),
 Without an index that serves it, a query scans and decodes **every live row of
 the entity** — `client.query` over the synced rows, and `queryServer` / the
 `Query` RPC / `ViewTx.Query` over the stored ones. Only memory is bounded (to
-`offset + limit`), never the work.
+the page), never the work.
 
 So: a selective predicate beats deep pagination, and a large entity behind a hot
 endpoint will be felt. There is no full-text search; `contains` is a substring
 test per row and is never index-servable.
+
+## Cursors page, offset jumps to a rank
+
+`after`/`before` are the default way to page: a cursor names a POSITION in the
+ordering, so the walk seeks to it and stops once the page is full — O(limit)
+rather than O(offset+limit) on an index-served query — and the page is STABLE.
+An offset counts rows, so a row inserted ahead of the page between two requests
+shifts every rank after it:
+the next page repeats a row the reader already saw, and a delete makes it skip
+one instead. Neither is an error the reader can detect. A cursor is a value in
+the ordering, and inserts and deletes elsewhere do not move it.
+
+What a cursor structurally cannot do is jump to an arbitrary rank. "Row 8000" is
+a count, and nothing in a page boundary expresses one — a scrollbar dragged into
+the middle of a long list is asking exactly that, and it is what `offset` is for
+and why it is capped. The two are mutually exclusive on a
+single request, because a rank and a position describe a page in terms that have
+no common resolution: picking one silently would be an invention, so the
+combination is rejected.
 
 Every result reports `total`, the matches behind it, and locally that is not
 free on an indexed query with a `limit`: the walk can stop reading rows once the

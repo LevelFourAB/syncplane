@@ -102,5 +102,7 @@ export function compileQuery<M>(q: Query<M>): CompiledQuery {
 	if (q.orderBy) out.orderBy = q.orderBy(ref);
 	if (q.limit !== undefined) out.limit = q.limit;
 	if (q.offset !== undefined) out.offset = q.offset;
+	if (q.after !== undefined) out.after = q.after;
+	if (q.before !== undefined) out.before = q.before;
 	return out;
 }

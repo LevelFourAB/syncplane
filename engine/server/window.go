@@ -143,7 +143,7 @@ func (w *compiledWindow) compute(tx storage.ReadTx, e *rowEmitter) ([]storage.Ro
 	// The order path is exactly a Query: same scan, same bounded-memory
 	// max-heap, same total order — which is what keeps "the window" and "the
 	// equivalent query" from drifting apart.
-	rows, err := queryRows(tx, w.info, w.pred, w.order, 0, w.limit, e.readable, e, e.srv.limits)
+	rows, _, err := queryRows(tx, w.info, w.pred, w.order, pageFor(nil, nil, 0, w.limit), e.readable, e, e.srv.limits)
 	if err != nil {
 		return nil, err
 	}

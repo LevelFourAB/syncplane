@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/service.proto.
  */
 export const file_syncplane_v1_service: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIogBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDSKuAQoMUHVsbFJlc3BvbnNlEiIKBXBhdGNoGAEgASgLMhMuc3luY3BsYW5lLnYxLlBhdGNoEhMKC25leHRfY3Vyc29yGAIgASgMEh4KFmxhc3RfYWNrZWRfbXV0YXRpb25faWQYAyABKAQSDQoFcmVzZXQYBCABKAgSEAoIaGFzX21vcmUYBSABKAgSCwoDc2VxGAYgASgEEhcKD3NjaGVtYV9yZXZpc2lvbhgHIAEoCSK4AQoQQm9vdHN0cmFwUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEjEKDXN1YnNjcmlwdGlvbnMYAyADKAsyGi5zeW5jcGxhbmUudjEuU3Vic2NyaXB0aW9uEhkKEXByaW9yaXR5X2VudGl0aWVzGAQgAygJEi0KBnJlc3VtZRgFIAEoCzIdLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXN1bWUiMAoPQm9vdHN0cmFwUmVzdW1lEg4KBmN1cnNvchgBIAEoDBINCgV0b2tlbhgCIAEoDCKPAwoRQm9vdHN0cmFwUmVzcG9uc2USNgoFYmVnaW4YASABKAsyJS5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UuQmVnaW5IABI2CgVjaHVuaxgCIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5DaHVua0gAEjIKA2VuZBgDIAEoCzIjLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5FbmRIABqAAQoFQmVnaW4SDgoGY3Vyc29yGAEgASgMEh4KFmxhc3RfYWNrZWRfbXV0YXRpb25faWQYAiABKAQSCwoDc2VxGAMgASgEEhcKD3NjaGVtYV9yZXZpc2lvbhgEIAEoCRIQCghlbnRpdGllcxgFIAMoCRIPCgdyZXN1bWVkGAYgASgIGkQKBUNodW5rEiUKBHJvd3MYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhQKDHJlc3VtZV90b2tlbhgCIAEoDBoFCgNFbmRCBgoEYm9keSK6AQoMUXVlcnlSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZlbnRpdHkYAyABKAkSKgoJcHJlZGljYXRlGAQgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCghvcmRlcl9ieRgFIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgGIAEoDRIOCgZvZmZzZXQYByABKA1KBAgCEANSCWNsaWVudF9pZCJPCg1RdWVyeVJlc3BvbnNlEiUKBHJvd3MYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhcKD3NjaGVtYV9yZXZpc2lvbhgCIAEoCSJpCg5Xb3Jrc3BhY2VTY29wZRIUCgx3b3Jrc3BhY2VfaWQYASABKAkSDgoGY3Vyc29yGAIgASgMEjEKDXN1YnNjcmlwdGlvbnMYAyADKAsyGi5zeW5jcGxhbmUudjEuU3Vic2NyaXB0aW9uImIKEFN1YnNjcmliZVJlcXVlc3QSEQoJY2xpZW50X2lkGAEgASgJEiwKBnNjb3BlcxgCIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VTY29wZRINCgVsaW1pdBgDIAEoDSK7AQoQV29ya3NwYWNlRHJvcHBlZBI1CgZyZWFzb24YASABKA4yJS5zeW5jcGxhbmUudjEuV29ya3NwYWNlRHJvcHBlZC5SZWFzb24SDwoHbWVzc2FnZRgCIAEoCSJfCgZSZWFzb24SFgoSUkVBU09OX1VOU1BFQ0lGSUVEEAASEAoMUkVBU09OX1JFU0VUEAESGQoVUkVBU09OX0FDQ0VTU19SRVZPS0VEEAISEAoMUkVBU09OX0VSUk9SEAMi0wEKEVN1YnNjcmliZVJlc3BvbnNlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSKgoEcGFnZRgDIAEoCzIaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2VIABITCgljYXVnaHRfdXAYBCABKAhIABIxCgdkcm9wcGVkGAUgASgLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZURyb3BwZWRIABITCgloZWFydGJlYXQYBiABKAhIAEIGCgRib2R5KpEBCg5NdXRhdGlvblN0YXR1cxIfChtNVVRBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIbChdNVVRBVElPTl9TVEFUVVNfQVBQTElFRBABEiMKH01VVEFUSU9OX1NUQVRVU19BTFJFQURZX0FQUExJRUQQAhIcChhNVVRBVElPTl9TVEFUVVNfUkVKRUNURUQQAzLtAgoLU3luY1NlcnZpY2USPQoEUHVzaBIZLnN5bmNwbGFuZS52MS5QdXNoUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdXNoUmVzcG9uc2USPQoEUHVsbBIZLnN5bmNwbGFuZS52MS5QdWxsUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2USTgoJQm9vdHN0cmFwEh4uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlcXVlc3QaHy5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UwARJOCglTdWJzY3JpYmUSHi5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVxdWVzdBofLnN5bmNwbGFuZS52MS5TdWJzY3JpYmVSZXNwb25zZTABEkAKBVF1ZXJ5Ehouc3luY3BsYW5lLnYxLlF1ZXJ5UmVxdWVzdBobLnN5bmNwbGFuZS52MS5RdWVyeVJlc3BvbnNlQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIogBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDSKuAQoMUHVsbFJlc3BvbnNlEiIKBXBhdGNoGAEgASgLMhMuc3luY3BsYW5lLnYxLlBhdGNoEhMKC25leHRfY3Vyc29yGAIgASgMEh4KFmxhc3RfYWNrZWRfbXV0YXRpb25faWQYAyABKAQSDQoFcmVzZXQYBCABKAgSEAoIaGFzX21vcmUYBSABKAgSCwoDc2VxGAYgASgEEhcKD3NjaGVtYV9yZXZpc2lvbhgHIAEoCSK4AQoQQm9vdHN0cmFwUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEjEKDXN1YnNjcmlwdGlvbnMYAyADKAsyGi5zeW5jcGxhbmUudjEuU3Vic2NyaXB0aW9uEhkKEXByaW9yaXR5X2VudGl0aWVzGAQgAygJEi0KBnJlc3VtZRgFIAEoCzIdLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXN1bWUiMAoPQm9vdHN0cmFwUmVzdW1lEg4KBmN1cnNvchgBIAEoDBINCgV0b2tlbhgCIAEoDCKPAwoRQm9vdHN0cmFwUmVzcG9uc2USNgoFYmVnaW4YASABKAsyJS5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UuQmVnaW5IABI2CgVjaHVuaxgCIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5DaHVua0gAEjIKA2VuZBgDIAEoCzIjLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5FbmRIABqAAQoFQmVnaW4SDgoGY3Vyc29yGAEgASgMEh4KFmxhc3RfYWNrZWRfbXV0YXRpb25faWQYAiABKAQSCwoDc2VxGAMgASgEEhcKD3NjaGVtYV9yZXZpc2lvbhgEIAEoCRIQCghlbnRpdGllcxgFIAMoCRIPCgdyZXN1bWVkGAYgASgIGkQKBUNodW5rEiUKBHJvd3MYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhQKDHJlc3VtZV90b2tlbhgCIAEoDBoFCgNFbmRCBgoEYm9keSLZAQoMUXVlcnlSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZlbnRpdHkYAyABKAkSKgoJcHJlZGljYXRlGAQgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCghvcmRlcl9ieRgFIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgGIAEoDRIOCgZvZmZzZXQYByABKA0SDQoFYWZ0ZXIYCCABKAwSDgoGYmVmb3JlGAkgASgMSgQIAhADUgljbGllbnRfaWQiiwEKDVF1ZXJ5UmVzcG9uc2USJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJEhQKDHN0YXJ0X2N1cnNvchgDIAEoDBISCgplbmRfY3Vyc29yGAQgASgMEhAKCGhhc19tb3JlGAUgASgIImkKDldvcmtzcGFjZVNjb3BlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZjdXJzb3IYAiABKAwSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24iYgoQU3Vic2NyaWJlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSLAoGc2NvcGVzGAIgAygLMhwuc3luY3BsYW5lLnYxLldvcmtzcGFjZVNjb3BlEg0KBWxpbWl0GAMgASgNIrsBChBXb3Jrc3BhY2VEcm9wcGVkEjUKBnJlYXNvbhgBIAEoDjIlLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VEcm9wcGVkLlJlYXNvbhIPCgdtZXNzYWdlGAIgASgJIl8KBlJlYXNvbhIWChJSRUFTT05fVU5TUEVDSUZJRUQQABIQCgxSRUFTT05fUkVTRVQQARIZChVSRUFTT05fQUNDRVNTX1JFVk9LRUQQAhIQCgxSRUFTT05fRVJST1IQAyLTAQoRU3Vic2NyaWJlUmVzcG9uc2USFAoMd29ya3NwYWNlX2lkGAEgASgJEhcKD3NjaGVtYV9yZXZpc2lvbhgCIAEoCRIqCgRwYWdlGAMgASgLMhouc3luY3BsYW5lLnYxLlB1bGxSZXNwb25zZUgAEhMKCWNhdWdodF91cBgEIAEoCEgAEjEKB2Ryb3BwZWQYBSABKAsyHi5zeW5jcGxhbmUudjEuV29ya3NwYWNlRHJvcHBlZEgAEhMKCWhlYXJ0YmVhdBgGIAEoCEgAQgYKBGJvZHkqkQEKDk11dGF0aW9uU3RhdHVzEh8KG01VVEFUSU9OX1NUQVRVU19VTlNQRUNJRklFRBAAEhsKF01VVEFUSU9OX1NUQVRVU19BUFBMSUVEEAESIwofTVVUQVRJT05fU1RBVFVTX0FMUkVBRFlfQVBQTElFRBACEhwKGE1VVEFUSU9OX1NUQVRVU19SRUpFQ1RFRBADMu0CCgtTeW5jU2VydmljZRI9CgRQdXNoEhkuc3luY3BsYW5lLnYxLlB1c2hSZXF1ZXN0Ghouc3luY3BsYW5lLnYxLlB1c2hSZXNwb25zZRI9CgRQdWxsEhkuc3luY3BsYW5lLnYxLlB1bGxSZXF1ZXN0Ghouc3luY3BsYW5lLnYxLlB1bGxSZXNwb25zZRJOCglCb290c3RyYXASHi5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVxdWVzdBofLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZTABEk4KCVN1YnNjcmliZRIeLnN5bmNwbGFuZS52MS5TdWJzY3JpYmVSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLlN1YnNjcmliZVJlc3BvbnNlMAESQAoFUXVlcnkSGi5zeW5jcGxhbmUudjEuUXVlcnlSZXF1ZXN0Ghsuc3luY3BsYW5lLnYxLlF1ZXJ5UmVzcG9uc2VCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
 
 /**
  * WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
@@ -586,9 +586,41 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
    * memory, so offsets beyond the server's maximum are rejected (not clamped:
    * a clamp would silently return the wrong page).
    *
+   * It is the way to jump to an arbitrary rank, which `after`/`before` cannot
+   * do; for walking pages in sequence those are cheaper and stable, and
+   * setting an offset alongside either is rejected.
+   *
    * @generated from field: uint32 offset = 7;
    */
   offset: number;
+
+  /**
+   * Exclusive lower bound: only rows sorting strictly after this position are
+   * returned. Opaque bytes from a prior QueryResponse of the SAME query — its
+   * end_cursor to step forward, its start_cursor to bound the page below.
+   *
+   * A cursor is tied to the (entity, order_by) pair it was issued under; one
+   * replayed against a different entity or ordering is INVALID_ARGUMENT, as
+   * is one sent alongside a non-zero offset. `limit` counts forward from this
+   * bound.
+   *
+   * @generated from field: bytes after = 8;
+   */
+  after: Uint8Array;
+
+  /**
+   * Exclusive upper bound: only rows sorting strictly before this position
+   * are returned. Same rules as `after`.
+   *
+   * With `before` alone, `limit` counts BACKWARD from this bound, so passing
+   * a page's start_cursor returns the page preceding it. With both bounds set
+   * the request reads a bounded range and `limit` counts forward from
+   * `after`. Rows always come back in order_by order whichever bounds are
+   * set.
+   *
+   * @generated from field: bytes before = 9;
+   */
+  before: Uint8Array;
 };
 
 /**
@@ -617,6 +649,32 @@ export type QueryResponse = Message<"syncplane.v1.QueryResponse"> & {
    * @generated from field: string schema_revision = 2;
    */
   schemaRevision: string;
+
+  /**
+   * Positions of the first and last returned row, for paging on. Send
+   * end_cursor as `after` for the next page, start_cursor as `before` for the
+   * previous one. Both are empty when the page is.
+   *
+   * There is no has_previous: under `after` it is "the request had one",
+   * which the caller already knows.
+   *
+   * @generated from field: bytes start_cursor = 3;
+   */
+  startCursor: Uint8Array;
+
+  /**
+   * @generated from field: bytes end_cursor = 4;
+   */
+  endCursor: Uint8Array;
+
+  /**
+   * Whether rows remain past the end `limit` counted from — after end_cursor
+   * for a forward page, before start_cursor for a backward one. False for an
+   * unlimited query, which returns everything that matched.
+   *
+   * @generated from field: bool has_more = 5;
+   */
+  hasMore: boolean;
 };
 
 /**
@@ -970,8 +1028,9 @@ export const SyncService: GenService<{
    * merged with local optimistic state and not stored. A declared secondary
    * index serves the query when one covers its predicate and ordering;
    * without one it scans and decodes every visible row of the entity per
-   * request, O(entity) in time regardless of limit. Memory is bounded to
-   * offset+limit rows; prefer a selective predicate over deep pagination.
+   * request, O(entity) in time regardless of limit. Memory is bounded to the
+   * page; prefer a selective predicate over deep pagination, and page with
+   * after/before rather than offset.
    *
    * @generated from rpc syncplane.v1.SyncService.Query
    */

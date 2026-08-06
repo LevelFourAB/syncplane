@@ -283,6 +283,23 @@ type Adapter interface {
 	Close() error
 }
 
+// ScanOrder is the direction an index walk yields entries in.
+type ScanOrder int
+
+const (
+	// ScanAsc yields entries in ascending key order, the zero value.
+	ScanAsc ScanOrder = iota
+	// ScanDesc yields them in descending key order.
+	ScanDesc
+)
+
+func (o ScanOrder) String() string {
+	if o == ScanDesc {
+		return "desc"
+	}
+	return "asc"
+}
+
 // ReadTx is a consistent read view of one workspace.
 //
 // Its scan methods may be re-entered: a scan callback may issue any read on the
@@ -402,9 +419,14 @@ type ReadTx interface {
 	// adapter must store it as durably as the row itself.
 	TextFloor(entity, key, field string) ([]byte, error)
 	// ScanIndex yields the entries one ENTITY holds in one secondary index whose
-	// key falls in [lo, hi), in ascending key order, at most limit entries
-	// (limit <= 0 means unlimited). A nil lo starts at the beginning; a nil hi
-	// runs to the end.
+	// key falls in [lo, hi), at most limit entries (limit <= 0 means
+	// unlimited). A nil lo starts at the beginning; a nil hi runs to the end.
+	//
+	// order is the direction of the yield. The bounds keep their meaning under
+	// both — lo inclusive, hi exclusive — so ScanDesc yields the exact reverse
+	// of what ScanAsc yields over the same range, and only the end limit takes
+	// from moves: from lo under ScanAsc, from hi under ScanDesc. The engine
+	// reads backwards to page a query from its `before` cursor.
 	//
 	// entity is part of the identity of an index, not a filter over a shared
 	// one. Index names are derived from field names, so two entities routinely
@@ -422,7 +444,7 @@ type ReadTx interface {
 	// fn must not assume the row still exists: it does, within this snapshot,
 	// but the caller re-reads it anyway to apply read filters — from INSIDE
 	// this callback, which is why a scan has to tolerate re-entrant reads.
-	ScanIndex(entity, index string, lo, hi []byte, limit int, fn func(entry []byte, rowKey string) error) error
+	ScanIndex(entity, index string, lo, hi []byte, limit int, order ScanOrder, fn func(entry []byte, rowKey string) error) error
 	// IndexState returns the spec fingerprint one entity's stored entries in an
 	// index were built under and whether the build finished. A missing index
 	// reads as ("", false, nil) — not an error, because an index the engine has

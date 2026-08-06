@@ -684,12 +684,114 @@ func sortedMapKeys(fd protoreflect.FieldDescriptor, m protoreflect.Map) []protor
 // to. A position shorter than a component's fan depth means "no element there",
 // which is how a row with an empty collection still gets its single entry.
 func (e *IndexEncoder) encodeAt(msg protoreflect.Message, rowKey string, pos position) []byte {
+	return appendIndexString(e.componentsAt(msg, pos), rowKey)
+}
+
+// componentsAt builds the component half of one entry: everything ahead of the
+// row-key suffix.
+func (e *IndexEncoder) componentsAt(msg protoreflect.Message, pos position) []byte {
 	buf := make([]byte, 0, 16+8*len(e.comps))
 	for _, c := range e.comps {
 		v, found := c.valueAt(msg, pos)
 		buf = appendComponent(buf, c, v, found)
 	}
-	return appendIndexString(buf, rowKey)
+	return buf
+}
+
+// SplitEntry cuts an entry of this index into its component half and its
+// row-key suffix, by walking the components the encoder was built from. It
+// rejects bytes that are not an entry of this index — an unknown tag, a payload
+// that runs off the end, an unterminated string, bytes left over past the row
+// key — which is what makes it usable on input a client supplied.
+//
+// A query cursor's seek bound is the component half alone: an index may carry
+// components past the ordering's keys, and a bound that ran on into the row key
+// would not be a prefix of any entry in such an index.
+func (e *IndexEncoder) SplitEntry(entry []byte) (components, rowKey []byte, err error) {
+	at := 0
+	for i, c := range e.comps {
+		n, err := componentLen(c, entry[at:])
+		if err != nil {
+			return nil, nil, fmt.Errorf("index entry: component %d: %w", i, err)
+		}
+		at += n
+	}
+	n, err := indexStringLen(entry[at:], false)
+	if err != nil {
+		return nil, nil, fmt.Errorf("index entry: row key: %w", err)
+	}
+	if at+n != len(entry) {
+		return nil, nil, fmt.Errorf("index entry: %d bytes left over past the row key", len(entry)-at-n)
+	}
+	return entry[:at], entry[at:], nil
+}
+
+// componentLen is the length of the component encoded at the head of buf,
+// including its tag. The component says which payload shape to expect, so the
+// walk needs no length prefixes in the encoding itself.
+func componentLen(c IndexComponent, buf []byte) (int, error) {
+	if len(buf) == 0 {
+		return 0, fmt.Errorf("entry ends before the tag")
+	}
+	switch buf[0] {
+	case tagNaN, tagMissing:
+		return 1, nil
+	case tagPresent:
+	default:
+		return 0, fmt.Errorf("tag %#02x is none of %#02x, %#02x, %#02x", buf[0], tagPresent, tagNaN, tagMissing)
+	}
+	rest := buf[1:]
+	switch singularKind(c.leafField()) {
+	case rvString:
+		n, err := indexStringLen(rest, c.desc)
+		if err != nil {
+			return 0, err
+		}
+		return 1 + n, nil
+	case rvBool:
+		if len(rest) < 1 {
+			return 0, fmt.Errorf("entry ends inside a bool payload")
+		}
+		return 2, nil
+	case rvNumber, rvBigint:
+		if len(rest) < 8 {
+			return 0, fmt.Errorf("entry ends inside an 8-byte payload")
+		}
+		return 9, nil
+	default:
+		// Unreachable: every component reaching an encoder has a comparable
+		// leaf, and only those four shapes are comparable.
+		return 0, fmt.Errorf("component has no payload shape")
+	}
+}
+
+// indexStringLen is the length of the CESU-8 string at the head of buf,
+// terminator included. inverted is set for a descending component, where every
+// payload byte is complemented — the escape and the terminator among them, so
+// the two bytes the walk looks for flip with it.
+func indexStringLen(buf []byte, inverted bool) (int, error) {
+	term, esc := byte(0x00), byte(0xff)
+	if inverted {
+		term, esc = 0xff, 0x00
+	}
+	for i := 0; i < len(buf); {
+		if buf[i] != term {
+			i++
+			continue
+		}
+		if i+1 >= len(buf) {
+			break
+		}
+		switch buf[i+1] {
+		case term:
+			return i + 2, nil
+		case esc:
+			i += 2
+		default:
+			return 0, fmt.Errorf("byte %#02x follows a string escape", buf[i+1])
+		}
+	}
+	return 0, fmt.Errorf("unterminated string")
 }
 
 // valueAt resolves this component against one position of the encoder's fan
@@ -784,11 +886,10 @@ func UpperBound(prefix []byte) []byte {
 //
 // It is deliberately written in terms both languages state identically (proto
 // field names, a payload-shape word) rather than in each language's own type
-// enum, so client/src/query/indexkey.ts is a literal mirror. Nothing requires
-// the two to agree — an index fingerprint never crosses the wire and each side
-// only ever compares its own stored hash to its own declaration — but a
-// fingerprint that differs between implementations for no reason is a trap
-// for anyone reading them side by side.
+// enum, so client/src/query/indexkey.ts is a literal mirror. The two must
+// agree: a stored index only ever compares its own hash to its own
+// declaration, but Order.Shape folds this hash into a query cursor, and a
+// cursor is minted on one side and replayed on the other.
 func SpecHash(comps []IndexComponent) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "v%d", indexEncodingVersion)
@@ -802,6 +903,13 @@ func SpecHash(comps []IndexComponent) string {
 			if st.fan && st.fd.IsMap() {
 				b.WriteByte('.')
 				b.WriteString(mapFanSegment)
+			}
+			if st.keyed {
+				// Only a cursor's components address one entry by key; an index
+				// path fans out instead, so this leaves every stored index
+				// fingerprint exactly where it was.
+				b.WriteByte('.')
+				b.WriteString(st.mapKey.String())
 			}
 		}
 		leaf := c.leafField()
@@ -857,10 +965,11 @@ func payloadShape(fd protoreflect.FieldDescriptor) string {
 	}
 }
 
-// fingerprint is FNV-1a/64 rendered as 16 hex digits. An index fingerprint
-// only has to CHANGE when the spec does — it never crosses the wire and
-// nothing authenticates against it — so a hash with no dependencies and a
-// synchronous mirror in the client beats a cryptographic one.
+// fingerprint is FNV-1a/64 rendered as 16 hex digits. It only has to CHANGE
+// when what it summarizes does, so a hash with no dependencies and a
+// synchronous mirror in the client beats a cryptographic one. Nothing
+// authenticates against it: a stored index whose hash moved rebuilds, and a
+// query cursor whose shape no longer matches is reissued.
 func fingerprint(s string) string {
 	const (
 		offset uint64 = 14695981039346656037

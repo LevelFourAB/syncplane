@@ -1,6 +1,6 @@
 import { type DescMessage, fromBinary, type MessageShape } from '@bufbuild/protobuf';
 
-import { COMPLETE, type Coverage, type RowSet, withCoverage } from './coverage.js';
+import { COMPLETE, type Coverage, type PageInfo, type RowSet, withCoverage } from './coverage.js';
 import { debugVerifyTouchesEnv } from './env.js';
 import { wsSegment } from './keys.js';
 import type { KVRead, KVStore } from './kv/store.js';
@@ -8,6 +8,8 @@ import type { EntityRegistry } from './mutations.js';
 import type { Mutex } from './mutex.js';
 import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
+import type { PageWindow } from './query/ast.js';
+import { OrderCursors, pageWindowOf } from './query/cursor.js';
 import { queryByIndex } from './query/execute.js';
 import { compareRows, type CompiledQuery, evalCond, runQuery } from './query/index.js';
 import { readMergedRowWithVersion, type Row, scanMergedRows, type ScopedRow } from './read.js';
@@ -165,6 +167,16 @@ interface Watcher {
 	cb: WatchCallback<unknown>;
 	/** When set, rows are filtered/ordered/sliced before the callback fires. */
 	query?: CompiledQuery;
+	/**
+	 * The query's cursor bounds. They bound the MATCH SET — a row outside them
+	 * is not a match — so `total` counts what is inside them and `window` slices
+	 * within that. Undefined when the query carries no cursors.
+	 */
+	bounds?: PageWindow;
+	/** Mints the positions each emitted page reports. Undefined for a
+	 * cross-workspace watcher, whose rows have no single ordering to name a
+	 * position in. */
+	cursors?: OrderCursors;
 	/** When set, result rows are hydrated against this include tree. */
 	include?: IncludeSpec;
 	/**
@@ -367,12 +379,23 @@ export class WatcherHub {
 		if (this.closed) return INERT;
 		const def = this.registry.bySchema(schema);
 		const reaches = this.reachableEntities(def.name, include);
+		if (workspaceId === undefined && (query?.after !== undefined || query?.before !== undefined)) {
+			throw new Error(
+				"watchQueryAll: after/before name a position in one workspace's ordering, "
+					+ 'which a cross-workspace watch has no counterpart for',
+			);
+		}
+		const cursors = workspaceId === undefined
+			? undefined
+			: new OrderCursors(schema, query?.orderBy ?? []);
 		const watcher: Watcher = {
 			schema,
 			entity: def.name,
 			workspaceId,
 			cb: cb as WatchCallback<unknown>,
 			query,
+			bounds: query === undefined ? undefined : pageWindowOf(schema, def.name, query),
+			cursors,
 			include,
 			reaches,
 			compare: comparatorFor(schema, query),
@@ -563,6 +586,7 @@ export class WatcherHub {
 			indexes(watcher.entity),
 			{ where: watcher.query.where, orderBy: watcher.query.orderBy },
 			watcher.workspaceId,
+			watcher.bounds,
 		);
 		if (found === undefined) return undefined;
 		const scoped = this.scopeRows(scanScope(watcher));
@@ -648,14 +672,14 @@ export class WatcherHub {
 			watcher.lastCoverage = coverage;
 			watcher.lastTotal = total;
 			watcher.pending = [];
-			deliver(watcher, withCoverage(hydrated, coverage, total), delta);
+			deliver(watcher, withCoverage(hydrated, coverage, pageInfo(watcher, rows, total, end)), delta);
 			return;
 		}
 		watcher.lastWindow = window;
 		watcher.lastCoverage = coverage;
 		watcher.lastTotal = total;
 		watcher.pending = [];
-		deliver(watcher, withCoverage(rows, coverage, total), delta);
+		deliver(watcher, withCoverage(rows, coverage, pageInfo(watcher, rows, total, end)), delta);
 	}
 
 	private scopeRows(scope: string): ScopeRows {
@@ -718,6 +742,7 @@ export class WatcherHub {
 			scanned,
 			{ where: watcher.query.where, orderBy: watcher.query.orderBy },
 			watcher.schema,
+			watcher.bounds,
 		);
 		const have = watcher.matches.ordered;
 		const describe = (r: Row<unknown>): string => `${r.workspaceId}/${r.key}@${r.version}`;
@@ -859,7 +884,7 @@ function deliver(watcher: Watcher, rows: RowSet<unknown>, delta: WatchDelta<unkn
 
 /** Derives a watcher's whole match set from a scope, given in scan order. */
 function buildMatches(watcher: Watcher, rows: readonly ResultRow[]): MatchSet {
-	const ordered = watcher.query?.where === undefined
+	const ordered = watcher.query?.where === undefined && watcher.bounds === undefined
 		? rows.slice()
 		: rows.filter((r) => admits(watcher, r));
 	if (watcher.query?.orderBy && watcher.query.orderBy.length > 0) {
@@ -868,10 +893,15 @@ function buildMatches(watcher: Watcher, rows: readonly ResultRow[]): MatchSet {
 	return { byId: new Map(ordered.map((r) => [ r.id, r ])), ordered };
 }
 
-/** Whether a watcher's predicate admits a row. */
+/**
+ * Whether a watcher's query admits a row. The cursor bounds are part of that
+ * and not a slice taken afterwards: a row outside them is not a match, so it
+ * never enters the maintained set and never reaches `total`.
+ */
 function admits(watcher: Watcher, row: ResultRow): boolean {
 	const where = watcher.query?.where;
-	return where === undefined || evalCond(row.row.value, where, watcher.schema);
+	if (where !== undefined && !evalCond(row.row.value, where, watcher.schema)) return false;
+	return watcher.bounds === undefined || watcher.bounds.within(row.row.value, row.row.key);
 }
 
 /**
@@ -953,6 +983,29 @@ function touchesInclude(watcher: Watcher, pairs: readonly TouchedPair[]): boolea
 		if (watcher.workspaceId === undefined || watcher.workspaceId === t.workspaceId) return true;
 	}
 	return false;
+}
+
+/**
+ * The page metadata one emit reports: the positions of its first and last row,
+ * plus whether matches remain past the window.
+ *
+ * The window slices the match set by OFFSET even for a query carrying cursors —
+ * the cursors bounded the set, `setWindow` moves inside what they left — so
+ * `hasMore` is about the window's end and nothing else.
+ */
+function pageInfo(
+	watcher: Watcher,
+	rows: readonly Row<unknown>[],
+	total: number,
+	end: number,
+): PageInfo {
+	const info: PageInfo = { total, hasMore: end !== Infinity && total > end };
+	if (watcher.cursors === undefined || rows.length === 0) return info;
+	const first = rows[0]!;
+	const last = rows[rows.length - 1]!;
+	info.startCursor = watcher.cursors.encode(watcher.entity, first.value, first.key);
+	info.endCursor = watcher.cursors.encode(watcher.entity, last.value, last.key);
+	return info;
 }
 
 /** One past the last result index the delivered page can see. */

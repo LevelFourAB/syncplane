@@ -932,7 +932,29 @@ type QueryRequest struct {
 	// Rows to skip after ordering. The server retains offset+limit rows in
 	// memory, so offsets beyond the server's maximum are rejected (not clamped:
 	// a clamp would silently return the wrong page).
-	Offset        uint32 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`
+	//
+	// It is the way to jump to an arbitrary rank, which `after`/`before` cannot
+	// do; for walking pages in sequence those are cheaper and stable, and
+	// setting an offset alongside either is rejected.
+	Offset uint32 `protobuf:"varint,7,opt,name=offset,proto3" json:"offset,omitempty"`
+	// Exclusive lower bound: only rows sorting strictly after this position are
+	// returned. Opaque bytes from a prior QueryResponse of the SAME query — its
+	// end_cursor to step forward, its start_cursor to bound the page below.
+	//
+	// A cursor is tied to the (entity, order_by) pair it was issued under; one
+	// replayed against a different entity or ordering is INVALID_ARGUMENT, as
+	// is one sent alongside a non-zero offset. `limit` counts forward from this
+	// bound.
+	After []byte `protobuf:"bytes,8,opt,name=after,proto3" json:"after,omitempty"`
+	// Exclusive upper bound: only rows sorting strictly before this position
+	// are returned. Same rules as `after`.
+	//
+	// With `before` alone, `limit` counts BACKWARD from this bound, so passing
+	// a page's start_cursor returns the page preceding it. With both bounds set
+	// the request reads a bounded range and `limit` counts forward from
+	// `after`. Rows always come back in order_by order whichever bounds are
+	// set.
+	Before        []byte `protobuf:"bytes,9,opt,name=before,proto3" json:"before,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1009,6 +1031,20 @@ func (x *QueryRequest) GetOffset() uint32 {
 	return 0
 }
 
+func (x *QueryRequest) GetAfter() []byte {
+	if x != nil {
+		return x.After
+	}
+	return nil
+}
+
+func (x *QueryRequest) GetBefore() []byte {
+	if x != nil {
+		return x.Before
+	}
+	return nil
+}
+
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Value changes only (never tombstones), ordered by order_by with ties
@@ -1017,8 +1053,20 @@ type QueryResponse struct {
 	// The server's schema revision; see PullResponse.schema_revision. A query
 	// answered by a skewed server is otherwise undetectable.
 	SchemaRevision string `protobuf:"bytes,2,opt,name=schema_revision,json=schemaRevision,proto3" json:"schema_revision,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Positions of the first and last returned row, for paging on. Send
+	// end_cursor as `after` for the next page, start_cursor as `before` for the
+	// previous one. Both are empty when the page is.
+	//
+	// There is no has_previous: under `after` it is "the request had one",
+	// which the caller already knows.
+	StartCursor []byte `protobuf:"bytes,3,opt,name=start_cursor,json=startCursor,proto3" json:"start_cursor,omitempty"`
+	EndCursor   []byte `protobuf:"bytes,4,opt,name=end_cursor,json=endCursor,proto3" json:"end_cursor,omitempty"`
+	// Whether rows remain past the end `limit` counted from — after end_cursor
+	// for a forward page, before start_cursor for a backward one. False for an
+	// unlimited query, which returns everything that matched.
+	HasMore       bool `protobuf:"varint,5,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *QueryResponse) Reset() {
@@ -1063,6 +1111,27 @@ func (x *QueryResponse) GetSchemaRevision() string {
 		return x.SchemaRevision
 	}
 	return ""
+}
+
+func (x *QueryResponse) GetStartCursor() []byte {
+	if x != nil {
+		return x.StartCursor
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetEndCursor() []byte {
+	if x != nil {
+		return x.EndCursor
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetHasMore() bool {
+	if x != nil {
+		return x.HasMore
+	}
+	return false
 }
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to
@@ -1661,17 +1730,23 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12!\n" +
 	"\fresume_token\x18\x02 \x01(\fR\vresumeToken\x1a\x05\n" +
 	"\x03EndB\x06\n" +
-	"\x04body\"\xf2\x01\n" +
+	"\x04body\"\xa0\x02\n" +
 	"\fQueryRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06entity\x18\x03 \x01(\tR\x06entity\x125\n" +
 	"\tpredicate\x18\x04 \x01(\v2\x17.syncplane.v1.ConditionR\tpredicate\x121\n" +
 	"\border_by\x18\x05 \x03(\v2\x16.syncplane.v1.OrderKeyR\aorderBy\x12\x14\n" +
 	"\x05limit\x18\x06 \x01(\rR\x05limit\x12\x16\n" +
-	"\x06offset\x18\a \x01(\rR\x06offsetJ\x04\b\x02\x10\x03R\tclient_id\"e\n" +
+	"\x06offset\x18\a \x01(\rR\x06offset\x12\x14\n" +
+	"\x05after\x18\b \x01(\fR\x05after\x12\x16\n" +
+	"\x06before\x18\t \x01(\fR\x06beforeJ\x04\b\x02\x10\x03R\tclient_id\"\xc2\x01\n" +
 	"\rQueryResponse\x12+\n" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12'\n" +
-	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\x8d\x01\n" +
+	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\x12!\n" +
+	"\fstart_cursor\x18\x03 \x01(\fR\vstartCursor\x12\x1d\n" +
+	"\n" +
+	"end_cursor\x18\x04 \x01(\fR\tendCursor\x12\x19\n" +
+	"\bhas_more\x18\x05 \x01(\bR\ahasMore\"\x8d\x01\n" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +

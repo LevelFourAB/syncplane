@@ -1,6 +1,7 @@
 package query_test
 
 import (
+	"bytes"
 	"encoding/hex"
 	"encoding/json"
 	"os"
@@ -51,9 +52,31 @@ type indexOrderCase struct {
 	Want []string        `json:"want"`
 }
 
+// cursorCase pins a query cursor: the bytes, the shape, and the two properties
+// after/before rest on. Unlike an index entry a cursor crosses the wire, so the
+// TS loader (client/test/unit/indexkey-vectors.test.ts) asserts the same
+// literals against the same rows.
+type cursorCase struct {
+	Name    string    `json:"name"`
+	Type    string    `json:"type"`
+	Entity  string    `json:"entity"`
+	OrderBy []struct {
+		Path []string `json:"path"`
+		Desc bool     `json:"desc"`
+	} `json:"orderBy"`
+	Rows []struct {
+		Key string          `json:"key"`
+		Row json.RawMessage `json:"row"`
+	} `json:"rows"`
+	Shape   string            `json:"shape"`
+	Cursors map[string]string `json:"cursors"`
+	Want    []string          `json:"want"`
+}
+
 type indexVectorFile struct {
 	EncodeCases []encodeCase     `json:"encodeCases"`
 	OrderCases  []indexOrderCase `json:"orderCases"`
+	CursorCases []cursorCase     `json:"cursorCases"`
 }
 
 func loadIndexVectors() indexVectorFile {
@@ -108,6 +131,7 @@ var _ = Describe("Index key conformance vectors", func() {
 	It("has cases", func() {
 		Expect(vectors.EncodeCases).NotTo(BeEmpty())
 		Expect(vectors.OrderCases).NotTo(BeEmpty())
+		Expect(vectors.CursorCases).NotTo(BeEmpty())
 	})
 
 	Describe("Encode", func() {
@@ -163,7 +187,80 @@ var _ = Describe("Index key conformance vectors", func() {
 			})
 		}
 	})
+
+	Describe("Cursor", func() {
+		for _, tc := range vectors.CursorCases {
+			It(tc.Name, func() {
+				keys := make([]*syncplanev1.OrderKey, 0, len(tc.OrderBy))
+				for _, k := range tc.OrderBy {
+					dir := syncplanev1.Direction_DIRECTION_ASC
+					if k.Desc {
+						dir = syncplanev1.Direction_DIRECTION_DESC
+					}
+					keys = append(keys, &syncplanev1.OrderKey{Path: k.Path, Dir: dir})
+				}
+				ord, err := query.CompileOrder(msgForType(tc.Type).ProtoReflect().Descriptor(), keys)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(ord.Shape(tc.Entity)).To(Equal(tc.Shape))
+
+				type row struct {
+					key   string
+					msg   proto.Message
+					entry []byte
+				}
+				rows := make([]row, 0, len(tc.Rows))
+				for _, r := range tc.Rows {
+					msg := msgForType(tc.Type)
+					Expect(protojson.Unmarshal(r.Row, msg)).To(Succeed())
+					Expect(hex.EncodeToString(ord.EncodeCursor(tc.Entity, msg.ProtoReflect(), r.Key))).
+						To(Equal(tc.Cursors[r.Key]), "cursor for %s", r.Key)
+					rows = append(rows, row{key: r.Key, msg: msg, entry: ord.Cursor(msg.ProtoReflect(), r.Key)})
+				}
+
+				byCursor := append([]row(nil), rows...)
+				sort.SliceStable(byCursor, func(i, j int) bool {
+					return bytes.Compare(byCursor[i].entry, byCursor[j].entry) < 0
+				})
+				Expect(keysOf(byCursor, func(r row) string { return r.key })).To(Equal(tc.Want))
+
+				// after/before are a byte comparison against one row's cursor, so
+				// each has to select exactly what the comparator ranks that way.
+				for _, pivot := range byCursor {
+					var after, before []string
+					// Built from the sorted order so the comparison is over the
+					// SET as well as its order, which is what after/before select.
+					for _, r := range byCursor {
+						switch c := ord.Compare(
+							r.msg.ProtoReflect(), pivot.msg.ProtoReflect(), r.key, pivot.key,
+						); {
+						case c > 0:
+							after = append(after, r.key)
+						case c < 0:
+							before = append(before, r.key)
+						}
+					}
+					Expect(selectBy(byCursor, func(r row) bool {
+						return bytes.Compare(r.entry, pivot.entry) > 0
+					}, func(r row) string { return r.key })).To(Equal(after), "after %s", pivot.key)
+					Expect(selectBy(byCursor, func(r row) bool {
+						return bytes.Compare(r.entry, pivot.entry) < 0
+					}, func(r row) string { return r.key })).To(Equal(before), "before %s", pivot.key)
+				}
+			})
+		}
+	})
 })
+
+// selectBy is keysOf over the rows keep admits, preserving their order.
+func selectBy[T any](rows []T, keep func(T) bool, key func(T) string) []string {
+	var out []string
+	for _, r := range rows {
+		if keep(r) {
+			out = append(out, key(r))
+		}
+	}
+	return out
+}
 
 func keysOf[T any](rows []T, key func(T) string) []string {
 	out := make([]string, 0, len(rows))

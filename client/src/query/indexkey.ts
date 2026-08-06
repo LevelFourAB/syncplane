@@ -466,6 +466,89 @@ export class IndexEncoder {
 		values.forEach((v, i) => appendComponent(out, this.components[i]!, true, v));
 		return bytesToKey(out);
 	}
+
+	/**
+	 * Cuts an entry of this index into its component half and its row-key
+	 * suffix, by walking the components the encoder was built from. It throws on
+	 * anything that is not an entry of this index — an unknown tag, a payload
+	 * running off the end, an unterminated string, characters left over past the
+	 * row key — which is what makes it usable on a cursor a caller supplied.
+	 *
+	 * A query cursor's seek bound is the component half alone: an index may carry
+	 * components past the ordering's keys, and a bound running on into the row
+	 * key would not be a prefix of any entry in such an index.
+	 */
+	splitEntry(entry: string): { components: string; rowKey: string } {
+		let at = 0;
+		this.components.forEach((c, i) => {
+			try {
+				at += componentLength(c, entry, at);
+			} catch (err) {
+				throw new Error(`index entry: component ${i}: ${(err as Error).message}`);
+			}
+		});
+		let n: number;
+		try {
+			n = indexStringLength(entry, at, false);
+		} catch (err) {
+			throw new Error(`index entry: row key: ${(err as Error).message}`);
+		}
+		if (at + n !== entry.length) {
+			throw new Error(`index entry: ${entry.length - at - n} characters left over past the row key`);
+		}
+		return { components: entry.slice(0, at), rowKey: entry.slice(at) };
+	}
+}
+
+/**
+ * The length of the component encoded at `at`, tag included. The component says
+ * which payload shape to expect, so the walk needs no length prefixes in the
+ * encoding itself.
+ */
+function componentLength(c: IndexComponent, entry: string, at: number): number {
+	if (at >= entry.length) throw new Error('entry ends before the tag');
+	const tag = entry.charCodeAt(at);
+	if (tag === TAG_NAN || tag === TAG_MISSING) return 1;
+	if (tag !== TAG_PRESENT) {
+		throw new Error(
+			`tag 0x${tag.toString(16).padStart(2, '0')} is none of 0x01, 0xfd, 0xff`,
+		);
+	}
+	switch (c.kind) {
+		case 'string':
+			return 1 + indexStringLength(entry, at + 1, c.desc);
+		case 'bool':
+			if (at + 2 > entry.length) throw new Error('entry ends inside a bool payload');
+			return 2;
+		default:
+			if (at + 9 > entry.length) throw new Error('entry ends inside an 8-byte payload');
+			return 9;
+	}
+}
+
+/**
+ * The length of the CESU-8 string starting at `at`, terminator included.
+ * `inverted` is set for a descending component, where every payload byte is
+ * complemented — the escape and the terminator among them, so the two the walk
+ * looks for flip with it.
+ */
+function indexStringLength(entry: string, at: number, inverted: boolean): number {
+	const term = inverted ? 0xff : 0x00;
+	const esc = inverted ? 0x00 : 0xff;
+	for (let i = at; i < entry.length;) {
+		if (entry.charCodeAt(i) !== term) {
+			i++;
+			continue;
+		}
+		if (i + 1 >= entry.length) break;
+		const next = entry.charCodeAt(i + 1);
+		if (next === term) return i + 2 - at;
+		if (next !== esc) {
+			throw new Error(`character 0x${next.toString(16).padStart(2, '0')} follows a string escape`);
+		}
+		i += 2;
+	}
+	throw new Error('unterminated string');
 }
 
 /** One scope a component fans out over: the segments from the enclosing scope
@@ -548,11 +631,10 @@ export function upperBound(prefix: string): string | undefined {
  * longer matches its declaration is stale, not wrong — its entries are simply
  * not readable under the current spec, and the index rebuilds.
  *
- * Mirrors engine/query/indexkey.go's SpecHash character for character. It has
- * to: nothing forces the two to agree — a fingerprint never crosses the wire,
- * and each side only compares its own stored hash to its own declaration — but
- * one that differed for no reason would be a trap for anyone reading them side
- * by side.
+ * Mirrors engine/query/indexkey.go's SpecHash character for character, and has
+ * to: a stored index only compares its own hash to its own declaration, but
+ * query/cursor.ts folds this hash into a query cursor, and a cursor is minted
+ * on one side and replayed on the other.
  *
  * It reads protoPath, not path: proto field names are what the two languages
  * state identically.
@@ -577,12 +659,13 @@ export function specHash(comps: IndexComponent[]): string {
 }
 
 /**
- * FNV-1a/64 as 16 hex digits. An index fingerprint only has to CHANGE when
- * the spec does — it never crosses the wire and nothing authenticates against
- * it — so a hash with no dependencies and a synchronous implementation beats a
+ * FNV-1a/64 as 16 hex digits. It only has to CHANGE when what it summarizes
+ * does, so a hash with no dependencies and a synchronous implementation beats a
  * cryptographic one (SubtleCrypto is async, which would infect every caller).
+ * Nothing authenticates against it: a stored index whose hash moved rebuilds,
+ * and a query cursor whose shape no longer matches is reissued.
  */
-function fingerprint(s: string): string {
+export function fingerprint(s: string): string {
 	const PRIME = 1099511628211n;
 	const MASK = (1n << 64n) - 1n;
 	let h = 14695981039346656037n;

@@ -14,6 +14,7 @@ import {
 	COMPLETE,
 	type Coverage,
 	CoverageResolver,
+	type PageInfo,
 	type RowSet,
 	withCoverage,
 } from './coverage.js';
@@ -89,6 +90,13 @@ import {
 	type MutatorMirror,
 } from './optimistic/rebase.js';
 import { generateKeyBetween, newElementId, orderFieldOf, sortOrderedFields } from './ordering.js';
+import {
+	cursorFromBytes,
+	cursorToBytes,
+	OrderCursors,
+	pageWindowOf,
+	type QueryCursor,
+} from './query/cursor.js';
 import { assertSameResult, queryByIndex } from './query/execute.js';
 import {
 	type CompiledQuery,
@@ -2525,6 +2533,21 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const compiled = prepareQuery(schema, compileQuery(q));
+		// A cursor names a position under ONE workspace's ordering, so a
+		// cross-workspace read neither accepts nor mints one; see the tie-break
+		// note in query/execute.ts for why the two orders differ.
+		const cursors = workspaceId === undefined
+			? undefined
+			: new OrderCursors(schema, compiled.orderBy ?? []);
+		const window = cursors === undefined
+			? undefined
+			: pageWindowOf(schema, def.name, compiled);
+		if (cursors === undefined && (compiled.after !== undefined || compiled.before !== undefined)) {
+			throw new Error(
+				"query: after/before name a position in one workspace's ordering, "
+					+ 'which a cross-workspace query has no counterpart for',
+			);
+		}
 		const kv = await this.kv();
 		const page = await this.kvMutex.runShared(async () => {
 			const tx = await kv.read();
@@ -2541,12 +2564,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					this.indexes.for(def.name),
 					compiled,
 					workspaceId,
+					window,
 				);
 				const scan = async () =>
 					runQueryPage(
 						await scanDecoded(tx, this.entityRegistry, def, schema, workspaceId),
 						compiled,
 						schema,
+						window,
 					);
 				if (planned === undefined) return await scan();
 				const rows = planned.rows.map((entry) => entry.row);
@@ -2556,7 +2581,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// for an expensive one: nothing else would notice an index and a
 				// scan drifting apart, because both look like perfectly ordinary
 				// results.
-				const found = { rows, total: planned.total };
+				const found = { rows, total: planned.total, hasMore: planned.hasMore };
 				if (this.verifyIndexReads) assertSameResult(found, await scan(), def.name);
 				return found;
 			} finally {
@@ -2566,7 +2591,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// Coverage is the BASE entity's: a query answers from what synced, and
 		// hydration only decorates the rows it found.
 		const coverage = this.coverage.coverageOf(def.name, workspaceId);
-		if (!opts?.include) return withCoverage(page.rows, coverage, page.total);
+		const info = pageInfoOf(cursors, def.name, page);
+		if (!opts?.include) return withCoverage(page.rows, coverage, info);
 		const hydrated = (await hydrate(
 			this.refClient(),
 			this.entityRegistry,
@@ -2574,11 +2600,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			page.rows as Row<Message>[],
 			opts.include,
 		)) as unknown as HydratedRow<MessageShape<D>>[];
-		return withCoverage(
-			hydrated as unknown as Row<MessageShape<D>>[],
-			coverage,
-			page.total,
-		);
+		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage, info);
 	}
 
 	/**
@@ -2695,6 +2717,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			orderBy: (wire.orderBy ?? []).map(orderKeyToProto),
 			limit: compiled.limit ?? 0,
 			offset: compiled.offset ?? 0,
+			// The wire field is bytes and the token a base64url string, so the
+			// two forms meet here and nowhere else.
+			after: compiled.after ? cursorToBytes(compiled.after) : new Uint8Array(0),
+			before: compiled.before ? cursorToBytes(compiled.before) : new Uint8Array(0),
 		});
 		// The query rode its own RPC, outside the sync cycle, so this is the only
 		// place its revision reaches the skew handshake.
@@ -2708,14 +2734,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			}
 		}
 		// A server query sees the whole entity, so the only thing that can make
-		// it partial is its own limit truncating the result. A short page proves
-		// it did not.
+		// it partial is its own limit truncating the result. has_more says so
+		// exactly; the full-page test is the fallback for a server that predates
+		// the field, and it errs toward claiming LESS completeness — an exact-
+		// length final page reads as truncated, which is the safe direction.
 		const requested = compiled.limit ?? 0;
+		const bounded = resp.hasMore || (requested > 0 && rows.length >= requested);
 		return withCoverage(
 			rows,
-			requested > 0 && rows.length >= requested
-				? { complete: false, bounds: [ 'window' ], limit: requested }
+			bounded
+				? { complete: false, bounds: [ 'window' ], limit: requested > 0 ? requested : rows.length }
 				: COMPLETE,
+			{
+				hasMore: resp.hasMore,
+				...(resp.startCursor.length > 0
+					? { startCursor: cursorFromBytes(resp.startCursor) }
+					: {}),
+				...(resp.endCursor.length > 0 ? { endCursor: cursorFromBytes(resp.endCursor) } : {}),
+			},
 		);
 	}
 
@@ -3436,4 +3472,30 @@ function resolveAccountId(opts: { accountId?: string }, workspaces: string[]): s
 /** True for a `meta/ws/<ws>/lastMutationId` key. */
 function isMutationCounterKey(key: string): boolean {
 	return key.startsWith(META_WS_PREFIX) && key.endsWith('/lastMutationId');
+}
+
+/**
+ * The page metadata a local read reports: what the evaluator already counted,
+ * plus the positions of the first and last row so a caller can page on.
+ *
+ * `cursors` is absent for a read that cannot mint one — a cross-workspace
+ * query, whose positions would not be comparable against one workspace's
+ * ordering.
+ */
+function pageInfoOf<T>(
+	cursors: OrderCursors | undefined,
+	entity: string,
+	page: { rows: Row<T>[]; total: number; hasMore: boolean },
+): PageInfo {
+	if (cursors === undefined || page.rows.length === 0) {
+		return { total: page.total, hasMore: page.hasMore };
+	}
+	const first = page.rows[0]!;
+	const last = page.rows[page.rows.length - 1]!;
+	return {
+		total: page.total,
+		hasMore: page.hasMore,
+		startCursor: cursors.encode(entity, first.value, first.key),
+		endCursor: cursors.encode(entity, last.value, last.key),
+	};
 }

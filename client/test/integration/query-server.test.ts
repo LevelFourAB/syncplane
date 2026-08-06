@@ -222,4 +222,140 @@ describe('queryServer (push-down)', () => {
 		await writer.close();
 		await cold.close();
 	});
+
+	describe('cursor paging', () => {
+		/** Seven widgets with distinct counts, in a fresh workspace. */
+		async function seeded() {
+			const ws = freshWorkspace();
+			const writer = newClient(ws);
+			await writer.start();
+			for (let i = 1; i <= 7; i++) {
+				await writer.mutate.put(WidgetSchema, { id: `w${i}`, count: i });
+			}
+			await writer.syncNow();
+			return { ws, writer };
+		}
+
+		const byCount: WidgetQuery = { orderBy: (w) => [ w.count.asc() ] };
+
+		it('accepts a cursor the client minted and mints one the client accepts', async () => {
+			// The whole cross-language claim in one spec: the two sides encode
+			// the same position for the same row under the same ordering, so a
+			// token from either is a valid bound for the other. Nothing in the
+			// unit suite can prove it — both sides of every assertion there are
+			// this implementation.
+			const { ws, writer } = await seeded();
+			const reader = newClient(ws);
+
+			const localHead = await writer.query(WidgetSchema, { ...byCount, limit: 2 });
+			expect(localHead.map((r) => r.key)).toEqual([ 'w1', 'w2' ]);
+
+			// A cursor the CLIENT minted, replayed against the server.
+			const fromServer = await reader.queryServer(WidgetSchema, {
+				...byCount,
+				limit: 2,
+				after: localHead.endCursor,
+			});
+			expect(fromServer.map((r) => r.key)).toEqual([ 'w3', 'w4' ]);
+
+			// And the SERVER's cursor replayed against the local evaluator.
+			const fromLocal = await writer.query(WidgetSchema, {
+				...byCount,
+				limit: 2,
+				after: fromServer.endCursor,
+			});
+			expect(fromLocal.map((r) => r.key)).toEqual([ 'w5', 'w6' ]);
+
+			await writer.close();
+			await reader.close();
+		});
+
+		it('pages forward and back over the wire', async () => {
+			const { ws, writer } = await seeded();
+			const reader = newClient(ws);
+
+			const keys: string[] = [];
+			let after = undefined as Awaited<ReturnType<typeof reader.queryServer>>['endCursor'];
+			for (;;) {
+				const page = await reader.queryServer(WidgetSchema, { ...byCount, limit: 3, after });
+				keys.push(...page.map((r) => r.key));
+				if (!page.hasMore) break;
+				after = page.endCursor;
+			}
+			expect(keys).toEqual([ 'w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7' ]);
+
+			const tail = await reader.queryServer(WidgetSchema, { ...byCount, limit: 2, offset: 5 });
+			const prev = await reader.queryServer(WidgetSchema, {
+				...byCount,
+				limit: 2,
+				before: tail.startCursor,
+			});
+			expect(prev.map((r) => r.key)).toEqual([ 'w4', 'w5' ]);
+
+			await writer.close();
+			await reader.close();
+		});
+
+		it('skips and repeats nothing while a second writer inserts ahead of the page', async () => {
+			// The behaviour the offset path gets wrong, over the real wire: a
+			// reader walks the ordering with cursors while another client keeps
+			// inserting rows BEFORE the position it holds. Every original row
+			// must come back exactly once.
+			const { ws, writer } = await seeded();
+			const reader = newClient(ws);
+
+			const seen: string[] = [];
+			let after = undefined as Awaited<ReturnType<typeof reader.queryServer>>['endCursor'];
+			for (let page = 0;; page++) {
+				const got = await reader.queryServer(WidgetSchema, { ...byCount, limit: 2, after });
+				seen.push(...got.map((r) => r.key));
+				if (!got.hasMore) break;
+				after = got.endCursor;
+				// Sorts ahead of everything already delivered, so an offset
+				// continuation would re-serve a row the reader has.
+				await writer.mutate.put(WidgetSchema, { id: `x${page}`, count: -1 - page });
+				await writer.syncNow();
+			}
+			expect(seen).toEqual([ 'w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7' ]);
+
+			// The same walk by rank, under the same interleaving, does repeat
+			// rows — which is the comparison that makes the assertion above mean
+			// something rather than just describing a quiet workspace.
+			const byRank: string[] = [];
+			for (let page = 0; page < 3; page++) {
+				const got = await reader.queryServer(WidgetSchema, {
+					...byCount,
+					limit: 2,
+					offset: page * 2,
+				});
+				byRank.push(...got.map((r) => r.key));
+				await writer.mutate.put(WidgetSchema, { id: `y${page}`, count: -100 - page });
+				await writer.syncNow();
+			}
+			expect(new Set(byRank).size).toBeLessThan(byRank.length);
+
+			await writer.close();
+			await reader.close();
+		});
+
+		it('rejects a cursor from a different ordering, and an offset beside one', async () => {
+			const { ws, writer } = await seeded();
+			const reader = newClient(ws);
+			const head = await reader.queryServer(WidgetSchema, { ...byCount, limit: 1 });
+
+			await expect(reader.queryServer(WidgetSchema, {
+				orderBy: (w) => [ w.label.asc() ],
+				after: head.endCursor,
+			})).rejects.toThrow(/different entity or ordering/);
+
+			await expect(reader.queryServer(WidgetSchema, {
+				...byCount,
+				offset: 1,
+				after: head.endCursor,
+			})).rejects.toThrow(/cannot be combined/);
+
+			await writer.close();
+			await reader.close();
+		});
+	});
 });

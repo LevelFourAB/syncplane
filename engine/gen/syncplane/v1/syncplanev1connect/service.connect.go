@@ -73,8 +73,9 @@ type SyncServiceClient interface {
 	// merged with local optimistic state and not stored. A declared secondary
 	// index serves the query when one covers its predicate and ordering;
 	// without one it scans and decodes every visible row of the entity per
-	// request, O(entity) in time regardless of limit. Memory is bounded to
-	// offset+limit rows; prefer a selective predicate over deep pagination.
+	// request, O(entity) in time regardless of limit. Memory is bounded to the
+	// page; prefer a selective predicate over deep pagination, and page with
+	// after/before rather than offset.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
 }
 
@@ -184,8 +185,9 @@ type SyncServiceHandler interface {
 	// merged with local optimistic state and not stored. A declared secondary
 	// index serves the query when one covers its predicate and ordering;
 	// without one it scans and decodes every visible row of the entity per
-	// request, O(entity) in time regardless of limit. Memory is bounded to
-	// offset+limit rows; prefer a selective predicate over deep pagination.
+	// request, O(entity) in time regardless of limit. Memory is bounded to the
+	// page; prefer a selective predicate over deep pagination, and page with
+	// after/before rather than offset.
 	Query(context.Context, *connect.Request[v1.QueryRequest]) (*connect.Response[v1.QueryResponse], error)
 }
 

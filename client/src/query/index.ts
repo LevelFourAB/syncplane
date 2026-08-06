@@ -1,4 +1,23 @@
-export type { CmpOp, CompiledQuery, Cond, OrderKey, Path, Scalar, StrOp } from './ast.js';
+export type {
+	CmpOp,
+	CompiledQuery,
+	Cond,
+	OrderKey,
+	PageWindow,
+	Path,
+	Scalar,
+	StrOp,
+} from './ast.js';
+export type { QueryCursor } from './cursor.js';
+export {
+	cursorFromBytes,
+	cursorShape,
+	CursorShapeError,
+	cursorToBytes,
+	orderCursor,
+	OrderCursors,
+	pageWindowOf,
+} from './cursor.js';
 export {
 	compareRows,
 	compareValues,

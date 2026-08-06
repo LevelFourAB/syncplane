@@ -673,7 +673,7 @@ func eavEntriesPerRow(
 	n := 0
 	if err := store.WithReadTx(ctx, benchWS, func(tx storage.ReadTx) error {
 		for _, idx := range indexes {
-			if err := tx.ScanIndex("record", idx.Name, nil, nil, 0, func(_ []byte, _ string) error {
+			if err := tx.ScanIndex("record", idx.Name, nil, nil, 0, storage.ScanAsc, func(_ []byte, _ string) error {
 				n++
 				return nil
 			}); err != nil {

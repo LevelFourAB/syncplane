@@ -93,6 +93,15 @@ type Plan struct {
 	// query's requested order. When false the caller must still sort, and the
 	// index bought only a narrower candidate set.
 	Ordered bool
+	// Prefix is the encoded equality-pinned components every entry in the range
+	// shares. A range component is NOT part of it: only the components the
+	// range fixes to a single value are.
+	//
+	// It is what an Ordered plan composes a seek bound from — appending a
+	// cursor's components (Order.CursorPrefix) to it names the position in the
+	// index the page resumes at. Nil when the plan produced several ranges,
+	// which share no single prefix, and empty when it pinned nothing.
+	Prefix []byte
 }
 
 // Range is a half-open byte range over an index: Lo inclusive, Hi exclusive. A
@@ -297,7 +306,11 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	if len(ranges) > 1 && order != nil && len(order.keys) > 0 {
 		ordered = false
 	}
-	return &Plan{Index: idx.Name, Ranges: ranges, Residual: residual, Ordered: ordered}, pinned
+	var prefix []byte
+	if len(prefixes) == 1 {
+		prefix = prefixes[0]
+	}
+	return &Plan{Index: idx.Name, Ranges: ranges, Residual: residual, Ordered: ordered, Prefix: prefix}, pinned
 }
 
 // maxIndexProbes bounds the fan-out of an `in` over a leading component. Past

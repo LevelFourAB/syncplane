@@ -163,18 +163,35 @@ await client.db.todo.query(q, { include? })
 await client.db.todo.queryServer(q)
 ```
 
-Every result array is a `RowSet`: an ordinary array carrying two non-enumerable
-extras — `coverage` (see §9) and `total`, the matches counted before `offset` and
-`limit`. Both stay out of `JSON.stringify`, `Object.keys` and structural
-equality.
+Every result array is a `RowSet`: an ordinary array carrying non-enumerable
+extras — `coverage` (see §9), `total`, and the three paging fields below. All of
+them stay out of `JSON.stringify`, `Object.keys` and structural equality.
 
-`total` counts what the read could see, which is what `coverage` describes: a
-local read counts synced rows, and `queryServer` counts only the page the server
-returned (a full page also carries the `window` bound, which is how a truncated
-one is recognised). An index that stops early on a `limit` still walks the rest
-of its range to count — positions only, with no row reads, unless a residual
-predicate is left over, in which case only the row can settle a match and the
-rest of the range is read too.
+```ts
+type RowSet<T> = Row<T>[] & {
+	readonly coverage: Coverage;
+	readonly total: number;
+	readonly startCursor?: QueryCursor; // position of the first row; absent when empty
+	readonly endCursor?: QueryCursor; // position of the last row
+	readonly hasMore: boolean; // matches remain past the end `limit` counted from
+};
+```
+
+`total` counts the matches before the page was cut, over what the read could see
+— which is what `coverage` describes: a local read counts synced rows, and
+`queryServer` counts only the page the server returned (a full page also carries
+the `window` bound, which is how a truncated one is recognised). A query
+carrying `after`/`before` counts the matches INSIDE those bounds, since a row
+outside them is not a match of that query. An index that stops early on a `limit`
+still walks the rest of its range to count — positions only, with no row reads,
+unless a residual predicate is left over, in which case only the row can settle a
+match and the rest of the range is read too.
+
+`startCursor`/`endCursor` are opaque `QueryCursor` tokens: base64url strings, so
+they survive `JSON.stringify` and drop into a URL. Pass `endCursor` back as
+`after` for the next page and `startCursor` as `before` for the previous one; see
+§4. A cross-workspace read (`queryAll`, `scanAll`) mints none — a position names
+a place in one workspace's ordering.
 
 ### `Row<T>`
 
@@ -354,6 +371,8 @@ interface Query<M> {
 	orderBy?: (w: QueryRef<M>) => OrderKey[];
 	limit?: number;
 	offset?: number;
+	after?: QueryCursor;
+	before?: QueryCursor;
 }
 ```
 
@@ -368,6 +387,42 @@ const rows = await client.db.todo.query({
 	limit: 20,
 });
 ```
+
+### Paging — `after` / `before`
+
+`after` and `before` are exclusive bounds on the ordering, taken from an earlier
+result of the SAME query:
+
+```ts
+const page = await client.db.todo.query({
+	orderBy: (t) => [ t.createdAt.desc() ],
+	limit: 50,
+});
+const next = await client.db.todo.query({
+	...same,
+	limit: 50,
+	after: page.endCursor,
+});
+const prev = await client.db.todo.query({
+	...same,
+	limit: 50,
+	before: page.startCursor,
+});
+```
+
+- `limit` counts forward from `after`, and BACKWARD from `before` when `before`
+  is the only bound — so `before` alone returns the page preceding the cursor's.
+  Both set reads a bounded range, paged forward. Rows come back in `orderBy`
+  order whichever bounds are set.
+- A cursor is tied to the `(entity, orderBy)` pair it was issued under. Replaying
+  one against a different entity or ordering throws `CursorShapeError` rather
+  than returning a wrong page, so changing `orderBy` means starting a fresh page.
+- `query` and `queryServer` mint and accept the same cursors, so a page started
+  against the server can continue locally and the other way round.
+- `offset` is the way to jump to an arbitrary rank, which a cursor cannot name.
+  Setting it alongside either cursor throws.
+- Cursors are unavailable on `queryAll`/`watchQueryAll`: a position names a place
+  in one workspace's ordering, and a cross-workspace result has no single one.
 
 ### Operator surface (by field type)
 
@@ -539,12 +594,22 @@ type CmpOp = 'eq' | 'neq' | 'gt' | 'gte' | 'lt' | 'lte';
 type StrOp = 'startsWith' | 'endsWith' | 'contains';
 type Cond = /* discriminated union: cmp | in | str | rep | ... */;
 interface OrderKey { path: Path; dir: 'asc' | 'desc'; }
-interface CompiledQuery { where?: Cond; orderBy?: OrderKey[]; limit?: number; offset?: number; }
+interface CompiledQuery {
+	where?: Cond;
+	orderBy?: OrderKey[];
+	limit?: number;
+	offset?: number;
+	after?: QueryCursor;
+	before?: QueryCursor;
+}
+// Opaque and branded: read one off a RowSet, never build one.
+type QueryCursor = string & { readonly __queryCursor: unique symbol };
 ```
 
-`QueryRef`, `CompiledQuery`, `Query`, `Cond`, `OrderKey`, `Path` and `Scalar` are
-exported as types. The converters that put a query on the wire are internal — the
-client sends one for you, and the AST above is what you build.
+`QueryRef`, `CompiledQuery`, `Query`, `QueryCursor`, `Cond`, `OrderKey`, `Path`
+and `Scalar` are exported as types, and `CursorShapeError` as a value. The
+converters that put a query on the wire are internal — the client sends one for
+you, and the AST above is what you build.
 
 ---
 
@@ -602,6 +667,12 @@ onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
 
 A move landing on the same rows delivers nothing. `setWindow({})` delivers the
 whole result.
+
+`after`/`before` are a different mechanism and compose with this one: a watch's
+cursors bound what the query MATCHES, and the window then slices what is left by
+rank. So a live query with an `after` reports a `total` counting only the rows
+past that position, and `setWindow` moves inside them. Every emitted page carries
+`startCursor`/`endCursor` for the rows it delivered.
 
 #### Deltas
 

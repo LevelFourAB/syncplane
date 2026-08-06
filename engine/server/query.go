@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"container/heap"
 	"context"
 	"errors"
@@ -51,6 +52,22 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(limitExceeded(
 			fmt.Sprintf("offset %d", offset), "MaxQueryOffset", s.limits.MaxQueryOffset)))
 	}
+	if offset > 0 && (len(msg.GetAfter()) > 0 || len(msg.GetBefore()) > 0) {
+		// The two describe a page in incompatible terms — a rank and a position
+		// — so any resolution here would be an invention. Failing says which of
+		// them the caller has to drop.
+		return nil, connect.NewError(connect.CodeInvalidArgument,
+			errors.New("offset cannot be combined with after/before; page with the cursors, or drop them to page by rank"))
+	}
+	after, err := s.queryCursor(order, msg.GetEntity(), "after", msg.GetAfter())
+	if err != nil {
+		return nil, err
+	}
+	before, err := s.queryCursor(order, msg.GetEntity(), "before", msg.GetBefore())
+	if err != nil {
+		return nil, err
+	}
+	pg := pageFor(after, before, offset, limit)
 
 	emitter, err := newRowEmitter(ctx, s, msg.GetWorkspaceId(), nil)
 	if err != nil {
@@ -78,10 +95,13 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 	}
 
-	var rows []qrow
+	var (
+		rows []qrow
+		more bool
+	)
 	err = s.store.WithReadTx(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
 		var err error
-		rows, err = queryRows(tx, info, predicate, order, offset, limit, func(row storage.Row) (bool, error) {
+		rows, more, err = queryRows(tx, info, predicate, order, pg, func(row storage.Row) (bool, error) {
 			class, err := emitter.classify(row)
 			if err != nil {
 				return false, err
@@ -105,11 +125,36 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		// Advertised here too: a query answered by a server whose schema has
 		// moved on is otherwise indistinguishable from one that has not.
 		SchemaRevision: s.catalogPtr().schemaRev,
+		HasMore:        more,
 	}
 	for _, r := range rows {
 		resp.Rows = append(resp.Rows, rowChange(r.row))
 	}
+	if len(rows) > 0 {
+		first, last := rows[0], rows[len(rows)-1]
+		resp.StartCursor = order.EncodeCursor(msg.GetEntity(), first.msg.ProtoReflect(), first.row.Key)
+		resp.EndCursor = order.EncodeCursor(msg.GetEntity(), last.msg.ProtoReflect(), last.row.Key)
+	}
 	return connect.NewResponse(resp), nil
+}
+
+// queryCursor caps and decodes one of a request's cursors. The cap comes first:
+// a cursor is walked component by component to validate it, so an uncapped one
+// costs work proportional to whatever the client sent.
+func (s *Server) queryCursor(order *query.Order, entity, field string, cursor []byte) ([]byte, error) {
+	if len(cursor) == 0 {
+		return nil, nil
+	}
+	if len(cursor) > s.limits.MaxQueryCursorBytes {
+		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(limitExceeded(
+			fmt.Sprintf("%s cursor of %d bytes", field, len(cursor)),
+			"MaxQueryCursorBytes", s.limits.MaxQueryCursorBytes)))
+	}
+	entry, err := order.DecodeCursor(entity, cursor)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("%s: %w", field, err))
+	}
+	return entry, nil
 }
 
 type qrow struct {
@@ -117,12 +162,65 @@ type qrow struct {
 	msg proto.Message
 }
 
+// page is the slice of an ordering a query asks for. Exactly one of the two
+// paging styles is ever in play: after/before name a POSITION in the ordering
+// and offset names a COUNT of rows to discard before it, and a request setting
+// both is rejected where it arrives (Query, runQuerySpec) rather than resolved
+// here.
+type page struct {
+	// after and before are decoded cursor entries — Order.DecodeCursor's
+	// result, not the framed wire form — or nil for an open end. A row is kept
+	// when its own cursor sorts strictly between them.
+	after, before []byte
+	offset, limit int
+	// backward takes the page from the before end rather than the after end,
+	// which is what makes `before` alone mean "the page preceding this one".
+	// The rows still come back in the query's order.
+	backward bool
+}
+
+// pageFor is the only place backward is decided, so the flag cannot disagree
+// with the bounds it is derived from.
+func pageFor(after, before []byte, offset, limit int) page {
+	if offset < 0 {
+		offset = 0
+	}
+	return page{
+		after:    after,
+		before:   before,
+		offset:   offset,
+		limit:    limit,
+		backward: after == nil && before != nil,
+	}
+}
+
+// bounded reports whether a candidate row has to be tested against the cursors
+// at all — one encode per candidate that an unbounded query need not pay.
+func (p page) bounded() bool { return p.after != nil || p.before != nil }
+
+// within reports whether a row at this position falls inside the page's
+// cursor bounds. Both are EXCLUSIVE, so the row a cursor was minted from is
+// never returned again.
+func (p page) within(cursor []byte) bool {
+	if p.after != nil && bytes.Compare(cursor, p.after) <= 0 {
+		return false
+	}
+	if p.before != nil && bytes.Compare(cursor, p.before) >= 0 {
+		return false
+	}
+	return true
+}
+
+// retain is how many rows a bounded run has to keep: the page itself plus the
+// one extra row that answers has_more without a second query.
+func (p page) retain() int { return p.offset + p.limit + 1 }
+
 // queryRows answers one predicate query against a read snapshot: it scans the
-// entity, keeps the rows visible admits and predicate matches, and returns the
-// page [offset, offset+limit) of the ordering. Shared by the Query RPC (where
-// visible applies the read filter) and ViewTx.Query (trusted, so everything
-// live is visible), which is what keeps a predicate meaning the same thing to
-// a client and to server-side code.
+// entity, keeps the rows visible admits and predicate matches, and returns one
+// page of the ordering plus whether rows remain past it. Shared by the Query
+// RPC (where visible applies the read filter) and ViewTx.Query (trusted, so
+// everything live is visible), which is what keeps a predicate meaning the same
+// thing to a client and to server-side code.
 //
 // emitter is the request's row emitter on a client-facing scan and nil on the
 // trusted one; it decides what a row that will not decode costs — a quarantined
@@ -131,22 +229,27 @@ type qrow struct {
 // A secondary index narrows which rows are considered when one serves the
 // query (see queryByIndex); otherwise the predicate can only be evaluated by
 // scanning and decoding every visible row, and the cost is O(entity) whatever
-// the limit. What the limit bounds either way is MEMORY: only the offset+limit
-// rows that sort first need to be retained, so a max-heap whose root is the
-// worst kept row evicts in O(log k) as better rows arrive. A non-positive limit
-// means no cap and retains every match; only trusted in-process callers can ask
-// for that.
+// the limit. What the limit bounds either way is MEMORY: only the rows that
+// sort first inside the page's bounds need to be retained, so a max-heap whose
+// root is the worst kept row evicts in O(log k) as better rows arrive. A
+// non-positive limit means no cap and retains every match; only trusted
+// in-process callers can ask for that.
+//
+// A cursor bound costs one encode per candidate here, since a scan has no way
+// to know a row is out of range before it has the row. An index-served ordered
+// query pays much less: the walk seeks past the bound and stops once the page
+// is full (see queryByIndex).
 func queryRows(
 	tx storage.ReadTx,
 	info *entityInfo,
 	predicate *query.Compiled,
 	order *query.Order,
-	offset, limit int,
+	pg page,
 	visible func(storage.Row) (bool, error),
 	emitter *rowEmitter,
 	limits Limits,
-) ([]qrow, error) {
-	h := &topK{order: order, cap: offset + limit, unbounded: limit <= 0}
+) (rows []qrow, more bool, err error) {
+	h := &topK{order: order, cap: pg.retain(), unbounded: pg.limit <= 0, worstFirst: pg.backward}
 	consider := func(row storage.Row, pred *query.Compiled) error {
 		ok, err := visible(row)
 		if err != nil {
@@ -162,6 +265,9 @@ func queryRows(
 		if !pred.Eval(decoded.ProtoReflect()) {
 			return nil
 		}
+		if pg.bounded() && !pg.within(order.Cursor(decoded.ProtoReflect(), row.Key)) {
+			return nil
+		}
 		h.offer(qrow{row: row, msg: decoded})
 		return nil
 	}
@@ -173,34 +279,52 @@ func queryRows(
 	// fall through to the scan below, and h.reset is how a decline hands the
 	// heap back empty: the scan re-offers every row the walk already offered,
 	// and the heap does not dedupe.
-	if served, err := queryByIndex(tx, info, predicate, order, limits, consider, h.reset); err != nil {
-		return nil, err
+	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, h.full, h.reset); err != nil {
+		return nil, false, err
 	} else if !served {
 		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
 			return consider(row, predicate)
 		}); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 	}
 
-	rows := h.rows
+	rows = h.rows
 	sort.SliceStable(rows, func(i, j int) bool {
 		return order.Less(
 			rows[i].msg.ProtoReflect(), rows[j].msg.ProtoReflect(),
 			rows[i].row.Key, rows[j].row.Key,
 		)
 	})
+	rows, more = pg.trim(rows)
+	return rows, more, nil
+}
 
-	if offset >= len(rows) {
-		return nil, nil
+// trim cuts the retained rows down to the page and reports whether any were
+// left over. The retained set is one row longer than the page (topK held
+// retain()), and which end that extra row sits at is which end the limit
+// counted from — so a backward page keeps its LAST limit rows and a forward one
+// its first. The result is in the query's order either way.
+func (p page) trim(rows []qrow) ([]qrow, bool) {
+	if p.limit <= 0 {
+		// Unbounded: everything that matched is the answer, so nothing is left
+		// over to report.
+		return rows[min(p.offset, len(rows)):], false
 	}
-	rows = rows[offset:]
-	// Bounded runs are already <= limit (the heap held offset+limit); an
-	// unbounded run has to be clamped here, and only when a limit was given.
-	if limit > 0 && len(rows) > limit {
-		rows = rows[:limit]
+	if p.backward {
+		if len(rows) > p.limit {
+			return rows[len(rows)-p.limit:], true
+		}
+		return rows, false
 	}
-	return rows, nil
+	if p.offset >= len(rows) {
+		return nil, false
+	}
+	rows = rows[p.offset:]
+	if len(rows) > p.limit {
+		return rows[:p.limit], true
+	}
+	return rows, false
 }
 
 // topK keeps the cap rows that sort first under order. It is a max-heap: the
@@ -213,10 +337,22 @@ func queryRows(
 // heap invariant is never established because the caller sorts at the end
 // anyway. It exists for in-process callers that asked for no limit.
 type topK struct {
-	order     *query.Order
-	cap       int
-	unbounded bool
-	rows      []qrow
+	order *query.Order
+	cap   int
+	// worstFirst inverts what "first" means, so the heap keeps the cap rows
+	// that sort LAST. That is the retention a backward page needs: its limit
+	// counts back from the before bound, so the rows nearest that bound are the
+	// ones worth keeping.
+	worstFirst bool
+	unbounded  bool
+	rows       []qrow
+}
+
+// full reports that the heap cannot admit a better row than it already holds.
+// An ordered index walk uses it to stop early: the rows it has are the page,
+// and everything past them sorts worse.
+func (h *topK) full() bool {
+	return !h.unbounded && h.cap > 0 && len(h.rows) >= h.cap
 }
 
 // reset drops every row kept so far, leaving the heap as newly built. It is the
@@ -243,11 +379,17 @@ func (h *topK) offer(cand qrow) {
 	}
 }
 
-// less reports whether a sorts strictly ahead of b in the requested order.
+// less reports whether a is the better row to KEEP: ahead of b in the
+// requested order, or behind it when the page counts back from its before
+// bound.
 func (h *topK) less(a, b qrow) bool {
-	return h.order.Compare(
+	c := h.order.Compare(
 		a.msg.ProtoReflect(), b.msg.ProtoReflect(), a.row.Key, b.row.Key,
-	) < 0
+	)
+	if h.worstFirst {
+		return c > 0
+	}
+	return c < 0
 }
 
 func (h *topK) Len() int { return len(h.rows) }

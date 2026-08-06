@@ -1,6 +1,7 @@
 package query
 
 import (
+	"errors"
 	"fmt"
 	"unicode/utf16"
 
@@ -12,6 +13,12 @@ import (
 // Order is a compiled multi-key row ordering.
 type Order struct {
 	keys []orderKey
+	// cursorEnc encodes a row's position in this ordering; see Order.Cursor.
+	// Built once at compile time because a query encodes one per candidate row.
+	cursorEnc *IndexEncoder
+	// cursorSpec is SpecHash over the same components, the ordering half of
+	// Shape.
+	cursorSpec string
 }
 
 type orderKey struct {
@@ -40,6 +47,13 @@ func CompileOrder(desc protoreflect.MessageDescriptor, keys []*syncplanev1.Order
 		}
 		o.keys = append(o.keys, orderKey{fields: fields, desc: k.GetDir() == syncplanev1.Direction_DIRECTION_DESC})
 	}
+	comps := o.cursorComponents()
+	enc, err := NewIndexEncoder(comps)
+	if err != nil {
+		return nil, err
+	}
+	o.cursorEnc = enc
+	o.cursorSpec = SpecHash(comps)
 	return o, nil
 }
 
@@ -107,6 +121,112 @@ func orderRank(v rowValue, found bool) int {
 // Less is Compare < 0, for sort.Slice.
 func (o *Order) Less(a, b protoreflect.Message, keyA, keyB string) bool {
 	return o.Compare(a, b, keyA, keyB) < 0
+}
+
+// Query cursors: a row's position in an ordering, as opaque bytes.
+//
+// A cursor says WHERE a page ended rather than how many rows to discard before
+// it, so the next page is unaffected by rows inserted ahead of it. It is the
+// index entry (indexkey.go) the row would occupy in an index whose components
+// are exactly this ordering's keys, framed with a version byte and a shape
+// fingerprint:
+//
+//	cursor := 0x01 shape entry
+//	shape  := 16 ASCII hex digits — Shape, over the entity and the order keys
+//
+// Byte order over entries equals Compare order, which is the one property the
+// entry format guarantees and the only one a cursor needs. So "after this
+// cursor" is bytes.Compare(rowEntry, cursorEntry) > 0 and "before" is < 0, and
+// the same bytes serve as either bound.
+//
+// Unlike an index, a cursor may be built over a collaborative-text order key.
+// CompileIndexComponent rejects one because a keystroke would rewrite the
+// stored entry; a cursor is computed and thrown away, so that cost never
+// arises, and resolveValue projects text to its plain string for the
+// comparator and the encoder alike.
+
+// cursorVersion is the first byte of every encoded cursor. Bumping it makes
+// every outstanding cursor decode as unreadable rather than as something else.
+const cursorVersion = 0x01
+
+// cursorShapeHexLen is the width of the shape fingerprint inside a cursor.
+const cursorShapeHexLen = 16
+
+// ErrCursorShape reports a cursor minted for a different entity or a different
+// ordering than the query replaying it. Nothing is lost by it: a query run
+// without the cursor issues one that fits.
+var ErrCursorShape = errors.New("query: cursor belongs to a different entity or ordering")
+
+// cursorComponents restates the order keys as index components. The two are
+// structurally the same thing — a resolved path and a direction — and building
+// them here rather than through CompileIndexComponent is what admits a
+// collaborative-text order key.
+func (o *Order) cursorComponents() []IndexComponent {
+	comps := make([]IndexComponent, len(o.keys))
+	for i, k := range o.keys {
+		comps[i] = IndexComponent{fields: k.fields, desc: k.desc}
+	}
+	return comps
+}
+
+// Shape fingerprints the (entity, ordering) pair a cursor is valid against, as
+// 16 hex digits. It is a non-security fingerprint like SpecHash: a mismatch
+// costs a reissued cursor, so nothing escalates if two shapes collide.
+func (o *Order) Shape(entity string) string {
+	return fingerprint(o.cursorSpec + "|" + entity)
+}
+
+// Cursor is msg's position in this ordering, unframed — the bytes rows are
+// compared against. EncodeCursor is the form a client is handed.
+//
+// It cannot fail: an order key never fans out, because CompileOrder rejects the
+// repeated and map leaves that would make it, so a row occupies exactly one
+// position.
+func (o *Order) Cursor(msg protoreflect.Message, rowKey string) []byte {
+	return o.cursorEnc.encodeAt(msg, rowKey, nil)
+}
+
+// EncodeCursor frames msg's position for a client: the version byte, the shape
+// for entity, and the entry Cursor returns.
+func (o *Order) EncodeCursor(entity string, msg protoreflect.Message, rowKey string) []byte {
+	entry := o.Cursor(msg, rowKey)
+	out := make([]byte, 0, 1+cursorShapeHexLen+len(entry))
+	out = append(out, cursorVersion)
+	out = append(out, o.Shape(entity)...)
+	return append(out, entry...)
+}
+
+// DecodeCursor unwraps a cursor a client sent back, returning the entry to
+// compare rows against. It reports ErrCursorShape for a cursor belonging to
+// another entity or ordering, and a descriptive error for bytes that are not a
+// cursor at all.
+//
+// It does not bound the length: a caller handling untrusted input caps that
+// before calling, since a malformed cursor is otherwise as much work as it is
+// long.
+func (o *Order) DecodeCursor(entity string, cursor []byte) ([]byte, error) {
+	if len(cursor) < 1+cursorShapeHexLen {
+		return nil, fmt.Errorf("query: cursor is %d bytes, too short to be one", len(cursor))
+	}
+	if cursor[0] != cursorVersion {
+		return nil, fmt.Errorf("query: cursor version %#02x is not %#02x", cursor[0], cursorVersion)
+	}
+	if string(cursor[1:1+cursorShapeHexLen]) != o.Shape(entity) {
+		return nil, ErrCursorShape
+	}
+	entry := cursor[1+cursorShapeHexLen:]
+	if _, _, err := o.cursorEnc.SplitEntry(entry); err != nil {
+		return nil, fmt.Errorf("query: %w", err)
+	}
+	return entry, nil
+}
+
+// CursorPrefix is the component half of an entry from Cursor or DecodeCursor:
+// the position without the row-key tiebreak. An index seek composes this rather
+// than the whole entry — see IndexEncoder.SplitEntry.
+func (o *Order) CursorPrefix(entry []byte) ([]byte, error) {
+	comps, _, err := o.cursorEnc.SplitEntry(entry)
+	return comps, err
 }
 
 // CompareStringsUTF16 orders strings by UTF-16 code unit — what JS `<`/`>`

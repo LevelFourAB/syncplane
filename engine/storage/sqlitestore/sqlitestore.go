@@ -1307,7 +1307,13 @@ func (t *sqliteTx) PutTextFloor(entity, key, field string, vv []byte) error {
 	return err
 }
 
-func (t *sqliteTx) ScanIndex(entity, index string, lo, hi []byte, limit int, fn func(entry []byte, rowKey string) error) error {
+func (t *sqliteTx) ScanIndex(
+	entity, index string,
+	lo, hi []byte,
+	limit int,
+	order storage.ScanOrder,
+	fn func(entry []byte, rowKey string) error,
+) error {
 	if limit <= 0 {
 		limit = -1 // SQLite: negative LIMIT means unlimited
 	}
@@ -1327,8 +1333,15 @@ func (t *sqliteTx) ScanIndex(entity, index string, lo, hi []byte, limit int, fn 
 		args = append(args, hi)
 	}
 	args = append(args, limit)
+	// The row key is part of the sort so that two entries sharing a key come
+	// out in a fixed order; reversing the walk has to reverse it too, or the
+	// descending scan would not be the exact mirror of the ascending one.
+	orderBy := `k, key`
+	if order == storage.ScanDesc {
+		orderBy = `k DESC, key DESC`
+	}
 	rows, err := t.tx.Query(
-		`SELECT k, key FROM index_entries WHERE `+where+` ORDER BY k, key LIMIT ?`, args...)
+		`SELECT k, key FROM index_entries WHERE `+where+` ORDER BY `+orderBy+` LIMIT ?`, args...)
 	if err != nil {
 		return err
 	}
