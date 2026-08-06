@@ -24,12 +24,12 @@ import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
-import { applyServerChanges } from '../../src/optimistic/rebase.js';
+import { applyServerChanges, wipeConfirmedState } from '../../src/optimistic/rebase.js';
 import { compileQuery, type Query } from '../../src/query/index.js';
 import type { Row } from '../../src/read.js';
 import { defineSchema, entity, type Infer, int32, text } from '../../src/schema/builder.js';
 import { TouchSet } from '../../src/touch.js';
-import { WatcherHub } from '../../src/watch.js';
+import { type WatchDelta, WatcherHub, type WatchHandle } from '../../src/watch.js';
 
 const registry = new EntityRegistry([ WidgetSchema ]);
 const WS = 'ws1';
@@ -100,7 +100,7 @@ function countingHub(kv: MemoryKVStore): WatcherHub {
 async function watchQuery(
 	hub: WatcherHub,
 	q: Query<Widget>,
-): Promise<{ seen: Row<Widget>[][]; unsub: () => void }> {
+): Promise<{ seen: Row<Widget>[][]; unsub: WatchHandle }> {
 	const seen: Row<Widget>[][] = [];
 	const unsub = hub.watch(
 		WidgetSchema,
@@ -150,7 +150,7 @@ describe('maintained query results', () => {
 		// Leave by deletion.
 		await hub.notify(await applyServer(kv, [ tombstone('a', 5n) ]));
 		expect(keysOf(seen.at(-1))).toEqual([ 'b', 'c' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('ties on the key exactly where the scan order does', async () => {
@@ -164,7 +164,7 @@ describe('maintained query results', () => {
 			await hub.notify(await applyServer(kv, [ serverRow(key, 1n, { id: key, count: 1 }) ]));
 		}
 		expect(keysOf(seen.at(-1))).toEqual([ 'a', 'm', 'z' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('leaves untouched rows as the same objects', async () => {
@@ -185,7 +185,7 @@ describe('maintained query results', () => {
 		expect(keysOf(after)).toEqual([ 'a', 'b', 'c' ]);
 		expect(after[0]).toBe(before[0]);
 		expect(after[2]).toBe(before[2]);
-		unsub();
+		unsub.close();
 	});
 
 	it('reads only the rows a commit named', async () => {
@@ -204,7 +204,7 @@ describe('maintained query results', () => {
 
 		expect(keysOf(seen.at(-1))).toEqual([ 'w3', 'w19', 'w18', 'w17', 'w16' ]);
 		expect(rowScans()).toBe(afterInitial);
-		unsub();
+		unsub.close();
 	});
 
 	it('does not emit for a change the page cannot see', async () => {
@@ -231,7 +231,7 @@ describe('maintained query results', () => {
 		await hub.notify(await applyServer(kv, [ serverRow('w1', 3n, { id: 'w1', count: -1 }) ]));
 		expect(seen.length).toBe(emits + 1);
 		expect(keysOf(seen.at(-1))).toEqual([ 'w1', 'w0', 'w2' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('fills a full page from the match set when a row is deleted out of it', async () => {
@@ -255,7 +255,7 @@ describe('maintained query results', () => {
 		// debugVerifyTouches scans once per notify by design; what must NOT have
 		// happened is a second scan to find w3.
 		expect(rowScans()).toBe(scans + 1);
-		unsub();
+		unsub.close();
 	});
 
 	it('honours an offset the same way a scan would', async () => {
@@ -274,7 +274,7 @@ describe('maintained query results', () => {
 		// A row entering BELOW the offset still moves the page: everything slides.
 		await hub.notify(await applyServer(kv, [ serverRow('x', 1n, { id: 'x', count: -1 }) ]));
 		expect(keysOf(seen.at(-1))).toEqual([ 'w1', 'w2' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('shares one read between watchers over the same entity', async () => {
@@ -299,8 +299,8 @@ describe('maintained query results', () => {
 		expect(rowScans()).toBe(scans);
 		// One decode, one object: the changed row is the SAME row in both results.
 		expect(low.seen.at(-1)?.[2]).toBe(high.seen.at(-1)?.[0]);
-		low.unsub();
-		high.unsub();
+		low.unsub.close();
+		high.unsub.close();
 	});
 
 	it('breaks a cross-workspace tie the way the scan order does', async () => {
@@ -334,7 +334,7 @@ describe('maintained query results', () => {
 		}
 
 		expect(seen.at(-1)?.map((r) => r.workspaceId)).toEqual([ 'wsA', 'wsB' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('suppresses a commit that leaves the result byte-identical', async () => {
@@ -353,7 +353,210 @@ describe('maintained query results', () => {
 		await hub.notify(await applyServer(kv, [ serverRow('w1', 2n, { id: 'w1', count: 1 }) ]));
 		expect(seen).toHaveLength(3);
 		expect(seen.at(-1)?.[0]?.version).toBe(2n);
-		unsub();
+		unsub.close();
+	});
+});
+
+describe('paging a maintained result', () => {
+	it('reports the matches a page was cut from', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		for (let i = 0; i < 7; i++) {
+			await applyServer(kv, [ serverRow(`w${i}`, 1n, { id: `w${i}`, count: i }) ]);
+		}
+		const totals: number[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(rows) => totals.push(rows.total),
+			compileQuery<Widget>({ where: (w) => w.count.gt(1), orderBy: (w) => [ w.count.asc() ] }),
+			undefined,
+			{ limit: 2 },
+		);
+		await flush();
+		expect(totals.at(-1)).toBe(5);
+
+		// A row entering the match set moves the total even though the page is full.
+		await hub.notify(await applyServer(kv, [ serverRow('x', 1n, { id: 'x', count: 9 }) ]));
+		expect(totals.at(-1)).toBe(6);
+
+		// And one leaving it.
+		await hub.notify(await applyServer(kv, [ tombstone('w6', 2n) ]));
+		expect(totals.at(-1)).toBe(5);
+		handle.close();
+	});
+
+	it('moves the window without reading the store', async () => {
+		const { kv, rowScans } = countingStore();
+		for (let i = 0; i < 10; i++) {
+			await applyServer(kv, [ serverRow(`w${i}`, 1n, { id: `w${i}`, count: i }) ]);
+		}
+		const hub = countingHub(kv);
+		const seen: Row<Widget>[][] = [];
+		const totals: number[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(rows) => {
+				seen.push(rows as Row<Widget>[]);
+				totals.push(rows.total);
+			},
+			compileQuery<Widget>({ orderBy: (w) => [ w.count.asc() ] }),
+			undefined,
+			{ limit: 3 },
+		);
+		await flush();
+		expect(keysOf(seen.at(-1))).toEqual([ 'w0', 'w1', 'w2' ]);
+		const scans = rowScans();
+
+		handle.setWindow({ offset: 4, limit: 3 });
+		await flush();
+		expect(keysOf(seen.at(-1))).toEqual([ 'w4', 'w5', 'w6' ]);
+		expect(totals.at(-1)).toBe(10);
+		// The rows were already held in result order: paging is a slice.
+		expect(rowScans()).toBe(scans);
+
+		// Clearing the window delivers the whole result.
+		handle.setWindow({});
+		await flush();
+		expect(seen.at(-1)).toHaveLength(10);
+		expect(rowScans()).toBe(scans);
+
+		// A move that lands on the same rows delivers nothing.
+		const emits = seen.length;
+		handle.setWindow({});
+		await flush();
+		expect(seen.length).toBe(emits);
+		handle.close();
+	});
+});
+
+describe('watch deltas', () => {
+	/** Applies an edit script the way a consumer maintaining its own list would. */
+	function applyScript(prev: Row<Widget>[], delta: WatchDelta<Widget>): Row<Widget>[] {
+		if (delta.kind === 'reset') return undefined as unknown as Row<Widget>[];
+		const out = [ ...prev ];
+		for (const change of delta.changes) {
+			if (change.op === 'insert') out.splice(change.index, 0, change.row);
+			else if (change.op === 'remove') out.splice(change.index, 1);
+			else out[change.index] = change.row;
+		}
+		return out;
+	}
+
+	it('hands out a script that rebuilds the delivered rows', async () => {
+		// The contract in one assertion: apply the changes to what you had and
+		// you hold what the callback just delivered. Every transition a row can
+		// make runs through it.
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		const kinds: string[] = [];
+		let held: Row<Widget>[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(rows, delta) => {
+				kinds.push(delta.kind);
+				const rebuilt = applyScript(held, delta as WatchDelta<Widget>);
+				// A reset replaces; a splice has to reproduce the array exactly.
+				if (rebuilt !== undefined) {
+					expect(rebuilt.map((r) => r.key)).toEqual(rows.map((r) => r.key));
+				}
+				held = [ ...rows ] as Row<Widget>[];
+			},
+			compileQuery<Widget>({
+				where: (w) => w.count.gt(0),
+				orderBy: (w) => [ w.count.asc() ],
+			}),
+		);
+		await flush();
+		expect(kinds).toEqual([ 'reset' ]);
+
+		for (const [ key, count ] of [ [ 'c', 30 ], [ 'a', 10 ], [ 'b', 20 ] ] as const) {
+			await hub.notify(await applyServer(kv, [ serverRow(key, 1n, { id: key, count }) ]));
+		}
+		// A move, an in-place change, a row failing the predicate, and a delete.
+		await hub.notify(await applyServer(kv, [ serverRow('a', 2n, { id: 'a', count: 25 }) ]));
+		await hub.notify(
+			await applyServer(kv, [ serverRow('a', 3n, { id: 'a', label: 'x', count: 25 }) ]),
+		);
+		await hub.notify(await applyServer(kv, [ serverRow('b', 4n, { id: 'b', count: 0 }) ]));
+		await hub.notify(await applyServer(kv, [ tombstone('c', 5n) ]));
+
+		expect(held.map((r) => r.key)).toEqual([ 'a' ]);
+		// Only the first callback reset; the rest were all describable as edits.
+		expect(kinds.slice(1).every((k) => k === 'splice')).toBe(true);
+		handle.close();
+	});
+
+	it('collapses a row changed in place into one update', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex());
+		await applyServer(kv, [ serverRow('w1', 1n, { id: 'w1', count: 1 }) ]);
+		const deltas: WatchDelta<Widget>[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(_rows, delta) => deltas.push(delta as WatchDelta<Widget>),
+			compileQuery<Widget>({ orderBy: (w) => [ w.count.asc() ] }),
+		);
+		await flush();
+
+		await hub.notify(
+			await applyServer(kv, [ serverRow('w1', 2n, { id: 'w1', label: 'x', count: 1 }) ]),
+		);
+
+		const last = deltas.at(-1)!;
+		expect(last.kind).toBe('splice');
+		expect(last.kind === 'splice' && last.changes).toEqual([
+			{ op: 'update', index: 0, row: expect.objectContaining({ key: 'w1' }) },
+		]);
+		handle.close();
+	});
+
+	it('resets rather than translating indices across a page', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex());
+		for (let i = 0; i < 5; i++) {
+			await applyServer(kv, [ serverRow(`w${i}`, 1n, { id: `w${i}`, count: i }) ]);
+		}
+		const kinds: string[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(_rows, delta) => kinds.push(delta.kind),
+			compileQuery<Widget>({ orderBy: (w) => [ w.count.asc() ] }),
+			undefined,
+			{ limit: 2 },
+		);
+		await flush();
+		await hub.notify(await applyServer(kv, [ serverRow('x', 1n, { id: 'x', count: -1 }) ]));
+
+		expect(kinds).toEqual([ 'reset', 'reset' ]);
+		handle.close();
+	});
+
+	it('resets when a commit reported an entity without its rows', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex());
+		await applyServer(kv, [ serverRow('w1', 1n, { id: 'w1', count: 1 }) ]);
+		const kinds: string[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(_rows, delta) => kinds.push(delta.kind),
+			compileQuery<Widget>({}),
+		);
+		await flush();
+
+		const touched = new TouchSet();
+		const tx = await kv.write();
+		await wipeConfirmedState(tx, registry, WS, touched);
+		await tx.commit();
+		await hub.notify(touched);
+
+		expect(kinds).toEqual([ 'reset', 'reset' ]);
+		handle.close();
 	});
 });
 
@@ -451,7 +654,7 @@ describe('index-seeded watch results', () => {
 
 		expect(seen.at(-1)?.map((r) => r.key)).toEqual([ 'n1', 'n2', 'n3' ]);
 		expect(rowScans()).toBe(before);
-		unsub();
+		unsub.close();
 	});
 
 	it('scans when no index covers the query', async () => {
@@ -479,6 +682,6 @@ describe('index-seeded watch results', () => {
 
 		expect(seen.at(-1)?.map((r) => r.key)).toEqual([ 'n3', 'n4' ]);
 		expect(rowScans()).toBeGreaterThan(before);
-		unsub();
+		unsub.close();
 	});
 });

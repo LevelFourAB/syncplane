@@ -458,6 +458,18 @@ export function compareRows<T>(
 
 /** filter → sort → slice. Input rows are already key-ordered. */
 export function runQuery<T>(rows: Row<T>[], q: CompiledQuery, schema?: DescMessage): Row<T>[] {
+	return runQueryPage(rows, q, schema).rows;
+}
+
+/**
+ * `runQuery`, with the number of rows that matched before `offset` and `limit`
+ * were applied — free here, because the whole match set exists either way.
+ */
+export function runQueryPage<T>(
+	rows: Row<T>[],
+	q: CompiledQuery,
+	schema?: DescMessage,
+): { rows: Row<T>[]; total: number } {
 	let out = q.where
 		? rows.filter((r) => evalCond(r.value, q.where as Cond, schema))
 		: rows.slice();
@@ -465,10 +477,11 @@ export function runQuery<T>(rows: Row<T>[], q: CompiledQuery, schema?: DescMessa
 		const orderBy = q.orderBy;
 		out = out.sort((a, b) => compareRows(a, b, orderBy, schema));
 	}
+	const total = out.length;
 	const start = q.offset ?? 0;
 	const end = q.limit !== undefined ? start + q.limit : undefined;
 	if (start !== 0 || end !== undefined) {
 		out = out.slice(start, end);
 	}
-	return out;
+	return { rows: out, total };
 }

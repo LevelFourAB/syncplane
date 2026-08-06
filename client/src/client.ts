@@ -97,7 +97,7 @@ import {
 	type OrderKey,
 	type Query,
 	type QueryRef,
-	runQuery,
+	runQueryPage,
 } from './query/index.js';
 import { condToProto, orderKeyToProto } from './query/proto.js';
 import { prepareQuery, toWirePaths } from './query/wire.js';
@@ -142,7 +142,17 @@ import {
 	type UndoOptions,
 	type UndoScopeOptions,
 } from './undo.js';
-import { type WatchCallback, WatcherHub, type WatchOptions } from './watch.js';
+import {
+	type WatchCallback,
+	type WatchDelta,
+	WatcherHub,
+	type WatchHandle,
+	type WatchOptions,
+	type WatchWindow,
+} from './watch.js';
+
+/** The handle a watch on a closed client gets: nothing subscribed, nothing to stop. */
+const INERT_WATCH: WatchHandle = Object.freeze({ close: () => {}, setWindow: () => {} });
 
 export type { MirrorTx, MutatorMirror } from './optimistic/rebase.js';
 export type { Row } from './read.js';
@@ -687,13 +697,13 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 		q: Query<MessageShape<D>>,
 		opts?: { include?: IncludeSpec },
 	): Promise<RowSet<MessageShape<D>>>;
-	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): () => void;
+	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): WatchHandle;
 	watchQuery<D extends DescMessage>(
 		schema: D,
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: { include?: IncludeSpec },
-	): () => void;
+	): WatchHandle;
 	resolveRef<D extends DescMessage>(
 		holderSchema: D,
 		fieldLocalName: string,
@@ -788,13 +798,13 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void;
+	): WatchHandle;
 	watchQuery<D extends DescMessage>(
 		schema: D,
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void;
+	): WatchHandle;
 	resolveRef<D extends DescMessage>(
 		holderSchema: D,
 		fieldLocalName: string,
@@ -1011,7 +1021,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void {
+	): WatchHandle {
 		return this.client.registerWatch(
 			this.workspaceId,
 			schema,
@@ -1019,6 +1029,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			undefined,
 			opts?.include,
 			opts?.onError,
+			opts?.window,
 		);
 	}
 
@@ -1027,7 +1038,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void {
+	): WatchHandle {
 		return this.client.registerWatch(
 			this.workspaceId,
 			schema,
@@ -1035,6 +1046,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
+			opts?.window,
 		);
 	}
 
@@ -1584,10 +1596,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					coalesce,
 				});
 			},
-			watch: (cb) =>
-				scope.watch(schema, (rows) => {
+			watch: (cb) => {
+				const handle = scope.watch(schema, (rows) => {
 					cb(fieldOf(rows.find((r) => r.key === rowKey)?.value));
-				}),
+				});
+				return () => handle.close();
+			},
 		});
 	}
 
@@ -2366,7 +2380,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void {
+	): WatchHandle {
 		return this.registerWatch(
 			this.defaultScope().workspaceId,
 			schema,
@@ -2374,6 +2388,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			undefined,
 			opts?.include,
 			opts?.onError,
+			opts?.window,
 		);
 	}
 
@@ -2399,14 +2414,18 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		compiled?: CompiledQuery,
 		include?: IncludeSpec,
 		onError?: (error: unknown) => void,
-	): () => void {
-		if (this.closed) return () => {};
+		initialWindow?: WatchWindow,
+	): WatchHandle {
+		if (this.closed) return INERT_WATCH;
 		this.entityRegistry.bySchema(schema);
-		let unsub: (() => void) | undefined;
+		let handle: WatchHandle | undefined;
 		let cancelled = false;
+		// A window set before the hub resolved is not lost: it becomes the one the
+		// watch registers with, so it costs no extra read.
+		let window = initialWindow;
 		void this.hub().then((hub) => {
 			if (cancelled) return;
-			unsub = hub.watch(schema, workspaceId, cb, compiled, include);
+			handle = hub.watch(schema, workspaceId, cb, compiled, include, window);
 		}).catch((err) => {
 			this.statusTracker.update({
 				lastError: {
@@ -2418,9 +2437,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// promise with nothing to reject into.
 			if (!cancelled && onError) safeInvoke(onError, err, 'watch onError callback');
 		});
-		return () => {
-			cancelled = true;
-			unsub?.();
+		return {
+			close: () => {
+				cancelled = true;
+				handle?.close();
+			},
+			setWindow: (next) => {
+				window = next;
+				handle?.setWindow(next);
+			},
 		};
 	}
 
@@ -2500,7 +2525,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const def = this.entityRegistry.bySchema(schema);
 		const compiled = prepareQuery(schema, compileQuery(q));
 		const kv = await this.kv();
-		const rows = await this.kvMutex.runShared(async () => {
+		const page = await this.kvMutex.runShared(async () => {
 			const tx = await kv.read();
 			try {
 				// An index narrows which rows are read; it never changes which
@@ -2517,21 +2542,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					workspaceId,
 				);
 				const scan = async () =>
-					runQuery(
+					runQueryPage(
 						await scanDecoded(tx, this.entityRegistry, def, schema, workspaceId),
 						compiled,
 						schema,
 					);
 				if (planned === undefined) return await scan();
-				const rows = planned.map((entry) => entry.row);
+				const rows = planned.rows.map((entry) => entry.row);
 				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
 				// This is the same net the watch hub uses for its maintained
 				// results, pointed at the other place a cheap answer stands in
 				// for an expensive one: nothing else would notice an index and a
 				// scan drifting apart, because both look like perfectly ordinary
 				// results.
-				if (this.verifyIndexReads) assertSameResult(rows, await scan(), def.name);
-				return rows;
+				const found = { rows, total: planned.total };
+				if (this.verifyIndexReads) assertSameResult(found, await scan(), def.name);
+				return found;
 			} finally {
 				tx.release();
 			}
@@ -2539,15 +2565,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// Coverage is the BASE entity's: a query answers from what synced, and
 		// hydration only decorates the rows it found.
 		const coverage = this.coverage.coverageOf(def.name, workspaceId);
-		if (!opts?.include) return withCoverage(rows, coverage);
+		if (!opts?.include) return withCoverage(page.rows, coverage, page.total);
 		const hydrated = (await hydrate(
 			this.refClient(),
 			this.entityRegistry,
 			def.name,
-			rows as Row<Message>[],
+			page.rows as Row<Message>[],
 			opts.include,
 		)) as unknown as HydratedRow<MessageShape<D>>[];
-		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage);
+		return withCoverage(
+			hydrated as unknown as Row<MessageShape<D>>[],
+			coverage,
+			page.total,
+		);
 	}
 
 	/**
@@ -2697,8 +2727,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void {
-		if (this.closed) return () => {};
+	): WatchHandle {
+		if (this.closed) return INERT_WATCH;
 		return this.registerWatch(
 			this.defaultScope().workspaceId,
 			schema,
@@ -2706,6 +2736,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
+			opts?.window,
 		);
 	}
 
@@ -2718,8 +2749,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void {
-		if (this.closed) return () => {};
+	): WatchHandle {
+		if (this.closed) return INERT_WATCH;
 		return this.registerWatch(
 			undefined,
 			schema,
@@ -2727,6 +2758,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
+			opts?.window,
 		);
 	}
 

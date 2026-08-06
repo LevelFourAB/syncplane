@@ -84,7 +84,7 @@ describe('client.db', () => {
 		await client.db.todo.mutate.put({ id: 't1', title: 'watched' });
 		await new Promise((r) => setTimeout(r, 0));
 		expect(snapshots.at(-1)?.map((r) => r.value.title)).toEqual([ 'watched' ]);
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 

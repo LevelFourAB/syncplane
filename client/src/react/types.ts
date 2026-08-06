@@ -12,6 +12,7 @@ import type { PatchInit } from '../mutations.js';
 import type { Query } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { IncludeSpec } from '../refs.js';
+import type { WatchWindow } from '../watch.js';
 import type { UseTextResult } from './hooks/use-text.js';
 import type { WatchResult, WatchState } from './result.js';
 
@@ -44,7 +45,20 @@ export interface UseWatchOptions extends UseWorkspaceOptions {
 	include?: IncludeSpec;
 }
 
-export type UseQueryOptions = UseWatchOptions;
+/** Options for `useQuery` and `useSuspenseQuery`. */
+export interface UseQueryOptions extends UseWatchOptions {
+	/**
+	 * Page of the result to render, in place of any `offset`/`limit` the query
+	 * carries. `rows.total` reports how many rows it was cut from, which is what
+	 * sizes a scroller over it.
+	 *
+	 * Moving it re-pages the result the subscription already holds — no store
+	 * read, no resubscription — so a virtualized list can follow the scroll
+	 * position. `useSuspenseQuery` is the exception: there the window is part of
+	 * the subscription identity, so a move re-reads and re-suspends.
+	 */
+	window?: WatchWindow;
+}
 
 /**
  * Options for `useRow`. `include` is shared with every other useRow on the same

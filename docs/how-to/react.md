@@ -177,6 +177,43 @@ All of them are built on `useSyncExternalStore` with an SSR snapshot, and
 nothing hands out a mutable row: results are readonly, which is what makes the
 snapshot stable and tearing-free.
 
+## Virtualizing a long list
+
+Pass a `window` instead of putting `offset`/`limit` in the query. The
+subscription holds the whole match set, so moving the window re-pages what it
+already has — no store read, no resubscription — and `total` tells the scroller
+how tall the list is.
+
+```tsx
+function TodoList() {
+	const [ first, setFirst ] = useState(0);
+	const rows = db.todo.useQuery(
+		{ orderBy: (t) => [ t.createdAtMs.desc() ] },
+		{ window: { offset: first, limit: 50 } },
+	);
+
+	return (
+		<Scroller
+			count={ rows.total }
+			rowHeight={ 32 }
+			onRangeChange={ setFirst }
+			offset={ first }
+		>
+			{ rows.map((row) => <Todo key={ row.key } row={ row } />) }
+		</Scroller>
+	);
+}
+```
+
+Two things follow from the window living outside the query. A commit that
+changes a row the page cannot see does not re-render the component — only
+`total` moving or the page itself moving does. And rows keep their identity
+across commits, so a memoized `<Todo>` re-renders only when its own row changes.
+
+`useSuspenseQuery` is the exception: there the window is part of the
+subscription identity, so moving it re-reads and re-suspends. Use `useQuery` for
+a page that follows a scroll position.
+
 ## A dialog with its own undo history
 
 A workspace has one undo stack, so by default the Cmd+Z inside a task dialog

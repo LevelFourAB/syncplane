@@ -10,6 +10,7 @@
 
 import type { CompiledQuery } from '../query/index.js';
 import type { IncludeSpec } from '../refs.js';
+import type { WatchWindow } from '../watch.js';
 
 /**
  * Deterministic JSON of an arbitrary plain-data value with object keys sorted
@@ -36,6 +37,12 @@ export function stableHash(
 	entityKey: string,
 	query?: CompiledQuery,
 	include?: IncludeSpec,
+	window?: WatchWindow,
 ): string {
-	return stableStringify({ e: entityKey, q: query ?? null, i: include ?? null });
+	return stableStringify({
+		e: entityKey,
+		q: query ?? null,
+		i: include ?? null,
+		w: window ? { o: window.offset ?? 0, l: window.limit ?? null } : null,
+	});
 }

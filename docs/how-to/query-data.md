@@ -11,10 +11,11 @@ const open = await client.db.todo.query({
 });
 
 // Live: re-emitted after every commit that changes the result.
-const stop = client.db.todo.watchQuery(
+const view = client.db.todo.watchQuery(
 	{ where: (t) => t.completed.eq(false) },
 	render,
 );
+// ... view.close() when done.
 
 // Server: everything, including rows this client never synced.
 const found = await client.db.todo.queryServer({
@@ -123,6 +124,24 @@ The cost is on writes: every write to the entity re-stores that row's position
 in every index it has, on both sides. An index over a repeated field stores one
 entry per element, so that cost grows with the list — `MaxIndexEntriesPerRow` is
 the ceiling, and a write past it fails rather than storing a partial index.
+
+## Paging a live result
+
+`offset`/`limit` inside a query are fixed for the life of a watch. To page
+through a live result, pass a `window` instead and move it:
+
+```ts
+const view = client.db.todo.watchQuery(
+	{ orderBy: (t) => [ t.createdAtMs.desc() ] },
+	(rows) => paint(rows, rows.total),
+	{ window: { offset: 0, limit: 50 } },
+);
+onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
+```
+
+The watch maintains the whole match set, so `setWindow` is a slice rather than a
+read, and `rows.total` reports how many rows the page was cut from. A move that
+lands on the same rows delivers nothing; `setWindow({})` delivers everything.
 
 ## Filtering on a list
 

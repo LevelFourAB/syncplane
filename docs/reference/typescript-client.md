@@ -159,6 +159,18 @@ await client.db.todo.query(q, { include? })
 await client.db.todo.queryServer(q)
 ```
 
+Every result array is a `RowSet`: an ordinary array carrying two non-enumerable
+extras — `coverage` (see §9) and `total`, the matches counted before `offset` and
+`limit`. Both stay out of `JSON.stringify`, `Object.keys` and structural
+equality.
+
+`total` counts what the read could see, which is what `coverage` describes: a
+local read counts synced rows, and `queryServer` counts only the page the server
+returned (a full page also carries the `window` bound, which is how a truncated
+one is recognised). An index that stops early on a `limit` still walks the rest
+of its range to count — positions only, with no row reads, unless a residual
+predicate means the row is the only thing that can settle a match.
+
 ### `Row<T>`
 
 ```ts
@@ -535,17 +547,25 @@ and each is spliced into or out of the result in place. The callback receives th
 full row list whenever that result moves.
 
 ```ts
-type WatchCallback<T> = (rows: Row<T>[]) => void;
+type WatchCallback<T> = (rows: RowSet<T>, delta: WatchDelta<T>) => void;
 
-const off = client.watch(Todo, (rows) => { ... });
-const off = client.watchQuery(Todo, q, (rows) => { ... }, { include? });
+interface WatchHandle {
+	close(): void;
+	setWindow(window: { offset?: number; limit?: number }): void;
+}
+
+const view = client.watch(Todo, (rows) => { ... });
+const view = client.watchQuery(Todo, q, (rows) => { ... }, { include?, window? });
 
 // db facade
-const off = client.db.todo.watch((rows) => { ... });
-const off = client.db.todo.watchQuery(q, (rows) => { ... }, { include? });
+const view = client.db.todo.watch((rows) => { ... });
+const view = client.db.todo.watchQuery(q, (rows) => { ... }, { include?, window? });
+
+view.setWindow({ offset: 1200, limit: 50 });
+view.close();
 ```
 
-- Returns a **synchronous unsubscribe** function.
+- Returns a **`WatchHandle`**, synchronously. `close()` is idempotent.
 - A callback fires only when the delivered rows change — same rows at the same
   versions, no callback. With a `limit`, a change past `offset + limit` cannot
   move the page and does not fire.
@@ -554,6 +574,49 @@ const off = client.db.todo.watchQuery(q, (rows) => { ... }, { include? });
   overlay clear) rescans it.
 - Callbacks must **not mutate** received rows (shared between same-entity watchers).
 - Cross-tab: a commit in another tab re-fires this tab's watchers (via BroadcastChannel).
+
+#### Paging a live result — `setWindow`
+
+`opts.window` replaces any `offset`/`limit` the query carries, and unlike them it
+moves. The watch maintains the whole match set, so `setWindow` re-pages what it
+already holds — a slice, not a read — and `rows.total` reports how many rows the
+page was cut from. That is the pair a virtualized list needs: `total` sizes the
+scroller, `setWindow` follows it.
+
+```ts
+const view = client.db.todo.watchQuery(
+	{ orderBy: (t) => [ t.createdAtMs.desc() ] },
+	(rows) => paint(rows, rows.total),
+	{ window: { offset: 0, limit: 50 } },
+);
+onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
+```
+
+A move landing on the same rows delivers nothing. `setWindow({})` delivers the
+whole result.
+
+#### Deltas
+
+The second callback argument describes the same change as an edit script against
+the previous array. Ignoring it is always correct.
+
+```ts
+type WatchDelta<T> =
+	| { kind: 'reset' }
+	| { kind: 'splice'; changes: readonly RowSplice<T>[] };
+
+interface RowSplice<T> {
+	op: 'insert' | 'remove' | 'update'; // update replaces; the others shift
+	index: number;
+	row: Row<T>;
+}
+```
+
+Apply the changes in order to a copy of the previous array and it becomes the
+current one. `reset` means replace it wholesale — the first callback, a window
+move, a commit that reported an entity without its rows, and **every** callback
+on a watch with an `offset` or a `limit` (a page short enough to compare directly
+is not worth translating indices for).
 
 ---
 
@@ -824,7 +887,8 @@ interface Coverage {
 }
 ```
 
-Every result array carries one as a non-enumerable `coverage`. `hydrating` is the
+Every result array carries one as a non-enumerable `coverage`, beside `total`
+(see §2). `hydrating` is the
 transient bound: a cold client's first snapshot lands entity by entity, so an
 entity that has not arrived reads as `[]` exactly like an empty one until this
 says otherwise. It clears on its own and the readers re-fire.
@@ -1180,6 +1244,13 @@ interface WatchState {
   [Which write verb](#which-write-verb).
 - Every `useRow` on one (workspace, entity, include) shares a single subscription
   and a key index; a commit re-renders only the hooks whose own row moved.
+- **`opts.window`** (`{ offset?, limit? }`) pages the result the subscription
+  already holds, so moving it costs a slice rather than a re-read and does not
+  resubscribe — the virtualization path, with `rows.total` sizing the scroller. An
+  edit the page cannot see does not re-render. `useSuspenseQuery` is the
+  exception: there the window is part of the subscription identity (one cached
+  entry serves every call site with that identity, and two windows would fight
+  over it), so a move re-reads and re-suspends.
 - The `useSuspense*` variants wait for the first callback rather than reporting
   `loading`, and throw a failed subscription for an error boundary. Suspense is a
   separate hook, not an option, because it selects a fixed hook path.

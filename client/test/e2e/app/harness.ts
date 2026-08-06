@@ -26,6 +26,7 @@ import { confirmedKey, type ConfirmedRecord, pendingPrefix } from '../../../src/
 import { IDBKVStore } from '../../../src/kv/idb.js';
 import { entityDefOf } from '../../../src/mutations.js';
 import { compactDoc } from '../../../src/text/index.js';
+import type { WatchHandle } from '../../../src/watch.js';
 import type { HarnessApi, MarkView, StatusView, TodoView } from '../harness-api.js';
 import { WriteMeter } from './write-meter.js';
 
@@ -37,7 +38,7 @@ const WIDGET_ENTITY = entityDefOf(WidgetSchema).name;
 let client: SyncClient | undefined;
 /** The workspace `open` was called with — needed to address confirmed rows. */
 let workspaceId: string | undefined;
-let unwatch: (() => void) | undefined;
+let unwatch: WatchHandle | undefined;
 let notificationCount = 0;
 const watched = new Set<string>();
 const rejections: string[] = [];
@@ -173,7 +174,7 @@ const harness: HarnessApi = {
 	},
 
 	async close() {
-		unwatch?.();
+		unwatch?.close();
 		unwatch = undefined;
 		// Awaited: closing drains each handle's write chain, so an edit made just
 		// before the tab closes is queued before the client goes away.
@@ -212,7 +213,7 @@ const harness: HarnessApi = {
 	},
 
 	async watchTodos() {
-		unwatch?.();
+		unwatch?.close();
 		unwatch = current().watch(TodoSchema, (rows) => {
 			notificationCount++;
 			for (const row of rows) watched.add(row.value.id);

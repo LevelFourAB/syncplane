@@ -227,7 +227,7 @@ describe('client reads carry coverage', () => {
 		const unsub = client.db.widget.watch((rows) => seen.push(rows.coverage.complete));
 		await new Promise((r) => setTimeout(r, 0));
 		expect(seen.at(-1)).toBe(false);
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 });

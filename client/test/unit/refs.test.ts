@@ -313,7 +313,7 @@ describe('watch include reactivity', () => {
 		await client.db.project.mutate.put({ id: 'p1', name: 'B' });
 		await flush();
 		expect(names.at(-1)).toBe('B');
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 
@@ -349,7 +349,7 @@ describe('watch include reactivity', () => {
 		await client.db.project.mutate.put({ id: 'p1', name: 'B' });
 		await flush();
 		expect(emits).toBe(initial + 2);
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 });

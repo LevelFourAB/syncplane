@@ -38,14 +38,27 @@ export interface Coverage {
 }
 
 /**
- * A result array that also reports how much of the entity it could see.
+ * A result array that also reports how much of the entity it could see, and how
+ * many rows matched before it was paged.
  *
  * It IS an array — `.map`, `.length`, spreads and destructuring all behave
- * exactly as before, and `coverage` is non-enumerable so it stays out of
+ * exactly as before, and both extras are non-enumerable so they stay out of
  * `JSON.stringify`, `Object.keys` and structural equality checks. The type is
  * the only thing that widened.
  */
-export type RowSet<T> = Row<T>[] & { readonly coverage: Coverage };
+export type RowSet<T> = Row<T>[] & {
+	readonly coverage: Coverage;
+	/**
+	 * Matching rows in the LOCAL store before `offset` and `limit` — what
+	 * `length` would have been without them, and what sizes a scroller over a
+	 * paged result. Equal to `length` when the read was not paged.
+	 *
+	 * Local is the operative word: it counts what `coverage` admits, not what
+	 * the server holds. A result bounded by a subscription reports the rows this
+	 * device could see, and reads that number as a workspace-wide total.
+	 */
+	readonly total: number;
+};
 
 /** The coverage of a client that holds everything — full sync. */
 export const COMPLETE: Coverage = Object.freeze({ complete: true, bounds: [] });
@@ -58,18 +71,29 @@ export const COMPLETE: Coverage = Object.freeze({ complete: true, bounds: [] });
 export const UNKNOWN: Coverage = Object.freeze({ complete: false, bounds: [] });
 
 /**
- * A readonly result array carrying its coverage — the shape the React bridge
- * hands to components, which must not mutate what they render.
+ * A readonly result array carrying its coverage and total — the shape the React
+ * bridge hands to components, which must not mutate what they render.
  */
-export type ReadonlyRowSet<T> = readonly Row<T>[] & { readonly coverage: Coverage };
+export type ReadonlyRowSet<T> = readonly Row<T>[] & {
+	readonly coverage: Coverage;
+	readonly total: number;
+};
 
-/** Attaches a coverage report to a result array without disturbing it. */
-export function withCoverage<T>(rows: Row<T>[], coverage: Coverage): RowSet<T> {
-	return Object.defineProperty(rows, 'coverage', {
-		value: coverage,
-		enumerable: false,
-		writable: false,
-		configurable: true,
+/**
+ * Attaches a coverage report and a match total to a result array without
+ * disturbing it.
+ *
+ * @param total - Matches before paging. Defaults to `rows.length`, which is
+ * correct for every unpaged read; a paged one must pass what it counted.
+ */
+export function withCoverage<T>(
+	rows: Row<T>[],
+	coverage: Coverage,
+	total: number = rows.length,
+): RowSet<T> {
+	return Object.defineProperties(rows, {
+		coverage: { value: coverage, enumerable: false, writable: false, configurable: true },
+		total: { value: total, enumerable: false, writable: false, configurable: true },
 	}) as RowSet<T>;
 }
 

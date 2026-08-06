@@ -21,7 +21,7 @@ import type { Query } from './query/index.js';
 import type { Row } from './read.js';
 import type { IncludeSpec } from './refs.js';
 import type { TextHandle } from './text/handle.js';
-import type { WatchCallback, WatchOptions } from './watch.js';
+import type { WatchCallback, WatchHandle, WatchOptions } from './watch.js';
 
 /** Last segment of a fully-qualified proto type name. */
 type SimpleName<T extends string> = T extends `${string}.${infer Rest}` ? SimpleName<Rest> : T;
@@ -103,12 +103,12 @@ export interface EntityApi<D extends DescMessage> {
 	 * Unavailable inside a transaction, which has no network of its own.
 	 */
 	queryServer(q: Query<MessageShape<D>>): Promise<RowSet<MessageShape<D>>>;
-	watch(cb: WatchCallback<MessageShape<D>>, opts?: WatchOptions): () => void;
+	watch(cb: WatchCallback<MessageShape<D>>, opts?: WatchOptions): WatchHandle;
 	watchQuery(
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void;
+	): WatchHandle;
 	/**
 	 * Opens a live handle over a collaborative text field
 	 * ((syncplane.v1.field_behavior).text) of an existing row. The handle applies
@@ -178,13 +178,13 @@ interface SchemaApi {
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void;
+	): WatchHandle;
 	watchQuery<D extends DescMessage>(
 		schema: D,
 		q: Query<MessageShape<D>>,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
-	): () => void;
+	): WatchHandle;
 	resolveRef<D extends DescMessage>(
 		holderSchema: D,
 		fieldLocalName: string,

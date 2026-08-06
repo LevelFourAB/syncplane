@@ -139,4 +139,11 @@ export type { TextInverseOp } from './text/undo-ops.js';
 // Undo is driven through the client (undo/redo/canUndo) — the manager and the
 // inversion it runs on are not part of the surface; only the option types are.
 export type { UndoOptions, UndoScopeOptions } from './undo.js';
-export type { WatchCallback, WatchOptions } from './watch.js';
+export type {
+	RowSplice,
+	WatchCallback,
+	WatchDelta,
+	WatchHandle,
+	WatchOptions,
+	WatchWindow,
+} from './watch.js';

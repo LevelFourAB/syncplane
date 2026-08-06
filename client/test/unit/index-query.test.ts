@@ -10,6 +10,7 @@ import { create, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
+import type { RowSet } from '../../src/coverage.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { metaCursor } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
@@ -197,13 +198,22 @@ async function clientWith(built: boolean, overlay?: Issue[]) {
  * `DescMessage`, so the two cannot be related without a nominal link the
  * builder does not create.
  */
-const run = (client: SyncClient<never>, q: Query<Issue>): Promise<Row<Issue>[]> =>
-	client.query(IssueSchema, q as never) as unknown as Promise<Row<Issue>[]>;
+const run = (client: SyncClient<never>, q: Query<Issue>): Promise<RowSet<Issue>> =>
+	client.query(IssueSchema, q as never) as unknown as Promise<RowSet<Issue>>;
 
 /** The two arms of one query, as comparable plain data. */
 async function both(q: Query<Issue>, overlay?: Issue[]) {
-	const shape = (rows: Row<Issue>[]) =>
-		rows.map((r) => ({ key: r.key, version: r.version, state: r.value.state, rank: r.value.rank }));
+	// `total` is part of the answer, so it is part of what the two arms have to
+	// agree on: an index that early-exits still has to count what it skipped.
+	const shape = (rows: RowSet<Issue>) => ({
+		rows: rows.map((r) => ({
+			key: r.key,
+			version: r.version,
+			state: r.value.state,
+			rank: r.value.rank,
+		})),
+		total: rows.total,
+	});
 	const scanned = await clientWith(false, overlay);
 	const indexed = await clientWith(true, overlay);
 	try {
@@ -222,7 +232,7 @@ function same(name: string, q: Query<Issue>, want: string[], overlay?: Issue[]):
 	it(name, async () => {
 		const { scanned, indexed } = await both(q, overlay);
 		expect(indexed).toEqual(scanned);
-		expect(scanned.map((r) => r.key)).toEqual(want);
+		expect(scanned.rows.map((r) => r.key)).toEqual(want);
 	});
 }
 

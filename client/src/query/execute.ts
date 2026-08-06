@@ -75,10 +75,17 @@ export interface IndexedRow<T> {
 	bytes: Uint8Array;
 }
 
+/** An index-served page, with the matches it was cut from. */
+export interface IndexedPage<T> {
+	rows: IndexedRow<T>[];
+	/** Matches before `offset` and `limit`; see RowSet.total. */
+	total: number;
+}
+
 /**
  * Answers a query from an index, or returns undefined to mean "scan instead".
  *
- * `undefined` is never "no rows" — an empty result is an empty array. It means
+ * `undefined` is never "no rows" — an empty page is an empty array. It means
  * no index serves this query, none is built yet, or the walk exceeded its
  * candidate budget.
  */
@@ -90,7 +97,7 @@ export async function queryByIndex<D extends DescMessage>(
 	indexes: CompiledIndex[],
 	compiled: CompiledQuery,
 	workspaceId: string | undefined,
-): Promise<IndexedRow<MessageShape<D>>[] | undefined> {
+): Promise<IndexedPage<MessageShape<D>> | undefined> {
 	// A cross-workspace query would need a k-way merge whose tie-break differs
 	// from the scan path's; see the header.
 	if (workspaceId === undefined || indexes.length === 0) return undefined;
@@ -144,6 +151,8 @@ export async function queryByIndex<D extends DescMessage>(
 	const confirmed: IndexedRow<MessageShape<D>>[] = [];
 	const seen = new Set<string>();
 	let walked = 0;
+	// Matches past the page, which `total` still has to account for.
+	let beyond = 0;
 
 	for (const range of plan.ranges) {
 		for await (
@@ -170,6 +179,19 @@ export async function queryByIndex<D extends DescMessage>(
 			// tombstoned — so the confirmed copy drops out here and reappears,
 			// if it still matches, from the overlay stream.
 			if (shadowed.has(key)) continue;
+			// An ordered plan yields matches in result order, so once enough of
+			// them are in hand no later one can reach the page — bounded above by
+			// how many the overlay could displace. What follows is still counted:
+			// `total` is the whole match set, not the page.
+			const settled = budget !== undefined && plan.ordered && confirmed.length >= budget;
+			// With nothing left for the row to decide, a position IS a match, so
+			// counting the rest of the range costs no row reads at all. A residual
+			// predicate takes that away — the row is the only thing that can
+			// settle it — which is the price of reporting a total here.
+			if (settled && plan.residual === undefined) {
+				beyond++;
+				continue;
+			}
 			const entry = await readConfirmed(tx, registry, def, schema, workspaceId, key);
 			// A position and its row are one record, so a position cannot outlive
 			// its row — and a reader holds the shared lock, so no commit lands
@@ -177,11 +199,8 @@ export async function queryByIndex<D extends DescMessage>(
 			// answering from a row that is not there would be silent and wrong.
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, plan.residual, schema)) continue;
-			confirmed.push(entry);
-			// An ordered plan yields matches in result order, so once enough of
-			// them are in hand no later one can reach the page — bounded above by
-			// how many the overlay could displace.
-			if (budget !== undefined && plan.ordered && confirmed.length >= budget) break;
+			if (settled) beyond++;
+			else confirmed.push(entry);
 		}
 	}
 
@@ -193,9 +212,10 @@ export async function queryByIndex<D extends DescMessage>(
 		// No ordering: the scan path returns rows in key order, so this must too.
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
+	const total = out.length + beyond;
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
-	return start !== 0 || end !== undefined ? out.slice(start, end) : out;
+	return { rows: start !== 0 || end !== undefined ? out.slice(start, end) : out, total };
 }
 
 /**
@@ -277,23 +297,24 @@ const matches = (value: unknown, cond: Cond | undefined, schema: DescMessage): b
  * Only reachable under the debug flag; see SyncClientOptions.debugVerifyIndexReads.
  */
 export function assertSameResult(
-	indexed: readonly Row<unknown>[],
-	scanned: readonly Row<unknown>[],
+	indexed: { rows: readonly Row<unknown>[]; total: number },
+	scanned: { rows: readonly Row<unknown>[]; total: number },
 	entity: string,
 ): void {
-	const describe = (rows: readonly Row<unknown>[]): string =>
-		rows.map((r) => `${r.workspaceId}/${r.key}@${r.version}`).join(', ');
-	const differs = indexed.length !== scanned.length
-		|| indexed.some((row, i) =>
-			row.key !== scanned[i]!.key
-			|| row.workspaceId !== scanned[i]!.workspaceId
-			|| row.version !== scanned[i]!.version
+	const describe = (page: { rows: readonly Row<unknown>[]; total: number }): string =>
+		`${page.rows.map((r) => `${r.workspaceId}/${r.key}@${r.version}`).join(', ')}] of ${page.total}`;
+	const differs = indexed.total !== scanned.total
+		|| indexed.rows.length !== scanned.rows.length
+		|| indexed.rows.some((row, i) =>
+			row.key !== scanned.rows[i]!.key
+			|| row.workspaceId !== scanned.rows[i]!.workspaceId
+			|| row.version !== scanned.rows[i]!.version
 		);
 	if (differs) {
 		throw new Error(
 			`index-served query on "${entity}" diverged from the scan:\n`
-				+ `  index: [${describe(indexed)}]\n`
-				+ `  scan:  [${describe(scanned)}]\n`
+				+ `  index: [${describe(indexed)}\n`
+				+ `  scan:  [${describe(scanned)}\n`
 				+ 'An index is an optimization; the scan is the definition.',
 		);
 	}

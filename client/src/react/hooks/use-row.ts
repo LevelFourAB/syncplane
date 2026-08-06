@@ -4,6 +4,7 @@ import { useCallback, useMemo } from 'react';
 import type { UpdateRecipe } from '../../client.js';
 import type { ReadonlyRowSet } from '../../coverage.js';
 import type { PatchInit } from '../../mutations.js';
+import type { WatchHandle } from '../../watch.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
 import { useRowStore } from '../row-store.js';
 import { stableHash } from '../stable-hash.js';
@@ -65,7 +66,7 @@ export function useRowHook<D extends DescMessage>(
 	const subscribe = (
 		onRows: (rows: ReadonlyRowSet<MessageShape<D>>) => void,
 		onError: (error: unknown) => void,
-	): () => void => scope.watch(schema, onRows, { include, onError });
+	): WatchHandle => scope.watch(schema, onRows, { include, onError });
 	const cell = useRowStore<MessageShape<D>>({
 		identity,
 		subscribe,

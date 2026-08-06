@@ -61,8 +61,8 @@ describe('SyncClient.close', () => {
 		const unsubQuery = client.watchQuery(TodoSchema, {}, (rows) => seen.push(rows));
 		await new Promise((r) => setTimeout(r, 10));
 		expect(seen).toEqual([]);
-		unsub();
-		unsubQuery();
+		unsub.close();
+		unsubQuery.close();
 	});
 
 	it('leaves no live coordinator when close races an in-flight start', async () => {
@@ -103,6 +103,6 @@ describe('SyncClient.close', () => {
 		// The hub is closed: no further emissions even if something notified.
 		await new Promise((r) => setTimeout(r, 10));
 		expect(seen.length).toBe(before);
-		unsub();
+		unsub.close();
 	});
 });

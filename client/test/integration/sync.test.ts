@@ -194,7 +194,7 @@ describe('sync (poll-driven)', () => {
 		await new Promise((r) => setTimeout(r, 50));
 
 		expect(snapshots.at(-1)).toEqual([ 'one', 'two' ]);
-		unsub();
+		unsub.close();
 		await a.close();
 	});
 

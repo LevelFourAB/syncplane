@@ -155,7 +155,7 @@ describe('useQuery hydration state', () => {
 		vi.spyOn(scope, 'watchQuery').mockImplementation(
 			((_s: unknown, _q: unknown, cb: (rows: RowSet<unknown>) => void) => {
 				emit = cb;
-				return () => {};
+				return { close: () => {}, setWindow: () => {} };
 			}) as unknown as typeof scope.watchQuery,
 		);
 		return (coverage) => act(() => emit(withCoverage([], coverage)));
@@ -214,7 +214,7 @@ describe('useRow load state', () => {
 		vi.spyOn(scope, 'watch').mockImplementation(
 			((_s: unknown, cb: (rows: RowSet<unknown>) => void) => {
 				emit = cb;
-				return () => {};
+				return { close: () => {}, setWindow: () => {} };
 			}) as unknown as typeof scope.watch,
 		);
 		const { result } = renderHook(() => db.todo.useRow('t1'), { wrapper: wrapper(client) });

@@ -20,10 +20,11 @@
 // Neither flavor mutates rows — they are exposed readonly and React relies on
 // that (no tearing) just as much as on the snapshot being stable.
 
-import { useCallback, useRef, useSyncExternalStore } from 'react';
+import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
 import type { SyncClient } from '../client.js';
 import type { ReadonlyRowSet } from '../coverage.js';
+import type { WatchHandle, WatchWindow } from '../watch.js';
 import { asError, emptyResult, type WatchResult, withState } from './result.js';
 
 /** Shared frozen sentinel returned before the first callback (and on the server). */
@@ -34,13 +35,13 @@ function loadingFor<T>(): WatchResult<T> {
 }
 
 /**
- * Factory that wires the underlying watch and returns its sync unsubscribe.
- * `onError` reports a watch that will never fire (see WatchOptions.onError).
+ * Factory that wires the underlying watch and returns its handle. `onError`
+ * reports a watch that will never fire (see WatchOptions.onError).
  */
 export type WatchFactory<T> = (
 	onRows: (rows: ReadonlyRowSet<T>) => void,
 	onError: (error: unknown) => void,
-) => () => void;
+) => WatchHandle;
 
 export interface WatchStoreParams<T> {
 	/** Identity used to scope the suspense cache; also the resubscribe key. */
@@ -51,6 +52,12 @@ export interface WatchStoreParams<T> {
 	client: SyncClient;
 	/** Must be stable for the lifetime of a call site (do not toggle per render). */
 	suspense?: boolean;
+	/**
+	 * Page to deliver. Deliberately outside `identity`: moving it re-pages the
+	 * result the watch already holds instead of resubscribing, which is what
+	 * makes a scrolling window cost a slice rather than a read.
+	 */
+	window?: WatchWindow;
 }
 
 /**
@@ -66,7 +73,7 @@ export function useWatchStore<T>(params: WatchStoreParams<T>): WatchResult<T> {
 // --- default (empty-then-fill) -------------------------------------------------
 
 function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
-	const { identity } = params;
+	const { identity, window } = params;
 	// Latest result for this hook; reset to LOADING when the subscription
 	// identity changes so a stale snapshot is never shown for a different query.
 	const cellRef = useRef<WatchResult<T>>(loadingFor<T>());
@@ -77,6 +84,18 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 		identityRef.current = identity;
 		cellRef.current = loadingFor<T>();
 	}
+	// The live handle, so a window move reaches the watch without going through
+	// a resubscription.
+	const handleRef = useRef<WatchHandle | undefined>(undefined);
+	const windowRef = useRef(window);
+	windowRef.current = window;
+	const windowKey = `${window?.offset ?? 0}:${window?.limit ?? ''}`;
+	const windowKeyRef = useRef(windowKey);
+	windowKeyRef.current = windowKey;
+	// The window the live subscription is on. A fresh subscription registers with
+	// the current one (see the factory), so it starts out matching and the effect
+	// below only fires for a move.
+	const appliedRef = useRef(windowKey);
 
 	// Re-created only when identity changes, so React resubscribes exactly then.
 	const subscribe = useCallback(
@@ -90,9 +109,9 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 					: emptyResult<T>(false, asError(err), rows.coverage);
 				notify();
 			};
-			let unsub: () => void;
+			let handle: WatchHandle;
 			try {
-				unsub = factoryRef.current((rows) => {
+				handle = factoryRef.current((rows) => {
 					cellRef.current = withState(rows, false, undefined);
 					notify();
 				}, fail);
@@ -105,14 +124,23 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 				notify();
 				return () => {};
 			}
+			handleRef.current = handle;
+			appliedRef.current = windowKeyRef.current;
 			return () => {
-				unsub();
+				handle.close();
+				handleRef.current = undefined;
 				cellRef.current = loadingFor<T>();
 			};
 		},
 		// eslint-disable-next-line react-hooks/exhaustive-deps
 		[ identity ],
 	);
+
+	useEffect(() => {
+		if (appliedRef.current === windowKey) return;
+		appliedRef.current = windowKey;
+		handleRef.current?.setWindow(windowRef.current ?? {});
+	}, [ windowKey ]);
 
 	const getSnapshot = useCallback(() => cellRef.current, []);
 	const getServerSnapshot = useCallback(() => loadingFor<T>(), []);
@@ -127,7 +155,7 @@ interface SuspenseEntry<T> {
 	rows: WatchResult<T>;
 	/** Set when the watch could not be established; thrown on the retry render. */
 	error: Error | undefined;
-	unsub: () => void;
+	handle: WatchHandle;
 	/** useSyncExternalStore notifiers for post-first-fire updates. */
 	notify: Set<() => void>;
 	/** Active subscribers; the watch is torn down when this returns to 0. */
@@ -163,7 +191,7 @@ function createEntry<T>(
 		}),
 		rows: loadingFor<T>(),
 		error: undefined,
-		unsub: () => {},
+		handle: { close: () => {}, setWindow: () => {} },
 		notify: new Set(),
 		refs: 0,
 		gc: undefined,
@@ -187,7 +215,7 @@ function createEntry<T>(
 		settle();
 	};
 	try {
-		entry.unsub = factory((rows) => {
+		entry.handle = factory((rows) => {
 			entry.rows = withState(rows, false, undefined);
 			settle();
 		}, fail);
@@ -202,7 +230,7 @@ function scheduleGc<T>(client: SyncClient, identity: string, entry: SuspenseEntr
 	if (entry.gc !== undefined) return;
 	entry.gc = setTimeout(() => {
 		if (entry.refs > 0) return;
-		entry.unsub();
+		entry.handle.close();
 		const map = caches.get(client);
 		if (map?.get(identity) === (entry as SuspenseEntry<unknown>)) map.delete(identity);
 	}, 0);

@@ -19,7 +19,7 @@ import {
 import { compileQuery } from '../../src/query/index.js';
 import type { Row } from '../../src/read.js';
 import { TouchSet } from '../../src/touch.js';
-import { WatcherHub } from '../../src/watch.js';
+import { WatcherHub, type WatchHandle } from '../../src/watch.js';
 
 const registry = new EntityRegistry([ WidgetSchema ]);
 const noMirrors: MirrorMap = {};
@@ -211,7 +211,7 @@ describe('WatcherHub incremental notification', () => {
 	async function watched(
 		kv: MemoryKVStore,
 		hub: WatcherHub,
-	): Promise<{ snapshots: Row<Widget>[][]; unsub: () => void }> {
+	): Promise<{ snapshots: Row<Widget>[][]; unsub: WatchHandle }> {
 		const snapshots: Row<Widget>[][] = [];
 		const unsub = hub.watch(WidgetSchema, WS, (rows) => snapshots.push(rows as Row<Widget>[]));
 		await flush();
@@ -229,7 +229,7 @@ describe('WatcherHub incremental notification', () => {
 
 		expect(snapshots.at(-1)?.map((r) => r.key)).toEqual([ 'w1', 'w2' ]);
 		expect(scans()).toBe(afterInitial);
-		unsub();
+		unsub.close();
 	});
 
 	it('rescans when the commit only names the entity', async () => {
@@ -247,7 +247,7 @@ describe('WatcherHub incremental notification', () => {
 
 		expect(snapshots.at(-1)).toEqual([]);
 		expect(scans()).toBeGreaterThan(afterInitial);
-		unsub();
+		unsub.close();
 	});
 
 	it('rescans once the touched rows outweigh the snapshot', async () => {
@@ -269,7 +269,7 @@ describe('WatcherHub incremental notification', () => {
 
 		expect(scans()).toBeGreaterThan(afterInitial);
 		expect(snapshots.at(-1)?.every((r) => r.value.count === 99)).toBe(true);
-		unsub();
+		unsub.close();
 	});
 
 	it('keeps the key order a full scan would produce as rows come and go', async () => {
@@ -289,7 +289,7 @@ describe('WatcherHub incremental notification', () => {
 
 		await hub.notify(await applyServer(kv, [ tombstone('a', 3n), tombstone('z', 3n) ]));
 		expect(snapshots.at(-1)?.map((r) => r.key)).toEqual([ 'c', 'q' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('re-emits a query watcher when only its coverage moved', async () => {
@@ -322,7 +322,7 @@ describe('WatcherHub incremental notification', () => {
 		await hub.notify(await applyServer(kv, [ serverRow('w2', 2n, { id: 'w2', count: 2 }) ]));
 		expect(seen).toHaveLength(2);
 		expect(seen.at(-1)).toEqual({ complete: true, bounds: [] });
-		unsub();
+		unsub.close();
 	});
 
 	it('orders a cross-workspace scan by workspace then key', async () => {
@@ -345,7 +345,7 @@ describe('WatcherHub incremental notification', () => {
 			[ WS, 'z' ],
 			[ OTHER_WS, 'b' ],
 		]);
-		unsub();
+		unsub.close();
 	});
 
 	it('alternating keyed and wildcard commits converge on the same view', async () => {
@@ -372,7 +372,7 @@ describe('WatcherHub incremental notification', () => {
 
 		await wipe();
 		expect(snapshots.at(-1)).toEqual([]);
-		unsub();
+		unsub.close();
 	});
 
 	it('leaves the scope alone when only an unrelated workspace changed', async () => {
@@ -388,7 +388,7 @@ describe('WatcherHub incremental notification', () => {
 		// The scoped watcher was never woken, so nothing was read at all.
 		expect(snapshots.length).toBe(beforeEmits);
 		expect(scans()).toBe(beforeScans);
-		unsub();
+		unsub.close();
 	});
 
 	it('throws under debugVerifyTouches when a commit under-reports its rows', async () => {
@@ -405,7 +405,7 @@ describe('WatcherHub incremental notification', () => {
 		lie.row(WS, 'widget', 'w1');
 
 		await expect(hub.notify(lie)).rejects.toThrow(/diverged/);
-		unsub();
+		unsub.close();
 	});
 
 	/**
@@ -464,7 +464,7 @@ describe('WatcherHub incremental notification', () => {
 
 		// The stale initial emit must not land on top of the newer one.
 		expect(snapshots.at(-1)?.map((r) => r.key)).toEqual([ 'w1', 'w2' ]);
-		unsub();
+		unsub.close();
 	});
 
 	it('replays optimistic writes onto the snapshot at row granularity', async () => {
@@ -485,6 +485,6 @@ describe('WatcherHub incremental notification', () => {
 			// No confirmed base yet, so the optimistic row carries version 0n.
 			[ 'w1', 7, 0n ],
 		]);
-		unsub();
+		unsub.close();
 	});
 });

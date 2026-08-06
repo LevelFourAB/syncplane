@@ -14,6 +14,13 @@ So: a selective predicate beats deep pagination, and a large entity behind a hot
 endpoint will be felt. There is no full-text search; `contains` is a substring
 test per row and is never index-servable.
 
+Every result reports `total`, the matches behind it, and locally that is not
+free on an indexed query with a `limit`: the walk can stop reading rows once the
+page is full, but it still has to reach the end of its range to count. Counting
+costs index positions rather than row reads — unless a predicate the range could
+not express is left over, in which case only the row can settle a match and the
+rest of the range is read too.
+
 `watchQuery` maintains its result rather than recomputing it. Each watcher
 holds the rows its query matches, in result order; a commit arrives naming the
 rows it changed, and each of those is spliced in or out — whether it matched
@@ -29,9 +36,13 @@ its rows** — a bootstrap swap, a wholesale overlay clear — forces a rescan,
 because "something in here changed" is all it said. And memory tracks the
 **match set**: a narrow query over a large entity holds little, but one with no
 predicate holds an entry per row, so a watch over an unfiltered large entity is
-still a large working set. A `limit` bounds what is delivered, not what is held —
-the rows past it are what lets a deletion inside the page pull the next one in
-without a read.
+still a large working set. A `limit` bounds what is delivered, not what is held.
+
+That is the trade the paging surface is built on. Holding the rows past the page
+is what lets a deletion inside a full page pull the next one in without a read,
+what makes `total` free, and what makes `setWindow` a slice — so a virtualized
+list scrolls a large result without touching the store. The price is that the
+result is in memory to scroll.
 
 `client.query` is served from an index when one covers it: a workspace-scoped
 query whose predicate and ordering the planner can express as a range reads that

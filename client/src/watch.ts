@@ -16,17 +16,91 @@ import { safeInvoke } from './report.js';
 import type { TouchSet } from './touch.js';
 
 /**
- * Receives the full result after every commit that moves it. The array also
- * carries `coverage` — how much of the entity the local store holds — because
- * a watcher over a bounded working set can be complete for the view it drives
- * and still not be the whole entity.
+ * Receives the delivered page after every commit that moves it, and how it
+ * moved.
+ *
+ * The array carries `coverage` — how much of the entity the local store holds,
+ * because a watcher over a bounded working set can be complete for the view it
+ * drives and still not be the whole entity — and `total`, the matches behind a
+ * page cut by `offset`/`limit`.
+ *
+ * `delta` describes the same change as an edit script against the PREVIOUS
+ * array, for a consumer maintaining its own list. Ignoring it is always
+ * correct; the array is the whole answer either way.
  */
-export type WatchCallback<T> = (rows: RowSet<T>) => void;
+export type WatchCallback<T> = (rows: RowSet<T>, delta: WatchDelta<T>) => void;
+
+/** The page of a result a watch delivers. Both bounds are row counts. */
+export interface WatchWindow {
+	/**
+	 * Matching rows to skip.
+	 * @defaultValue 0
+	 */
+	offset?: number;
+	/** Rows to deliver at most. Absent delivers everything from `offset` on. */
+	limit?: number;
+}
+
+/**
+ * How the delivered rows changed since the previous callback.
+ *
+ * `splice` carries an edit script: apply the changes in order to a copy of the
+ * previous array and it becomes the current one. `reset` means the previous
+ * array cannot be transformed into this one cheaply and should be replaced —
+ * the first callback, a window move, a commit that reported an entity without
+ * its rows, and every callback on a watch with an `offset` or a `limit`
+ * (translating match-set positions across a page boundary is not worth it when
+ * the page is short enough to compare directly).
+ */
+export type WatchDelta<T> =
+	| { kind: 'reset' }
+	| { kind: 'splice'; changes: readonly RowSplice<T>[] };
+
+/** One edit in a `splice` delta, at an index into the array being transformed. */
+export interface RowSplice<T> {
+	/** `update` replaces the row at `index`; the other two shift what follows. */
+	op: 'insert' | 'remove' | 'update';
+	index: number;
+	/** The row inserted, removed, or put in place. */
+	row: Row<T>;
+}
+
+/**
+ * Controls a live watch.
+ *
+ * Every method is safe to call before the first callback arrives, and after
+ * `close`.
+ */
+export interface WatchHandle {
+	/** Stops delivering rows. Idempotent. */
+	close(): void;
+	/**
+	 * Moves the delivered page over the result the watch already holds, and
+	 * re-delivers it.
+	 *
+	 * Costs a slice, not a read: the rows are held in result order, so paging
+	 * through a large result does not touch the store. A move that lands on the
+	 * same rows delivers nothing. Fields left out are cleared, so `setWindow({})`
+	 * delivers the whole result.
+	 */
+	setWindow(window: WatchWindow): void;
+}
+
+/** A handle to a watch that was never established (a closed client). */
+const INERT: WatchHandle = Object.freeze({ close: () => {}, setWindow: () => {} });
 
 /** Options shared by `watch` and `watchQuery`. */
 export interface WatchOptions {
 	/** Hydrate result rows against this include tree. */
 	include?: IncludeSpec;
+	/**
+	 * Page to deliver, in place of any `offset`/`limit` the query carries.
+	 *
+	 * The difference is that this one moves: the match set behind it is
+	 * maintained whole, so WatchHandle.setWindow re-pages it without a read,
+	 * while a bound compiled into the query is fixed for the life of the watch.
+	 */
+	window?: WatchWindow;
 	/**
 	 * Called if this watch cannot be established at all — the store or hub
 	 * failed to come up. It fires once and no rows ever arrive, which is the
@@ -101,6 +175,22 @@ interface Watcher {
 	reaches: ReadonlySet<string>;
 	/** The total order `matches.ordered` is in; see comparatorFor. */
 	compare: (a: ResultRow, b: ResultRow) => number;
+	/**
+	 * The page delivered out of `matches`. Seeded from the query's own
+	 * offset/limit and moved by WatchHandle.setWindow, which is why it lives here
+	 * and not in `query` — the match set is maintained whole, and the page is a
+	 * slice taken at emit time.
+	 */
+	window: WatchWindow;
+	/**
+	 * Edits applied to `matches` since the last delivered callback, or 'reset'
+	 * when no edit script describes the move.
+	 *
+	 * It accumulates rather than being rebuilt per commit because a callback can
+	 * be dropped (a newer dispatch beat it), and the consumer is then behind by
+	 * everything since the last one that actually landed.
+	 */
+	pending: RowSplice<unknown>[] | 'reset';
 	/** Rows the query matches, maintained in place; undefined until first read. */
 	matches?: MatchSet;
 	/**
@@ -109,6 +199,13 @@ interface Watcher {
 	 * landed on the same page, or two dispatches racing to deliver one commit.
 	 */
 	lastWindow?: ResultRow[];
+	/**
+	 * Matches behind the last emitted page. Like coverage, it rides on the result
+	 * and so moves it: a row entering or leaving the match set past a full page
+	 * changes nothing a reader can see EXCEPT this, and suppressing that emit
+	 * leaves a scroller sized for a result that no longer exists.
+	 */
+	lastTotal?: number;
 	/**
 	 * Coverage of the last emit. It rides on the result, so it moves the result:
 	 * an entity that finishes hydrating with no matching rows changes nothing
@@ -265,8 +362,9 @@ export class WatcherHub {
 		cb: WatchCallback<MessageShape<D>>,
 		query?: CompiledQuery,
 		include?: IncludeSpec,
-	): () => void {
-		if (this.closed) return () => {};
+		window?: WatchWindow,
+	): WatchHandle {
+		if (this.closed) return INERT;
 		const def = this.registry.bySchema(schema);
 		const reaches = this.reachableEntities(def.name, include);
 		const watcher: Watcher = {
@@ -278,15 +376,31 @@ export class WatcherHub {
 			include,
 			reaches,
 			compare: comparatorFor(schema, query),
+			window: window ?? { offset: query?.offset, limit: query?.limit },
+			pending: 'reset',
 			emittedAt: 0,
 		};
 		this.watchers.add(watcher);
 		// Read the initial result asynchronously (also seeds the emit memo).
 		void this.emitTo(watcher);
-		return () => {
-			this.watchers.delete(watcher);
-			this.pruneScope(scanScope(watcher));
+		return {
+			close: () => {
+				if (!this.watchers.delete(watcher)) return;
+				this.pruneScope(scanScope(watcher));
+			},
+			setWindow: (window) => void this.moveWindow(watcher, window),
 		};
+	}
+
+	/**
+	 * Re-delivers one watcher's page over a new window. No read: the rows are
+	 * already held in result order, so this is a slice and a comparison.
+	 */
+	private async moveWindow(watcher: Watcher, window: WatchWindow): Promise<void> {
+		if (!this.watchers.has(watcher)) return;
+		watcher.window = { offset: window.offset, limit: window.limit };
+		watcher.pending = 'reset';
+		await this.emit(watcher, 0, false, ++this.readSeq);
 	}
 
 	/**
@@ -452,7 +566,7 @@ export class WatcherHub {
 		);
 		if (found === undefined) return undefined;
 		const scoped = this.scopeRows(scanScope(watcher));
-		const ordered = found.map((entry) => {
+		const ordered = found.rows.map((entry) => {
 			const id = rowId(entry.row.workspaceId, entry.row.key);
 			const prev = scoped.rows.get(id);
 			const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
@@ -474,13 +588,15 @@ export class WatcherHub {
 	}
 
 	/**
-	 * Hands one watcher its current page, unless nothing the page can see moved.
+	 * Hands one watcher its current page, unless nothing it reports has moved.
 	 *
 	 * `from` is the lowest result index the commit disturbed (Infinity for none),
 	 * which settles in one comparison whether a windowed watcher has to look at
 	 * all: an insert, delete or move at or past `offset + limit` cannot change
-	 * the rows before it. `force` bypasses the memo — the first emit, and an
-	 * include watcher whose hydration targets moved where its own rows did not.
+	 * the rows before it. Only the rows — `total` and `coverage` ride on the
+	 * result too, and each moves it on its own. `force` bypasses the memo: the
+	 * first emit, and an include watcher whose hydration targets moved where its
+	 * own rows did not.
 	 */
 	private async emit(watcher: Watcher, from: number, force: boolean, at: number): Promise<void> {
 		if (!this.watchers.has(watcher) || watcher.matches === undefined) return;
@@ -493,13 +609,28 @@ export class WatcherHub {
 			&& watcher.lastWindow !== undefined
 			&& watcher.lastCoverage !== undefined
 			&& sameCoverage(watcher.lastCoverage, coverage);
-		const end = windowEnd(watcher.query);
-		if (memoized && from >= end) return;
+		const end = windowEnd(watcher.window);
+		const total = watcher.matches.ordered.length;
+		const settled = memoized && total === watcher.lastTotal;
+		// The O(1) gate. `pending` has to be empty for it: a callback dropped by
+		// a newer dispatch leaves edits undelivered, and the consumer is behind
+		// by them however little this commit moved.
+		if (settled && from >= end && watcher.pending !== 'reset' && watcher.pending.length === 0) {
+			return;
+		}
 		const window = watcher.matches.ordered.slice(
-			watcher.query?.offset ?? 0,
+			watcher.window.offset ?? 0,
 			end === Infinity ? undefined : end,
 		);
-		if (memoized && sameWindow(watcher.lastWindow!, window)) return;
+		if (settled && sameWindow(watcher.lastWindow!, window)) {
+			// The page the consumer holds is already this one, so whatever the
+			// edits were, they cancelled out.
+			watcher.pending = [];
+			return;
+		}
+		const delta: WatchDelta<unknown> = watcher.pending === 'reset'
+			? { kind: 'reset' }
+			: { kind: 'splice', changes: watcher.pending };
 		const rows = window.map((r) => r.row);
 		if (watcher.include && this.refClient) {
 			// Hydrated after the read tx closed (own shared reads).
@@ -515,12 +646,16 @@ export class WatcherHub {
 			if (!this.watchers.has(watcher) || watcher.emittedAt !== at) return;
 			watcher.lastWindow = window;
 			watcher.lastCoverage = coverage;
-			safeInvoke(watcher.cb, withCoverage(hydrated, coverage), 'watch callback');
+			watcher.lastTotal = total;
+			watcher.pending = [];
+			deliver(watcher, withCoverage(hydrated, coverage, total), delta);
 			return;
 		}
 		watcher.lastWindow = window;
 		watcher.lastCoverage = coverage;
-		safeInvoke(watcher.cb, withCoverage(rows, coverage), 'watch callback');
+		watcher.lastTotal = total;
+		watcher.pending = [];
+		deliver(watcher, withCoverage(rows, coverage, total), delta);
 	}
 
 	private scopeRows(scope: string): ScopeRows {
@@ -653,6 +788,7 @@ interface TouchedPair {
 function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
 	if (delta.rebuild) {
 		watcher.matches = buildMatches(watcher, delta.rows);
+		watcher.pending = 'reset';
 		return 0;
 	}
 	const matches = watcher.matches;
@@ -666,6 +802,8 @@ function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
 		if (prev !== undefined && prev === next) continue;
 		const admitted = next !== undefined && admits(watcher, next);
 		if (prev === undefined && !admitted) continue;
+		let removedAt = -1;
+		let insertedAt = -1;
 		if (prev !== undefined) {
 			let at = lowerBound(matches.ordered, watcher.compare, prev);
 			// A fence, not a path: the comparator is a total order and `prev` is in
@@ -674,18 +812,49 @@ function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
 			if (matches.ordered[at] !== prev) at = matches.ordered.indexOf(prev);
 			if (at >= 0) {
 				matches.ordered.splice(at, 1);
+				removedAt = at;
 				if (at < from) from = at;
 			}
 			matches.byId.delete(id);
 		}
 		if (admitted) {
-			const at = lowerBound(matches.ordered, watcher.compare, next!);
-			matches.ordered.splice(at, 0, next!);
+			insertedAt = lowerBound(matches.ordered, watcher.compare, next!);
+			matches.ordered.splice(insertedAt, 0, next!);
 			matches.byId.set(id, next!);
-			if (at < from) from = at;
+			if (insertedAt < from) from = insertedAt;
 		}
+		// A row that left and re-entered at the same position was replaced, not
+		// moved — one edit rather than two, and the one a list wants.
+		if (removedAt >= 0 && removedAt === insertedAt) {
+			record(watcher, { op: 'update', index: insertedAt, row: next!.row });
+			continue;
+		}
+		if (removedAt >= 0) record(watcher, { op: 'remove', index: removedAt, row: prev!.row });
+		if (insertedAt >= 0) record(watcher, { op: 'insert', index: insertedAt, row: next!.row });
 	}
 	return from;
+}
+
+/**
+ * Appends one edit to a watcher's pending script, in the order it was applied.
+ *
+ * A watcher with a page gives up and reports `reset` instead: its indices are
+ * into the match set, and translating them across an offset and a limit means
+ * composing shifts over the page boundary for a consumer that can compare two
+ * short arrays instead.
+ */
+function record(watcher: Watcher, splice: RowSplice<unknown>): void {
+	if (watcher.pending === 'reset') return;
+	if (watcher.window.limit !== undefined || (watcher.window.offset ?? 0) !== 0) {
+		watcher.pending = 'reset';
+		return;
+	}
+	watcher.pending.push(splice);
+}
+
+/** Hands one result to a watcher's callback, isolating anything it throws. */
+function deliver(watcher: Watcher, rows: RowSet<unknown>, delta: WatchDelta<unknown>): void {
+	safeInvoke((r: RowSet<unknown>) => watcher.cb(r, delta), rows, 'watch callback');
 }
 
 /** Derives a watcher's whole match set from a scope, given in scan order. */
@@ -786,9 +955,9 @@ function touchesInclude(watcher: Watcher, pairs: readonly TouchedPair[]): boolea
 	return false;
 }
 
-/** One past the last result index the emitted page can see. */
-function windowEnd(query?: CompiledQuery): number {
-	return query?.limit === undefined ? Infinity : (query.offset ?? 0) + query.limit;
+/** One past the last result index the delivered page can see. */
+function windowEnd(window: WatchWindow): number {
+	return window.limit === undefined ? Infinity : (window.offset ?? 0) + window.limit;
 }
 
 /**

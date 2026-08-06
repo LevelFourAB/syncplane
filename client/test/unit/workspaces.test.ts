@@ -137,8 +137,8 @@ describe('multi-workspace client', () => {
 		await vi.waitFor(() => expect(seenA.length).toBeGreaterThan(afterInitialA));
 		expect(seenA.at(-1)?.map((r) => r.workspaceId)).toEqual([ A ]);
 
-		unsubA();
-		unsubAll();
+		unsubA.close();
+		unsubAll.close();
 		await client.close();
 	});
 

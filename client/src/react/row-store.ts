@@ -17,6 +17,7 @@ import { useCallback, useRef, useSyncExternalStore } from 'react';
 import type { SyncClient } from '../client.js';
 import type { ReadonlyRowSet } from '../coverage.js';
 import type { Row } from '../read.js';
+import type { WatchHandle } from '../watch.js';
 import { asError } from './result.js';
 import type { WatchFactory } from './store.js';
 
@@ -64,7 +65,7 @@ interface RowEntry<T> {
 	/** Coverage state of the last delivered result; see WatchState.hydrating. */
 	hydrating: boolean;
 	error: Error | undefined;
-	unsub: () => void;
+	handle: WatchHandle;
 	refs: number;
 	gc: ReturnType<typeof setTimeout> | undefined;
 }
@@ -171,13 +172,13 @@ function createEntry<T>(
 		listeners: new Map(),
 		hydrating: false,
 		error: undefined,
-		unsub: () => {},
+		handle: { close: () => {}, setWindow: () => {} },
 		refs: 0,
 		gc: undefined,
 	};
 	cacheFor(client).set(identity, entry as RowEntry<unknown>);
 	try {
-		entry.unsub = factory((rows) => publish(entry, rows), (err) => fail(entry, err));
+		entry.handle = factory((rows) => publish(entry, rows), (err) => fail(entry, err));
 	} catch (err) {
 		fail(entry, err);
 	}
@@ -188,7 +189,7 @@ function scheduleGc<T>(client: SyncClient, identity: string, entry: RowEntry<T>)
 	if (entry.gc !== undefined) return;
 	entry.gc = setTimeout(() => {
 		if (entry.refs > 0) return;
-		entry.unsub();
+		entry.handle.close();
 		const map = caches.get(client);
 		if (map?.get(identity) === (entry as RowEntry<unknown>)) map.delete(identity);
 	}, 0);

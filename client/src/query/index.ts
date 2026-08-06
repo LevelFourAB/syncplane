@@ -1,5 +1,12 @@
 export type { CmpOp, CompiledQuery, Cond, OrderKey, Path, Scalar, StrOp } from './ast.js';
-export { compareRows, compareValues, evalCond, resolvePath, runQuery } from './evaluate.js';
+export {
+	compareRows,
+	compareValues,
+	evalCond,
+	resolvePath,
+	runQuery,
+	runQueryPage,
+} from './evaluate.js';
 export type { IndexComponent, IndexKind } from './indexkey.js';
 export { compileIndexComponent, IndexEncoder, specHash, upperBound } from './indexkey.js';
 export type { IndexRange, PlannableIndex, QueryPlan } from './plan.js';

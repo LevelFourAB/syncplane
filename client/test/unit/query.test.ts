@@ -111,7 +111,7 @@ describe('client query', () => {
 		expect(snapshots).toHaveLength(3);
 		expect(snapshots.at(-1)?.[0]?.value.count).toBe(21);
 
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 
@@ -127,7 +127,7 @@ describe('client query', () => {
 		await client.db.widget.mutate.put({ id: 'w1', count: 1 }); // state-identical
 		await flush();
 		expect(calls).toBe(initial + 1);
-		unsub();
+		unsub.close();
 		await client.close();
 	});
 });
@@ -209,7 +209,7 @@ describe('watchQuery across rebase', () => {
 		});
 		await hub.notify(rebased.touched);
 		expect(snapshots.at(-1)).toEqual([]);
-		unsub();
+		unsub.close();
 	});
 
 	it('re-fires a byte-identical rebase that only bumps the version', async () => {
@@ -244,7 +244,7 @@ describe('watchQuery across rebase', () => {
 		await hub.notify(touched);
 		expect(snapshots.length).toBe(count + 1);
 		expect(snapshots.at(-1)?.[0]?.version).toBe(2n);
-		unsub();
+		unsub.close();
 	});
 
 	it('delivers the real version when an optimistic create is server-acked', async () => {
@@ -275,7 +275,7 @@ describe('watchQuery across rebase', () => {
 		await hub.notify(touched);
 		expect(snapshots.length).toBe(count + 1);
 		expect(snapshots.at(-1)?.[0]?.version).toBe(7n);
-		unsub();
+		unsub.close();
 	});
 });
 
@@ -312,7 +312,7 @@ describe('WatcherHub decode reuse', () => {
 		expect(second?.[1]?.value).toBe(first?.[1]?.value);
 		expect(second?.[0]?.value).not.toBe(first?.[0]?.value);
 		expect(second?.[0]?.value.count).toBe(25);
-		unsub();
+		unsub.close();
 	});
 
 	it('forgets a scope once its last watcher unsubscribes', async () => {
@@ -326,14 +326,14 @@ describe('WatcherHub decode reuse', () => {
 		const unsubA = watch();
 		await flush();
 		const before = seen.at(-1)?.[0]?.value;
-		unsubA();
+		unsubA.close();
 
 		const unsubB = watch();
 		await flush();
 		// Cache dropped with the last watcher, so this is a fresh decode rather
 		// than a value retained for a scope nobody was watching.
 		expect(seen.at(-1)?.[0]?.value).not.toBe(before);
-		unsubB();
+		unsubB.close();
 	});
 
 	it('keeps a scope cache alive while another watcher still needs it', async () => {
@@ -347,11 +347,11 @@ describe('WatcherHub decode reuse', () => {
 		await flush();
 		const before = seen.at(-1)?.[0]?.value;
 
-		unsubA();
+		unsubA.close();
 		const touched = await enqueueLocally(kv, putMutation(2n, { id: 'w2', count: 5 }));
 		await hub.notify(touched);
 		expect(seen.at(-1)?.find((r) => r.key === 'w1')?.value).toBe(before);
-		unsubB();
+		unsubB.close();
 	});
 });
 
@@ -380,8 +380,8 @@ describe('WatcherHub isolates throwing callbacks', () => {
 			expect(seen.at(-1)?.map((r) => r.key).sort()).toEqual([ 'w1', 'w2' ]);
 			expect(errSpy).toHaveBeenCalled();
 
-			unsubA();
-			unsubB();
+			unsubA.close();
+			unsubB.close();
 		} finally {
 			errSpy.mockRestore();
 		}
