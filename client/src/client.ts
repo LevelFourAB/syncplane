@@ -459,10 +459,11 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	/** Max row changes per pull page; 0 = server default. Pages loop until drained. */
 	pullLimit?: number;
 	/**
-	 * Cross-checks the watcher hub's incremental row updates against a full
-	 * re-scan on every commit and throws when they disagree. A development and
-	 * test aid — it doubles the read cost of every notification — that catches a
-	 * write path which changed a row without reporting it. Default false.
+	 * Cross-checks every maintained watch result against a full scan on each
+	 * commit and throws when the two disagree. A development and test aid — it
+	 * doubles the read cost of every notification — that catches a write path
+	 * which changed a row without reporting it, and an ordering that disagrees
+	 * with the query evaluator. Default false.
 	 */
 	debugVerifyTouches?: boolean;
 	/**

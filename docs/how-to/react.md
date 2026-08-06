@@ -182,7 +182,8 @@ snapshot stable and tearing-free.
 Pass a `window` instead of putting `offset`/`limit` in the query. The
 subscription holds the whole match set, so moving the window re-pages what it
 already has — no store read, no resubscription — and `total` tells the scroller
-how tall the list is.
+how tall the list is. `<Scroller>` below stands for whichever virtualizer you
+use; the two things it needs from us are that count and a page that follows it.
 
 ```tsx
 function TodoList() {

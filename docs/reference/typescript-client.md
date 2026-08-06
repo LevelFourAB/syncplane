@@ -45,34 +45,38 @@ await client.close(); // stop sync, drop watchers, close KV. One-shot; not reope
 
 `SyncClientOptions<E extends readonly DescMessage[]>`:
 
-| Option                | Type                                           | Notes                                                                                                                                                                                      |
-| --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `entities`            | `E` (`readonly DescMessage[]`)                 | **Required.** All syncable entity descriptors. Pass as a `const` tuple so `db` types per entity.                                                                                           |
-| `workspaceId`         | `string`                                       | Shorthand for `workspaces: [id], defaultWorkspace: id`. Give this **or** `workspaces`.                                                                                                     |
-| `workspaces`          | `string[]`                                     | Workspaces to sync. Add and remove more at runtime.                                                                                                                                        |
-| `defaultWorkspace`    | `string`                                       | What the client-level API (`client.mutate`, `client.db`, `client.get/scan/query/watch`, `transact`, undo) binds to. Defaults to the only configured workspace; **required** past one.      |
-| `accountId`           | `string`                                       | Storage scope — one IndexedDB database, KV mutex, change channel and leadership lock per account. Defaults to the single workspace's id; **required** when starting with more than one.    |
-| `url`                 | `string`                                       | Server base URL. Either `url` **or** `transport` required.                                                                                                                                 |
-| `transport`           | `Transport` (`@connectrpc/connect`)            | Prebuilt Connect transport (tests / Node).                                                                                                                                                 |
-| `wireFormat`          | `'binary' \| 'json'`                           | Encoding of the transport built from `url`. Default `'binary'`; `'json'` trades size and decode cost for traffic you can read in the network inspector. Ignored when `transport` is given. |
-| `kvStore`             | `KVStore`                                      | Defaults to IndexedDB in browsers, in-memory elsewhere.                                                                                                                                    |
-| `mutators`            | `Record<string, MutatorMirror<DescMessage>>`   | Best-effort local mirrors of server-side custom mutators.                                                                                                                                  |
-| `mergers`             | `MergerSpec[]`                                 | Client mirrors of server merge hooks for opaque fields; divergence self-heals on next rebase.                                                                                              |
-| `onMutationRejected`  | `(info: RejectionInfo) => void`                | Dead-letter callback (rejection or poison drop). Best-effort, **not durable**.                                                                                                             |
-| `onStatusChange`      | `(status: SyncStatus) => void`                 | Same as `onStatusChange()` method.                                                                                                                                                         |
-| `onSyncEvent`         | `(event: SyncEvent) => void`                   | Observability seam: push/pull/bootstrap/rebase/poke/stream/leadership events with durations and counts. No OpenTelemetry dependency — see [Telemetry](telemetry.md#the-typescript-client). |
-| `pollIntervalMs`      | `number`                                       | Fallback poll; `0` disables. Default 60s.                                                                                                                                                  |
-| `pokeEnabled`         | `boolean`                                      | Maintain poke stream. Default `true`.                                                                                                                                                      |
-| `pushDebounceMs`      | `number`                                       | How long a local write waits before it is pushed, restarted by each further write, so a burst ships as one compacted push. Default 50ms; `0` pushes on every write.                        |
-| `pushMaxDelayMs`      | `number`                                       | Ceiling on that wait, from the first write of a burst, so continuous writing still pushes regularly. Default 250ms; `0` removes the ceiling.                                               |
-| `pullLimit`           | `number`                                       | Max row changes per pull page; `0` = server default.                                                                                                                                       |
-| `poisonThreshold`     | `number`                                       | Deterministic push failures before dropping head mutation to dead-letter. Default 5; `<=0` disables.                                                                                       |
-| `maxMutationsPerPush` | `number`                                       | Max batch per push RPC. Default 256.                                                                                                                                                       |
-| `subscriptions`       | `SubscriptionSpec[]`                           | Partial sync. Empty/absent = full sync.                                                                                                                                                    |
-| `bootstrapPriority`   | `readonly DescMessage[]`                       | Entities the first snapshot delivers first — what the first screen renders. A reordering, never a filter; only cold starts feel it.                                                        |
-| `schemaRevision`      | `string`                                       | Opaque token matched against server's; drives skew handshake.                                                                                                                              |
-| `onSchemaSkew`        | `(info: {client, server}) => SchemaSkewAction` | `'ignore' \| 'warn' \| 'block' \| 'resync'`. Default `'warn'` when `schemaRevision` set.                                                                                                   |
-| `undo`                | `UndoOptions`                                  | Enables in-memory undo/redo.                                                                                                                                                               |
+| Option                    | Type                                           | Notes                                                                                                                                                                                      |
+| ------------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `entities`                | `E` (`readonly DescMessage[]`)                 | **Required.** All syncable entity descriptors. Pass as a `const` tuple so `db` types per entity.                                                                                           |
+| `workspaceId`             | `string`                                       | Shorthand for `workspaces: [id], defaultWorkspace: id`. Give this **or** `workspaces`.                                                                                                     |
+| `workspaces`              | `string[]`                                     | Workspaces to sync. Add and remove more at runtime.                                                                                                                                        |
+| `defaultWorkspace`        | `string`                                       | What the client-level API (`client.mutate`, `client.db`, `client.get/scan/query/watch`, `transact`, undo) binds to. Defaults to the only configured workspace; **required** past one.      |
+| `accountId`               | `string`                                       | Storage scope — one IndexedDB database, KV mutex, change channel and leadership lock per account. Defaults to the single workspace's id; **required** when starting with more than one.    |
+| `url`                     | `string`                                       | Server base URL. Either `url` **or** `transport` required.                                                                                                                                 |
+| `transport`               | `Transport` (`@connectrpc/connect`)            | Prebuilt Connect transport (tests / Node).                                                                                                                                                 |
+| `wireFormat`              | `'binary' \| 'json'`                           | Encoding of the transport built from `url`. Default `'binary'`; `'json'` trades size and decode cost for traffic you can read in the network inspector. Ignored when `transport` is given. |
+| `kvStore`                 | `KVStore`                                      | Defaults to IndexedDB in browsers, in-memory elsewhere.                                                                                                                                    |
+| `mutators`                | `Record<string, MutatorMirror<DescMessage>>`   | Best-effort local mirrors of server-side custom mutators.                                                                                                                                  |
+| `mergers`                 | `MergerSpec[]`                                 | Client mirrors of server merge hooks for opaque fields; divergence self-heals on next rebase.                                                                                              |
+| `onMutationRejected`      | `(info: RejectionInfo) => void`                | Dead-letter callback (rejection or poison drop). Best-effort, **not durable**.                                                                                                             |
+| `onStatusChange`          | `(status: SyncStatus) => void`                 | Same as `onStatusChange()` method.                                                                                                                                                         |
+| `onSyncEvent`             | `(event: SyncEvent) => void`                   | Observability seam: push/pull/bootstrap/rebase/poke/stream/leadership events with durations and counts. No OpenTelemetry dependency — see [Telemetry](telemetry.md#the-typescript-client). |
+| `pollIntervalMs`          | `number`                                       | Fallback poll; `0` disables. Default 60s.                                                                                                                                                  |
+| `pokeEnabled`             | `boolean`                                      | Maintain poke stream. Default `true`.                                                                                                                                                      |
+| `streamEnabled`           | `boolean`                                      | Hold the live change stream open. Default `true`; `false` leaves the poll and poke paths to carry changes.                                                                                 |
+| `pushDebounceMs`          | `number`                                       | How long a local write waits before it is pushed, restarted by each further write, so a burst ships as one compacted push. Default 50ms; `0` pushes on every write.                        |
+| `pushMaxDelayMs`          | `number`                                       | Ceiling on that wait, from the first write of a burst, so continuous writing still pushes regularly. Default 250ms; `0` removes the ceiling.                                               |
+| `pullLimit`               | `number`                                       | Max row changes per pull page; `0` = server default.                                                                                                                                       |
+| `poisonThreshold`         | `number`                                       | Deterministic push failures before dropping head mutation to dead-letter. Default 5; `<=0` disables.                                                                                       |
+| `maxMutationsPerPush`     | `number`                                       | Max batch per push RPC. Default 256.                                                                                                                                                       |
+| `maxWorkspacesPerRequest` | `number`                                       | Most workspaces one request may name (push batches, Subscribe scopes). Default 64. A client holding more splits its pushes; the extra workspaces sync by poll rather than stream.          |
+| `subscriptions`           | `SubscriptionSpec[]`                           | Partial sync. Empty/absent = full sync.                                                                                                                                                    |
+| `bootstrapPriority`       | `readonly DescMessage[]`                       | Entities the first snapshot delivers first — what the first screen renders. A reordering, never a filter; only cold starts feel it.                                                        |
+| `schemaRevision`          | `string`                                       | Opaque token matched against server's; drives skew handshake.                                                                                                                              |
+| `onSchemaSkew`            | `(info: {client, server}) => SchemaSkewAction` | `'ignore' \| 'warn' \| 'block' \| 'resync'`. Default `'warn'` when `schemaRevision` set.                                                                                                   |
+| `undo`                    | `UndoOptions`                                  | Enables in-memory undo/redo.                                                                                                                                                               |
+| `debugVerifyTouches`      | `boolean`                                      | Cross-check every maintained watch result against a full scan and throw on a difference. Development aid; doubles the read cost of every commit. Default from `SYNC_DEBUG_VERIFY_TOUCHES`. |
+| `debugVerifyIndexReads`   | `boolean`                                      | The same check for index-served queries against the equivalent scan, totals included. Same default.                                                                                        |
 
 Only the entities in `entities` are stored: a full-sync client is sent whatever
 the server has, and rows it has no schema for are dropped rather than kept.
@@ -147,9 +151,9 @@ schema-first form and the `db` facade form are shown.
 // schema-first
 await client.get(Todo, key):    Promise<MessageShape<D> | undefined>
 await client.getRow(Todo, key): Promise<Row<MessageShape<D>> | undefined>
-await client.scan(Todo):        Promise<Row<MessageShape<D>>[]>
-await client.query(Todo, q, { include? }): Promise<Row<MessageShape<D>>[]>
-await client.queryServer(Todo, q):         Promise<Row<MessageShape<D>>[]>  // server push-down; NOT merged with overlay
+await client.scan(Todo):        Promise<RowSet<MessageShape<D>>>
+await client.query(Todo, q, { include? }): Promise<RowSet<MessageShape<D>>>
+await client.queryServer(Todo, q):         Promise<RowSet<MessageShape<D>>>  // server push-down; NOT merged with overlay
 
 // db facade (identical semantics)
 await client.db.todo.get(key)
@@ -169,7 +173,8 @@ local read counts synced rows, and `queryServer` counts only the page the server
 returned (a full page also carries the `window` bound, which is how a truncated
 one is recognised). An index that stops early on a `limit` still walks the rest
 of its range to count — positions only, with no row reads, unless a residual
-predicate means the row is the only thing that can settle a match.
+predicate is left over, in which case only the row can settle a match and the
+rest of the range is read too.
 
 ### `Row<T>`
 
@@ -177,13 +182,16 @@ predicate means the row is the only thing that can settle a match.
 interface Row<T = unknown> {
 	key: string;
 	value: T;
+	workspaceId: string; // always set; routes a write back through client.ws(id)
 	version: bigint; // server-confirmed version this row is based on; 0n if optimistic-only.
 	// Pass as `expectedVersion` for compare-and-swap.
 }
 ```
 
 - `get` returns the decoded value only; `getRow` returns the `Row` (with `version`,
-  needed for CAS). `query`/`scan` return `Row[]`.
+  needed for CAS). `query`/`scan` return a `RowSet`.
+- `workspaceId` is what makes a cross-workspace result (`scanAll`, `queryAll`,
+  `watchQueryAll`) attributable — every row names the partition it came from.
 - `queryServer` queries the server directly for data outside the synced subset.
   Results are server snapshots: not merged with the overlay, not stored, never feed
   watchers. Works before `start()`; requires connectivity. Ordering matches the

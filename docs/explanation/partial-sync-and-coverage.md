@@ -70,10 +70,16 @@ own-scope coverage errs toward claiming _less_ completeness than reality — and
 more importantly, it does not flap as peer tabs come and go.
 
 `RowSet<T>` is an array — `.map`, `.length`, spreads and destructuring all
-behave as they would on one, and `coverage` is non-enumerable, so it rides along
-without showing up in `Object.keys` or `JSON.stringify`. `queryServer` reports
+behave as they would on one, and `coverage` rides along non-enumerably, so it
+never shows up in `Object.keys` or `JSON.stringify`. `queryServer` reports
 coverage too: a server query sees the whole entity, so it is complete unless its
 own `limit` truncated the page.
+
+The same bounds reach `total`, the match count a paged result carries beside its
+coverage. It is counted from the rows the read could see, so under a window or a
+predicate scope it reports what this device holds rather than what the workspace
+does, and the two can differ by any amount. Nothing in the number says which one
+it is — that is what the coverage beside it is for.
 
 ### Hydrating: the bound that clears itself
 
