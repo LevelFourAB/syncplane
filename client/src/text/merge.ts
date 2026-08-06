@@ -1,7 +1,7 @@
 // State merge and item-graph diff for TextDoc — mirrors Go engine/text
 // merge.go and diff.go.
 
-import { decodeTextDoc, encodeTextDoc } from './codec.js';
+import { decodeTextDoc, encodeTextDoc, isPlainString } from './codec.js';
 import {
 	type Anchor,
 	compareIds,
@@ -41,6 +41,10 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * applies as the same union and yields byte-identical output whenever the base
  * covers the fragment's own base.
  *
+ * Neither side may be a plain-string value (codec.ts): applying one means
+ * minting the difference under a writer identity, which this function does not
+ * have. Resolving happens before the write — see applyTextStringsToCrud.
+ *
  * Folding two queued fragments together is a client-only operation on values
  * that have not been stored yet, and is not this function: see
  * optimistic/compact.ts.
@@ -48,6 +52,16 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 export function mergeText(base: Uint8Array, incoming: Uint8Array): Uint8Array {
 	if (isFragment(base)) {
 		throw new Error('text: merge base is a fragment; stored state is always a full document');
+	}
+	if (isPlainString(base)) {
+		throw new Error(
+			'text: merge base is a plain-string value; stored state is always a full document',
+		);
+	}
+	if (isPlainString(incoming)) {
+		throw new Error(
+			'text: incoming plain-string value must be resolved under a writer identity before a write',
+		);
 	}
 	if (isFragment(incoming)) return applyFragmentBytes(base, incoming);
 	if (bytesEqual(base, incoming)) return base;

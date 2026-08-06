@@ -17,8 +17,19 @@ import (
 const vectorsPath = "../../testdata/text/vectors.json"
 
 type vectorFile struct {
-	Cases   []vectorCase   `json:"cases"`
-	Rejects []vectorReject `json:"rejects"`
+	Cases        []vectorCase        `json:"cases"`
+	Rejects      []vectorReject      `json:"rejects"`
+	PlainStrings []vectorPlainString `json:"plainStrings"`
+}
+
+// vectorPlainString is one plain-string value (format version 3) with the text
+// it reads as. Both languages must encode Text to Hex, decode Hex back to Text,
+// and return Text from the plain-text read path a reader takes when it does not
+// know which form a field holds.
+type vectorPlainString struct {
+	Name string `json:"name"`
+	Text string `json:"text"`
+	Hex  string `json:"hex"`
 }
 
 // vectorReject is one payload both decoders must refuse, with the exact
@@ -379,6 +390,30 @@ var _ = Describe("shared vectors", func() {
 				_, err = text.Decode(data, "")
 			}
 			Expect(err).To(MatchError(rj.Error))
+		})
+	}
+
+	for _, ps := range file.PlainStrings {
+		ps := ps
+		It("encodes and reads the plain-string value: "+ps.Name, func() {
+			want, err := hex.DecodeString(ps.Hex)
+			Expect(err).NotTo(HaveOccurred())
+
+			enc, err := text.EncodePlainString(ps.Text)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(enc).To(Equal(want))
+
+			Expect(text.IsPlainString(want)).To(BeTrue())
+
+			got, err := text.PlainString(want)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(got).To(Equal(ps.Text))
+
+			// The read path a holder of a field value takes without knowing
+			// which form it has.
+			plain, err := text.PlainText(want)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(plain).To(Equal(ps.Text))
 		})
 	}
 })

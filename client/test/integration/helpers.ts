@@ -3,7 +3,15 @@ import { inject } from 'vitest';
 
 import { SyncClient, type SyncClientOptions } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
-import { PairSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import {
+	HistoriedSchema,
+	PairSchema,
+	WidgetSchema,
+} from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+// The server-only history entity. Registering it is what lets queryServer
+// resolve its wire name; nothing about it ever syncs, so it costs the client
+// only a name in the registry.
+import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 
 /** Unique workspace per test so tests cannot observe each other (test files
@@ -20,7 +28,7 @@ export function newClient(
 		transport: createConnectTransport({ baseUrl: inject('serverUrl'), httpVersion: '1.1' }),
 		workspaceId,
 		kvStore: new MemoryKVStore(),
-		entities: [ TodoSchema, WidgetSchema, PairSchema ],
+		entities: [ TodoSchema, WidgetSchema, PairSchema, HistoriedSchema, FieldHistorySchema ],
 		// Integration tests drive sync explicitly unless a test opts in.
 		pollIntervalMs: 0,
 		streamEnabled: false,
@@ -42,7 +50,7 @@ export function newMultiClient(
 		workspaces,
 		defaultWorkspace: workspaces[0],
 		kvStore: new MemoryKVStore(),
-		entities: [ TodoSchema, WidgetSchema, PairSchema ],
+		entities: [ TodoSchema, WidgetSchema, PairSchema, HistoriedSchema, FieldHistorySchema ],
 		pollIntervalMs: 0,
 		streamEnabled: false,
 		...overrides,

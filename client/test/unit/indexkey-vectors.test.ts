@@ -14,6 +14,7 @@ import { type DescMessage, fromJson, type JsonValue } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import type { OrderKey, Path } from '../../src/query/ast.js';
 import { compareRows } from '../../src/query/evaluate.js';
@@ -54,7 +55,12 @@ const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as {
 	orderCases: OrderCase[];
 };
 
-const schemaFor = (type?: string): DescMessage => (type === 'issue' ? IssueSchema : WidgetSchema);
+// Planner vectors also cover FieldHistory, the engine's own history entity:
+// its by_source index is the one shape the feature cannot afford the planner to
+// decline, because a history row key renders `seq` as unpadded decimal and so
+// does not sort by sequence.
+const schemaFor = (type?: string): DescMessage =>
+	type === 'issue' ? IssueSchema : type === 'field_history' ? FieldHistorySchema : WidgetSchema;
 
 const encoderFor = (spec: SpecVector, schema: DescMessage): IndexEncoder =>
 	new IndexEncoder(spec.key.map((k) => compileIndexComponent(schema, k.path, k.desc)));

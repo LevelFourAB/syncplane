@@ -48,9 +48,12 @@ import (
 //
 // Format version 2 (leading byte 0x02) is the delta-state FRAGMENT layout —
 // the same sections and rules with relaxed reference resolution and the
-// source document's full version vector; see fragment.go. Stored rows are
-// always version 1; Decode rejects fragment bytes with a distinct error so
-// partial state can never be persisted as a document by accident.
+// source document's full version vector; see fragment.go. Version 3 (0x03) is
+// a PLAIN-STRING value: the tag followed by the text's UTF-8 bytes, the form
+// a field carries when it says what it should read as without having been
+// resolved into a document; see plain.go. Stored rows are always version 1,
+// and Decode rejects the other two with distinct errors so neither partial
+// state nor an unresolved value can be persisted as a document by accident.
 const formatVersion = 1
 
 // maxVarint is the largest value any varint in the format may carry: 2^53−1,
@@ -322,6 +325,14 @@ func Decode(data []byte, peer string) (*Doc, error) {
 		// payloads only; a caller decoding one as a document is about to
 		// persist partial state as a row, which must fail loudly instead.
 		return nil, fmt.Errorf("text: fragment where full document expected")
+	}
+	if v == plainStringVersion {
+		// A plain-string value (see plain.go) names text without saying who
+		// wrote it, and building a document from it would have to mint items
+		// under some peer — the choice this package refuses to make for a
+		// caller. PlainText reads it; a resolver applies it.
+		return nil, unresolved{fmt.Errorf(
+			"text: plain-string value where full document expected; resolve it under a writer identity first")}
 	}
 	if v != formatVersion {
 		return nil, fmt.Errorf("text: unsupported format version %d", v)

@@ -61,6 +61,7 @@ import {
 	buildDelete,
 	buildPatch,
 	buildPut,
+	crudHasPlainString,
 	encodeItemKey,
 	EntityRegistry,
 	expandCollectionMask,
@@ -2006,6 +2007,18 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private compileSubscriptions(specs: SubscriptionSpec[]): Subscription[] {
 		return specs.map((spec) => {
 			const def = this.entityRegistry.bySchema(spec.schema);
+			// The server refuses the whole subscription set for one server-only
+			// entity, which reaches the app as a sync failure at the next cycle
+			// rather than at the call that named it. The option is on the
+			// descriptor in hand, so the same set fails here instead — the case
+			// that matters is an app deriving its subscriptions from its entity
+			// list, where a registered history entity is in the list by design.
+			if (def.serverOnly) {
+				throw new Error(
+					`entity "${def.name}" is server-only and never syncs to a client; `
+						+ `remove it from the subscription set and read it with queryServer()`,
+				);
+			}
 			// The predicate and the window ordering go through the same
 			// compile → prepare → wire-path pipeline a query does, so a
 			// subscription and the equivalent query agree on what they name.
@@ -2863,7 +2876,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// payload — conversion is serialized here, so one identity is sound.
 		const crudTexts = payloadCruds?.map((crud) => takeTextStrings(crud));
 		let peerLease: PeerLease | undefined;
-		if (crudTexts?.some((t) => t !== undefined)) {
+		// A plain-string value already in a crud's value (a restore from field
+		// history) converts the same way and needs the same lease, so it has to
+		// be spotted out here too rather than where it is resolved.
+		const needsPeer = crudTexts?.some((t) => t !== undefined)
+			|| payloadCruds?.some((crud) => {
+				const def = this.entityRegistry.get(crud.entity);
+				return def !== undefined
+					&& crudHasPlainString(def, crud, this.entityRegistry.textPathsOf(def.name));
+			});
+		if (needsPeer) {
 			peerLease = await (await this.textPeerLeases()).acquire();
 		}
 		try {
@@ -2904,20 +2926,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								}
 								return priorBytes;
 							};
-							// Convert pending text strings into full-document bytes,
-							// diffed against the merged row under the leased peer.
-							// Mutates crud.value (and, for PATCH, the mask) in place;
-							// mutation.payload shares the crud, so what persists and
-							// pushes is the converted, full-state form.
+							// Convert text strings — the caller's pending ones, and any
+							// plain-string value the crud already carries (a restore from
+							// field history) — into full-document bytes, diffed against
+							// the merged row under the leased peer. Mutates crud.value
+							// (and, for PATCH, the mask) in place; mutation.payload shares
+							// the crud, so what persists and pushes is the converted,
+							// full-state form.
 							const texts = crudTexts?.[crudIndex];
 							let textEdits: TextStringEdits | undefined;
-							if (def && texts !== undefined) {
-								textEdits = applyTextStringsToCrud(
+							if (def) {
+								textEdits = await applyTextStringsToCrud(
 									def,
 									crud,
-									await priorRow(),
+									priorRow,
 									texts,
-									peerLease!.peer,
+									peerLease?.peer,
+									this.entityRegistry.textPathsOf(def.name),
 								);
 							}
 							// Expand bare collection masks into per-item paths so concurrent

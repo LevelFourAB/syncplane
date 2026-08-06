@@ -1537,6 +1537,355 @@ func (x *Ledger) GetLabel() string {
 	return ""
 }
 
+// History fixture with a NARROWED capture set: `title` and `body` are marked,
+// `note` is not, so a write that touches only `note` records nothing. `body` is
+// collaborative text, which is what makes the restore-is-a-PATCH trap
+// observable — restoring it as a PUT would union the old text back in instead
+// of replacing it.
+type Historied struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Body          []byte                 `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	Note          string                 `protobuf:"bytes,4,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Historied) Reset() {
+	*x = Historied{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Historied) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Historied) ProtoMessage() {}
+
+func (x *Historied) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Historied.ProtoReflect.Descriptor instead.
+func (*Historied) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *Historied) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Historied) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Historied) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Historied) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+// History fixture whose capture set covers EVERY non-key field, spelled out one
+// mark at a time. There is no capture-everything default to lean on, so the
+// difference between this and Historied is only what the marks say.
+type HistoriedAll struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Count         int32                  `protobuf:"varint,3,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoriedAll) Reset() {
+	*x = HistoriedAll{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoriedAll) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoriedAll) ProtoMessage() {}
+
+func (x *HistoriedAll) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoriedAll.ProtoReflect.Descriptor instead.
+func (*HistoriedAll) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *HistoriedAll) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *HistoriedAll) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *HistoriedAll) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+// History fixture carrying a ONEOF. A oneof is one field to the merge, named by
+// its group, so the capture set has to name it that way too — a mask naming a
+// member could neither record a prior value nor be handed back to a restore.
+// Marking one member is what marks the group.
+type HistoriedOneof struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Label string                 `protobuf:"bytes,2,opt,name=label,proto3" json:"label,omitempty"`
+	// Types that are valid to be assigned to Choice:
+	//
+	//	*HistoriedOneof_ChoiceText
+	//	*HistoriedOneof_ChoiceNumber
+	Choice        isHistoriedOneof_Choice `protobuf_oneof:"choice"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoriedOneof) Reset() {
+	*x = HistoriedOneof{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoriedOneof) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoriedOneof) ProtoMessage() {}
+
+func (x *HistoriedOneof) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoriedOneof.ProtoReflect.Descriptor instead.
+func (*HistoriedOneof) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *HistoriedOneof) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *HistoriedOneof) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
+func (x *HistoriedOneof) GetChoice() isHistoriedOneof_Choice {
+	if x != nil {
+		return x.Choice
+	}
+	return nil
+}
+
+func (x *HistoriedOneof) GetChoiceText() string {
+	if x != nil {
+		if x, ok := x.Choice.(*HistoriedOneof_ChoiceText); ok {
+			return x.ChoiceText
+		}
+	}
+	return ""
+}
+
+func (x *HistoriedOneof) GetChoiceNumber() int32 {
+	if x != nil {
+		if x, ok := x.Choice.(*HistoriedOneof_ChoiceNumber); ok {
+			return x.ChoiceNumber
+		}
+	}
+	return 0
+}
+
+type isHistoriedOneof_Choice interface {
+	isHistoriedOneof_Choice()
+}
+
+type HistoriedOneof_ChoiceText struct {
+	ChoiceText string `protobuf:"bytes,3,opt,name=choice_text,json=choiceText,proto3,oneof"`
+}
+
+type HistoriedOneof_ChoiceNumber struct {
+	ChoiceNumber int32 `protobuf:"varint,4,opt,name=choice_number,json=choiceNumber,proto3,oneof"`
+}
+
+func (*HistoriedOneof_ChoiceText) isHistoriedOneof_Choice() {}
+
+func (*HistoriedOneof_ChoiceNumber) isHistoriedOneof_Choice() {}
+
+// History fixture carrying a NESTED message field. A capture set names
+// top-level units, but a PATCH mask may point inside one and a record keeps the
+// sub-path it was given, so this is the only shape where a session records
+// "settings.color" and then folds in a write naming the whole of "settings".
+type HistoriedNested struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Settings      *Settings              `protobuf:"bytes,2,opt,name=settings,proto3" json:"settings,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoriedNested) Reset() {
+	*x = HistoriedNested{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoriedNested) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoriedNested) ProtoMessage() {}
+
+func (x *HistoriedNested) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoriedNested.ProtoReflect.Descriptor instead.
+func (*HistoriedNested) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *HistoriedNested) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *HistoriedNested) GetSettings() *Settings {
+	if x != nil {
+		return x.Settings
+	}
+	return nil
+}
+
+// History fixture that opts the entity in and marks NOTHING. Registering it is
+// an error: capture is explicit, and an entity that names no field has asked
+// for a log that could never say anything.
+type HistoriedUnmarked struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoriedUnmarked) Reset() {
+	*x = HistoriedUnmarked{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoriedUnmarked) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoriedUnmarked) ProtoMessage() {}
+
+func (x *HistoriedUnmarked) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoriedUnmarked.ProtoReflect.Descriptor instead.
+func (*HistoriedUnmarked) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *HistoriedUnmarked) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *HistoriedUnmarked) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 var File_syncplane_testdata_v1_testdata_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
@@ -1702,7 +2051,34 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x06Ledger\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label:\x12\xa2\xbb\x18\x0e\n" +
-	"\x06ledger\x12\x02id \x02BNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
+	"\x06ledger\x12\x02id \x02\"\x82\x01\n" +
+	"\tHistoried\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\x05title\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x020\x01R\x05title\x12\x1c\n" +
+	"\x04body\x18\x03 \x01(\fB\b\xaa\xbb\x18\x04 \x010\x01R\x04body\x12\x12\n" +
+	"\x04note\x18\x04 \x01(\tR\x04note:\x15\xa2\xbb\x18\x11\n" +
+	"\thistoried\x12\x02id2\x00\"u\n" +
+	"\fHistoriedAll\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\x05title\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x020\x01R\x05title\x12\x1c\n" +
+	"\x05count\x18\x03 \x01(\x05B\x06\xaa\xbb\x18\x020\x01R\x05count:\x19\xa2\xbb\x18\x15\n" +
+	"\rhistoried_all\x12\x02id2\x00\"\xaf\x01\n" +
+	"\x0eHistoriedOneof\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05label\x18\x02 \x01(\tR\x05label\x12)\n" +
+	"\vchoice_text\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x020\x01H\x00R\n" +
+	"choiceText\x12%\n" +
+	"\rchoice_number\x18\x04 \x01(\x05H\x00R\fchoiceNumber:\x1b\xa2\xbb\x18\x17\n" +
+	"\x0fhistoried_oneof\x12\x02id2\x00B\b\n" +
+	"\x06choice\"\x84\x01\n" +
+	"\x0fHistoriedNested\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12C\n" +
+	"\bsettings\x18\x02 \x01(\v2\x1f.syncplane.testdata.v1.SettingsB\x06\xaa\xbb\x18\x020\x01R\bsettings:\x1c\xa2\xbb\x18\x18\n" +
+	"\x10historied_nested\x12\x02id2\x00\"Y\n" +
+	"\x11HistoriedUnmarked\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title:\x1e\xa2\xbb\x18\x1a\n" +
+	"\x12historied_unmarked\x12\x02id2\x00BNZLgithub.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1;testdatav1b\x06proto3"
 
 var (
 	file_syncplane_testdata_v1_testdata_proto_rawDescOnce sync.Once
@@ -1716,7 +2092,7 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                // 0: syncplane.testdata.v1.Widget
 	(*FieldValue)(nil),            // 1: syncplane.testdata.v1.FieldValue
@@ -1735,18 +2111,23 @@ var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Settings)(nil),              // 14: syncplane.testdata.v1.Settings
 	(*Blob)(nil),                  // 15: syncplane.testdata.v1.Blob
 	(*Ledger)(nil),                // 16: syncplane.testdata.v1.Ledger
-	nil,                           // 17: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                           // 18: syncplane.testdata.v1.Widget.ByIdEntry
-	nil,                           // 19: syncplane.testdata.v1.Widget.CustomEntry
-	nil,                           // 20: syncplane.testdata.v1.Issue.CustomEntry
-	nil,                           // 21: syncplane.testdata.v1.Issue.TagsMapEntry
+	(*Historied)(nil),             // 17: syncplane.testdata.v1.Historied
+	(*HistoriedAll)(nil),          // 18: syncplane.testdata.v1.HistoriedAll
+	(*HistoriedOneof)(nil),        // 19: syncplane.testdata.v1.HistoriedOneof
+	(*HistoriedNested)(nil),       // 20: syncplane.testdata.v1.HistoriedNested
+	(*HistoriedUnmarked)(nil),     // 21: syncplane.testdata.v1.HistoriedUnmarked
+	nil,                           // 22: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                           // 23: syncplane.testdata.v1.Widget.ByIdEntry
+	nil,                           // 24: syncplane.testdata.v1.Widget.CustomEntry
+	nil,                           // 25: syncplane.testdata.v1.Issue.CustomEntry
+	nil,                           // 26: syncplane.testdata.v1.Issue.TagsMapEntry
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	14, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
 	15, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	17, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	18, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
-	19, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
+	22, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	23, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	24, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
 	8,  // 5: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
 	10, // 6: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
 	9,  // 7: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
@@ -1761,16 +2142,17 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	12, // 16: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
 	12, // 17: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
 	10, // 18: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
-	20, // 19: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
-	21, // 20: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
+	25, // 19: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
+	26, // 20: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
 	15, // 21: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
-	1,  // 22: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	1,  // 23: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	14, // 22: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
+	1,  // 23: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	1,  // 24: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	25, // [25:25] is the sub-list for method output_type
+	25, // [25:25] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_v1_testdata_proto_init() }
@@ -1806,13 +2188,17 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 		(*OneofRefEntity_Project)(nil),
 		(*OneofRefEntity_User)(nil),
 	}
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[19].OneofWrappers = []any{
+		(*HistoriedOneof_ChoiceText)(nil),
+		(*HistoriedOneof_ChoiceNumber)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   22,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -356,3 +356,86 @@ message Ledger {
 	string id = 1;
 	string label = 2;
 }
+
+// History fixture with a NARROWED capture set: `title` and `body` are marked,
+// `note` is not, so a write that touches only `note` records nothing. `body` is
+// collaborative text, which is what makes the restore-is-a-PATCH trap
+// observable — restoring it as a PUT would union the old text back in instead
+// of replacing it.
+message Historied {
+	option (syncplane.v1.entity) = {
+		name: "historied"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	string title = 2 [(syncplane.v1.field_behavior) = { history: true }];
+	bytes body = 3
+		[(syncplane.v1.field_behavior) = { text: true history: true }];
+	string note = 4;
+}
+
+// History fixture whose capture set covers EVERY non-key field, spelled out one
+// mark at a time. There is no capture-everything default to lean on, so the
+// difference between this and Historied is only what the marks say.
+message HistoriedAll {
+	option (syncplane.v1.entity) = {
+		name: "historied_all"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	string title = 2 [(syncplane.v1.field_behavior) = { history: true }];
+	int32 count = 3 [(syncplane.v1.field_behavior) = { history: true }];
+}
+
+// History fixture carrying a ONEOF. A oneof is one field to the merge, named by
+// its group, so the capture set has to name it that way too — a mask naming a
+// member could neither record a prior value nor be handed back to a restore.
+// Marking one member is what marks the group.
+message HistoriedOneof {
+	option (syncplane.v1.entity) = {
+		name: "historied_oneof"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	string label = 2;
+	oneof choice {
+		string choice_text = 3
+			[(syncplane.v1.field_behavior) = { history: true }];
+		int32 choice_number = 4;
+	}
+}
+
+// History fixture carrying a NESTED message field. A capture set names
+// top-level units, but a PATCH mask may point inside one and a record keeps the
+// sub-path it was given, so this is the only shape where a session records
+// "settings.color" and then folds in a write naming the whole of "settings".
+message HistoriedNested {
+	option (syncplane.v1.entity) = {
+		name: "historied_nested"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	Settings settings = 2 [(syncplane.v1.field_behavior) = { history: true }];
+}
+
+// History fixture that opts the entity in and marks NOTHING. Registering it is
+// an error: capture is explicit, and an entity that names no field has asked
+// for a log that could never say anything.
+message HistoriedUnmarked {
+	option (syncplane.v1.entity) = {
+		name: "historied_unmarked"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	string title = 2;
+}

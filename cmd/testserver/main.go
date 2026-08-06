@@ -77,6 +77,11 @@ func main() {
 			// projection and reference-following subscriptions (issue→project,
 			// project→issues).
 			&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{},
+			// Historied opts into field history (and carries a collaborative
+			// text field), which also brings the engine's server-only history
+			// entity into the catalog: integration tests read it back through
+			// queryServer and restore from it with an ordinary PATCH.
+			&testdatav1.Historied{},
 		),
 	)
 	if *gcInterval > 0 || *gcRetention > 0 {
@@ -90,6 +95,14 @@ func main() {
 	opts = append(opts,
 		server.WithTextDeltaRetention(*gcTextDelta),
 		server.WithTextCompaction(*gcTextPurge),
+		// One record per write, rather than the five-minute default that folds a
+		// run of writes to one row into one. A suite's writes all land inside any
+		// realistic window and under one actor, so the default would collapse
+		// every history spec to a single record and leave the per-write shape —
+		// which mask a write records, which before-state, how a restore reads it
+		// — unobservable from this side. Folding is decided entirely on the Go
+		// write path and is covered by the engine's own suite.
+		server.WithHistorySession(server.HistorySessionOff),
 	)
 	srv, err := server.New(store, opts...)
 	if err != nil {

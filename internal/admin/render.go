@@ -71,7 +71,7 @@ func (h *handler) buildNav(ctx context.Context, srv *server.Server, app, ws, act
 		return ui.Nav{}, err
 	}
 	nav.Workspace = ws
-	entities := srv.Entities()
+	entities := appEntities(srv)
 	target := active
 	if target == "" && len(entities) > 0 {
 		target = entities[0].Name

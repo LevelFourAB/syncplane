@@ -199,11 +199,11 @@ export const PresentCondSchema: GenMessage<PresentCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 5);
 
 /**
- * ExistsCond matches a row when AT LEAST ONE element of a repeated message
- * field satisfies `cond`. It is the only way to ask about the contents of
- * message elements, and the only condition whose sub-paths are relative to
- * something other than the row: `cond`'s paths resolve against the ELEMENT
- * message, so ["assignees"] + ["id"] reads "some assignee's id".
+ * ExistsCond matches a row when AT LEAST ONE element of a collection satisfies
+ * `cond`. It is the only way to ask about the contents of message elements, and
+ * the only condition whose sub-paths are relative to something other than the
+ * row: `cond`'s paths resolve against the ELEMENT, so ["assignees"] + ["id"]
+ * reads "some assignee's id".
  *
  * The element scope is explicit for a reason. Distributing the quantifier over
  * each condition instead — reading a bare path as "some element" — makes
@@ -211,19 +211,35 @@ export const PresentCondSchema: GenMessage<PresentCond> = /*@__PURE__*/
  * (possibly other) item has qty > 3", and once the conditions are separate
  * terms nothing records that they were meant to describe the same element.
  *
+ * Two collections have elements this way:
+ *
+ *   - a repeated MESSAGE field, whose element is the message; and
+ *   - a MAP, whose element is the ENTRY. The entry's two sides are addressed as
+ *     `key` and `value` — the same two names an index component's `*` selector
+ *     uses — so ["custom"] + and(key == "priority", value.number == 5) reads
+ *     "some custom field named priority holds 5", and a sub-condition on
+ *     `value` alone reads "SOME custom field holds 5" without saying which.
+ *
+ * The map form is what answers "which field holds X" across keys, where
+ * addressing one entry by key (["custom", "priority", "number"]) answers "does
+ * THIS field hold X". Note that it is a predicate and not a projection: it says
+ * that some entry matched, never which one — an app that needs the name reads
+ * it off the row's map.
+ *
  * @generated from message syncplane.v1.ExistsCond
  */
 export type ExistsCond = Message<"syncplane.v1.ExistsCond"> & {
   /**
-   * Path to a repeated message field, from the row.
+   * Path to a repeated message field or a map, from the row.
    *
    * @generated from field: repeated string path = 1;
    */
   path: string[];
 
   /**
-   * Evaluated against each element, with paths relative to it. An empty list
-   * makes this false, like every condition on a missing value.
+   * Evaluated against each element — each map ENTRY, for a map — with paths
+   * relative to it. An empty collection makes this false, like every
+   * condition on a missing value.
    *
    * @generated from field: syncplane.v1.Condition cond = 2;
    */

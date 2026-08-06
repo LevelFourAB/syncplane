@@ -271,6 +271,50 @@ var _ = Describe("Text fields", func() {
 			})
 		})
 
+		// A plain-string value says what a field should read as without saying
+		// who wrote it, so applying one means minting edits under a peer the
+		// server does not have. A client resolves it at enqueue; a payload that
+		// carries one to the wire skipped that, and no resend fixes it.
+		Describe("an unresolved plain-string value", func() {
+			plain := func(s string) []byte {
+				GinkgoHelper()
+				b, err := text.EncodePlainString(s)
+				Expect(err).NotTo(HaveOccurred())
+				return b
+			}
+
+			It("is rejected on PATCH, leaving the row untouched", func() {
+				stored := bodyDoc("alice", "hello")
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: stored}))
+
+				results := push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Body: plain("goodbye")}, "body"))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+				Expect(getWidget("w1").GetBody()).To(Equal(stored))
+			})
+
+			It("is rejected on PUT", func() {
+				results := push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{
+					Id: "w1", Body: plain("hello"),
+				}))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+			})
+
+			It("is rejected in a field the mask does not name", func() {
+				// The guard runs over the bytes a client sent, not over what the
+				// merge would reach — the same strictness the fragment case above
+				// applies in this position.
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Label: "v1"}))
+				results := push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Label: "v2", Body: plain("hidden")}, "label"))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal(server.CodeInvalidArgument))
+				Expect(getWidget("w1").GetLabel()).To(Equal("v1"))
+			})
+		})
+
 		It("keeps marks attached across concurrent edits", func() {
 			base := bodyDoc("seed", "hello world")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))

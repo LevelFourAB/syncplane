@@ -84,9 +84,13 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 
 // leavingEntities returns the registered entities subscribed under the old
 // scope but not the new one.
+//
+// Server-only entities are outside this question entirely: no client ever held
+// their rows, so neither scope can have carried them and announcing one as
+// leaving would tell the client to drop something it never had.
 func (s *Server) leavingEntities(oldEm, newEm *rowEmitter) []string {
 	var out []string
-	for _, name := range s.catalogPtr().entityNames() {
+	for _, name := range s.catalogPtr().syncEntityNames() {
 		if oldEm.subscribed(name) && !newEm.subscribed(name) {
 			out = append(out, name)
 		}

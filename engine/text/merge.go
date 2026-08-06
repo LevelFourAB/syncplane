@@ -27,9 +27,26 @@ import (
 // output whenever the receiver covers the fragment's base. When it does not,
 // the error is tagged ErrFragmentUnusable and the remedy is a full-state
 // resend.
+//
+// Neither side may be a plain-string value (plain.go): the error is tagged
+// ErrPlainStringUnresolved, and the remedy is to resolve the value under a
+// writer identity rather than to resend it.
 func Merge(base, incoming []byte) ([]byte, error) {
 	if IsFragment(base) {
 		return nil, fmt.Errorf("text: merge base is a fragment; stored state is always a full document")
+	}
+	if IsPlainString(base) {
+		return nil, unresolved{fmt.Errorf(
+			"text: merge base is a plain-string value; stored state is always a full document")}
+	}
+	if IsPlainString(incoming) {
+		// Applying it means diffing against the base and minting the difference
+		// under a writer identity, which no merger has: the peer belongs to
+		// whoever applies the value. Resolving happens before the write (the
+		// client's enqueue path, server.ApplyTextStrings), so reaching here
+		// means a payload skipped that step.
+		return nil, unresolved{fmt.Errorf(
+			"text: incoming plain-string value must be resolved under a writer identity before a write")}
 	}
 	if IsFragment(incoming) {
 		return ApplyFragmentBytes(base, incoming)
@@ -58,11 +75,17 @@ func Merge(base, incoming []byte) ([]byte, error) {
 // floor is the field's compaction floor, nil or empty for a field that was
 // never compacted; see MergeWithFloor for what a floor decides.
 //
+// An incoming plain-string value is rejected with ErrPlainStringUnresolved.
+//
 // d MUST BE DISCARDED if this returns an error. The fragment path validates
 // before it commits, but the full-state path does not, so a failed merge can
 // leave d holding part of the incoming side. Encoding it would persist a state
 // no replica ever produced.
 func (d *Doc) MergeEncoded(incoming []byte, floor map[string]uint64) error {
+	if IsPlainString(incoming) {
+		return unresolved{fmt.Errorf(
+			"text: incoming plain-string value must be resolved under a writer identity before a write")}
+	}
 	if IsFragment(incoming) {
 		f, err := DecodeFragment(incoming)
 		if err != nil {

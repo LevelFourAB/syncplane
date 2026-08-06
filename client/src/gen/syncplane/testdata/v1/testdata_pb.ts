@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/testdata/v1/testdata.proto.
  */
 export const file_syncplane_testdata_v1_testdata: GenFile = /*@__PURE__*/
-  fileDesc("CiRzeW5jcGxhbmUvdGVzdGRhdGEvdjEvdGVzdGRhdGEucHJvdG8SFXN5bmNwbGFuZS50ZXN0ZGF0YS52MSLFBwoGV2lkZ2V0EgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg0KBWNvdW50GAMgASgFEjEKCHNldHRpbmdzGAQgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzEjAKA2RvYxgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDAoEdGFncxgGIAMoCRILCgNiaWcYByABKAMSEgoFbWF5YmUYCCABKAlIAYgBARIMCgRmbGFnGAkgASgIEhMKA3JhdxgKIAEoDEIGqrsYAggBEjcKBWF0dHJzGAsgAygLMiguc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5BdHRyc0VudHJ5EjYKBWJ5X2lkGAwgAygLMicuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5CeUlkRW50cnkSOQoGY3VzdG9tGBcgAygLMikuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5DdXN0b21FbnRyeRI5CgdtZW1iZXJzGA0gAygLMh0uc3luY3BsYW5lLnRlc3RkYXRhLnYxLk1lbWJlckIJqrsYBRIDdWlkEikKBHJlZnMYDiADKAsyGy5zeW5jcGxhbmUudGVzdGRhdGEudjEuUGFpchIbCgthdG9taWNfdGFncxgPIAMoCUIGqrsYAggBEjkKBWl0ZW1zGBAgAygLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkl0ZW1CDaq7GAkSAmlkGgNwb3MSFAoEYm9keRgRIAEoDEIGqrsYAiABEg0KBXJhdGlvGBIgASgBEgwKBHViaWcYEyABKAQSFQoLY2hvaWNlX3RleHQYFCABKAlIABIXCg1jaG9pY2VfbnVtYmVyGBUgASgFSAASOgoPY2hvaWNlX3NldHRpbmdzGBYgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzSAAaLAoKQXR0cnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGisKCUJ5SWRFbnRyeRILCgNrZXkYASABKAMSDQoFdmFsdWUYAiABKAk6AjgBGlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4AToQorsYDAoGd2lkZ2V0EgJpZEIICgZjaG9pY2VCCAoGX21heWJlIrEBCgpGaWVsZFZhbHVlEg4KBHRleHQYASABKAlIABIQCgZudW1iZXIYAiABKAFIABIRCgdjaGVja2VkGAMgASgISAASMwoGbGFiZWxzGAQgASgLMiEuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlN0cmluZ0xpc3RIABIxCgphdHRhY2htZW50GAUgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkJsb2JIAEIGCgRraW5kIhwKClN0cmluZ0xpc3QSDgoGdmFsdWVzGAEgAygJIk0KDk9uZW9mS2V5RW50aXR5EgwKAmlkGAEgASgJSAASDwoFb3RoZXIYAiABKAlIADoTorsYDwoJb25lb2Zfa2V5EgJpZEIHCgV3aGljaCJlCg9PbmVvZlRleHRFbnRpdHkSCgoCaWQYASABKAkSFgoEYm9keRgCIAEoDEIGqrsYAiABSAASDwoFcGxhaW4YAyABKAlIADoUorsYEAoKb25lb2ZfdGV4dBICaWRCBwoFd2hpY2gijwEKFU9uZW9mTmVzdGVkVGV4dEVudGl0eRIKCgJpZBgBIAEoCRIzCgZob2xkZXIYAiABKAsyIS5zeW5jcGxhbmUudGVzdGRhdGEudjEuVGV4dEhvbGRlckgAEg8KBXBsYWluGAMgASgJSAA6G6K7GBcKEW9uZW9mX25lc3RlZF90ZXh0EgJpZEIHCgV3aGljaCIiCgpUZXh0SG9sZGVyEhQKBGJvZHkYASABKAxCBqq7GAIgASKbAQoOT25lb2ZSZWZFbnRpdHkSCgoCaWQYASABKAkSMQoHcHJvamVjdBgCIAEoCzIeLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Qcm9qZWN0SAASKwoEdXNlchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VySAA6E6K7GA8KCW9uZW9mX3JlZhICaWRCCAoGdGFyZ2V0Ij8KBk1lbWJlchILCgN1aWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRyb2xlGAMgASgFEgwKBHRhZ3MYBCADKAkiLQoESXRlbRIKCgJpZBgBIAEoCRILCgNwb3MYAiABKAkSDAoEdGV4dBgDIAEoCSJBCgRQYWlyEgoKAm5zGAEgASgJEgoKAmlkGAIgASgJEg0KBWxhYmVsGAMgASgJOhKiuxgOCgRwYWlyEgJucxICaWQiNgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOhGiuxgNCgdwcm9qZWN0EgJpZCIwCgRVc2VyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6DqK7GAoKBHVzZXISAmlkIu8HCgVJc3N1ZRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIvCgdwcm9qZWN0GAMgASgLMh4uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlByb2plY3QSMAoKYmxvY2tlZF9ieRgEIAMoCzIcLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Jc3N1ZRItCghhc3NpZ25lZRgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VyEi0KCHJlcG9ydGVyGAYgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlVzZXISKQoEcGFpchgHIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5QYWlyEhUKBXN0YXRlGAggASgJQgaquxgCKAESDAoEcmFuaxgJIAEoBRIWCgZsYWJlbHMYCiADKAlCBqq7GAIoARI4CgZjdXN0b20YCyADKAsyKC5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuQ3VzdG9tRW50cnkSOwoIdGFnc19tYXAYDCADKAsyKS5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuVGFnc01hcEVudHJ5GlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4ARouCgxUYWdzTWFwRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ATqoA6K7GKMDCgVpc3N1ZRICaWQaIgoNYnlfc3RhdGVfcmFuaxIHCgVzdGF0ZRIICgRyYW5rEAEaIwoNYnlfbGFiZWxfcmFuaxIICgZsYWJlbHMSCAoEcmFuaxABGjQKCWNmX251bWJlchIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyGjcKDGNmX2J5X251bWJlchIXChVjdXN0b20uKi52YWx1ZS5udW1iZXISDgoMY3VzdG9tLioua2V5GikKDmNmX251bWJlcl9vbmx5EhcKFWN1c3RvbS4qLnZhbHVlLm51bWJlchpACgtjZl9udW1fcmFuaxIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyEggKBHJhbmsQARo7CgljZl9sYWJlbHMSDgoMY3VzdG9tLioua2V5Eh4KHGN1c3RvbS4qLnZhbHVlLmxhYmVscy52YWx1ZXMaNAoMdGFnX2J5X3ZhbHVlEhIKEHRhZ3NfbWFwLioudmFsdWUSEAoOdGFnc19tYXAuKi5rZXkiagoIU2V0dGluZ3MSDQoFY29sb3IYASABKAkSDAoEc2l6ZRgCIAEoBRIyCgVpbm5lchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDQoFcmF0aW8YBCABKAEiIgoEQmxvYhIMCgRkYXRhGAEgASgMEgwKBG5vdGUYAiABKAkiNwoGTGVkZ2VyEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJOhKiuxgOCgZsZWRnZXISAmlkIAJCTlpMZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdGVzdGRhdGEvdjE7dGVzdGRhdGF2MWIGcHJvdG8z", [file_syncplane_v1_options]);
+  fileDesc("CiRzeW5jcGxhbmUvdGVzdGRhdGEvdjEvdGVzdGRhdGEucHJvdG8SFXN5bmNwbGFuZS50ZXN0ZGF0YS52MSLFBwoGV2lkZ2V0EgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEg0KBWNvdW50GAMgASgFEjEKCHNldHRpbmdzGAQgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzEjAKA2RvYxgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDAoEdGFncxgGIAMoCRILCgNiaWcYByABKAMSEgoFbWF5YmUYCCABKAlIAYgBARIMCgRmbGFnGAkgASgIEhMKA3JhdxgKIAEoDEIGqrsYAggBEjcKBWF0dHJzGAsgAygLMiguc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5BdHRyc0VudHJ5EjYKBWJ5X2lkGAwgAygLMicuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5CeUlkRW50cnkSOQoGY3VzdG9tGBcgAygLMikuc3luY3BsYW5lLnRlc3RkYXRhLnYxLldpZGdldC5DdXN0b21FbnRyeRI5CgdtZW1iZXJzGA0gAygLMh0uc3luY3BsYW5lLnRlc3RkYXRhLnYxLk1lbWJlckIJqrsYBRIDdWlkEikKBHJlZnMYDiADKAsyGy5zeW5jcGxhbmUudGVzdGRhdGEudjEuUGFpchIbCgthdG9taWNfdGFncxgPIAMoCUIGqrsYAggBEjkKBWl0ZW1zGBAgAygLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkl0ZW1CDaq7GAkSAmlkGgNwb3MSFAoEYm9keRgRIAEoDEIGqrsYAiABEg0KBXJhdGlvGBIgASgBEgwKBHViaWcYEyABKAQSFQoLY2hvaWNlX3RleHQYFCABKAlIABIXCg1jaG9pY2VfbnVtYmVyGBUgASgFSAASOgoPY2hvaWNlX3NldHRpbmdzGBYgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzSAAaLAoKQXR0cnNFbnRyeRILCgNrZXkYASABKAkSDQoFdmFsdWUYAiABKAk6AjgBGisKCUJ5SWRFbnRyeRILCgNrZXkYASABKAMSDQoFdmFsdWUYAiABKAk6AjgBGlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4AToQorsYDAoGd2lkZ2V0EgJpZEIICgZjaG9pY2VCCAoGX21heWJlIrEBCgpGaWVsZFZhbHVlEg4KBHRleHQYASABKAlIABIQCgZudW1iZXIYAiABKAFIABIRCgdjaGVja2VkGAMgASgISAASMwoGbGFiZWxzGAQgASgLMiEuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlN0cmluZ0xpc3RIABIxCgphdHRhY2htZW50GAUgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLkJsb2JIAEIGCgRraW5kIhwKClN0cmluZ0xpc3QSDgoGdmFsdWVzGAEgAygJIk0KDk9uZW9mS2V5RW50aXR5EgwKAmlkGAEgASgJSAASDwoFb3RoZXIYAiABKAlIADoTorsYDwoJb25lb2Zfa2V5EgJpZEIHCgV3aGljaCJlCg9PbmVvZlRleHRFbnRpdHkSCgoCaWQYASABKAkSFgoEYm9keRgCIAEoDEIGqrsYAiABSAASDwoFcGxhaW4YAyABKAlIADoUorsYEAoKb25lb2ZfdGV4dBICaWRCBwoFd2hpY2gijwEKFU9uZW9mTmVzdGVkVGV4dEVudGl0eRIKCgJpZBgBIAEoCRIzCgZob2xkZXIYAiABKAsyIS5zeW5jcGxhbmUudGVzdGRhdGEudjEuVGV4dEhvbGRlckgAEg8KBXBsYWluGAMgASgJSAA6G6K7GBcKEW9uZW9mX25lc3RlZF90ZXh0EgJpZEIHCgV3aGljaCIiCgpUZXh0SG9sZGVyEhQKBGJvZHkYASABKAxCBqq7GAIgASKbAQoOT25lb2ZSZWZFbnRpdHkSCgoCaWQYASABKAkSMQoHcHJvamVjdBgCIAEoCzIeLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Qcm9qZWN0SAASKwoEdXNlchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VySAA6E6K7GA8KCW9uZW9mX3JlZhICaWRCCAoGdGFyZ2V0Ij8KBk1lbWJlchILCgN1aWQYASABKAkSDAoEbmFtZRgCIAEoCRIMCgRyb2xlGAMgASgFEgwKBHRhZ3MYBCADKAkiLQoESXRlbRIKCgJpZBgBIAEoCRILCgNwb3MYAiABKAkSDAoEdGV4dBgDIAEoCSJBCgRQYWlyEgoKAm5zGAEgASgJEgoKAmlkGAIgASgJEg0KBWxhYmVsGAMgASgJOhKiuxgOCgRwYWlyEgJucxICaWQiNgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOhGiuxgNCgdwcm9qZWN0EgJpZCIwCgRVc2VyEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6DqK7GAoKBHVzZXISAmlkIu8HCgVJc3N1ZRIKCgJpZBgBIAEoCRINCgV0aXRsZRgCIAEoCRIvCgdwcm9qZWN0GAMgASgLMh4uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlByb2plY3QSMAoKYmxvY2tlZF9ieRgEIAMoCzIcLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Jc3N1ZRItCghhc3NpZ25lZRgFIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5Vc2VyEi0KCHJlcG9ydGVyGAYgASgLMhsuc3luY3BsYW5lLnRlc3RkYXRhLnYxLlVzZXISKQoEcGFpchgHIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5QYWlyEhUKBXN0YXRlGAggASgJQgaquxgCKAESDAoEcmFuaxgJIAEoBRIWCgZsYWJlbHMYCiADKAlCBqq7GAIoARI4CgZjdXN0b20YCyADKAsyKC5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuQ3VzdG9tRW50cnkSOwoIdGFnc19tYXAYDCADKAsyKS5zeW5jcGxhbmUudGVzdGRhdGEudjEuSXNzdWUuVGFnc01hcEVudHJ5GlAKC0N1c3RvbUVudHJ5EgsKA2tleRgBIAEoCRIwCgV2YWx1ZRgCIAEoCzIhLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5GaWVsZFZhbHVlOgI4ARouCgxUYWdzTWFwRW50cnkSCwoDa2V5GAEgASgJEg0KBXZhbHVlGAIgASgJOgI4ATqoA6K7GKMDCgVpc3N1ZRICaWQaIgoNYnlfc3RhdGVfcmFuaxIHCgVzdGF0ZRIICgRyYW5rEAEaIwoNYnlfbGFiZWxfcmFuaxIICgZsYWJlbHMSCAoEcmFuaxABGjQKCWNmX251bWJlchIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyGjcKDGNmX2J5X251bWJlchIXChVjdXN0b20uKi52YWx1ZS5udW1iZXISDgoMY3VzdG9tLioua2V5GikKDmNmX251bWJlcl9vbmx5EhcKFWN1c3RvbS4qLnZhbHVlLm51bWJlchpACgtjZl9udW1fcmFuaxIOCgxjdXN0b20uKi5rZXkSFwoVY3VzdG9tLioudmFsdWUubnVtYmVyEggKBHJhbmsQARo7CgljZl9sYWJlbHMSDgoMY3VzdG9tLioua2V5Eh4KHGN1c3RvbS4qLnZhbHVlLmxhYmVscy52YWx1ZXMaNAoMdGFnX2J5X3ZhbHVlEhIKEHRhZ3NfbWFwLioudmFsdWUSEAoOdGFnc19tYXAuKi5rZXkiagoIU2V0dGluZ3MSDQoFY29sb3IYASABKAkSDAoEc2l6ZRgCIAEoBRIyCgVpbm5lchgDIAEoCzIbLnN5bmNwbGFuZS50ZXN0ZGF0YS52MS5CbG9iQgaquxgCCAESDQoFcmF0aW8YBCABKAEiIgoEQmxvYhIMCgRkYXRhGAEgASgMEgwKBG5vdGUYAiABKAkiNwoGTGVkZ2VyEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJOhKiuxgOCgZsZWRnZXISAmlkIAIiawoJSGlzdG9yaWVkEgoKAmlkGAEgASgJEhUKBXRpdGxlGAIgASgJQgaquxgCMAESFgoEYm9keRgDIAEoDEIIqrsYBCABMAESDAoEbm90ZRgEIAEoCToVorsYEQoJaGlzdG9yaWVkEgJpZDIAImMKDEhpc3RvcmllZEFsbBIKCgJpZBgBIAEoCRIVCgV0aXRsZRgCIAEoCUIGqrsYAjABEhUKBWNvdW50GAMgASgFQgaquxgCMAE6GaK7GBUKDWhpc3RvcmllZF9hbGwSAmlkMgAiigEKDkhpc3RvcmllZE9uZW9mEgoKAmlkGAEgASgJEg0KBWxhYmVsGAIgASgJEh0KC2Nob2ljZV90ZXh0GAMgASgJQgaquxgCMAFIABIXCg1jaG9pY2VfbnVtYmVyGAQgASgFSAA6G6K7GBcKD2hpc3RvcmllZF9vbmVvZhICaWQyAEIICgZjaG9pY2UidgoPSGlzdG9yaWVkTmVzdGVkEgoKAmlkGAEgASgJEjkKCHNldHRpbmdzGAIgASgLMh8uc3luY3BsYW5lLnRlc3RkYXRhLnYxLlNldHRpbmdzQgaquxgCMAE6HKK7GBgKEGhpc3RvcmllZF9uZXN0ZWQSAmlkMgAiTgoRSGlzdG9yaWVkVW5tYXJrZWQSCgoCaWQYASABKAkSDQoFdGl0bGUYAiABKAk6HqK7GBoKEmhpc3RvcmllZF91bm1hcmtlZBICaWQyAEJOWkxnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS90ZXN0ZGF0YS92MTt0ZXN0ZGF0YXYxYgZwcm90bzM", [file_syncplane_v1_options]);
 
 /**
  * @generated from message syncplane.testdata.v1.Widget
@@ -767,4 +767,170 @@ export type Ledger = Message<"syncplane.testdata.v1.Ledger"> & {
  */
 export const LedgerSchema: GenMessage<Ledger> = /*@__PURE__*/
   messageDesc(file_syncplane_testdata_v1_testdata, 16);
+
+/**
+ * History fixture with a NARROWED capture set: `title` and `body` are marked,
+ * `note` is not, so a write that touches only `note` records nothing. `body` is
+ * collaborative text, which is what makes the restore-is-a-PATCH trap
+ * observable — restoring it as a PUT would union the old text back in instead
+ * of replacing it.
+ *
+ * @generated from message syncplane.testdata.v1.Historied
+ */
+export type Historied = Message<"syncplane.testdata.v1.Historied"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title: string;
+
+  /**
+   * @generated from field: bytes body = 3;
+   */
+  body: Uint8Array;
+
+  /**
+   * @generated from field: string note = 4;
+   */
+  note: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.Historied.
+ * Use `create(HistoriedSchema)` to create a new message.
+ */
+export const HistoriedSchema: GenMessage<Historied> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 17);
+
+/**
+ * History fixture whose capture set covers EVERY non-key field, spelled out one
+ * mark at a time. There is no capture-everything default to lean on, so the
+ * difference between this and Historied is only what the marks say.
+ *
+ * @generated from message syncplane.testdata.v1.HistoriedAll
+ */
+export type HistoriedAll = Message<"syncplane.testdata.v1.HistoriedAll"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title: string;
+
+  /**
+   * @generated from field: int32 count = 3;
+   */
+  count: number;
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.HistoriedAll.
+ * Use `create(HistoriedAllSchema)` to create a new message.
+ */
+export const HistoriedAllSchema: GenMessage<HistoriedAll> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 18);
+
+/**
+ * History fixture carrying a ONEOF. A oneof is one field to the merge, named by
+ * its group, so the capture set has to name it that way too — a mask naming a
+ * member could neither record a prior value nor be handed back to a restore.
+ * Marking one member is what marks the group.
+ *
+ * @generated from message syncplane.testdata.v1.HistoriedOneof
+ */
+export type HistoriedOneof = Message<"syncplane.testdata.v1.HistoriedOneof"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string label = 2;
+   */
+  label: string;
+
+  /**
+   * @generated from oneof syncplane.testdata.v1.HistoriedOneof.choice
+   */
+  choice: {
+    /**
+     * @generated from field: string choice_text = 3;
+     */
+    value: string;
+    case: "choiceText";
+  } | {
+    /**
+     * @generated from field: int32 choice_number = 4;
+     */
+    value: number;
+    case: "choiceNumber";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.HistoriedOneof.
+ * Use `create(HistoriedOneofSchema)` to create a new message.
+ */
+export const HistoriedOneofSchema: GenMessage<HistoriedOneof> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 19);
+
+/**
+ * History fixture carrying a NESTED message field. A capture set names
+ * top-level units, but a PATCH mask may point inside one and a record keeps the
+ * sub-path it was given, so this is the only shape where a session records
+ * "settings.color" and then folds in a write naming the whole of "settings".
+ *
+ * @generated from message syncplane.testdata.v1.HistoriedNested
+ */
+export type HistoriedNested = Message<"syncplane.testdata.v1.HistoriedNested"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: syncplane.testdata.v1.Settings settings = 2;
+   */
+  settings?: Settings | undefined;
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.HistoriedNested.
+ * Use `create(HistoriedNestedSchema)` to create a new message.
+ */
+export const HistoriedNestedSchema: GenMessage<HistoriedNested> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 20);
+
+/**
+ * History fixture that opts the entity in and marks NOTHING. Registering it is
+ * an error: capture is explicit, and an entity that names no field has asked
+ * for a log that could never say anything.
+ *
+ * @generated from message syncplane.testdata.v1.HistoriedUnmarked
+ */
+export type HistoriedUnmarked = Message<"syncplane.testdata.v1.HistoriedUnmarked"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: string title = 2;
+   */
+  title: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.v1.HistoriedUnmarked.
+ * Use `create(HistoriedUnmarkedSchema)` to create a new message.
+ */
+export const HistoriedUnmarkedSchema: GenMessage<HistoriedUnmarked> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_v1_testdata, 21);
 

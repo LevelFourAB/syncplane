@@ -4,6 +4,7 @@ import { describe, expect, it } from 'vitest';
 import { reconcileStoreEntities, syncableEntities } from '../../src/entities.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { type RowChange, RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import {
 	confirmedKey,
@@ -111,6 +112,20 @@ describe('reconcileStoreEntities', () => {
 		expect(await get(kv, META_ENTITIES)).toEqual([ 'todo', 'widget' ]);
 	});
 
+	// A server-only entity has no rows to acquire, so recording it would buy a
+	// re-bootstrap of every workspace for a snapshot that ships nothing.
+	it('ignores a server-only entity', async () => {
+		const kv = new MemoryKVStore();
+		await reconcile(kv, todoOnly);
+		const tx = await kv.write();
+		await tx.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await tx.commit();
+
+		expect(await reconcile(kv, new EntityRegistry([ TodoSchema, FieldHistorySchema ]))).toEqual([]);
+		expect(await get(kv, metaCursor(WS))).toEqual(new Uint8Array([ 1 ]));
+		expect(await get(kv, META_ENTITIES)).toEqual([ 'todo' ]);
+	});
+
 	// Tabs of different builds share one store: the set is the union of every
 	// registry that has opened it, so the tab with fewer entities does not narrow
 	// what the others sync.
@@ -131,6 +146,14 @@ describe('syncableEntities', () => {
 		const names = await syncableEntities(tx, new EntityRegistry([ TodoSchema ]));
 		tx.release();
 		expect([ ...names ].sort()).toEqual([ 'todo', 'widget' ]);
+	});
+
+	it('omits a server-only entity the registry holds', async () => {
+		const kv = new MemoryKVStore();
+		const tx = await kv.read();
+		const names = await syncableEntities(tx, new EntityRegistry([ TodoSchema, FieldHistorySchema ]));
+		tx.release();
+		expect([ ...names ]).toEqual([ 'todo' ]);
 	});
 });
 

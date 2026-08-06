@@ -10,6 +10,10 @@
  *
  *   an entity syncs if THIS build's registry knows it, or the store records it.
  *
+ * A server_only entity is registered but never synced — the server ships no rows
+ * of it to any client — so it counts for neither half: it claims nothing here and
+ * registering one is not the change of entity set the second half reacts to.
+ *
  * The second half is what makes the first half safe across tabs. Tabs of
  * different builds share one store (see touch.ts), so a store whose entity set
  * were narrowed to whichever build started last would have the older tab
@@ -57,7 +61,7 @@ export async function syncableEntities(
 	registry: EntityRegistry,
 ): Promise<ReadonlySet<string>> {
 	const names = new Set(await readStoreEntities(tx));
-	for (const name of registry.names()) names.add(name);
+	for (const name of registry.syncableNames()) names.add(name);
 	return names;
 }
 
@@ -91,7 +95,7 @@ export async function reconcileStoreEntities(
 ): Promise<string[]> {
 	const stored = await readStoreEntities(tx);
 	const known = new Set(stored);
-	const added = registry.names().filter((name) => !known.has(name));
+	const added = registry.syncableNames().filter((name) => !known.has(name));
 	if (added.length === 0) return [];
 	for (const segment of await workspaceSegments(tx)) {
 		const workspaceId = wsFromSegment(segment);

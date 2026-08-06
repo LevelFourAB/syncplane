@@ -94,13 +94,26 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return out
 	}
 
+	// failInternal reports a fault the caller cannot act on. Only the phase
+	// reaches the client; err itself is logged, because a permission hook, a
+	// history filter or a storage adapter words its errors for an operator and
+	// may name a dependency, a key or a row the caller has no business seeing.
+	// The log is the ONLY record: a workspace-scoped failure travels as a code
+	// on the result, so the logging interceptor sees this RPC succeed.
+	failInternal := func(phase string, err error) *syncplanev1.WorkspaceResults {
+		s.reqLog(ctx, "push", ws, "").LogAttrs(ctx, slog.LevelError, "batch failed",
+			slog.String("phase", phase),
+			slog.String("error", err.Error()))
+		return fail(CodeInternal, "workspace %q: %s failed", ws, phase)
+	}
+
 	principal, err := s.enterWorkspace(ctx, ws)
 	if err != nil {
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return fail(CodeWorkspaceAccessRevoked, "workspace %q: access denied", ws)
 		}
 		// Could not decide (a hook outage). Transient: the client retries.
-		return fail(CodeInternal, "workspace %q: resolving access: %v", ws, err)
+		return failInternal("resolving access", err)
 	}
 
 	// Authorize every mutation BEFORE opening the write transaction. CanMutate
@@ -117,7 +130,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	for i, m := range muts {
 		if err := s.authorize(ctx, principal, ws, m); err != nil {
 			if _, isRejection := AsRejection(err); !isRejection {
-				return fail(CodeInternal, "workspace %q: authorizing mutation %d: %v", ws, m.GetMutationId(), err)
+				return failInternal(fmt.Sprintf("authorizing mutation %d", m.GetMutationId()), err)
 			}
 			authz[i] = err
 		}
@@ -244,7 +257,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	case badArg != "":
 		return fail(CodeInvalidArgument, "workspace %q: %s", ws, badArg)
 	case err != nil:
-		return fail(CodeInternal, "workspace %q: %v", ws, err)
+		return failInternal("applying the batch", err)
 	}
 	if applied {
 		s.notifier.Notify(ws)
@@ -555,6 +568,16 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown entity %q", crud.GetEntity()))
 	}
+	// A server-only entity's rows never reach the client that would be writing
+	// them, so a wire write of one could only ever be a misconfiguration — an
+	// optimistic edit whose row the client can neither read back nor rebase
+	// against. Rejecting is deterministic, so the client acks and drains rather
+	// than wedging its queue. In-process writes are unaffected: EntityTx is how
+	// the engine's own history capture writes these rows.
+	if info.serverOnly {
+		return Reject(CodeInvalidArgument,
+			fmt.Sprintf("entity %q is server-only and cannot be written from a client", info.name))
+	}
 	// The key addresses a row in storage and, on the client, a KV key built by
 	// pasting it after the entity prefix; a key breaking the shared naming rules
 	// is a client bug that would otherwise be discovered as a missing or
@@ -564,13 +587,14 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 	}
 
 	// The stored row as it stands before this mutation, fetched at most once.
-	// Three sites inside this one savepoint want it — the CAS guard below, the
-	// PUT text union and the PATCH merge base — and each has to treat an absent
-	// row and a tombstone alike; one fetch behind one `live` flag is what keeps
-	// that handling from drifting apart between them. Nothing here writes the
-	// row before the op switch's final PutRow/DeleteRow, so the memo cannot go
-	// stale. Lazy, so a DELETE (or an unguarded PUT of an entity without text
-	// fields) still reads nothing.
+	// Four sites inside this one savepoint want it — the CAS guard below, the
+	// PUT text union, the PATCH merge base and history capture — and each has to
+	// treat an absent row and a tombstone alike; one fetch behind one `live`
+	// flag is what keeps that handling from drifting apart between them.
+	// Nothing here writes the row before the op switch's final
+	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE (or an
+	// unguarded PUT of an entity that has neither text fields nor history) still
+	// reads nothing.
 	var (
 		cachedRow  storage.Row
 		cachedLive bool
@@ -671,6 +695,21 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 		if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), msg); err != nil {
 			return err
 		}
+		// Capture last, once every rejection is behind us: a record must
+		// describe a write that happened. A PUT carries no mask, so capture
+		// starts from the whole capture set (nil mask) and narrows it against
+		// `msg`, the row about to be stored; the before-state is the memo above,
+		// which the text union read for its own reasons and an entity without
+		// text fields pays one read for here.
+		if info.history != nil {
+			row, live, rowErr := currentRow()
+			if rowErr != nil {
+				return rowErr
+			}
+			if err := s.captureHistory(ctx, tx, ws, info, crud.GetKey(), row, live, msg, nil, seq, actor); err != nil {
+				return err
+			}
+		}
 		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
 
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
@@ -768,6 +807,18 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 				return err
 			}
 		}
+		// `row` is the memo the merge base came from, still holding the encoded
+		// before-state: the merge above rewrote `base` in place, so the bytes
+		// are the only copy of it left, and `base` is now the after-state the
+		// capture diffs against. The mask is the request's, which for a wire
+		// PATCH is already the effective one — nothing adds paths on this path
+		// the way EntityTx's text options do.
+		if info.history != nil {
+			if err := s.captureHistory(ctx, tx, ws, info, crud.GetKey(), row, live, base,
+				crud.GetFieldMask().GetPaths(), seq, actor); err != nil {
+				return err
+			}
+		}
 		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
@@ -779,6 +830,12 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 			return err
 		}
 		if err := info.clearRowIndexes(tx, crud.GetKey()); err != nil {
+			return err
+		}
+		// The row's history goes with the row: nothing can restore into a
+		// tombstone, and a row later re-created under this key must not inherit
+		// the old one's log. See Server.purgeHistory.
+		if err := s.purgeHistory(tx, info, crud.GetKey()); err != nil {
 			return err
 		}
 		return tx.DeleteRow(info.name, crud.GetKey(), seq, actor)
@@ -793,6 +850,10 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 // not fit is retryable by sending the same edit as a full document; state that
 // predates a compaction floor is not retryable at all until the sender re-reads
 // the row. Everything else never becomes valid by resending.
+//
+// An unresolved plain-string value (text.ErrPlainStringUnresolved) is in that
+// last group: the server has no writer identity to resolve it with, so the
+// sender has to resolve it and send a document.
 func rejectTextWrite(err error) error {
 	switch {
 	case errors.Is(err, text.ErrStateStale):

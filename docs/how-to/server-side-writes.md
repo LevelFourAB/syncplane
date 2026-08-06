@@ -96,6 +96,41 @@ read-modify-write under `Apply`, pass the version you read as `Patch`'s
 `expected` argument, which turns a concurrent edit into a `conflict` rejection
 instead of a silent merge.
 
+## Collaborative text
+
+A collaborative-text field holds a CRDT document, so server-side code sets it
+from a plain string and lets the engine mint the difference. This is how you put
+a string-shaped API — an HTTP handler, an importer, an admin form — in front of a
+text field:
+
+```go
+srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
+    return tx.Patch(&Issue{Id: key}, nil, nil,
+        server.WithTextString("description", body),
+        server.WithTextPeer("importer:text"))
+})
+```
+
+The string is diffed against the **stored** document — a multi-hunk diff over
+code points, so untouched regions keep their items and the marks attached to
+them — and the difference is applied as edits. Text the row already holds and the
+string does not contain is deleted; edits arriving after the write merge
+normally. An empty string deletes all visible text, and on `Patch` the field is
+added to the mask.
+
+`WithTextPeer` is required: the engine invents no writer identity. Two writers
+that can produce diverging documents must never share a peer, and a server-side
+string write is not one of them — it resolves inside the write transaction,
+reading the stored row and observing its version before it allocates counters,
+so one name is safe across calls, across a retried closure, and across processes
+(per-workspace write exclusion is the storage contract). Keep that name away from
+anything that writes outside such a transaction — a client, a connector — and
+prefix it per service.
+
+A text field of the written message that already holds a plain-string value
+resolves the same way, which is what makes restoring a field-history record an
+ordinary `Patch`. See [Restore a field](restore-a-field.md).
+
 ## Writes that may be retried
 
 `ApplyIdempotent` is the same write guarded by a caller-supplied key, for

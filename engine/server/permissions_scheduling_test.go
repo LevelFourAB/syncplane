@@ -148,6 +148,8 @@ var _ = Describe("Permissions hook scheduling (issue 017)", func() {
 		Expect(resp.Msg.GetResults()).To(HaveLen(1))
 		Expect(resp.Msg.GetResults()[0].GetErrorCode()).To(Equal(server.CodeInternal))
 		Expect(resp.Msg.GetResults()[0].GetResults()).To(BeEmpty())
+		Expect(resp.Msg.GetResults()[0].GetErrorMessage()).NotTo(ContainSubstring("introspection backend down"),
+			"the hook words its errors for an operator; only the code is the caller's")
 
 		// Nothing committed: authorization runs before any write transaction.
 		pull, perr := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws, ClientId: "c1"}))

@@ -19,14 +19,18 @@ import {
 	diffText,
 	encodeAnchor,
 	encodeFragment,
+	encodePlainString,
 	encodeTextDoc,
 	type Expand,
 	ExpandAfter,
 	ExpandBefore,
 	ExpandBoth,
 	ExpandNone,
+	isPlainString,
 	mergeFragments,
 	mergeText,
+	plainString,
+	plainTextOf,
 	TextDoc,
 } from '../../src/text/index.js';
 
@@ -102,9 +106,22 @@ interface VectorReject {
 	error: string;
 }
 
+/**
+ * One plain-string value (format version 3) with the text it reads as. Both
+ * languages must encode text to hex, decode hex back to text, and return text
+ * from the plain-text read path a reader takes when it does not know which
+ * form a field holds.
+ */
+interface VectorPlainString {
+	name: string;
+	text: string;
+	hex: string;
+}
+
 const file = JSON.parse(readFileSync(vectorsPath, 'utf8')) as {
 	cases: VectorCase[];
 	rejects: VectorReject[];
+	plainStrings: VectorPlainString[];
 };
 
 function expandOf(s: string | undefined): Expand {
@@ -323,6 +340,18 @@ describe('shared text vectors', () => {
 			// Exact, not a substring match: the point of the section is that
 			// both decoders refuse the same bytes for the same stated reason.
 			expect(message, `${rj.name} was accepted`).toBe(rj.error);
+		});
+	}
+
+	for (const ps of file.plainStrings) {
+		it(`encodes and reads the plain-string value: ${ps.name}`, () => {
+			const want = fromHex(ps.hex);
+			expect(toHex(encodePlainString(ps.text))).toBe(ps.hex);
+			expect(isPlainString(want)).toBe(true);
+			expect(plainString(want)).toBe(ps.text);
+			// The read path a holder of a field value takes without knowing
+			// which form it has.
+			expect(plainTextOf(want)).toBe(ps.text);
 		});
 	}
 });

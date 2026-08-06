@@ -81,7 +81,7 @@ var _ = Describe("Bootstrap delivery order", func() {
 		seedOneEach()
 		announced, rowOrder := bootstrap(&syncplanev1.BootstrapRequest{})
 		// Full sync: everything registered, in the server's own (sorted) order.
-		Expect(announced).To(Equal([]string{"issue", "ledger", "pair", "project", "todo", "user", "widget"}))
+		Expect(announced).To(Equal([]string{"historied", "historied_all", "issue", "ledger", "pair", "project", "todo", "user", "widget"}))
 		Expect(rowOrder).To(Equal([]string{"project", "todo", "user", "widget"}))
 	})
 
@@ -90,7 +90,7 @@ var _ = Describe("Bootstrap delivery order", func() {
 		announced, rowOrder := bootstrap(&syncplanev1.BootstrapRequest{
 			PriorityEntities: []string{"user", "todo"},
 		})
-		Expect(announced).To(Equal([]string{"user", "todo", "issue", "ledger", "pair", "project", "widget"}))
+		Expect(announced).To(Equal([]string{"user", "todo", "historied", "historied_all", "issue", "ledger", "pair", "project", "widget"}))
 		Expect(rowOrder).To(Equal([]string{"user", "todo", "project", "widget"}))
 	})
 
@@ -171,7 +171,7 @@ var _ = Describe("Bootstrap entity ordering", func() {
 			}
 		}
 		Expect(stream.Err()).NotTo(HaveOccurred())
-		Expect(announced).To(ConsistOf("issue", "ledger", "pair", "project", "todo", "user", "widget"))
+		Expect(announced).To(ConsistOf("historied", "historied_all", "issue", "ledger", "pair", "project", "todo", "user", "widget"))
 		Expect(announced[:2]).To(Equal([]string{"widget", "todo"}))
 	})
 })

@@ -28,7 +28,12 @@ type gcLoop struct {
 	// WithIdempotencyRetention. Independent of retention — it is measured
 	// against callers' retry windows, not clients' offline windows.
 	keyRetention time.Duration
-	interval     time.Duration
+	// historyRetention is how long field-history records are kept; see
+	// WithHistoryRetention. Independent of retention for the same reason
+	// keyRetention is: it is measured against how far back an app wants to be
+	// able to restore, which has nothing to do with client offline windows.
+	historyRetention time.Duration
+	interval         time.Duration
 	// configured is set by WithGC. WithTextDeltaRetention can create the loop
 	// on its own, and a loop nobody asked to collect must not collect.
 	configured bool
@@ -58,7 +63,9 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // carries the text delta log and the trusted-write idempotency ledger, each on
 // its own retention (WithTextDeltaRetention, WithIdempotencyRetention), and
 // effect consumers stranded below the horizon the pass just set — a consumer
-// still keeping up is never below it, however long it idles.
+// still keeping up is never below it, however long it idles. The same pass also
+// expires field-history records (WithHistoryRetention), which it hard-deletes
+// rather than tombstones because nothing syncs them.
 //
 // Retention MUST comfortably exceed the longest expected client offline
 // window. The push path's watermark adoption depends on it: a pruned client
@@ -123,6 +130,74 @@ func WithIdempotencyRetention(d time.Duration) Option {
 		s.gc.keyRetention = d
 		return nil
 	}
+}
+
+// defaultHistoryRetention is how long field-history records are kept when
+// WithHistoryRetention says nothing. It is measured against how far back a
+// person wants to reach when restoring, not against how long a client can be
+// offline, and it is generous: too short means the value someone came to
+// recover is the one that expired.
+//
+// Finite rather than HistoryForever, because a workspace's history grows with
+// every write and nothing else here opts an operator into unbounded growth by
+// default.
+const defaultHistoryRetention = 90 * 24 * time.Hour
+
+// HistoryForever disables time-based expiry of field-history records: a record
+// then lives exactly as long as the row it describes, since a DELETE of that
+// row purges its history whatever the retention.
+//
+// Pass it to WithHistoryRetention when history is app-visible data with no
+// natural age limit. The cost is that a hot row's log grows without bound for
+// as long as the row lives, so it suits entities whose rows are edited by
+// people rather than rewritten by machinery.
+const HistoryForever time.Duration = -1
+
+// WithHistoryRetention overrides how long each GC pass keeps the field-history
+// records written for entities carrying (syncplane.v1.entity).history. It only
+// takes effect together with WithGC — without a pass, records are kept until
+// their row is deleted whatever this says. Default 90 days.
+//
+// Pass HistoryForever to turn time-based expiry off and tie a record's lifetime
+// to its row's alone.
+//
+// A record ages from its LAST write rather than from its recorded_at, so one a
+// session folded later writes into survives up to a WithHistorySession window
+// past what its timestamp says. Nothing folds under HistorySessionOff, where
+// the two coincide.
+//
+// Unlike the text delta log it is NOT clamped to WithGC's retention: history is
+// app-visible data with a lifetime of its own, so a value either side of the
+// tombstone window is valid.
+//
+// The sweep HARD-DELETES, leaving no tombstone — nothing syncs these records,
+// so nothing has a copy to be told they are gone. It is also the one collector
+// that works in chunks, draining a long-accumulated log across transactions
+// instead of inside the pass's own (see historyPurgeChunk).
+func WithHistoryRetention(d time.Duration) Option {
+	return func(s *Server) error {
+		if s.gc == nil {
+			s.gc = &gcLoop{}
+		}
+		s.gc.historyRetention = d
+		return nil
+	}
+}
+
+// historyCutoff is the timestamp below which history records are collectable,
+// and whether there is one at all — HistoryForever leaves expiry to the row's
+// own deletion. Zero (unset) takes the default rather than meaning forever, so
+// that "I never configured this" and "I asked for unbounded growth" stay
+// different answers.
+func (g *gcLoop) historyCutoff(now time.Time) (time.Time, bool) {
+	d := g.historyRetention
+	if d < 0 {
+		return time.Time{}, false
+	}
+	if d == 0 {
+		d = defaultHistoryRetention
+	}
+	return now.Add(-d), true
 }
 
 // idempotencyCutoff is the timestamp below which claimed keys are collectable.
@@ -190,8 +265,10 @@ func (g *gcLoop) close() {
 
 // CollectGarbage runs one manual collection pass (tombstones + idle
 // clients) for a single workspace using the retention configured via
-// WithGC. The pass runs in one write transaction; it is stateless and safe
-// to re-run.
+// WithGC. The pass runs in one write transaction, plus one transaction per
+// further chunk of expired field history (see historyPurgeChunk); it is
+// stateless and safe to re-run, and an interrupted drain resumes on the next
+// pass.
 //
 // Do not call it from inside a mutator: it opens a write transaction, which
 // would deadlock against the one the mutator already holds. When the context
@@ -209,12 +286,23 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	cutoff := now.Add(-s.gc.retention)
 	textCutoff := s.gc.textDeltaCutoff(now)
 	keyCutoff := s.gc.idempotencyCutoff(now)
+	// HistoryForever is the only reason to skip the sweep: it leaves expiry to
+	// the row's own deletion. Notably NOT gated on the history entity being in
+	// the catalog, even though sweeping a name nothing writes costs a statement
+	// per workspace per pass: records are durable state and catalog membership is
+	// not, so a deploy that drops the last history: {} leaves records that no
+	// write path touches, no read path reaches, and no DELETE purges (see
+	// Server.purgeHistory). The age sweep is all they have left, and gating it on
+	// the catalog would make them immortal.
+	historyCutoff, historyExpires := s.gc.historyCutoff(now)
 	var horizon, deltaHorizon uint64
-	var idleRemoved, keysRemoved, compacted, consumersRemoved int
+	var idleRemoved, keysRemoved, compacted, consumersRemoved, historyRemoved int
+	var historyMore bool
 	if err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		// Re-zero on retry: the closure may run more than once (see the
 		// storage.Adapter write-closure contract).
 		horizon, deltaHorizon, idleRemoved, keysRemoved, compacted, consumersRemoved = 0, 0, 0, 0, 0, 0
+		historyRemoved, historyMore = 0, false
 		h, err := tx.CollectTombstones(cutoff)
 		if err != nil {
 			return err
@@ -236,12 +324,38 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		if deltaHorizon, err = tx.PruneFieldDeltas(textCutoff); err != nil {
 			return err
 		}
+		// Hard delete, not a tombstone: no client syncs these rows, so nothing
+		// has a copy to be told about and there is no second pass to collect
+		// what a tombstone would have left. See WithHistoryRetention.
+		//
+		// The one collector here that takes a limit. Everything else in this
+		// transaction is bounded by rows — tombstones, clients, consumers — while
+		// history is bounded by WRITES, so the first sweep after enabling it (or
+		// after raising retention) is the largest delete the engine issues, and it
+		// would hold this transaction for all of it. What the chunk leaves behind
+		// drains below, one transaction at a time.
+		if historyExpires {
+			if historyRemoved, historyMore, err = tx.PurgeEntityRows(historyEntityName, "", historyCutoff, historyPurgeChunk); err != nil {
+				return err
+			}
+		}
 		// Compaction runs last, on rows the prune just declared quiet (see
 		// compact.go); it allocates a sequence only if it rewrites something.
 		compacted, err = s.compactText(tx, deltaHorizon)
 		return err
 	}); err != nil {
 		return err
+	}
+	// The backlog the bounded chunk did not reach, in transactions of its own —
+	// the point of the bound. Its error is carried to the end rather than
+	// returned here: the chunks that did commit are reclaimed either way, and a
+	// pass that collected everything else should say so before it reports the
+	// drain that stopped short.
+	var drainErr error
+	if historyMore {
+		var drained int
+		drained, drainErr = s.drainExpiredHistory(ctx, workspaceID, historyCutoff)
+		historyRemoved += drained
 	}
 	// What the pass actually reclaimed, by kind. Recorded after the commit, so
 	// a retried write closure cannot double-count. stranded_consumers is the
@@ -253,6 +367,7 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		{"idle_clients", idleRemoved},
 		{"idempotency_keys", keysRemoved},
 		{"text_rows", compacted},
+		{"history_records", historyRemoved},
 		{"stranded_consumers", consumersRemoved},
 	} {
 		if c.n > 0 {
@@ -278,9 +393,51 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		slog.Int("idle_clients_removed", idleRemoved),
 		slog.Int("idempotency_keys_removed", keysRemoved),
 		slog.Int("text_rows_compacted", compacted),
+		slog.Int("history_records_removed", historyRemoved),
 		slog.Int("consumers_removed", consumersRemoved),
 	)
-	return nil
+	return drainErr
+}
+
+// historyPurgeChunk is how many expired field-history records one transaction
+// removes. Large enough that an ordinary pass drains in one or two chunks —
+// history accrues per field-writing mutation, so a busy workspace produces
+// thousands between passes — and small enough that no single delete holds a
+// write transaction long enough to matter to the writers queued behind it.
+//
+// A var only so the drain loop is testable without planting a chunk's worth of
+// records; nothing changes it at runtime.
+var historyPurgeChunk = 2000
+
+// drainExpiredHistory removes what the pass's first bounded purge left behind,
+// one transaction per chunk, until the sweep reports the selection empty. It
+// takes the pass's cutoff rather than a fresh one so the selection it is
+// draining cannot grow under it: records written while it runs are newer than
+// the cutoff, which is what makes the loop terminate.
+//
+// Each chunk commits on its own, so an error (or a cancelled context on
+// shutdown) keeps whatever earlier chunks reclaimed and leaves the rest for the
+// next pass to resume on — the sweep carries no state between calls.
+func (s *Server) drainExpiredHistory(ctx context.Context, workspaceID string, cutoff time.Time) (int, error) {
+	total := 0
+	for more := true; more; {
+		// Checked here rather than left to the adapter so a shutdown mid-drain
+		// reports the cancellation itself instead of whatever the store makes of
+		// a cancelled transaction.
+		if err := ctx.Err(); err != nil {
+			return total, err
+		}
+		var removed int
+		if err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+			var err error
+			removed, more, err = tx.PurgeEntityRows(historyEntityName, "", cutoff, historyPurgeChunk)
+			return err
+		}); err != nil {
+			return total, err
+		}
+		total += removed
+	}
+	return total, nil
 }
 
 // collectAllGarbage runs one pass over every workspace. A per-workspace

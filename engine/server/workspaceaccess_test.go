@@ -440,6 +440,16 @@ var _ = Describe("Workspace-access authorization (issue 064)", func() {
 					"%s must not carry the revocation code", r.name)
 			}
 		})
+
+		It("keeps the gate's own wording off the wire", func() {
+			// A gate words its errors for an operator and may name the host it
+			// could not reach. The caller gets the code, which is all it can act
+			// on; the wording goes to the log.
+			res, err := pushOnce(theirs)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(res.GetErrorCode()).To(Equal(server.CodeInternal))
+			Expect(res.GetErrorMessage()).NotTo(ContainSubstring("membership service unreachable"))
+		})
 	})
 
 	Describe("a gate that picks its own transport code", func() {

@@ -5,6 +5,7 @@ import { subscription, type SubscriptionSpec, SyncClient } from '../../src/clien
 import { coverageOfEntity, CoverageResolver, withCoverage } from '../../src/coverage.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { SubscriptionSchema, WindowSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { CmpOp, ConditionSchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
@@ -257,6 +258,35 @@ describe('subscription window compilation', () => {
 		});
 		expect(() => client.setSubscriptions([ subscription(WidgetSchema, undefined, { limit: 0 }) ]))
 			.toThrow(/positive integer/);
+		void client.close();
+	});
+
+	// The server refuses such a subscription with invalid_argument, which reaches
+	// the app as a sync failure long after the set was written. The option is on
+	// the descriptor the client already holds, so it is refused where it is built.
+	it('rejects a subscription naming a server-only entity', () => {
+		expect(() =>
+			new SyncClient({
+				workspaceId: 'ws1',
+				kvStore: new MemoryKVStore(),
+				entities: [ WidgetSchema, FieldHistorySchema ],
+				streamEnabled: false,
+				pollIntervalMs: 0,
+				subscriptions: [ subscription(WidgetSchema), subscription(FieldHistorySchema) ],
+			})
+		).toThrow(/syncplane_field_history.*server-only/);
+	});
+
+	it('rejects a server-only entity added by setSubscriptions', () => {
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ WidgetSchema, FieldHistorySchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		expect(() => client.setSubscriptions([ subscription(FieldHistorySchema) ]))
+			.toThrow(/server-only/);
 		void client.close();
 	});
 

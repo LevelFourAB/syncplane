@@ -22,6 +22,8 @@ message Todo {
 | `key_fields`    | Field names, in order, whose values form the row key. Singular scalars.                             |
 | `index`         | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
 | `delete_policy` | Who may DELETE rows of this entity. See [Delete policy](#delete-policy).                            |
+| `server_only`   | The entity's rows never sync to a client. See [Server-only entities](#server-only-entities).        |
+| `history`       | Record an append-only history of field changes. See [Field history](#field-history).                |
 
 The first two are constrained: the name must be an identifier, and a key field
 must be a singular string, integer, bool or enum. See [Naming rules](naming.md)
@@ -76,6 +78,120 @@ Reach for this on the rows a cascade hangs off. It removes the only
 irreversible verb the wire has, rather than making its damage recoverable after
 the fact.
 
+### Server-only entities
+
+`server_only: true` keeps an entity's rows on the server. They are never
+bootstrapped, pulled or streamed; a subscription naming the entity is refused as
+`invalid_argument`, and a client CRUD targeting it is rejected. The TypeScript
+client reads the option off the schema it registers, so a subscription set naming
+one throws where it is built rather than reaching that server error.
+
+```proto
+message AuditEvent {
+	option (syncplane.v1.entity) = {
+		name: "audit_event"
+		key_fields: [ "id" ]
+		server_only: true
+	};
+	string id = 1;
+}
+```
+
+Server-side reads are untouched. The `Query` RPC (`queryServer` in the
+TypeScript client), `ViewTx` and mutators all still reach the entity — it is
+**queryable, not syncable**.
+
+Subscriptions are not a substitute for this. An empty subscription list means
+full sync, and full sync is _absorbing_ across the tabs sharing one local store:
+one tab that never calls `setSubscriptions` pulls the entity into shared
+IndexedDB and every sibling tab inherits it. Only a property of the schema holds
+an entity back from all of them.
+
+### Field history
+
+`history: {}` records an append-only log of what a row's marked fields held
+**before** each editing session that changed them.
+
+```proto
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		history: {}
+	};
+	string id = 1;
+	string title = 2 [(syncplane.v1.field_behavior) = { history: true }];
+	string description = 3 [(syncplane.v1.field_behavior) = { history: true }];
+	int64 sort_key = 4; // not marked, so not recorded
+}
+```
+
+Every recorded field is marked; there is no capture-everything default. An
+entity that opts in and marks none is **rejected at registration**.
+
+Capture happens on the server's write path, so every write is covered whatever
+made it: a client push, a mutator, a connector, a trusted write.
+
+Records land in one entity, `syncplane.v1.FieldHistory` (wire name
+`syncplane_field_history`), which the engine registers automatically the first
+time some entity opts in. It is `server_only`, so none of it syncs; read it with
+`queryServer`. See [Restore a field to a previous value](../how-to/restore-a-field.md).
+
+| `FieldHistory` field                                            | Meaning                                                                                                                                                                                                                                                               |
+| --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source_entity`, `source_key`                                   | The row that changed.                                                                                                                                                                                                                                                 |
+| `seq`                                                           | The workspace sequence the before-state precedes — the sequence of the write that opened the record.                                                                                                                                                                  |
+| `through_seq`, `writes`                                         | The last sequence folded into the record, and how many writes folded in (at least 1). The record covers the span `seq`…`through_seq`; spans of one row can overlap across nodes.                                                                                      |
+| `row_created`                                                   | **The row did not exist when the session began**, so `mask` and `prior` are empty and there is nothing to restore. Read this rather than an empty `mask`: a history filter can empty a mask too.                                                                      |
+| `mask`                                                          | The fields the session changed, as dotted proto paths.                                                                                                                                                                                                                |
+| `prior`                                                         | The source entity, serialized, carrying its key fields plus the masked fields as they stood. A text field holds a **plain-string value** rather than a document; restoring resolves it into edits, and reading it for display takes `plainTextOf` / `text.PlainText`. |
+| `actor_issuer`, `actor_subject`, `actor_client`, `actor_system` | Who wrote (see `storage.Actor`). One session belongs to one actor. `actor_client` is unauthenticated wire input — correlate with it, never authorize on it.                                                                                                           |
+| `recorded_at`                                                   | Server wall clock when the record opened, for display. Not an ordering; only `seq` orders writes.                                                                                                                                                                     |
+
+Four rules govern what a record ends up naming:
+
+- **Changes are recorded, not writes.** The server compares the stored row with
+  the one replacing it and keeps only the fields that moved; a write that stores
+  what was already there produces no record at all.
+- **Sessions are recorded, not keystrokes.** A run of writes to one row by one
+  actor folds into the record the first of them opened: the record keeps saying
+  what the fields held before the run began, its mask widens to the union of what
+  the run touched, and `through_seq`/`writes` grow instead of the log. No other
+  record of that session covers the states in between. The window is
+  [`WithHistorySession`](server.md#field-history), five minutes by default, and
+  runs from when the record opened rather than from its last write.
+- A **PATCH** starts from its effective mask (text paths a write option added
+  included), a **PUT** from the whole capture set, and the comparison narrows
+  either. Narrowing is per top-level field, the granularity per-field LWW
+  resolves at, so two masked paths under one field stand or fall together. A
+  oneof counts as one field and is named by its group.
+- **Key fields are never in the mask**, however they are marked. A PATCH may not
+  change a key field, so a restore built from a mask naming one could never be
+  applied. `prior` still carries them, so a decoded record always says which row
+  it belongs to.
+
+Why the log is scoped this way, and what it costs, is in
+[Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes).
+
+`DELETE` is not captured, and it **purges** the row's records — nothing can
+restore into a tombstone, and a row re-created under the same key must not
+inherit the old one's log. A record's lifetime is therefore bounded by its row as
+well as by the clock, and under
+`WithHistoryRetention(server.HistoryForever)` the row is the only bound. This
+tier restores fields, not rows: making a removal recoverable and attributable
+means modelling it as a field — see
+[Recover a deleted row](../how-to/recover-a-deleted-row.md).
+
+Removing `history: {}` later stops capture but does **not** remove what was
+already captured. The engine keeps purging those records on `DELETE` and expiring
+them under retention, for as long as some entity in the schema still opts in.
+
+Records are read under **the source row's** permissions, not their own — see
+[Field history](server.md#field-history).
+
+Retention and an admission hook are server options — see
+[`WithHistoryRetention` and `WithHistoryFilter`](server.md#field-history).
+
 ## `(syncplane.v1.field_behavior)` — on a field
 
 ```proto
@@ -85,13 +201,14 @@ repeated Member members = 4 [(syncplane.v1.field_behavior) = { key_field: [ "uid
 repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] order_field: "pos" }];
 ```
 
-| Field         | Type       | Meaning                                                                                                                                                                                                                                                          |
-| ------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `opaque`      | `bool`     | Replaced whole, never merged structurally. The escape hatch for CRDT blobs and for any list you want treated as one atomic value (order-sensitive, duplicate-bearing).                                                                                           |
-| `key_field`   | `repeated` | List-of-message identity field(s); composite allowed. Empty, with an element that is a registered entity, reuses that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                              |
-| `order_field` | `string`   | Names the position field on the element that orders this keyed list — a **movable list**, whose position the framework manages as a fractional index. Requires a keyed message list.                                                                             |
-| `text`        | `bool`     | **Collaborative text.** The field holds an encoded convergent text document with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`; the engine auto-installs the text merger. Incompatible with `key_field` / `order_field`. |
-| `indexed`     | `bool`     | Maintain a single-component secondary index over this field; on a repeated scalar the row takes one entry per element. See [Secondary indexes](#secondary-indexes).                                                                                              |
+| Field         | Type       | Meaning                                                                                                                                                                                                                                                                                                                       |
+| ------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `opaque`      | `bool`     | Replaced whole, never merged structurally. The escape hatch for CRDT blobs and for any list you want treated as one atomic value (order-sensitive, duplicate-bearing).                                                                                                                                                        |
+| `key_field`   | `repeated` | List-of-message identity field(s); composite allowed. Empty, with an element that is a registered entity, reuses that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                                                                                           |
+| `order_field` | `string`   | Names the position field on the element that orders this keyed list — a **movable list**, whose position the framework manages as a fractional index. Requires a keyed message list.                                                                                                                                          |
+| `text`        | `bool`     | **Collaborative text.** The field holds an encoded convergent text document with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`; the engine auto-installs the text merger. Incompatible with `key_field` / `order_field`.                                                              |
+| `indexed`     | `bool`     | Maintain a single-component secondary index over this field; on a repeated scalar the row takes one entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                           |
+| `history`     | `bool`     | Record this field in the entity's history. Capture is **explicit** — only marked fields are recorded, and an entity that opts in and marks none is rejected at registration. A oneof is captured as a group, so marking any member marks it. Ignored on an entity that has not opted in. See [Field history](#field-history). |
 
 ## Secondary indexes
 

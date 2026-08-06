@@ -28,6 +28,7 @@ Task-oriented recipes. Each assumes you already have something running.
 
 - [Define entities in your own module](how-to/define-entities.md)
 - [Define schemas in TypeScript](how-to/define-schemas-in-typescript.md)
+- [Recover a deleted row](how-to/recover-a-deleted-row.md)
 
 **Server**
 
@@ -48,6 +49,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Use collaborative text](how-to/use-collaborative-text.md)
 - [Build a UI with React](how-to/react.md)
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
+- [Restore a field to a previous value](how-to/restore-a-field.md)
 - [Handle failures](how-to/handle-failures.md)
 
 **Working on syncplane itself**

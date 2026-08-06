@@ -881,6 +881,277 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		Describe("entity row purging", func() {
+			It("removes an entity's expired rows outright, leaving no tombstone", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "h1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.PutRow("hist", "h2", []byte("v"), 2, storage.Actor{})).To(Succeed())
+					// Another entity's rows are not this collection's business.
+					Expect(tx.PutRow("widget", "w1", []byte("v"), 3, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, _, err := tx.PurgeEntityRows("hist", "", time.Now().Add(time.Hour), 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(2))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					// Gone outright: a tombstone would read back as a Row with
+					// Deleted set, which is exactly what must NOT happen.
+					_, err := tx.GetRow("hist", "h1")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+					_, err = tx.GetRow("hist", "h2")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+					row, err := tx.GetRow("widget", "w1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.Deleted).To(BeFalse())
+					// No tombstone was minted, so no cursor is invalidated.
+					horizon, err := tx.TombstoneHorizon()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(horizon).To(BeZero())
+					var seen []string
+					Expect(tx.ScanChanges(0, "", "", 0, func(r storage.Row) error {
+						seen = append(seen, r.Entity+"/"+r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(seen).To(ConsistOf("widget/w1"))
+				})
+			})
+
+			It("spares rows newer than the cutoff", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "old", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				cutoff := time.Now().Add(time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "new", []byte("v"), 2, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, _, err := tx.PurgeEntityRows("hist", "", cutoff, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(1))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					_, err := tx.GetRow("hist", "old")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+					_, err = tx.GetRow("hist", "new")
+					Expect(err).NotTo(HaveOccurred())
+				})
+			})
+
+			It("takes the collected rows' index entries with them", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "h1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.PutIndexEntries("hist", "h1", []storage.IndexEntry{
+						{Index: "by_source", Key: []byte("a")},
+					})).To(Succeed())
+					Expect(tx.PutRow("widget", "w1", []byte("v"), 2, storage.Actor{})).To(Succeed())
+					Expect(tx.PutIndexEntries("widget", "w1", []storage.IndexEntry{
+						{Index: "by_source", Key: []byte("a")},
+					})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					_, _, err := tx.PurgeEntityRows("hist", "", time.Now().Add(time.Hour), 0)
+					Expect(err).NotTo(HaveOccurred())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					var got []string
+					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0,
+						func(_ []byte, rowKey string) error {
+							got = append(got, rowKey)
+							return nil
+						})).To(Succeed())
+					Expect(got).To(BeEmpty(), "an entry outliving its row would leak")
+					// An index name is per entity, so the other entity's
+					// identically-named index is untouched.
+					got = nil
+					Expect(tx.ScanIndex("widget", "by_source", nil, nil, 0,
+						func(_ []byte, rowKey string) error {
+							got = append(got, rowKey)
+							return nil
+						})).To(Succeed())
+					Expect(got).To(ConsistOf("w1"))
+				})
+			})
+
+			It("keeps only the rows under a key prefix", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					for _, k := range []string{"todo/t1/1", "todo/t1/2", "todo/t10/1", "todo/t2/1"} {
+						Expect(tx.PutRow("hist", k, []byte("v"), 1, storage.Actor{})).To(Succeed())
+					}
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					// The trailing separator is what keeps "t1" from taking
+					// "t10" with it — the prefix is a byte range, not a
+					// component-aware match, so the caller supplies the boundary.
+					removed, _, err := tx.PurgeEntityRows("hist", "todo/t1/", time.Time{}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(2))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					var left []string
+					Expect(tx.ScanEntity("hist", func(r storage.Row) error {
+						left = append(left, r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(left).To(ConsistOf("todo/t10/1", "todo/t2/1"))
+				})
+			})
+
+			It("treats the zero time as no age bound at all", func() {
+				// Not "before the epoch", which is what a naive UnixMilli() of
+				// the zero time would say — and would delete nothing, silently.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "h1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, _, err := tx.PurgeEntityRows("hist", "", time.Time{}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(1))
+				})
+			})
+
+			It("applies the prefix and the age bound together", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "todo/t1/1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.PutRow("hist", "todo/t2/1", []byte("v"), 2, storage.Actor{})).To(Succeed())
+				})
+				cutoff := time.Now().Add(time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("hist", "todo/t1/2", []byte("v"), 3, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, _, err := tx.PurgeEntityRows("hist", "todo/t1/", cutoff, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(1), "old AND under the prefix")
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					var left []string
+					Expect(tx.ScanEntity("hist", func(r storage.Row) error {
+						left = append(left, r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(left).To(ConsistOf("todo/t1/2", "todo/t2/1"))
+				})
+			})
+
+			It("removes no more than the limit and reports what is left", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					for _, k := range []string{"h1", "h2", "h3", "h4", "h5"} {
+						Expect(tx.PutRow("hist", k, []byte("v"), 1, storage.Actor{})).To(Succeed())
+					}
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, more, err := tx.PurgeEntityRows("hist", "", time.Now().Add(time.Hour), 2)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(2), "the bound is a hard cap, not a hint")
+					Expect(more).To(BeTrue())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					var left []string
+					Expect(tx.ScanEntity("hist", func(r storage.Row) error {
+						left = append(left, r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(left).To(HaveLen(3), "the rest waits for the next call")
+				})
+			})
+
+			It("drains the selection across bounded calls, index entries included", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					for _, k := range []string{"h1", "h2", "h3", "h4", "h5"} {
+						Expect(tx.PutRow("hist", k, []byte("v"), 1, storage.Actor{})).To(Succeed())
+						Expect(tx.PutIndexEntries("hist", k, []storage.IndexEntry{
+							{Index: "by_source", Key: []byte(k)},
+						})).To(Succeed())
+					}
+				})
+				// Each chunk is its own transaction, which is how the GC pass drains
+				// a long history without holding one write open for all of it.
+				total, more := 0, true
+				for i := 0; more && i < 10; i++ {
+					write("ws1", func(tx storage.WriteTx) {
+						removed, m, err := tx.PurgeEntityRows("hist", "", time.Now().Add(time.Hour), 2)
+						Expect(err).NotTo(HaveOccurred())
+						total += removed
+						more = m
+					})
+				}
+				// The loop must end on its own: more is allowed to be conservative
+				// (a call that removed exactly its limit may report it), but a call
+				// that removes nothing must settle it.
+				Expect(more).To(BeFalse())
+				Expect(total).To(Equal(5))
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.ScanEntity("hist", func(storage.Row) error {
+						return fmt.Errorf("unexpected row")
+					})).To(Succeed())
+					var got []string
+					Expect(tx.ScanIndex("hist", "by_source", nil, nil, 0,
+						func(_ []byte, rowKey string) error {
+							got = append(got, rowKey)
+							return nil
+						})).To(Succeed())
+					Expect(got).To(BeEmpty(), "a chunk must take its own rows' entries, no more and no less")
+				})
+			})
+
+			It("applies the limit within the other narrowings", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					for _, k := range []string{"todo/t1/1", "todo/t1/2", "todo/t2/1"} {
+						Expect(tx.PutRow("hist", k, []byte("v"), 1, storage.Actor{})).To(Succeed())
+					}
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					// A limit selects among the rows the prefix already chose; it
+					// must not reach past it for the count.
+					removed, more, err := tx.PurgeEntityRows("hist", "todo/t1/", time.Time{}, 5)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(2))
+					Expect(more).To(BeFalse(), "a call under its limit has drained the selection")
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					var left []string
+					Expect(tx.ScanEntity("hist", func(r storage.Row) error {
+						left = append(left, r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(left).To(ConsistOf("todo/t2/1"))
+				})
+			})
+
+			It("treats a limit of zero or less as no bound", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					for _, k := range []string{"h1", "h2", "h3"} {
+						Expect(tx.PutRow("hist", k, []byte("v"), 1, storage.Actor{})).To(Succeed())
+					}
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, more, err := tx.PurgeEntityRows("hist", "", time.Time{}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(3))
+					// An unbounded call left nothing to come back for, so saying it
+					// might have would send a drain loop round again for nothing.
+					Expect(more).To(BeFalse())
+				})
+			})
+
+			It("purges nothing for an entity or prefix that matches no row", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "w1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, _, err := tx.PurgeEntityRows("absent", "", time.Now().Add(time.Hour), 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(BeZero())
+					removed, _, err = tx.PurgeEntityRows("widget", "nope/", time.Time{}, 0)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(BeZero())
+				})
+			})
+		})
+
 		It("lists workspaces that have been written", func() {
 			ids, err := store.ListWorkspaceIDs(ctx)
 			Expect(err).NotTo(HaveOccurred())

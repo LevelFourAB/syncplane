@@ -223,7 +223,7 @@ var _ = Describe("Server entity introspection", func() {
 		for _, e := range srv.Entities() {
 			names = append(names, e.Name)
 		}
-		Expect(names).To(Equal([]string{"issue", "ledger", "pair", "project", "todo", "user", "widget"}))
+		Expect(names).To(Equal([]string{"historied", "historied_all", "issue", "ledger", "pair", "project", "syncplane_field_history", "todo", "user", "widget"}))
 
 		meta, ok := srv.Entity("issue")
 		Expect(ok).To(BeTrue())
@@ -236,6 +236,17 @@ var _ = Describe("Server entity introspection", func() {
 
 		_, ok = srv.Entity("nope")
 		Expect(ok).To(BeFalse())
+	})
+
+	It("marks the entities the engine registers for itself as managed", func() {
+		srv := newTestServer()
+		hist, ok := srv.Entity("syncplane_field_history")
+		Expect(ok).To(BeTrue())
+		Expect(hist.Managed).To(BeTrue())
+
+		src, ok := srv.Entity("historied")
+		Expect(ok).To(BeTrue())
+		Expect(src.Managed).To(BeFalse(), "opting into history does not make an app entity managed")
 	})
 
 	It("classifies typed references via RefKeyFields", func() {

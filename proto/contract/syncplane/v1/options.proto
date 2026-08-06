@@ -28,7 +28,54 @@ message EntityOptions {
 	// Who may DELETE rows of this entity. Unset allows anyone the app's
 	// permission policy admits, which is the behaviour of every other entity.
 	DeletePolicy delete_policy = 4;
+	// Keep this entity's rows on the server only: they are never bootstrapped,
+	// pulled or streamed to a client, and a client that names the entity in a
+	// subscription or a mutation is refused rather than served nothing.
+	//
+	// It is NOT a permission, and subscriptions are not a substitute for it: an
+	// empty subscription list means full sync, and full sync is ABSORBING
+	// across the tabs that share one local store, so one tab that never narrows
+	// its subscriptions pulls the entity into storage every sibling tab reads.
+	//
+	// Server-side reads are unaffected: the Query RPC, the in-process view and
+	// query APIs, and mutators all still reach the entity. Server-only means
+	// "does not sync", not "cannot be read".
+	bool server_only = 5;
+	// Record an append-only history of this entity's field changes. See
+	// HistoryOptions.
+	HistoryOptions history = 6;
 }
+
+// HistoryOptions opts an entity into server-side field history: a PUT or PATCH
+// that changes one of the fields marked (syncplane.v1.field_behavior).history
+// records what those fields held BEFORE the write, as a
+// syncplane.v1.FieldHistory row. Which fields is always explicit — an entity
+// that opts in and marks none is rejected at registration.
+//
+// Changes are recorded, not writes. The server compares the stored row with the
+// one replacing it and records only the fields that actually moved: a write
+// that stores a field's current value again records nothing for it, and a write
+// that changes nothing records nothing at all.
+//
+// Sessions are recorded, not keystrokes. Successive writes to one row by one
+// actor fold into a single record holding the state before the FIRST of them,
+// for as long as the session stays open (server.WithHistorySession, five
+// minutes by default). The states in between are not recorded: history answers
+// "what did this hold before that editing session", not "replay the session".
+//
+// Capture is on the server's write path, so every write is covered whatever
+// made it — a client push, a mutator, a connector, a trusted write.
+//
+// The history entity is server_only, so none of it ever syncs; read it with the
+// Query RPC (the TypeScript client's queryServer). Restoring a value is an
+// ordinary PATCH of the recorded mask — see the "Restore a field to a previous
+// value" how-to.
+//
+// It records field changes, not row lifecycle. A DELETE is not captured and
+// purges the row's records, so a removal that has to be recoverable or
+// attributable is modelled as a field instead — see the "Recover a deleted row"
+// how-to.
+message HistoryOptions {}
 
 // DeletePolicy says which callers may DELETE rows of an entity. The engine
 // enforces it before the app's permission policy runs, on every path that
@@ -111,6 +158,24 @@ message FieldBehavior {
 	// Rejected on a text field: every keystroke changes the value, so the entry
 	// would be rewritten with it. Full-text search is a different mechanism.
 	bool indexed = 5;
+	// Record this field in the entity's history (see EntityOptions.history).
+	//
+	// Capture is EXPLICIT: an entity that opts in records the fields marked
+	// here and nothing else, and one that marks none is rejected at
+	// registration. There is no "capture everything" default — what a field
+	// costs to record varies by orders of magnitude, a collaborative-text field
+	// recording its whole document on every write that touches it.
+	//
+	// Key fields are never recorded in a history row's mask however they are
+	// marked: a PATCH may not change one, so a restore built from a mask naming
+	// one would be refused. The prior value still carries them, so a decoded
+	// history entry always says which row it belongs to.
+	//
+	// A oneof is captured as a GROUP, the only unit a mask may name it in, so
+	// marking any member marks the whole oneof.
+	//
+	// Ignored on an entity that has not opted in.
+	bool history = 6;
 }
 
 extend google.protobuf.MessageOptions {

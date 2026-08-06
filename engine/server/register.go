@@ -138,7 +138,7 @@ func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
 			c.byType[info.msgType.Descriptor().FullName()] = info
 		}
 		c.schemaRev = revision
-		return nil
+		return ensureHistoryEntity(c)
 	})
 	if err != nil {
 		return RegisterResult{}, err

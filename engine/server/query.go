@@ -56,12 +56,26 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if err != nil {
 		return nil, err
 	}
+	// Query is a READ path: it answers for the one entity the request named,
+	// having already resolved it from the catalog above, so a server-only
+	// entity is reachable here even though nothing ever syncs it. Read filters
+	// still apply — this is not a permission bypass, only a sync one.
+	emitter.includeServerOnly = true
 	// Resolve the entity's read filter BEFORE opening the snapshot (the hook
 	// must not run while the read tx is pinned); classify() inside the scan
 	// then hits the memoized filter. Query scans a single entity, so this is
 	// the only filter to warm.
 	if _, err := emitter.filterOf(info.name); err != nil {
 		return nil, err
+	}
+	// Except for field history, whose records describe OTHER entities' rows and
+	// are governed by those entities' filters rather than their own (see
+	// Server.historyReadable). Warm every one they could name.
+	history := info.name == historyEntityName
+	if history {
+		if err := s.warmHistorySourceFilters(emitter); err != nil {
+			return nil, err
+		}
 	}
 
 	var rows []qrow
@@ -72,7 +86,13 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 			if err != nil {
 				return false, err
 			}
-			return class == rowVisible, nil
+			if class != rowVisible {
+				return false, nil
+			}
+			if !history {
+				return true, nil
+			}
+			return s.historyReadable(tx, emitter, info, row)
 		}, emitter, s.limits)
 		return err
 	})

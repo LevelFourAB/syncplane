@@ -29,11 +29,16 @@ type evalCase struct {
 }
 
 // msgForType returns a fresh message of the vector's row type (defaulting to
-// Widget). Ref vectors use Issue, whose fields include first-class references.
+// Widget). Ref vectors use Issue, whose fields include first-class references;
+// planner vectors also use FieldHistory, the engine's own history entity, whose
+// by_source index is the one shape the feature cannot afford the planner to
+// decline.
 func msgForType(typ string) proto.Message {
 	switch typ {
 	case "issue":
 		return &testdatav1.Issue{}
+	case "field_history":
+		return &syncplanev1.FieldHistory{}
 	default:
 		return &testdatav1.Widget{}
 	}

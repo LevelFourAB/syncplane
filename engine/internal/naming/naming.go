@@ -241,6 +241,18 @@ func RowKey(parts []string) string {
 	return strings.Join(escaped, "/")
 }
 
+// RowKeyPartLen reports how many bytes one part of a composite key occupies
+// inside the joined key, the escaping RowKey applies included and the `/` that
+// joins it excluded. It answers len(s) for the parts that carry neither `\` nor
+// `/`, which is nearly all of them.
+//
+// It exists for callers deriving a key that has to fit MaxRowKeyBytes and needs
+// to know how much of a part will: measuring the joined key instead only says
+// whether an already-built key fits.
+func RowKeyPartLen(s string) int {
+	return len(s) + strings.Count(s, `\`) + strings.Count(s, "/")
+}
+
 // escapeKeyPart escapes the composite-key separator and the escape character
 // itself.
 func escapeKeyPart(s string) string {

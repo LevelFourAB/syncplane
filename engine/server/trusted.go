@@ -107,6 +107,11 @@ func (s *Server) readGate(ctx context.Context, workspaceID string, enforced bool
 	if err != nil {
 		return nil, err
 	}
+	// In-process reads are a READ path: an app handler that scans a server-only
+	// entity asked for it by name, and withholding it here would only make the
+	// entity unreadable from the process that owns it. The read filter it
+	// carries still applies.
+	emitter.includeServerOnly = true
 	for _, name := range s.catalogPtr().entityNames() {
 		if _, err := emitter.filterOf(name); err != nil {
 			return nil, err

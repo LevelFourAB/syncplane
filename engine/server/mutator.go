@@ -200,6 +200,12 @@ func (e *EntityTx) Get(dst proto.Message, key string) (bool, error) {
 // WithTextPeer — which diffs the string against the stored document under the
 // given writer identity, so a whole-value write turns into minimal edits that
 // merge with concurrent work (see ApplyTextStrings).
+//
+// A text field of msg holding a plain-string value (text.EncodePlainString,
+// which is what a field-history record's before-state carries) is resolved the
+// same way, so restoring a record needs no option naming its fields. It still
+// requires WithTextPeer: without one the write fails rather than writing under
+// an invented identity.
 func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
@@ -218,14 +224,23 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, msg, nil, nil); err != nil {
 		return err
 	}
-	var prevText map[string][]byte
-	if len(info.textFields) > 0 || len(o.texts) > 0 {
-		row, rowErr := e.tx.GetRow(info.name, key)
+	var (
+		prevText map[string][]byte
+		// The stored row before this write, hoisted out of the text branch
+		// because history capture wants the same one — and, like the wire path's
+		// memo, must treat an absent row and a tombstone alike.
+		row  storage.Row
+		live bool
+	)
+	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil {
+		var rowErr error
+		row, rowErr = e.tx.GetRow(info.name, key)
 		if rowErr != nil && rowErr != storage.ErrNotFound {
 			return rowErr
 		}
+		live = rowErr == nil && !row.Deleted
 		var base proto.Message
-		if rowErr == nil && !row.Deleted {
+		if live {
 			// A stored row that will not decode (see poison.go) is no base: Put
 			// replaces whole rows, so this write is the repair that clears the
 			// quarantine. Mirrors the client PUT path.
@@ -238,11 +253,15 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		}
 		// Clone so the caller's message is not mutated by the merges.
 		msg = proto.Clone(msg)
-		if len(o.texts) > 0 {
+		texts, err := takePlainStrings(info, msg, nil, o)
+		if err != nil {
+			return err
+		}
+		if len(texts) > 0 {
 			// Diff each string against the stored document (ancestor = cur):
 			// the union below is then a no-op for these fields, but it still
 			// covers text fields the caller set as raw bytes.
-			if err := ApplyTextStrings(msg, nil, base, o.texts, o.peer); err != nil {
+			if err := ApplyTextStrings(msg, nil, base, texts, o.peer); err != nil {
 				return err
 			}
 		}
@@ -270,6 +289,12 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.updateRowIndexes(e.tx, e.srv.limits, key, msg); err != nil {
 		return err
 	}
+	// Same contract as the wire PUT: no mask, so capture starts from the whole
+	// capture set and narrows it to what `msg` actually moves against the row
+	// read above.
+	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, msg, nil, seq, e.actor); err != nil {
+		return err
+	}
 	return e.tx.PutRow(info.name, key, value, seq, e.actor)
 }
 
@@ -291,6 +316,13 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 // WithTextPeer — which diffs the string against the stored document under the
 // given writer identity and adds the field to the mask automatically (see
 // ApplyTextStrings).
+//
+// A text field of msg holding a plain-string value (text.EncodePlainString,
+// which is what a field-history record's before-state carries) is resolved the
+// same way, so restoring a record needs no option naming its fields. It still
+// requires WithTextPeer: without one the write fails rather than writing under
+// an invented identity. Unlike WithTextString it does not widen mask: a value
+// in a field mask does not name is ignored, like any other unmasked field.
 func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
@@ -357,18 +389,25 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	// Snapshot before the merge: the delta log records the move it makes.
 	prevText := info.textSnapshot(base)
-	if len(o.texts) > 0 {
-		// Turn each string into document bytes on a clone of msg, diffed
-		// against the live row's document; the masked merge below then unions
-		// them in (the diffed doc already contains the base, so the union
-		// keeps exactly the intended state).
-		var cur proto.Message
-		if live {
-			cur = base
-		}
+	if len(o.texts) > 0 || hasPlainString(info, msg) {
+		// Clone before either rewrite so the caller's message is not mutated.
 		msg = proto.Clone(msg)
-		if err := ApplyTextStrings(msg, nil, cur, o.texts, o.peer); err != nil {
+		texts, err := takePlainStrings(info, msg, mask, o)
+		if err != nil {
 			return err
+		}
+		if len(texts) > 0 {
+			// Turn each string into document bytes, diffed against the live
+			// row's document; the masked merge below then unions them in (the
+			// diffed doc already contains the base, so the union keeps exactly
+			// the intended state).
+			var cur proto.Message
+			if live {
+				cur = base
+			}
+			if err := ApplyTextStrings(msg, nil, cur, texts, o.peer); err != nil {
+				return err
+			}
 		}
 	}
 	mergers := info.mergers
@@ -416,6 +455,15 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 			return err
 		}
 	}
+	// The EFFECTIVE mask, which is the one this write merged: a text write
+	// option added its paths to `mask` above, before the authorization that
+	// also runs on the effective set. Recording the request's mask instead
+	// would leave a text field's before-state unrecorded on exactly the writes
+	// that overwrite one. `row` still carries the encoded before-state — `base`
+	// was merged in place, and is therefore the after-state to diff against.
+	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, base, mask, seq, e.actor); err != nil {
+		return err
+	}
 	return e.tx.PutRow(info.name, key, value, seq, e.actor)
 }
 
@@ -444,6 +492,10 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 		return err
 	}
 	if err := info.clearRowIndexes(e.tx, key); err != nil {
+		return err
+	}
+	// Same as the wire DELETE: the row's history goes with the row.
+	if err := e.srv.purgeHistory(e.tx, info, key); err != nil {
 		return err
 	}
 	return e.tx.DeleteRow(info.name, key, seq, e.actor)

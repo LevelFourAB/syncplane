@@ -109,7 +109,23 @@ type EntityOptions struct {
 	Index []*IndexSpec `protobuf:"bytes,3,rep,name=index,proto3" json:"index,omitempty"`
 	// Who may DELETE rows of this entity. Unset allows anyone the app's
 	// permission policy admits, which is the behaviour of every other entity.
-	DeletePolicy  DeletePolicy `protobuf:"varint,4,opt,name=delete_policy,json=deletePolicy,proto3,enum=syncplane.v1.DeletePolicy" json:"delete_policy,omitempty"`
+	DeletePolicy DeletePolicy `protobuf:"varint,4,opt,name=delete_policy,json=deletePolicy,proto3,enum=syncplane.v1.DeletePolicy" json:"delete_policy,omitempty"`
+	// Keep this entity's rows on the server only: they are never bootstrapped,
+	// pulled or streamed to a client, and a client that names the entity in a
+	// subscription or a mutation is refused rather than served nothing.
+	//
+	// It is NOT a permission, and subscriptions are not a substitute for it: an
+	// empty subscription list means full sync, and full sync is ABSORBING
+	// across the tabs that share one local store, so one tab that never narrows
+	// its subscriptions pulls the entity into storage every sibling tab reads.
+	//
+	// Server-side reads are unaffected: the Query RPC, the in-process view and
+	// query APIs, and mutators all still reach the entity. Server-only means
+	// "does not sync", not "cannot be read".
+	ServerOnly bool `protobuf:"varint,5,opt,name=server_only,json=serverOnly,proto3" json:"server_only,omitempty"`
+	// Record an append-only history of this entity's field changes. See
+	// HistoryOptions.
+	History       *HistoryOptions `protobuf:"bytes,6,opt,name=history,proto3" json:"history,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -172,6 +188,85 @@ func (x *EntityOptions) GetDeletePolicy() DeletePolicy {
 	return DeletePolicy_DELETE_POLICY_UNSPECIFIED
 }
 
+func (x *EntityOptions) GetServerOnly() bool {
+	if x != nil {
+		return x.ServerOnly
+	}
+	return false
+}
+
+func (x *EntityOptions) GetHistory() *HistoryOptions {
+	if x != nil {
+		return x.History
+	}
+	return nil
+}
+
+// HistoryOptions opts an entity into server-side field history: a PUT or PATCH
+// that changes one of the fields marked (syncplane.v1.field_behavior).history
+// records what those fields held BEFORE the write, as a
+// syncplane.v1.FieldHistory row. Which fields is always explicit — an entity
+// that opts in and marks none is rejected at registration.
+//
+// Changes are recorded, not writes. The server compares the stored row with the
+// one replacing it and records only the fields that actually moved: a write
+// that stores a field's current value again records nothing for it, and a write
+// that changes nothing records nothing at all.
+//
+// Sessions are recorded, not keystrokes. Successive writes to one row by one
+// actor fold into a single record holding the state before the FIRST of them,
+// for as long as the session stays open (server.WithHistorySession, five
+// minutes by default). The states in between are not recorded: history answers
+// "what did this hold before that editing session", not "replay the session".
+//
+// Capture is on the server's write path, so every write is covered whatever
+// made it — a client push, a mutator, a connector, a trusted write.
+//
+// The history entity is server_only, so none of it ever syncs; read it with the
+// Query RPC (the TypeScript client's queryServer). Restoring a value is an
+// ordinary PATCH of the recorded mask — see the "Restore a field to a previous
+// value" how-to.
+//
+// It records field changes, not row lifecycle. A DELETE is not captured and
+// purges the row's records, so a removal that has to be recoverable or
+// attributable is modelled as a field instead — see the "Recover a deleted row"
+// how-to.
+type HistoryOptions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *HistoryOptions) Reset() {
+	*x = HistoryOptions{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *HistoryOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*HistoryOptions) ProtoMessage() {}
+
+func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use HistoryOptions.ProtoReflect.Descriptor instead.
+func (*HistoryOptions) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{1}
+}
+
 // IndexKey is one component of an index, in the order it sorts.
 type IndexKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -189,7 +284,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[1]
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +296,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[1]
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +309,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{1}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -248,7 +343,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -260,7 +355,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -273,7 +368,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -325,14 +420,32 @@ type FieldBehavior struct {
 	//
 	// Rejected on a text field: every keystroke changes the value, so the entry
 	// would be rewritten with it. Full-text search is a different mechanism.
-	Indexed       bool `protobuf:"varint,5,opt,name=indexed,proto3" json:"indexed,omitempty"`
+	Indexed bool `protobuf:"varint,5,opt,name=indexed,proto3" json:"indexed,omitempty"`
+	// Record this field in the entity's history (see EntityOptions.history).
+	//
+	// Capture is EXPLICIT: an entity that opts in records the fields marked
+	// here and nothing else, and one that marks none is rejected at
+	// registration. There is no "capture everything" default — what a field
+	// costs to record varies by orders of magnitude, a collaborative-text field
+	// recording its whole document on every write that touches it.
+	//
+	// Key fields are never recorded in a history row's mask however they are
+	// marked: a PATCH may not change one, so a restore built from a mask naming
+	// one would be refused. The prior value still carries them, so a decoded
+	// history entry always says which row it belongs to.
+	//
+	// A oneof is captured as a GROUP, the only unit a mask may name it in, so
+	// marking any member marks the whole oneof.
+	//
+	// Ignored on an entity that has not opted in.
+	History       bool `protobuf:"varint,6,opt,name=history,proto3" json:"history,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -344,7 +457,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -357,7 +470,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -391,6 +504,13 @@ func (x *FieldBehavior) GetText() bool {
 func (x *FieldBehavior) GetIndexed() bool {
 	if x != nil {
 		return x.Indexed
+	}
+	return false
+}
+
+func (x *FieldBehavior) GetHistory() bool {
+	if x != nil {
+		return x.History
 	}
 	return false
 }
@@ -432,26 +552,31 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xb2\x01\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\x8b\x02\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
 	"key_fields\x18\x02 \x03(\tR\tkeyFields\x12-\n" +
 	"\x05index\x18\x03 \x03(\v2\x17.syncplane.v1.IndexSpecR\x05index\x12?\n" +
-	"\rdelete_policy\x18\x04 \x01(\x0e2\x1a.syncplane.v1.DeletePolicyR\fdeletePolicy\"2\n" +
+	"\rdelete_policy\x18\x04 \x01(\x0e2\x1a.syncplane.v1.DeletePolicyR\fdeletePolicy\x12\x1f\n" +
+	"\vserver_only\x18\x05 \x01(\bR\n" +
+	"serverOnly\x126\n" +
+	"\ahistory\x18\x06 \x01(\v2\x1c.syncplane.v1.HistoryOptionsR\ahistory\"\x10\n" +
+	"\x0eHistoryOptions\"2\n" +
 	"\bIndexKey\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\x93\x01\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xad\x01\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
 	"\vorder_field\x18\x03 \x01(\tR\n" +
 	"orderField\x12\x12\n" +
 	"\x04text\x18\x04 \x01(\bR\x04text\x12\x18\n" +
-	"\aindexed\x18\x05 \x01(\bR\aindexed*f\n" +
+	"\aindexed\x18\x05 \x01(\bR\aindexed\x12\x18\n" +
+	"\ahistory\x18\x06 \x01(\bR\ahistory*f\n" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
@@ -472,29 +597,31 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
 	(*EntityOptions)(nil),               // 1: syncplane.v1.EntityOptions
-	(*IndexKey)(nil),                    // 2: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 3: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 4: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 5: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 6: google.protobuf.FieldOptions
+	(*HistoryOptions)(nil),              // 2: syncplane.v1.HistoryOptions
+	(*IndexKey)(nil),                    // 3: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 4: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 5: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 6: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 7: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	3, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	4, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
 	0, // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
-	2, // 2: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	5, // 3: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	6, // 4: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	1, // 5: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	4, // 6: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	5, // [5:7] is the sub-list for extension type_name
-	3, // [3:5] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	2, // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	3, // 3: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	6, // 4: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	7, // 5: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	1, // 6: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	5, // 7: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	6, // [6:8] is the sub-list for extension type_name
+	4, // [4:6] is the sub-list for extension extendee
+	0, // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -508,7 +635,7 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   4,
+			NumMessages:   5,
 			NumExtensions: 2,
 			NumServices:   0,
 		},

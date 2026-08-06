@@ -65,6 +65,7 @@ arbitrary root.
 | `WithGC(retention, interval)`   | —          | Tombstone retention and background pass interval; `interval <= 0` is manual-only.                                                                                                                                                                                                                              |
 | `WithTextDeltaRetention(d)`     | 1h         | How long the collaborative-text delta log is kept.                                                                                                                                                                                                                                                             |
 | `WithIdempotencyRetention(d)`   | 24h        | How long claimed `MutateIdempotent` keys are kept.                                                                                                                                                                                                                                                             |
+| `WithHistoryRetention(d)`       | 90d        | How long field-history records are kept; `HistoryForever` disables time-based expiry. See [Field history](#field-history).                                                                                                                                                                                     |
 | `WithTextCompaction(minPurged)` | off        | Opt-in purge of unneeded text tombstones and mark ops on the GC pass.                                                                                                                                                                                                                                          |
 | `WithTextCache(budgetBytes)`    | 8 MiB      | Keeps written text documents decoded between writes; 0 disables.                                                                                                                                                                                                                                               |
 | `WithSchemaRevision(rev)`       | —          | Advertises an app-defined revision on every frame, push, pull, query and bootstrap.                                                                                                                                                                                                                            |
@@ -74,6 +75,8 @@ arbitrary root.
 | `WithEntities(msgs...)`         | —          | Declares syncable entities; repeatable.                                                                                                                                                                                                                                                                        |
 | `WithMutator(name, args, fn)`   | —          | Declares a server-authoritative named mutation.                                                                                                                                                                                                                                                                |
 | `WithMerger(proto, path, fn)`   | —          | Declares a merge hook for an opaque field.                                                                                                                                                                                                                                                                     |
+| `WithHistoryFilter(fn)`         | —          | Admits, rejects or rewrites every field-history record. See [Field history](#field-history).                                                                                                                                                                                                                   |
+| `WithHistorySession(d)`         | 5m         | How long one row's field-history record stays open to later writes by the same actor; `HistorySessionOff` records every write. See [Field history](#field-history).                                                                                                                                            |
 
 ### Limits
 
@@ -134,13 +137,14 @@ never on message text: the wording here is documentation, not contract.
 ## Garbage collection
 
 One GC pass prunes expired tombstones, idle client watermark rows, the
-collaborative-text delta log and claimed trusted-write idempotency keys, and —
-when `WithTextCompaction` asks for it — compacts quiet collaborative-text
-documents. `srv.CollectGarbage(ctx, workspaceID)` runs it manually.
+collaborative-text delta log, claimed trusted-write idempotency keys and
+field-history records, and — when `WithTextCompaction` asks for it — compacts
+quiet collaborative-text documents. `srv.CollectGarbage(ctx, workspaceID)` runs
+it manually.
 
 Keep the tombstone retention comfortably above the longest client offline
 window; a pruned client that returns is re-admitted at whatever mutation id it
-pushes next. The three retentions answer different questions:
+pushes next. The four retentions answer different questions:
 
 - **Tombstones** (`WithGC`) — bounded by how long a client may be offline.
   Too short forces a re-bootstrap.
@@ -149,6 +153,55 @@ pushes next. The three retentions answer different questions:
 - **Idempotency keys** (`WithIdempotencyRetention`) — bounded by callers' retry
   windows. **Too short is a correctness problem**: a retry arriving after its
   key expired applies again.
+- **Field history** (`WithHistoryRetention`) — bounded by how far back you want
+  to be able to restore. Unlike the delta log it is not clamped to the tombstone
+  retention: history is app-visible data with its own lifetime, so setting it
+  either side of the tombstone window is fine. A record ages from the last write
+  folded into it rather than from its `recorded_at`, so it outlives what its
+  timestamp says by at most one [session window](#editing-sessions).
+
+History records are **hard-deleted**, leaving no tombstone — nothing syncs them,
+so nothing holds a copy to be told they are gone.
+
+They are also the one thing the pass collects in **chunks**. Everything else it
+touches is bounded by rows; history is bounded by writes, so the first sweep
+after enabling it — or after raising retention — is the largest delete the engine
+issues. The pass takes a bounded chunk inside its own transaction and drains the
+rest a chunk per transaction, so no single delete holds a write open across the
+whole backlog. An interrupted drain needs no recovery: the sweep keeps no state,
+and the next pass resumes on what is left.
+
+### History that lives as long as its row
+
+`WithHistoryRetention(server.HistoryForever)` turns time-based expiry off. A
+record is then bounded only by its row: **deleting a row purges its history**,
+in every retention mode, in the same transaction as the delete.
+
+```go
+server.WithGC(30*24*time.Hour, time.Hour),
+server.WithHistoryRetention(server.HistoryForever),
+```
+
+The cascade runs whatever the retention: nothing can use a deleted row's history
+— a restore is a PATCH, and a PATCH of a tombstoned row is a conflict under
+delete-wins — and keeping it would attach the old row's log to a new row that
+later claims the same key.
+
+It also survives an entity **ceasing** to opt in. Registration is additive, so
+dropping `history: {}` in a later deploy leaves everything already captured, and
+the cascade keeps running over it.
+
+Drop the **last** `history: {}` and the history entity leaves the catalog
+entirely: the records that remain are no longer readable, and deleting their
+source rows no longer purges them. The expiry sweep still runs — it is not gated
+on the catalog, because records are durable state and catalog membership is not
+— so retention drains what is left on its own. Under `HistoryForever` there is
+no sweep to drain them, and records left behind that way stay until something
+purges them. Worth knowing before turning the option off.
+
+The default is a finite 90 days. `HistoryForever` suits entities whose rows are
+edited by people; on rows machinery rewrites in a loop, the log grows without
+bound for as long as the row lives.
 
 ## Registration
 
@@ -219,7 +272,10 @@ come from the snapshot taken before the closure ran: they do not see the
 closure's own recorded writes, and `Get` on a key you have written is an error
 rather than a stale row. `EntityTx` offers `Get`, `Put`, `Patch`, `Delete`,
 `Scan`, `Query`, `Seq` and `ScanPage(prototype, afterKey, limit, fn)`. Write
-options on both: `WithTextString(field, value)` and `WithTextPeer(peer)`.
+options on both: `WithTextString(field, value)` and `WithTextPeer(peer)`. A text
+field of the written message holding a plain-string value
+(`text.EncodePlainString`, what a field-history record carries) resolves the same
+way and needs the same `WithTextPeer`; on `Patch` it does not widen the mask.
 
 Neither consults a client watermark. See
 [Write from server-side code](../how-to/server-side-writes.md).
@@ -258,6 +314,141 @@ which is what lets a change-feed consumer recognize its own writes.
 the mutator body writes are not authorized individually, exactly as on the push
 path.
 
+## Field history
+
+An entity carrying `(syncplane.v1.entity).history` gets an append-only log of
+what its fields held before each write that changed them, captured on the
+server's write path — a write storing what is already there records nothing. The
+schema half — how to opt in, how to narrow it per field, what a record contains
+— is in [Proto options](proto-options.md#field-history); the restore recipe is
+[Restore a field to a previous value](../how-to/restore-a-field.md). Three server
+options tune it.
+
+```go
+func WithHistoryFilter(fn HistoryFilterFunc) Option
+func WithHistoryRetention(d time.Duration) Option
+func WithHistorySession(d time.Duration) Option
+
+type HistoryFilterFunc func(ctx context.Context, rec *syncplanev1.FieldHistory,
+    src EntityMeta) (*syncplanev1.FieldHistory, bool, error)
+```
+
+### Editing sessions
+
+`WithHistorySession(d)` sets how long one row's record stays open to later
+writes **by the same actor**. Writes landing inside the window fold into it: the
+record keeps saying what the fields held before the first of them, its mask
+widens to the union of what the run touched, and `through_seq`/`writes` grow
+instead of the log. Default **five minutes**; `server.HistorySessionOff` keeps
+every write.
+
+The window runs from when the record **opened**, not from its last write, so one
+record never covers more than a window however long the editing runs — a day of
+work stays a timeline rather than one entry.
+
+What folding costs is the intermediate states: the log answers "what did the
+field hold before that editing session", not "replay the session". Turn it off
+when each write has to be separately restorable, weighing that against what
+per-write capture costs on an entity carrying a text field — see
+[Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes).
+
+Off is still not an audit trail. A `DELETE` is uncaptured whatever the window,
+and purges the row's log — see
+[Field history is a restore mechanism, not an audit log](../explanation/limits-and-trade-offs.md#field-history-is-a-restore-mechanism-not-an-audit-log)
+and [Recover a deleted row](../how-to/recover-a-deleted-row.md).
+
+Which record a write folds into is tracked in memory and re-validated against
+storage before every fold, so it is a hint rather than authority. A restart, or a
+sibling node handling the next write in a multi-node deployment, opens a new
+record — a shorter session, never a wrong one.
+
+Across nodes that costs one guarantee: **two records of one row can cover
+overlapping spans**. The node that opened a record still holds the hint, so a
+write it handles later folds in around the record a sibling opened meanwhile.
+Every record is still the state before its own `seq`, so restoring from one is
+unaffected; a timeline that reads `seq`…`through_seq` as a partition of the row's
+writes is not.
+
+### Who can read a record
+
+A record is read under **the source row's** read filter, never the history
+entity's own. That is not a knob: `syncplane_field_history` is an entity your app
+never declared, so a `ReadFilter` written against your own entity names never
+matches it and it would fall to the default — allow all. The rule the engine
+applies instead is the one you would write by hand: **you may read the history of
+a row you can currently read**.
+
+"Currently" is load-bearing. The filter is applied to the live source row, not to
+the record's `prior` — `prior` carries only the masked fields, so it cannot answer
+a filter that tests an unrecorded one. A record whose source row is gone, or whose
+source entity has left the catalog, is unreadable rather than open. `Query` is the
+only door a client has to a `server_only` entity, so this is the whole gate;
+trusted in-process reads (`View`, `ViewTx.Query`) are unfiltered as always.
+
+A filter you do register for `syncplane_field_history` still applies on top of
+this — the two are an AND — but it is not where the rule comes from, and it is
+not needed to get one.
+
+The cost is one `ReadFilter` call per registered entity on a history query — the
+records name entities the request does not — and, for entities that do filter, a
+lookup of the source row per candidate record.
+
+### The admission hook
+
+`WithHistoryFilter` runs on every record, inside the write transaction,
+immediately before the record is stored. Return the record and `true` to keep
+it, `false` to drop it, or an error to **fail the write that triggered it** — a
+hook that cannot decide must not let a write land unrecorded.
+
+An error means the hook **could not decide**, so the write stays retryable: the
+batch fails with `internal`, nothing is acked, and the client resends once the
+hook can answer. The error's text is logged, never sent — a hook's wording can
+name dependencies and rows the caller has no business seeing.
+
+To refuse a record **permanently**, return `server.Reject(code, message)`
+instead. That acks the mutation and the client drops it, which is what a hook
+failing on a record's _shape_ wants: resending the identical mutation would fail
+identically. A rejection's code and message are the hook's own and do reach the
+client. The split is [`CanMutate`](#permissions-and-identity)'s — a dependency
+having a bad minute must not cost the caller its write.
+
+A hook may redact, rewrite or drop a record. It may **not** move one: changing
+`source_entity`, `source_key` or `seq` fails the write. Those three are the
+record's identity — what the row key derives from, what same-sequence merging
+folds on, and what the `DELETE` cascade purges by.
+
+Nor may it restate `row_created`, which fails the write the same way. A record
+marking a row's creation absorbs the rest of its session, so a hook that set the
+flag would silence every write folding in behind it; redacting a creation record
+means dropping it. Redacting a mask down to empty is allowed and leaves an
+update — the record still says a change happened, and later writes in the
+session record their own fields.
+
+```go
+server.WithHistoryFilter(func(_ context.Context, rec *syncplanev1.FieldHistory,
+	src server.EntityMeta) (*syncplanev1.FieldHistory, bool, error) {
+	if src.Name == "session" {
+		return nil, false, nil // not worth a log
+	}
+	if slices.Contains(rec.GetMask().GetPaths(), "ssn") {
+		rec.Prior = nil // keep the entry, drop the value
+	}
+	return rec, true, nil
+})
+```
+
+It must be a **pure function of its arguments**, exactly as
+`Permissions.CanMutate` must and for the same reason: the storage adapter may
+re-run the write closure and re-invoke the hook, so a hook that audit-logs or
+meters double-counts. Redaction, sampling and per-entity policy belong here;
+anything that has to happen once belongs after the write commits.
+
+Like `WithMutator` and `WithMerger` it is construction-time only: it is a func,
+so unlike a schema it cannot be provisioned at runtime. Passing `nil` fails
+`New`.
+
+`WithHistoryRetention` is covered under [Garbage collection](#garbage-collection).
+
 ## Change feed
 
 ```go
@@ -273,6 +464,16 @@ behind the write (see [the change feed](../how-to/change-feed.md#who-wrote-it)).
 Because the feed coalesces by row it reports the row's **last** writer, which is
 enough for echo suppression and "notify everyone except the actor", and is not
 an audit trail.
+
+If you need "what did this field hold at sequence N", that is what
+[field history](#field-history) is for — the feed cannot answer it.
+
+The feed narrows by nothing, **field history included**: a consumer reading
+`Changes` directly sees a `syncplane_field_history` change beside each captured
+write, at the same sequence. Anything dispatching on `Change.Entity` — including
+[effects](../how-to/react-to-changes.md), which dispatch per registered prototype — is
+unaffected; a consumer that treats every change alike should skip that entity
+itself.
 
 Returns `ErrCursorTooOld` when the cursor predates the tombstone horizon. See
 [Follow committed changes](../how-to/change-feed.md). `CurrentSeq` is the head of

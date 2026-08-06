@@ -41,7 +41,47 @@ package docs — this is the part an implementer must not get wrong.
   missing actor is indistinguishable from an unattributed write.
 
   A row holds one actor, replaced on each write, so only its **last** writer is
-  recoverable. Adapters need no history table.
+  recoverable. Adapters still need no history table: the engine's
+  [field history](proto-options.md#field-history) is ordinary rows of an
+  ordinary entity, written through `PutRow` on the same write path as everything
+  else. What it does need is `PurgeEntityRows` — see below.
+- **`PurgeEntityRows(entity, keyPrefix, before, limit)`** hard-deletes rows of
+  one entity — **live rows included** — together with their index entries,
+  leaving no tombstone and not moving the tombstone horizon. It is the only
+  delete in the interface that removes a live row outright.
+
+  It exists for entities no client ever receives (`server_only`, of which field
+  history is the one that ships), and is only sound for those: used on anything
+  a client syncs it would delete rows every replica still holds with no
+  tombstone to carry the deletion. Make it a bulk statement rather than a scan
+  plus `DeleteRow` — a `DeleteRow` per expired record would mint the tombstones
+  this exists to avoid. Index entries go in the same statement, because the
+  engine has no row keys in hand here to pair a `DeleteIndexEntries` with.
+
+  All three narrowings are optional and all apply. `keyPrefix` is a **bytewise**
+  prefix, so express it as a half-open key range rather than a `LIKE` — that is
+  the same comparison every other key predicate makes, uses the primary key, and
+  needs no wildcard escaping. An empty prefix matches the whole entity. `before`
+  keeps rows written strictly before it, and its **zero value means no age bound
+  at all** — not "before the epoch", which is what a naive `UnixMilli()` would
+  say and would silently delete nothing. `limit` caps how many rows one call
+  removes, `<= 0` meaning no cap; which matching rows a bounded call takes is up
+  to the adapter, as long as the ones it leaves are reported through `more`.
+
+  `more` is allowed to be conservative — "this call hit its limit" is a fine
+  answer, so a call that removed exactly the last `limit` rows may report `more`
+  and the next one then removes nothing. Only `false` is definite, and it must
+  arrive: the caller drains by looping until it does.
+
+  Both SQL adapters implement the bound as `key IN (SELECT key FROM rows WHERE …
+  ORDER BY key LIMIT n)`, shared by the row delete and the index-entry delete.
+  The `ORDER BY` is load-bearing rather than cosmetic: the two subqueries must
+  select the **same** set, or entries outlive their rows or die before them.
+
+  The engine calls it both ways: the GC pass expires old records with an age
+  bound and a limit it drains across transactions, while a `DELETE` drops the
+  records describing the row it removes with a prefix and no limit — those must
+  go with the row in its own transaction or not at all.
 - **Secondary index entries** (`PutIndexEntries` / `DeleteIndexEntries` /
   `ScanIndex` / `IndexState` / `SetIndexState`) map an opaque sort key to a row
   key, per workspace and per **(entity, index name)** pair. Four rules:

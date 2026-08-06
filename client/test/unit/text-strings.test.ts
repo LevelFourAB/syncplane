@@ -9,7 +9,14 @@ import { describe, expect, it } from 'vitest';
 import { SyncClient } from '../../src/client.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { decodeTextDoc, encodeTextDoc, ExpandNone, TextDoc } from '../../src/text/index.js';
+import {
+	decodeTextDoc,
+	encodePlainString,
+	encodeTextDoc,
+	ExpandNone,
+	isPlainString,
+	TextDoc,
+} from '../../src/text/index.js';
 
 function newClient(opts?: { undo?: boolean }) {
 	return new SyncClient({
@@ -130,6 +137,69 @@ describe('string writes to text fields', () => {
 		const after = decodeTextDoc((await client.db.widget.get('w1'))?.body, '');
 		expect(after.plainText()).toBe('one TWO three four');
 		await client.close();
+	});
+
+	// A plain-string value is what a field-history record's before-state holds
+	// for a text field, so a restore is decode-then-patch with no per-field
+	// handling. Resolving it is the enqueue path's job: it carries no writer
+	// identity, and the server refuses one.
+	describe('a plain-string value in the written row', () => {
+		it('resolves into a document under the leased peer', async () => {
+			const client = newClient();
+			await client.db.widget.mutate.put({ id: 'w1', body: 'original text' });
+			await client.db.widget.mutate.patch('w1', { body: encodePlainString('restored text') });
+
+			const row = await client.db.widget.get('w1');
+			expect(isPlainString(row?.body)).toBe(false);
+			expect(decodeTextDoc(row?.body, '').plainText()).toBe('restored text');
+			await client.close();
+		});
+
+		it('lands as edits against the live document, not a replacement', async () => {
+			const client = newClient();
+			await client.db.widget.mutate.put({ id: 'w1', body: 'shared prefix, original tail' });
+			const before = decodeTextDoc((await client.db.widget.get('w1'))?.body, '');
+
+			await client.db.widget.mutate.patch('w1', {
+				body: encodePlainString('shared prefix, replaced tail'),
+			});
+
+			const after = decodeTextDoc((await client.db.widget.get('w1'))?.body, '');
+			expect(after.plainText()).toBe('shared prefix, replaced tail');
+			// The untouched prefix keeps the items the first write minted, which
+			// is what makes the restore an edit rather than a new document.
+			for (const [ peer, counter ] of before.vv) {
+				expect(after.vv.get(peer)).toBeGreaterThanOrEqual(counter);
+			}
+			await client.close();
+		});
+
+		it('is dropped when the patch mask does not name its field', async () => {
+			// A PATCH writes what its mask names. The value has to go rather than
+			// ride along unresolved: the server refuses one in any position.
+			const client = newClient();
+			await client.db.widget.mutate.put({ id: 'w1', label: 'v1', body: 'kept' });
+			await client.db.widget.mutate.patch('w1', {
+				label: 'v2',
+				body: encodePlainString('ignored'),
+			}, { paths: [ 'label' ] });
+
+			const row = await client.db.widget.get('w1');
+			expect(row?.label).toBe('v2');
+			expect(decodeTextDoc(row?.body, '').plainText()).toBe('kept');
+			await client.close();
+		});
+
+		it('resolves on put, where every text field is written', async () => {
+			const client = newClient();
+			await client.db.widget.mutate.put({ id: 'w1', body: 'first' });
+			await client.db.widget.mutate.put({ id: 'w1', body: encodePlainString('second') });
+
+			const row = await client.db.widget.get('w1');
+			expect(isPlainString(row?.body)).toBe(false);
+			expect(decodeTextDoc(row?.body, '').plainText()).toBe('second');
+			await client.close();
+		});
 	});
 
 	it('strings work inside transact batches', async () => {

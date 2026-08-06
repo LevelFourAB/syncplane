@@ -26,7 +26,7 @@ func fieldDiff(base, next proto.Message) []string {
 		if lww.IsText(fd) || lww.OneofOf(fd) != nil {
 			continue
 		}
-		if !equalField(bm, nm, fd) {
+		if !lww.EqualField(bm, nm, fd) {
 			paths = append(paths, string(fd.Name()))
 		}
 	}
@@ -37,28 +37,11 @@ func fieldDiff(base, next proto.Message) []string {
 			continue
 		}
 		bf, nf := bm.WhichOneof(od), nm.WhichOneof(od)
-		if bf != nf || (bf != nil && !equalField(bm, nm, bf)) {
+		if bf != nf || (bf != nil && !lww.EqualField(bm, nm, bf)) {
 			paths = append(paths, string(od.Name()))
 		}
 	}
 	return paths
-}
-
-// equalField compares one field across two messages by projecting it into
-// otherwise-empty messages and comparing those — this reuses proto.Equal's
-// semantics for every field shape (scalar, message, repeated, map).
-func equalField(a, b protoreflect.Message, fd protoreflect.FieldDescriptor) bool {
-	if a.Has(fd) != b.Has(fd) {
-		return false
-	}
-	if !a.Has(fd) {
-		return true
-	}
-	am := a.Type().New()
-	bm := b.Type().New()
-	am.Set(fd, a.Get(fd))
-	bm.Set(fd, b.Get(fd))
-	return proto.Equal(am.Interface(), bm.Interface())
 }
 
 // applyFields copies the named top-level fields from src onto dst, clearing

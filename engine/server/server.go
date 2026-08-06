@@ -50,6 +50,22 @@ type entityInfo struct {
 	// held here rather than re-read from the descriptor because it is consulted
 	// once per authorized write.
 	deletePolicy syncplanev1.DeletePolicy
+	// serverOnly is (syncplane.v1.entity).server_only: the entity's rows never
+	// reach a client. Enforced at the row emitter, which is the chokepoint
+	// bootstrap, pull and resync share, and at the two doors a client could name
+	// it through — a subscription and a CRUD mutation. See emit.go.
+	serverOnly bool
+	// history is (syncplane.v1.entity).history when the entity opted in, else
+	// nil. Its presence is what puts a write of this entity on the capture path
+	// (see history.go).
+	history *syncplanev1.HistoryOptions
+	// historyFields are the top-level field names a history record captures, in
+	// field order: exactly those marked (field_behavior).history. Empty only for
+	// an entity that has not opted in — an entity that opts in and marks nothing
+	// is refused at registration. Key fields are excluded here and populated
+	// separately on the recorded prior value — see the field option's doc for
+	// why a mask must never name one.
+	historyFields []string
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -370,6 +386,17 @@ type Server struct {
 	pendingEntities []proto.Message
 	pendingMutators []pendingMutator
 	pendingMergers  []pendingMerger
+	// historyFilter is the WithHistoryFilter hook, nil when none was installed.
+	// Fixed once New returns — it is a func, like the mutator table — which is
+	// what lets the capture path read it without a lock.
+	historyFilter HistoryFilterFunc
+	// historySession is the WithHistorySession window, resolved by
+	// historySessionWindow. Fixed once New returns.
+	historySession time.Duration
+	// historyOpen notes which history record each row currently has open, so a
+	// run of writes folds into one. A hint the capture path re-validates against
+	// storage, never authority — see historySessions.
+	historyOpen historySessions
 	// poison dedupes the quarantine log for rows that will not decode (see
 	// poison.go).
 	poison poisonReports
@@ -688,7 +715,7 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		}
 		c.entities[info.name] = info
 		c.byType[info.msgType.Descriptor().FullName()] = info
-		return nil
+		return ensureHistoryEntity(c)
 	}); err != nil {
 		return err
 	}
@@ -731,7 +758,13 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if len(eo.GetKeyFields()) == 0 {
 		return nil, fmt.Errorf("server: entity %q declares no key_fields", eo.GetName())
 	}
-	info := &entityInfo{name: eo.GetName(), msgType: mt, deletePolicy: eo.GetDeletePolicy()}
+	info := &entityInfo{
+		name:         eo.GetName(),
+		msgType:      mt,
+		deletePolicy: eo.GetDeletePolicy(),
+		serverOnly:   eo.GetServerOnly(),
+		history:      eo.GetHistory(),
+	}
 	for _, kf := range eo.GetKeyFields() {
 		fd := desc.Fields().ByName(protoreflect.Name(kf))
 		if fd == nil {
@@ -807,7 +840,72 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			info.mergers[tf.path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
 		}
 	}
+	if info.history != nil {
+		info.historyFields = historyFieldsOf(desc, info.keyFields)
+		if len(info.historyFields) == 0 {
+			// Refused rather than treated as "capture everything" or "capture
+			// nothing": both readings are plausible, and each is a trap in one
+			// direction — silent unbounded growth, or a history panel that stays
+			// empty forever with nothing to point at.
+			return nil, fmt.Errorf("server: entity %q opts into history but marks no field with "+
+				"(syncplane.v1.field_behavior).history; capture is explicit", info.name)
+		}
+	}
 	return info, nil
+}
+
+// historyFieldsOf resolves an entity's capture set: the top-level units a
+// history record may name, which are exactly the fields marked
+// (field_behavior).history.
+//
+// Capture is explicit — there is no "opt the entity in and get everything"
+// fallback — because what a field costs to record spans orders of magnitude. A
+// scalar's before-state is a few bytes; a collaborative-text field's is the
+// document as it stood, recorded again on every write that touches it. An
+// implicit capture set would opt a schema into that by ADDING a field, which is
+// the one schema change the engine otherwise treats as always safe. Marking is
+// cheap and says what the app meant.
+//
+// Returning empty is therefore a schema error rather than a mode, and the caller
+// raises it: an entity that opts in and marks nothing has asked for a log that
+// can never say anything.
+//
+// A oneof contributes its GROUP name, once, however many members it has. That
+// is the only form a mask may name it in (see engine/internal/lww), and the
+// capture set has to speak the same language: it becomes a record's mask, and a
+// mask the merge refuses could neither record a prior value nor restore one.
+// Marking any member therefore marks the group.
+//
+// Key fields are dropped however they are marked. A row's identity lives in
+// both its storage key and its embedded key fields and the two must agree, so
+// the write paths reject a PATCH whose mask would move one; a restore built
+// from a mask naming a key field could therefore never be applied. The recorded
+// prior value still carries them (see historyPrior), which is what a decoded
+// record needs to say which row it describes.
+func historyFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) []string {
+	isKey := make(map[protoreflect.Name]bool, len(keyFields))
+	for _, fd := range keyFields {
+		isKey[fd.Name()] = true
+	}
+	fields := desc.Fields()
+	var marked []string
+	seen := make(map[string]bool, fields.Len())
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if isKey[fd.Name()] || !fieldBehaviorOf(fd).GetHistory() {
+			continue
+		}
+		name := string(fd.Name())
+		if od := lww.OneofOf(fd); od != nil {
+			name = string(od.Name())
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		marked = append(marked, name)
+	}
+	return marked
 }
 
 // collectTextFields walks a message's fields (descending through singular,
@@ -1023,6 +1121,14 @@ type EntityMeta struct {
 	// KeyFields are the fields (in order) whose values form the row key. They
 	// are identity, so an editor renders them read-only on edit.
 	KeyFields []protoreflect.FieldDescriptor
+	// Managed reports an entity the engine registers and writes for itself
+	// rather than one the app declared — today only the field-history log. Its
+	// rows are engine state whose meaning comes from the writes that produced
+	// them, so a generic editor must not offer them: writing one by hand claims
+	// a field held a value it never held, and deleting one loses the only copy
+	// of a value the row no longer carries. A browser may still read them, and
+	// the RPC surface refuses client writes of them outright.
+	Managed bool
 }
 
 // Entities returns metadata for every registered entity, sorted by name.
@@ -1052,6 +1158,7 @@ func entityMeta(info *entityInfo) EntityMeta {
 		Name:       info.name,
 		Descriptor: info.msgType.Descriptor(),
 		KeyFields:  info.keyFields,
+		Managed:    info.name == historyEntityName,
 	}
 }
 
@@ -1068,6 +1175,22 @@ func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 func (c *catalog) entityNames() []string {
 	names := make([]string, 0, len(c.entities))
 	for n := range c.entities {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// syncEntityNames is entityNames without the server-only entities: the set a
+// client may be shipped rows of. Every sync path resolves its entity list
+// through the row emitter, which calls this, so "does not sync" is decided once
+// rather than per path.
+func (c *catalog) syncEntityNames() []string {
+	names := make([]string, 0, len(c.entities))
+	for n, info := range c.entities {
+		if info.serverOnly {
+			continue
+		}
 		names = append(names, n)
 	}
 	sort.Strings(names)
@@ -1180,6 +1303,13 @@ func (info *entityInfo) mergeTextFields(
 // A rejected fragment is reported with a tagged error (text.ErrFragmentUnusable)
 // so the caller can answer "resend full state" instead of "your write is
 // invalid".
+//
+// A plain-string value is refused outright, in every position: resolving one
+// into edits needs a writer identity, which the client holds and the server does
+// not, so the enqueue path resolves before it pushes and the wire carries
+// documents only. An unmasked field is refused too, unlike on the in-process
+// write path — this guard runs over the bytes a client sent rather than over
+// what a merge would reach, the same footing the fragment case above rejects on.
 func (info *entityInfo) canonicalizeTextFields(
 	msg protoreflect.Message,
 	fragmentOK func(path string) bool,
@@ -1188,6 +1318,10 @@ func (info *entityInfo) canonicalizeTextFields(
 		b := chainGetBytes(msg, tf.chain)
 		if len(b) == 0 {
 			continue
+		}
+		if text.IsPlainString(b) {
+			return fmt.Errorf("entity %q text field %q: %w", info.name, tf.path,
+				text.ErrPlainStringUnresolved)
 		}
 		if text.IsFragment(b) {
 			if fragmentOK == nil || !fragmentOK(tf.path) {

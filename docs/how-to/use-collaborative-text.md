@@ -79,8 +79,10 @@ operations.
   on the JS side — rather than stored with U+FFFD in its place.
 
 Server-side, `EntityTx.Put` / `Patch` take `WithTextString(field, s)` plus
-`WithTextPeer(peer)` (the engine never invents a writer identity) with the same
-three-way semantics.
+`WithTextPeer(peer)`. The diff base there is the **stored** document rather than
+a state the writer saw earlier, so text the row already holds and the string does
+not contain is deleted — see
+[Write from server-side code](server-side-writes.md#collaborative-text).
 
 ## In React
 

@@ -90,6 +90,18 @@ type rowEmitter struct {
 	// resync classifies rows under both the old and the new scope, and a
 	// window is part of the scope it has to resolve.
 	windowMembers closureRows
+	// includeServerOnly lets rows of a server_only entity through classify. It
+	// is the difference between the two kinds of consumer this type serves:
+	// SYNC paths (pull, bootstrap, resync, subscribe) ship rows to a client and
+	// must never carry one, so they take the zero value; READ paths (the Query
+	// RPC, the trusted read gate) answer a caller who asked for the entity by
+	// name and must reach it, so they set this.
+	//
+	// Excluding by default is deliberate. A read path that forgets to set it
+	// answers "no rows" for an entity nobody could otherwise see; a sync path
+	// that forgot to clear it would ship a client rows the whole option exists
+	// to withhold.
+	includeServerOnly bool
 	// deltas enables collaborative-text delta state on emitted rows, cut
 	// against deltaAfter (the cursor's sequence). Only the forward pull scan
 	// sets it: every other path (bootstrap, delta resync, membership diffs,
@@ -99,6 +111,10 @@ type rowEmitter struct {
 	deltaAfter uint64
 	// deltaSafeBy memoizes the per-entity verdict of deltaSafe.
 	deltaSafeBy map[string]bool
+	// historySources memoizes, per source row, whether the caller may read the
+	// field-history records describing it (see historySourceReadable). Only the
+	// history query populates it.
+	historySources map[historySourceKey]bool
 }
 
 // newRowEmitter validates the subscription set (unknown entities and
@@ -123,6 +139,13 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 		if !ok {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("subscription names unknown entity %q", sub.GetEntity()))
+		}
+		// A server-only entity would sync nothing whatever this subscription
+		// says, and silently syncing nothing is the failure a misconfiguration
+		// takes longest to notice. Refusing names it at the request that asked.
+		if info.serverOnly {
+			return nil, connect.NewError(connect.CodeInvalidArgument,
+				fmt.Errorf("subscription names server-only entity %q, which never syncs to clients", info.name))
 		}
 		sc := e.scopes[info.name]
 		if sc == nil {
@@ -179,8 +202,15 @@ func (e *rowEmitter) subscribed(entity string) bool {
 // them. The order is SORTED, which resync depends on to resume a paused diff
 // (it skips every entity below its saved position); bootstrap wants a
 // different order and asks bootstrapEntities for it instead.
+//
+// Server-only entities are dropped from BOTH branches. The subscribed branch
+// could not name one (newRowEmitter refuses it), but a follow spec can reach
+// one through a reference and full sync names every entity there is — and full
+// sync is the case a subscription set cannot protect against, since one tab
+// that never narrows its subscriptions pulls the whole catalog into a store its
+// siblings share.
 func (e *rowEmitter) entities() []string {
-	names := e.srv.catalogPtr().entityNames()
+	names := e.srv.catalogPtr().syncEntityNames()
 	if e.scopes == nil {
 		return names
 	}
@@ -252,6 +282,7 @@ func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 // classify is the decision table:
 //
 //	entity not registered                → unsubscribed (skip)
+//	entity is server-only                → unsubscribed (skip)
 //	real tombstone                       → visible (pull passes it through)
 //	entity unsubscribed (subs non-empty) → unsubscribed (skip)
 //	follow-closure or window member      → visible (already read-filtered)
@@ -274,6 +305,16 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 	// cursor, re-declaring the entity could never deliver them again.
 	info, registered := e.srv.catalogPtr().entities[row.Entity]
 	if !registered {
+		return rowUnsubscribed, nil
+	}
+	// A server-only entity takes the same skip-don't-tombstone path, for the
+	// same reason: no client ever held these rows, so there is nothing to
+	// tombstone, and emitting one would only tell a client to delete something
+	// it never had. This is what makes the forward pull scan agree with
+	// bootstrap and resync, which never scan the entity at all (see entities()).
+	// A READ path names the entity outright and is let through (see
+	// includeServerOnly) — server-only is "does not sync", not "cannot be read".
+	if info.serverOnly && !e.includeServerOnly {
 		return rowUnsubscribed, nil
 	}
 	if !e.subscribed(row.Entity) {

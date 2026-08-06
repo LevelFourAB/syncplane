@@ -3449,13 +3449,37 @@
 	"rejects": [
 		{
 			"name": "unsupported format version",
-			"hex": "03",
-			"error": "text: unsupported format version 3"
+			"hex": "04",
+			"error": "text: unsupported format version 4"
 		},
 		{
 			"name": "fragment bytes fed to the document decoder",
 			"hex": "02",
 			"error": "text: fragment where full document expected"
+		},
+		{
+			"name": "plain-string bytes fed to the document decoder",
+			"hex": "03",
+			"error": "text: plain-string value where full document expected; resolve it under a writer identity first"
+		},
+		{
+			"name": "plain-string bytes fed to the document decoder, with text",
+			"hex": "0368656c6c6f",
+			"error": "text: plain-string value where full document expected; resolve it under a writer identity first"
+		},
+		{
+			"name": "plain-string value as the incoming side of a merge",
+			"kind": "merge",
+			"docHex": "01000000",
+			"hex": "0368656c6c6f",
+			"error": "text: incoming plain-string value must be resolved under a writer identity before a write"
+		},
+		{
+			"name": "plain-string value as the merge base",
+			"kind": "merge",
+			"docHex": "0368656c6c6f",
+			"hex": "01000000",
+			"error": "text: merge base is a plain-string value; stored state is always a full document"
 		},
 		{
 			"name": "document bytes fed to the fragment decoder",
@@ -3688,6 +3712,29 @@
 			"docHex": "020105616c696365010100010106017800",
 			"hex": "010105616c696365010100010106017900",
 			"error": "text: merge base is a fragment; stored state is always a full document"
+		}
+	],
+	"plainStringComment": "plainStrings pins the plain-string value form (format version 3): the tag byte followed by the text's UTF-8 bytes. Harnesses must verify that encoding text yields hex, that decoding hex yields text, and that the plain-text read path returns text for hex — the same path that returns a document's visible text, since a reader holding a field value cannot know which form it has.",
+	"plainStrings": [
+		{
+			"name": "empty",
+			"text": "",
+			"hex": "03"
+		},
+		{
+			"name": "ascii",
+			"text": "hello",
+			"hex": "0368656c6c6f"
+		},
+		{
+			"name": "multi-byte and astral",
+			"text": "héllo 😀",
+			"hex": "0368c3a96c6c6f20f09f9880"
+		},
+		{
+			"name": "newline",
+			"text": "line1\nline2",
+			"hex": "036c696e65310a6c696e6532"
 		}
 	]
 }

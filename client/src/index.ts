@@ -54,8 +54,10 @@ export { newId } from './id.js';
 export { IDBKVStore } from './kv/idb.js';
 export { MemoryKVStore } from './kv/memory.js';
 export type { KVRead, KVStore, KVWrite } from './kv/store.js';
-// Only what SyncClientOptions.mergers names — the registry, the mask merge and
-// the ref plumbing around them stay module-private.
+// What SyncClientOptions.mergers names, plus the mask merge itself — a reader
+// that walks field history folds each record back over the live row with it.
+// The registry and the ref plumbing around them stay module-private.
+export { mergeMask } from './mutations.js';
 export type { MergeFn, MergerSpec } from './mutations.js';
 export {
 	MAX_ENTITY_NAME_LENGTH,
@@ -104,12 +106,15 @@ export {
 	decodeTextDoc,
 	diffText,
 	encodeAnchor,
+	encodePlainString,
 	encodeTextDoc,
 	ExpandAfter,
 	ExpandBefore,
 	ExpandBoth,
 	ExpandNone,
+	isPlainString,
 	mergeText,
+	plainString,
 	plainTextOf,
 	TextDoc,
 	textMarksOf,

@@ -803,6 +803,99 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 	return t.TombstoneHorizon()
 }
 
+// PurgeEntityRows hard-deletes the selected rows of one entity and the index
+// entries they occupied. Entries go first so no statement can observe an entry
+// whose row this call has already removed; both are in the caller's
+// transaction, so a rollback keeps them together either way.
+//
+// The prefix becomes a half-open key RANGE rather than a LIKE: every text column
+// here is COLLATE "C" (see the package comment), so a range is the same bytewise
+// comparison every other key predicate makes — and, unlike LIKE, it can use the
+// primary-key index and needs no escaping of wildcards.
+//
+// A limit turns both statements into the same `key IN (SELECT … ORDER BY key
+// LIMIT n)` subquery — Postgres has no DELETE … LIMIT, and the subquery is what
+// the row delete needs anyway. The ORDER BY is load-bearing rather than cosmetic:
+// the two subqueries run against the same rows (the entries delete does not touch
+// them) and must select the SAME set, or entries outlive their row or die before
+// it. A total order over a unique key is what makes them agree.
+//
+// more is "this call hit its limit", which the interface allows: the drain that
+// exactly emptied the selection costs one more no-op call, which is cheaper than
+// probing for a next row on every chunk.
+func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (int, bool, error) {
+	where, args := purgeWhere(t.ns, t.ws, entity, keyPrefix, before)
+	selected, rowsWhere := where, where
+	if limit > 0 {
+		args = append(args, limit)
+		selected = fmt.Sprintf("%s ORDER BY key LIMIT $%d", where, len(args))
+		// The outer predicate reuses $1..$3, which purgeWhere always numbers as
+		// namespace, workspace and entity.
+		rowsWhere = `namespace = $1 AND workspace_id = $2 AND entity = $3 AND key IN (
+		   SELECT key FROM rows WHERE ` + selected + `)`
+	}
+	if _, err := t.tx.Exec(t.ctx,
+		`DELETE FROM index_entries
+		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key IN (
+		   SELECT key FROM rows WHERE `+selected+`
+		 )`,
+		args...,
+	); err != nil {
+		return 0, false, err
+	}
+	tag, err := t.tx.Exec(t.ctx, `DELETE FROM rows WHERE `+rowsWhere, args...)
+	if err != nil {
+		return 0, false, err
+	}
+	n := int(tag.RowsAffected())
+	return n, limit > 0 && n == limit, nil
+}
+
+// purgeWhere builds PurgeEntityRows' row predicate and its arguments. The first
+// three placeholders are shared with the enclosing index_entries statement, so
+// the numbering starts where that one's does.
+//
+// Both narrowings are optional: an empty prefix bounds nothing, and a zero
+// `before` means no age bound at all — which is NOT what its UnixMilli() would
+// say, so the branch is load-bearing rather than an optimization.
+func purgeWhere(ns, ws, entity, keyPrefix string, before time.Time) (string, []any) {
+	where := "namespace = $1 AND workspace_id = $2 AND entity = $3"
+	args := []any{ns, ws, entity}
+	next := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	if keyPrefix != "" {
+		where += " AND key >= " + next(keyPrefix)
+		// Both halves are needed: ">= prefix" alone also matches every key that
+		// merely sorts after it. The upper bound is missing only for a prefix of
+		// nothing but 0xff bytes, which no UTF-8 key can contain — so in
+		// practice this branch always runs.
+		if hi, bounded := prefixUpperBound(keyPrefix); bounded {
+			where += " AND key < " + next(hi)
+		}
+	}
+	if !before.IsZero() {
+		where += " AND updated_at < " + next(before.UnixMilli())
+	}
+	return where, args
+}
+
+// prefixUpperBound returns the least string greater than every string starting
+// with prefix, and whether one exists. Increment the last byte that can be
+// incremented and drop everything after it; a prefix of nothing but 0xff bytes
+// has no upper bound.
+func prefixUpperBound(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xff {
+			b[i]++
+			return string(b[:i+1]), true
+		}
+	}
+	return "", false
+}
+
 func (t *pgTx) CollectIdleClients(cutoff time.Time) (int, error) {
 	tag, err := t.tx.Exec(t.ctx,
 		`DELETE FROM clients WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,

@@ -17,6 +17,7 @@ import {
 	type ItemID,
 	type MarkOp,
 	type MarkValue,
+	requireWellFormed,
 	SIDE_L,
 	SIDE_R,
 	TextDoc,
@@ -30,6 +31,12 @@ const FORMAT_VERSION = 1;
  * v1's sections with relaxed reference resolution and the source document's
  * full version vector. Stored rows are always version 1. */
 export const FRAGMENT_VERSION = 2;
+
+/** Format version 3 is a PLAIN-STRING value: the tag followed by the text's
+ * UTF-8 bytes, the form a field carries when it says what it should read as
+ * without having been resolved into a document. The Go counterpart and the
+ * reasoning are in engine/text/plain.go. */
+export const PLAIN_STRING_VERSION = 3;
 
 const utf8Encoder = new TextEncoder();
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
@@ -270,6 +277,15 @@ export function decodeTextDoc(data: Uint8Array | undefined, peer: string): TextD
 		// loudly instead.
 		throw new Error('text: fragment where full document expected');
 	}
+	if (version === PLAIN_STRING_VERSION) {
+		// A plain-string value names text without saying who wrote it, and
+		// building a document from it would have to mint items under some peer
+		// — the choice this package refuses to make for a caller. plainTextOf
+		// reads it; a resolver applies it.
+		throw new Error(
+			'text: plain-string value where full document expected; resolve it under a writer identity first',
+		);
+	}
 	if (version !== FORMAT_VERSION) {
 		throw new Error(`text: unsupported format version ${version}`);
 	}
@@ -481,9 +497,13 @@ export function decodeAnchor(data: Uint8Array): Anchor {
 }
 
 /**
- * Decodes and returns the visible text — the cheap read path for query
- * evaluation, which decodes each row fresh. Rendering wants `textOf`, which
- * memoizes this per byte instance.
+ * Returns the text an encoded value reads as: a document's visible text, or a
+ * plain-string value's text. Empty input reads as `''`.
+ *
+ * The cheap read path for query evaluation, which decodes each row fresh, and
+ * the one to take when only the text is wanted — `decodeTextDoc` accepts
+ * documents alone, and a field-history record's before-state carries the other
+ * form. Rendering wants `textOf`, which memoizes this per byte instance.
  *
  * A resident document is borrowed rather than decoded (residency.ts), which is
  * what keeps a predicate over the row someone is typing into off the decode
@@ -493,5 +513,41 @@ export function decodeAnchor(data: Uint8Array): Anchor {
  */
 export function plainTextOf(data: Uint8Array | undefined): string {
 	if (!data || data.length === 0) return '';
+	if (data[0] === PLAIN_STRING_VERSION) return plainString(data);
 	return (textResidency.lend(data) ?? decodeTextDoc(data, '')).plainText();
+}
+
+/**
+ * Whether data is a plain-string value. Empty input is not one: an absent
+ * bytes field is a document nobody wrote yet.
+ */
+export function isPlainString(data: Uint8Array | undefined): boolean {
+	return data !== undefined && data.length > 0 && data[0] === PLAIN_STRING_VERSION;
+}
+
+/**
+ * Builds the plain-string value reading as s. Throws for the text the write
+ * entry points refuse (an unpaired surrogate), so a value that could never be
+ * applied cannot be built.
+ *
+ * The empty string encodes to a one-byte value rather than to nothing, which
+ * distinguishes "reads as empty" from an absent field. Callers that want the
+ * two to be indistinguishable should store no value at all.
+ */
+export function encodePlainString(s: string): Uint8Array {
+	requireWellFormed('plain string', s);
+	const body = utf8Encoder.encode(s);
+	const out = new Uint8Array(body.length + 1);
+	out[0] = PLAIN_STRING_VERSION;
+	out.set(body, 1);
+	return out;
+}
+
+/**
+ * Returns the text a plain-string value reads as. Throws when data is not one
+ * — including when it is a document, which plainTextOf reads instead.
+ */
+export function plainString(data: Uint8Array): string {
+	if (!isPlainString(data)) throw new Error('text: not a plain-string value');
+	return decodeUtf8(data.subarray(1), 'in plain-string value');
 }

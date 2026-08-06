@@ -39,7 +39,14 @@ import {
 } from './naming.js';
 import { RESERVED_QUERY_NAMES } from './query/proxy.js';
 import type { DeletedSegment, InsertedRange } from './text/doc.js';
-import { decodeTextDoc, encodeTextDoc, isFragment, mergeText } from './text/index.js';
+import {
+	decodeTextDoc,
+	encodeTextDoc,
+	isFragment,
+	isPlainString,
+	mergeText,
+	plainString,
+} from './text/index.js';
 
 /** A registered syncable entity, derived from (syncplane.v1.entity) options. */
 export interface EntityDef {
@@ -57,6 +64,13 @@ export interface EntityDef {
 	 * relations differently.
 	 */
 	indexes: IndexDef[];
+	/**
+	 * (syncplane.v1.entity).server_only: the entity's rows never sync, so the
+	 * local store holds none of them however the client is configured. It is
+	 * registered to be reachable by name — `queryServer` resolves against the
+	 * same registry — not to be synced.
+	 */
+	serverOnly: boolean;
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -94,7 +108,13 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		}
 		return field;
 	});
-	return { schema, name: opts.name, keyFields, indexes: indexesOf(schema, opts) };
+	return {
+		schema,
+		name: opts.name,
+		keyFields,
+		indexes: indexesOf(schema, opts),
+		serverOnly: opts.serverOnly,
+	};
 }
 
 /**
@@ -319,6 +339,16 @@ export class EntityRegistry {
 		return [ ...this.byName.keys() ];
 	}
 
+	/**
+	 * names() without the server-only entities: the ones a store can ever hold
+	 * rows of. Every path that asks "which entities does this client sync" goes
+	 * through here, so a registered-but-never-synced entity neither claims local
+	 * state nor forces work to acquire state that is never sent.
+	 */
+	syncableNames(): string[] {
+		return [ ...this.byName.values() ].filter((d) => !d.serverOnly).map((d) => d.name);
+	}
+
 	/** Forward refs declared by an entity (empty if none). */
 	forwardRefsOf(entity: string): ForwardRef[] {
 		return this.forwardRefs.get(entity) ?? [];
@@ -537,6 +567,21 @@ export function isTextField(field: DescField): boolean {
  * ("settings.color"). Opaque fields are replaced whole, unless a merger is
  * registered for the field and both sides carry a value, in which case the
  * merger combines them (mirroring lww.MergeWithMergers).
+ *
+ * Mutates `dst` in place and leaves `src` untouched. Message, list and map
+ * values are cloned on the way across; a `bytes` value is shared by reference,
+ * so treat it as immutable afterwards.
+ *
+ * Throws if a path names no field of `schema`, names a oneof member rather than
+ * its group, or sub-paths a field that cannot carry one. `dst` may be partially
+ * merged when it throws — paths are applied in order.
+ *
+ * @example Step a row back one entry of its field history. A text field lands
+ * as the plain-string value the record carries, which `plainTextOf` reads.
+ * ```ts
+ * const before = fromBinary(IssueSchema, rec.prior);
+ * mergeMask(IssueSchema, row, before, rec.mask?.paths ?? []);
+ * ```
  */
 export function mergeMask<T extends Message>(
 	schema: DescMessage,
@@ -1047,34 +1092,103 @@ export function setTextFieldBytes(
 export type TextStringEdits = Map<string, { deleted: DeletedSegment[]; inserted: InsertedRange[] }>;
 
 /**
- * Converts a crud's pending text strings into document bytes in place:
- * each string is diffed (multi-hunk) against the field's document in the
- * merged row `prevRow`, under the leased writer identity `peer`, and the
- * resulting full document replaces the field inside crud.value. For a PATCH
- * the field's path is added to the mask when nothing covers it yet.
+ * Whether any text field of a crud's value holds a plain-string value, and so
+ * needs resolving into edits before the write.
+ *
+ * The enqueue path asks before it opens its transaction, because resolving
+ * needs a leased writer peer and the lease has to be acquired first.
+ */
+export function crudHasPlainString(
+	def: EntityDef,
+	crud: CrudMutation,
+	textPaths: readonly string[],
+): boolean {
+	if (textPaths.length === 0) return false;
+	const value = fromBinary(def.schema, crud.value) as unknown as Rec;
+	return textPaths.some((path) =>
+		isPlainString(getBytesAt(value, textFieldChain(def.schema, path)))
+	);
+}
+
+/**
+ * Converts a crud's text strings into document bytes in place: each string is
+ * diffed (multi-hunk) against the field's document in the merged row `prevRow`,
+ * under the leased writer identity `peer`, and the resulting full document
+ * replaces the field inside crud.value.
+ *
+ * Strings come from two places. `texts` is what the caller asked to write, and
+ * a path there is added to a PATCH's mask when nothing covers it yet. The other
+ * is a text field of crud.value already holding a plain-string value (see
+ * `encodePlainString`, which is what a field-history record's before-state
+ * carries), so restoring a record needs no per-field handling. That one does
+ * not widen the mask; outside the mask it is cleared rather than left to ride
+ * along, since the server refuses an unresolved value in any position.
+ *
+ * `prevRow` is read only when there is a string to diff, keeping a write that
+ * touches no text off the O(document) merged-row read. `peer` may be undefined
+ * only when there is nothing to convert — the caller takes the lease before its
+ * transaction opens (`crudHasPlainString`) — and converting without one throws.
+ *
+ * Returns undefined when the crud carries no text strings at all.
  *
  * Must run inside the enqueue transaction with the peer lease held: the diff
  * base has to be the row the overlay will apply on top of, and the peer must
  * not be speakable by anyone else while counters are allocated.
  */
-export function applyTextStringsToCrud(
+export async function applyTextStringsToCrud(
 	def: EntityDef,
 	crud: CrudMutation,
-	prevRow: Uint8Array | undefined,
-	texts: ReadonlyMap<string, string>,
-	peer: string,
-): TextStringEdits {
-	const prev = prevRow !== undefined
-		? fromBinary(def.schema, prevRow) as unknown as Rec
-		: undefined;
+	prevRow: () => Promise<Uint8Array | undefined>,
+	texts: ReadonlyMap<string, string> | undefined,
+	peer: string | undefined,
+	textPaths: readonly string[],
+): Promise<TextStringEdits | undefined> {
+	if ((texts === undefined || texts.size === 0) && textPaths.length === 0) return undefined;
+
 	const value = fromBinary(def.schema, crud.value) as unknown as Rec;
+	const masked = (path: string): boolean =>
+		crud.op !== CrudOp.PATCH || !crud.fieldMask
+		|| crud.fieldMask.paths.some((p) => p === path || path.startsWith(`${p}.`));
+
+	// Embedded values first, so an explicit string for the same path wins: it
+	// is the caller's stated intent for this write, while an embedded value
+	// arrived with whatever they decoded it from.
+	const pending = new Map<string, string>();
+	let cleared = false;
+	for (const path of textPaths) {
+		const chain = textFieldChain(def.schema, path);
+		const current = getBytesAt(value, chain);
+		if (!isPlainString(current)) continue;
+		if (!masked(path)) {
+			setBytesAt(value, chain, new Uint8Array(0));
+			cleared = true;
+			continue;
+		}
+		pending.set(path, plainString(current!));
+	}
+	if (texts) { for (const [ path, s ] of texts) pending.set(path, s); }
+
+	if (pending.size === 0) {
+		if (cleared) crud.value = toBinary(def.schema, value as unknown as Message);
+		return undefined;
+	}
+
+	if (peer === undefined) {
+		throw new Error(
+			`text strings in a write to "${def.name}" need a leased writer peer, and none was taken`,
+		);
+	}
+	const prevBytes = await prevRow();
+	const prev = prevBytes !== undefined
+		? fromBinary(def.schema, prevBytes) as unknown as Rec
+		: undefined;
 	const edits: TextStringEdits = new Map();
-	for (const [ path, s ] of texts) {
+	for (const [ path, s ] of pending) {
 		const chain = textFieldChain(def.schema, path);
 		const doc = decodeTextDoc(getBytesAt(prev, chain), peer);
 		edits.set(path, doc.setString(s));
 		setBytesAt(value, chain, encodeTextDoc(doc));
-		if (crud.op === CrudOp.PATCH && crud.fieldMask) {
+		if (crud.op === CrudOp.PATCH && crud.fieldMask && texts?.has(path)) {
 			const covered = crud.fieldMask.paths.some(
 				(p) => p === path || path.startsWith(`${p}.`),
 			);

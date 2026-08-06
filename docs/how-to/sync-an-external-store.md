@@ -57,9 +57,11 @@ data.
 ## Collaborative text in a connector
 
 Connectors report text as plain strings (`Item.TextFields`). The connector diffs
-against the shadow base and unions with the engine's current document — via the
-same `server.ApplyTextStrings` three-way that backs `WithTextString` — so an
-external file edit and a concurrent client edit both survive.
+against the shadow base — the last state the source observed — and unions the
+result with the engine's current document, so an external file edit and a
+concurrent client edit both survive. The shadow is what buys that: a writer with
+no stored ancestor diffs against the current document instead, and takes the
+field's text whole ([Write from server-side code](server-side-writes.md#collaborative-text)).
 
 Two constraints:
 

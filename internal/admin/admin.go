@@ -72,7 +72,7 @@ func (h *handler) apps(w http.ResponseWriter, r *http.Request) {
 	for _, sc := range schemas {
 		var ents []string
 		if srv := h.mgr.App(sc.AppID); srv != nil {
-			for _, e := range srv.Entities() {
+			for _, e := range appEntities(srv) {
 				ents = append(ents, e.Name)
 			}
 		}
@@ -94,7 +94,7 @@ func (h *handler) app(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	entities := srv.Entities()
+	entities := appEntities(srv)
 	if len(workspaces) > 0 && len(entities) > 0 {
 		http.Redirect(w, r, entityURL(app, workspaces[0], entities[0].Name), http.StatusSeeOther)
 		return
@@ -650,17 +650,38 @@ func (h *handler) resolveApp(w http.ResponseWriter, r *http.Request) (*server.Se
 }
 
 // resolveEntity additionally resolves the {entity} path value to its metadata.
+// A managed entity resolves to 404 like an unregistered one: every route this
+// serves leads into the generic editor, and appEntities keeps those entities
+// out of the UI in the first place.
 func (h *handler) resolveEntity(w http.ResponseWriter, r *http.Request) (*server.Server, string, server.EntityMeta, bool) {
 	srv, app, ok := h.resolveApp(w, r)
 	if !ok {
 		return nil, "", server.EntityMeta{}, false
 	}
 	meta, ok := srv.Entity(r.PathValue("entity"))
-	if !ok {
+	if !ok || meta.Managed {
 		http.NotFound(w, r)
 		return nil, "", server.EntityMeta{}, false
 	}
 	return srv, app, meta, true
+}
+
+// appEntities lists an app's entities as the UI offers them: everything
+// registered except what the engine manages for itself. The admin browser and
+// the editor are one surface — every row it lists is a row it will let someone
+// edit or delete — and its writes go through Server.Mutate, which trusts the
+// caller, so hiding those entities is what keeps a hand-written field-history
+// record out of the log (see server.EntityMeta.Managed).
+func appEntities(srv *server.Server) []server.EntityMeta {
+	all := srv.Entities()
+	out := make([]server.EntityMeta, 0, len(all))
+	for _, e := range all {
+		if e.Managed {
+			continue
+		}
+		out = append(out, e)
+	}
+	return out
 }
 
 // autoIDField returns the entity's key field when it is keyed by a single

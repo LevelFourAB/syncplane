@@ -2,7 +2,10 @@ export {
 	decodeAnchor,
 	decodeTextDoc,
 	encodeAnchor,
+	encodePlainString,
 	encodeTextDoc,
+	isPlainString,
+	plainString,
 	plainTextOf,
 } from './codec.js';
 export {

@@ -160,8 +160,8 @@ A GC pass collects per-workspace failures and carries on, so `gc.workspaces`
 with `outcome=error` is where one persistently broken workspace shows up —
 invisible in `gc.duration` alone.
 
-`gc_kind` is `idle_clients`, `idempotency_keys`, `text_rows` or
-`stranded_consumers`. **Alert on `stranded_consumers`**: an effect consumer
+`gc_kind` is `idle_clients`, `idempotency_keys`, `text_rows`, `history_records`
+or `stranded_consumers`. **Alert on `stranded_consumers`**: an effect consumer
 collected below the horizon stopped reacting to writes long enough to be given
 up on, and what it missed cannot be recovered.
 

@@ -256,11 +256,18 @@ func (d *Doc) PlainText() string {
 	return string(runes)
 }
 
-// PlainText decodes an encoded document and returns its visible text. It is
-// the cheap read path for query evaluation, rendering and connectors.
+// PlainText returns the text an encoded value reads as: a document's visible
+// text, or a plain-string value's text (plain.go). Empty input reads as "".
+//
+// It is the cheap read path for query evaluation, rendering and connectors, and
+// the one to take when only the text is wanted: Decode accepts documents alone,
+// and a field-history record's before-state carries the other form.
 func PlainText(data []byte) (string, error) {
 	if len(data) == 0 {
 		return "", nil
+	}
+	if IsPlainString(data) {
+		return PlainString(data)
 	}
 	d, err := Decode(data, "")
 	if err != nil {

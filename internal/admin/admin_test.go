@@ -122,6 +122,41 @@ var _ = Describe("admin HTTP", func() {
 		Expect(body).To(ContainSubstring("project"))
 	})
 
+	It("keeps the engine's field-history entity out of the UI", func() {
+		// A second app, since opting into history is a schema property and the
+		// entity only exists in a catalog that holds an opted-in entity.
+		set := descriptorSet(project, issue)
+		optIntoHistory(set, "Issue", "title")
+		const histApp = "historied"
+		_, err := mgr.Register(ctx, histApp, marshalSet(set))
+		Expect(err).NotTo(HaveOccurred())
+		_, registered := mgr.App(histApp).Entity("syncplane_field_history")
+		Expect(registered).To(BeTrue(), "the engine should have registered its history entity")
+
+		_, body := get("/")
+		Expect(body).To(ContainSubstring(histApp))
+		Expect(body).NotTo(ContainSubstring("syncplane_field_history"))
+
+		// Nor in the entity nav the browser renders beside the rows.
+		histPath := "/apps/" + histApp + "/ws/" + ws + "/e/syncplane_field_history"
+		status, body := get("/apps/" + histApp + "/ws/" + ws + "/e/issue")
+		Expect(status).To(Equal(http.StatusOK))
+		Expect(body).NotTo(ContainSubstring("syncplane_field_history"))
+
+		// Every route into the generic editor refuses it, so a URL typed by
+		// hand cannot write or delete a record either.
+		status, _ = get(histPath)
+		Expect(status).To(Equal(http.StatusNotFound))
+		status, _ = get(histPath + "/new")
+		Expect(status).To(Equal(http.StatusNotFound))
+		status, _ = get(histPath + "/rows/issue%2Fi1%2F1")
+		Expect(status).To(Equal(http.StatusNotFound))
+		Expect(submit(http.MethodPost, histPath+"/rows", url.Values{}).StatusCode).
+			To(Equal(http.StatusNotFound))
+		Expect(submit(http.MethodDelete, histPath+"/rows/issue%2Fi1%2F1", url.Values{}).StatusCode).
+			To(Equal(http.StatusNotFound))
+	})
+
 	It("renders a row table fragment listing stored rows", func() {
 		Expect(mgr.App(appID).Mutate(ctx, ws, func(tx *server.EntityTx) error {
 			meta, _ := mgr.App(appID).Entity("issue")

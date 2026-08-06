@@ -58,7 +58,9 @@
 //     ScanIndex, IndexState, SetIndexState) exist only for LIVE rows: a
 //     DeleteRow is paired with a DeleteIndexEntries by the engine, so a
 //     tombstone never has entries. CollectTombstones is a bulk delete of rows
-//     that are already gone from the index and needs no index work. The keys
+//     that are already gone from the index and needs no index work;
+//     PurgeEntityRows removes live rows, so it must drop their entries with
+//     them — it is the one bulk delete that does its own index work. The keys
 //     are opaque bytes compared BYTEWISE — the engine builds them so that byte
 //     order is the row order it wants, and an adapter that applies a collation
 //     instead answers ordered queries wrongly. Entries are derived state:
@@ -472,6 +474,49 @@ type WriteTx interface {
 	// advances the workspace's tombstone horizon to the highest version it
 	// deleted. The horizon never regresses. Returns the resulting horizon.
 	CollectTombstones(cutoff time.Time) (horizon uint64, err error)
+	// PurgeEntityRows deletes rows of ONE entity — LIVE rows included — together
+	// with the secondary-index entries those rows occupied, and returns how many
+	// rows were removed and whether the selection may still hold more. It leaves
+	// no tombstone and does not move the tombstone horizon.
+	//
+	// Three narrowings, all optional and all applied:
+	//
+	//   - keyPrefix keeps only rows whose key starts with it, compared BYTEWISE
+	//     like every other key comparison here (see ScanEntity). Empty matches
+	//     every row of the entity.
+	//   - before keeps only rows last written strictly before it. The ZERO time
+	//     means NO age bound — not "before the epoch" — so a caller that wants
+	//     only the prefix passes time.Time{}.
+	//   - limit caps how many rows ONE call removes; <= 0 removes every match at
+	//     once. WHICH matching rows a bounded call takes is unspecified — only
+	//     that it takes some and reports the rest through more, so a caller that
+	//     keeps calling drains the selection.
+	//
+	// more means matching rows MAY remain, and an adapter may answer it from
+	// nothing better than "this call hit its limit": a call that removed exactly
+	// the last limit rows is allowed to report more, and the next one then removes
+	// nothing and reports false. Only false is definite, and it always arrives,
+	// because the predicate is fixed while rows only leave the selection. An
+	// unbounded call never reports more.
+	//
+	// This is the only delete in the interface that removes a live row outright,
+	// and it is sound only for an entity no client ever receives — the engine's
+	// server_only entities, of which the field-history log is the one that ships.
+	// Used on anything a client syncs it would silently delete rows every replica
+	// still holds, with no tombstone to carry the deletion and no way to notice.
+	//
+	// Implement it as a bulk statement rather than a scan plus DeleteRow: a
+	// DeleteRow per expired record would mint a tombstone per record, which is
+	// what this exists to avoid. Index entries must go with the rows in the same
+	// statement — the engine has no row keys in hand here to pair a
+	// DeleteIndexEntries with, and an entry outliving its row leaks.
+	//
+	// The engine calls it two ways: the GC pass expires old records in bounded
+	// chunks it drains across transactions (an age bound, no prefix, a limit), and
+	// a DELETE drops the records describing the row it is removing (a prefix, no
+	// age bound, no limit — those records must go with the row in its own
+	// transaction or not at all). Matching nothing is not an error.
+	PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (removed int, more bool, err error)
 	// CollectIdleClients deletes the workspace's per-client watermark rows
 	// not updated since cutoff and returns how many were removed. A pruned
 	// client that later returns re-enters via watermark adoption (see the

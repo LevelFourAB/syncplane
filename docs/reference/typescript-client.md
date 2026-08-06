@@ -137,8 +137,10 @@ interface Row<T = unknown> {
   Results are server snapshots: not merged with the overlay, not stored, never feed
   watchers. Works before `start()`; requires connectivity. Ordering matches the
   local evaluator. Unavailable inside `transact` (no transport of its own).
-  Unindexed on the server — a full entity scan per call, memory-bounded to
-  `offset + limit` — so prefer a selective predicate over deep pagination.
+  A declared [secondary index](proto-options.md#secondary-indexes) serves it when
+  one fits the predicate and ordering; without one the call costs a full entity
+  scan on the server, memory-bounded to `offset + limit` — so prefer a selective
+  predicate over deep pagination.
 
 ---
 
@@ -698,6 +700,17 @@ function subscription<D>(
 
 Empty/absent subscriptions = full sync. All tabs sharing a store sync the UNION of
 live subscription sets (full sync is absorbing) — see `SyncStatus.scope`.
+
+Which is why subscriptions cannot be used to keep an entity off clients: one tab
+that never calls `setSubscriptions` pulls the whole catalog into the shared
+store and every sibling inherits it. An entity that must never reach a client is
+declared [`server_only`](proto-options.md#server-only-entities) in the schema and
+read with `queryServer`.
+
+Such an entity is still registered in `entities` — that is how `queryServer`
+resolves it — but naming it in a subscription set throws, since it would sync
+nothing. An app deriving its subscriptions from its entity list has to leave it
+out.
 
 ### Coverage
 

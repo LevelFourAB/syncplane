@@ -351,6 +351,62 @@ func SplitPath(path string) []string {
 	}
 }
 
+// EqualField reports whether one field holds the same value in two messages of
+// the same type. Comparison follows proto.Equal for every field shape: scalar,
+// message, repeated and map, with an absent field never equal to a present one.
+func EqualField(a, b protoreflect.Message, fd protoreflect.FieldDescriptor) bool {
+	if a.Has(fd) != b.Has(fd) {
+		return false
+	}
+	if !a.Has(fd) {
+		return true
+	}
+	// Projecting into empty messages reuses proto.Equal's per-shape semantics
+	// rather than restating them. Comparing the field's encoding instead would
+	// be cheaper and wrong: map entries have no stable wire order, so two equal
+	// maps routinely marshal to different bytes.
+	am := a.Type().New()
+	bm := b.Type().New()
+	am.Set(fd, a.Get(fd))
+	bm.Set(fd, b.Get(fd))
+	return proto.Equal(am.Interface(), bm.Interface())
+}
+
+// EqualUnit reports whether the mask unit named by seg holds the same value in
+// both messages. A unit is what ONE top-level mask segment may name — a field,
+// or a oneof group (see mergePath) — so a caller narrowing a mask to the parts
+// that moved splits at the same granularity the merge applies at.
+//
+// An unrecognized name reports false — a mask naming it could not be applied
+// either, and "it differs" is the conservative answer for a caller deciding
+// whether to act on the unit.
+func EqualUnit(a, b protoreflect.Message, seg string) bool {
+	desc := a.Descriptor()
+	if fd := desc.Fields().ByName(protoreflect.Name(seg)); fd != nil {
+		if od := OneofOf(fd); od != nil {
+			// A member name is not a unit — the merge refuses it — but a caller
+			// that resolved one anyway means the group.
+			return equalOneof(a, b, od)
+		}
+		return EqualField(a, b, fd)
+	}
+	if od := desc.Oneofs().ByName(protoreflect.Name(seg)); od != nil && !od.IsSynthetic() {
+		return equalOneof(a, b, od)
+	}
+	return false
+}
+
+// equalOneof compares a oneof group: which member is set, and then that
+// member's value. A group is replaced whole by the merge, so it is compared
+// whole here.
+func equalOneof(a, b protoreflect.Message, od protoreflect.OneofDescriptor) bool {
+	af, bf := a.WhichOneof(od), b.WhichOneof(od)
+	if af != bf {
+		return false
+	}
+	return af == nil || EqualField(a, b, af)
+}
+
 // splitSeg splits path at the first unescaped '.'. The returned segment keeps
 // its escape sequences intact (decode separately); rest is everything after the
 // dot. A backslash escapes the following byte. Mirrors the TS splitter.

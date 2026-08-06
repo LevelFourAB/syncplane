@@ -206,6 +206,43 @@ keep their items and the marks attached to them. Strings further apart than the
 shared `maxDiffCost` bound (1024) fall back to one replacement hunk; the bound is
 pinned by the shared vectors because it changes which items survive.
 
+## A field can carry text instead of a document
+
+The encoded forms are tagged by their first byte: `0x01` a document, `0x02` a
+delta-state fragment, `0x03` a **plain-string value** — the tag followed by the
+text's UTF-8 bytes. The third exists because some values have to say what a field
+should read as before anyone has decided who is writing it. A field-history
+record's before-state is the case that forced it: the server captures what a
+field held, and the identity that will put it back belongs to whoever restores,
+possibly days later.
+
+Recording the document instead fails twice over. It cannot be restored as
+itself — writing an old document back merges it with the stored one, where the
+delete markers win, so the restore silently changes nothing — and it costs
+several times the text it renders, recorded again for every write.
+
+The tag is what makes the recorded value a **legal value of the field** rather
+than a convention two sides have to remember. A record decodes as an ordinary
+partial message of its source entity, restores by being PATCHed back under the
+record's mask with nothing said about the text field, and `plainTextOf` /
+`text.PlainText` read either form for display.
+
+Resolving one is a diff against the stored document, minting the difference
+under a writer identity — so it happens where an identity exists: the client's
+enqueue path under its leased peer, and `EntityTx.Put`/`Patch` under
+`WithTextPeer`.
+
+Everywhere else refuses it by name. The document decoder rejects it the way it
+already rejects a fragment, and the merger rejects it on either side. The
+server's ingress guard rejects it in any position, masked or not — the wire
+carries documents, and a client resolves before it pushes.
+
+Where a value may appear is therefore a matter of **direction, not storage**. A
+field-history record carries one at rest, and that record is stored and served
+like any other row; what is refused is a plain-string value arriving as the
+incoming side of a write. Only a live text field is guaranteed to hold a
+document.
+
 ## The PUT exception
 
 Every PUT path — `EntityTx.Put` (trusted server-side writes, connectors), client
@@ -304,6 +341,33 @@ short-lived ones.
 
 There is no presence/awareness channel; and formatting is out of scope — marks
 are for annotations, so keep rich text in the source format (e.g. Markdown).
+
+A client that does not implement the CRDT cannot set a text field: the wire
+refuses a plain-string value in every position, and strings resolve in-process
+instead — the TypeScript client's enqueue path under its leased peer, and
+`EntityTx.Put`/`Patch` under `WithTextPeer`. A string API in front of the engine
+is therefore server-side Go code.
+
+Nothing in the CRDT forces that. A server-minted peer would be sound on the
+argument that already lets a connector reuse one: resolution runs inside the
+serialized write transaction and observes the stored document's version before
+allocating counters. What is missing is an identity the engine is willing to
+invent — `client_id` is an unauthenticated idempotency handle — and an ancestor.
+The ancestor is the part that cannot be recovered. A three-way diff needs the
+document the writer last saw rather than its text, because hunks are positions
+and positions have to land on items, and an item carries one deleted flag with
+no record of which operation set it. The state a version vector describes cannot
+be reconstructed from the current document, so the only sound ancestors are the
+ones somebody stored: the client's confirmed row, a connector's shadow.
+
+A stateless caller would therefore get the two-way form `EntityTx.Put`/`Patch`
+and ingress-only connectors already take — text the server holds at that moment
+and the string does not contain is deleted, while edits arriving afterwards
+still merge. That is worth having where a caller names its own identity and
+knows it is the source of truth for the field, and not worth having as the
+shortest path to writing text. The cost of holding that line falls on field
+history, where a recorded value is readable by any client and restorable only by
+one that can resolve it.
 
 ## Related
 

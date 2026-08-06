@@ -2346,15 +2346,15 @@ export class Coordinator {
 	/**
 	 * Starts reporting a workspace as hydrating, before its first row lands.
 	 *
-	 * The seed is everything this tab's own scope names — Begin replaces it with
-	 * what the server will actually ship. A full-sync client cannot narrow that
-	 * to the entities the SERVER holds, and must not: an entity it does not know
-	 * about cannot be read locally anyway, and one the server drops from the
-	 * snapshot completes when the next entity's rows arrive.
+	 * The seed is everything this tab's own scope names that can sync at all —
+	 * Begin replaces it with what the server will actually ship. A full-sync
+	 * client cannot narrow that to the entities the SERVER holds, and must not:
+	 * an entity it does not know about cannot be read locally anyway, and one the
+	 * server drops from the snapshot completes when the next entity's rows arrive.
 	 */
 	private beginHydration(workspaceId: string, subs: Subscription[]): void {
 		const scoped = subs.length === 0
-			? this.opts.registry.names()
+			? this.opts.registry.syncableNames()
 			: [ ...new Set(subs.map((s) => s.entity)) ];
 		this.hydration.begin(workspaceId, scoped);
 		this.publishHydration(workspaceId);

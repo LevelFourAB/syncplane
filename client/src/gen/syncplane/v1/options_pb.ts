@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIowBCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSJmCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5OmMKDmZpZWxkX2JlaGF2aW9yEh0uZ29vZ2xlLnByb3RvYnVmLkZpZWxkT3B0aW9ucxi1hwMgASgLMhsuc3luY3BsYW5lLnYxLkZpZWxkQmVoYXZpb3JSDWZpZWxkQmVoYXZpb3JCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxItABCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IncKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCCpmCgxEZWxldGVQb2xpY3kSHQoZREVMRVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0RFTEVURV9QT0xJQ1lfQUxMT1cQARIeChpERUxFVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -59,6 +59,32 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: syncplane.v1.DeletePolicy delete_policy = 4;
    */
   deletePolicy: DeletePolicy;
+
+  /**
+   * Keep this entity's rows on the server only: they are never bootstrapped,
+   * pulled or streamed to a client, and a client that names the entity in a
+   * subscription or a mutation is refused rather than served nothing.
+   *
+   * It is NOT a permission, and subscriptions are not a substitute for it: an
+   * empty subscription list means full sync, and full sync is ABSORBING
+   * across the tabs that share one local store, so one tab that never narrows
+   * its subscriptions pulls the entity into storage every sibling tab reads.
+   *
+   * Server-side reads are unaffected: the Query RPC, the in-process view and
+   * query APIs, and mutators all still reach the entity. Server-only means
+   * "does not sync", not "cannot be read".
+   *
+   * @generated from field: bool server_only = 5;
+   */
+  serverOnly: boolean;
+
+  /**
+   * Record an append-only history of this entity's field changes. See
+   * HistoryOptions.
+   *
+   * @generated from field: syncplane.v1.HistoryOptions history = 6;
+   */
+  history?: HistoryOptions | undefined;
 };
 
 /**
@@ -67,6 +93,49 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
  */
 export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 0);
+
+/**
+ * HistoryOptions opts an entity into server-side field history: a PUT or PATCH
+ * that changes one of the fields marked (syncplane.v1.field_behavior).history
+ * records what those fields held BEFORE the write, as a
+ * syncplane.v1.FieldHistory row. Which fields is always explicit — an entity
+ * that opts in and marks none is rejected at registration.
+ *
+ * Changes are recorded, not writes. The server compares the stored row with the
+ * one replacing it and records only the fields that actually moved: a write
+ * that stores a field's current value again records nothing for it, and a write
+ * that changes nothing records nothing at all.
+ *
+ * Sessions are recorded, not keystrokes. Successive writes to one row by one
+ * actor fold into a single record holding the state before the FIRST of them,
+ * for as long as the session stays open (server.WithHistorySession, five
+ * minutes by default). The states in between are not recorded: history answers
+ * "what did this hold before that editing session", not "replay the session".
+ *
+ * Capture is on the server's write path, so every write is covered whatever
+ * made it — a client push, a mutator, a connector, a trusted write.
+ *
+ * The history entity is server_only, so none of it ever syncs; read it with the
+ * Query RPC (the TypeScript client's queryServer). Restoring a value is an
+ * ordinary PATCH of the recorded mask — see the "Restore a field to a previous
+ * value" how-to.
+ *
+ * It records field changes, not row lifecycle. A DELETE is not captured and
+ * purges the row's records, so a removal that has to be recoverable or
+ * attributable is modelled as a field instead — see the "Recover a deleted row"
+ * how-to.
+ *
+ * @generated from message syncplane.v1.HistoryOptions
+ */
+export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
+};
+
+/**
+ * Describes the message syncplane.v1.HistoryOptions.
+ * Use `create(HistoryOptionsSchema)` to create a new message.
+ */
+export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 1);
 
 /**
  * IndexKey is one component of an index, in the order it sorts.
@@ -98,7 +167,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 1);
+  messageDesc(file_syncplane_v1_options, 2);
 
 /**
  * IndexSpec is one declared secondary index: a name unique within the entity,
@@ -130,7 +199,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 3);
 
 /**
  * FieldBehavior tunes how a field participates in merges and queries.
@@ -195,6 +264,29 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * @generated from field: bool indexed = 5;
    */
   indexed: boolean;
+
+  /**
+   * Record this field in the entity's history (see EntityOptions.history).
+   *
+   * Capture is EXPLICIT: an entity that opts in records the fields marked
+   * here and nothing else, and one that marks none is rejected at
+   * registration. There is no "capture everything" default — what a field
+   * costs to record varies by orders of magnitude, a collaborative-text field
+   * recording its whole document on every write that touches it.
+   *
+   * Key fields are never recorded in a history row's mask however they are
+   * marked: a PATCH may not change one, so a restore built from a mask naming
+   * one would be refused. The prior value still carries them, so a decoded
+   * history entry always says which row it belongs to.
+   *
+   * A oneof is captured as a GROUP, the only unit a mask may name it in, so
+   * marking any member marks the whole oneof.
+   *
+   * Ignored on an entity that has not opted in.
+   *
+   * @generated from field: bool history = 6;
+   */
+  history: boolean;
 };
 
 /**
@@ -202,7 +294,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * DeletePolicy says which callers may DELETE rows of an entity. The engine

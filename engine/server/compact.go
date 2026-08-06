@@ -180,5 +180,9 @@ func (s *Server) compactRow(
 	// tombstones from a document; it makes no semantic change to the row, so
 	// stamping the maintenance pass here would erase who last wrote the row and
 	// tell every feed consumer that the engine did.
+	//
+	// For the same reason this is the one row write that records no field
+	// history (see history.go): the document reads the same before and after, so
+	// a record would say a field changed when nothing did.
 	return true, tx.PutRow(info.name, row.Key, value, *seq, row.Actor)
 }

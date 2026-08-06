@@ -157,3 +157,70 @@ func collectWriteOpts(opts []WriteOption) (writeOpts, error) {
 	}
 	return o, nil
 }
+
+// hasPlainString reports whether any text field of msg carries a plain-string
+// value. Separate from takePlainStrings so Patch can skip cloning the message
+// on the ordinary write, which carries none.
+func hasPlainString(info *entityInfo, msg proto.Message) bool {
+	refl := msg.ProtoReflect()
+	for _, tf := range info.textFields {
+		if text.IsPlainString(chainGetBytes(refl, tf.chain)) {
+			return true
+		}
+	}
+	return false
+}
+
+// takePlainStrings moves every plain-string value in msg's text fields into the
+// map to hand ApplyTextStrings, keyed by dotted path, clearing the field so the
+// value can never reach a merge. It returns o.texts unchanged when msg carries
+// none, and errors when it carries one and o names no peer — resolving mints
+// edits, and the engine invents no identity to mint them under.
+//
+// An explicit WithTextString for the same path wins: the option states the
+// intent of this write, while a value in the message came in with whatever the
+// caller decoded.
+//
+// mask, when non-nil, limits it to the fields that write covers; a value
+// outside is cleared rather than resolved, which keeps a PATCH writing what its
+// mask names. Pass nil for a PUT, which carries no mask.
+func takePlainStrings(
+	info *entityInfo,
+	msg proto.Message,
+	mask []string,
+	o writeOpts,
+) (map[string]string, error) {
+	var found map[string]string
+	refl := msg.ProtoReflect()
+	for _, tf := range info.textFields {
+		value := chainGetBytes(refl, tf.chain)
+		if !text.IsPlainString(value) {
+			continue
+		}
+		if mask != nil && !maskCovers(mask, tf.path) {
+			chainClearBytes(refl, tf.chain)
+			continue
+		}
+		s, err := text.PlainString(value)
+		if err != nil {
+			return nil, fmt.Errorf("server: entity %q: text field %q: %w", info.name, tf.path, err)
+		}
+		if found == nil {
+			found = make(map[string]string, len(info.textFields))
+		}
+		found[tf.path] = s
+		chainClearBytes(refl, tf.chain)
+	}
+	if found == nil {
+		return o.texts, nil
+	}
+	if o.peer == "" {
+		return nil, fmt.Errorf(
+			"server: entity %q carries a plain-string text value, which requires WithTextPeer to resolve",
+			info.name)
+	}
+	for path, s := range o.texts {
+		found[path] = s
+	}
+	return found, nil
+}

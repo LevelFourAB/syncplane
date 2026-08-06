@@ -279,6 +279,79 @@ reader instead. The in-process reads (`ViewTx`, `ApplyTx`, `EntityTx`) also do
 not quarantine — they return the decode error to the Go caller, since silently
 short-changing a server-side job's result set is the worse failure.
 
+## Field history records editing sessions, not keystrokes
+
+An entity carrying [`history: {}`](../reference/proto-options.md#field-history)
+logs what its marked fields held before each change. Two decisions shape what
+that log can answer, and both trade fidelity for a size bound.
+
+The log is proportional to **edits**, not to writes. A local-first client
+re-sends whole rows, so a per-write log would carry one full-capture-set record
+per edit, each holding a `prior` identical to the row stored beside it. The
+server compares the stored row with the one replacing it and records only the
+fields that moved, which is why a write that stores a field's current value
+again leaves nothing behind.
+
+The log is proportional to **sessions**, not to writes within one. A run of
+writes to one row by one actor folds into the record the first of them opened.
+Without folding, a minute of typing lands hundreds of records, each carrying the
+whole document that one keystroke changed, and a row's history outgrows the row
+by orders of magnitude. What folding gives up is the states in between: history
+answers "what did this field hold before that editing session", not "replay the
+session". Keystroke granularity is what the collaborative-text delta log is for,
+and it has a much shorter retention.
+
+The same size argument decides two smaller things. A **text field is recorded as
+its text** rather than as its encoded document — the document carries a peer
+table, a version vector, per-run parents and the tombstoned runs holding every
+deleted character, several times the text it renders, and a restore has to go
+through the text anyway (writing document bytes back merges them with the stored
+document, where the delete markers win). And **capture is explicit** per field
+rather than defaulting to the whole message: what a field costs to record spans
+orders of magnitude, so an implicit capture set would opt a schema into
+recording a whole text document by adding a field — the one schema change the
+engine otherwise treats as always safe.
+
+Retention is finite by default (90 days) for the same reason: a workspace's
+history grows with every write, and
+[`HistoryForever`](../reference/server.md#history-that-lives-as-long-as-its-row)
+is a choice to make deliberately rather than to inherit.
+
+## Field history is a restore mechanism, not an audit log
+
+The log answers "what did this field hold before that editing session". It does
+not answer "who deleted this row" or "put the row back", and no retention
+setting changes that.
+
+A `DELETE` is not a field change, so nothing captures it — and it purges the
+row's records in the same transaction, whatever the retention. Both halves are
+forced. A restore is a PATCH, and a PATCH of a tombstoned row is a conflict
+under delete-wins, so a kept log would be unusable for the one thing it exists
+for. And keys are app-chosen, so a kept log would attach the old row's timeline
+to whatever row next claims the key — readable by whoever can read that new row,
+since a record is served under the **current** source row's filter.
+
+Keeping the records anyway would still not buy an undelete. Capture is explicit
+per field and records only the fields a write **moved**, so the log holds
+before-states and never the row's final state: that lived on the row, and the
+delete dropped it. A record of what a row's marked fields used to be is not a
+snapshot of what the row was.
+
+The change feed is not the fallback. It reports state rather than transitions,
+coalesces writes to one row into a single change, and collects past the
+tombstone horizon — attribution, not history. An audit trail that has to hold up
+is [a row you write yourself](../how-to/change-feed.md#not-an-event-log),
+retained under ordinary row rules.
+
+What does make a deletion recoverable and attributable is modelling it as a
+field. A captured `deleted_at` turns the delete into an ordinary PATCH, which
+the log records with its actor and timestamp, and turns the undelete into a
+PATCH clearing it, with no tombstone to conflict with.
+[`DELETE_POLICY_TRUSTED_ONLY`](../reference/proto-options.md#delete-policy) then
+reserves the real DELETE for erasure, where purging the history is the point
+rather than the limitation. See
+[Recover a deleted row](../how-to/recover-a-deleted-row.md).
+
 ## Custom mergers must satisfy the contract
 
 Fields marked `opaque: true` are replaced whole during merges on both sides — the

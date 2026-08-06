@@ -1663,6 +1663,96 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 	return t.TombstoneHorizon()
 }
 
+// PurgeEntityRows hard-deletes the selected rows of one entity and the index
+// entries they occupied. Entries go first so no statement can observe an entry
+// whose row this call has already removed; both are in the caller's
+// transaction, so a rollback keeps them together either way.
+//
+// The prefix becomes a half-open key RANGE rather than a LIKE: the column is
+// BINARY-collated, so a range is the same bytewise comparison every other key
+// predicate here makes, and it needs no escaping of LIKE's wildcards.
+//
+// A limit turns both statements into the same `key IN (SELECT … ORDER BY key
+// LIMIT n)` subquery. The ORDER BY is load-bearing rather than cosmetic: the two
+// subqueries run against the same rows (the entries delete does not touch them)
+// and must select the SAME set, or entries outlive their row or die before it.
+// A total order over a unique key is what makes them agree.
+//
+// more is "this call hit its limit", which the interface allows: the drain that
+// exactly emptied the selection costs one more no-op call, which is cheaper than
+// probing for a next row on every chunk.
+func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (int, bool, error) {
+	where, args := purgeWhere(t.ns, t.ws, entity, keyPrefix, before)
+	selected, rowsWhere := where, where
+	rowsArgs := args
+	if limit > 0 {
+		selected = where + " ORDER BY key LIMIT ?"
+		args = append(args, limit)
+		// The outer predicate repeats the (namespace, workspace, entity) keys the
+		// subquery already applies; the subquery is what narrows the delete.
+		rowsWhere = `namespace = ? AND workspace_id = ? AND entity = ? AND key IN (
+		   SELECT key FROM rows WHERE ` + selected + `)`
+		rowsArgs = append([]any{t.ns, t.ws, entity}, args...)
+	}
+	if _, err := t.tx.Exec(
+		`DELETE FROM index_entries
+		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key IN (
+		   SELECT key FROM rows WHERE `+selected+`
+		 )`,
+		append([]any{t.ns, t.ws, entity}, args...)...,
+	); err != nil {
+		return 0, false, err
+	}
+	res, err := t.tx.Exec(`DELETE FROM rows WHERE `+rowsWhere, rowsArgs...)
+	if err != nil {
+		return 0, false, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), limit > 0 && int(n) == limit, err
+}
+
+// purgeWhere builds PurgeEntityRows' row predicate and its arguments. Both
+// narrowings are optional: an empty prefix bounds nothing, and a zero `before`
+// means no age bound at all — which is NOT what its UnixMilli() would say, so
+// the branch is load-bearing rather than an optimization.
+func purgeWhere(ns, ws, entity, keyPrefix string, before time.Time) (string, []any) {
+	where := "namespace = ? AND workspace_id = ? AND entity = ?"
+	args := []any{ns, ws, entity}
+	if keyPrefix != "" {
+		hi, bounded := prefixUpperBound(keyPrefix)
+		where += " AND key >= ?"
+		args = append(args, keyPrefix)
+		// Both halves are needed: ">= prefix" alone also matches every key that
+		// merely sorts after it. The upper bound is missing only for a prefix of
+		// nothing but 0xff bytes, which no UTF-8 key can contain — so in
+		// practice this branch always runs.
+		if bounded {
+			where += " AND key < ?"
+			args = append(args, hi)
+		}
+	}
+	if !before.IsZero() {
+		where += " AND updated_at < ?"
+		args = append(args, before.UnixMilli())
+	}
+	return where, args
+}
+
+// prefixUpperBound returns the least string greater than every string starting
+// with prefix, and whether one exists. Increment the last byte that can be
+// incremented and drop everything after it; a prefix of nothing but 0xff bytes
+// has no upper bound.
+func prefixUpperBound(prefix string) (string, bool) {
+	b := []byte(prefix)
+	for i := len(b) - 1; i >= 0; i-- {
+		if b[i] < 0xff {
+			b[i]++
+			return string(b[:i+1]), true
+		}
+	}
+	return "", false
+}
+
 func (t *sqliteTx) CollectIdleClients(cutoff time.Time) (int, error) {
 	res, err := t.tx.Exec(
 		`DELETE FROM clients WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,

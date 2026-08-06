@@ -1318,7 +1318,7 @@ export class TextDoc {
  * op names the operation for the message; the index counts UTF-16 code units,
  * the unit of the string the caller passed.
  */
-function requireWellFormed(op: string, s: string): void {
+export function requireWellFormed(op: string, s: string): void {
 	for (let i = 0; i < s.length; i++) {
 		const c = s.charCodeAt(i);
 		if (c < 0xd800 || c > 0xdfff) continue;
