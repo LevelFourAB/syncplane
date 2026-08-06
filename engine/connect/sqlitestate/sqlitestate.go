@@ -18,7 +18,7 @@ import (
 )
 
 // schema is the immutable baseline; structural evolution happens through
-// migrations indexed by PRAGMA user_version, mirroring sqlitestore.
+// migrations indexed by PRAGMA user_version.
 const schema = `
 CREATE TABLE IF NOT EXISTS shadows (
 	workspace_id   TEXT NOT NULL,

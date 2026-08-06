@@ -93,10 +93,9 @@ import (
 )
 
 // migrations[i] takes a database at ledger version i to i+1. Index 0 is the
-// baseline: unlike sqlitestore — whose twelve migrations exist because
-// databases in the field must climb to the current shape — a first Postgres
-// schema is that shape stated once. Later structural changes append here, and
-// the ledger is what makes them replayable.
+// baseline — the current shape stated once, as sqlitestore's schema is. Later
+// structural changes append here, and the ledger is what makes them
+// replayable.
 //
 // Every text column is COLLATE "C" (see the package comment). It is applied
 // even to columns nothing orders by — the actor's subject and system label,

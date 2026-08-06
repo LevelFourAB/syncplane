@@ -47,10 +47,33 @@ var _ = storagetest.ConformanceNamespaced("sqlite", func() (storage.Adapter, sto
 	}
 })
 
-var _ = Describe("SQLite migrations", func() {
-	It("stamps user_version and keeps data intact across reopen", func() {
+var _ = Describe("SQLite schema versioning", func() {
+	// The stamps a database created by this binary carries, spelled out rather
+	// than read from the package: changing either is a compatibility break for
+	// every database in the field, and this is the assertion that makes it
+	// deliberate.
+	const applicationID = 0x73796E63
+	const baselineVersion = 1
+
+	// foreign creates a database holding one table under the given stamps,
+	// standing in for whatever a binary other than this one left behind.
+	foreign := func(name string, appID, version int) string {
+		path := filepath.Join(GinkgoT().TempDir(), name)
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(fmt.Sprintf(`
+			CREATE TABLE workspaces (workspace_id TEXT PRIMARY KEY);
+			PRAGMA application_id = %d;
+			PRAGMA user_version = %d;
+		`, appID, version))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+		return path
+	}
+
+	It("stamps a new database and keeps its data across reopen", func() {
 		ctx := context.Background()
-		path := filepath.Join(GinkgoT().TempDir(), "migrate.db")
+		path := filepath.Join(GinkgoT().TempDir(), "baseline.db")
 
 		store, err := sqlitestore.Open(path)
 		Expect(err).NotTo(HaveOccurred())
@@ -59,6 +82,8 @@ var _ = Describe("SQLite migrations", func() {
 		})).To(Succeed())
 		Expect(store.Close()).To(Succeed())
 
+		// The second Open finds the schema already there and must leave it — and
+		// the rows in it — alone.
 		store, err = sqlitestore.Open(path)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
@@ -72,215 +97,31 @@ var _ = Describe("SQLite migrations", func() {
 		db, err := sql.Open("sqlite", path)
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(db.Close()).To(Succeed()) })
-		var version int
+		var appID, version int
+		Expect(db.QueryRow(`PRAGMA application_id`).Scan(&appID)).To(Succeed())
+		Expect(appID).To(Equal(applicationID))
 		Expect(db.QueryRow(`PRAGMA user_version`).Scan(&version)).To(Succeed())
-		Expect(version).To(Equal(12), "all migrations applied exactly once")
+		Expect(version).To(Equal(baselineVersion))
 	})
 
-	It("migrates a pre-migration database in place", func() {
-		path := filepath.Join(GinkgoT().TempDir(), "old.db")
-		// Build a database the way the pre-migration binary did: baseline
-		// schema only, user_version 0, no updated_at column.
-		db, err := sql.Open("sqlite", path)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(`
-			CREATE TABLE workspaces (
-				workspace_id      TEXT PRIMARY KEY,
-				last_seq          INTEGER NOT NULL DEFAULT 0,
-				tombstone_horizon INTEGER NOT NULL DEFAULT 0
-			);
-			CREATE TABLE rows (
-				workspace_id TEXT NOT NULL,
-				entity       TEXT NOT NULL,
-				key          TEXT NOT NULL,
-				value        BLOB,
-				version      INTEGER NOT NULL,
-				deleted      INTEGER NOT NULL DEFAULT 0,
-				PRIMARY KEY (workspace_id, entity, key)
-			);
-			CREATE TABLE clients (
-				workspace_id     TEXT NOT NULL,
-				client_id        TEXT NOT NULL,
-				last_mutation_id INTEGER NOT NULL DEFAULT 0,
-				updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-				PRIMARY KEY (workspace_id, client_id)
-			);
-			INSERT INTO rows (workspace_id, entity, key, value, version, deleted)
-			VALUES ('ws1', 'widget', 'k1', x'aa', 1, 0);
-		`)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(db.Close()).To(Succeed())
-
-		store, err := sqlitestore.Open(path)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
-		Expect(store.WithReadTx(context.Background(), "ws1", func(tx storage.ReadTx) error {
-			row, err := tx.GetRow("widget", "k1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(row.Value).To(Equal([]byte{0xaa}))
-			return nil
-		})).To(Succeed())
+	It("refuses a database from a schema lineage that predates the stamp", func() {
+		// The version numbering restarts per lineage, so an unstamped database is
+		// refused whatever it says its version is — including one this binary
+		// would otherwise read as its own baseline.
+		for _, version := range []int{0, baselineVersion, 12} {
+			_, err := sqlitestore.Open(foreign(fmt.Sprintf("old-%d.db", version), 0, version))
+			Expect(err).To(MatchError(ContainSubstring("carries no application_id")))
+		}
 	})
 
-	It("migrates a user_version-1 database into the default namespace", func() {
-		ctx := context.Background()
-		path := filepath.Join(GinkgoT().TempDir(), "v1.db")
-		// A database as the user_version-1 binary left it: rows already have
-		// the INTEGER updated_at from migration 1, clients still carry the
-		// TEXT datetime('now') timestamps, nothing is namespaced.
-		db, err := sql.Open("sqlite", path)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(`
-			CREATE TABLE workspaces (
-				workspace_id      TEXT PRIMARY KEY,
-				last_seq          INTEGER NOT NULL DEFAULT 0,
-				tombstone_horizon INTEGER NOT NULL DEFAULT 0
-			);
-			CREATE TABLE rows (
-				workspace_id TEXT NOT NULL,
-				entity       TEXT NOT NULL,
-				key          TEXT NOT NULL,
-				value        BLOB,
-				version      INTEGER NOT NULL,
-				deleted      INTEGER NOT NULL DEFAULT 0,
-				updated_at   INTEGER NOT NULL DEFAULT 0,
-				PRIMARY KEY (workspace_id, entity, key)
-			);
-			CREATE INDEX rows_by_version ON rows (workspace_id, version);
-			CREATE TABLE clients (
-				workspace_id     TEXT NOT NULL,
-				client_id        TEXT NOT NULL,
-				last_mutation_id INTEGER NOT NULL DEFAULT 0,
-				updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-				PRIMARY KEY (workspace_id, client_id)
-			);
-			INSERT INTO workspaces (workspace_id, last_seq, tombstone_horizon) VALUES ('ws1', 5, 2);
-			INSERT INTO rows (workspace_id, entity, key, value, version, deleted, updated_at)
-			VALUES ('ws1', 'widget', 'k1', x'aa', 5, 0, 1700000000000);
-			INSERT INTO clients (workspace_id, client_id, last_mutation_id, updated_at)
-			VALUES ('ws1', 'c1', 3, '2024-01-02 03:04:05');
-			PRAGMA user_version = 1;
-		`)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(db.Close()).To(Succeed())
-
-		store, err := sqlitestore.Open(path)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
-
-		// All pre-migration data is visible through the default namespace ''.
-		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
-			row, err := tx.GetRow("widget", "k1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(row.Value).To(Equal([]byte{0xaa}))
-			Expect(row.Version).To(BeEquivalentTo(5))
-			seq, err := tx.CurrentSeq()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(seq).To(BeEquivalentTo(5))
-			horizon, err := tx.TombstoneHorizon()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(horizon).To(BeEquivalentTo(2))
-			id, err := tx.ClientLastMutationID("c1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(id).To(BeEquivalentTo(3))
-			// Migration 3->4 backfills a store epoch for the pre-existing
-			// workspace, so cursors already in the field are pinned to this
-			// lineage on the next pull.
-			epoch, err := tx.StoreEpoch()
-			Expect(err).NotTo(HaveOccurred())
-			Expect(epoch).NotTo(BeZero(), "pre-existing workspace backfilled with an epoch")
-			// Migration 8->9 adds attribution columns. A row written before it
-			// reads back unattributed, which is the truth about it: nothing
-			// recorded who wrote it, and nothing can reconstruct it.
-			Expect(row.Actor).To(Equal(storage.Actor{}), "pre-migration row is unattributed")
-			return nil
-		})).To(Succeed())
-
-		// ...and invisible from any other namespace.
-		Expect(store.Namespace("other").WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
-			_, err := tx.GetRow("widget", "k1")
-			Expect(err).To(MatchError(storage.ErrNotFound))
-			return nil
-		})).To(Succeed())
-
-		// The clients.updated_at TEXT timestamp became unix millis.
-		raw, err := sql.Open("sqlite", path)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { Expect(raw.Close()).To(Succeed()) })
-		var ns string
-		var updatedAt int64
-		Expect(raw.QueryRow(
-			`SELECT namespace, updated_at FROM clients WHERE workspace_id = 'ws1' AND client_id = 'c1'`,
-		).Scan(&ns, &updatedAt)).To(Succeed())
-		Expect(ns).To(Equal(""))
-		want := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC).UnixMilli()
-		Expect(updatedAt).To(Equal(want), "TEXT datetime converted to unix millis")
+	It("refuses a database that was never a syncplane store", func() {
+		_, err := sqlitestore.Open(foreign("other.db", 0x11223344, baselineVersion))
+		Expect(err).To(MatchError(ContainSubstring("is not a syncplane store")))
 	})
 
-	It("gives a user_version-9 database index storage without touching its rows", func() {
-		ctx := context.Background()
-		path := filepath.Join(GinkgoT().TempDir(), "v9.db")
-		// A database as the user_version-9 binary left it: namespaced,
-		// attributed, and with no index tables at all.
-		db, err := sql.Open("sqlite", path)
-		Expect(err).NotTo(HaveOccurred())
-		_, err = db.Exec(`
-			CREATE TABLE workspaces (
-				namespace           TEXT NOT NULL DEFAULT '',
-				workspace_id        TEXT NOT NULL,
-				last_seq            INTEGER NOT NULL DEFAULT 0,
-				tombstone_horizon   INTEGER NOT NULL DEFAULT 0,
-				store_epoch         INTEGER NOT NULL DEFAULT 0,
-				field_delta_horizon INTEGER NOT NULL DEFAULT 0,
-				PRIMARY KEY (namespace, workspace_id)
-			);
-			CREATE TABLE rows (
-				namespace     TEXT NOT NULL DEFAULT '',
-				workspace_id  TEXT NOT NULL,
-				entity        TEXT NOT NULL,
-				key           TEXT NOT NULL,
-				value         BLOB,
-				version       INTEGER NOT NULL,
-				deleted       INTEGER NOT NULL DEFAULT 0,
-				updated_at    INTEGER NOT NULL DEFAULT 0,
-				actor_issuer  TEXT NOT NULL DEFAULT '',
-				actor_subject TEXT NOT NULL DEFAULT '',
-				actor_client  TEXT NOT NULL DEFAULT '',
-				actor_system  INTEGER NOT NULL DEFAULT 0,
-				PRIMARY KEY (namespace, workspace_id, entity, key)
-			);
-			CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version);
-			INSERT INTO workspaces (workspace_id, last_seq, store_epoch) VALUES ('ws1', 7, 42);
-			INSERT INTO rows (workspace_id, entity, key, value, version)
-			VALUES ('ws1', 'widget', 'k1', x'aa', 5), ('ws1', 'widget', 'k2', x'bb', 7);
-			PRAGMA user_version = 9;
-		`)
-		Expect(err).NotTo(HaveOccurred())
-		Expect(db.Close()).To(Succeed())
-
-		store, err := sqlitestore.Open(path)
-		Expect(err).NotTo(HaveOccurred())
-		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
-
-		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
-			// Pre-existing rows survive untouched...
-			row, err := tx.GetRow("widget", "k1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(row.Value).To(Equal([]byte{0xaa}))
-			// ...and the new recency scan reads them newest-first.
-			var keys []string
-			Expect(tx.ScanEntityByVersionDesc("widget", 0, func(r storage.Row) error {
-				keys = append(keys, r.Key)
-				return nil
-			})).To(Succeed())
-			Expect(keys).To(Equal([]string{"k2", "k1"}))
-			// An index nobody has built reads as absent, not as an error.
-			hash, ready, err := tx.IndexState("issue", "__ref_project")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(hash).To(BeEmpty())
-			Expect(ready).To(BeFalse())
-			return nil
-		})).To(Succeed())
+	It("refuses a database newer than the binary", func() {
+		_, err := sqlitestore.Open(foreign("future.db", applicationID, baselineVersion+1))
+		Expect(err).To(MatchError(ContainSubstring("newer than this binary")))
 	})
 })
 

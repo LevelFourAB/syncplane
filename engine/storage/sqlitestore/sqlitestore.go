@@ -67,317 +67,214 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// schema is the immutable baseline: it must NEVER change, or fresh and
-// migrated databases diverge. Structural evolution happens through
-// migrations below, indexed by PRAGMA user_version; fresh databases apply
-// the baseline and then replay every migration.
+// applicationID stamps a file as a syncplane store, in the 32-bit slot SQLite
+// keeps for exactly that (PRAGMA application_id). It is what makes user_version
+// below readable: a database left by an earlier schema lineage, or one that was
+// never a syncplane store at all, carries 0 here, so its version numbers are
+// never mistaken for this lineage's. The value is "sync" in ASCII, chosen to be
+// recognisable in a hex dump rather than for any property of the number.
+const applicationID = 0x73796E63
+
+// baselineVersion is the PRAGMA user_version a database created from schema
+// carries, and the lowest this binary can open. The number counts within one
+// schema lineage and says nothing across lineages, which is what applicationID
+// settles first.
+const baselineVersion = 1
+
+// schema is the baseline every new database is created at — the current shape,
+// stated once, applied only to an empty file. It must NEVER change once
+// anything has been created from it: a database already in the field reaches a
+// new shape by replaying migrations, so an edit here makes fresh and upgraded
+// databases diverge. Structural evolution appends to migrations below.
 const schema = `
-CREATE TABLE IF NOT EXISTS workspaces (
-	workspace_id      TEXT PRIMARY KEY,
-	last_seq          INTEGER NOT NULL DEFAULT 0,
-	tombstone_horizon INTEGER NOT NULL DEFAULT 0
+CREATE TABLE workspaces (
+	namespace           TEXT NOT NULL DEFAULT '',
+	workspace_id        TEXT NOT NULL,
+	last_seq            INTEGER NOT NULL DEFAULT 0,
+	tombstone_horizon   INTEGER NOT NULL DEFAULT 0,
+	-- A random identity pinning a cursor to the store lineage that issued it
+	-- (see ReadTx.StoreEpoch); 0 reads back as "no epoch yet".
+	store_epoch         INTEGER NOT NULL DEFAULT 0,
+	-- The field-delta log's pruned-through watermark: a span reaching below it
+	-- cannot be trusted and falls back to full state.
+	field_delta_horizon INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id)
 );
-CREATE TABLE IF NOT EXISTS rows (
-	workspace_id TEXT NOT NULL,
-	entity       TEXT NOT NULL,
-	key          TEXT NOT NULL,
-	value        BLOB,
-	version      INTEGER NOT NULL,
-	deleted      INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (workspace_id, entity, key)
+
+CREATE TABLE rows (
+	namespace     TEXT NOT NULL DEFAULT '',
+	workspace_id  TEXT NOT NULL,
+	entity        TEXT NOT NULL,
+	key           TEXT NOT NULL,
+	value         BLOB,
+	version       INTEGER NOT NULL,
+	deleted       INTEGER NOT NULL DEFAULT 0,
+	updated_at    INTEGER NOT NULL DEFAULT 0,
+	-- Write attribution (see storage.Actor), two columns rather than one
+	-- encoded blob so a query can filter on a subject or a system label
+	-- without parsing, and so the empty string keeps its ordinary meaning.
+	actor_subject TEXT NOT NULL DEFAULT '',
+	actor_system  TEXT NOT NULL DEFAULT '',
+	PRIMARY KEY (namespace, workspace_id, entity, key)
 );
-CREATE INDEX IF NOT EXISTS rows_by_version ON rows (workspace_id, version);
-CREATE TABLE IF NOT EXISTS clients (
+-- What ScanChanges pages the whole workspace by.
+CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version);
+-- Partial, because deleted = 1 is the only collectable state, which keeps the
+-- GC index proportional to the dead rows rather than the live ones. Without
+-- it every pass range-scans the workspace: the primary key narrows to the
+-- workspace but not to the collectable subset.
+CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted = 1;
+-- Backs ScanEntityByVersionDesc. A recency window asks for ONE entity's newest
+-- live rows, and rows_by_version orders by version across every entity, so
+-- serving it from there means reading and discarding the other entities' rows.
+-- It is a second index rather than a widening of the first, because putting
+-- entity ahead of version there would cost the pull path its index. The key
+-- order matches aheadByRecency's tie-break (version descending, key ascending)
+-- so a page boundary lands where the in-memory top-K would have put it.
+CREATE INDEX rows_by_entity_version
+	ON rows (namespace, workspace_id, entity, version DESC, key) WHERE deleted = 0;
+
+CREATE TABLE clients (
+	namespace        TEXT NOT NULL DEFAULT '',
 	workspace_id     TEXT NOT NULL,
 	client_id        TEXT NOT NULL,
 	last_mutation_id INTEGER NOT NULL DEFAULT 0,
-	updated_at       TEXT NOT NULL DEFAULT (datetime('now')),
-	PRIMARY KEY (workspace_id, client_id)
+	updated_at       INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id, client_id)
+);
+CREATE INDEX clients_gc ON clients (namespace, workspace_id, updated_at);
+
+-- The server-global runtime schema catalog. app_id is the partition (no
+-- namespace or workspace columns): one engine hosts multiple apps, each
+-- registering a self-contained FileDescriptorSet the engine reloads and
+-- re-registers on boot.
+CREATE TABLE schemas (
+	app_id         TEXT PRIMARY KEY,
+	descriptor_set BLOB NOT NULL,
+	revision       TEXT NOT NULL,
+	updated_at     INTEGER NOT NULL DEFAULT 0
+);
+
+-- The collaborative-text delta log — one row per (text field, write) holding
+-- the fragment that write added, so a pull can ship a keystroke instead of a
+-- document. The primary key is ordered so the per-field span read (one row,
+-- one field, seq > cursor) is a range scan of its tail. frag is empty for a
+-- gap marker (see WriteTx.PutFieldDelta).
+CREATE TABLE field_deltas (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	field        TEXT NOT NULL,
+	seq          INTEGER NOT NULL,
+	frag         BLOB NOT NULL,
+	updated_at   INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id, entity, key, field, seq)
+);
+CREATE INDEX field_deltas_gc ON field_deltas (namespace, workspace_id, updated_at);
+
+-- Collaborative-text compaction floors — one row per text field whose
+-- tombstones have been purged, holding the version vector the document held at
+-- the purge. Read on every write to such a field, so it is keyed the way the
+-- row is.
+CREATE TABLE text_floors (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	field        TEXT NOT NULL,
+	vv           BLOB NOT NULL,
+	PRIMARY KEY (namespace, workspace_id, entity, key, field)
+);
+
+-- The idempotency ledger for trusted writes — one row per claimed key, holding
+-- the sequence the original write took and the caller's recorded result.
+CREATE TABLE idempotency (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	seq          INTEGER NOT NULL,
+	result       BLOB NOT NULL,
+	updated_at   INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id, key)
+);
+-- Backs the retention sweep, which is a range scan of one workspace's expired
+-- keys rather than of all of them.
+CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
+
+-- Secondary index entries. WITHOUT ROWID with a covering primary key, so a
+-- range scan of one index reads the b-tree it is already ordered by and never
+-- touches rows. k is a BLOB, which SQLite compares with memcmp — the bytewise
+-- order the engine's key encoder is built for. key sits in the PK after k for
+-- uniqueness only: k already ends with the row key, so two live rows cannot
+-- collide. entity comes ahead of idx because an index name is derived from a
+-- FIELD name ("__field_state"), so two entities that mark a field of the same
+-- name claim the same one, while an entry carries a bare row key that only
+-- identifies a row within its own entity.
+CREATE TABLE index_entries (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	idx          TEXT NOT NULL,
+	k            BLOB NOT NULL,
+	key          TEXT NOT NULL,
+	PRIMARY KEY (namespace, workspace_id, entity, idx, k, key)
+) WITHOUT ROWID;
+-- What makes the write path affordable: entries are replaced per row and
+-- deleted per row, and both need "every entry this row holds" without knowing
+-- which indexes those are.
+CREATE INDEX index_entries_by_row
+	ON index_entries (namespace, workspace_id, entity, key);
+-- Per-index build state: whether the entries cover the whole entity yet. Keyed
+-- like the entries, so one readiness flag never spans two entities' sets.
+CREATE TABLE index_state (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	idx          TEXT NOT NULL,
+	spec_hash    TEXT NOT NULL,
+	ready        INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id, entity, idx)
+);
+
+-- Effect-consumer state — how far each consumer has acted on the change feed,
+-- and the per-row snapshots it derives before-state from (see
+-- storage.ConsumerPosition). Both are written by the SAME transaction, which is
+-- what makes a crash redeliver a change instead of skipping it.
+CREATE TABLE consumer_positions (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	consumer     TEXT NOT NULL,
+	seq          INTEGER NOT NULL DEFAULT 0,
+	entity       TEXT NOT NULL DEFAULT '',
+	key          TEXT NOT NULL DEFAULT '',
+	updated_at   INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (namespace, workspace_id, consumer)
+);
+-- Backs the staleness sweep, which is a range scan of one workspace's expired
+-- consumers rather than of every consumer.
+CREATE INDEX consumer_positions_gc
+	ON consumer_positions (namespace, workspace_id, updated_at);
+-- No GC index of its own: shadows are only ever deleted per row, or wholesale
+-- with their consumer, and the primary key's (namespace, workspace_id,
+-- consumer) prefix is the range scan for that.
+CREATE TABLE consumer_shadows (
+	namespace    TEXT NOT NULL DEFAULT '',
+	workspace_id TEXT NOT NULL,
+	consumer     TEXT NOT NULL,
+	entity       TEXT NOT NULL,
+	key          TEXT NOT NULL,
+	snapshot     BLOB NOT NULL,
+	PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
 );
 `
 
-// migrations[i] upgrades a database at user_version i to i+1. Each runs in
-// its own transaction; user_version is bumped inside that transaction.
-var migrations = []string{
-	// 0 -> 1: row write timestamps (unix millis) for tombstone GC. Rows
-	// written before this migration keep updated_at=0, so pre-existing
-	// tombstones are collected on the first GC pass — intended.
-	`ALTER TABLE rows ADD COLUMN updated_at INTEGER NOT NULL DEFAULT 0`,
-	// 1 -> 2: app namespacing + clients.updated_at TEXT -> INTEGER. All
-	// three tables gain a namespace column in their primary key (rebuild —
-	// SQLite cannot alter PKs in place); pre-migration data lands in the
-	// default namespace ''. The clients table is being rebuilt anyway, so
-	// the same pass converts updated_at from datetime('now') TEXT to unix
-	// millis (unparseable/legacy values become 0 and are pruned by the
-	// first idle-client GC pass — intended, mirroring migration 1's
-	// tombstone behavior).
-	`
-	ALTER TABLE workspaces RENAME TO workspaces_old;
-	CREATE TABLE workspaces (
-		namespace         TEXT NOT NULL DEFAULT '',
-		workspace_id      TEXT NOT NULL,
-		last_seq          INTEGER NOT NULL DEFAULT 0,
-		tombstone_horizon INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id)
-	);
-	INSERT INTO workspaces (namespace, workspace_id, last_seq, tombstone_horizon)
-		SELECT '', workspace_id, last_seq, tombstone_horizon FROM workspaces_old;
-	DROP TABLE workspaces_old;
-
-	DROP INDEX IF EXISTS rows_by_version;
-	ALTER TABLE rows RENAME TO rows_old;
-	CREATE TABLE rows (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		value        BLOB,
-		version      INTEGER NOT NULL,
-		deleted      INTEGER NOT NULL DEFAULT 0,
-		updated_at   INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, entity, key)
-	);
-	INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at)
-		SELECT '', workspace_id, entity, key, value, version, deleted, updated_at FROM rows_old;
-	DROP TABLE rows_old;
-	CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version);
-
-	ALTER TABLE clients RENAME TO clients_old;
-	CREATE TABLE clients (
-		namespace        TEXT NOT NULL DEFAULT '',
-		workspace_id     TEXT NOT NULL,
-		client_id        TEXT NOT NULL,
-		last_mutation_id INTEGER NOT NULL DEFAULT 0,
-		updated_at       INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, client_id)
-	);
-	INSERT INTO clients (namespace, workspace_id, client_id, last_mutation_id, updated_at)
-		SELECT '', workspace_id, client_id, last_mutation_id,
-		       COALESCE(CAST(strftime('%s', updated_at) AS INTEGER), 0) * 1000
-		FROM clients_old;
-	DROP TABLE clients_old;
-	`,
-	// 2 -> 3: indexes backing the GC DELETE predicates. Without them each
-	// pass range-scans every row (resp. client) of the workspace — the
-	// (namespace, workspace_id) PK prefix narrows to the workspace but not
-	// to the collectable subset. The tombstone index is partial (deleted=1
-	// is the only collectable state) so it stays proportional to the dead
-	// rows, not the live ones.
-	`
-	CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted = 1;
-	CREATE INDEX clients_gc ON clients (namespace, workspace_id, updated_at);
-	`,
-	// 3 -> 4: per-workspace store epoch — a random identity pinning a cursor
-	// to the store lineage that issued it (see ReadTx.StoreEpoch). Existing
-	// workspaces are backfilled with a distinct random epoch each, so cursors
-	// already in the field are reset against the lineage they came from on the
-	// first pull after upgrade (which also clears any phantom rows left by the
-	// pre-epoch cursor-provenance bug). SQLite's random() yields a signed
-	// 64-bit value the store reinterprets as the epoch; 0 is read back as "no
-	// epoch", so the (astronomically unlikely) random() = 0 row simply waits
-	// for the next mint — harmless.
-	`
-	ALTER TABLE workspaces ADD COLUMN store_epoch INTEGER NOT NULL DEFAULT 0;
-	UPDATE workspaces SET store_epoch = random() WHERE store_epoch = 0;
-	`,
-	// 4 -> 5: server-global runtime schema catalog. app_id is the partition
-	// (no namespace/workspace columns): one engine hosts multiple apps, each
-	// registering a self-contained FileDescriptorSet the engine reloads and
-	// re-registers on boot.
-	`
-	CREATE TABLE schemas (
-		app_id         TEXT PRIMARY KEY,
-		descriptor_set BLOB NOT NULL,
-		revision       TEXT NOT NULL,
-		updated_at     INTEGER NOT NULL DEFAULT 0
-	);
-	`,
-	// 5 -> 6: the collaborative-text delta log — one row per (text field,
-	// write) holding the fragment that write added, so a pull can ship a
-	// keystroke instead of a document. The primary key is ordered so the
-	// per-field span read (one row, one field, seq > cursor) is a range scan of
-	// its tail. frag is empty for a gap marker (see WriteTx.PutFieldDelta).
-	// field_delta_horizon is the workspace's pruned-through watermark: a span
-	// reaching below it cannot be trusted and falls back to full state.
-	`
-	CREATE TABLE field_deltas (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		field        TEXT NOT NULL,
-		seq          INTEGER NOT NULL,
-		frag         BLOB NOT NULL,
-		updated_at   INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, entity, key, field, seq)
-	);
-	CREATE INDEX field_deltas_gc ON field_deltas (namespace, workspace_id, updated_at);
-	ALTER TABLE workspaces ADD COLUMN field_delta_horizon INTEGER NOT NULL DEFAULT 0;
-	`,
-	// 6 -> 7: collaborative-text compaction floors — one row per text field
-	// whose tombstones have been purged, holding the version vector the document
-	// held at the purge. Read on every write to such a field, so it is keyed the
-	// same way the row is.
-	`
-	CREATE TABLE text_floors (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		field        TEXT NOT NULL,
-		vv           BLOB NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, entity, key, field)
-	);
-	`,
-	// 7 -> 8: the idempotency ledger for trusted writes — one row per claimed
-	// key, holding the sequence the original write took and the caller's
-	// recorded result. Keyed like every other per-workspace table; the GC index
-	// backs the retention sweep, which is a range scan of one workspace's
-	// expired keys rather than of all of them.
-	`
-	CREATE TABLE idempotency (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		seq          INTEGER NOT NULL,
-		result       BLOB NOT NULL,
-		updated_at   INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, key)
-	);
-	CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
-	`,
-	// 8 -> 9: per-row write attribution (see storage.Actor). Two columns rather
-	// than one encoded blob so an adapter-level query can filter on a subject
-	// or a system label without parsing, and so the empty string keeps its
-	// ordinary meaning. Rows written before this migration read back as the
-	// zero Actor — unattributed, which is the truth about them: nothing
-	// recorded who wrote them and nothing can reconstruct it.
-	`
-	ALTER TABLE rows ADD COLUMN actor_subject TEXT NOT NULL DEFAULT '';
-	ALTER TABLE rows ADD COLUMN actor_system  TEXT NOT NULL DEFAULT '';
-	`,
-	// 9 -> 10: secondary index entries, plus the per-index build state that
-	// says whether they cover the whole entity yet. Both tables are replaced by
-	// migration 11, which keys them by entity first; see there for the shape
-	// that survives.
-	//
-	// This migration also adds rows_by_entity_version, which backs
-	// ScanEntityByVersionDesc: a recency window asks for ONE entity's newest
-	// live rows, and rows_by_version orders by version across every entity, so
-	// serving it from there means reading and discarding the other entities'
-	// rows. It is a second index rather than a widening of the first, because
-	// rows_by_version is what ScanChanges pages the whole workspace by and
-	// putting entity ahead of version there would cost the pull path its index.
-	// The key order matches aheadByRecency's tie-break (version descending, key
-	// ascending) so a page boundary lands in the same place the in-memory top-K
-	// would have put it.
-	`
-	CREATE TABLE index_entries (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		idx          TEXT NOT NULL,
-		k            BLOB NOT NULL,
-		entity       TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, idx, k, key)
-	) WITHOUT ROWID;
-	CREATE INDEX index_entries_by_row
-		ON index_entries (namespace, workspace_id, entity, key);
-	CREATE TABLE index_state (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		idx          TEXT NOT NULL,
-		spec_hash    TEXT NOT NULL,
-		ready        INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, idx)
-	);
-
-	CREATE INDEX rows_by_entity_version
-		ON rows (namespace, workspace_id, entity, version DESC, key) WHERE deleted = 0;
-	`,
-	// 10 -> 11: put the entity ahead of the index name in both index keyspaces.
-	//
-	// An index name is derived from a FIELD name ("__field_state"), so two
-	// entities that mark a field of the same name claim the same one — and an
-	// entry carries a bare row key, which only identifies a row within its own
-	// entity. Keyed by name alone, a range scan for one entity yielded the
-	// other's row keys, which the reader then looked up among ITS rows: same
-	// key, different row, and a predicate nothing checked again. index_state had
-	// the mirror of that, one readiness flag over two separate sets of entries.
-	//
-	// The rest of the shape is what migration 10 established. index_entries is
-	// WITHOUT ROWID with a covering primary key, so a range scan of one index
-	// reads the b-tree it is already ordered by and never touches `rows`. k is a
-	// BLOB, which SQLite compares with memcmp — the bytewise order the engine's
-	// key encoder is built for. `key` sits in the PK after k for uniqueness
-	// only: k already ends with the row key, so two live rows can never collide.
-	// index_entries_by_row is what makes the write path affordable: entries are
-	// replaced per row and deleted per row, and both need "every entry this row
-	// holds" without knowing which indexes those are.
-	//
-	// Both tables are DERIVED, so the migration drops rather than rewrites them:
-	// index_state going empty is exactly the "not built yet" state, which sends
-	// every read to its scan fallback until the background build pass re-walks
-	// each entity. That costs one rebuild and no correctness.
-	`
-	DROP TABLE index_entries;
-	DROP TABLE index_state;
-	CREATE TABLE index_entries (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		idx          TEXT NOT NULL,
-		k            BLOB NOT NULL,
-		key          TEXT NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, entity, idx, k, key)
-	) WITHOUT ROWID;
-	CREATE INDEX index_entries_by_row
-		ON index_entries (namespace, workspace_id, entity, key);
-	CREATE TABLE index_state (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		idx          TEXT NOT NULL,
-		spec_hash    TEXT NOT NULL,
-		ready        INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, entity, idx)
-	);
-	`,
-	// 11 -> 12: effect-consumer state — how far each consumer has acted on the
-	// change feed, and the per-row snapshots it derives before-state from (see
-	// storage.ConsumerPosition). Both are keyed by consumer name within the
-	// workspace, and both are written by the SAME transaction, which is what
-	// makes a crash redeliver a change instead of skipping it.
-	//
-	// consumer_shadows needs no GC index of its own: shadows are only ever
-	// deleted per row, or wholesale with their consumer, and the primary key's
-	// (namespace, workspace_id, consumer) prefix is the range scan for that.
-	// consumer_positions_gc backs the staleness sweep, which is a range scan of
-	// one workspace's expired consumers rather than of every consumer.
-	`
-	CREATE TABLE consumer_positions (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		consumer     TEXT NOT NULL,
-		seq          INTEGER NOT NULL DEFAULT 0,
-		entity       TEXT NOT NULL DEFAULT '',
-		key          TEXT NOT NULL DEFAULT '',
-		updated_at   INTEGER NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, consumer)
-	);
-	CREATE INDEX consumer_positions_gc
-		ON consumer_positions (namespace, workspace_id, updated_at);
-	CREATE TABLE consumer_shadows (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		consumer     TEXT NOT NULL,
-		entity       TEXT NOT NULL,
-		key          TEXT NOT NULL,
-		snapshot     BLOB NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
-	);
-	`,
-}
+// migrations[i] upgrades a database at user_version baselineVersion+i to
+// baselineVersion+i+1. Each runs in its own transaction; user_version is
+// bumped inside that transaction. A structural change appends here and leaves
+// schema alone, so a database in the field reaches the new shape by the same
+// steps a fresh one skips.
+var migrations = []string{}
 
 // Store implements storage.Adapter. Stores derived via Namespace share the
 // underlying pools; only the Store returned by Open owns (and closes) them.
@@ -493,6 +390,12 @@ func WithOptimizeInterval(d time.Duration) Option {
 //
 // Open a given file at most once per process: see the package comment. Use
 // Namespace to multiplex apps over one Store.
+//
+// An empty path is created at the current schema; an existing database is
+// brought up to it. A database that is not a syncplane store, or belongs to a
+// schema lineage this binary cannot read, is refused with an error rather than
+// opened — it has to be re-created, which costs every client of the workspaces
+// it held a re-bootstrap.
 func Open(path string, opts ...Option) (*Store, error) {
 	cfg := defaultConfig()
 	for _, opt := range opts {
@@ -525,10 +428,6 @@ func Open(path string, opts ...Option) (*Store, error) {
 	// once and the maintenance pass keeps meeting the same connection.
 	write.SetMaxOpenConns(1)
 	write.SetMaxIdleConns(1)
-	if _, err := write.Exec(schema); err != nil {
-		write.Close()
-		return nil, fmt.Errorf("sqlitestore: apply schema: %w", err)
-	}
 	if err := migrate(write); err != nil {
 		write.Close()
 		return nil, err
@@ -556,7 +455,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 		read.SetConnMaxIdleTime(readIdleTimeout)
 	}
 	s := &Store{read: read, write: write, ns: cfg.ns, owner: true}
-	// Migration may have created indexes, which is one of the moments SQLite
+	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
 	// gets before Close.
 	s.optimize()
@@ -660,20 +559,43 @@ func (s *Store) Namespace(ns string) storage.Adapter {
 	return &Store{read: s.read, write: s.write, ns: ns}
 }
 
+// migrate creates the schema in an empty database and brings an existing one
+// up to baselineVersion+len(migrations).
+//
+// A database from another lineage — a different application_id, or a version
+// outside the range this binary knows — is refused rather than opened: writing
+// through a shape that is not the one on disk is the failure this check exists
+// to prevent, and it is silent.
 func migrate(db *sql.DB) error {
+	var appID int
+	if err := db.QueryRow(`PRAGMA application_id`).Scan(&appID); err != nil {
+		return fmt.Errorf("sqlitestore: read application_id: %w", err)
+	}
+	if appID == 0 {
+		// Either a file with nothing in it yet, or one this lineage never
+		// stamped; applyBaseline tells those apart.
+		return applyBaseline(db)
+	}
+	if appID != applicationID {
+		return fmt.Errorf("sqlitestore: database application_id %#x is not a syncplane store (want %#x)", appID, applicationID)
+	}
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("sqlitestore: read user_version: %w", err)
 	}
-	if version > len(migrations) {
-		return fmt.Errorf("sqlitestore: database user_version %d is newer than this binary (max %d)", version, len(migrations))
+	latest := baselineVersion + len(migrations)
+	if version < baselineVersion {
+		return fmt.Errorf("sqlitestore: database user_version %d predates this binary's schema (baseline %d); it cannot be upgraded in place and must be re-created", version, baselineVersion)
 	}
-	for ; version < len(migrations); version++ {
+	if version > latest {
+		return fmt.Errorf("sqlitestore: database user_version %d is newer than this binary (max %d)", version, latest)
+	}
+	for ; version < latest; version++ {
 		tx, err := db.Begin()
 		if err != nil {
 			return err
 		}
-		if _, err := tx.Exec(migrations[version]); err != nil {
+		if _, err := tx.Exec(migrations[version-baselineVersion]); err != nil {
 			tx.Rollback()
 			return fmt.Errorf("sqlitestore: migration %d: %w", version+1, err)
 		}
@@ -685,6 +607,46 @@ func migrate(db *sql.DB) error {
 		if err := tx.Commit(); err != nil {
 			return fmt.Errorf("sqlitestore: migration %d: commit: %w", version+1, err)
 		}
+	}
+	return nil
+}
+
+// applyBaseline creates schema in an unstamped database and stamps it, in one
+// transaction so a database is never left half-created.
+//
+// An unstamped file is either one nothing has written yet or one from a lineage
+// that predates the stamp, and the two are told apart by whether any table is
+// there. Laying the baseline over tables it did not create would leave the
+// shape on disk and the shape in the code disagreeing.
+func applyBaseline(db *sql.DB) error {
+	var tables int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'`,
+	).Scan(&tables); err != nil {
+		return fmt.Errorf("sqlitestore: inspect database: %w", err)
+	}
+	if tables > 0 {
+		return fmt.Errorf("sqlitestore: database holds %d table(s) but carries no application_id; it is not a store this binary can read and must be re-created", tables)
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(schema); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("sqlitestore: apply schema: %w", err)
+	}
+	// PRAGMA takes no placeholders; both values are constants. The stamps go in
+	// the same transaction as the schema, so a crash between them cannot leave
+	// tables that claim a version they were not created at.
+	if _, err := tx.Exec(fmt.Sprintf(
+		"PRAGMA application_id = %d;\nPRAGMA user_version = %d;", applicationID, baselineVersion,
+	)); err != nil {
+		tx.Rollback()
+		return fmt.Errorf("sqlitestore: stamp schema version: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("sqlitestore: apply schema: commit: %w", err)
 	}
 	return nil
 }
