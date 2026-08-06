@@ -175,10 +175,53 @@ together:
   encoding byte-for-byte, so any change to `engine/text` or `client/src/text`
   must land in the other implementation and the vectors in one change.
 
+## Documentation
+
+Every comment has exactly one reader, and writing for the wrong one is the
+failure these rules exist to prevent:
+
+- **Doc comment on an exported identifier** → a consumer who can only see the
+  API. Contract only, and say the things a signature cannot: errors (name the
+  sentinel or type), behaviour on nil/zero/empty, ownership of arguments and
+  who closes what, concurrency safety, whether the call blocks, units and
+  ranges, ordering guarantees, what a default or omitted option means, and cost
+  when it would surprise a caller. Two tests: a sentence may only state facts
+  observable from the caller's side, and it must stay true when the body is
+  rewritten from scratch. Go comments open with the identifier and a summary
+  sentence that stands alone in a package listing; TS uses TSDoc with a summary
+  line and no leading tag.
+- **Comment inside a function body** → a maintainer about to change this code.
+  Why this approach and not the obvious alternative — a non-obvious ordering
+  dependency, a workaround for an upstream bug (link it), a deliberate deviation
+  from the surrounding pattern, a measured performance decision. Never narrate
+  what the code already says.
+- **`docs/`** → whichever Diátaxis mode the file lives in. Rationale, history
+  and trade-offs live in `explanation/`; a doc comment links there instead of
+  inlining them.
+- **Commit message** → alternatives considered, benchmarks, "we chose X because
+  Y". When such a sentence turns up in a doc comment, move it here rather than
+  deleting it.
+
+Never restate the signature. Delete any `@param` that expands the parameter name
+into a sentence, any `@returns` that restates the return type, and any prose that
+repeats a TypeScript type; encode a constraint in the type system rather than
+documenting it. A compiling example (Go `Example` function, TSDoc `@example`)
+outranks a paragraph.
+
+Banned everywhere: filler (`note that`, `simply`, `just`, `basically`,
+`under the hood`, `in order to`), self-narration (`we went with`,
+`the honest option`, `it turns out that`), unverifiable superlatives (`robust`,
+`powerful`, `seamless`, `blazingly fast`), and asides about alternatives that
+were rejected — there is no alternative in the reader's world.
+
+Load the `documentation` skill for the full rules — the revision checklist that
+turns a finished draft into a shorter one carrying more information, per-language
+tag usage, and worked before/after corrections. Reach for it when writing or
+revising more than a line or two of doc comment, adding a page under `docs/`, or
+reviewing someone else's comments and prose.
+
 ## Conventions
 
-- Document contracts and trade-offs at the point of code — why a thing is shaped
-  the way it is, and what breaks if it changes.
 - Match the surrounding code's idiom, naming and comment density.
 - Prefer the smallest change that fixes the actual problem; don't widen scope.
 - Write non-printing, ambiguous or invisible characters as escapes rather than
