@@ -84,6 +84,36 @@ describe('bootstrap resume (against the real server)', () => {
 		await reader.close();
 	});
 
+	it('resumes across a filter-epoch bump in another workspace', async () => {
+		// The resume carries the epoch its snapshot was taken under, and the
+		// server drops one whose epoch has moved. That check is per workspace, so
+		// a visibility change somewhere else must not cost this snapshot the rows
+		// it already downloaded.
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		const ids = Array.from({ length: CHUNK * 3 }, (_, i) => `t${String(i).padStart(2, '0')}`);
+		for (const id of ids) await writer.mutate.put(TodoSchema, { id, title: id });
+		await writer.syncNow();
+
+		const { transport, delivered } = truncatingTransport();
+		const reader = newClient(ws, { transport });
+		await reader.start();
+		await eventually(async () => delivered[0] === CHUNK);
+
+		const elsewhere = newClient(freshWorkspace());
+		await elsewhere.start();
+		await elsewhere.mutate.custom('bump_epoch');
+		await elsewhere.syncNow();
+
+		await reader.syncNow();
+		expect(delivered).toEqual([ CHUNK, ids.length - CHUNK ]);
+
+		await elsewhere.close();
+		await writer.close();
+		await reader.close();
+	});
+
 	it('re-delivers rows that changed between the attempts', async () => {
 		// The resumed snapshot keeps its first attempt's cursor, so the pull that
 		// follows still covers the whole span — including an edit to a row the

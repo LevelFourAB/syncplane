@@ -6,6 +6,7 @@ package exampleapp
 import (
 	"context"
 	"strings"
+	"sync"
 	"sync/atomic"
 
 	"google.golang.org/protobuf/proto"
@@ -17,20 +18,35 @@ import (
 
 // Permissions rejects todo writes whose title contains "forbidden" and hides
 // todos whose title contains "secret" from reads. The filter epoch is a
-// process-local counter the bump_epoch mutator advances, standing in for
-// out-of-band visibility changes (e.g. a membership edit).
+// process-local counter per workspace that the bump_epoch mutator advances,
+// standing in for out-of-band visibility changes (e.g. a membership edit).
 //
 // It embeds server.AllowAll purely to show the partial-implementation pattern;
 // every hook below is overridden. It authorizes on the write's content rather
 // than on the caller, so it ignores the principal — a real policy would not.
+//
+// Safe for concurrent use.
 type Permissions struct {
 	server.AllowAll
-	epoch atomic.Uint64
+	// Keyed per workspace so a bump cannot invalidate cursors it says nothing
+	// about: the test suites share one server between workspaces, and a global
+	// counter made every suite's cursors collateral of any other suite's bump.
+	epochs sync.Map // workspace ID -> *atomic.Uint64
 }
 
-// NewPermissions returns the example permission policy (epoch starts at 0).
+// NewPermissions returns the example permission policy (every workspace's
+// epoch starts at 0).
 func NewPermissions() *Permissions {
 	return &Permissions{}
+}
+
+// epochOf returns the counter for a workspace, creating it on first use.
+func (p *Permissions) epochOf(workspaceID string) *atomic.Uint64 {
+	if v, ok := p.epochs.Load(workspaceID); ok {
+		return v.(*atomic.Uint64)
+	}
+	v, _ := p.epochs.LoadOrStore(workspaceID, &atomic.Uint64{})
+	return v.(*atomic.Uint64)
 }
 
 func (*Permissions) CanMutate(_ context.Context, _ server.Principal, _ string, w server.Write) error {
@@ -58,15 +74,16 @@ func (*Permissions) ReadFilter(_ context.Context, _ server.Principal, _ string, 
 	}, nil
 }
 
-func (p *Permissions) FilterEpoch(context.Context, server.Principal, string) (uint64, error) {
-	return p.epoch.Load(), nil
+func (p *Permissions) FilterEpoch(_ context.Context, _ server.Principal, workspaceID string) (uint64, error) {
+	return p.epochOf(workspaceID).Load(), nil
 }
 
-// BumpEpoch invalidates all outstanding cursors. This policy does not
-// implement server.EpochReadFilters, so the next pull of every client
+// BumpEpoch invalidates every outstanding cursor for one workspace, leaving
+// the other workspaces' alone. This policy does not implement
+// server.EpochReadFilters, so the next pull of every client in that workspace
 // resets into a re-bootstrap (the delta-resync fallback path).
-func (p *Permissions) BumpEpoch() uint64 {
-	return p.epoch.Add(1)
+func (p *Permissions) BumpEpoch(workspaceID string) uint64 {
+	return p.epochOf(workspaceID).Add(1)
 }
 
 // Options returns the server options for the whole example app: the todo,
@@ -125,9 +142,9 @@ func MutatorOptions(perms *Permissions) []server.Option {
 		// bump_epoch lets integration tests exercise filter-epoch revocation
 		// end to end: push bump_epoch, the notifier fires, the next pull resets.
 		server.WithMutator("bump_epoch", nil,
-			func(context.Context, *server.EntityTx, proto.Message) error {
+			func(_ context.Context, tx *server.EntityTx, _ proto.Message) error {
 				if perms != nil {
-					perms.BumpEpoch()
+					perms.BumpEpoch(tx.Workspace())
 				}
 				return nil
 			}),

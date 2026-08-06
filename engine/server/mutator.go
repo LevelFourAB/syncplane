@@ -146,6 +146,13 @@ func (e *EntityTx) authorizeCrud(
 	return e.authz(Write{Crud: crud})
 }
 
+// Workspace returns the workspace this tx writes to. A mutator body that
+// keeps state of its own outside the store — a cache, a counter, a permission
+// epoch — uses it to partition that state the way every row is partitioned.
+func (e *EntityTx) Workspace() string {
+	return e.ws
+}
+
 // Seq returns the workspace sequence this tx's writes are stamped with, or
 // 0 before the first write (Server.Mutate allocates lazily). Trusted callers
 // use it to record which sequence their writes landed at — e.g. a connector

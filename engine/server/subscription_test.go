@@ -267,7 +267,7 @@ var _ = Describe("Subscriptions and revocation", func() {
 			cursor, _ := bootstrap()
 			Expect(pull(cursor).GetReset_()).To(BeFalse())
 
-			perms.BumpEpoch()
+			perms.BumpEpoch(ws)
 			Expect(pull(cursor).GetReset_()).To(BeTrue())
 
 			// Re-bootstrap issues a cursor under the new epoch.
