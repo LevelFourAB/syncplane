@@ -99,9 +99,9 @@ import (
 // the ledger is what makes them replayable.
 //
 // Every text column is COLLATE "C" (see the package comment). It is applied
-// even to columns nothing orders by — actor attribution, stored values — so the
-// rule is "all of them" rather than a judgement call per column that a later
-// index turns into a bug.
+// even to columns nothing orders by — the actor's subject and system label,
+// consumer names — so the rule is "all of them" rather than a judgement call
+// per column that a later index turns into a bug.
 var migrations = []string{
 	// 1: the baseline schema.
 	`
@@ -124,10 +124,8 @@ var migrations = []string{
 		version       BIGINT NOT NULL,
 		deleted       BOOLEAN NOT NULL DEFAULT FALSE,
 		updated_at    BIGINT NOT NULL DEFAULT 0,
-		actor_issuer  TEXT COLLATE "C" NOT NULL DEFAULT '',
 		actor_subject TEXT COLLATE "C" NOT NULL DEFAULT '',
-		actor_client  TEXT COLLATE "C" NOT NULL DEFAULT '',
-		actor_system  BOOLEAN NOT NULL DEFAULT FALSE,
+		actor_system  TEXT COLLATE "C" NOT NULL DEFAULT '',
 		PRIMARY KEY (namespace, workspace_id, entity, key)
 	);
 	-- ScanChanges pages by the whole (version, entity, key) tuple, so the index

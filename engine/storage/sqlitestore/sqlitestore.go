@@ -246,17 +246,15 @@ var migrations = []string{
 	);
 	CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
 	`,
-	// 8 -> 9: per-row write attribution (see storage.Actor). Four columns
-	// rather than one encoded blob so an adapter-level query can filter on a
-	// subject or a client without parsing, and so the empty string keeps its
+	// 8 -> 9: per-row write attribution (see storage.Actor). Two columns rather
+	// than one encoded blob so an adapter-level query can filter on a subject
+	// or a system label without parsing, and so the empty string keeps its
 	// ordinary meaning. Rows written before this migration read back as the
 	// zero Actor — unattributed, which is the truth about them: nothing
 	// recorded who wrote them and nothing can reconstruct it.
 	`
-	ALTER TABLE rows ADD COLUMN actor_issuer  TEXT NOT NULL DEFAULT '';
 	ALTER TABLE rows ADD COLUMN actor_subject TEXT NOT NULL DEFAULT '';
-	ALTER TABLE rows ADD COLUMN actor_client  TEXT NOT NULL DEFAULT '';
-	ALTER TABLE rows ADD COLUMN actor_system  INTEGER NOT NULL DEFAULT 0;
+	ALTER TABLE rows ADD COLUMN actor_system  TEXT NOT NULL DEFAULT '';
 	`,
 	// 9 -> 10: secondary index entries, plus the per-index build state that
 	// says whether they cover the whole entity yet. Both tables are replaced by
@@ -934,13 +932,13 @@ func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
 
 func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
-	var deleted, system int
+	var deleted int
 	err := t.tx.QueryRow(
-		`SELECT value, version, deleted, actor_issuer, actor_subject, actor_client, actor_system FROM rows
+		`SELECT value, version, deleted, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, entity, key,
 	).Scan(&row.Value, &row.Version, &deleted,
-		&row.Actor.Issuer, &row.Actor.Subject, &row.Actor.Client, &system)
+		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.Row{}, storage.ErrNotFound
 	}
@@ -948,7 +946,6 @@ func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 		return storage.Row{}, err
 	}
 	row.Deleted = deleted != 0
-	row.Actor.System = system != 0
 	return row, nil
 }
 
@@ -961,7 +958,7 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 		limit = -1 // SQLite: negative LIMIT means unlimited
 	}
 	rows, err := t.tx.Query(
-		`SELECT key, value, version, actor_issuer, actor_subject, actor_client, actor_system FROM rows
+		`SELECT key, value, version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
 		 ORDER BY key LIMIT ?`,
 		t.ns, t.ws, entity, afterKey, limit,
@@ -972,12 +969,10 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 	defer rows.Close()
 	for rows.Next() {
 		r := storage.Row{Entity: entity}
-		var system int
 		if err := rows.Scan(&r.Key, &r.Value, &r.Version,
-			&r.Actor.Issuer, &r.Actor.Subject, &r.Actor.Client, &system); err != nil {
+			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
-		r.Actor.System = system != 0
 		if err := fn(r); err != nil {
 			return err
 		}
@@ -993,7 +988,7 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	// partial on deleted = 0), so this reads the index prefix and stops at
 	// LIMIT instead of sorting the entity.
 	rows, err := t.tx.Query(
-		`SELECT key, value, version, actor_issuer, actor_subject, actor_client, actor_system FROM rows
+		`SELECT key, value, version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0
 		 ORDER BY version DESC, key LIMIT ?`,
 		t.ns, t.ws, entity, limit,
@@ -1004,12 +999,10 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	defer rows.Close()
 	for rows.Next() {
 		r := storage.Row{Entity: entity}
-		var system int
 		if err := rows.Scan(&r.Key, &r.Value, &r.Version,
-			&r.Actor.Issuer, &r.Actor.Subject, &r.Actor.Client, &system); err != nil {
+			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
-		r.Actor.System = system != 0
 		if err := fn(r); err != nil {
 			return err
 		}
@@ -1032,7 +1025,7 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		// Clean version boundary: everything strictly past afterSeq.
 		rows, err = t.tx.Query(
 			`SELECT entity, key, value, version, deleted,
-			        actor_issuer, actor_subject, actor_client, actor_system FROM rows
+			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND version > ?
 			 ORDER BY version, entity, key LIMIT ?`,
 			t.ns, t.ws, afterSeq, limit,
@@ -1042,7 +1035,7 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		// the split group whose (entity, key) sorts after (afterEntity, afterKey).
 		rows, err = t.tx.Query(
 			`SELECT entity, key, value, version, deleted,
-			        actor_issuer, actor_subject, actor_client, actor_system FROM rows
+			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND (
 			   version > ?
 			   OR (version = ? AND (entity > ? OR (entity = ? AND key > ?)))
@@ -1057,13 +1050,12 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 	defer rows.Close()
 	for rows.Next() {
 		var r storage.Row
-		var deleted, system int
+		var deleted int
 		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &r.Version, &deleted,
-			&r.Actor.Issuer, &r.Actor.Subject, &r.Actor.Client, &system); err != nil {
+			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
 		r.Deleted = deleted != 0
-		r.Actor.System = system != 0
 		if r.Deleted {
 			r.Value = nil
 		}
@@ -1549,15 +1541,15 @@ func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, acto
 	}
 	_, err := t.tx.Exec(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
-		                   actor_issuer, actor_subject, actor_client, actor_system)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?)
+		                   actor_subject, actor_system)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = 0,
 		               updated_at = excluded.updated_at,
-		               actor_issuer = excluded.actor_issuer, actor_subject = excluded.actor_subject,
-		               actor_client = excluded.actor_client, actor_system = excluded.actor_system`,
+		               actor_subject = excluded.actor_subject,
+		               actor_system = excluded.actor_system`,
 		t.ns, t.ws, entity, key, value, version, time.Now().UnixMilli(),
-		actor.Issuer, actor.Subject, actor.Client, boolToInt(actor.System),
+		actor.Subject, actor.System,
 	)
 	return err
 }
@@ -1568,15 +1560,15 @@ func (t *sqliteTx) DeleteRow(entity, key string, version uint64, actor storage.A
 	}
 	_, err := t.tx.Exec(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
-		                   actor_issuer, actor_subject, actor_client, actor_system)
-		 VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?, ?, ?)
+		                   actor_subject, actor_system)
+		 VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = 1,
 		               updated_at = excluded.updated_at,
-		               actor_issuer = excluded.actor_issuer, actor_subject = excluded.actor_subject,
-		               actor_client = excluded.actor_client, actor_system = excluded.actor_system`,
+		               actor_subject = excluded.actor_subject,
+		               actor_system = excluded.actor_system`,
 		t.ns, t.ws, entity, key, version, time.Now().UnixMilli(),
-		actor.Issuer, actor.Subject, actor.Client, boolToInt(actor.System),
+		actor.Subject, actor.System,
 	)
 	return err
 }

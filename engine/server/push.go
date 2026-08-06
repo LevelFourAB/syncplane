@@ -503,10 +503,13 @@ func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteT
 		return 0, err
 	}
 
-	// Who this mutation is attributed to: the authenticated caller plus the
-	// client_id it pushed under. Resolved once per mutation, so every row a
-	// batch or a mutator writes carries the same actor as the mutation itself.
-	actor := actorOf(ctx, m.GetClientId())
+	// Who this mutation is attributed to: the authenticated caller that pushed
+	// it. Resolved once per mutation, so every row a batch or a mutator writes
+	// carries the same actor as the mutation itself.
+	actor, err := actorOf(ctx)
+	if err != nil {
+		return 0, err
+	}
 
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:

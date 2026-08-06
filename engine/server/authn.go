@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"connectrpc.com/connect"
+
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 )
 
 // ErrUnauthenticated is the sentinel an Authenticator returns to reject a
@@ -128,6 +130,11 @@ func (i *authInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc
 // infrastructure fault and stays internal (see the Authenticator contract).
 // The client-visible message is fixed either way — the authenticator's own
 // wording is left to the logging interceptor, which records the full error.
+//
+// A Subject the engine cannot record as an actor falls under the same rule: an
+// authenticator that returns one is misconfigured, not a caller misbehaving.
+// Failing here rather than at write time keeps the request from authorizing
+// under an identity no row could carry.
 func (i *authInterceptor) authenticate(ctx context.Context, header http.Header) (context.Context, error) {
 	p, err := i.authn.Authenticate(ctx, header)
 	if err != nil {
@@ -135,6 +142,10 @@ func (i *authInterceptor) authenticate(ctx context.Context, header http.Header) 
 			return nil, connect.NewError(connect.CodeUnauthenticated,
 				fmt.Errorf("authentication failed: %w", err))
 		}
+		return nil, connect.NewError(connect.CodeInternal,
+			fmt.Errorf("authenticating request: %w", err))
+	}
+	if err := naming.ValidateActorSubject(p.Subject); err != nil {
 		return nil, connect.NewError(connect.CodeInternal,
 			fmt.Errorf("authenticating request: %w", err))
 	}

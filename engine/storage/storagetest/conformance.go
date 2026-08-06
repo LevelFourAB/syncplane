@@ -151,7 +151,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 		})
 
 		Describe("write attribution", func() {
-			actor := storage.Actor{Issuer: "https://issuer.example", Subject: "user-7", Client: "tab-a"}
+			actor := storage.Actor{Subject: "user-7"}
 
 			It("returns the write's actor from every read that yields a row", func() {
 				write("ws1", func(tx storage.WriteTx) {
@@ -189,7 +189,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("replaces the actor on overwrite: a row records its LAST writer only", func() {
-				second := storage.Actor{Issuer: "https://issuer.example", Subject: "user-9", Client: "tab-b"}
+				second := storage.Actor{Subject: "user-9"}
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, actor)).To(Succeed())
 					Expect(tx.PutRow("widget", "k1", []byte("v2"), 2, second)).To(Succeed())
@@ -202,7 +202,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("attributes a tombstone to whoever deleted the row", func() {
-				deleter := storage.Actor{Subject: "gc", System: true}
+				deleter := storage.Actor{System: "gc"}
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, actor)).To(Succeed())
 					Expect(tx.DeleteRow("widget", "k1", 2, deleter)).To(Succeed())
@@ -227,18 +227,31 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
-			It("keeps System distinguishable from an unattributed write", func() {
+			It("keeps a system write distinguishable from an unattributed one", func() {
 				write("ws1", func(tx storage.WriteTx) {
-					Expect(tx.PutRow("widget", "unnamed", []byte("v"), 1, storage.Actor{System: true})).To(Succeed())
+					Expect(tx.PutRow("widget", "unnamed", []byte("v"), 1, storage.Actor{System: "system"})).To(Succeed())
 					Expect(tx.PutRow("widget", "none", []byte("v"), 2, storage.Actor{})).To(Succeed())
 				})
 				read("ws1", func(tx storage.ReadTx) {
 					row, err := tx.GetRow("widget", "unnamed")
 					Expect(err).NotTo(HaveOccurred())
-					Expect(row.Actor.System).To(BeTrue(), "unnamed system work is still system work")
+					Expect(row.Actor.System).To(Equal("system"), "unnamed system work is still system work")
 					row, err = tx.GetRow("widget", "none")
 					Expect(err).NotTo(HaveOccurred())
-					Expect(row.Actor.System).To(BeFalse())
+					Expect(row.Actor.System).To(BeEmpty())
+				})
+			})
+
+			It("round-trips a caller and a system label together", func() {
+				both := storage.Actor{Subject: "user-7", System: "connect:markdown"}
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v"), 1, both)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.Actor).To(Equal(both),
+						"a bypass taken inside a request records the label AND whose request it ran under")
 				})
 			})
 		})
@@ -2455,7 +2468,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("returns the row's value and attribution, like the other scans", func() {
-				actor := storage.Actor{Issuer: "iss", Subject: "sub", Client: "c1"}
+				actor := storage.Actor{Subject: "sub"}
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutRow("widget", "a", []byte("v"), 1, actor)).To(Succeed())
 				})

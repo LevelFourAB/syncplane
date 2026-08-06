@@ -171,7 +171,7 @@ func (c *Connector) applyDeletion(ctx context.Context, workspaceID string, del D
 	// Arrival-order LWW, like every write: the delete reaches the
 	// linearization point now; a concurrent client edit that lands later
 	// recreates the row.
-	if err := c.srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error {
+	if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), workspaceID, func(tx *server.EntityTx) error {
 		cur := b.prototype.ProtoReflect().New().Interface()
 		found, err := tx.Get(cur, del.Key)
 		if err != nil || !found {

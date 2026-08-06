@@ -33,12 +33,13 @@ this is the part an implementer must not get wrong.
   `(entity, key, field)`, are the opposite: not an optimization. Losing one lets
   a replica holding pre-compaction state put purged tombstones back, so they must
   be **as durable as the row**.
-- **Write attribution.** `PutRow` and `DeleteRow` take a `storage.Actor` — who
-  the write is attributed to — which is stored with the row and returned by
+- **Write attribution.** `PutRow` and `DeleteRow` take a `storage.Actor` — two
+  strings, `Subject` (the authenticated caller) and `System` (the label a
+  trusted write gave itself) — which is stored with the row and returned by
   **every** read that yields a `Row`: `GetRow`, `ScanEntity`, `ScanEntityAfter`,
-  `ScanChanges`. Store it as given; a zero `Actor` means "unattributed" and must
-  not be filled in from anything the adapter knows. Populating it on some read
-  paths and not others is the one failure that misleads silently, because a
+  `ScanChanges`. Store both as given; a zero `Actor` means "unattributed" and
+  must not be filled in from anything the adapter knows. Populating it on some
+  read paths and not others is the one failure that misleads silently, because a
   missing actor is indistinguishable from an unattributed write.
 
   A row holds one actor, replaced on each write, so only its **last** writer is

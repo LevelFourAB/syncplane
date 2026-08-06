@@ -47,6 +47,15 @@ const (
 	// 8000-byte ceiling on a Postgres NOTIFY payload — past which pgnotify drops
 	// the notification instead of waking the workspace's clients.
 	MaxWorkspaceIDBytes = 128
+	// MaxActorSubjectBytes caps the subject recorded as a write's actor. The
+	// subject is stored on every row and repeated in every field-history record,
+	// so it is a per-row cost. 256 holds a UUID, an email address or a
+	// namespaced service-account name.
+	MaxActorSubjectBytes = 256
+	// MaxActorSystemBytes caps the label a write made under the engine's trusted
+	// bypass gives itself. It is written by the operator's own code and read by
+	// humans and echo-suppression checks, so it is short by design.
+	MaxActorSystemBytes = 64
 )
 
 // ValidateEntityName checks an entity's wire name — (syncplane.v1.entity).name,
@@ -187,6 +196,44 @@ func ValidateRowKey(key string) error {
 	for _, r := range key {
 		if r < 0x20 || r == 0x7f {
 			return fmt.Errorf(`row key contains the control character \u%04x`, r)
+		}
+	}
+	return nil
+}
+
+// ValidateActorSubject checks the subject recorded as a write's actor. It must
+// be valid UTF-8, free of ASCII control characters, and at most
+// MaxActorSubjectBytes long. Empty is valid and means the write had no
+// authenticated caller.
+//
+// The control-character rule is the one row keys follow, for the same reasons:
+// U+001F separates the fields of the client's change tokens, and an actor rides
+// the change feed into logs and rendered history, where a control character
+// turns the output into something that cannot be read back.
+func ValidateActorSubject(subject string) error {
+	return validateActorField("actor subject", subject, MaxActorSubjectBytes)
+}
+
+// ValidateActorSystem checks the label a write made under the engine's trusted
+// bypass gives itself. It must be valid UTF-8, free of ASCII control
+// characters, and at most MaxActorSystemBytes long. Empty is valid and means a
+// caller, not the bypass, made the write.
+func ValidateActorSystem(system string) error {
+	return validateActorField("actor system label", system, MaxActorSystemBytes)
+}
+
+// validateActorField holds the rules both actor fields share; what differs is
+// the cap and the noun in the message.
+func validateActorField(what, s string, maxBytes int) error {
+	if len(s) > maxBytes {
+		return fmt.Errorf("%s is %d bytes, the limit is %d", what, len(s), maxBytes)
+	}
+	if !utf8.ValidString(s) {
+		return fmt.Errorf("%s is not valid UTF-8", what)
+	}
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f {
+			return fmt.Errorf(`%s contains the control character \u%04x`, what, r)
 		}
 	}
 	return nil

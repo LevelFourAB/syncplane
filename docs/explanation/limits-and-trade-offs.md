@@ -349,7 +349,9 @@ retained under ordinary row rules.
 What does make a deletion recoverable and attributable is modelling it as a
 field. A captured `deleted_at` turns the delete into an ordinary PATCH, which
 the log records with its actor and timestamp, and turns the undelete into a
-PATCH clearing it, with no tombstone to conflict with.
+PATCH clearing it, with no tombstone to conflict with. Attribution is only as
+good as authentication: a row records the caller's subject, so a server that
+admits every request as anonymous records nobody.
 [`DELETE_POLICY_TRUSTED_ONLY`](../reference/proto-options.md#delete-policy) then
 reserves the real DELETE for erasure, where purging the history is the point
 rather than the limitation. See

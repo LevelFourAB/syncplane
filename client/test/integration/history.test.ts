@@ -21,7 +21,7 @@ import {
 	plainTextOf,
 	TextDoc,
 } from '../../src/text/index.js';
-import { freshWorkspace, newClient } from './helpers.js';
+import { authenticatedTransport, freshWorkspace, newClient } from './helpers.js';
 
 type HistoryQuery = Query<MessageShape<typeof FieldHistorySchema>>;
 
@@ -73,6 +73,44 @@ describe('field history', () => {
 		// asserting. It holds the source row and nothing else.
 		expect((await client.scan(HistoriedSchema)).map((r) => r.key)).toEqual([ 'h1' ]);
 		expect(await client.scan(FieldHistorySchema)).toEqual([]);
+
+		await client.close();
+	});
+
+	it('attributes a record to the caller that pushed the write', async () => {
+		const ws = freshWorkspace();
+		const client = newClient(ws, { transport: authenticatedTransport('u_7') });
+		await client.start();
+
+		await client.mutate.put(HistoriedSchema, { id: 'h1', title: 'one' });
+		await client.syncNow();
+		await client.mutate.patch(HistoriedSchema, 'h1', { title: 'two' });
+		await client.syncNow();
+
+		const log = await client.queryServer(FieldHistorySchema, logOf('h1'));
+		expect(log.map((r) => r.value.actorSubject)).toEqual([ 'u_7', 'u_7' ]);
+		// The label a write made under the server's trusted bypass gives itself.
+		// A client push never takes it, so it stays empty on every record here.
+		expect(log.map((r) => r.value.actorSystem)).toEqual([ '', '' ]);
+
+		await client.close();
+	});
+
+	it('records nothing for a push no authenticator ran on', async () => {
+		// Per-row attribution is what authentication buys: the client_id a push
+		// came under is an idempotency handle a client chooses for itself, so a
+		// server admitting anonymous callers records no writer at all.
+		const ws = freshWorkspace();
+		const client = newClient(ws);
+		await client.start();
+
+		await client.mutate.put(HistoriedSchema, { id: 'h1', title: 'one' });
+		await client.syncNow();
+
+		const log = await client.queryServer(FieldHistorySchema, logOf('h1'));
+		expect(log).toHaveLength(1);
+		expect(log[0]?.value.actorSubject).toBe('');
+		expect(log[0]?.value.actorSystem).toBe('');
 
 		await client.close();
 	});

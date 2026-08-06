@@ -8,12 +8,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -103,6 +105,19 @@ func main() {
 		// — unobservable from this side. Folding is decided entirely on the Go
 		// write path and is covered by the engine's own suite.
 		server.WithHistorySession(server.HistorySessionOff),
+		// Write attribution needs an identity to attribute to, and a suite has
+		// to be able to choose one per spec. A bearer token is taken at face
+		// value as the subject — nothing is verified, which is only tolerable
+		// because this binary exists to be driven by the suites. A request
+		// without one stays anonymous, which is what every other spec expects.
+		server.WithAuthenticator(server.AuthenticatorFunc(
+			func(_ context.Context, h http.Header) (server.Principal, error) {
+				subject, ok := strings.CutPrefix(h.Get("Authorization"), "Bearer ")
+				if !ok || subject == "" {
+					return server.Principal{}, nil
+				}
+				return server.Principal{Subject: subject}, nil
+			})),
 	)
 	srv, err := server.New(store, opts...)
 	if err != nil {

@@ -12,6 +12,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/effects"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 var _ = Describe("Effects runtime", func() {
@@ -115,7 +116,7 @@ var _ = Describe("Effects runtime", func() {
 			// An in-process Mutate with no caller identity is unattributed; what
 			// matters here is that the field round-trips for handlers that
 			// suppress their own echo by name.
-			Expect(rec.events()[0].Actor.System).To(BeFalse())
+			Expect(rec.events()[0].Actor).To(Equal(storage.Actor{}))
 		})
 	})
 

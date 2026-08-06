@@ -97,7 +97,8 @@ the source entity's filter and the log follows — deny someone a row and its
 history goes with it.
 
 Each row renders straightforwardly: `recordedAt` for the timestamp,
-`actorSubject` / `actorIssuer` for who, `mask.paths` for which fields — the
+`actorSubject` for who (and `actorSystem` when the engine or a connector wrote
+it rather than a person), `mask.paths` for which fields — the
 server records changes rather than writes, so a mask names the fields that
 actually moved and an entry never says "nothing happened here".
 

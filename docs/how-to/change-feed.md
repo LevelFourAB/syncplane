@@ -36,25 +36,30 @@ saveCursor(next)                        // persist AFTER acting on the page
 
 ## Who wrote it
 
-`ch.Actor` (a `storage.Actor`) reports the writer: `Issuer` and `Subject` from
-the caller's authenticated principal, `Client` for the `client_id` a push came
-under, and `System` with an optional `Subject` name for writes made under
-[`Trusted`/`TrustedAs`](server-side-writes.md). The zero actor means the write
-was unattributed — no authenticated caller, or a row last written before the
-store recorded actors.
+`ch.Actor` (a `storage.Actor`) reports the writer in two fields:
+
+- `Subject` — the authenticated caller's subject, copied from its
+  [`Principal`](authentication-and-permissions.md). Empty when no authenticated
+  caller made the write.
+- `System` — the label a write made under
+  [`Trusted`/`TrustedAs`](server-side-writes.md) gave itself, `"system"` for a
+  bare `Trusted`. Empty exactly when a caller made the write.
+
+Both set means a bypass ran under that caller's request. The zero actor means
+the write was unattributed.
 
 It is what makes two common rules expressible:
 
 ```go
 // Don't react to your own writes.
-if ch.Actor.System && ch.Actor.Subject == "notifier" {
+if ch.Actor.System == "notifier" {
     return nil
 }
 // Notify everyone except whoever did it.
 notifyAllExcept(ch.Actor.Subject, ch)
 ```
 
-Two limits to design around:
+Three limits to design around:
 
 - **It is the last writer of the row, not every writer.** The feed reports state
   rather than transitions, so writes that coalesce into one change leave only
@@ -62,9 +67,16 @@ Two limits to design around:
   someone else's write is coalesced behind your own — the same blind spot a
   sequence watermark has. A consumer that must not miss a change reacts to state
   instead of to authorship. It is attribution, not an audit trail.
-- **`Client` is unauthenticated.** A client picks its own `client_id` and can
-  pick anyone else's. Use it to correlate and to suppress, never as an identity
-  and never in a record that has to hold up.
+- **A caller's writes are attributed only if you authenticate them.** With no
+  `Authenticator` installed — the default — every client push records the zero
+  actor, so `Subject` is empty and the suppression rules above no-op for
+  anything a client wrote. Per-row attribution is something
+  [authentication](authentication-and-permissions.md) buys. The `client_id` a
+  push came under is not a substitute and is not recorded: a client picks its
+  own and may pick anyone else's.
+- **`System` is a label, not an identity.** Nothing verifies it and no policy
+  runs against it — the write that set it skipped the hooks. It answers "which
+  pass wrote this", never "was this allowed".
 
 ## Falling behind
 

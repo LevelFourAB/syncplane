@@ -142,6 +142,19 @@ its last writer, and the [change feed](change-feed.md#who-wrote-it) reports it.
 Attribution is derived from the same ctx the hooks read, so it cannot disagree
 with what was authorized.
 
+Two consequences of what a row stores:
+
+- **Without an `Authenticator` there is no attribution.** A row records the
+  subject alone, so on a server that admits every request as anonymous every
+  push records the zero actor — indistinguishable from unattributed. Echo
+  suppression and "notify everyone except the actor" no-op there. Authenticate
+  if you want the feed to say who wrote something.
+- **An authenticator serving more than one issuer must namespace its
+  subjects.** The issuer is a live input to your policy and is never stored, so
+  two callers whose issuers differ but whose subjects match collapse into one
+  actor on the feed and in field history. Prefix the subject (`google:1234`,
+  `saml:1234`) when you admit principals from several authorities.
+
 `Invoke` authorizes once on the verb (`Write{Custom}`); the rows the mutator
 body writes are not authorized individually, exactly as on the push path.
 

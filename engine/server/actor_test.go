@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"strings"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -11,6 +12,7 @@ import (
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -58,42 +60,47 @@ var _ = Describe("Write attribution", func() {
 	})
 
 	Describe("the sync path", func() {
-		It("records the authenticated caller and the pushing client", func() {
+		It("records the authenticated caller", func() {
 			push(server.WithPrincipal(ctx, principal),
 				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
-				Issuer:  principal.Issuer,
-				Subject: principal.Subject,
-				Client:  "c1",
-			}))
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Subject: principal.Subject}))
 		})
 
-		It("records the client alone when no authenticator ran", func() {
+		It("records nothing for a push no authenticator ran on", func() {
 			push(ctx, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
 
-			// An anonymous caller is not "no attribution": client_id still says
-			// which replica wrote, which is what echo suppression keys on.
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Client: "c1"}))
+			// Attribution is what authentication buys: the client_id a push
+			// came under is an idempotency handle a client chooses for itself,
+			// so it is not recorded as identity.
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{}))
+		})
+
+		It("records the subject alone, never the issuer that vouched for it", func() {
+			push(server.WithPrincipal(ctx, server.Principal{
+				Issuer:  "https://issuer.example",
+				Subject: "user-7",
+			}), putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Subject: "user-7"}),
+				"an authenticator serving several issuers has to namespace its subjects")
 		})
 
 		It("attributes a tombstone to whoever deleted the row", func() {
 			push(ctx, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
 			push(server.WithPrincipal(ctx, principal), deleteMutation("c2", 1, "todo", "t1"))
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
-				Issuer:  principal.Issuer,
-				Subject: principal.Subject,
-				Client:  "c2",
-			}), "the tombstone records the deleter, not the row's last writer")
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Subject: principal.Subject}),
+				"the tombstone records the deleter, not the row's last writer")
 		})
 
 		It("keeps the last writer only, since the feed coalesces by row", func() {
 			push(server.WithPrincipal(ctx, principal),
 				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
-			push(ctx, putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "two"}))
+			push(server.WithPrincipal(ctx, server.Principal{Subject: "user-9"}),
+				putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "two"}))
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Client: "c2"}),
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Subject: "user-9"}),
 				"the earlier writer is not recoverable — this is attribution, not an audit log")
 		})
 
@@ -106,11 +113,8 @@ var _ = Describe("Write attribution", func() {
 			push(server.WithPrincipal(ctx, principal),
 				customMutation("c1", 1, "rename", &testdatav1.Widget{Label: "renamed"}))
 
-			Expect(actorOf("widget", "w1")).To(Equal(storage.Actor{
-				Issuer:  principal.Issuer,
-				Subject: principal.Subject,
-				Client:  "c1",
-			}), "a mutator body writes as its caller, never as itself")
+			Expect(actorOf("widget", "w1")).To(Equal(storage.Actor{Subject: principal.Subject}),
+				"a mutator body writes as its caller, never as itself")
 		})
 	})
 
@@ -125,18 +129,13 @@ var _ = Describe("Write attribution", func() {
 		It("records the ctx principal", func() {
 			put(server.WithPrincipal(ctx, principal), "t1")
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
-				Issuer:  principal.Issuer,
-				Subject: principal.Subject,
-			}), "no client_id off the sync path")
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{Subject: principal.Subject}))
 		})
 
 		It("marks a trusted write as system, named by TrustedAs", func() {
 			put(server.TrustedAs(ctx, "connect:markdown"), "t1")
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
-				System: true, Subject: "connect:markdown",
-			}))
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{System: "connect:markdown"}))
 		})
 
 		It("marks a bare trusted write as unnamed system work", func() {
@@ -144,17 +143,47 @@ var _ = Describe("Write attribution", func() {
 
 			// Distinguishable from an unattributed write, which is what a
 			// consumer deciding whether to react has to tell apart.
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{System: true}))
-			Expect(actorOf("todo", "t1")).NotTo(Equal(storage.Actor{}))
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{System: "system"}))
 		})
 
-		It("prefers the trusted marker over a principal left on the ctx", func() {
+		It("records the caller a trusted write ran under alongside its label", func() {
 			// Trusted composes with a principal so a request ctx can opt one
-			// call out of enforcement. Recording the principal would attribute a
-			// write to a caller who was never authorized for it.
+			// call out of enforcement. Both fields answer different questions:
+			// the label says a bypass ran, the subject says whose request it
+			// ran under.
 			put(server.TrustedAs(server.WithPrincipal(ctx, principal), "migration"), "t1")
 
-			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{System: true, Subject: "migration"}))
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
+				Subject: principal.Subject,
+				System:  "migration",
+			}))
+		})
+
+		It("truncates a system label rather than failing the write", func() {
+			long := strings.Repeat("x", naming.MaxActorSystemBytes+10)
+			put(server.TrustedAs(ctx, long), "t1")
+
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{
+				System: strings.Repeat("x", naming.MaxActorSystemBytes),
+			}), "a typo in a connector's name must not stall the connector")
+		})
+
+		It("falls back to the bare label when a system label is unusable", func() {
+			put(server.TrustedAs(ctx, "connect\u001fmarkdown"), "t1")
+
+			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{System: "system"}))
+		})
+
+		It("rejects a write whose principal cannot be recorded", func() {
+			bad := server.WithPrincipal(ctx, server.Principal{
+				Subject: strings.Repeat("u", naming.MaxActorSubjectBytes+1),
+			})
+			err := srv.Mutate(bad, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&todov1.Todo{Id: "t1", Title: "t"})
+			})
+			// A truncated identity is a different identity and possibly a
+			// colliding one, so the subject is the half that fails.
+			Expect(err).To(MatchError(ContainSubstring("actor subject")))
 		})
 
 		It("records an unauthenticated in-process write as unattributed", func() {

@@ -81,10 +81,14 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 	authz := s.writeAuthorizer(ctx, p, workspaceID, enforced)
 	wrote := false
 	err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		actor, err := actorOf(ctx)
+		if err != nil {
+			return err
+		}
 		// A fresh EntityTx per attempt keeps the closure re-runnable: a
 		// retried attempt re-allocates its sequence instead of stamping rows
 		// with one a rolled-back attempt consumed.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, actor: actorOf(ctx, "")}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, actor: actor}
 		if err := fn(etx); err != nil {
 			return err
 		}

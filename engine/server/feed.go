@@ -37,11 +37,12 @@ type Change struct {
 	// entity is not registered on this server (consumers still see the
 	// Entity/Key/Seq envelope).
 	Message proto.Message
-	// Actor is who made the write this change reports — the caller's principal
-	// for a client push or an in-process write, or the named system actor for a
-	// write made under Trusted/TrustedAs. The zero Actor means the write was
-	// unattributed (no authenticated caller, or a row last written before the
-	// store recorded actors).
+	// Actor is who made the write this change reports — the caller's subject
+	// for a client push or an in-process write, the label a write made under
+	// Trusted/TrustedAs gave itself, or both when a bypass ran inside a
+	// caller's request. The zero Actor means the write was unattributed: no
+	// authenticated caller made it, which is every push on a server with no
+	// Authenticator installed.
 	//
 	// It is the LAST writer of the row, not the writer of every change that
 	// coalesced into this one, because the feed reports state rather than

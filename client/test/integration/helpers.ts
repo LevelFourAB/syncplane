@@ -36,6 +36,20 @@ export function newClient(
 	});
 }
 
+/** A transport that authenticates every request as `subject`. The spawned
+ * testserver takes a bearer token at face value, so this is how a spec writes
+ * as somebody rather than anonymously. */
+export function authenticatedTransport(subject: string): SyncClientOptions['transport'] {
+	return createConnectTransport({
+		baseUrl: inject('serverUrl'),
+		httpVersion: '1.1',
+		interceptors: [ (next) => (req) => {
+			req.header.set('Authorization', `Bearer ${subject}`);
+			return next(req);
+		} ],
+	});
+}
+
 /**
  * A client holding several workspaces at once: one store, one stream, one push.
  * `workspaces[0]` is the default, so the client-level API still works unqualified.

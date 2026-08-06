@@ -53,7 +53,10 @@ await client.db.project.mutate.update(id, (p) => {
 
 An ordinary optimistic mutation — offline-queueable, undoable, and captured. The
 history record it produces names `deleted_at_ms` in its mask and carries the
-actor, which is the "who deleted this" a `DELETE` cannot answer.
+actor, which is the "who deleted this" a `DELETE` cannot answer — as long as the
+server
+[authenticates its callers](authentication-and-permissions.md), since the record
+holds the caller's subject and nothing else.
 
 ## 3. Keep removed rows out of ordinary reads
 

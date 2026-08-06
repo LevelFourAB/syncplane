@@ -62,7 +62,7 @@ func (c *Connector) resyncSource(ctx context.Context, workspaceID string, p *pas
 		writes  []proto.Message
 		deletes []rowID
 	)
-	if err := c.srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error {
+	if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), workspaceID, func(tx *server.EntityTx) error {
 		// Reset on entry: the storage adapter may retry this closure. The
 		// closure only reads; collected work applies after commit so source
 		// I/O never runs under the workspace write lock.

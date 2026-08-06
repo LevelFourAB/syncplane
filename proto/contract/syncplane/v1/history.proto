@@ -122,18 +122,17 @@ message FieldHistory {
 	// formatting anchored to the old runs is not reapplied.
 	bytes prior = 8;
 	// Who made the write, copied from the row's actor at capture time (see the
-	// engine's storage.Actor). issuer/subject are the verified principal;
-	// client is the unauthenticated client_id a push came under, useful to
-	// correlate and never as identity; system marks a write made under the
-	// engine's Trusted bypass, with subject holding the name it gave itself.
+	// engine's storage.Actor). actor_subject is the verified caller, empty when
+	// no authenticated caller made the write. actor_system is the label a write
+	// made under the engine's trusted bypass gave itself — an operator's label,
+	// never an identity — and is empty exactly when a caller made the write.
+	// Both set means a bypass ran under that caller's request.
 	//
 	// One session belongs to one actor — a write by anyone else opens its own
 	// record rather than folding — so this attributes the whole span, not only
 	// the write that opened it.
-	string actor_issuer = 9;
-	string actor_subject = 10;
-	string actor_client = 11;
-	bool actor_system = 12;
+	string actor_subject = 9;
+	string actor_system = 12;
 	// Server wall clock when the session OPENED, for display. It is NOT an
 	// ordering: only `seq` orders writes, and two records may share a clock
 	// reading. Folding a later write in leaves it alone, so it stays the moment

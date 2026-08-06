@@ -88,7 +88,8 @@ type principalKey struct{}
 // performs. It does not reach the change feed — a feed consumer drains on its
 // own ctx, on its own schedule, so it never sees the writing ctx at all. What
 // crosses that boundary is the actor recorded on the row (see storage.Actor and
-// Change.Actor), which is derived from this principal at write time.
+// Change.Actor), and only Subject does: Issuer and Claims stay live inputs to
+// policy and are never stored.
 //
 // Work with no caller to authorize marks its ctx with Trusted instead, which
 // skips the hooks; the two compose, so a ctx can carry a principal for

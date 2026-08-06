@@ -115,9 +115,9 @@ type Row struct {
 	Deleted bool
 	// Actor attributes the write that produced this state — including a
 	// tombstone, which records who deleted the row. Every read that returns a
-	// Row populates it; the zero Actor means the write was unattributed (a
-	// write made before an adapter recorded actors, or one whose caller had no
-	// identity to record).
+	// Row populates it; the zero Actor means the write was unattributed — an
+	// unauthenticated caller made it, or an adapter stored it before it
+	// recorded actors at all.
 	Actor Actor
 }
 
@@ -133,33 +133,22 @@ type Row struct {
 // The zero Actor is "unattributed" and is what an adapter reads back for rows
 // written before it recorded actors at all.
 type Actor struct {
-	// Issuer and Subject are copied from the engine's Principal — the verified
-	// identity of the caller whose write this was. Both are empty for a write
-	// with no authenticated caller; two principals from different issuers may
-	// share a Subject and are not the same actor, so a consumer comparing
-	// actors must compare both.
+	// Subject is the verified caller, copied from the engine's Principal. Empty
+	// when no authenticated caller made the write.
 	//
-	// For a System write Issuer is empty and Subject holds the system name,
-	// which is a label chosen by the operator and not an identity at all.
-	Issuer  string
+	// It carries no issuer, so it is unique only to the extent the
+	// Authenticator makes it so: a server admitting principals from more than
+	// one issuer must give their subjects distinct namespaces, or two callers
+	// collapse into one actor here.
 	Subject string
-	// Client is the client_id of the push this write came from, empty off the
-	// sync path. It is the only per-device handle the engine has — one
-	// principal syncs from many tabs — which makes it what "suppress the
-	// writer's own echo" usually keys on.
+	// System is the label a write made under the Trusted bypass gave itself,
+	// empty exactly when a caller made the write. Bare Trusted records
+	// "system", which a bypass may also name itself.
 	//
-	// It is UNAUTHENTICATED wire input: a client chooses its own id and may
-	// choose anyone else's. Use it to correlate and to suppress, never as an
-	// identity and never in an audit record that has to hold up.
-	Client string
-	// System marks a write made under the Trusted bypass — a connector, a
-	// migration, a GC or compaction pass — where there was no caller to
-	// authorize. Subject then holds the name that write gave itself, or is
-	// empty for machinery that did not name itself.
-	//
-	// It distinguishes "system, unnamed" from "no identity recorded", which a
-	// consumer deciding whether to react to a change has to tell apart.
-	System bool
+	// It is an operator's label and never an identity: nothing verifies it and
+	// no policy runs against it. Subject is recorded alongside it whenever the
+	// ctx carried a principal, which is whose request the bypass ran under.
+	System string
 }
 
 // AppSchema is a persisted runtime schema registration: the serialized

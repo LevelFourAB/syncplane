@@ -260,7 +260,7 @@ var _ = Describe("Field history", func() {
 			Expect(recs).To(HaveLen(2))
 			Expect(recs[0].GetMask().GetPaths()).To(Equal([]string{"title"}))
 			Expect(priorOf(recs[0]).GetTitle()).To(Equal("first"))
-			Expect(recs[0].GetActorSystem()).To(BeTrue(), "a trusted write records itself as one")
+			Expect(recs[0].GetActorSystem()).To(Equal("system"), "a trusted write records itself as one")
 		})
 
 		It("records nothing for a write that touches no captured field", func() {
@@ -582,7 +582,7 @@ var _ = Describe("Field history", func() {
 			Expect(recs[0].GetWrites()).To(BeEquivalentTo(3))
 			Expect(recs[0].GetThroughSeq()).To(BeNumerically(">", recs[0].GetSeq()),
 				"the record spans the writes it folded")
-			Expect(recs[0].GetActorSubject()).To(Equal("editor"))
+			Expect(recs[0].GetActorSystem()).To(Equal("editor"))
 		})
 
 		It("keeps a typing session to one record", func() {
@@ -726,11 +726,11 @@ var _ = Describe("Field history", func() {
 			Expect(recs).To(HaveLen(3))
 			// Newest first: the typist's second run, the editor's, and the
 			// creation record that absorbed the typist's first.
-			Expect(recs[0].GetActorSubject()).To(Equal("typist"))
+			Expect(recs[0].GetActorSystem()).To(Equal("typist"))
 			Expect(priorOf(recs[0]).GetTitle()).To(Equal("editor one"),
 				"a resumed session would have claimed the field still held what the typist left")
 			Expect(recs[0].GetWrites()).To(BeEquivalentTo(1))
-			Expect(recs[1].GetActorSubject()).To(Equal("editor"))
+			Expect(recs[1].GetActorSystem()).To(Equal("editor"))
 			Expect(priorOf(recs[1]).GetTitle()).To(Equal("typist one"))
 			Expect(recs[2].GetRowCreated()).To(BeTrue())
 			Expect(recs[2].GetWrites()).To(BeEquivalentTo(2), "the creation absorbed the write after it")
@@ -752,9 +752,61 @@ var _ = Describe("Field history", func() {
 
 			recs := historyOf(srv, ws, "historied", "h1")
 			Expect(recs).To(HaveLen(2), "the typist's session, and the editor's own")
-			Expect(recs[0].GetActorSubject()).To(Equal("editor"))
+			Expect(recs[0].GetActorSystem()).To(Equal("editor"))
 			Expect(priorOf(recs[0]).GetTitle()).To(Equal("second"))
-			Expect(recs[1].GetActorSubject()).To(Equal("typist"))
+			Expect(recs[1].GetActorSystem()).To(Equal("typist"))
+		})
+
+		It("folds writes one caller made from two clients into one record", func() {
+			// client_id is an idempotency handle, not an identity: one user
+			// typing in two browser tabs is one editing session.
+			srv := newTestServer()
+			user := server.WithPrincipal(ctx, server.Principal{Subject: "u_7"})
+			Expect(srv.Mutate(typist(), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Historied{Id: "h1", Title: "first"})
+			})).To(Succeed())
+
+			for i, clientID := range []string{"c1", "c2"} {
+				resp, err := srv.Push(user, connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+					patchMutation(clientID, 1, "historied", "h1",
+						&testdatav1.Historied{Id: "h1", Title: fmt.Sprintf("edit %d", i)}, "title"),
+				})))
+				Expect(err).NotTo(HaveOccurred())
+				for _, r := range pushResults(resp.Msg) {
+					Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED),
+						"push rejected: %s", r.GetErrorMessage())
+				}
+			}
+
+			recs := historyOf(srv, ws, "historied", "h1")
+			Expect(recs).To(HaveLen(2), "the creation, and one record for the user's session")
+			Expect(recs[0].GetActorSubject()).To(Equal("u_7"))
+			Expect(recs[0].GetWrites()).To(BeEquivalentTo(2))
+			Expect(priorOf(recs[0]).GetTitle()).To(Equal("first"))
+		})
+
+		It("opens a new record when a bypass runs under a caller's request", func() {
+			// A restore a user triggered is not a keystroke in their typing
+			// session, so the system label separates the two records even
+			// though both carry the same subject.
+			srv := newTestServer()
+			user := server.WithPrincipal(ctx, server.Principal{Subject: "u_7"})
+			Expect(srv.Mutate(typist(), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Historied{Id: "h1", Title: "first"})
+			})).To(Succeed())
+			Expect(srv.Mutate(user, ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.Historied{Id: "h1", Title: "typed"}, []string{"title"}, nil)
+			})).To(Succeed())
+			Expect(srv.Mutate(server.TrustedAs(user, "restore"), ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.Historied{Id: "h1", Title: "restored"}, []string{"title"}, nil)
+			})).To(Succeed())
+
+			recs := historyOf(srv, ws, "historied", "h1")
+			Expect(recs).To(HaveLen(3), "the creation, the user's edit, and the restore")
+			Expect(recs[0].GetActorSubject()).To(Equal("u_7"))
+			Expect(recs[0].GetActorSystem()).To(Equal("restore"))
+			Expect(recs[1].GetActorSubject()).To(Equal("u_7"))
+			Expect(recs[1].GetActorSystem()).To(BeEmpty())
 		})
 
 		It("opens a new record once the window has passed", func() {

@@ -105,6 +105,11 @@ type Config struct {
 	// a per-run identity leaves one dead entry per restart in every document
 	// the connector has touched. Empty means a fresh identity per instance,
 	// which is always safe but pays that cost.
+	//
+	// It also labels the connector's writes on the change feed, as
+	// "connect:<WriterID>" — the name an effect or another connector suppresses
+	// its own echo by. Empty labels them "connect", which is enough to tell a
+	// connector's write from a GC pass but not one connector from another.
 	WriterID string
 	// Logger is the structured logger the background loops write to. Loop
 	// failures are logged (never returned — convergence work must not take the
@@ -164,6 +169,11 @@ type Connector struct {
 	// instance's lifetime (Config.WriterID, or one minted in New): see
 	// applyTextFields.
 	peer string
+	// label names this connector on every row it writes (server.TrustedAs), so
+	// a feed consumer can recognize a connector's writes and skip them. It is
+	// derived from Config.WriterID rather than from the minted peer: a label
+	// that changes per run tells a consumer nothing.
+	label string
 
 	mu      sync.Mutex
 	ready   *sync.Cond
@@ -232,8 +242,11 @@ func New(cfg Config) (*Connector, error) {
 	}
 	logger = logger.With("component", "connect")
 	writerID := cfg.WriterID
+	label := "connect"
 	if writerID == "" {
 		writerID = id.New()
+	} else {
+		label += ":" + writerID
 	}
 	providers := telemetry.Providers{
 		TracerProvider: cfg.TracerProvider,
@@ -262,6 +275,7 @@ func New(cfg Config) (*Connector, error) {
 		tracked:      make(map[string]*workspace),
 		health:       make(map[string]Health),
 		peer:         "connector:" + writerID,
+		label:        label,
 	}
 	c.ready = sync.NewCond(&c.mu)
 	bind := func(prototype proto.Message, dir Direction) error {

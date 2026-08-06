@@ -29,7 +29,12 @@ var _ = Describe("Collaborative-text compaction", func() {
 	// A retention of a millisecond makes every write "quiet" after a short
 	// sleep, which is what puts rows in reach of one manual collection pass.
 	newServerWith := func(opts ...server.Option) {
-		srv = newTestServer(opts...)
+		// Every push authenticates as one caller, so a row carries an actor a
+		// maintenance pass could overwrite if it stamped itself.
+		authn := server.AuthenticatorFunc(func(context.Context, http.Header) (server.Principal, error) {
+			return server.Principal{Subject: "u_7"}, nil
+		})
+		srv = newTestServer(append([]server.Option{server.WithAuthenticator(authn)}, opts...)...)
 		path, handler := srv.Handler()
 		mux := http.NewServeMux()
 		mux.Handle(path, handler)
@@ -201,7 +206,7 @@ var _ = Describe("Collaborative-text compaction", func() {
 		// Compaction purges tombstones from the document and changes nothing an
 		// app can see. Stamping the maintenance pass here would erase who wrote
 		// the row and tell every feed consumer the engine did it.
-		Expect(got.Actor).To(Equal(storage.Actor{Client: "c1"}))
+		Expect(got.Actor).To(Equal(storage.Actor{Subject: "u_7"}))
 	})
 
 	It("is idempotent across passes", func() {

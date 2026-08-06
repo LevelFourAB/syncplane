@@ -459,8 +459,9 @@ func (s *Server) SubscribeActivity() (ids <-chan string, cancel func(), ok bool)
 func (s *Server) CurrentSeq(ctx, workspaceID string) (uint64, error)
 ```
 
-Each `Change` carries `Actor` — the principal, `client_id` or named system actor
-behind the write (see [the change feed](../how-to/change-feed.md#who-wrote-it)).
+Each `Change` carries `Actor` — the authenticated caller's subject, the label a
+trusted write gave itself, or both (see
+[the change feed](../how-to/change-feed.md#who-wrote-it)).
 Because the feed coalesces by row it reports the row's **last** writer, which is
 enough for echo suppression and "notify everyone except the actor", and is not
 an audit trail.

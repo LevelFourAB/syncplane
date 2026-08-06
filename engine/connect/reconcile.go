@@ -73,7 +73,7 @@ func (c *Connector) reconcile(ctx context.Context, workspaceID string, p *pass) 
 		// Arrival-order LWW, like every write: the delete reaches the
 		// linearization point now; a concurrent client edit that lands later
 		// recreates the row.
-		if err := c.srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error {
+		if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), workspaceID, func(tx *server.EntityTx) error {
 			return tx.Delete(c.bound[id.entity].prototype, id.key)
 		}); err != nil {
 			return err
@@ -147,7 +147,7 @@ func (c *Connector) ingest(ctx context.Context, workspaceID string, p *pass, b b
 		seq    uint64
 		merged proto.Message
 	)
-	if err := c.srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error {
+	if err := c.srv.Mutate(server.TrustedAs(ctx, c.label), workspaceID, func(tx *server.EntityTx) error {
 		// Reset on entry: the storage adapter may retry this closure.
 		seq, merged = 0, nil
 		cur := b.prototype.ProtoReflect().New().Interface()

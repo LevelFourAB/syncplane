@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/history.proto.
  */
 export const file_syncplane_v1_history: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvaGlzdG9yeS5wcm90bxIMc3luY3BsYW5lLnYxIrkDCgxGaWVsZEhpc3RvcnkSFQoNc291cmNlX2VudGl0eRgBIAEoCRISCgpzb3VyY2Vfa2V5GAIgASgJEgsKA3NlcRgDIAEoBBITCgt0aHJvdWdoX3NlcRgEIAEoBBIOCgZ3cml0ZXMYBSABKA0SEwoLcm93X2NyZWF0ZWQYBiABKAgSKAoEbWFzaxgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE1hc2sSDQoFcHJpb3IYCCABKAwSFAoMYWN0b3JfaXNzdWVyGAkgASgJEhUKDWFjdG9yX3N1YmplY3QYCiABKAkSFAoMYWN0b3JfY2xpZW50GAsgASgJEhQKDGFjdG9yX3N5c3RlbRgMIAEoCBIvCgtyZWNvcmRlZF9hdBgNIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5UaW1lc3RhbXA6dKK7GHAKF3N5bmNwbGFuZV9maWVsZF9oaXN0b3J5Eg1zb3VyY2VfZW50aXR5Egpzb3VyY2Vfa2V5EgNzZXEaMwoJYnlfc291cmNlEg8KDXNvdXJjZV9lbnRpdHkSDAoKc291cmNlX2tleRIHCgNzZXEQASgBQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_field_mask, file_google_protobuf_timestamp, file_syncplane_v1_options]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvaGlzdG9yeS5wcm90bxIMc3luY3BsYW5lLnYxIo0DCgxGaWVsZEhpc3RvcnkSFQoNc291cmNlX2VudGl0eRgBIAEoCRISCgpzb3VyY2Vfa2V5GAIgASgJEgsKA3NlcRgDIAEoBBITCgt0aHJvdWdoX3NlcRgEIAEoBBIOCgZ3cml0ZXMYBSABKA0SEwoLcm93X2NyZWF0ZWQYBiABKAgSKAoEbWFzaxgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE1hc2sSDQoFcHJpb3IYCCABKAwSFQoNYWN0b3Jfc3ViamVjdBgJIAEoCRIUCgxhY3Rvcl9zeXN0ZW0YDCABKAkSLwoLcmVjb3JkZWRfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wOnSiuxhwChdzeW5jcGxhbmVfZmllbGRfaGlzdG9yeRINc291cmNlX2VudGl0eRIKc291cmNlX2tleRIDc2VxGjMKCWJ5X3NvdXJjZRIPCg1zb3VyY2VfZW50aXR5EgwKCnNvdXJjZV9rZXkSBwoDc2VxEAEoAUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_field_mask, file_google_protobuf_timestamp, file_syncplane_v1_options]);
 
 /**
  * FieldHistory is one recorded field change: what a row's changed fields held
@@ -157,33 +157,24 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
 
   /**
    * Who made the write, copied from the row's actor at capture time (see the
-   * engine's storage.Actor). issuer/subject are the verified principal;
-   * client is the unauthenticated client_id a push came under, useful to
-   * correlate and never as identity; system marks a write made under the
-   * engine's Trusted bypass, with subject holding the name it gave itself.
+   * engine's storage.Actor). actor_subject is the verified caller, empty when
+   * no authenticated caller made the write. actor_system is the label a write
+   * made under the engine's trusted bypass gave itself — an operator's label,
+   * never an identity — and is empty exactly when a caller made the write.
+   * Both set means a bypass ran under that caller's request.
    *
    * One session belongs to one actor — a write by anyone else opens its own
    * record rather than folding — so this attributes the whole span, not only
    * the write that opened it.
    *
-   * @generated from field: string actor_issuer = 9;
-   */
-  actorIssuer: string;
-
-  /**
-   * @generated from field: string actor_subject = 10;
+   * @generated from field: string actor_subject = 9;
    */
   actorSubject: string;
 
   /**
-   * @generated from field: string actor_client = 11;
+   * @generated from field: string actor_system = 12;
    */
-  actorClient: string;
-
-  /**
-   * @generated from field: bool actor_system = 12;
-   */
-  actorSystem: boolean;
+  actorSystem: string;
 
   /**
    * Server wall clock when the session OPENED, for display. It is NOT an

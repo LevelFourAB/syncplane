@@ -127,7 +127,11 @@ func (s *Server) MutateIdempotent(
 			out = WriteOutcome{Seq: rec.Seq, Result: rec.Result}
 			return nil
 		}
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, actor: actorOf(ctx, "")}
+		actor, err := actorOf(ctx)
+		if err != nil {
+			return err
+		}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, actor: actor}
 		result, err := fn(etx)
 		if err != nil {
 			return err

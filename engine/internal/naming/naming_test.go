@@ -154,6 +154,61 @@ var _ = Describe("ValidateRowKey", func() {
 	})
 })
 
+var _ = Describe("ValidateActorSubject", func() {
+	It("accepts the identities an authenticator produces", func() {
+		for _, s := range []string{"u_7", "user@example.com", "acct:acme:svc-sync", "åäö"} {
+			Expect(naming.ValidateActorSubject(s)).To(Succeed(), s)
+		}
+	})
+
+	// The unauthenticated caller, which is a write with no attribution.
+	It("accepts the empty subject", func() {
+		Expect(naming.ValidateActorSubject("")).To(Succeed())
+	})
+
+	It("rejects control characters", func() {
+		Expect(naming.ValidateActorSubject("u\x00" + "7")).To(MatchError(ContainSubstring(`\u0000`)))
+		// U+001F separates the fields of a cross-tab change token.
+		Expect(naming.ValidateActorSubject("u\x1f7")).To(MatchError(ContainSubstring(`\u001f`)))
+		Expect(naming.ValidateActorSubject("u\x7f")).To(MatchError(ContainSubstring(`\u007f`)))
+	})
+
+	It("rejects invalid UTF-8", func() {
+		Expect(naming.ValidateActorSubject(string([]byte{0x61, 0xff}))).
+			To(MatchError(ContainSubstring("valid UTF-8")))
+	})
+
+	It("caps the length in bytes, not characters", func() {
+		Expect(naming.ValidateActorSubject(strings.Repeat("a", naming.MaxActorSubjectBytes))).To(Succeed())
+		Expect(naming.ValidateActorSubject(strings.Repeat("a", naming.MaxActorSubjectBytes+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+		// Two bytes per character, so half the cap in characters is the limit.
+		Expect(naming.ValidateActorSubject(strings.Repeat("å", naming.MaxActorSubjectBytes/2+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
+var _ = Describe("ValidateActorSystem", func() {
+	It("accepts the labels a trusted write gives itself", func() {
+		for _, s := range []string{"", "system", "connect:markdown", "gc"} {
+			Expect(naming.ValidateActorSystem(s)).To(Succeed(), s)
+		}
+	})
+
+	It("rejects control characters and invalid UTF-8", func() {
+		Expect(naming.ValidateActorSystem("connect\x1fx")).To(MatchError(ContainSubstring(`\u001f`)))
+		Expect(naming.ValidateActorSystem(string([]byte{0x61, 0xff}))).
+			To(MatchError(ContainSubstring("valid UTF-8")))
+	})
+
+	It("caps the label shorter than a subject", func() {
+		Expect(naming.MaxActorSystemBytes).To(BeNumerically("<", naming.MaxActorSubjectBytes))
+		Expect(naming.ValidateActorSystem(strings.Repeat("a", naming.MaxActorSystemBytes))).To(Succeed())
+		Expect(naming.ValidateActorSystem(strings.Repeat("a", naming.MaxActorSystemBytes+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
 var _ = Describe("ScalarKeyString", func() {
 	It("renders each admitted kind the way the client does", func() {
 		w := &testdatav1.Widget{Id: "w1", Count: -7, Big: 9007199254740993, Flag: true}

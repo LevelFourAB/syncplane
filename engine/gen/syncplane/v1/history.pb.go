@@ -121,18 +121,17 @@ type FieldHistory struct {
 	// formatting anchored to the old runs is not reapplied.
 	Prior []byte `protobuf:"bytes,8,opt,name=prior,proto3" json:"prior,omitempty"`
 	// Who made the write, copied from the row's actor at capture time (see the
-	// engine's storage.Actor). issuer/subject are the verified principal;
-	// client is the unauthenticated client_id a push came under, useful to
-	// correlate and never as identity; system marks a write made under the
-	// engine's Trusted bypass, with subject holding the name it gave itself.
+	// engine's storage.Actor). actor_subject is the verified caller, empty when
+	// no authenticated caller made the write. actor_system is the label a write
+	// made under the engine's trusted bypass gave itself — an operator's label,
+	// never an identity — and is empty exactly when a caller made the write.
+	// Both set means a bypass ran under that caller's request.
 	//
 	// One session belongs to one actor — a write by anyone else opens its own
 	// record rather than folding — so this attributes the whole span, not only
 	// the write that opened it.
-	ActorIssuer  string `protobuf:"bytes,9,opt,name=actor_issuer,json=actorIssuer,proto3" json:"actor_issuer,omitempty"`
-	ActorSubject string `protobuf:"bytes,10,opt,name=actor_subject,json=actorSubject,proto3" json:"actor_subject,omitempty"`
-	ActorClient  string `protobuf:"bytes,11,opt,name=actor_client,json=actorClient,proto3" json:"actor_client,omitempty"`
-	ActorSystem  bool   `protobuf:"varint,12,opt,name=actor_system,json=actorSystem,proto3" json:"actor_system,omitempty"`
+	ActorSubject string `protobuf:"bytes,9,opt,name=actor_subject,json=actorSubject,proto3" json:"actor_subject,omitempty"`
+	ActorSystem  string `protobuf:"bytes,12,opt,name=actor_system,json=actorSystem,proto3" json:"actor_system,omitempty"`
 	// Server wall clock when the session OPENED, for display. It is NOT an
 	// ordering: only `seq` orders writes, and two records may share a clock
 	// reading. Folding a later write in leaves it alone, so it stays the moment
@@ -228,13 +227,6 @@ func (x *FieldHistory) GetPrior() []byte {
 	return nil
 }
 
-func (x *FieldHistory) GetActorIssuer() string {
-	if x != nil {
-		return x.ActorIssuer
-	}
-	return ""
-}
-
 func (x *FieldHistory) GetActorSubject() string {
 	if x != nil {
 		return x.ActorSubject
@@ -242,18 +234,11 @@ func (x *FieldHistory) GetActorSubject() string {
 	return ""
 }
 
-func (x *FieldHistory) GetActorClient() string {
-	if x != nil {
-		return x.ActorClient
-	}
-	return ""
-}
-
-func (x *FieldHistory) GetActorSystem() bool {
+func (x *FieldHistory) GetActorSystem() string {
 	if x != nil {
 		return x.ActorSystem
 	}
-	return false
+	return ""
 }
 
 func (x *FieldHistory) GetRecordedAt() *timestamppb.Timestamp {
@@ -267,7 +252,7 @@ var File_syncplane_v1_history_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_history_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/history.proto\x12\fsyncplane.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1asyncplane/v1/options.proto\"\xc5\x04\n" +
+	"\x1asyncplane/v1/history.proto\x12\fsyncplane.v1\x1a google/protobuf/field_mask.proto\x1a\x1fgoogle/protobuf/timestamp.proto\x1a\x1asyncplane/v1/options.proto\"\xff\x03\n" +
 	"\fFieldHistory\x12#\n" +
 	"\rsource_entity\x18\x01 \x01(\tR\fsourceEntity\x12\x1d\n" +
 	"\n" +
@@ -279,12 +264,9 @@ const file_syncplane_v1_history_proto_rawDesc = "" +
 	"\vrow_created\x18\x06 \x01(\bR\n" +
 	"rowCreated\x12.\n" +
 	"\x04mask\x18\a \x01(\v2\x1a.google.protobuf.FieldMaskR\x04mask\x12\x14\n" +
-	"\x05prior\x18\b \x01(\fR\x05prior\x12!\n" +
-	"\factor_issuer\x18\t \x01(\tR\vactorIssuer\x12#\n" +
-	"\ractor_subject\x18\n" +
-	" \x01(\tR\factorSubject\x12!\n" +
-	"\factor_client\x18\v \x01(\tR\vactorClient\x12!\n" +
-	"\factor_system\x18\f \x01(\bR\vactorSystem\x12;\n" +
+	"\x05prior\x18\b \x01(\fR\x05prior\x12#\n" +
+	"\ractor_subject\x18\t \x01(\tR\factorSubject\x12!\n" +
+	"\factor_system\x18\f \x01(\tR\vactorSystem\x12;\n" +
 	"\vrecorded_at\x18\r \x01(\v2\x1a.google.protobuf.TimestampR\n" +
 	"recordedAt:t\xa2\xbb\x18p\n" +
 	"\x17syncplane_field_history\x12\rsource_entity\x12\n" +

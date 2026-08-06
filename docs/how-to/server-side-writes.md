@@ -68,7 +68,12 @@ attached. The name is recorded on every row the call writes and shows up on the
 [change feed](change-feed.md#who-wrote-it) as the write's actor, so a consumer
 can skip its own writes instead of reacting to them. Prefer it for anything that
 writes on a schedule or in a loop; nothing verifies the name, and no policy runs
-against it.
+against it. A bare `Trusted` records the name `"system"`.
+
+Both bypasses compose with a principal rather than replacing it: a request ctx
+that opts one call out of enforcement records the label **and** the caller whose
+request it ran under, which is what tells a user-triggered restore from a
+scheduled pass.
 
 `Invoke` authorizes **once**, on the verb — a `Write{Custom}` carrying the
 mutator name and args. The rows the mutator body writes are not authorized

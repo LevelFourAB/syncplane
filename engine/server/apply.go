@@ -213,9 +213,13 @@ func (s *Server) apply(
 				return nil
 			}
 		}
+		actor, err := actorOf(ctx)
+		if err != nil {
+			return err
+		}
 		// authz stays nil: phase 2 already authorized every intent, and
 		// re-running the hook here would put it back under the write lock.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, actor: actorOf(ctx, "")}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, actor: actor}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err

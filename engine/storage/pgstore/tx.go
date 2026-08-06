@@ -101,12 +101,12 @@ func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
 	var version int64
 	err := t.tx.QueryRow(t.ctx,
-		`SELECT value, version, deleted, actor_issuer, actor_subject, actor_client, actor_system
+		`SELECT value, version, deleted, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4`,
 		t.ns, t.ws, entity, key,
 	).Scan(&row.Value, &version, &row.Deleted,
-		&row.Actor.Issuer, &row.Actor.Subject, &row.Actor.Client, &row.Actor.System)
+		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.Row{}, storage.ErrNotFound
 	}
@@ -124,7 +124,7 @@ func decodeEntityRow(entity string) func(pgx.Rows) (storage.Row, error) {
 		r := storage.Row{Entity: entity}
 		var version int64
 		if err := rows.Scan(&r.Key, &r.Value, &version,
-			&r.Actor.Issuer, &r.Actor.Subject, &r.Actor.Client, &r.Actor.System); err != nil {
+			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return storage.Row{}, err
 		}
 		r.Version = uint64(version)
@@ -138,7 +138,7 @@ func (t *pgTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 
 func (t *pgTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(storage.Row) error) error {
 	return scanCursor(t,
-		`SELECT key, value, version, actor_issuer, actor_subject, actor_client, actor_system
+		`SELECT key, value, version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted AND key > $4
 		 ORDER BY key
@@ -152,7 +152,7 @@ func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage
 	// partial on NOT deleted), so this reads the index prefix and stops at the
 	// limit instead of sorting the entity.
 	return scanCursor(t,
-		`SELECT key, value, version, actor_issuer, actor_subject, actor_client, actor_system
+		`SELECT key, value, version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted
 		 ORDER BY version DESC, key
@@ -166,7 +166,7 @@ func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit 
 		var r storage.Row
 		var version int64
 		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &version, &r.Deleted,
-			&r.Actor.Issuer, &r.Actor.Subject, &r.Actor.Client, &r.Actor.System); err != nil {
+			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return storage.Row{}, err
 		}
 		r.Version = uint64(version)
@@ -176,7 +176,7 @@ func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit 
 		return r, nil
 	}
 	const cols = `SELECT entity, key, value, version, deleted,
-	                     actor_issuer, actor_subject, actor_client, actor_system
+	                     actor_subject, actor_system
 	              FROM rows `
 
 	if afterEntity == "" {
@@ -687,15 +687,15 @@ func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor st
 	}
 	_, err := t.tx.Exec(t.ctx,
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
-		                   actor_issuer, actor_subject, actor_client, actor_system)
-		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9, $10, $11)
+		                   actor_subject, actor_system)
+		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = FALSE,
 		               updated_at = excluded.updated_at,
-		               actor_issuer = excluded.actor_issuer, actor_subject = excluded.actor_subject,
-		               actor_client = excluded.actor_client, actor_system = excluded.actor_system`,
+		               actor_subject = excluded.actor_subject,
+		               actor_system = excluded.actor_system`,
 		t.ns, t.ws, entity, key, value, int64(version), time.Now().UnixMilli(),
-		actor.Issuer, actor.Subject, actor.Client, actor.System,
+		actor.Subject, actor.System,
 	)
 	return err
 }
@@ -706,15 +706,15 @@ func (t *pgTx) DeleteRow(entity, key string, version uint64, actor storage.Actor
 	}
 	_, err := t.tx.Exec(t.ctx,
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
-		                   actor_issuer, actor_subject, actor_client, actor_system)
-		 VALUES ($1, $2, $3, $4, NULL, $5, TRUE, $6, $7, $8, $9, $10)
+		                   actor_subject, actor_system)
+		 VALUES ($1, $2, $3, $4, NULL, $5, TRUE, $6, $7, $8)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = TRUE,
 		               updated_at = excluded.updated_at,
-		               actor_issuer = excluded.actor_issuer, actor_subject = excluded.actor_subject,
-		               actor_client = excluded.actor_client, actor_system = excluded.actor_system`,
+		               actor_subject = excluded.actor_subject,
+		               actor_system = excluded.actor_system`,
 		t.ns, t.ws, entity, key, int64(version), time.Now().UnixMilli(),
-		actor.Issuer, actor.Subject, actor.Client, actor.System,
+		actor.Subject, actor.System,
 	)
 	return err
 }

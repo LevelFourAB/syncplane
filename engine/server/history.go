@@ -434,9 +434,7 @@ func (s *Server) captureHistory(
 		Seq:          seq,
 		ThroughSeq:   seq,
 		Writes:       1,
-		ActorIssuer:  actor.Issuer,
 		ActorSubject: actor.Subject,
-		ActorClient:  actor.Client,
 		ActorSystem:  actor.System,
 		RecordedAt:   timestamppb.New(now),
 	}
@@ -917,10 +915,7 @@ func sameHistorySession(
 	now time.Time,
 	window time.Duration,
 ) bool {
-	if stored.GetActorIssuer() != actor.Issuer ||
-		stored.GetActorSubject() != actor.Subject ||
-		stored.GetActorClient() != actor.Client ||
-		stored.GetActorSystem() != actor.System {
+	if storedActor(stored) != actor {
 		return false
 	}
 	opened := stored.GetRecordedAt()
@@ -928,6 +923,13 @@ func sameHistorySession(
 		return false
 	}
 	return !now.After(opened.AsTime().Add(window))
+}
+
+// storedActor reads back the actor a record was written with. It is the inverse
+// of the population in captureHistory, kept next to the comparison that depends
+// on the two agreeing field for field.
+func storedActor(rec *syncplanev1.FieldHistory) storage.Actor {
+	return storage.Actor{Subject: rec.GetActorSubject(), System: rec.GetActorSystem()}
 }
 
 // foldHistory folds a new record into the one already in its place and returns
