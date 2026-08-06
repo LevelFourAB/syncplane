@@ -8,7 +8,7 @@ For wiring an SDK and an exporter, see
 **Instrument names are a compatibility surface.** Dashboards and alerts are
 written against them, so they change like any other public API.
 
-## What you get for free
+## Without an SDK installed
 
 The engine depends only on the OpenTelemetry **API**, never the SDK. Until a
 process installs an SDK, every instrument is the API's own no-op: an interface
@@ -275,7 +275,7 @@ const client = new SyncClient({
 | `leadership` | `leader`                                                                                                 |
 
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`
-from `error`, so an error rate does not simply track connectivity.
+from `error`, so an error rate does not track connectivity.
 
 Counting `poke` against `pull` is what separates changes that took the realtime
 path from ones that waited for the poll floor.

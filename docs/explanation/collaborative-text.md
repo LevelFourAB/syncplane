@@ -337,9 +337,9 @@ This is the one place the engine can drop a user's work, which is why compaction
 is off by default. Enable it for documents edited over months; leave it off for
 short-lived ones.
 
-## Known limitations, by design for now
+## What is out of scope
 
-There is no presence/awareness channel; and formatting is out of scope — marks
+There is no presence/awareness channel, and formatting is out of scope — marks
 are for annotations, so keep rich text in the source format (e.g. Markdown).
 
 A client that does not implement the CRDT cannot set a text field: the wire

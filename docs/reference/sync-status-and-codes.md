@@ -3,34 +3,17 @@
 ## `client.status()`
 
 `client.status()` returns a snapshot and `client.onStatusChange(cb)` (or the
-constructor option) subscribes — both work before `start()`:
-
-```ts
-interface SyncStatus {
-	state: 'idle' | 'syncing' | 'error';
-	online: boolean; // change stream connected or last sync succeeded
-	dirty: boolean; // pendingMutations > 0, anywhere
-	pendingMutations: number; // total across every workspace
-	lastSyncedAt?: Date;
-	// code is a SyncErrorCode; transportCode is the raw Connect code, if any.
-	lastError?: { message: string; code?: string; transportCode?: string };
-	// Per-workspace health; also reachable as client.ws(id).status().
-	workspaces: Record<string, {
-		workspaceId: string;
-		pendingMutations: number;
-		access?: 'granted' | 'revoked';
-		scope?: { own: number; effective: number; widened: boolean };
-	}>;
-	// The default workspace's scope/access, mirrored so a single-workspace app
-	// never has to index `workspaces`.
-	scope?: { own: number; effective: number; widened: boolean };
-	workspaceAccess?: 'granted' | 'revoked';
-}
-```
+constructor option) subscribes. Both work before `start()`.
 
 Connectivity, the sync-loop state and the schema-revision skew are
-**account-wide** (one stream, one server build); pending counts, scope and access
-are **per workspace**.
+**account-wide** (one stream, one server build); pending counts, scope, access
+and snapshot progress are **per workspace**, with the default workspace's
+mirrored onto the top level so a single-workspace app never indexes
+`workspaces`.
+
+The full shape is in
+[the client reference](typescript-client.md#8-sync-status). This page is about
+which channel reports what.
 
 ## Where failures show up
 

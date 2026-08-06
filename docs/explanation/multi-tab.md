@@ -25,8 +25,8 @@ They run no stream of their own.
 
 Leadership is released on `visibilitychange→hidden` (after a short grace),
 `pagehide` and `freeze`, and re-contended on `visible`/`resume`. So it always
-lives in a visible tab — or nowhere: all-hidden tabs simply fall back to the
-per-tab poll floor, and a suspended background tab never strands the lock.
+lives in a visible tab — or nowhere: all-hidden tabs fall back to the per-tab
+poll floor, and a suspended background tab never strands the lock.
 
 If the lock request itself fails — Web Locks exists but is unusable, as in some
 sandboxed or storage-partitioned embeds — the tab stops contending, logs it, and

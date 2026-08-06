@@ -196,8 +196,8 @@ entirely: the records that remain are no longer readable, and deleting their
 source rows no longer purges them. The expiry sweep still runs — it is not gated
 on the catalog, because records are durable state and catalog membership is not
 — so retention drains what is left on its own. Under `HistoryForever` there is
-no sweep to drain them, and records left behind that way stay until something
-purges them. Worth knowing before turning the option off.
+no sweep to drain them, so records left behind that way stay until something
+purges them.
 
 The default is a finite 90 days. `HistoryForever` suits entities whose rows are
 edited by people; on rows machinery rewrites in a loop, the log grows without
@@ -560,6 +560,8 @@ mgr.Close()          // stops every hosted app's *Server (not the root adapter)
 
 ## Storage
 
-`sqlitestore.Open(path, sqlitestore.WithNamespace(...))`, and
-`root.Namespace(id)` to derive one view per app from a single open file. See
-[Storage adapter contract](storage-adapter.md).
+`sqlitestore.Open(path, sqlitestore.WithNamespace(...))` is the single-process
+default; `pgstore.Open(ctx, dsn)` backs several nodes off one database. Either
+way `root.Namespace(id)` derives one view per app from a single open store. See
+[Storage adapter contract](storage-adapter.md) and
+[Run more than one node](../how-to/run-multiple-nodes.md).

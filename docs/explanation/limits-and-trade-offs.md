@@ -15,10 +15,10 @@ endpoint will be felt. There is no full-text search; `contains` is a substring
 test per row and is never index-servable.
 
 `watchQuery` **always** scans, on both a cold start and every commit that
-touches its entity. Its snapshot is shared per (entity, workspace) rather than
-per query, so it cannot be narrowed to one query's matches without giving each
-watcher its own — which is the remaining piece of this work, and the reason a
-watched query over a large entity still costs what it always did.
+touches its entity, however well an index covers the same query passed to
+`query`. Its snapshot is shared per (entity, workspace) rather than per query,
+and narrowing it to one query's matches would mean a snapshot per watcher — so a
+watched query over a large entity costs an entity scan per commit.
 
 `client.query` is served from an index when one covers it: a workspace-scoped
 query whose predicate and ordering the planner can express as a range reads that
@@ -31,10 +31,13 @@ Two further paths are exceptions, both server-side and neither reachable from a
 query:
 
 - A **reverse follow hop** ("every issue whose project is this one") is served
-  from an index the engine derives for every reference field, to-one and to-many
-  alike, so it costs O(matches) rather than O(source entity). A to-many
-  reference stores a list of target keys, so its row occupies one position per
-  key.
+  from an index the engine derives for every reference field, so it costs
+  O(matches) rather than O(source entity) — through a **to-one** ref. Through a
+  **to-many** one the hop scans the source entity and re-derives each stub's
+  key: the index holds one position per key in the list, but probing it for a
+  single target would need the multi-entry read the reverse path does not do.
+  The entries are still written either way, so the write cost below is paid by
+  both.
 - The **seeds of a following subscription** — the base-scope rows its closure is
   walked from — go through the same planner as a query, so a follow anchored on
   a predicate costs O(matches) to anchor. With no predicate the seeds _are_ the
@@ -238,7 +241,7 @@ What multi-node still does not give you, even with both:
 - **Effects fire once per node**, not once. A consumer running on three nodes
   reacts three times, which is silent rather than convergent.
 - **GC has no cross-node coordination.** The pass is idempotent so every node
-  may run it; they just duplicate the work.
+  may run it; they duplicate the work.
 
 Sizing, single node: one process, one SQLite file, tens of apps at human-paced
 write rates. See [the scale envelope](../how-to/host-multiple-apps.md#scale-envelope)
@@ -407,4 +410,4 @@ expect that.
 The custom option field numbers (50100/50101) sit in the range reserved for use
 within a single organization. Claim numbers in protobuf's global extension
 registry before publishing the protos; moving them afterwards is a breaking
-change for every adopter's generated code. See [Proto options](../reference/proto-options.md#a-note-on-the-option-field-numbers).
+change for every adopter's generated code. See [Proto options](../reference/proto-options.md#the-option-field-numbers).

@@ -181,7 +181,7 @@ edit, and mark operations it applied over dropped characters do not survive the
 re-diff. Enable it for documents edited over months; leave it off for
 short-lived ones. [Collaborative text](../explanation/collaborative-text.md#compaction) explains the mechanism.
 
-## Known limitations, by design for now
+## What is out of scope
 
 - There is no presence/awareness channel.
 - Formatting is out of scope — marks are for annotations; keep rich text in the

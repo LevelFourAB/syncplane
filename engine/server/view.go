@@ -112,10 +112,13 @@ func (v *ViewTx) ScanPage(prototype proto.Message, afterKey string, limit int, f
 // The caller's read filter applies (a Trusted view sees every live row), so
 // Offset and Limit count only rows this caller may see. No engine limit caps
 // the result, though, so unlike the RPC a spec with no Limit returns — and
-// holds in memory — every match. It is also unindexed: every call scans and
-// decodes every live row of the entity, so it is O(entity) in time however
-// selective the predicate is. Fine for a background job; think twice in a hot
-// handler over a large entity.
+// holds in memory — every match.
+//
+// A declared secondary index serves the query when one covers its predicate and
+// ordering, making it O(matches). With none — or while an index is still
+// building — every live row of the entity is read and decoded, so the query is
+// O(entity) however selective the predicate is. Fine for a background job;
+// think twice in a hot handler over a large entity.
 //
 // fn runs inside the read snapshot, so it must not start another transaction.
 // An error from fn stops the iteration and surfaces.

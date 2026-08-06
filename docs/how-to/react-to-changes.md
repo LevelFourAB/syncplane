@@ -197,10 +197,11 @@ stranded below the horizon is eventually collected by the GC pass, loudly.
 
 ## Single instance
 
-The position lives in the engine's store, but nothing yet leases a workspace to
-one drainer. Two processes running the same consumer each drain the feed and each
-fire the handler. **Run exactly one instance of a given consumer** until leasing
-lands.
+The position lives in the engine's store, but nothing leases a workspace to one
+drainer. Two processes running the same consumer each drain the feed and each
+fire the handler. **Run exactly one instance of a given consumer** — in a
+multi-node deployment, that means a single dedicated process rather than every
+node serving traffic.
 
 That includes overlap during a **rolling deploy**: the outgoing process keeps
 draining while the incoming one starts, so effects duplicate across the handover.

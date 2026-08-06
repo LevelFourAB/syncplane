@@ -71,7 +71,7 @@ recovers automatically with backoff.
 
 What it _can_ reject on is the local set-up it awaits before sync begins —
 missing `url`/`transport`, or a local store that will not open. Such a start
-leaves the client startable: fix the cause (or just wait out a flaky store) and
+leaves the client startable: fix the cause (or wait out a flaky store) and
 call `start()` again. Concurrent callers share one start attempt.
 
 ## Handle losing access to a workspace

@@ -15,9 +15,9 @@ Pick the tier that can actually observe the behavior you are changing.
 ## Running a single test
 
 ```sh
-# Go: pass ginkgo args through task, or run ginkgo directly in engine/
+# Go: pass ginkgo args through task, or run ginkgo directly from the repo root
 task test:go -- --focus "rejects a stale version"
-cd engine && go tool ginkgo run ./server          # one package
+go tool ginkgo run ./engine/server                # one package
 
 # TS: vitest in client/
 cd client && pnpm vitest run --project unit test/unit/kv.test.ts
@@ -63,11 +63,16 @@ cd client && pnpm exec playwright test           # every installed engine at onc
 
 ## Shared conformance vectors
 
-Two directories are contracts between the Go and TypeScript implementations.
+Three directories are contracts between the Go and TypeScript implementations.
 Extend them when touching the semantics they pin, and update **both** sides in
 one change:
 
 - `testdata/queryeval/` — query-evaluation vectors.
+- `testdata/indexkey/` — index-entry encoding (`encodeCases` pin the bytes),
+  entry-vs-comparator agreement (`orderCases`) and the planner's decisions
+  (`probeCases`). The planner half is the one nothing else would catch: a
+  planner that chose differently still returns the right rows, just at a
+  different cost.
 - `testdata/text/` — text-CRDT vectors. The `encodedHex` checks pin the canonical
   encoding byte for byte, so any change to `engine/text` or `client/src/text`
   must land in the other implementation and the vectors together.

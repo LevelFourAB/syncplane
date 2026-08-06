@@ -522,10 +522,11 @@ func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) erro
 // them", inside the same transaction as the writes so nothing moves underneath.
 // It is the same compiled predicate ViewTx.Query and the Query RPC use.
 //
-// Two costs to keep in mind here specifically: this is an unindexed full scan
-// of the entity, and it runs while the workspace's write lock is held, so a
-// broad query inside a mutation blocks every other writer for its duration. A
-// spec with no Limit also retains every match in memory. See query.Spec.
+// The cost to keep in mind here specifically is that it runs while the
+// workspace's write lock is held, so a broad query inside a mutation blocks
+// every other writer for its duration — and it is a full scan of the entity
+// unless a declared secondary index covers its predicate and ordering. A spec
+// with no Limit also retains every match in memory. See query.Spec.
 func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message) error) error {
 	info, err := e.info(prototype)
 	if err != nil {

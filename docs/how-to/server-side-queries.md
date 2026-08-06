@@ -32,16 +32,18 @@ naming no field is rejected at compile time rather than matching nothing.
 
 Nothing in the API hints at either:
 
-- **There is no secondary index.** Every query scans and decodes every live row
-  of the entity, so it is O(entity) in time however selective the predicate is
-  and however small the limit. Fine for a background job; think twice in a hot
-  handler over a large entity.
+- **An unindexed query scans the entity.** Where a declared
+  [secondary index](../reference/proto-options.md#secondary-indexes) serves the
+  predicate and the ordering, the read is a range scan over that index. With
+  none, every live row is read and decoded, so the query is O(entity) however
+  selective the predicate is and however small the limit. Fine for a background
+  job; think twice in a hot handler over a large entity.
 - **No engine limit caps the result**, unlike the RPC, so a `Spec` with no
   `Limit` holds every match in memory. Inside `EntityTx` the scan also runs
   while the workspace write lock is held.
 
 `ViewTx` and `ApplyTx` apply the caller's `ReadFilter` — a filtered row is
-simply absent from the result, and `Offset`/`Limit` count only rows the caller
+absent from the result, and `Offset`/`Limit` count only rows the caller
 may see. `EntityTx` does not: its reads are server-authoritative, like a
 mutator's. A read marked `server.Trusted(ctx)` skips the filter everywhere.
 

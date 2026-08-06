@@ -18,15 +18,29 @@ It ships as two halves joined by a protobuf wire contract: a Go server
 - 🪟 **Partial sync** — subscribe to a subset of rows by predicate _and_ by rank
   ("the 1000 most recently updated open issues"). Every read reports its own
   `coverage`, so partial data is never mistaken for the whole answer.
+- 🔎 **Queries, local and server-side** — one predicate language, evaluated
+  identically in Go and TypeScript and pinned by shared vectors. Declare a
+  secondary index and the same query becomes a range read on both sides;
+  without one it falls back to a scan that returns the same rows.
 - ✍️ **Collaborative text** — mark a `bytes` field `text: true` and it holds a
-  convergent text document.
+  convergent text document, with Peritext-style marks and anchors that travel
+  with the characters they cover.
+- 🕰️ **Field history** — opt an entity into `history: {}` and the server logs
+  what its marked fields held before each editing session, with the actor;
+  restoring one is an ordinary `patch`.
 - 🔐 **Auth & permission seams** — an `Authenticator` turns headers into a
   `Principal`; `CanAccessWorkspace`, `CanMutate` and `ReadFilter` decide what it
   may do. Rejections come back as results, not RPC errors.
 - 🧬 **CRUD + custom mutations** — generated `put`/`patch`/`del` plus named,
-  server-authoritative Go mutators with optional TypeScript mirrors.
-- 🗂️ **Multi-tab safe** — tabs share one IndexedDB store; one visible tab holds
-  the stream (Web Locks leader election) and the rest see its writes.
+  server-authoritative Go mutators with optional TypeScript mirrors. An entity
+  can reserve `DELETE` for trusted writes in its own schema.
+- 📤 **Server-side reactions** — a durable change feed, an `effects` runtime
+  that runs handlers on committed writes with before-state and backoff, and
+  `connect` for keeping an external store converged bidirectionally.
+- 🗂️ **Multi-tab, multi-workspace** — tabs share one IndexedDB store; one
+  visible tab holds the stream (Web Locks leader election) and the rest see its
+  writes. One client holds every workspace an account belongs to, over one
+  stream and one push.
 - ⚛️ **React adapter** — `syncplane/react` mirrors `client.db` as hooks
   (`useQuery`, `useRow`, `useMutate`, `useText`, `useSyncStatus`, `useUndo`,
   `useOnMutationRejected`), with suspense variants, a provider that owns the
@@ -34,6 +48,9 @@ It ships as two halves joined by a protobuf wire contract: a Go server
 - 🧩 **Runtime schemas** — an app's entities can arrive as a
   `FileDescriptorSet` at runtime instead of compiled-in Go, and one process can
   host many apps.
+- 🖧 **One node or many** — SQLite plus an in-process notifier needs no
+  infrastructure; swap in `pgstore` and `pgnotify` and several nodes share one
+  Postgres database. Nothing above the storage seam changes.
 
 ## Quick start
 
@@ -172,12 +189,13 @@ Full documentation lives in [`docs/`](docs/README.md), organized along
 
 - **[Tutorials](docs/README.md#tutorials)** — build your first sync app, then
   add collaborative text.
-- **[How-to guides](docs/README.md#how-to-guides)** — permissions, partial sync,
-  server-side writes, the change feed, external-store connectors, hosting many
-  apps, React, failure handling.
+- **[How-to guides](docs/README.md#how-to-guides)** — permissions, queries,
+  partial sync, collaborative text, server-side writes, the change feed and
+  effects, external-store connectors, field history, hosting many apps, running
+  more than one node, observability, React, failure handling.
 - **[Reference](docs/README.md#reference)** — the Go server API, the TypeScript
-  client API, proto options, connectors, sync status and rejection codes, the
-  storage adapter contract.
+  client API, proto options, connectors, naming rules, sync status and rejection
+  codes, the storage adapter contract, telemetry.
 - **[Explanation](docs/README.md#explanation)** — the convergence model, partial
   sync and coverage, the collaborative-text CRDT, multi-tab behaviour, and the
   limits and trade-offs you should know before adopting.

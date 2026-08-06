@@ -123,7 +123,9 @@ and a workspace's write path is short. That is sized for **internal tools — te
 of apps, human-paced write rates**.
 
 It stops fitting when sustained writes saturate the single writer, or when you
-need more than one node. The way out is the deferred [Postgres adapter](../reference/storage-adapter.md) plus a shared notifier via
+need more than one node. The way out is
+[`pgstore`](../reference/storage-adapter.md#adapters) plus a shared notifier via
 `WithNotifier` (clients on other nodes otherwise converge by polling, correctly
 but with poll latency). Nothing above the storage seam changes when that
 happens — `Manager`, namespaces and the authentication wiring are unaffected.
+See [Run more than one node](run-multiple-nodes.md).

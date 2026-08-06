@@ -1,8 +1,9 @@
 # Storage adapter contract
 
-`storage.Adapter` is the persistence seam; SQLite (`engine/storage/sqlitestore`)
-is the only implementation today. The full contract lives in the `storage`
-package docs — this is the part an implementer must not get wrong.
+`storage.Adapter` is the persistence seam. Two implementations ship —
+`engine/storage/sqlitestore` and `engine/storage/pgstore`, described under
+[Adapters](#adapters). The full contract lives in the `storage` package docs;
+this is the part an implementer must not get wrong.
 
 ## Invariants
 

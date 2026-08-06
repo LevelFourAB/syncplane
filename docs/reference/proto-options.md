@@ -389,7 +389,7 @@ and in field masks. On the wire a path is already a list of segments, so a key
 travels verbatim.
 
 A query names the VARIANT it means. Because a oneof member has explicit
-presence, an entry holding a different variant simply reads as **not found**:
+presence, an entry holding a different variant reads as **not found**:
 the condition is false and the ordering ranks it last, exactly as for any unset
 field. That is why the engine needs no canonical value type, no cross-variant
 sort order, and no rule for comparing a number against an attachment — no path
@@ -492,8 +492,8 @@ be genuinely ambiguous: for `map<string, string> attrs`, `attrs.*` could mean
 either side of the entry. `key` and `value` are the same two words the `any()`
 entry scope uses, so one concept has one spelling in a declaration and in a
 query. Neither `*` nor a selector can collide with a field name in a condition
-path — there, the segment after a map is an entry key, and these would simply be
-that key.
+path — there, the segment after a map is an entry key, and these would be that
+key.
 
 Three properties follow:
 
@@ -516,10 +516,12 @@ has to be re-checked per row rather than dropped.
 `indexed: true` on a map is refused: a field mark has no room to say which side,
 which entry or which variant. The error points at the `*` form.
 
-### Not there yet
+### What the admin UI covers
 
-- **The admin UI** renders and filters scalar-valued maps only; a message-valued
-  one is skipped in the row view, the edit form and the filter bar.
+It renders and filters **scalar-valued** maps only. A message-valued map — the
+shape user-defined fields take — is skipped in the row view, the edit form and
+the filter bar. Everything above works the same either way; this is a gap in the
+UI, not in the index or the query.
 
 ## Custom mergers for opaque fields
 
@@ -531,7 +533,7 @@ every rebase replay, so a non-idempotent merger (a concat, say) corrupts data.
 For collaborative prose do not write one — use `text: true`, whose built-in
 union merger satisfies the contract by construction.
 
-## A note on the option field numbers
+## The option field numbers
 
 The custom option field numbers (50100/50101) sit in the range reserved for use
 within a single organization and are not registered. Two libraries claiming one

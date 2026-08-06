@@ -69,10 +69,11 @@ union the coordinator actually syncs. The union is always a superset, so
 own-scope coverage errs toward claiming _less_ completeness than reality — and,
 more importantly, it does not flap as peer tabs come and go.
 
-`RowSet<T>` is still an array (`.map`, `.length`, spreads and destructuring
-unchanged; `coverage` is non-enumerable), so adding the signal broke no call
-site. `queryServer` reports coverage too: a server query sees the whole entity,
-so it is complete unless its own `limit` truncated the page.
+`RowSet<T>` is an array — `.map`, `.length`, spreads and destructuring all
+behave as they would on one, and `coverage` is non-enumerable, so it rides along
+without showing up in `Object.keys` or `JSON.stringify`. `queryServer` reports
+coverage too: a server query sees the whole entity, so it is complete unless its
+own `limit` truncated the page.
 
 ### Hydrating: the bound that clears itself
 

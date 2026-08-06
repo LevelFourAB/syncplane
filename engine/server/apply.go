@@ -374,9 +374,11 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 // matching X and write to it" read. It is the same compiled predicate the Query
 // RPC and the TS client use.
 //
-// It is an unindexed full scan of the entity and a spec with no Limit holds
-// every match in memory; see query.Spec. Unlike EntityTx.Query it does NOT run
-// under the workspace write lock, so a broad query here blocks no other writer.
+// A declared secondary index serves it when one covers the predicate and
+// ordering; otherwise it is a full scan of the entity. A spec with no Limit
+// holds every match in memory either way; see query.Spec. Unlike EntityTx.Query
+// it does NOT run under the workspace write lock, so a broad query here blocks
+// no other writer.
 //
 // Recorded writes are not visible to it (see Apply).
 func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {

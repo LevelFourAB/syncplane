@@ -163,11 +163,11 @@ type Limits struct {
 	// Maximum rows per Query response. Also clamps client-requested limits.
 	// Default 1024.
 	MaxQueryRows int
-	// Maximum offset accepted by Query. Query has no secondary index: it scans
-	// and decodes every visible row, retaining the offset+limit that sort
-	// first, so the offset bounds that in-memory working set. Requests beyond
-	// this are rejected rather than clamped (a clamp would return the wrong
-	// page silently). Default 16384.
+	// Maximum offset accepted by Query. A query retains the offset+limit rows
+	// that sort first, so the offset bounds that in-memory working set however
+	// the query is served — from an index or from a scan. Requests beyond this
+	// are rejected rather than clamped (a clamp would return the wrong page
+	// silently). Default 16384.
 	MaxQueryOffset int
 	// Maximum follow depth a Subscription.follow may request (rounds the path
 	// set is re-applied). A request above this is InvalidArgument. Default 4.

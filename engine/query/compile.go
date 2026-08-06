@@ -14,13 +14,14 @@
 //		}, func(msg proto.Message, version uint64) error { … })
 //	})
 //
-// Cost to know before reaching for it: nothing plans a predicate against a
-// secondary index yet, so every query scans and decodes every live row of the
-// entity — O(entity) in time however selective the predicate is and however
+// Cost to know before reaching for it: a query is served from a declared
+// secondary index only when one covers its predicate and ordering. With none —
+// or while an index is still building — it scans and decodes every live row of
+// the entity, O(entity) in time however selective the predicate is and however
 // small the limit. Memory is bounded to Offset+Limit rows when an order is
-// given. That is fine for a background job and a trap in a hot HTTP handler
-// over a large entity. (Indexes themselves exist and are maintained; see
-// indexkey.go for the entry encoding and engine/server for what reads them.)
+// given. An unindexed query is fine for a background job and a trap in a hot
+// HTTP handler over a large entity. This package compiles the predicate and
+// encodes index entries (see indexkey.go); engine/server chooses the plan.
 //
 // Semantics mirror the client evaluator (client/src/query/evaluate.ts)
 // exactly; the shared conformance vectors in testdata/queryeval enforce the

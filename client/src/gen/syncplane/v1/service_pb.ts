@@ -967,10 +967,11 @@ export const SyncService: GenService<{
   /**
    * Query runs a one-shot predicate query against current server state —
    * for data outside the synced subset. Results are snapshots: they are not
-   * merged with local optimistic state and not stored. Query has no
-   * secondary index, so it scans and decodes every visible row of the entity
-   * per request — O(entity) in time, regardless of limit. Memory is bounded
-   * to offset+limit rows; prefer a selective predicate over deep pagination.
+   * merged with local optimistic state and not stored. A declared secondary
+   * index serves the query when one covers its predicate and ordering;
+   * without one it scans and decodes every visible row of the entity per
+   * request, O(entity) in time regardless of limit. Memory is bounded to
+   * offset+limit rows; prefer a selective predicate over deep pagination.
    *
    * @generated from rpc syncplane.v1.SyncService.Query
    */

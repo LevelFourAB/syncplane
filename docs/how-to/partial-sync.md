@@ -57,22 +57,23 @@ if (!rows.coverage.complete) {
 }
 ```
 
-`RowSet<T>` is still an array — `.map`, `.length`, spreads and destructuring are
-unchanged, and `coverage` is non-enumerable — so adding the signal broke no call
-site.
+`RowSet<T>` is an array: `.map`, `.length`, spreads and destructuring all behave
+as they would on one, and `coverage` is non-enumerable, so `toEqual([])`,
+`Object.keys` and `JSON.stringify` do not see it.
 
 `hydrating` is the one bound that is not about scope: a cold client's first
 snapshot lands entity by entity, so an entity that has not arrived reads as `[]`
-just like an empty one. It clears itself as the snapshot fills, and readers
+exactly like an empty one. It clears itself as the snapshot fills, and readers
 re-fire — so the thing to do about it is show a loading state, not fetch from
 the server. `bootstrapPriority` decides which entities land first, and
 `status().workspaces[id].hydration` reports what is still outstanding.
 
 ## What it costs the server
 
-A window bounds the **client**, not the server. With no secondary index over
-proto fields, computing an `orderBy` window still costs one entity scan per
-pull, the same price `Query` pays.
+A window bounds the **client**, not the server. Computing an `orderBy` window
+costs what the equivalent `Query` costs — a range read where a
+[secondary index](../reference/proto-options.md#secondary-indexes) serves the
+predicate and the ordering, and a full entity scan where none does.
 
 ## Related
 

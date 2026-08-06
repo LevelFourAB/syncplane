@@ -156,8 +156,8 @@ pull. GC removes tombstones past a retention window and advances the workspace
 horizon; a client whose cursor predates the horizon transparently re-bootstraps.
 
 Keep the retention comfortably above the longest client offline window. A client
-pruned as idle that later returns is simply re-admitted at whatever mutation id
-it pushes next.
+pruned as idle that later returns is re-admitted at whatever mutation id it
+pushes next.
 
 ## A bootstrap survives a dropped connection
 

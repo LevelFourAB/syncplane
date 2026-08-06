@@ -47,8 +47,11 @@ await client.close(); // stop sync, drop watchers, close KV. One-shot; not reope
 
 | Option                | Type                                           | Notes                                                                                                                                                                                      |
 | --------------------- | ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `workspaceId`         | `string`                                       | **Required.** Hard partition key.                                                                                                                                                          |
 | `entities`            | `E` (`readonly DescMessage[]`)                 | **Required.** All syncable entity descriptors. Pass as a `const` tuple so `db` types per entity.                                                                                           |
+| `workspaceId`         | `string`                                       | Shorthand for `workspaces: [id], defaultWorkspace: id`. Give this **or** `workspaces`.                                                                                                     |
+| `workspaces`          | `string[]`                                     | Workspaces to sync. Add and remove more at runtime.                                                                                                                                        |
+| `defaultWorkspace`    | `string`                                       | What the client-level API (`client.mutate`, `client.db`, `client.get/scan/query/watch`, `transact`, undo) binds to. Defaults to the only configured workspace; **required** past one.      |
+| `accountId`           | `string`                                       | Storage scope — one IndexedDB database, KV mutex, change channel and leadership lock per account. Defaults to the single workspace's id; **required** when starting with more than one.    |
 | `url`                 | `string`                                       | Server base URL. Either `url` **or** `transport` required.                                                                                                                                 |
 | `transport`           | `Transport` (`@connectrpc/connect`)            | Prebuilt Connect transport (tests / Node).                                                                                                                                                 |
 | `wireFormat`          | `'binary' \| 'json'`                           | Encoding of the transport built from `url`. Default `'binary'`; `'json'` trades size and decode cost for traffic you can read in the network inspector. Ignored when `transport` is given. |
@@ -84,7 +87,8 @@ never skipping the callbacks behind it. A throwing `onSchemaSkew` yields
 ### Lifecycle / control methods
 
 ```ts
-client.workspaceId: string                   // readonly
+client.defaultWorkspace: string | undefined  // readonly; undefined when there is no default
+client.workspaceId: string                   // readonly; the default workspace, throwing when there is none
 
 await client.start(): Promise<void>          // idempotent + retryable; begins background sync
 await client.close(): Promise<void>          // idempotent; teardown. Not reopenable.
@@ -94,8 +98,43 @@ await client.pendingCount(): Promise<number> // locally queued, not-yet-acked mu
 
 client.status(): SyncStatus                          // snapshot (works before start())
 client.onStatusChange(cb): () => void                // subscribe; returns unsubscribe
+client.onMutationRejected(cb): () => void            // multi-listener sibling of the option
 client.setSubscriptions(specs: SubscriptionSpec[]): void  // swap partial-sync scope at runtime
 ```
+
+### Workspaces
+
+The client-level read, write, `transact` and undo APIs target
+`defaultWorkspace`; with no default they throw and everything goes through
+`client.ws(id)`. See
+[Hold several workspaces on one client](../how-to/multiple-workspaces.md).
+
+```ts
+client.ws(workspaceId): WorkspaceClient<E>   // throws for a workspace not held
+client.addWorkspace(workspaceId, specs?): WorkspaceClient<E>  // bootstraps on the next cycle
+await client.removeWorkspace(workspaceId, opts?): Promise<RemoveWorkspaceResult>
+
+interface RemoveWorkspaceOptions {
+	purge?: boolean; // also delete the local rows, overlay, cursor and queue
+}
+interface RemoveWorkspaceResult {
+	removed: boolean; // false when the client did not hold it — the call is idempotent
+	purged: boolean;
+	discarded: DiscardedMutation[]; // queued mutations the purge dropped
+}
+```
+
+A purge discards whatever was still queued for the workspace. Those mutations
+can never be acked, so they come back in `discarded` — read inside the
+transaction that deleted them, so the list is exactly what was lost — and each
+also reaches `onMutationRejected` with code `workspace_purged`. Removing the
+default workspace leaves the client without one.
+
+A `WorkspaceClient` carries the same surface bound to one workspace: the reads,
+`mutate`, `db`, `transact`, `text`, `undoScope`, `pendingCount`,
+`setSubscriptions` and a `status()` returning that workspace's
+`WorkspaceStatus`. Cross-workspace reads (`scanAll`, `queryAll`,
+`watchQueryAll`) stay on the client and tag each row with its `workspaceId`.
 
 ---
 
@@ -639,19 +678,39 @@ one push.
 
 ```ts
 interface SyncStatus {
+	// Account-wide: one stream, one server build.
 	state: 'idle' | 'syncing' | 'error';
-	online: boolean;
-	dirty: boolean; // derived: pendingMutations > 0
-	pendingMutations: number;
+	online: boolean; // live stream connected, or the last cycle succeeded
+	dirty: boolean; // derived: pendingMutations > 0, anywhere
+	pendingMutations: number; // total across every workspace
 	lastSyncedAt?: Date;
-	lastError?: SyncErrorInfo; // { message, code? }
-	schemaSkew?: SchemaSkewInfo; // { client, server, action }; standing condition (survives successful cycles)
-	scope?: SyncScopeInfo; // { own, effective, widened } — effective partial-sync scope
-	hydration?: HydrationInfo; // set only while a first snapshot is downloading
-	workspaces: Record<string, WorkspaceStatus>; // per workspace; scope/hydration above mirror the default one
+	lastError?: SyncErrorInfo; // { message, code?, transportCode? }
+	schemaSkew?: SchemaSkewInfo; // { client, server, action }; a standing condition
+	// Per workspace, one entry each. Also reachable as client.ws(id).status().
+	workspaces: Record<string, WorkspaceStatus>;
+	// The default workspace's fields, mirrored so a single-workspace app never
+	// indexes `workspaces`. Unset when there is no default, or it has not synced.
+	scope?: SyncScopeInfo;
+	workspaceAccess?: WorkspaceAccess;
+	hydration?: HydrationInfo;
 }
+
+interface WorkspaceStatus {
+	workspaceId: string;
+	pendingMutations: number;
+	access?: WorkspaceAccess;
+	scope?: SyncScopeInfo;
+	hydration?: HydrationInfo;
+}
+
+type WorkspaceAccess = 'granted' | 'revoked';
 type SchemaSkewAction = 'ignore' | 'warn' | 'block' | 'resync';
 
+interface SyncScopeInfo {
+	own: number; // subscriptions this client declared
+	effective: number; // what the coordinator syncs, peer tabs included
+	widened: boolean;
+}
 interface HydrationInfo {
 	pending: readonly string[]; // entities still arriving, in delivery order
 	total: number; // entities the snapshot ships
@@ -666,6 +725,9 @@ Per read, the same fact arrives as the `hydrating` coverage bound (§9).
 `RejectionInfo` is delivered to `onMutationRejected` (carries `mutationId` and reason;
 codes include `"conflict"`, `"poison_dropped"`). `CodePoisonDropped` and the
 proto codes `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied` are exported.
+
+Which channel reports which failure, and the full code vocabulary, are in
+[Sync status and failure codes](sync-status-and-codes.md).
 
 ---
 
@@ -900,9 +962,10 @@ What the client index does and does not cover:
 - **`query()`** uses it when the query is scoped to one workspace and the
   planner can express its predicate and ordering as a range. A cross-workspace
   query always scans.
-- **`watchQuery()`** always scans. Its snapshot is shared per (entity,
-  workspace) rather than per query, so narrowing it to one query's matches needs
-  per-watcher snapshots — not yet built.
+- **`watchQuery()`** always scans, however well an index covers the same query
+  passed to `query()`. Its snapshot is shared per (entity, workspace) rather
+  than per query, and narrowing it to one query's matches would mean a snapshot
+  per watcher.
 - **Confirmed rows only.** The optimistic overlay is scanned whole and merged
   over the index range, which is O(pending) and keeps the answer identical to
   the merged view.
