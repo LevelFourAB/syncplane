@@ -133,41 +133,11 @@ export const metaServerSeq = (workspaceId: string): string =>
  * Version of this KV layout. On mismatch the client tries to push the
  * pending queues once, then wipes everything except the clientId and the
  * per-workspace mutation-id counters and re-bootstraps. Bump when the layout or
- * record encoding changes incompatibly.
- *
- * 2 — account-scoped store: workspace moved from the database name into the
- * keys (entity-first rows, per-workspace cursors/queues/counters).
- * 3 — optimistic text log (`ot/`): a text field's optimistic value is no longer
- * held whole in the overlay row. Bumped for the DOWNGRADE direction — a v2
- * client reads the row and never looks for the log, so it would silently show
- * text with every unacked local edit missing. Upgrading needs nothing: a store
- * with no log folds nothing and is already correct.
- * 4 — secondary indexes (`i/`, `ir/`). Bumped for the DOWNGRADE direction, like
- * v3: a v3 client writing `c/` rows would leave the index untouched, and a v4
- * client returning to that store would then serve queries from entries that no
- * longer describe the rows — the one failure mode here that is silent and
- * wrong rather than merely slow. Upgrading needs nothing beyond the wipe: an
- * empty index is simply an unbuilt one, and every query scans until it is
- * built.
- * 5 — the `ir/` reverse pointer is gone: a row's previous index positions are
- * recomputed from its previous confirmed bytes instead of recorded. Bumped for
- * the DOWNGRADE direction once more — a v4 client maintains the index through
- * `ir/` records a v5 client no longer writes, so it would clear nothing on a
- * rewrite and leave entries describing values the rows have left. Upgrading
- * needs nothing beyond the wipe, which is also what reclaims the `ir/` records a
- * v4 store still holds; nothing reads them, so they would otherwise be
- * permanent.
- * 6 — the `i/` index keyspace is gone: a confirmed row carries the positions it
- * occupies as a field, and the KV store maintains one secondary index over it.
- * Bumped in BOTH directions this time. A v5 client reading a v6 store finds no
- * `i/` entries and scans, which is merely slow — but it also rewrites rows
- * without the field and so unindexes them under a v6 marker claiming otherwise;
- * a v6 client reading a v5 store finds rows carrying no positions under markers
- * that say they are built, and answers queries from an empty index. Both are
- * silent and wrong, so neither direction may resume from the other's store. The
- * wipe is also what reclaims the `i/` entries a v5 store still holds.
+ * record encoding changes incompatibly — in either direction: a client that
+ * cannot read a newer store's records is as broken as one whose writes a newer
+ * client would misread.
  */
-export const FORMAT_VERSION = 6;
+export const FORMAT_VERSION = 1;
 
 /** Every workspace's confirmed rows of one entity — the cross-workspace scan. */
 export const confirmedPrefix = (entity: string): string => `c/${entity}/`;
