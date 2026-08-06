@@ -1690,6 +1690,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			const hub = new WatcherHub(await this.kv(), this.entityRegistry, this.kvMutex, {
 				debugVerifyTouches: this.opts.debugVerifyTouches,
 				coverageOf: (entity, workspaceId) => this.coverage.coverageOf(entity, workspaceId),
+				indexes: (entity) => this.indexes.for(entity),
 			});
 			hub.setRefClient(this.refClient());
 			// close() may have torn down during the kv await. Do not resurrect the
@@ -2522,14 +2523,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						schema,
 					);
 				if (planned === undefined) return await scan();
+				const rows = planned.map((entry) => entry.row);
 				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
-				// This is the same net the watch hub uses for its incremental
-				// snapshots, pointed at the other place a cheap answer stands in
+				// This is the same net the watch hub uses for its maintained
+				// results, pointed at the other place a cheap answer stands in
 				// for an expensive one: nothing else would notice an index and a
 				// scan drifting apart, because both look like perfectly ordinary
 				// results.
-				if (this.verifyIndexReads) assertSameResult(planned, await scan(), def.name);
-				return planned;
+				if (this.verifyIndexReads) assertSameResult(rows, await scan(), def.name);
+				return rows;
 			} finally {
 				tx.release();
 			}

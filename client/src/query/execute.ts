@@ -62,6 +62,20 @@ import { planQuery } from './plan.js';
 const MAX_INDEX_CANDIDATES = 10000;
 
 /**
+ * A result row together with the merged-view bytes it was decoded from — the
+ * same bytes a scan would have read, collaborative-text log folded in.
+ *
+ * The bytes are what a caller keeping rows ACROSS reads compares to decide
+ * whether the row it holds is still current: identical bytes decode to an
+ * identical value, while the row version does not settle it — an optimistic
+ * edit moves the bytes and leaves the confirmed version alone.
+ */
+export interface IndexedRow<T> {
+	row: Row<T>;
+	bytes: Uint8Array;
+}
+
+/**
  * Answers a query from an index, or returns undefined to mean "scan instead".
  *
  * `undefined` is never "no rows" — an empty result is an empty array. It means
@@ -76,7 +90,7 @@ export async function queryByIndex<D extends DescMessage>(
 	indexes: CompiledIndex[],
 	compiled: CompiledQuery,
 	workspaceId: string | undefined,
-): Promise<Row<MessageShape<D>>[] | undefined> {
+): Promise<IndexedRow<MessageShape<D>>[] | undefined> {
 	// A cross-workspace query would need a k-way merge whose tie-break differs
 	// from the scan path's; see the header.
 	if (workspaceId === undefined || indexes.length === 0) return undefined;
@@ -101,14 +115,14 @@ export async function queryByIndex<D extends DescMessage>(
 	// go: only an overlay row can displace a confirmed one from the result.
 	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
-	const overlayRows: Row<MessageShape<D>>[] = [];
+	const overlayRows: IndexedRow<MessageShape<D>>[] = [];
 	for await (const [ k, v ] of tx.scan(oPrefix)) {
 		const key = k.slice(oPrefix.length);
 		shadowed.add(key);
 		const record = v as OverlayRecord;
 		if (record.del) continue; // a local tombstone: shadowed and gone
-		const value = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
-		if (!matches(value, compiled.where, schema)) continue;
+		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		if (!matches(decoded.value, compiled.where, schema)) continue;
 		// The confirmed base version survives an optimistic edit — it is what a
 		// compare-and-swap writes back — so it is read rather than zeroed. A row
 		// that exists only optimistically has no base, hence 0n. The scan path
@@ -116,7 +130,10 @@ export async function queryByIndex<D extends DescMessage>(
 		const base = await tx.get(confirmedKey(def.name, workspaceId, key)) as
 			| ConfirmedRecord
 			| undefined;
-		overlayRows.push({ key, value, workspaceId, version: base ? BigInt(base.ver) : 0n });
+		overlayRows.push({
+			row: { key, value: decoded.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
+			bytes: decoded.bytes,
+		});
 	}
 
 	const budget = candidateBudget(compiled, overlayRows.length);
@@ -124,7 +141,7 @@ export async function queryByIndex<D extends DescMessage>(
 	// indexScan yields the KV keys of the records holding each position, which
 	// for an index position is always the c/ row it was computed from.
 	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
-	const confirmed: Row<MessageShape<D>>[] = [];
+	const confirmed: IndexedRow<MessageShape<D>>[] = [];
 	const seen = new Set<string>();
 	let walked = 0;
 
@@ -153,14 +170,14 @@ export async function queryByIndex<D extends DescMessage>(
 			// tombstoned — so the confirmed copy drops out here and reappears,
 			// if it still matches, from the overlay stream.
 			if (shadowed.has(key)) continue;
-			const row = await readConfirmed(tx, registry, def, schema, workspaceId, key);
+			const entry = await readConfirmed(tx, registry, def, schema, workspaceId, key);
 			// A position and its row are one record, so a position cannot outlive
 			// its row — and a reader holds the shared lock, so no commit lands
 			// between the index read and this one. The guard stays because
 			// answering from a row that is not there would be silent and wrong.
-			if (row === undefined) continue;
-			if (!matches(row.value, plan.residual, schema)) continue;
-			confirmed.push(row);
+			if (entry === undefined) continue;
+			if (!matches(entry.row.value, plan.residual, schema)) continue;
+			confirmed.push(entry);
 			// An ordered plan yields matches in result order, so once enough of
 			// them are in hand no later one can reach the page — bounded above by
 			// how many the overlay could displace.
@@ -171,10 +188,10 @@ export async function queryByIndex<D extends DescMessage>(
 	const out = [ ...confirmed, ...overlayRows ];
 	if (compiled.orderBy && compiled.orderBy.length > 0) {
 		const orderBy = compiled.orderBy;
-		out.sort((a, b) => compareRows(a, b, orderBy, schema));
+		out.sort((a, b) => compareRows(a.row, b.row, orderBy, schema));
 	} else {
 		// No ordering: the scan path returns rows in key order, so this must too.
-		out.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
@@ -210,13 +227,16 @@ async function readConfirmed<D extends DescMessage>(
 	schema: D,
 	workspaceId: string,
 	key: string,
-): Promise<Row<MessageShape<D>> | undefined> {
+): Promise<IndexedRow<MessageShape<D>> | undefined> {
 	const record = await tx.get(confirmedKey(def.name, workspaceId, key)) as
 		| ConfirmedRecord
 		| undefined;
 	if (record === undefined) return undefined;
-	const value = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
-	return { key, value, workspaceId, version: BigInt(record.ver) };
+	const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+	return {
+		row: { key, value: decoded.value, workspaceId, version: BigInt(record.ver) },
+		bytes: decoded.bytes,
+	};
 }
 
 /**
@@ -238,11 +258,11 @@ async function decodeRow<D extends DescMessage>(
 	workspaceId: string,
 	key: string,
 	bytes: Uint8Array,
-): Promise<MessageShape<D>> {
+): Promise<{ value: MessageShape<D>; bytes: Uint8Array }> {
 	const folded = await foldTextLog(tx, registry, def.name, workspaceId, key, bytes);
 	const value = fromBinary(schema, folded);
 	sortOrderedFields(schema, value);
-	return value;
+	return { value, bytes: folded };
 }
 
 const matches = (value: unknown, cond: Cond | undefined, schema: DescMessage): boolean =>

@@ -316,4 +316,40 @@ describe('watch include reactivity', () => {
 		unsub();
 		await client.close();
 	});
+
+	it('does not re-hydrate when only its own rows moved, and they did not', async () => {
+		// An include watcher has to over-fire on a TARGET change — a changed
+		// project is invisible in the issue rows it holds. A change to its own
+		// entity is not invisible, so the maintained result settles it, and a
+		// commit that leaves the result where it was costs no hydration at all.
+		const client = newClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 't', project: { id: 'p1' } });
+
+		let emits = 0;
+		const unsub = client.db.issue.watchQuery(
+			{ where: (i) => i.title.eq('t') },
+			() => emits++,
+			{ include: { project: true } },
+		);
+		await flush();
+		const initial = emits;
+
+		// Its own entity, but a row the query rejects: the result cannot move.
+		await client.db.issue.mutate.put({ id: 'i2', title: 'other', project: { id: 'p1' } });
+		await flush();
+		expect(emits).toBe(initial);
+
+		// A matching row entering does move it.
+		await client.db.issue.mutate.put({ id: 'i3', title: 't', project: { id: 'p1' } });
+		await flush();
+		expect(emits).toBe(initial + 1);
+
+		// And a target change still re-hydrates, invisible in the base rows.
+		await client.db.project.mutate.put({ id: 'p1', name: 'B' });
+		await flush();
+		expect(emits).toBe(initial + 2);
+		unsub();
+		await client.close();
+	});
 });

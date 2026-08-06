@@ -114,10 +114,10 @@ produce identical results, which is what lets either side decline any plan it is
 unsure of.
 
 The same indexes serve the **local** `query()` too, for a workspace-scoped query
-the planner covers; a cross-workspace one always scans, and `watchQuery()` always
-scans. Locally the index covers confirmed rows, with the optimistic overlay
-scanned whole and merged over the range — so a query still sees your own unpushed
-writes.
+the planner covers, and the first read of a `watchQuery()` on the same terms; a
+cross-workspace one always scans. Locally the index covers confirmed rows, with
+the optimistic overlay scanned whole and merged over the range — so a query still
+sees your own unpushed writes.
 
 The cost is on writes: every write to the entity re-stores that row's position
 in every index it has, on both sides. An index over a repeated field stores one

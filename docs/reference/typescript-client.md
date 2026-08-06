@@ -530,8 +530,9 @@ client sends one for you, and the AST above is what you build.
 
 ## 5. Watchers (reactivity)
 
-Scan-based: after any commit touching a (reachable) entity, the watcher re-scans and
-fires with the full row list.
+A watcher holds its result and maintains it: a commit names the rows it changed,
+and each is spliced into or out of the result in place. The callback receives the
+full row list whenever that result moves.
 
 ```ts
 type WatchCallback<T> = (rows: Row<T>[]) => void;
@@ -545,8 +546,12 @@ const off = client.db.todo.watchQuery(q, (rows) => { ... }, { include? });
 ```
 
 - Returns a **synchronous unsubscribe** function.
-- `watchQuery` suppresses callbacks when the result is unchanged (memoized on
-  keys + bytes + versions).
+- A callback fires only when the delivered rows change — same rows at the same
+  versions, no callback. With a `limit`, a change past `offset + limit` cannot
+  move the page and does not fire.
+- Cost per commit is the rows the commit named, not the size of the entity. A
+  commit reporting an entity without naming rows (a bootstrap swap, a wholesale
+  overlay clear) rescans it.
 - Callbacks must **not mutate** received rows (shared between same-entity watchers).
 - Cross-tab: a commit in another tab re-fires this tab's watchers (via BroadcastChannel).
 
@@ -741,6 +746,13 @@ const specs = [
     include: { project: true },  // follow refs into scope
     depth: 2,                     // transitive follow rounds
   }),
+  // Windowed: the 100 highest-priority open issues, and nothing else.
+  subscription(Issue, (i) => i.state.eq('open'), {
+    limit: 100,
+    orderBy: (i) => [ i.priority.desc() ],
+  }),
+  // Windowed by write sequence: the 500 most recently changed comments.
+  subscription(Comment, undefined, { limit: 500, byRecency: true }),
 ];
 new SyncClient({ ..., subscriptions: specs });
 client.setSubscriptions(specs);  // runtime swap → server delta-resyncs the difference
@@ -752,11 +764,14 @@ interface SubscriptionSpec {
 	where?: (w) => Cond;
 	follow?: IncludeSpec;
 	followDepth?: number;
+	orderBy?: (w) => OrderKey[];
+	limit?: number;
+	byRecency?: boolean;
 }
 function subscription<D>(
 	schema,
 	where?,
-	follow?: { include?; depth? },
+	opts?: { include?; depth?; limit?; orderBy?; byRecency? },
 ): SubscriptionSpec;
 ```
 
@@ -773,6 +788,30 @@ Such an entity is still registered in `entities` — that is how `queryServer`
 resolves it — but naming it in a subscription set throws, since it would sync
 nothing. An app deriving its subscriptions from its entity list has to leave it
 out.
+
+### Windows — capping a subscription by rank
+
+`limit` is what makes a subscription windowed: only the first `limit` rows of
+the predicate match sync, ranked by `orderBy` (or by write sequence, newest
+first, with `byRecency`), ties broken on row key. A row that falls off the tail
+is removed from the local store — the cursor carries the window's membership as
+a key-set and every pull diffs a freshly computed window against it, so a row
+that merely sank below the boundary is dropped as precisely as a deleted one.
+
+- `orderBy` or `byRecency` without a `limit` throws; so does a non-positive or
+  non-integer `limit`, and setting both `orderBy` and `byRecency`.
+- The server rejects a `limit` above `MaxWindowSize`
+  ([default 1000](server.md)).
+- Changing the window delta-resyncs the difference; changing `follow` alone does
+  not.
+- A windowed entity is never `complete`: results report `bounds: ['window']`
+  and, when a window is the only thing scoping the entity, the total `limit`.
+  A client holding the top N by one order cannot answer a local query ordered by
+  another — check `coverage` and fall back to `queryServer`.
+
+A window bounds the client, not the server: computing an `orderBy` window costs
+what the equivalent `Query` costs. Why they exist and how membership is
+maintained: [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
 ### Coverage
 
@@ -853,8 +892,8 @@ entity — see [Naming rules](naming.md)), `.opaque()`, `.indexed()`,
 ### Secondary indexes
 
 `.indexed()` maintains an index over one field, so filtering or ordering by it
-costs O(result) rather than a scan — on the server, and on the client for
-`query()`. For a query that filters on
+costs O(result) rather than a scan — on the server, and on the client for both
+`query()` and the first read of a `watchQuery()`. For a query that filters on
 one field and orders by _another_, declare a composite instead — a sorted
 key-value store has no posting lists to intersect, so one marked field can only
 serve that shape by re-checking every candidate:
@@ -962,10 +1001,12 @@ What the client index does and does not cover:
 - **`query()`** uses it when the query is scoped to one workspace and the
   planner can express its predicate and ordering as a range. A cross-workspace
   query always scans.
-- **`watchQuery()`** always scans, however well an index covers the same query
-  passed to `query()`. Its snapshot is shared per (entity, workspace) rather
-  than per query, and narrowing it to one query's matches would mean a snapshot
-  per watcher.
+- **`watchQuery()`** uses it for its first read, under the same planner as
+  `query()`. It asks for every match rather than one page — that set is what it
+  goes on to maintain — so a query whose matches run into the thousands can
+  exceed the walk budget and scan where the same query passed to `query()` with
+  a `limit` would not. Later commits read only the rows they name, and a rescan
+  (see Watchers) scans.
 - **Confirmed rows only.** The optimistic overlay is scanned whole and merged
   over the index range, which is O(pending) and keeps the answer identical to
   the merged view.

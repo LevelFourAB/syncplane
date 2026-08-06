@@ -115,7 +115,7 @@ describe('client query', () => {
 		await client.close();
 	});
 
-	it('plain watch keeps always-fire semantics', async () => {
+	it('plain watch fires only when the rows move', async () => {
 		const client = newClient();
 		let calls = 0;
 		const unsub = client.db.widget.watch(() => calls++);
@@ -123,9 +123,10 @@ describe('client query', () => {
 		const initial = calls;
 		await client.db.widget.mutate.put({ id: 'w1', count: 1 });
 		await flush();
+		expect(calls).toBe(initial + 1);
 		await client.db.widget.mutate.put({ id: 'w1', count: 1 }); // state-identical
 		await flush();
-		expect(calls).toBe(initial + 2);
+		expect(calls).toBe(initial + 1);
 		unsub();
 		await client.close();
 	});

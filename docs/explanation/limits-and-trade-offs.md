@@ -14,11 +14,24 @@ So: a selective predicate beats deep pagination, and a large entity behind a hot
 endpoint will be felt. There is no full-text search; `contains` is a substring
 test per row and is never index-servable.
 
-`watchQuery` **always** scans, on both a cold start and every commit that
-touches its entity, however well an index covers the same query passed to
-`query`. Its snapshot is shared per (entity, workspace) rather than per query,
-and narrowing it to one query's matches would mean a snapshot per watcher — so a
-watched query over a large entity costs an entity scan per commit.
+`watchQuery` maintains its result rather than recomputing it. Each watcher
+holds the rows its query matches, in result order; a commit arrives naming the
+rows it changed, and each of those is spliced in or out — whether it matched
+before is what the watcher already holds, and where it sat is a binary search
+away. So a commit costs the rows it changed, not the size of the entity, and one
+that changes nothing the query holds or now admits costs nothing at all. Its
+first read is served from an index when one covers it, like `client.query`'s —
+though it asks for every match rather than one page, so a very large match set
+can exceed the index walk's budget and fall back to the scan.
+
+Two things still cost the whole entity. A commit that reports an entity **without
+its rows** — a bootstrap swap, a wholesale overlay clear — forces a rescan,
+because "something in here changed" is all it said. And memory tracks the
+**match set**: a narrow query over a large entity holds little, but one with no
+predicate holds an entry per row, so a watch over an unfiltered large entity is
+still a large working set. A `limit` bounds what is delivered, not what is held —
+the rows past it are what lets a deletion inside the page pull the next one in
+without a read.
 
 `client.query` is served from an index when one covers it: a workspace-scoped
 query whose predicate and ordering the planner can express as a range reads that
