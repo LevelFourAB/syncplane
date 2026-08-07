@@ -2154,6 +2154,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const stored = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
 				if (stored === FORMAT_VERSION) {
 					tx.release();
+					// Someone stamped this version, and it may have been another tab
+					// whose wipe discarded the identity — nothing distinguishes that
+					// store from one we upgraded ourselves. Drop the memo a pre-start
+					// mutation may have taken so the next read comes off the store.
+					this.clientIdPromise = undefined;
 					return null;
 				}
 				if (stored === undefined) {
@@ -2258,6 +2263,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const now = (await tx.get(META_FORMAT_VERSION)) as number | undefined;
 				if (now === FORMAT_VERSION) {
 					tx.release();
+					// Their salvage, not ours, decided whether the identity survived,
+					// so our memo of it is no longer evidence of anything.
+					this.clientIdPromise = undefined;
 					return;
 				}
 
@@ -2384,10 +2392,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Memoized by PROMISE: the stored id never changes under a running client,
 	 * and every mutation needs it — reading it back per enqueue would put a
 	 * second cross-tab lock acquisition and an extra KV write transaction on the
-	 * write path, for a value that cannot have moved. A failed mint is not
-	 * cached (minting touches the store and can fail transiently), and the one
-	 * path that does invalidate the id — a format upgrade that discards the
-	 * identity — drops the memo with it.
+	 * write path, for a value that cannot have moved under a running client. A
+	 * failed mint is not cached (minting touches the store and can fail
+	 * transiently). The value CAN change across start(), which re-reads it
+	 * whenever a local format upgrade — this client's or another tab's — could
+	 * have discarded the stored identity.
 	 */
 	clientId(): Promise<string> {
 		if (!this.clientIdPromise) {

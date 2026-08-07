@@ -72,7 +72,20 @@ interface StubServer {
 }
 
 function stubServer(
-	{ failPush = false, failFirstPush = false, failPushAttempt = 0, watermark = 0n } = {},
+	{
+		failPush = false,
+		failFirstPush = false,
+		failPushAttempt = 0,
+		watermark = 0n,
+		onPush,
+	}: {
+		failPush?: boolean;
+		failFirstPush?: boolean;
+		failPushAttempt?: number;
+		watermark?: bigint;
+		/** Runs before the push is answered, to interleave another tab's work. */
+		onPush?: () => Promise<void> | void;
+	} = {},
 ): StubServer {
 	const pushedBatches: Mutation[][] = [];
 	// Per-client watermarks, like the real server. The seeded store's client
@@ -81,8 +94,9 @@ function stubServer(
 	let pushAttempts = 0;
 	const transport = createRouterTransport(({ service }) => {
 		service(SyncService, {
-			push(req) {
+			async push(req) {
 				pushAttempts++;
+				await onPush?.();
 				if (failPush || (failFirstPush && pushAttempts === 1) || pushAttempts === failPushAttempt) {
 					throw new Error('server unreachable during upgrade');
 				}
@@ -138,6 +152,20 @@ function newUpgradingClient(
 		onStatusChange: (s) => statuses.push(s),
 		onMutationRejected: (info) => rejections?.push(info),
 	});
+}
+
+/**
+ * The wipe another tab's upgrade commits when its own salvage dropped
+ * something: the whole store gone, identity included, and the new version
+ * stamped.
+ */
+async function otherTabUpgrade(kv: MemoryKVStore): Promise<void> {
+	const tx = await kv.write();
+	const keys: string[] = [];
+	for await (const [ k ] of tx.scan('')) keys.push(k);
+	for (const k of keys) await tx.del(k);
+	await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
+	await tx.commit();
 }
 
 async function dump(kv: MemoryKVStore): Promise<Map<string, unknown>> {
@@ -290,6 +318,53 @@ describe('format version upgrade', () => {
 		const batch = pushedBatches.at(-1);
 		expect(batch?.[0]?.clientId).not.toBe('seeded-client');
 		expect(batch?.map((m) => m.mutationId)).toEqual([ 1n ]);
+		await client.close();
+	});
+
+	it('rotates the identity when another tab wiped it before this one looked', async () => {
+		const kv = await seedOldFormatStore();
+		const { transport, pushedBatches } = stubServer();
+		const client = newUpgradingClient(kv, transport, []);
+		await client.mutate.put(TodoSchema, { id: 't3', title: 'pre-start' });
+		expect(await client.clientId()).toBe('seeded-client');
+
+		// The other tab finishes the upgrade, identity and all, before this one
+		// reaches the version check — which then finds nothing to do.
+		await otherTabUpgrade(kv);
+		await client.start();
+		expect(await client.clientId()).not.toBe('seeded-client');
+
+		await client.mutate.put(TodoSchema, { id: 't4', title: 'post-upgrade' });
+		await client.syncNow();
+		expect(pushedBatches.at(-1)?.[0]?.clientId).not.toBe('seeded-client');
+		await client.close();
+	});
+
+	it('rotates the identity when another tab wiped it during the salvage push', async () => {
+		const kv = await seedOldFormatStore();
+		// The other tab wins the race while this one's salvage is in flight: by
+		// the time this tab takes the lock back the version is already current, so
+		// it leaves the wipe alone — but the identity it memoized before start()
+		// went with it, and minting under it would put every later mutation on
+		// watermarks the wipe existed to escape.
+		let wiped = false;
+		const { transport, pushedBatches } = stubServer({
+			onPush: async () => {
+				if (wiped) return;
+				wiped = true;
+				await otherTabUpgrade(kv);
+			},
+		});
+		const client = newUpgradingClient(kv, transport, []);
+		await client.mutate.put(TodoSchema, { id: 't3', title: 'pre-start' });
+		expect(await client.clientId()).toBe('seeded-client');
+
+		await client.start();
+		expect(await client.clientId()).not.toBe('seeded-client');
+
+		await client.mutate.put(TodoSchema, { id: 't4', title: 'post-upgrade' });
+		await client.syncNow();
+		expect(pushedBatches.at(-1)?.[0]?.clientId).not.toBe('seeded-client');
 		await client.close();
 	});
 
