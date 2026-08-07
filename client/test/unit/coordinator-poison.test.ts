@@ -2,10 +2,14 @@ import { create } from '@bufbuild/protobuf';
 import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 import { beforeEach, describe, expect, it } from 'vitest';
 
-import { CodePoisonDropped } from '../../src/codes.js';
+import { CodeInternal, CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { MutationStatus, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
+import {
+	MutationStatus,
+	type PushRequest,
+	SyncService,
+} from '../../src/gen/syncplane/v1/service_pb.js';
 import { metaCursor, metaLastMutationId, metaPushedThrough } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
@@ -22,18 +26,15 @@ import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfak
 const WS = 'ws';
 
 // Drives the Coordinator's push path against a fake server to exercise the
-// poison-queue backstop: an older server that RPC-errors on a mutation a
-// current one would ack must not wedge the queue forever.
+// poison-queue backstop: a mutation the server keeps failing — as an RPC error
+// or as a workspace-scoped batch failure — must not wedge the queue forever.
 
-/** A SyncService transport whose push() runs the given hook; pull/bootstrap
- * are no-ops so a seeded cursor keeps sync from bootstrapping. */
-function fakeTransport(onPush: () => void): Transport {
+/** A SyncService transport with the given push(); pull/bootstrap are no-ops so
+ * a seeded cursor keeps sync from bootstrapping. */
+function syncTransport(push: (req: PushRequest) => ReturnType<typeof pushResults>): Transport {
 	return createRouterTransport(({ service }) => {
 		service(SyncService, {
-			push(req) {
-				onPush();
-				return pushResults(req, []);
-			},
+			push,
 			pull() {
 				return {
 					patch: { changes: [], dropEntities: [] },
@@ -53,6 +54,19 @@ function fakeTransport(onPush: () => void): Transport {
 			},
 		});
 	});
+}
+
+/** A transport whose push() runs the given hook and then answers emptily. */
+function fakeTransport(onPush: () => void): Transport {
+	return syncTransport((req) => {
+		onPush();
+		return pushResults(req, []);
+	});
+}
+
+/** A transport whose push() fails the whole batch with a workspace-scoped code. */
+function batchFailTransport(errorCode: string, errorMessage: () => string): Transport {
+	return syncTransport((req) => pushFailed(req, errorCode, errorMessage()));
 }
 
 describe('coordinator poison backstop', () => {
@@ -138,6 +152,52 @@ describe('coordinator poison backstop', () => {
 		} finally {
 			tx.release();
 		}
+
+		await coord.stop();
+	});
+
+	it('drops a head whose batch the server keeps failing the same way', async () => {
+		// A workspace-scoped batch failure is what a custom mutator returning a
+		// plain error instead of Reject(...) produces. It is not an RPC error, so
+		// nothing about it is deterministic on its face — but a head that fails
+		// alone with the same verdict every time is one nothing can drain.
+		const coord = newCoordinator(
+			batchFailTransport(CodeInternal, () => 'workspace "ws": applying the batch failed'),
+			3,
+		);
+
+		await cycle(coord);
+		await cycle(coord);
+		expect(rejections).toHaveLength(0);
+		expect(await pendingIds()).toEqual([ 1n ]);
+
+		await cycle(coord);
+		expect(rejections).toEqual([
+			expect.objectContaining({
+				mutationId: 1n,
+				errorCode: CodePoisonDropped,
+				errorMessage: 'workspace "ws": applying the batch failed',
+			}),
+		]);
+		expect(await pendingIds()).toEqual([]);
+
+		await coord.stop();
+	});
+
+	it('restarts the count when the batch failure changes', async () => {
+		// A batch failure that reads differently each time is the shape of an
+		// outage, not of a mutation nothing can apply: only a repeat of the same
+		// verdict is evidence that retrying cannot help.
+		let attempt = 0;
+		const coord = newCoordinator(
+			batchFailTransport(CodeInternal, () => `attempt ${++attempt} lost its connection`),
+			3,
+		);
+
+		for (let i = 0; i < 6; i++) await cycle(coord);
+
+		expect(rejections).toHaveLength(0);
+		expect(await pendingIds()).toEqual([ 1n ]);
 
 		await coord.stop();
 	});

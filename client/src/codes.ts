@@ -130,10 +130,10 @@ export const ErrorCodeMetadataKey = 'syncplane-error-code';
  */
 
 /**
- * The client itself dropped a mutation the server kept failing
- * deterministically (the poison-queue backstop in the coordinator's push), as
- * opposed to the server rejecting it. Lets apps tell a client-side dead-letter
- * apart from a normal "no".
+ * The client itself dropped a mutation whose push the server kept failing the
+ * same way (the poison-queue backstop in the coordinator's push), as opposed to
+ * the server rejecting it. Lets apps tell a client-side dead-letter apart from
+ * a normal "no". `errorMessage` carries the failure the server last reported.
  */
 export const CodePoisonDropped = 'poison_dropped';
 

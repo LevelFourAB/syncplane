@@ -487,10 +487,11 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 */
 	debugVerifyIndexReads?: boolean;
 	/**
-	 * Deterministic (invalid-argument) push failures of the head mutation before
-	 * the client drops it to the dead-letter surface (onMutationRejected, code
-	 * "poison_dropped"). Backstop against a queue wedged by an older server that
-	 * RPC-errors on a mutation a current one would ack. Default 5; <= 0 disables.
+	 * Identical push failures of the head mutation — an invalid-argument RPC
+	 * error, or a batch the server refuses as a whole with an internal or
+	 * unrecognized code — before the client drops it to the dead-letter surface
+	 * (onMutationRejected, code "poison_dropped"). Backstop against a queue no
+	 * amount of retrying can drain. Default 5; <= 0 disables.
 	 */
 	poisonThreshold?: number;
 	/**

@@ -19,6 +19,13 @@ import (
 // push write transaction; every row it writes is stamped with the
 // mutation's sequence. Return Reject(...) for a business "no".
 //
+// Any other error is read as infrastructure: the whole batch fails as
+// CodeInternal, nothing in it is acked, and the client resends. Returning one
+// for a verdict that cannot change — a validation failure, an unhandled case —
+// therefore costs the client a retry loop that ends in the mutation being
+// dropped to its dead-letter surface, so it reaches the app as a lost write
+// rather than as the "no" it was.
+//
 // args follows the registration, not the caller: a mutator registered with a
 // prototype always receives a non-nil message of that type — zeroed when the
 // invocation carried none — and one registered without a prototype always

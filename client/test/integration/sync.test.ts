@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import type { RejectionInfo } from '../../src/client.js';
-import { CodeConflict } from '../../src/codes.js';
+import { CodeConflict, CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { PairSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { freshWorkspace, newClient } from './helpers.js';
@@ -252,5 +252,45 @@ describe('sync (poll-driven)', () => {
 		expect(await a.get(TodoSchema, 'ghost')).toBeUndefined();
 
 		await a.close();
+	});
+
+	it('dead-letters a mutation whose mutator fails the batch on every attempt', async () => {
+		// fail_internal returns a plain error instead of a Reject, so the server
+		// fails the whole batch as "internal" — retryable by contract, but no
+		// retry can ever change the answer. Without the backstop the queue never
+		// drains and the app is told only that sync is failing.
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws, {
+			onMutationRejected: (info) => rejections.push(info),
+			poisonThreshold: 2,
+		});
+		await a.start();
+
+		await a.mutate.custom('fail_internal');
+		expect(await a.pendingCount()).toBe(1);
+
+		// Each attempt fails the cycle until the head has failed alone, with the
+		// same verdict, `poisonThreshold` times over. (How many cycles that takes
+		// is pinned by the unit suite, which does not race the background push a
+		// write arms.)
+		for (let i = 0; i < 4; i++) await a.syncNow().catch(() => undefined);
+		expect(rejections).toEqual([
+			expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
+		]);
+		expect(await a.pendingCount()).toBe(0);
+
+		// The queue drains from here: a following write is pushed and acked.
+		await a.mutate.put(TodoSchema, { id: 't1', title: 'after the drop' });
+		await a.syncNow();
+		expect(await a.pendingCount()).toBe(0);
+
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		expect((await b.get(TodoSchema, 't1'))?.title).toBe('after the drop');
+
+		await a.close();
+		await b.close();
 	});
 });

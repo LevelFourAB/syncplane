@@ -429,7 +429,7 @@ It skips such an entry and reports it over `console.error` rather than failing t
 rebase, which would stall the workspace: pulls, rollbacks and bootstrap all
 rebuild the optimistic overlay in the transaction that advances the cursor. The
 entry stays queued, and the push retires it as usual — an ack, a rejection, or a
-dead-letter after `poisonThreshold` deterministic refusals. Until then that tab
+dead-letter after `poisonThreshold` identical failures. Until then that tab
 shows the confirmed row.
 
 ## A local write is not pushed immediately

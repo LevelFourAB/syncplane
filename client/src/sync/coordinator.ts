@@ -276,13 +276,15 @@ export interface CoordinatorOptions {
 	 */
 	priorityEntities?: string[];
 	/**
-	 * How many times the head mutation may fail with a deterministic
-	 * (invalid-argument) push error before the client gives up and drops it to
-	 * the dead-letter surface (onMutationRejected, code "poison_dropped"). This
-	 * is a backstop for an older server that still RPC-errors on a mutation a
-	 * newer one would ack as a rejection; a higher value tolerates longer
-	 * version-skew windows (e.g. rolling deploys) at the cost of staying wedged
-	 * longer. Default 5; <= 0 disables dropping (retry forever).
+	 * How many times the head mutation may fail the same way — an
+	 * invalid-argument push error, or a batch the server refuses as a whole with
+	 * an internal or unrecognized code — before the client gives up and drops it
+	 * to the dead-letter surface (onMutationRejected, code "poison_dropped").
+	 * Counted only while the verdict repeats unchanged, so an outage does not
+	 * accumulate toward it. A higher value tolerates longer windows in which the
+	 * failure could still turn out to be transient (a rolling deploy, a failing
+	 * dependency) at the cost of staying wedged longer. Default 5; <= 0 disables
+	 * dropping (retry forever).
 	 */
 	poisonThreshold?: number;
 	/**
@@ -351,11 +353,12 @@ interface WorkspaceSync {
 	 */
 	serverSeq: bigint;
 	/**
-	 * Tracks consecutive deterministic push failures of this workspace's queue
-	 * head for the poison backstop. Reset whenever the head changes or a push
-	 * succeeds.
+	 * Tracks consecutive push failures of this workspace's queue head for the
+	 * poison backstop, and what it failed with — a different verdict restarts
+	 * the count (see countHeadFailure). Reset whenever the head changes or a
+	 * push succeeds.
 	 */
-	poison?: { id: bigint; failures: number };
+	poison?: { id: bigint; failures: number; signature: string };
 	/**
 	 * The server said this client may no longer access the workspace. Permanent:
 	 * it is dropped from pushes, pulls, bootstraps and the stream scope set, and
@@ -1090,10 +1093,10 @@ export class Coordinator {
 		// keep the values rebase replays.
 		const wire = await this.toWireQueues(queues);
 
-		// A workspace whose head has already failed deterministically is pushed
-		// ALONE, in its own request, so the next failure (or success) is
-		// unambiguously attributable to that one mutation. Other workspaces wait a
-		// cycle; the isolation runs at most poisonThreshold times.
+		// A workspace whose head has already failed a push is pushed ALONE, in its
+		// own request, so the next failure (or success) is unambiguously
+		// attributable to that one mutation. Other workspaces wait a cycle; the
+		// isolation runs at most poisonThreshold times.
 		for (const [ ws, pending ] of wire) {
 			if (this.workspaces.get(ws)?.poison?.id === pending[0]!.mutationId) {
 				await this.pushRequests(new Map([ [ ws, [ pending[0]! ] ] ]), 1);
@@ -1212,15 +1215,12 @@ export class Coordinator {
 							// its own, dead-letter it so the queue stops wedging forever.
 							const state = this.workspaces.get(lone.workspaceId);
 							const head = queues.get(lone.workspaceId)?.[0];
-							if (state && head) {
-								const isolating = state.poison?.id === head.mutationId && lone.count === 1;
-								const failures = isolating ? state.poison!.failures + 1 : 1;
-								state.poison = { id: head.mutationId, failures };
-								if (isolating && failures >= this.poisonThreshold) {
-									await this.deadLetter(lone.workspaceId, head, err);
-									state.poison = undefined;
-									return;
-								}
+							if (
+								state && head
+								&& this.countHeadFailure(state, head, `rpc ${err.code}`, lone.count === 1)
+							) {
+								await this.deadLetter(lone.workspaceId, head, err.rawMessage);
+								return;
 							}
 							throw err; // retry; the next cycle isolates the head.
 						}
@@ -1280,7 +1280,6 @@ export class Coordinator {
 						// acked: the queue stays put and the code decides what happens next.
 						// Either way this workspace ships nothing more this cycle — its
 						// remaining mutations would land past the gap.
-						if (state) state.poison = undefined;
 						remaining.delete(sent.workspaceId);
 						if (wsResult.errorCode === CodeMutationIdGap) {
 							// The server is ahead of or behind our queue (e.g. a restored
@@ -1290,21 +1289,42 @@ export class Coordinator {
 							// stranded above it is renumbered onto the watermark. Recorded
 							// rather than retried, because a re-push of the same ids can
 							// only be refused the same way.
-							if (state) state.gapped = true;
+							if (state) {
+								state.poison = undefined;
+								state.gapped = true;
+							}
 							continue;
 						}
 						if (wsResult.errorCode === CodeWorkspaceAccessRevoked) {
 							// Permanent: this client may no longer write here. Retrying can
 							// never succeed, so stop and let the status carry it.
+							if (state) state.poison = undefined;
 							this.markRevoked(sent.workspaceId);
 							continue;
 						}
-						// Transient (internal) or unrecognized: retry the cycle with
-						// backoff rather than draining a queue the server never took.
-						throw new Error(
-							`push failed for workspace ${sent.workspaceId}: `
-								+ `${wsResult.errorMessage || wsResult.errorCode}`,
-						);
+						// Internal or unrecognized: presumed transient, so the cycle retries
+						// with backoff rather than draining a queue the server never took.
+						// A deterministic one would retry forever though — a custom mutator
+						// returning a plain error instead of Reject(...) fails its batch this
+						// way on every attempt — so the head runs the same isolation and
+						// dead-lettering as a deterministic RPC failure. Only a repeat of the
+						// identical verdict counts, which is what keeps an outage (whose
+						// batches fail for changing reasons) out of the backstop.
+						const failure = wsResult.errorMessage || wsResult.errorCode;
+						const head = queues.get(sent.workspaceId)?.[0];
+						if (
+							state && head && sent.atHead && this.poisonThreshold > 0
+							&& this.countHeadFailure(
+								state,
+								head,
+								`batch ${wsResult.errorCode} ${wsResult.errorMessage}`,
+								sent.count === 1,
+							)
+						) {
+							await this.deadLetter(sent.workspaceId, head, failure);
+							continue;
+						}
+						throw new Error(`push failed for workspace ${sent.workspaceId}: ${failure}`);
 					}
 
 					// A clean (or rejecting) response means the head is not poison, and
@@ -1833,26 +1853,56 @@ export class Coordinator {
 	}
 
 	/**
-	 * Drops a mutation the server keeps deterministically failing: rolls it back
-	 * exactly like a rejection and reports it through onMutationRejected with the
-	 * client-side poison code, so the app can observe (and re-issue) it instead
-	 * of the queue staying wedged forever.
+	 * Counts one failed push of a workspace's queue head and reports whether the
+	 * head has now earned a dead-letter — in which case the count is cleared,
+	 * because the mutation it named is about to leave the queue.
+	 *
+	 * signature says what the head failed with; a different one restarts the
+	 * count, so only a verdict that repeats unchanged is taken as evidence that
+	 * retrying cannot help. isolated says the failed push carried the head alone,
+	 * which is the only arrangement in which the failure is attributable to it —
+	 * failures counted before isolation still lead up to the threshold, but the
+	 * drop itself never fires on one.
+	 */
+	private countHeadFailure(
+		state: WorkspaceSync,
+		head: Mutation,
+		signature: string,
+		isolated: boolean,
+	): boolean {
+		const prev = state.poison;
+		const repeat = isolated && prev?.id === head.mutationId && prev.signature === signature;
+		const failures = repeat ? prev.failures + 1 : 1;
+		if (repeat && failures >= this.poisonThreshold) {
+			state.poison = undefined;
+			return true;
+		}
+		state.poison = { id: head.mutationId, failures, signature };
+		return false;
+	}
+
+	/**
+	 * Drops a mutation whose push the server keeps failing the same way: rolls it
+	 * back exactly like a rejection and reports it through onMutationRejected
+	 * with the client-side poison code, so the app can observe (and re-issue) it
+	 * instead of the queue staying wedged forever.
 	 */
 	private async deadLetter(
 		workspaceId: string,
 		m: Mutation,
-		err: ConnectError,
+		failure: string,
 	): Promise<void> {
 		await this.rollbackPending(workspaceId, [ m.mutationId ]);
-		// This id died on an RPC error, so the server never applied it and its
-		// watermark stops one below. Left where they are, the survivors would gap
-		// past that watermark and the workspace could never push again.
+		// Nothing was acked for this id — its push died as an RPC error, or the
+		// server refused the whole batch — so the watermark stops one below. Left
+		// where they are, the survivors would gap past that watermark and the
+		// workspace could never push again.
 		await this.resequence(workspaceId, m.mutationId);
 		this.opts.onMutationRejected?.({
 			workspaceId,
 			mutationId: m.mutationId,
 			errorCode: CodePoisonDropped,
-			errorMessage: err.rawMessage,
+			errorMessage: failure,
 			...describeMutation(m),
 		});
 	}

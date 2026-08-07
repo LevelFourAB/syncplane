@@ -5,6 +5,7 @@ package exampleapp
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -101,8 +102,8 @@ func Options(perms *Permissions) []server.Option {
 	}, MutatorOptions(perms)...)
 }
 
-// MutatorOptions returns just complete_all, write_then_reject and bump_epoch,
-// for servers that declare the todo entity themselves.
+// MutatorOptions returns just complete_all, write_then_reject, fail_internal
+// and bump_epoch, for servers that declare the todo entity themselves.
 func MutatorOptions(perms *Permissions) []server.Option {
 	return []server.Option{
 		server.WithMutator("complete_all", &todov1.CompleteAllArgs{},
@@ -138,6 +139,14 @@ func MutatorOptions(perms *Permissions) []server.Option {
 					return err
 				}
 				return server.Reject(server.CodeConflict, "write_then_reject always rejects")
+			}),
+		// fail_internal returns a plain error where it should return a Reject,
+		// which is the app-code mistake that fails a whole batch as "internal"
+		// on every attempt. It exists so the TS suite can prove the client's
+		// dead-letter backstop drains a queue no retry can.
+		server.WithMutator("fail_internal", nil,
+			func(context.Context, *server.EntityTx, proto.Message) error {
+				return errors.New("fail_internal always fails")
 			}),
 		// bump_epoch lets integration tests exercise filter-epoch revocation
 		// end to end: push bump_epoch, the notifier fires, the next pull resets.
