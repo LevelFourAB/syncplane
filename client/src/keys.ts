@@ -85,7 +85,10 @@ export const metaLastMutationId = (workspaceId: string): string =>
  *
  * A resequence lowers it (see resequencePending): the ids it renumbers were
  * refused by the server rather than applied, so leaving the mark above them
- * would freeze compaction out of a queue the server never took.
+ * would freeze compaction out of a queue the server never took. A format
+ * upgrade that keeps the counter restamps it from the counter (see
+ * SyncClient.ensureFormatVersion), since the salvage it just ran leaves the
+ * server holding every id the counter has minted.
  */
 export const metaPushedThrough = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}pushedThrough`;
@@ -136,7 +139,8 @@ export const metaServerSeq = (workspaceId: string): string =>
 /**
  * Version of this KV layout. On mismatch the client tries to push the
  * pending queues once, then wipes everything except the clientId and the
- * per-workspace mutation-id counters and re-bootstraps. Bump when the layout or
+ * per-workspace mutation-id counters (and the pushed-through marks that pair
+ * with them) and re-bootstraps. Bump when the layout or
  * record encoding changes incompatibly — in either direction: a client that
  * cannot read a newer store's records is as broken as one whose writes a newer
  * client would misread.

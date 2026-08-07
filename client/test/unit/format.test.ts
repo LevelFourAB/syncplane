@@ -18,6 +18,7 @@ import {
 	META_FORMAT_VERSION,
 	metaCursor,
 	metaLastMutationId,
+	metaPushedThrough,
 	pendingKey,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
@@ -175,6 +176,9 @@ describe('format version upgrade', () => {
 		const all = await dump(kv);
 		expect(all.get(META_CLIENT_ID)).toBe('seeded-client');
 		expect(all.get(metaLastMutationId(WS))).toBe('2');
+		// The counter's pushed-through mark comes with it: the salvage put every
+		// id the counter has minted on the server.
+		expect(all.get(metaPushedThrough(WS))).toBe('2');
 		expect(all.get(META_FORMAT_VERSION)).toBe(FORMAT_VERSION);
 		expect(all.has(confirmedKey('todo', WS, 'old'))).toBe(false);
 		expect(await client.pendingCount()).toBe(0);
@@ -198,6 +202,29 @@ describe('format version upgrade', () => {
 
 		const postUpgrade = pushedBatches.at(-1);
 		expect(postUpgrade?.map((m) => m.mutationId)).toEqual([ 3n ]);
+		await client.close();
+	});
+
+	it('keeps compaction off the ids the salvage push already delivered', async () => {
+		const kv = await seedOldFormatStore();
+		const { transport, pushedBatches } = stubServer();
+		const client = newUpgradingClient(kv, transport, []);
+		await client.start();
+		await client.syncNow();
+		// The salvage push carried ids 1-2, so the server's watermark is 2.
+		expect(pushedBatches[0]?.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
+
+		// A burst on one key folds to a single slot, and compaction renumbers the
+		// folded tail from the pushed-through mark. A mark the wipe left for
+		// initPushedThrough to re-seed from the (now empty) queue reads as 0, which
+		// puts that slot back at id 1 — already applied, and silently dropped along
+		// with every id up to the watermark that followed it.
+		await client.mutate.put(TodoSchema, { id: 't3', title: 'first' });
+		await client.mutate.put(TodoSchema, { id: 't3', title: 'second' });
+		await client.syncNow();
+
+		expect(pushedBatches.at(-1)?.map((m) => m.mutationId)).toEqual([ 3n ]);
+		expect(await client.pendingCount()).toBe(0);
 		await client.close();
 	});
 

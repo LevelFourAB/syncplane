@@ -51,6 +51,7 @@ import {
 	pendingPrefix,
 	stagingWsRoot,
 	workspaceOfPendingKey,
+	wsFromSegment,
 } from './keys.js';
 import { IDBKVStore } from './kv/idb.js';
 import { MemoryKVStore } from './kv/memory.js';
@@ -2128,8 +2129,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Verifies the local KV layout version before sync starts. A mismatch
 	 * (this build expects a different layout than the store carries) salvages
 	 * the pending queues with one best-effort push, then wipes everything
-	 * except the clientId and the per-workspace mutation-id counters and stamps
-	 * the new version — the missing cursors make the first sync re-bootstrap.
+	 * except the clientId and the per-workspace mutation-id counters (whose
+	 * pushed-through marks are restamped to match) and stamps the new version —
+	 * the missing cursors make the first sync re-bootstrap.
 	 * Mutations that could not be pushed are dropped and reported both as a count
 	 * on the status surface and one by one through onMutationRejected, under code
 	 * "format_upgraded"; in that case the clientId
@@ -2267,11 +2269,30 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// in that case start over as a fresh client.
 				const keepIdentity = dropped === 0;
 				const doomed: string[] = [];
-				for await (const [ k ] of tx.scan('')) {
-					if (keepIdentity && (k === META_CLIENT_ID || isMutationCounterKey(k))) continue;
+				// Counter value per surviving workspace, to restamp its pushed-through
+				// mark below.
+				const counters = new Map<string, string>();
+				for await (const [ k, v ] of tx.scan('')) {
+					if (keepIdentity) {
+						if (k === META_CLIENT_ID) continue;
+						const ws = workspaceOfMutationCounterKey(k);
+						if (ws !== undefined) {
+							counters.set(ws, v as string);
+							continue;
+						}
+					}
 					doomed.push(k);
 				}
 				for (const k of doomed) await tx.del(k);
+				// A counter without its pushed-through mark is half an invariant:
+				// compaction may only renumber ids strictly above the mark, and the
+				// wipe empties the queue the coordinator would otherwise re-seed the
+				// mark from — leaving it at 0 while the counter still reads 42, so the
+				// first burst that folds renumbers from 1 and every mutation up to the
+				// watermark is dropped as already applied. Every id the counter has
+				// minted is now either acked or salvaged (that is what dropped == 0
+				// means), so the server's watermark IS the counter.
+				for (const [ ws, id ] of counters) await tx.put(metaPushedThrough(ws), id);
 				await tx.put(META_FORMAT_VERSION, FORMAT_VERSION);
 				await tx.commit();
 				// The stored identity is gone, so the memo of it must go too —
@@ -3483,9 +3504,15 @@ function resolveAccountId(opts: { accountId?: string }, workspaces: string[]): s
 	throw new Error('accountId is required when the client holds more than one workspace');
 }
 
-/** True for a `meta/ws/<ws>/lastMutationId` key. */
-function isMutationCounterKey(key: string): boolean {
-	return key.startsWith(META_WS_PREFIX) && key.endsWith('/lastMutationId');
+const MUTATION_COUNTER_SUFFIX = '/lastMutationId';
+
+/**
+ * The workspace a `meta/ws/<ws>/lastMutationId` key counts for, or undefined
+ * when the key is not one.
+ */
+function workspaceOfMutationCounterKey(key: string): string | undefined {
+	if (!key.startsWith(META_WS_PREFIX) || !key.endsWith(MUTATION_COUNTER_SUFFIX)) return undefined;
+	return wsFromSegment(key.slice(META_WS_PREFIX.length, -MUTATION_COUNTER_SUFFIX.length));
 }
 
 /**
