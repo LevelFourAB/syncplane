@@ -1005,17 +1005,71 @@ export async function resequencePending(
 	workspaceId: string,
 	firstId: bigint,
 ): Promise<ResequenceResult> {
+	return runResequence(kv, registry, mirrors, workspaceId, undefined, firstId);
+}
+
+/**
+ * Drops the pending mutation `dropId` of a workspace and renumbers what
+ * survives it down onto that id, in ONE transaction. Everything
+ * resequencePending documents applies, and the caller owes the same proof: the
+ * server has taken nothing from `dropId` on.
+ *
+ * The two halves are inseparable because either alone leaves the queue
+ * unpushable — the drop makes a hole no ack can ever fill, and only the
+ * renumber closes it. A caller that committed them separately would, on a
+ * failure in between, strand the workspace with a hole whose one repair is the
+ * renumber that just failed.
+ *
+ * `dropId` names the queue head. A queue that still holds lower ids keeps its
+ * numbering (they are contiguous with the watermark already, and moving them UP
+ * would open a second hole), so `changed` is false and only the drop lands.
+ *
+ * Run under the kv mutex.
+ */
+export async function dropAndResequencePending(
+	kv: KVStore,
+	registry: EntityRegistry,
+	mirrors: MirrorMap,
+	workspaceId: string,
+	dropId: bigint,
+): Promise<ResequenceResult> {
+	return runResequence(kv, registry, mirrors, workspaceId, dropId, dropId);
+}
+
+async function runResequence(
+	kv: KVStore,
+	registry: EntityRegistry,
+	mirrors: MirrorMap,
+	workspaceId: string,
+	dropId: bigint | undefined,
+	firstId: bigint,
+): Promise<ResequenceResult> {
 	const touched = new TouchSet();
 	const tx = await kv.write();
 	try {
 		const pending = await readPending(tx, workspaceId);
-		const head = pending[0];
+		const survivors: Mutation[] = [];
+		let dropped = false;
+		for (const m of pending) {
+			if (m.mutationId === dropId) {
+				await tx.del(pendingKey(workspaceId, m.mutationId));
+				dropped = true;
+			} else {
+				survivors.push(m);
+			}
+		}
+		const head = survivors[0];
 		if (head !== undefined && firstId >= head.mutationId) {
 			// The server is at or ahead of the head: not a hole, and renumbering
 			// upward would manufacture the very gap this closes. dropAcked retires
 			// those ids instead.
-			tx.release();
-			return { touched, pendingCount: pending.length, remap: new Map(), changed: false };
+			if (dropped) {
+				await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, survivors, touched);
+				await tx.commit();
+			} else {
+				tx.release();
+			}
+			return { touched, pendingCount: survivors.length, remap: new Map(), changed: false };
 		}
 		// Every old key goes before any new one is written: the ranges overlap
 		// whenever the queue is longer than the hole, and a write-then-delete
@@ -1023,7 +1077,7 @@ export async function resequencePending(
 		const remap = new Map<bigint, bigint>();
 		const renumbered: Mutation[] = [];
 		let nextId = firstId;
-		for (const m of pending) {
+		for (const m of survivors) {
 			await tx.del(pendingKey(workspaceId, m.mutationId));
 			const moved = clone(MutationSchema, m);
 			moved.mutationId = nextId;
@@ -1037,7 +1091,7 @@ export async function resequencePending(
 		// the workspace again on the very next edit.
 		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
 		await writePushedThrough(tx, workspaceId, firstId - 1n);
-		if (renumbered.length > 0) {
+		if (dropped || renumbered.length > 0) {
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
 		}
 		await tx.commit();

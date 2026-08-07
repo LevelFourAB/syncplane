@@ -47,12 +47,14 @@ import {
 	applyBootstrapRows,
 	applyCrudLocally,
 	clearStaging,
+	dropAndResequencePending,
 	finalizeRebase,
 	type MirrorMap,
 	promoteStaged,
 	rebase,
 	type RebaseResult,
 	resequencePending,
+	type ResequenceResult,
 	rollbackRejected,
 	stageServerChanges,
 	wipeConfirmedState,
@@ -1494,8 +1496,21 @@ export class Coordinator {
 			)
 		);
 		if (!result.changed) return false;
-		this.opts.onCompacted?.(workspaceId, result.remap);
+		this.afterResequence(workspaceId, firstId, result);
+		await this.opts.notify(result.touched);
+		return true;
+	}
+
+	/**
+	 * The in-memory half of a renumber, once its transaction has committed: the
+	 * status count, and — when ids actually moved — the bookkeeping that names
+	 * them (the undo stacks via onCompacted, this tab's intent record) plus the
+	 * event.
+	 */
+	private afterResequence(workspaceId: string, firstId: bigint, result: ResequenceResult): void {
 		this.opts.status.setPendingCount(workspaceId, result.pendingCount);
+		if (!result.changed) return;
+		this.opts.onCompacted?.(workspaceId, result.remap);
 		// The record's ref ids name the old numbering; onCompacted above already
 		// remapped the in-memory stacks, so refresh from those.
 		void this.opts.intent?.updateRefs(workspaceId, this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS);
@@ -1505,8 +1520,6 @@ export class Coordinator {
 			firstId,
 			mutations: result.pendingCount,
 		});
-		await this.opts.notify(result.touched);
-		return true;
 	}
 
 	/**
@@ -1883,21 +1896,36 @@ export class Coordinator {
 
 	/**
 	 * Drops a mutation whose push the server keeps failing the same way: rolls it
-	 * back exactly like a rejection and reports it through onMutationRejected
-	 * with the client-side poison code, so the app can observe (and re-issue) it
-	 * instead of the queue staying wedged forever.
+	 * back like a rejection, renumbers the queue onto the id it vacated, and
+	 * reports it through onMutationRejected with the client-side poison code, so
+	 * the app can observe (and re-issue) it instead of the queue staying wedged
+	 * forever.
+	 *
+	 * All of it or none of it: a store that fails leaves the mutation queued and
+	 * the app unnotified, and the backstop counts up to the threshold again.
 	 */
 	private async deadLetter(
 		workspaceId: string,
 		m: Mutation,
 		failure: string,
 	): Promise<void> {
-		await this.rollbackPending(workspaceId, [ m.mutationId ]);
 		// Nothing was acked for this id — its push died as an RPC error, or the
 		// server refused the whole batch — so the watermark stops one below. Left
 		// where they are, the survivors would gap past that watermark and the
-		// workspace could never push again.
-		await this.resequence(workspaceId, m.mutationId);
+		// workspace could never push again, which is why the drop and the renumber
+		// share one transaction: a failure between them would leave exactly that
+		// queue behind, and the renumber is also the only way back out of it.
+		const result = await this.opts.kvMutex.run(() =>
+			dropAndResequencePending(
+				this.opts.kv,
+				this.opts.registry,
+				this.opts.mirrors,
+				workspaceId,
+				m.mutationId,
+			)
+		);
+		this.afterResequence(workspaceId, m.mutationId, result);
+		await this.opts.notify(result.touched);
 		this.opts.onMutationRejected?.({
 			workspaceId,
 			mutationId: m.mutationId,

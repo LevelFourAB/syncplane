@@ -10,8 +10,9 @@ import {
 	type PushRequest,
 	SyncService,
 } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, metaLastMutationId, metaPushedThrough } from '../../src/keys.js';
+import { metaCursor, metaLastMutationId, metaPushedThrough, pendingKey } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import type { KVWrite } from '../../src/kv/store.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
@@ -69,6 +70,105 @@ function batchFailTransport(errorCode: string, errorMessage: () => string): Tran
 	return syncTransport((req) => pushFailed(req, errorCode, errorMessage()));
 }
 
+/** A transaction that calls `onDel` before each delete and `onCommit` after a commit. */
+class HookedWrite implements KVWrite {
+	constructor(
+		private readonly inner: KVWrite,
+		private readonly onDel: (key: string) => void,
+		private readonly onCommit: () => void,
+	) {}
+
+	get(key: string): Promise<unknown | undefined> {
+		return this.inner.get(key);
+	}
+
+	has(key: string): Promise<boolean> {
+		return this.inner.has(key);
+	}
+
+	scan(prefix: string): AsyncIterable<[key: string, value: unknown]> {
+		return this.inner.scan(prefix);
+	}
+
+	scanRange(lo?: string, hi?: string): AsyncIterable<[key: string, value: unknown]> {
+		return this.inner.scanRange(lo, hi);
+	}
+
+	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
+		return this.inner.indexScan(lo, hi);
+	}
+
+	put(key: string, value: unknown): Promise<void> {
+		return this.inner.put(key, value);
+	}
+
+	async del(key: string): Promise<void> {
+		this.onDel(key);
+		await this.inner.del(key);
+	}
+
+	async commit(): Promise<void> {
+		await this.inner.commit();
+		this.onCommit();
+	}
+
+	release(): void {
+		this.inner.release();
+	}
+}
+
+/**
+ * A store whose transaction opened straight AFTER the one that deleted `key`
+ * committed fails once — the window a dead-letter would leave open if it
+ * dropped the mutation in one transaction and renumbered the survivors in the
+ * next.
+ */
+class FailAfterDelete extends MemoryKVStore {
+	private armed = false;
+
+	constructor(private readonly key: string) {
+		super();
+	}
+
+	override async write(): Promise<KVWrite> {
+		if (this.armed) {
+			this.armed = false;
+			throw new Error('kv unavailable');
+		}
+		let deleted = false;
+		return new HookedWrite(
+			await super.write(),
+			(k) => {
+				if (k === this.key) deleted = true;
+			},
+			() => {
+				if (deleted) this.armed = true;
+			},
+		);
+	}
+}
+
+/** A store whose first delete of `key` throws, failing the dead-letter's own write. */
+class FailOnDelete extends MemoryKVStore {
+	private failed = false;
+
+	constructor(private readonly key: string) {
+		super();
+	}
+
+	override async write(): Promise<KVWrite> {
+		return new HookedWrite(
+			await super.write(),
+			(k) => {
+				if (k !== this.key || this.failed) return;
+				this.failed = true;
+				throw new Error('kv unavailable');
+			},
+			() => {},
+		);
+	}
+}
+
 describe('coordinator poison backstop', () => {
 	let kv: MemoryKVStore;
 	let registry: EntityRegistry;
@@ -78,9 +178,15 @@ describe('coordinator poison backstop', () => {
 		kv = new MemoryKVStore();
 		registry = new EntityRegistry([ TodoSchema ]);
 		rejections = [];
+		await seed();
+	});
 
-		// Seed one pending mutation plus its optimistic overlay, a cursor (so the
-		// first sync skips bootstrap), and the id counter.
+	/**
+	 * Seeds `kv` with one pending mutation plus its optimistic overlay, a cursor
+	 * (so the first sync skips bootstrap), and the id counter. A spec that needs
+	 * a different store assigns `kv` and calls this again.
+	 */
+	async function seed(): Promise<void> {
 		const def = registry.bySchema(TodoSchema);
 		const crud = buildPut(def, TodoSchema, create(TodoSchema, { id: 't1', title: 'poison' }));
 		const mutation = create(MutationSchema, {
@@ -94,7 +200,25 @@ describe('coordinator poison backstop', () => {
 		await tx.put(metaCursor(WS), new Uint8Array([ 1 ]));
 		await tx.put(metaLastMutationId(WS), '1');
 		await tx.commit();
-	});
+	}
+
+	/** Queues further pending mutations behind the seeded head. */
+	async function seedTail(ids: bigint[]): Promise<void> {
+		const def = registry.bySchema(TodoSchema);
+		const tx = await kv.write();
+		for (const id of ids) {
+			const crud = buildPut(def, TodoSchema, create(TodoSchema, { id: `t${id}`, title: 'keep' }));
+			const m = create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: id,
+				payload: { case: 'crud', value: crud },
+			});
+			await enqueuePending(tx, WS, m);
+			await applyMutationLocally(tx, registry, {}, WS, m, new TouchSet());
+		}
+		await tx.put(metaLastMutationId(WS), String(ids[ids.length - 1]));
+		await tx.commit();
+	}
 
 	function newCoordinator(transport: Transport, poisonThreshold: number): Coordinator {
 		const kvMutex = createKvMutex('test');
@@ -330,20 +454,7 @@ describe('coordinator poison backstop', () => {
 		// A dead-letter discards an id the server never acked, so its watermark
 		// stays below the tail. Left at their old ids, the survivors would gap
 		// past it and the workspace would never push again.
-		const def = registry.bySchema(TodoSchema);
-		const seedTx = await kv.write();
-		for (const id of [ 2n, 3n ]) {
-			const crud = buildPut(def, TodoSchema, create(TodoSchema, { id: `t${id}`, title: 'keep' }));
-			const m = create(MutationSchema, {
-				clientId: 'c1',
-				mutationId: id,
-				payload: { case: 'crud', value: crud },
-			});
-			await enqueuePending(seedTx, WS, m);
-			await applyMutationLocally(seedTx, registry, {}, WS, m, new TouchSet());
-		}
-		await seedTx.put(metaLastMutationId(WS), '3');
-		await seedTx.commit();
+		await seedTail([ 2n, 3n ]);
 
 		const coord = newCoordinator(
 			fakeTransport(() => {
@@ -370,6 +481,71 @@ describe('coordinator poison backstop', () => {
 		} finally {
 			tx.release();
 		}
+
+		await coord.stop();
+	});
+
+	it('drops and renumbers in one transaction', async () => {
+		// The drop is what makes the hole and the renumber is what closes it. A
+		// store that dies between them would leave the queue numbered above a
+		// watermark no ack can ever reach: every push refused for the gap, and the
+		// gap recovery is this same renumber. One transaction is the only
+		// arrangement in which the hole cannot outlive the drop.
+		kv = new FailAfterDelete(pendingKey(WS, 1n));
+		await seed();
+		await seedTail([ 2n, 3n ]);
+
+		const coord = newCoordinator(
+			fakeTransport(() => {
+				throw new ConnectError('unknown entity', Code.InvalidArgument);
+			}),
+			3,
+		);
+
+		await cycle(coord);
+		await cycle(coord);
+		await cycle(coord);
+
+		expect(await pendingIds()).toEqual([ 1n, 2n ]);
+		expect(rejections).toEqual([
+			expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
+		]);
+
+		await coord.stop();
+	});
+
+	it('keeps the mutation queued when the dead-letter cannot commit', async () => {
+		// The other half of the same atomicity: a drop that fails writes nothing,
+		// so the head stays queued with the survivors behind it and the backstop
+		// simply counts up to the threshold again.
+		kv = new FailOnDelete(pendingKey(WS, 1n));
+		await seed();
+		await seedTail([ 2n, 3n ]);
+
+		const coord = newCoordinator(
+			fakeTransport(() => {
+				throw new ConnectError('unknown entity', Code.InvalidArgument);
+			}),
+			3,
+		);
+
+		await cycle(coord);
+		await cycle(coord);
+		await cycle(coord);
+
+		expect(rejections).toHaveLength(0);
+		expect(await pendingIds()).toEqual([ 1n, 2n, 3n ]);
+
+		// The failure was the store's, not the mutation's: the next run of the
+		// threshold dead-letters it for real.
+		await cycle(coord);
+		await cycle(coord);
+		await cycle(coord);
+
+		expect(rejections).toEqual([
+			expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
+		]);
+		expect(await pendingIds()).toEqual([ 1n, 2n ]);
 
 		await coord.stop();
 	});
