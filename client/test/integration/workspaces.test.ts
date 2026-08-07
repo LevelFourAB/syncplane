@@ -123,4 +123,38 @@ describe('multi-workspace client', () => {
 
 		await client.close();
 	});
+
+	it('keeps writing after a purged workspace is added back', async () => {
+		const a = freshWorkspace();
+		const b = freshWorkspace();
+		const client = newMultiClient([ a, b ]);
+		await client.start();
+
+		// Push enough of b's ids that the server's (workspace, client) watermark
+		// is well ahead of a counter that restarted at zero.
+		await client.ws(b).mutate.put(TodoSchema, { id: 'b1', title: 'b1' });
+		await client.ws(b).mutate.put(TodoSchema, { id: 'b2', title: 'b2' });
+		await client.ws(b).mutate.put(TodoSchema, { id: 'b3', title: 'b3' });
+		await client.syncNow();
+
+		await client.removeWorkspace(b, { purge: true });
+		client.addWorkspace(b);
+		await client.ws(b).mutate.put(TodoSchema, { id: 'b4', title: 'after rejoin' });
+		await client.syncNow();
+
+		// The clientId is account-wide and the server's watermark survived the
+		// purge, so a reset counter would mint ids the server already applied and
+		// the write would vanish — locally and on the server — without a rejection.
+		expect(client.status().pendingMutations).toBe(0);
+		expect(client.status().lastError).toBeUndefined();
+		expect((await client.ws(b).get(TodoSchema, 'b4'))?.title).toBe('after rejoin');
+
+		const peer = newClient(b);
+		await peer.start();
+		await peer.syncNow();
+		expect((await peer.get(TodoSchema, 'b4'))?.title).toBe('after rejoin');
+
+		await peer.close();
+		await client.close();
+	});
 });

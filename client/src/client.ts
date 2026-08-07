@@ -44,6 +44,7 @@ import {
 	META_FORMAT_VERSION,
 	META_WS_PREFIX,
 	metaLastMutationId,
+	metaPushedThrough,
 	metaWsPrefix,
 	overlayWsPrefix,
 	PENDING_ROOT,
@@ -1342,8 +1343,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	/**
 	 * Deletes every trace of a workspace from the local store: confirmed rows,
-	 * optimistic overlay, bootstrap staging, pending queue, cursor and
-	 * watermarks. Watchers are notified so the UI drops the rows immediately.
+	 * optimistic overlay, bootstrap staging, pending queue and cursor. Watchers
+	 * are notified so the UI drops the rows immediately.
+	 *
+	 * The mutation-id counter and its push mark are the exception and survive:
+	 * the server's per-(workspace, client) watermark is not purged with the
+	 * local data, and the clientId is account-wide, so a workspace added back
+	 * would mint ids the server has already applied and every edit would be
+	 * dropped as already-acked. The counter can never trail that watermark —
+	 * the watermark only advances on ids this client minted — so keeping it is
+	 * exactly enough to resume above it.
 	 *
 	 * The pending queue is read inside the same transaction that deletes it, so
 	 * what comes back is exactly what was lost — a queue read before the call
@@ -1364,6 +1373,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					// are deleted with them and need nothing here.
 					touched.entity(workspaceId, entity);
 				}
+				const kept = new Set([
+					metaLastMutationId(workspaceId),
+					metaPushedThrough(workspaceId),
+				]);
 				for (
 					const prefix of [
 						stagingWsRoot(workspaceId),
@@ -1371,7 +1384,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						metaWsPrefix(workspaceId),
 					]
 				) {
-					for await (const [ k ] of tx.scan(prefix)) doomed.push(k);
+					for await (const [ k ] of tx.scan(prefix)) {
+						if (!kept.has(k)) doomed.push(k);
+					}
 				}
 				for (const k of doomed) await tx.del(k);
 				await tx.commit();
