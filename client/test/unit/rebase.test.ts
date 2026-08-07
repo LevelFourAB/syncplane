@@ -1,5 +1,5 @@
 import { create, fromBinary, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { type Todo, TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { CrudOp, type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
@@ -581,6 +581,200 @@ describe('replay across builds', () => {
 		const todos = await mergedTodos(kv);
 		expect(todos.get('t2')?.title).toBe('from server');
 		expect(todos.get('t1')?.title).toBe('mine');
+	});
+
+	/**
+	 * A PATCH of a REGISTERED entity naming a field only the newer build's schema
+	 * has — additive schema evolution as documented, seen from the older tab. The
+	 * mask cannot be applied here at all: mergeMask throws on the unknown path.
+	 */
+	const foreignFieldPatch = (id: bigint, key: string): Mutation =>
+		create(MutationSchema, {
+			clientId: 'c2',
+			mutationId: id,
+			payload: {
+				case: 'crud',
+				value: {
+					entity: 'todo',
+					key,
+					op: CrudOp.PATCH,
+					value: toBinary(TodoSchema, create(TodoSchema, {})),
+					fieldMask: { paths: [ 'priority' ] },
+				},
+			},
+		});
+
+	/** Confirmed base every unapplicable-patch spec below patches against. */
+	async function seedBase(kv: MemoryKVStore): Promise<void> {
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t1', 1n, { id: 't1', title: 'confirmed' }) ],
+			nextCursor: cursor(1),
+			lastAckedMutationId: 0n,
+		});
+	}
+
+	it('steps over a queued PATCH whose mask names a field it cannot resolve', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		await seedBase(kv);
+		await enqueueForeign(kv, foreignFieldPatch(1n, 't1'));
+		await enqueueLocally(kv, putMutation(2n, { id: 't2', title: 'mine' }));
+
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [],
+			nextCursor: cursor(2),
+			lastAckedMutationId: 0n,
+		});
+
+		// The page applied and the cursor advanced: one unapplicable queue entry
+		// does not stop this workspace from pulling.
+		const tx = await kv.read();
+		expect(await tx.get(metaCursor(WS))).toEqual(cursor(2));
+		expect((await readPending(tx, WS)).map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
+		tx.release();
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t1')?.title).toBe('confirmed');
+		expect(todos.get('t2')?.title).toBe('mine');
+		expect(errSpy).toHaveBeenCalled();
+		errSpy.mockRestore();
+	});
+
+	it('steps over a queued crud whose value will not decode', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		await seedBase(kv);
+		await enqueueForeign(
+			kv,
+			create(MutationSchema, {
+				clientId: 'c2',
+				mutationId: 1n,
+				payload: {
+					case: 'crud',
+					value: {
+						entity: 'todo',
+						key: 't1',
+						op: CrudOp.PATCH,
+						// Not a Todo — an incompatible message type reaching a shared queue.
+						value: new Uint8Array([ 0xff, 0xff, 0xff, 0xff ]),
+						fieldMask: { paths: [ 'title' ] },
+					},
+				},
+			}),
+		);
+		await enqueueLocally(kv, putMutation(2n, { id: 't2', title: 'mine' }));
+
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [],
+			nextCursor: cursor(2),
+			lastAckedMutationId: 0n,
+		});
+
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t1')?.title).toBe('confirmed');
+		expect(todos.get('t2')?.title).toBe('mine');
+		expect(errSpy).toHaveBeenCalled();
+		errSpy.mockRestore();
+	});
+
+	it('applies the other sub-mutations of a batch holding an unapplicable PATCH', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		await seedBase(kv);
+		await enqueueForeign(
+			kv,
+			create(MutationSchema, {
+				clientId: 'c2',
+				mutationId: 1n,
+				payload: {
+					case: 'batch',
+					value: {
+						mutations: [
+							{
+								entity: 'todo',
+								key: 't1',
+								op: CrudOp.PATCH,
+								value: toBinary(TodoSchema, create(TodoSchema, {})),
+								fieldMask: { paths: [ 'priority' ] },
+							},
+							{
+								entity: 'todo',
+								key: 't2',
+								op: CrudOp.PUT,
+								value: toBinary(TodoSchema, create(TodoSchema, { id: 't2', title: 'sibling' })),
+							},
+						],
+					},
+				},
+			}),
+		);
+
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [],
+			nextCursor: cursor(2),
+			lastAckedMutationId: 0n,
+		});
+
+		// Only the op that could not be applied is skipped.
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t2')?.title).toBe('sibling');
+		expect(todos.get('t1')?.title).toBe('confirmed');
+		expect(errSpy).toHaveBeenCalled();
+		errSpy.mockRestore();
+	});
+
+	it('bootstraps past an unapplicable PATCH instead of wedging the workspace', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		await seedBase(kv);
+		await enqueueForeign(kv, foreignFieldPatch(1n, 't1'));
+		await enqueueLocally(kv, putMutation(2n, { id: 't2', title: 'mine' }));
+
+		// The path that cannot self-heal: the swap runs before the push, so a throw
+		// here leaves the workspace unable to bootstrap out of it.
+		const gen = await claimGen(kv);
+		await stageChunk(kv, gen, serverRow('t1', 5n, { id: 't1', title: 'rebootstrapped' }));
+		const { committed, pendingCount } = await swap(kv, gen, {
+			nextCursor: cursor(5),
+			lastAckedMutationId: 0n,
+		});
+
+		expect(committed).toBe(true);
+		expect(pendingCount).toBe(2);
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t1')?.title).toBe('rebootstrapped');
+		expect(todos.get('t2')?.title).toBe('mine');
+		expect(errSpy).toHaveBeenCalled();
+		errSpy.mockRestore();
+	});
+
+	it('steps over a custom mutation whose mirror throws', async () => {
+		const errSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+		const kv = new MemoryKVStore();
+		const mirrors: MirrorMap = {
+			// App code runs inside the rebase transaction; a bug in it must not take
+			// the workspace with it.
+			broken: { apply: () => Promise.reject(new Error('mirror bug')) },
+		};
+		await enqueueForeign(
+			kv,
+			create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: 1n,
+				payload: { case: 'custom', value: { name: 'broken' } },
+			}),
+		);
+		await enqueueLocally(kv, putMutation(2n, { id: 't2', title: 'mine' }));
+
+		const { pendingCount } = await rebase(kv, registry, mirrors, WS, {
+			changes: [],
+			nextCursor: cursor(1),
+			lastAckedMutationId: 0n,
+		});
+
+		expect(pendingCount).toBe(2);
+		expect((await mergedTodos(kv)).get('t2')?.title).toBe('mine');
+		expect(errSpy).toHaveBeenCalled();
+		errSpy.mockRestore();
 	});
 });
 

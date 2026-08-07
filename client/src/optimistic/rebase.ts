@@ -72,6 +72,11 @@ export interface MirrorTx {
  * Best-effort local twin of a server mutator. Divergence from the server
  * implementation is fine: it self-heals on the next rebase, because replay
  * always happens on top of server-confirmed state.
+ *
+ * A rejected `apply` fails the write that issued the mutation. During rebase
+ * replay it instead leaves that one mutation without optimistic state and is
+ * reported over console.error: the mutation is already queued, and the row it
+ * writes appears when the server acks it.
  */
 export interface MutatorMirror<D extends DescMessage = DescMessage> {
 	args?: D;
@@ -300,8 +305,10 @@ async function clearRowTextLog(
  * would leave the rebase retrying the same impossible merge forever. The edit
  * itself is not lost: the live handle still holds it, and its next write is
  * refused by the server as `text_full_state_required`, whose recovery re-sends
- * the whole document (sync/coordinator.ts). Rethrows anything that is not this
- * — a merge conflict between two writers is corrupt state, not a stale queue.
+ * the whole document (sync/coordinator.ts). Anything else rethrows — a mask
+ * holding no text path at all, or one whose remaining paths fail too, is a
+ * different problem, and half-applying it is worse than leaving it to the caller:
+ * replay skips the crud (replayCrud) and a local write fails outright.
  */
 function withoutUnapplicableText(
 	def: EntityDef,
@@ -327,26 +334,56 @@ function withoutUnapplicableText(
 }
 
 /**
+ * Applies one crud of a REPLAYED mutation, skipping and reporting it instead of
+ * letting a failure escape into the transaction around it.
+ *
+ * The pending queue is one per workspace, not one per tab (keys.ts), so an entry
+ * is replayed against the registry of whichever tab happens to rebase — and an
+ * entry that registry cannot apply is ordinary rather than corrupt: a mask naming
+ * a field only the newer build's schema declares (additive evolution), or a value
+ * that will not decode as the type this build has for the entity. Every path that
+ * rebuilds the overlay does so in the transaction that also advances the
+ * workspace, so a throw would leave it unable to pull, roll a rejection back,
+ * close a mutation-id gap, or even bootstrap — the swap replays the same entry
+ * (see clearOverlayAndReplay's callers).
+ *
+ * What is skipped is optimism, not the write. The entry stays queued, and the
+ * push retires it: the server acks it, rejects it (a rejection is an ack), or the
+ * poison backstop dead-letters it after repeated deterministic refusals
+ * (sync/coordinator.ts). The tab whose build can apply it holds the optimistic
+ * state meanwhile, rebuilt from the same queue on its own next rebase; this one
+ * shows the confirmed row until the ack lands. It is the pending queue's half of
+ * the rule entities.ts states for confirmed rows.
+ */
+async function replayCrud(
+	tx: KVWrite,
+	registry: EntityRegistry,
+	workspaceId: string,
+	crud: CrudMutation,
+	touched: TouchSet,
+	slot: TextLogSlot,
+): Promise<void> {
+	try {
+		await applyCrudLocally(tx, registry, workspaceId, crud, touched, undefined, slot);
+	} catch (err) {
+		reportError(
+			`replay: a queued ${crud.entity} write ("${crud.key}") could not be applied locally`,
+			err,
+		);
+	}
+}
+
+/**
  * Applies one local mutation to the optimistic overlay of `workspaceId`. Used
  * both when the user mutates (immediate optimism) and when pending mutations
  * replay during rebase. Records what it touched, at row granularity (see
  * TouchSet).
  *
- * A crud naming an entity this build does not register is skipped rather than
- * throwing. The pending queue is one per workspace, not one per tab (keys.ts),
- * so tabs of different builds share it, and every entry is replayed against the
- * registry of whichever tab happens to rebase. Throwing there fails the whole KV
- * transaction: on a pull the cycle merely retries, but on a bootstrap it wedges
- * the workspace outright — a workspace whose `ensureBase` throws never reaches
- * the push that would drain the mutation (sync/coordinator.ts). Skipping is also
- * the right semantics: this tab holds no optimistic state for entities it cannot
- * read, and the tab that can rebuilds it from the same queue on its own next
- * rebase. It is the pending queue's half of the rule entities.ts states for
- * confirmed rows.
- *
- * The skip lives here rather than in applyCrudLocally because that one is also
- * the path a locally issued crud takes, where an unregistered entity is a
- * programming error and must still throw loudly.
+ * A replayed crud naming an entity this build does not register is skipped, as is
+ * one it cannot apply — see replayCrud for why a shared queue makes both
+ * ordinary. Neither skip covers a locally issued crud: that one reaches
+ * applyCrudLocally directly, where an unregistered entity or an unapplicable mask
+ * is a programming error and throws.
  */
 export async function applyMutationLocally(
 	tx: KVWrite,
@@ -360,7 +397,7 @@ export async function applyMutationLocally(
 		case 'crud': {
 			const crud = mutation.payload.value;
 			if (!registry.get(crud.entity)) return;
-			await applyCrudLocally(tx, registry, workspaceId, crud, touched, undefined, {
+			await replayCrud(tx, registry, workspaceId, crud, touched, {
 				mutationId: mutation.mutationId,
 				index: 0,
 			});
@@ -376,7 +413,7 @@ export async function applyMutationLocally(
 			for (const crud of mutation.payload.value.mutations) {
 				index++;
 				if (!registry.get(crud.entity)) continue;
-				await applyCrudLocally(tx, registry, workspaceId, crud, touched, undefined, {
+				await replayCrud(tx, registry, workspaceId, crud, touched, {
 					mutationId: mutation.mutationId,
 					index,
 				});
@@ -738,6 +775,11 @@ export interface FinalizeInput {
  * rows here would drop state the tab that can read them still needs and this
  * one cannot rebuild, since it does not replay the mutations behind them
  * either — those stay queued until that tab rebases.
+ *
+ * Replay is isolated per mutation: an entry this build cannot apply is skipped
+ * and reported over console.error, and no failure to replay one reaches the
+ * caller's transaction. See replayCrud for why a shared queue makes such an entry
+ * ordinary, and what retires it.
  */
 export async function clearOverlayAndReplay(
 	tx: KVWrite,
@@ -761,7 +803,17 @@ export async function clearOverlayAndReplay(
 		}
 	}
 	for (const mutation of remaining) {
-		await applyMutationLocally(tx, registry, mirrors, workspaceId, mutation, touched);
+		try {
+			await applyMutationLocally(tx, registry, mirrors, workspaceId, mutation, touched);
+		} catch (err) {
+			// The backstop for what replayCrud does not cover: a custom mutation's
+			// mirror is app code running inside this transaction, and its args unpack
+			// against a type this build may not have.
+			reportError(
+				`replay: queued mutation ${mutation.mutationId} could not be applied locally`,
+				err,
+			);
+		}
 	}
 }
 

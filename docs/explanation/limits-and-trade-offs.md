@@ -415,7 +415,22 @@ merger satisfies the contract by construction.
 ## Custom-mutation mirrors are best-effort
 
 A TypeScript mirror of a Go mutator exists to keep the UI responsive. Divergence
-is expected and self-heals on rebase; never rely on mirror output as truth.
+is expected and self-heals on rebase; never rely on mirror output as truth. A
+mirror that throws fails the write that issued it, but on a later replay costs
+only that mutation's optimism — the mutation is queued by then, and the server
+applies it regardless.
+
+## A queued mutation a tab cannot replay loses its optimism, not the write
+
+The pending queue belongs to the workspace, so a tab replays entries other tabs
+queued — including ones written against a schema it does not have (see
+[the convergence model](convergence-model.md#a-client-holds-only-the-entities-it-declares)).
+It skips such an entry and reports it over `console.error` rather than failing the
+rebase, which would stall the workspace: pulls, rollbacks and bootstrap all
+rebuild the optimistic overlay in the transaction that advances the cursor. The
+entry stays queued, and the push retires it as usual — an ack, a rejection, or a
+dead-letter after `poisonThreshold` deterministic refusals. Until then that tab
+shows the confirmed row.
 
 ## A local write is not pushed immediately
 

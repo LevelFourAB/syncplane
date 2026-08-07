@@ -228,6 +228,16 @@ every registry that has opened it, not the registry of whichever tab started
 last. A tab that cannot read an entity still keeps its rows current for the tab
 that can.
 
+The pending queue is shared the same way, and every rebase replays it against the
+registry of whichever tab is pulling — so a tab routinely replays a mutation written
+against a schema it does not have: an unknown entity, or a PATCH whose mask names
+a field only the newer build declares. It skips that entry, reports it over
+`console.error`, and leaves it queued for the push that retires it. What is lost
+is optimism, not the write: the tab that can apply it holds the optimistic state,
+and this one shows the confirmed row until the ack lands. Refusing to replay it
+would stall the workspace instead, because the transaction that rebuilds the
+overlay is the one advancing the cursor.
+
 ## Related
 
 - [Limits and trade-offs](limits-and-trade-offs.md) — the consequences, listed.
