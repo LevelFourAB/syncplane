@@ -2791,6 +2791,11 @@ export class Coordinator {
 							scopes: planned.scopes,
 							limit: this.opts.pullLimit ?? 0,
 							noDeltaEntities: planned.noDeltaEntities,
+							// A frame without a cursor leaves the stored one in
+							// place (see FinalizeInput.nextCursor), so the server
+							// can skip restating a membership-carrying cursor on
+							// every frame and send it as a checkpoint instead.
+							sparseCursor: true,
 						},
 						{ signal: streamAbort.signal },
 					)

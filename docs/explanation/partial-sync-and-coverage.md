@@ -39,6 +39,29 @@ recomputation entirely: nothing has been written, so no membership can have
 moved, and the cursor's key-set is carried forward as issued. A polling client
 on a quiet workspace therefore costs nothing to tell "nothing happened".
 
+## The cursor is a checkpoint on a stream, not a per-frame receipt
+
+Membership is what makes the cursor big: a window at its limit carries that many
+row keys, and a reference-following closure can carry far more. On `Pull` that
+cost is unavoidable — the client hands the cursor back, so it has to hold the
+set. On `Subscribe` it is not: the server keeps the scope's position itself, and
+the cursor on a frame exists only so the client can resume from it later.
+
+So a client that sets `sparse_cursor` gets the cursor as a periodic checkpoint
+instead of on every frame, and the steady-state cost of a live subscription
+becomes the row that changed rather than the row plus a restatement of
+everything the client holds. Between checkpoints its stored position sits behind
+the rows it has already applied; a reopened stream resumes from that position
+and re-delivers what followed, which the client's own stored-sequence guard
+discards as already-applied.
+
+The server withholds a cursor only while the rows it has sent since the last
+checkpoint weigh less than the cursor itself, so the re-delivery after a
+reconnect can never cost more than the restatements it avoided. A subscription
+with no window and no follow has a cursor smaller than any page it rides on,
+which never clears that bar — those streams checkpoint on every frame, and the
+setting changes nothing for them.
+
 ## What a window does not bound
 
 It bounds the **client**, not the server. Computing an `orderBy` window costs

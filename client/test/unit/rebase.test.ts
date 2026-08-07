@@ -164,6 +164,45 @@ describe('rebase', () => {
 		expect(todos.get('t2')?.title).toBe('two');
 	});
 
+	// A Subscribe frame the server chose not to checkpoint carries no cursor
+	// (SubscribeRequest.sparse_cursor). Storing the empty value would read back
+	// as "never synced" and re-bootstrap the workspace on the next cycle, so the
+	// rows have to land while the stored position stays put.
+	it('applies a page that carries no cursor without disturbing the stored one', async () => {
+		const kv = new MemoryKVStore();
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t1', 1n, { id: 't1', title: 'one' }) ],
+			nextCursor: cursor(7),
+			lastAckedMutationId: 0n,
+			serverSeq: 1n,
+		});
+
+		await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t2', 2n, { id: 't2', title: 'two' }) ],
+			nextCursor: new Uint8Array(),
+			lastAckedMutationId: 0n,
+			serverSeq: 2n,
+		});
+
+		const tx = await kv.read();
+		expect(await tx.get(metaCursor(WS))).toEqual(cursor(7));
+		tx.release();
+
+		// The seq still advances, so the gate keeps dropping stale pages from a
+		// concurrent tab even while the cursor sits behind what has been applied.
+		const stale = await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t2', 1n, { id: 't2', title: 'stale' }) ],
+			nextCursor: new Uint8Array(),
+			lastAckedMutationId: 0n,
+			serverSeq: 1n,
+		});
+		expect(stale.skipped).toBe(true);
+
+		const todos = await mergedTodos(kv);
+		expect(todos.get('t1')?.title).toBe('one');
+		expect(todos.get('t2')?.title).toBe('two');
+	});
+
 	it('with deferAcked, keeps acked mutations queued so a row does not regress mid-drain', async () => {
 		const kv = new MemoryKVStore();
 		// Confirmed base: t1 = "old".

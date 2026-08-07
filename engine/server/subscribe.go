@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"google.golang.org/protobuf/proto"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -39,6 +40,14 @@ type subScope struct {
 	// against. Both advance as pages are sent.
 	cur       cursorState
 	rawCursor []byte
+	// sparseCursor is the client's opt-in to page frames that carry no cursor
+	// (SubscribeRequest.sparse_cursor). cursorSent records whether the client
+	// holds one at all — a scope opened without a cursor must be given one
+	// before any can be withheld. owedBytes is the weight of the rows sent
+	// since the last one. See checkpointDue.
+	sparseCursor bool
+	cursorSent   bool
+	owedBytes    int
 	// signals fires when this workspace changes; cancel releases the notifier
 	// subscription.
 	signals <-chan struct{}
@@ -113,7 +122,7 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 	}()
 	noDeltas := noDeltaEntitySet(msg.GetNoDeltaEntities())
 	for _, want := range msg.GetScopes() {
-		sc, reason, err := s.openScope(ctx, want, msg.GetClientId(), noDeltas)
+		sc, reason, err := s.openScope(ctx, want, msg.GetClientId(), noDeltas, msg.GetSparseCursor())
 		if err != nil {
 			if sendErr := s.sendDropped(stream, want.GetWorkspaceId(), reason, err); sendErr != nil {
 				return sendErr
@@ -244,7 +253,7 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 // outside any read snapshot and outside the tail loop: FilterEpoch up front,
 // then the emitter's per-entity read filters are warmed so classify() inside
 // each per-notify scan is a pure cache hit.
-func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
+func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool, sparseCursor bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
 	ws := want.GetWorkspaceId()
 
 	principal, err := s.enterWorkspace(ctx, ws)
@@ -280,18 +289,20 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 
 	signals, cancel := s.notifier.Subscribe(ws)
 	return &subScope{
-		ws:        ws,
-		clientID:  clientID,
-		emitter:   emitter,
-		epoch:     epoch,
-		wantHash:  wantHash,
-		subs:      want.GetSubscriptions(),
-		cur:       cur,
-		rawCursor: want.GetCursor(),
-		signals:   signals,
-		cancel:    cancel,
-		logger:    s.reqLog(ctx, "subscribe", ws, clientID),
-		live:      true,
+		ws:           ws,
+		clientID:     clientID,
+		emitter:      emitter,
+		epoch:        epoch,
+		wantHash:     wantHash,
+		subs:         want.GetSubscriptions(),
+		cur:          cur,
+		rawCursor:    want.GetCursor(),
+		sparseCursor: sparseCursor,
+		cursorSent:   len(want.GetCursor()) > 0,
+		signals:      signals,
+		cancel:       cancel,
+		logger:       s.reqLog(ctx, "subscribe", ws, clientID),
+		live:         true,
 	}, syncplanev1.WorkspaceDropped_REASON_UNSPECIFIED, nil
 }
 
@@ -365,6 +376,24 @@ func (s *Server) mergeSignals(ctx context.Context, scopes []*subScope) <-chan st
 	return merged
 }
 
+// checkpointDue reports whether the page being sent must carry next_cursor.
+//
+// Withholding one leaves the client resuming from an older position, so a
+// reopened stream re-delivers every row sent since. That is a saving only
+// while those rows weigh less than the cursor they displaced, which is what
+// the byte debt tracks — and it needs no tuning to stay honest. The cursor of
+// a subscription with no window and no follow is smaller than any page it
+// rides on, so every frame checkpoints exactly as it did before sparse
+// cursors existed; only a cursor carrying a whole membership set is large
+// enough to be worth skipping, and even then never for longer than it takes
+// the skipped rows to add up to it.
+func (sc *subScope) checkpointDue(pageBytes, cursorBytes int) bool {
+	if !sc.sparseCursor || !sc.cursorSent {
+		return true
+	}
+	return sc.owedBytes+pageBytes >= cursorBytes
+}
+
 // drainScope pages one scope forward until its backlog (or burst) is
 // exhausted, sending each page as it is produced. A page carrying rows is
 // always sent; an empty page is sent only when keepalive is set, which is how
@@ -372,7 +401,8 @@ func (s *Server) mergeSignals(ctx context.Context, scopes []*subScope) <-chan st
 //
 // A reset verdict drops the scope instead of ending the stream: the client
 // re-bootstraps that workspace and reopens. The scope's cursor advances as a
-// side effect of every page sent.
+// side effect of every page sent; whether that cursor also goes out on the
+// frame is checkpointDue's call.
 //
 // It returns an error only when the STREAM cannot continue (a failed Send, or
 // a cancelled context). A failure scoped to the workspace drops the scope and
@@ -399,6 +429,17 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		last := !page.GetHasMore()
 		hasRows := len(page.GetPatch().GetChanges()) > 0 || len(page.GetPatch().GetDropEntities()) > 0
 		if hasRows || (keepalive && last) {
+			// The scope carries its own position, so the cursor on the frame is
+			// the client's resume point and nothing else — it can be left off
+			// when it would cost more than the re-delivery it saves.
+			pageBytes := proto.Size(page.GetPatch())
+			if sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
+				sc.owedBytes = 0
+				sc.cursorSent = true
+			} else {
+				sc.owedBytes += pageBytes
+				page.NextCursor = nil
+			}
 			if err := stream.Send(&syncplanev1.SubscribeResponse{
 				WorkspaceId:    sc.ws,
 				SchemaRevision: s.catalogPtr().schemaRev,

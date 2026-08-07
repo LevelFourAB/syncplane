@@ -735,6 +735,11 @@ export async function clearStaging(tx: KVWrite, prefix: string): Promise<void> {
 }
 
 export interface FinalizeInput {
+	/**
+	 * Position to store. Empty leaves the stored cursor alone — a Subscribe
+	 * frame the server did not checkpoint. Rows still apply, and `serverSeq`
+	 * still advances, so the gate keeps working against re-delivery.
+	 */
 	nextCursor: Uint8Array;
 	lastAckedMutationId: bigint;
 	/**
@@ -834,10 +839,16 @@ export async function finalizeRebase(
 	input: FinalizeInput,
 	touched: TouchSet,
 ): Promise<number> {
-	// A cursor is a handful of bytes viewing the whole page it arrived on, and
-	// it is stored on every pull — so leaving it attached would keep a
-	// 4096-change page resident until the next pull replaced it. See detached().
-	await tx.put(metaCursor(workspaceId), detached(input.nextCursor));
+	// An empty cursor is a Subscribe frame the server chose not to checkpoint
+	// (SubscribeRequest.sparse_cursor), not a position: the stored one stays,
+	// and a reopened stream re-delivers whatever came after it. Storing the
+	// empty value instead would read back as "never synced" and re-bootstrap.
+	//
+	// A cursor viewing the whole page it arrived on would keep a 4096-change
+	// page resident until the next one replaced it, hence detached().
+	if (input.nextCursor.length > 0) {
+		await tx.put(metaCursor(workspaceId), detached(input.nextCursor));
+	}
 	// Unconditional (not monotonic) on purpose: pulls already gated in rebase(),
 	// and a bootstrap swap must be able to move the seq BACKWARDS — a full
 	// snapshot is authoritative even against a server restored from backup. A

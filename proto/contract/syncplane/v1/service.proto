@@ -178,6 +178,11 @@ message PullRequest {
 
 message PullResponse {
 	Patch patch = 1;
+	// Where to resume. A Pull response always carries one. A Subscribe page
+	// frame carries one only at a checkpoint when the client set
+	// sparse_cursor: empty then means "keep the cursor you hold", and the
+	// frames since the last checkpoint are re-delivered if the stream is
+	// reopened. Empty is never a valid cursor to store.
 	bytes next_cursor = 2;
 	// Highest mutation id the server has applied for this client; the client
 	// drops pending mutations at or below it during rebase.
@@ -373,6 +378,17 @@ message SubscribeRequest {
 	// PullRequest.no_delta_entities, applied to every scope: what a client can
 	// decode is a property of its build, not of one workspace.
 	repeated string no_delta_entities = 4;
+	// True when the client can apply a page frame that carries no next_cursor,
+	// keeping the cursor it already holds. The server then sends the cursor as
+	// a periodic checkpoint instead of on every frame.
+	//
+	// It is worth setting for a windowed or reference-following subscription,
+	// whose cursor carries the client's whole membership set and so is orders
+	// of magnitude larger than the page it rides on. The cost is that a
+	// reopened stream resumes from the last checkpoint rather than the last
+	// frame, re-delivering what came after it; the server withholds a cursor
+	// only while that re-delivery would cost less than the cursor it skipped.
+	bool sparse_cursor = 5;
 }
 
 // WorkspaceDropped ends one workspace's participation in a stream. The server

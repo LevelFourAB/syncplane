@@ -579,9 +579,14 @@ func (x *PullRequest) GetNoDeltaEntities() []string {
 }
 
 type PullResponse struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Patch      *Patch                 `protobuf:"bytes,1,opt,name=patch,proto3" json:"patch,omitempty"`
-	NextCursor []byte                 `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Patch *Patch                 `protobuf:"bytes,1,opt,name=patch,proto3" json:"patch,omitempty"`
+	// Where to resume. A Pull response always carries one. A Subscribe page
+	// frame carries one only at a checkpoint when the client set
+	// sparse_cursor: empty then means "keep the cursor you hold", and the
+	// frames since the last checkpoint are re-delivered if the stream is
+	// reopened. Empty is never a valid cursor to store.
+	NextCursor []byte `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
 	// Highest mutation id the server has applied for this client; the client
 	// drops pending mutations at or below it during rebase.
 	LastAckedMutationId uint64 `protobuf:"varint,3,opt,name=last_acked_mutation_id,json=lastAckedMutationId,proto3" json:"last_acked_mutation_id,omitempty"`
@@ -1236,8 +1241,19 @@ type SubscribeRequest struct {
 	// PullRequest.no_delta_entities, applied to every scope: what a client can
 	// decode is a property of its build, not of one workspace.
 	NoDeltaEntities []string `protobuf:"bytes,4,rep,name=no_delta_entities,json=noDeltaEntities,proto3" json:"no_delta_entities,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// True when the client can apply a page frame that carries no next_cursor,
+	// keeping the cursor it already holds. The server then sends the cursor as
+	// a periodic checkpoint instead of on every frame.
+	//
+	// It is worth setting for a windowed or reference-following subscription,
+	// whose cursor carries the client's whole membership set and so is orders
+	// of magnitude larger than the page it rides on. The cost is that a
+	// reopened stream resumes from the last checkpoint rather than the last
+	// frame, re-delivering what came after it; the server withholds a cursor
+	// only while that re-delivery would cost less than the cursor it skipped.
+	SparseCursor  bool `protobuf:"varint,5,opt,name=sparse_cursor,json=sparseCursor,proto3" json:"sparse_cursor,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *SubscribeRequest) Reset() {
@@ -1296,6 +1312,13 @@ func (x *SubscribeRequest) GetNoDeltaEntities() []string {
 		return x.NoDeltaEntities
 	}
 	return nil
+}
+
+func (x *SubscribeRequest) GetSparseCursor() bool {
+	if x != nil {
+		return x.SparseCursor
+	}
+	return false
 }
 
 // WorkspaceDropped ends one workspace's participation in a stream. The server
@@ -1779,12 +1802,13 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +
-	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\"\xa7\x01\n" +
+	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\"\xcc\x01\n" +
 	"\x10SubscribeRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x124\n" +
 	"\x06scopes\x18\x02 \x03(\v2\x1c.syncplane.v1.WorkspaceScopeR\x06scopes\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\rR\x05limit\x12*\n" +
-	"\x11no_delta_entities\x18\x04 \x03(\tR\x0fnoDeltaEntities\"\xcc\x01\n" +
+	"\x11no_delta_entities\x18\x04 \x03(\tR\x0fnoDeltaEntities\x12#\n" +
+	"\rsparse_cursor\x18\x05 \x01(\bR\fsparseCursor\"\xcc\x01\n" +
 	"\x10WorkspaceDropped\x12=\n" +
 	"\x06reason\x18\x01 \x01(\x0e2%.syncplane.v1.WorkspaceDropped.ReasonR\x06reason\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"_\n" +
