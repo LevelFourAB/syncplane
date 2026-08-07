@@ -279,6 +279,28 @@ describe('coordinator push: compaction + chunking', () => {
 		await tabA.stop();
 	});
 
+	it('seeds the pushed-through watermark of a workspace added after start()', async () => {
+		// A store written before the watermark key existed carries queues that may
+		// already have reached the server. start() seeds the mark for the
+		// workspaces it finds; one added mid-session must get the same seed, or
+		// compaction reads the absent mark as 0 and renumbers ids the server would
+		// then drop as ALREADY_APPLIED.
+		await seed([ patch(1n, 't1', [ 'title' ]), patch(2n, 't1', [ 'completed' ]) ]);
+		const coord = newCoordinator(transport(), { scopes: new Map() });
+		await coord.start();
+
+		coord.addWorkspace(WS, []);
+		await coord.syncNow();
+
+		// Neither folded nor renumbered: both ids ship as they stand.
+		expect(await pendingIds()).toEqual([ 1n, 2n ]);
+		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
+		expect(remaps).toHaveLength(0);
+		expect(pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
+
+		await coord.stop();
+	});
+
 	it('does not recompact mutations once pushed', async () => {
 		// The pull acks nothing, so the compacted mutation stays queued. A second
 		// cycle must NOT compact it again (it has now been pushed).

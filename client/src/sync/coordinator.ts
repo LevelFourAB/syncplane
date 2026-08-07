@@ -420,6 +420,11 @@ export class Coordinator {
 	/** Per-workspace state, in the order the workspaces were added. */
 	private workspaces = new Map<string, WorkspaceSync>();
 	/**
+	 * Workspaces added since start() whose durable pushed-through watermark has
+	 * not been seeded yet; see initPushedThrough.
+	 */
+	private unseeded = new Set<string>();
+	/**
 	 * Which entities of a cold-starting workspace are still downloading. Read by
 	 * the coverage layer so a reader can tell a not-yet-arrived entity from an
 	 * empty one; see hydration.ts.
@@ -555,6 +560,10 @@ export class Coordinator {
 			return;
 		}
 		this.workspaces.set(workspaceId, { subscriptions: subs, serverSeq: 0n, revoked: false });
+		// Its store-resident queue is inherited exactly like those start() found,
+		// so it needs the same watermark seed before anything compacts it. Deferred
+		// to the push path (this method is synchronous) — see initPushedThrough.
+		this.unseeded.add(workspaceId);
 		this.publishScopes();
 	}
 
@@ -622,7 +631,7 @@ export class Coordinator {
 	 * the status tracker, not as a start() rejection.
 	 */
 	async start(): Promise<void> {
-		await this.initPushedThrough();
+		await this.initPushedThrough([ ...this.workspaces.keys() ]);
 		const refs = new Map<string, ReadonlySet<bigint>>();
 		for (const ws of this.workspaces.keys()) {
 			refs.set(ws, this.opts.undoRefIds?.(ws) ?? EMPTY_IDS);
@@ -1047,6 +1056,10 @@ export class Coordinator {
 		// safely write against, so hold the queues (they keep growing locally) until
 		// the revisions line up and the skew clears.
 		if (this.pushBlocked) return;
+		// Seed the watermark of any workspace added since start() before reading it
+		// below: absent parses as 0, and compaction against 0 would renumber an
+		// inherited queue the server may already have applied.
+		await this.initPushedThrough(workspaceIds.filter((ws) => this.unseeded.has(ws)));
 		// Squash the never-pushed tails first: shrinks both this push and the
 		// rebase the following pull will run. Skipped for a workspace isolating a
 		// poison head — there we are deliberately draining one mutation at a time.
@@ -1378,9 +1391,14 @@ export class Coordinator {
 	 * workspace that already has the key — including 0 for a genuinely
 	 * never-pushed queue written by this build — is left untouched. Idempotent and
 	 * cross-tab safe.
+	 *
+	 * Called for the workspaces held at start(), and again from the push path for
+	 * any workspace added after it: compaction reads an absent mark as 0, which
+	 * would let it renumber ids the server has already applied. A seed that fails
+	 * leaves the workspace marked unseeded, so the next cycle retries it before
+	 * compacting.
 	 */
-	private async initPushedThrough(): Promise<void> {
-		const workspaceIds = [ ...this.workspaces.keys() ];
+	private async initPushedThrough(workspaceIds: string[]): Promise<void> {
 		if (workspaceIds.length === 0) return;
 		await this.opts.kvMutex.run(async () => {
 			const tx = await this.opts.kv.write();
@@ -1403,6 +1421,7 @@ export class Coordinator {
 				throw err;
 			}
 		});
+		for (const ws of workspaceIds) this.unseeded.delete(ws);
 	}
 
 	/**
