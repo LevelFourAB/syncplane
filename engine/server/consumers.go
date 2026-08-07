@@ -26,7 +26,10 @@ type ConsumerShadowWrite struct {
 // ConsumerUpdate is the durable bookkeeping one drained page produces: how far
 // the consumer got, and the shadows it derived along the way.
 type ConsumerUpdate struct {
-	// Cursor is the position the consumer has now fully acted on.
+	// Cursor is the position the consumer has now fully acted on. Its Epoch is
+	// not retained and ConsumerPosition reads back 0: the position is held in
+	// the workspace's own store, so it is swapped or restored along with the
+	// changes it points into and has no lineage of its own to be stranded from.
 	Cursor Cursor
 	// Shadows are the per-row snapshot writes to land with that position.
 	Shadows []ConsumerShadowWrite

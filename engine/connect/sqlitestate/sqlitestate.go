@@ -51,6 +51,10 @@ var migrations = []string{
 	);
 	ALTER TABLE shadows ADD COLUMN base_text BLOB;
 	`,
+	// 2: the store lineage an egress cursor was issued by
+	// (server.Cursor.Epoch). 0 on rows written before it existed, which the
+	// feed reads as an unknown lineage and accepts.
+	`ALTER TABLE egress_cursors ADD COLUMN epoch INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Store implements connect.State.
@@ -205,27 +209,35 @@ func (s *Store) ScanShadows(ctx context.Context, workspaceID string, fn func(ent
 }
 
 func (s *Store) Cursor(ctx context.Context, workspaceID string) (server.Cursor, error) {
-	var c server.Cursor
+	var (
+		c     server.Cursor
+		epoch int64
+	)
 	err := s.db.QueryRowContext(ctx,
-		`SELECT seq, entity, key FROM egress_cursors WHERE workspace_id = ?`,
+		`SELECT seq, entity, key, epoch FROM egress_cursors WHERE workspace_id = ?`,
 		workspaceID,
-	).Scan(&c.Seq, &c.Entity, &c.Key)
+	).Scan(&c.Seq, &c.Entity, &c.Key, &epoch)
 	if err == sql.ErrNoRows {
 		return server.Cursor{}, nil
 	}
 	if err != nil {
 		return server.Cursor{}, err
 	}
+	c.Epoch = uint64(epoch)
 	return c, nil
 }
 
 func (s *Store) SetCursor(ctx context.Context, workspaceID string, c server.Cursor) error {
 	_, err := s.db.ExecContext(ctx,
-		`INSERT INTO egress_cursors (workspace_id, seq, entity, key)
-		 VALUES (?, ?, ?, ?)
+		`INSERT INTO egress_cursors (workspace_id, seq, entity, key, epoch)
+		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (workspace_id) DO UPDATE SET
-		   seq = excluded.seq, entity = excluded.entity, key = excluded.key`,
-		workspaceID, c.Seq, c.Entity, c.Key,
+		   seq = excluded.seq, entity = excluded.entity, key = excluded.key,
+		   epoch = excluded.epoch`,
+		// The epoch spans all 64 bits, which database/sql will not carry as a
+		// uint64; store the same bits as a signed INTEGER, the way the engine's
+		// own stores hold it. The value is opaque — only equality matters.
+		workspaceID, c.Seq, c.Entity, c.Key, int64(c.Epoch),
 	)
 	return err
 }

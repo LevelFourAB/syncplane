@@ -80,9 +80,24 @@ Three limits to design around:
 
 ## Falling behind
 
-When the cursor predates the tombstone horizon — the consumer was offline past
-GC retention — `Changes` returns `ErrCursorTooOld` plus a cursor at the current
-sequence. Resync against current state, then resume from it.
+`Changes` returns `ErrCursorTooOld` plus a cursor at the current sequence
+whenever the cursor you presented cannot be resumed. Resync against current
+state, then resume from the one it handed back. Three things produce it:
+
+- The cursor predates the tombstone horizon — the consumer was offline past GC
+  retention.
+- The cursor sits above the current sequence — the store behind the feed was
+  recreated empty, or restored below the consumer's position.
+- The cursor names a different store lineage — the database at this address was
+  swapped for another one, or restored from a store created separately. Without
+  this check the feed would hand a consumer rows from a history it never read.
+
+**Persist the cursor whole, `Epoch` included.** That field is what makes the
+third case detectable, and a consumer whose bookkeeping drops it keeps working
+without the check — 0 reads as "lineage unknown" and is always accepted. The
+shipped `sqlitestate` keeps it; a `connect.State` you write yourself must too.
+Effect consumers need nothing: their positions live in the workspace's own
+store, so a swap or restore carries them along with the changes they point into.
 
 A new consumer takes the same path: the zero cursor is below the horizon of any
 workspace that has ever collected a tombstone, so a first run against an

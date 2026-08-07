@@ -23,6 +23,15 @@ type Cursor struct {
 	Seq    uint64
 	Entity string
 	Key    string
+	// Epoch names the store lineage that issued this cursor (see
+	// storage.ReadTx.StoreEpoch). Changes stamps it into every cursor it
+	// returns and answers one naming another lineage with ErrCursorTooOld, so
+	// a consumer whose cursor lives outside the engine store cannot resume
+	// against a database swapped or restored underneath it. 0 means the
+	// lineage is unknown and is always accepted, so bookkeeping that does not
+	// carry the field still works — without the check. The value is opaque and
+	// spans all 64 bits; whatever persists it must round-trip every one.
+	Epoch uint64
 }
 
 // Change is one committed row change observed through the feed.
@@ -57,11 +66,14 @@ type Change struct {
 	Actor storage.Actor
 }
 
-// ErrCursorTooOld reports a feed cursor below the workspace's tombstone
-// horizon: deletions the consumer never saw may have been garbage-collected,
-// so only a full resync against current state recovers. After resyncing,
-// resume from the cursor Changes returned alongside this error.
-var ErrCursorTooOld = errors.New("server: feed cursor below tombstone horizon")
+// ErrCursorTooOld reports a feed cursor that cannot be resumed against this
+// store: it sits below the workspace's tombstone horizon, above its current
+// sequence, or names a different store lineage (see Cursor.Epoch). Deletions
+// the consumer never saw may have been garbage-collected, and rows above the
+// cursor may belong to a history it never observed, so only a full resync
+// against current state recovers. After resyncing, resume from the cursor
+// Changes returned alongside this error.
+var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against this store")
 
 // Changes drains committed row changes after the cursor, in (seq, entity,
 // key) order, invoking fn for at most limit rows (limit <= 0 uses the
@@ -77,9 +89,14 @@ var ErrCursorTooOld = errors.New("server: feed cursor below tombstone horizon")
 // (coalescing by row, like pull). The feed is trusted server-side API:
 // read filters and subscription scoping do not apply.
 //
-// When the cursor predates the tombstone horizon Changes returns
+// When the cursor cannot be resumed — below the tombstone horizon, above the
+// current sequence, or from another store lineage — Changes returns
 // ErrCursorTooOld along with a cursor at the workspace's current sequence:
-// resync against current state first, then resume from that cursor.
+// resync against current state first, then resume from that cursor. The
+// lineage check does not cover a restore of the SAME store to an earlier point
+// that has since been written back past the consumer's position; seq and epoch
+// both match there, and the cursor alone cannot tell that history apart from
+// one the consumer has yet to read.
 func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, limit int, fn func(Change) error) (next Cursor, more bool, err error) {
 	if workspaceID == "" {
 		return Cursor{}, false, fmt.Errorf("server: workspace id is required")
@@ -99,10 +116,21 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		if err != nil {
 			return err
 		}
+		epoch, err := tx.StoreEpoch()
+		if err != nil {
+			return err
+		}
+		// Lineage before position: a cursor from another store makes its seq
+		// meaningless here, so comparing it against this workspace's horizon
+		// and head would only pick an arbitrary one of the two errors.
+		if after.Epoch != 0 && after.Epoch != epoch {
+			next = Cursor{Seq: current, Epoch: epoch}
+			return ErrCursorTooOld
+		}
 		// A cursor older than the tombstone horizon may have missed
 		// garbage-collected deletions; only a full resync recovers those.
 		if after.Seq < horizon {
-			next = Cursor{Seq: current}
+			next = Cursor{Seq: current, Epoch: epoch}
 			return ErrCursorTooOld
 		}
 		// A cursor ahead of CurrentSeq cannot have been issued by this store:
@@ -111,12 +139,11 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		// position. Scanning from after.Seq would silently regress the cursor
 		// and strand the consumer; recover the same way as the horizon case —
 		// resync against current state, then resume from the returned cursor.
-		// (The pull path additionally pins a store epoch into the cursor to
-		// catch a foreign store whose seq sits ABOVE the consumer's; feed
-		// cursors are persisted by the connector and carry no epoch yet, so
-		// that lineage-swap case remains a known gap here.)
+		// This still earns its place next to the epoch check: it is what
+		// catches an epoch-less cursor, and a lineage that never minted an
+		// epoch because nothing was ever written to it.
 		if after.Seq > current {
-			next = Cursor{Seq: current}
+			next = Cursor{Seq: current, Epoch: epoch}
 			return ErrCursorTooOld
 		}
 		// Scan one row past the limit: seeing it proves truncation without
@@ -147,9 +174,9 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		if more {
 			// Resume just past the last delivered row; the (entity, key)
 			// sub-position picks up the rest of a group sharing this seq.
-			next = Cursor{Seq: last.Version, Entity: last.Entity, Key: last.Key}
+			next = Cursor{Seq: last.Version, Entity: last.Entity, Key: last.Key, Epoch: epoch}
 		} else {
-			next = Cursor{Seq: current}
+			next = Cursor{Seq: current, Epoch: epoch}
 		}
 		return nil
 	})

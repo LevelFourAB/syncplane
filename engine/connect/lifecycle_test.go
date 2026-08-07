@@ -220,6 +220,40 @@ var _ = Describe("Cursor-too-old recovery", func() {
 		Expect(f.src.writeCount()).To(Equal(writes))
 		Expect(f.currentSeq(ctx, ws)).To(Equal(seq))
 	})
+
+	It("heals a cursor left behind by another store lineage", func() {
+		const ws = "ws-swap"
+		f := newFixture()
+
+		// Converged baseline: t1 exists on both sides, cursor past seq 1.
+		f.push(ctx, ws, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.src.get(ws, "t1")).NotTo(BeNil())
+
+		cur, err := f.st.Cursor(ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(cur.Epoch).NotTo(BeZero(), "the drained cursor names the store that issued it")
+
+		// The engine store is swapped for another lineage that already holds
+		// t2 above the cursor's position — the connector's own state DB
+		// survives the swap, so it presents a cursor whose seq still fits.
+		f.push(ctx, ws, putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}))
+		Expect(f.st.SetCursor(ctx, ws, server.Cursor{Seq: cur.Seq, Epoch: cur.Epoch + 1})).To(Succeed())
+
+		// t2 must reach the source through the full repair, not by being read
+		// off the feed as a change this cursor was entitled to.
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.src.get(ws, "t2")).NotTo(BeNil())
+
+		healed, err := f.st.Cursor(ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(healed.Epoch).To(Equal(cur.Epoch), "the cursor now names the store it was served by")
+
+		// Converged and quiescent afterwards.
+		writes := f.src.writeCount()
+		Expect(f.conn.Drain(ctx, ws)).To(Succeed())
+		Expect(f.src.writeCount()).To(Equal(writes))
+	})
 })
 
 var _ = Describe("Multiple workspaces", func() {

@@ -79,7 +79,7 @@ var _ = Describe("Server.Changes", func() {
 			Expect(got[1].Deleted).To(BeTrue())
 			Expect(got[1].Message).To(BeNil())
 
-			Expect(next).To(Equal(server.Cursor{Seq: 3}))
+			Expect(next.Seq).To(BeEquivalentTo(3))
 		})
 
 		It("resumes from a returned cursor and sees only newer changes", func() {
@@ -109,12 +109,16 @@ var _ = Describe("Server.Changes", func() {
 			Expect(page1).To(HaveLen(2))
 			// The cursor splits the seq-1 group: it must carry the
 			// sub-position of the last delivered row.
-			Expect(cur).To(Equal(server.Cursor{Seq: 1, Entity: "todo", Key: "b"}))
+			Expect(cur.Seq).To(BeEquivalentTo(1))
+			Expect(cur.Entity).To(Equal("todo"))
+			Expect(cur.Key).To(Equal("b"))
 
 			page2, next, more := drain(cur, 2)
 			Expect(more).To(BeFalse())
 			Expect(page2).To(HaveLen(1))
-			Expect(next).To(Equal(server.Cursor{Seq: 1}))
+			Expect(next.Seq).To(BeEquivalentTo(1))
+			Expect(next.Entity).To(BeEmpty())
+			Expect(next.Key).To(BeEmpty())
 
 			var keys []string
 			for _, ch := range append(page1, page2...) {
@@ -182,6 +186,83 @@ var _ = Describe("Server.Changes", func() {
 			Expect(calls).To(BeZero(), "no changes spliced from a foreign position")
 			Expect(more).To(BeFalse())
 			Expect(next.Seq).To(BeEquivalentTo(1), "resume cursor sits at the current seq")
+		})
+	})
+
+	// A consumer that persists its cursor outside the engine store (connect's
+	// egress cursor, any in-process consumer with its own bookkeeping) can
+	// present it to a store swapped or restored under the same address. The
+	// seq guard above only catches the case where the foreign store sits
+	// BELOW the cursor; the epoch is what catches the rest.
+	Describe("store lineage", func() {
+		BeforeEach(func() {
+			srv = newTestServer()
+		})
+
+		It("stamps the store epoch into every cursor it returns", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			_, next, _ := drain(server.Cursor{}, 0)
+			Expect(next.Epoch).NotTo(BeZero())
+
+			// The cursor the feed just issued must resume without tripping the
+			// check it was stamped for.
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+			got, again, _ := drain(next, 0)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Key).To(Equal("t2"))
+			Expect(again.Epoch).To(Equal(next.Epoch))
+		})
+
+		It("returns ErrCursorTooOld for a cursor from another lineage (store swap)", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+			_, next, _ := drain(server.Cursor{}, 0)
+
+			// A foreign store whose seq sits within range: both the horizon and
+			// the seq guard pass, so without the epoch its rows would be handed
+			// out as this workspace's history.
+			foreign := server.Cursor{Seq: 1, Epoch: next.Epoch + 1}
+			var calls int
+			resume, more, err := srv.Changes(ctx, ws, foreign, 0, func(server.Change) error {
+				calls++
+				return nil
+			})
+			Expect(err).To(MatchError(server.ErrCursorTooOld))
+			Expect(calls).To(BeZero(), "no rows spliced from a foreign lineage")
+			Expect(more).To(BeFalse())
+			Expect(resume).To(Equal(server.Cursor{Seq: 2, Epoch: next.Epoch}),
+				"the resume cursor carries this store's lineage")
+		})
+
+		It("accepts an epoch-less cursor and stamps it going forward", func() {
+			// Cursors persisted before the epoch existed carry 0. They are
+			// honored once — the horizon and seq guards still cover their gap
+			// cases — and gain the lineage check from the cursor they get back.
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2"}))
+
+			got, next, _ := drain(server.Cursor{Seq: 1}, 0)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Key).To(Equal("t2"))
+			Expect(next.Epoch).NotTo(BeZero())
+		})
+
+		It("stamps the resume cursor a below-horizon cursor gets back", func() {
+			srv = newTestServer(server.WithGC(-time.Second, 0))
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			push(deleteMutation("c1", 2, "todo", "t1"))
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+			next, _, err := srv.Changes(ctx, ws, server.Cursor{}, 0, func(server.Change) error { return nil })
+			Expect(err).To(MatchError(server.ErrCursorTooOld))
+			Expect(next.Epoch).NotTo(BeZero(), "resyncing gains lineage protection too")
+		})
+
+		It("stamps a cursor issued for a workspace that has never been written", func() {
+			// Nothing has minted an epoch yet, so the feed has none to stamp
+			// and the zero cursor round-trips unchanged.
+			_, next, _ := drain(server.Cursor{}, 0)
+			Expect(next).To(Equal(server.Cursor{}))
 		})
 	})
 

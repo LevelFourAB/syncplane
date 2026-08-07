@@ -101,6 +101,16 @@ var _ = Describe("Connector.Drain", func() {
 		Expect(f.src.writeCount()).To(Equal(1), "shadow suppresses the redelivered change")
 	})
 
+	It("persists a cursor epoch across the whole 64-bit range", func() {
+		// A store epoch is random, so half of all of them set the high bit —
+		// which the state store must carry through a signed column intact, or
+		// every drain against such a store reads its own cursor as foreign.
+		f := newFixture()
+		cur := server.Cursor{Seq: 7, Entity: "todo", Key: "t1", Epoch: 1<<63 | 0x1234}
+		Expect(f.st.SetCursor(ctx, ws, cur)).To(Succeed())
+		Expect(f.st.Cursor(ctx, ws)).To(Equal(cur))
+	})
+
 	It("recovers when the shadow update was lost after the source write", func() {
 		f := newFixtureWithState(func(st engineconnect.State) engineconnect.State {
 			return &failingState{State: st}

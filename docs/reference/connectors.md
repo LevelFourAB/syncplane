@@ -194,3 +194,10 @@ type State interface {
 Implementations need no cross-row transactionality; the connector orders its
 writes so any crash between two `State` calls is healed by redelivery or
 reconcile.
+
+Store the egress `server.Cursor` whole, `Epoch` included, and across all 64
+bits — it is a random value, so half of them set the high bit. That field names
+the engine store the cursor came from, and it is the only thing that stops a
+connector from egressing rows out of a database swapped in behind the same
+address (see [Falling behind](../how-to/change-feed.md#falling-behind)). Dropping
+it is not an error: 0 reads as "lineage unknown" and the check goes quiet.

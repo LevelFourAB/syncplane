@@ -477,9 +477,12 @@ write, at the same sequence. Anything dispatching on `Change.Entity` — includi
 unaffected; a consumer that treats every change alike should skip that entity
 itself.
 
-Returns `ErrCursorTooOld` when the cursor predates the tombstone horizon. See
-[Follow committed changes](../how-to/change-feed.md). `CurrentSeq` is the head of
-the feed; the distance from a consumer's position to it is that consumer's lag.
+Returns `ErrCursorTooOld` when the cursor cannot be resumed against this store:
+below the tombstone horizon, above the current sequence, or stamped with another
+store lineage. `Cursor.Epoch` carries that lineage and must survive whatever
+persists the cursor. See [Follow committed changes](../how-to/change-feed.md).
+`CurrentSeq` is the head of the feed; the distance from a consumer's position to
+it is that consumer's lag.
 
 `SubscribeChanges` needs a workspace id up front, which is the right shape for
 one stream and the wrong one for background work across a whole store.

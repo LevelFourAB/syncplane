@@ -42,12 +42,13 @@ func (c *Connector) drain(ctx context.Context, workspaceID string, p *pass) erro
 			return nil
 		})
 		if errors.Is(err, server.ErrCursorTooOld) {
-			// The feed has a gap: changes (including tombstones, since
-			// collected) between the cursor and the horizon are gone. Heal
-			// both directions outside the feed — source→engine via
-			// reconcile, engine→source via the shadow/state sweep — then
-			// resume the feed past the gap.
-			logger.LogAttrs(ctx, slog.LevelWarn, "feed cursor below horizon; healing via full reconcile + resync",
+			// The cursor cannot be resumed: changes below it were collected,
+			// or the store answering now is not the one that issued it. Either
+			// way the feed can no longer say what the source is missing, so
+			// heal both directions outside it — source→engine via reconcile,
+			// engine→source via the shadow/state sweep — then resume from the
+			// position the feed handed back.
+			logger.LogAttrs(ctx, slog.LevelWarn, "feed cursor cannot be resumed; healing via full reconcile + resync",
 				slog.Uint64("resume_seq", next.Seq))
 			if err := c.reconcile(ctx, workspaceID, p); err != nil {
 				return err
