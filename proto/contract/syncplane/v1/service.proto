@@ -163,6 +163,17 @@ message PullRequest {
 	// server clamps to its own maximum either way. When the response is
 	// truncated, has_more is set and next_cursor resumes the scan.
 	uint32 limit = 5;
+	// Entities whose rows this client stores but cannot decode, and so cannot
+	// fold delta state into. Their rows ship as full snapshots and are never
+	// named in RowChange.text_deltas. Empty means the client can reconstruct
+	// every entity it stores.
+	//
+	// Delta state assumes the recipient both holds the row as of its cursor and
+	// can read it, and the server can only judge the first. A client that
+	// stores rows for an entity outside its own schema — one build keeping
+	// another build's rows current in a shared local store — names it here, or
+	// discards and re-bootstraps on every page that carries delta state for it.
+	repeated string no_delta_entities = 6;
 }
 
 message PullResponse {
@@ -359,6 +370,9 @@ message SubscribeRequest {
 	// server clamps to its own maximum either way. Pages stream back-to-back
 	// until each scope is drained.
 	uint32 limit = 3;
+	// PullRequest.no_delta_entities, applied to every scope: what a client can
+	// decode is a property of its build, not of one workspace.
+	repeated string no_delta_entities = 4;
 }
 
 // WorkspaceDropped ends one workspace's participation in a stream. The server

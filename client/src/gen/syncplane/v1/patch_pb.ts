@@ -101,7 +101,9 @@ export type RowChange = Message<"syncplane.v1.RowChange"> & {
    * prior state is not known to match that position — bootstrap, delta
    * resync, membership diffs, query results, and any scoped subscription
    * whose visibility could have changed. A recipient that cannot reconstruct
-   * a named field must discard the page and re-bootstrap.
+   * a named field must discard the page and re-bootstrap; one that knows in
+   * advance it holds no schema for an entity names it in
+   * PullRequest.no_delta_entities instead.
    *
    * @generated from field: repeated syncplane.v1.FieldDelta text_deltas = 6;
    */

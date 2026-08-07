@@ -380,7 +380,8 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
  * It means this client's confirmed state is not what the server assumed when it
  * cut the fragments, so the page as a whole is untrustworthy: the only recovery
  * is to drop it and re-bootstrap. Never a normal outcome — the server declines
- * to send delta state wherever the client's prior state is not knowable.
+ * to send delta state wherever the client's prior state is not knowable, and
+ * the client separately names the entities it holds no schema for.
  */
 export class TextDeltaUnusableError extends Error {
 	constructor(entity: string, key: string, field: string, cause?: unknown) {
@@ -413,6 +414,11 @@ export async function applyTextDeltas(
 	if (change.textDeltas.length === 0) return value;
 	const def = registry.get(change.entity);
 	if (!def) {
+		// A row this build stores for another build's sake (entities.ts). The
+		// server was asked not to send delta state for these — no_delta_entities
+		// on the request — so reaching here means a server that predates the
+		// field, or the window where another tab added the entity to the store
+		// after this pull was issued. Both resolve on the re-bootstrap.
 		throw new TextDeltaUnusableError(change.entity, change.key, change.textDeltas[0]!.field);
 	}
 	const record = (await tx.get(confirmedKey(def.name, workspaceId, change.key))) as

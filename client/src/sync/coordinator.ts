@@ -13,6 +13,7 @@ import {
 	type RejectionCode,
 	type SyncErrorCode,
 } from '../codes.js';
+import { opaqueEntities } from '../entities.js';
 import {
 	CrudMutationSchema,
 	CrudOp,
@@ -987,6 +988,25 @@ export class Coordinator {
 	}
 
 	/**
+	 * The entity names to send as no_delta_entities.
+	 *
+	 * Re-read per pull cycle and per stream open rather than cached: the set
+	 * grows when a tab of a different build opens the shared store, and this tab
+	 * has no signal for that beyond the reset it eventually causes. One point
+	 * read costs less than one stale answer.
+	 */
+	private async noDeltaEntities(): Promise<string[]> {
+		return this.opts.kvMutex.runShared(async () => {
+			const tx = await this.opts.kv.read();
+			try {
+				return await opaqueEntities(tx, this.opts.registry);
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
 	 * Marks a workspace permanently revoked when an error carries the revocation
 	 * code, and reports it. Returns true when it did — the caller then treats the
 	 * failure as handled rather than as a reason to back off and retry, because
@@ -1822,6 +1842,7 @@ export class Coordinator {
 		// The watermark the last page reported, which is what a queue refused for
 		// a mutation-id gap has to be renumbered onto once paging is done.
 		let lastAcked = 0n;
+		const noDeltaEntities = await this.noDeltaEntities();
 		for (;;) {
 			const cursor = await this.cursor(workspaceId);
 			// Timed from issuing the request to the page being committed locally,
@@ -1837,6 +1858,7 @@ export class Coordinator {
 						cursor: cursor ?? new Uint8Array(),
 						limit: this.opts.pullLimit ?? 0,
 						subscriptions: subs,
+						noDeltaEntities,
 					},
 					{ signal: this.abort.signal },
 				);
@@ -2648,6 +2670,7 @@ export class Coordinator {
 							clientId: this.opts.clientId,
 							scopes: planned.scopes,
 							limit: this.opts.pullLimit ?? 0,
+							noDeltaEntities: planned.noDeltaEntities,
 						},
 						{ signal: streamAbort.signal },
 					)
@@ -2772,6 +2795,7 @@ export class Coordinator {
 	private async planStream(): Promise<{
 		scopes: { workspaceId: string; cursor: Uint8Array; subscriptions: Subscription[] }[];
 		subs: Map<string, Subscription[]>;
+		noDeltaEntities: string[];
 	}> {
 		const own = this.ownScopes();
 		const union = this.opts.intent ? await this.opts.intent.unionScopes(own) : own;
@@ -2787,7 +2811,7 @@ export class Coordinator {
 			const cursor = await this.cursor(ws);
 			scopes.push({ workspaceId: ws, cursor: cursor ?? new Uint8Array(), subscriptions: subs });
 		}
-		return { scopes, subs: union };
+		return { scopes, subs: union, noDeltaEntities: await this.noDeltaEntities() };
 	}
 
 	private async pollLoop(): Promise<void> {

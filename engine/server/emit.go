@@ -109,6 +109,10 @@ type rowEmitter struct {
 	// deltaAfter, which is the assumption delta state rests on.
 	deltas     bool
 	deltaAfter uint64
+	// noDeltaEntities indexes the entities the request's sender said it cannot
+	// decode; nil when it named none. Set by the sync entry points from
+	// PullRequest/SubscribeRequest.no_delta_entities.
+	noDeltaEntities map[string]bool
 	// deltaSafeBy memoizes the per-entity verdict of deltaSafe.
 	deltaSafeBy map[string]bool
 	// historySources memoizes, per source row, whether the caller may read the
@@ -477,6 +481,20 @@ func foldFragments(frags [][]byte) ([]byte, bool) {
 	return folded, true
 }
 
+// noDeltaEntitySet indexes a request's no_delta_entities by name, or returns
+// nil for the ordinary case of a client that named none. The result is read
+// only, so one stream's scopes can share it.
+func noDeltaEntitySet(names []string) map[string]bool {
+	if len(names) == 0 {
+		return nil
+	}
+	set := make(map[string]bool, len(names))
+	for _, name := range names {
+		set[name] = true
+	}
+	return set
+}
+
 // deltaSafe reports whether a recipient at deltaAfter is guaranteed to hold
 // this entity's rows as of that sequence — the premise delta state depends on,
 // since a fragment is meaningless against state the recipient never had.
@@ -485,6 +503,10 @@ func foldFragments(frags [][]byte) ([]byte, bool) {
 // a window or a follow closure can each have hidden a row at the cursor that is
 // visible now, and the forward scan emits such a row as an ordinary change
 // without knowing it is the recipient's first sight of it.
+//
+// Holding the row is necessary and not sufficient: the recipient must also be
+// able to decode it, which only the recipient knows. That half arrives as
+// no_delta_entities on the request.
 func (e *rowEmitter) deltaSafe(entity string) (bool, error) {
 	if verdict, known := e.deltaSafeBy[entity]; known {
 		return verdict, nil
@@ -501,6 +523,9 @@ func (e *rowEmitter) deltaSafe(entity string) (bool, error) {
 }
 
 func (e *rowEmitter) computeDeltaSafe(entity string) (bool, error) {
+	if e.noDeltaEntities[entity] {
+		return false, nil
+	}
 	if len(e.windows) > 0 || e.followEntities != nil {
 		return false, nil
 	}

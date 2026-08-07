@@ -10,7 +10,9 @@
 import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
 
+import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { MemoryKVStore } from '../../src/kv/memory.js';
 import { decodeTextDoc, encodeTextDoc, plainTextOf, TextDoc } from '../../src/text/index.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -127,6 +129,55 @@ describe('downstream text delta state', () => {
 		expect(Array.from(row.body!)).toEqual(Array.from(base));
 
 		await reader.close();
+		await writer.close();
+	});
+
+	// Tabs of different builds share one store, so a build routinely syncs rows
+	// for an entity only its neighbour declares — and it holds no schema to fold
+	// a fragment into. Delta state for such an entity would leave it re-
+	// bootstrapping the whole workspace on every edit, so it asks not to be sent
+	// any.
+	it('is not sent for an entity this build cannot decode', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', body: bigDoc('seed', 100) });
+		await writer.syncNow();
+
+		// The newer build is what puts "widget" in the store's entity set.
+		const kv = new MemoryKVStore();
+		const newer = newClient(ws, { kvStore: kv });
+		await newer.start();
+		await newer.syncNow();
+		await newer.close();
+
+		let bootstraps = 0;
+		let resets = 0;
+		const older = newClient(ws, {
+			entities: [ TodoSchema ],
+			kvStore: kv,
+			onSyncEvent: (e) => {
+				if (e.type === 'bootstrap') bootstraps++;
+				if (e.type === 'pull' && e.reset) resets++;
+			},
+		});
+		await older.start();
+		await older.syncNow();
+		bootstraps = 0;
+		resets = 0;
+
+		await typeInto(writer, 'alice', (d) => d.insert(0, 'HELLO '));
+		await older.syncNow();
+		expect({ bootstraps, resets }).toEqual({ bootstraps: 0, resets: 0 });
+		await older.close();
+
+		// What the older build stored is what the build that CAN read it sees:
+		// reopening the same store registers nothing new, so nothing re-fetches.
+		const after = newClient(ws, { kvStore: kv });
+		await after.start();
+		expect(plainTextOf((await after.get(WidgetSchema, 'w1'))?.body)).toMatch(/^HELLO lorem/);
+
+		await after.close();
 		await writer.close();
 	});
 

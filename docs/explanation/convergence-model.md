@@ -226,7 +226,9 @@ a one-time cost, paid the first time a build with the new entity starts.
 Tabs of different builds share one store, so what a store syncs is the union of
 every registry that has opened it, not the registry of whichever tab started
 last. A tab that cannot read an entity still keeps its rows current for the tab
-that can.
+that can. It names those entities on every pull, because a row it cannot decode
+is also one it cannot fold collaborative-text delta state into — see
+[Collaborative text](collaborative-text.md#downstream-pulls-ship-deltas).
 
 The pending queue is shared the same way, and every rebase replays it against the
 registry of whichever tab is pulling — so a tab routinely replays a mutation written

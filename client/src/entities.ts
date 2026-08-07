@@ -66,6 +66,22 @@ export async function syncableEntities(
 }
 
 /**
+ * The names the store syncs that this build holds no schema for — rows it keeps
+ * current on another build's behalf and can do nothing else with. Empty unless
+ * a tab of another build has opened this store.
+ *
+ * What a sync request names as undecodable (PullRequest.no_delta_entities): a
+ * text delta for one of these arrives with no way to fold it in, and costs a
+ * re-bootstrap of the workspace.
+ */
+export async function opaqueEntities(
+	tx: KVRead,
+	registry: EntityRegistry,
+): Promise<string[]> {
+	return (await readStoreEntities(tx)).filter((name) => registry.get(name) === undefined);
+}
+
+/**
  * Brings the store's entity set up to date with this build's registry, and
  * returns the names that were missing from it (empty when nothing changed).
  *

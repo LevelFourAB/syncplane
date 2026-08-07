@@ -1,7 +1,7 @@
 import { create, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
-import { reconcileStoreEntities, syncableEntities } from '../../src/entities.js';
+import { opaqueEntities, reconcileStoreEntities, syncableEntities } from '../../src/entities.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
@@ -154,6 +154,40 @@ describe('syncableEntities', () => {
 		const names = await syncableEntities(tx, new EntityRegistry([ TodoSchema, FieldHistorySchema ]));
 		tx.release();
 		expect([ ...names ]).toEqual([ 'todo' ]);
+	});
+});
+
+describe('opaqueEntities', () => {
+	it('names what the store records and this build cannot decode', async () => {
+		const kv = new MemoryKVStore();
+		await reconcile(kv, todoAndWidget);
+		const tx = await kv.read();
+		const names = await opaqueEntities(tx, todoOnly);
+		tx.release();
+		expect(names).toEqual([ 'widget' ]);
+	});
+
+	it('is empty for a build whose registry covers the store', async () => {
+		const kv = new MemoryKVStore();
+		await reconcile(kv, todoOnly);
+		const tx = await kv.read();
+		const names = await opaqueEntities(tx, todoAndWidget);
+		tx.release();
+		expect(names).toEqual([]);
+	});
+
+	// Decodable, just not synced: the registry holds a schema for it, which is
+	// all reconstructing delta state asks for.
+	it('passes over a server-only entity this build registers', async () => {
+		const kv = new MemoryKVStore();
+		const tx = await kv.write();
+		await tx.put(META_ENTITIES, [ 'todo', 'syncplane_field_history' ]);
+		await tx.commit();
+
+		const read = await kv.read();
+		const names = await opaqueEntities(read, new EntityRegistry([ TodoSchema, FieldHistorySchema ]));
+		read.release();
+		expect(names).toEqual([]);
 	});
 });
 

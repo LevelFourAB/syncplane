@@ -490,9 +490,20 @@ type PullRequest struct {
 	// Maximum number of changes to return. 0 means "server default"; the
 	// server clamps to its own maximum either way. When the response is
 	// truncated, has_more is set and next_cursor resumes the scan.
-	Limit         uint32 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Limit uint32 `protobuf:"varint,5,opt,name=limit,proto3" json:"limit,omitempty"`
+	// Entities whose rows this client stores but cannot decode, and so cannot
+	// fold delta state into. Their rows ship as full snapshots and are never
+	// named in RowChange.text_deltas. Empty means the client can reconstruct
+	// every entity it stores.
+	//
+	// Delta state assumes the recipient both holds the row as of its cursor and
+	// can read it, and the server can only judge the first. A client that
+	// stores rows for an entity outside its own schema — one build keeping
+	// another build's rows current in a shared local store — names it here, or
+	// discards and re-bootstraps on every page that carries delta state for it.
+	NoDeltaEntities []string `protobuf:"bytes,6,rep,name=no_delta_entities,json=noDeltaEntities,proto3" json:"no_delta_entities,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *PullRequest) Reset() {
@@ -558,6 +569,13 @@ func (x *PullRequest) GetLimit() uint32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *PullRequest) GetNoDeltaEntities() []string {
+	if x != nil {
+		return x.NoDeltaEntities
+	}
+	return nil
 }
 
 type PullResponse struct {
@@ -1214,9 +1232,12 @@ type SubscribeRequest struct {
 	// Catch-up page size, applied per workspace. 0 means "server default"; the
 	// server clamps to its own maximum either way. Pages stream back-to-back
 	// until each scope is drained.
-	Limit         uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Limit uint32 `protobuf:"varint,3,opt,name=limit,proto3" json:"limit,omitempty"`
+	// PullRequest.no_delta_entities, applied to every scope: what a client can
+	// decode is a property of its build, not of one workspace.
+	NoDeltaEntities []string `protobuf:"bytes,4,rep,name=no_delta_entities,json=noDeltaEntities,proto3" json:"no_delta_entities,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *SubscribeRequest) Reset() {
@@ -1268,6 +1289,13 @@ func (x *SubscribeRequest) GetLimit() uint32 {
 		return x.Limit
 	}
 	return 0
+}
+
+func (x *SubscribeRequest) GetNoDeltaEntities() []string {
+	if x != nil {
+		return x.NoDeltaEntities
+	}
+	return nil
 }
 
 // WorkspaceDropped ends one workspace's participation in a stream. The server
@@ -1690,13 +1718,14 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"q\n" +
 	"\fPushResponse\x128\n" +
 	"\aresults\x18\x01 \x03(\v2\x1e.syncplane.v1.WorkspaceResultsR\aresults\x12'\n" +
-	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\xbd\x01\n" +
+	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\xe9\x01\n" +
 	"\vPullRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x16\n" +
 	"\x06cursor\x18\x03 \x01(\fR\x06cursor\x12@\n" +
 	"\rsubscriptions\x18\x04 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x12\x14\n" +
-	"\x05limit\x18\x05 \x01(\rR\x05limit\"\xfb\x01\n" +
+	"\x05limit\x18\x05 \x01(\rR\x05limit\x12*\n" +
+	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\"\xfb\x01\n" +
 	"\fPullResponse\x12)\n" +
 	"\x05patch\x18\x01 \x01(\v2\x13.syncplane.v1.PatchR\x05patch\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\fR\n" +
@@ -1750,11 +1779,12 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +
-	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\"{\n" +
+	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\"\xa7\x01\n" +
 	"\x10SubscribeRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x124\n" +
 	"\x06scopes\x18\x02 \x03(\v2\x1c.syncplane.v1.WorkspaceScopeR\x06scopes\x12\x14\n" +
-	"\x05limit\x18\x03 \x01(\rR\x05limit\"\xcc\x01\n" +
+	"\x05limit\x18\x03 \x01(\rR\x05limit\x12*\n" +
+	"\x11no_delta_entities\x18\x04 \x03(\tR\x0fnoDeltaEntities\"\xcc\x01\n" +
 	"\x10WorkspaceDropped\x12=\n" +
 	"\x06reason\x18\x01 \x01(\x0e2%.syncplane.v1.WorkspaceDropped.ReasonR\x06reason\x12\x18\n" +
 	"\amessage\x18\x02 \x01(\tR\amessage\"_\n" +

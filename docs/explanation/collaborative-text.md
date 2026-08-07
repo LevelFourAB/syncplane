@@ -71,6 +71,13 @@ visibility of the entity could have changed since its cursor (a read filter, a
 predicate, a window or a follow closure). Bootstrap chunks, delta resyncs,
 membership diffs, query results and the `Changes` feed are always full state.
 
+Every one of those is a judgement the server can make alone. Holding the row is
+necessary and not sufficient — folding a fragment also takes a schema, and a
+build routinely stores rows for an entity only a neighbouring tab declares (see
+[A client holds only the entities it declares](convergence-model.md#a-client-holds-only-the-entities-it-declares)).
+That half only the client knows, so it names those entities in
+`PullRequest.no_delta_entities` and their rows arrive as full state.
+
 ### Locally: edits are deltas in storage too
 
 A live text handle queues the fragment for the one edit it just applied, and

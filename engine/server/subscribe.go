@@ -111,8 +111,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 			sc.release()
 		}
 	}()
+	noDeltas := noDeltaEntitySet(msg.GetNoDeltaEntities())
 	for _, want := range msg.GetScopes() {
-		sc, reason, err := s.openScope(ctx, want, msg.GetClientId())
+		sc, reason, err := s.openScope(ctx, want, msg.GetClientId(), noDeltas)
 		if err != nil {
 			if sendErr := s.sendDropped(stream, want.GetWorkspaceId(), reason, err); sendErr != nil {
 				return sendErr
@@ -243,7 +244,7 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 // outside any read snapshot and outside the tail loop: FilterEpoch up front,
 // then the emitter's per-entity read filters are warmed so classify() inside
 // each per-notify scan is a pure cache hit.
-func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
+func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
 	ws := want.GetWorkspaceId()
 
 	principal, err := s.enterWorkspace(ctx, ws)
@@ -266,6 +267,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
+	emitter.noDeltaEntities = noDeltas
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err

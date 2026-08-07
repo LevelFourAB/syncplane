@@ -265,6 +265,52 @@ var _ = Describe("Downstream text delta state", func() {
 			Expect(rc.GetValue()).To(Equal(storedRow("w1")))
 		})
 
+		// The half of the delta premise the server cannot see: a client may hold
+		// the row as of its cursor and still have no schema to fold a fragment
+		// into. It says so per request, and the entity falls back for that
+		// recipient alone.
+		It("ships the document for an entity the client named as undecodable", func() {
+			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+			first := pull(nil)
+
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.SetString("the quick brown fox leaps over the lazy dog")).To(Succeed())
+			})
+			push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId:     ws,
+				Cursor:          first.GetNextCursor(),
+				NoDeltaEntities: []string{"widget"},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			rc := changeFor(resp.Msg, "w1")
+			Expect(rc.GetTextDeltas()).To(BeEmpty())
+			Expect(rc.GetValue()).To(Equal(storedRow("w1")))
+		})
+
+		It("names an entity per request, not per server", func() {
+			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+			first := pull(nil)
+
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.SetString("the quick brown fox leaps over the lazy dog")).To(Succeed())
+			})
+			push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+
+			// An unrelated name constrains nothing, and the same cursor still
+			// gets delta state for the entity the client can read.
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId:     ws,
+				Cursor:          first.GetNextCursor(),
+				NoDeltaEntities: []string{"gadget"},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(changeFor(resp.Msg, "w1").GetTextDeltas()).To(HaveLen(1))
+		})
+
 		It("never ships delta state on bootstrap", func() {
 			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
@@ -400,5 +446,43 @@ var _ = Describe("Downstream text delta state", func() {
 		Expect(rc).NotTo(BeNil())
 		Expect(rc.GetTextDeltas()).To(HaveLen(1))
 		Expect(reconstruct(rc, held)).To(Equal(storedRow("w1")))
+	})
+
+	It("honours an undecodable entity across every scope of a stream", func() {
+		base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
+		push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
+		first := pull(nil)
+
+		edited := editBody(base, "alice", func(d *text.Doc) {
+			Expect(d.SetString("the quick brown fox leaps over the lazy dog")).To(Succeed())
+		})
+		push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+
+		streamCtx, cancel := context.WithCancel(ctx)
+		defer cancel()
+		stream, err := client.Subscribe(streamCtx, connect.NewRequest(&syncplanev1.SubscribeRequest{
+			ClientId:        "c9",
+			Scopes:          []*syncplanev1.WorkspaceScope{{WorkspaceId: ws, Cursor: first.GetNextCursor()}},
+			NoDeltaEntities: []string{"widget"},
+		}))
+		Expect(err).NotTo(HaveOccurred())
+		var rc *syncplanev1.RowChange
+		for stream.Receive() {
+			page := stream.Msg().GetPage()
+			if page == nil {
+				continue
+			}
+			for _, c := range page.GetPatch().GetChanges() {
+				if c.GetKey() == "w1" {
+					rc = c
+				}
+			}
+			if rc != nil {
+				break
+			}
+		}
+		Expect(rc).NotTo(BeNil())
+		Expect(rc.GetTextDeltas()).To(BeEmpty())
+		Expect(rc.GetValue()).To(Equal(storedRow("w1")))
 	})
 })

@@ -103,7 +103,9 @@ type RowChange struct {
 	// prior state is not known to match that position — bootstrap, delta
 	// resync, membership diffs, query results, and any scoped subscription
 	// whose visibility could have changed. A recipient that cannot reconstruct
-	// a named field must discard the page and re-bootstrap.
+	// a named field must discard the page and re-bootstrap; one that knows in
+	// advance it holds no schema for an entity names it in
+	// PullRequest.no_delta_entities instead.
 	TextDeltas    []*FieldDelta `protobuf:"bytes,6,rep,name=text_deltas,json=textDeltas,proto3" json:"text_deltas,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
