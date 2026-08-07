@@ -26,7 +26,7 @@ import (
 // way to send, so it would take a path that was never broken and never touch
 // the one that was. What is emulated here is connect-web — enveloped frames
 // over a plain POST, with the Accept-Encoding the browser attaches itself.
-var _ = Describe("Streaming response compression (issue 120)", func() {
+var _ = Describe("Streaming response compression", func() {
 	const ws = "w1"
 
 	var (

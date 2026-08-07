@@ -5,7 +5,7 @@ import { freshWorkspace, newClient } from './helpers.js';
 
 // Per-item merge end-to-end: two clients that each touch a different item of the
 // same collection offline converge with both items after sync, instead of the
-// last writer clobbering the whole collection (issue 059).
+// last writer clobbering the whole collection.
 describe('per-item collection merge (sync)', () => {
 	it('two clients add disjoint list items offline → both survive', async () => {
 		const ws = freshWorkspace();

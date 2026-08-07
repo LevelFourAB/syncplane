@@ -13,9 +13,9 @@ import {
 	SUBS_TTL_MS,
 } from '../../src/sync/intent.js';
 
-// The cross-tab intent registry (issue 023, lean variant): per-tab records of
-// per-workspace subscriptions + undo refs in the shared KV store, unioned with
-// TTL-based liveness. No locks, no channels — plain Node suffices.
+// The cross-tab intent registry: per-tab records of per-workspace
+// subscriptions + undo refs in the shared KV store, unioned with TTL-based
+// liveness. No locks, no channels — plain Node suffices.
 
 /** The workspace most specs use; the multi-workspace ones name their own. */
 const WS = 'ws1';

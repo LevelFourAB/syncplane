@@ -650,9 +650,9 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 		if len(info.textFields) > 0 {
 			// Ingress guard: text bytes a client sends must decode as full
 			// documents (and are canonicalized), or the row would brick every
-			// reader — the client-supplied mirror of issue 029. A PUT carries
-			// whole rows, so delta state has no meaning here and is refused
-			// along with everything else that does not decode.
+			// reader. A PUT carries whole rows, so delta state has no meaning
+			// here and is refused along with everything else that does not
+			// decode.
 			if err := info.canonicalizeTextFields(msg.ProtoReflect(), nil); err != nil {
 				return rejectTextWrite(err)
 			}

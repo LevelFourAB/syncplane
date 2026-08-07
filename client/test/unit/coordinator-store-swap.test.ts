@@ -17,8 +17,8 @@ import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfak
 /** The workspace these specs drive. */
 const WS = 'ws';
 
-// Reproduces issue 058 end-to-end at the client: a client synced against a
-// store at a high seq, then the same URL begins serving a fresh, empty store.
+// Store swap end-to-end at the client: a client synced against a store at a
+// high seq, then the same URL begins serving a fresh, empty store.
 // The server answers reset (its cursor-provenance guard fired); the client must
 // re-bootstrap, purge the phantom rows, AND reset its monotonic stale-page gate
 // DOWN to the new store's baseline — otherwise every subsequent page from the
@@ -33,7 +33,7 @@ function serverRow(key: string, version: bigint, title: string): RowChange {
 	});
 }
 
-describe('coordinator store swap (issue 058)', () => {
+describe('coordinator store swap', () => {
 	let kv: MemoryKVStore;
 	let registry: EntityRegistry;
 

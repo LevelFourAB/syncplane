@@ -131,7 +131,7 @@ var _ = Describe("Text fields", func() {
 			// A PATCH from a client still in flight while another client PUTs a
 			// row built from the same base: without the union-on-PUT the PUT
 			// would reset the doc and the PATCH would union the old document
-			// back in, duplicating the text (issue 097).
+			// back in, duplicating the text.
 			patched := editBody(base, "client", func(d *text.Doc) {
 				Expect(d.Insert(13, " four")).To(Succeed())
 			})

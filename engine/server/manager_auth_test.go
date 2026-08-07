@@ -46,7 +46,7 @@ func (a *appPerms) principals() []server.Principal {
 	return append([]server.Principal(nil), a.seen...)
 }
 
-var _ = Describe("Manager authentication and per-app policy (issue 051)", func() {
+var _ = Describe("Manager authentication and per-app policy", func() {
 	const (
 		docsApp    = "docs"
 		billingApp = "billing"

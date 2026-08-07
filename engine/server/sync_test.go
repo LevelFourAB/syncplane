@@ -560,7 +560,7 @@ var _ = Describe("SyncService", func() {
 	// or restored from backup, so the client presents a cursor this store
 	// never issued. Pull must re-bootstrap rather than scan from a foreign
 	// position (which silently regresses the cursor and wedges the client) or
-	// splice a different lineage's rows onto the client's. See issue 058.
+	// splice a different lineage's rows onto the client's.
 	Describe("Cursor provenance", func() {
 		decodeCursor := func(raw []byte) *syncplanecursorv1.Cursor {
 			GinkgoHelper()

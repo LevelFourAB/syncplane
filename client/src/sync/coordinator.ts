@@ -359,7 +359,7 @@ interface WorkspaceSync {
 	 * The server said this client may no longer access the workspace. Permanent:
 	 * it is dropped from pushes, pulls, bootstraps and the stream scope set, and
 	 * nothing retries it. The local rows stay put — purging is the app's call
-	 * (SyncClient.removeWorkspace with purge, issue 079).
+	 * (SyncClient.removeWorkspace with purge).
 	 */
 	revoked: boolean;
 	/**
@@ -1975,8 +1975,8 @@ export class Coordinator {
 	 * revocation needs no reopen: the scope is simply gone, and reopening on a
 	 * revoked answer would be an infinite reconnect. Local data for a revoked
 	 * workspace is NOT purged here — deleting a user's rows on one server verdict
-	 * is the app's decision (`removeWorkspace(id, { purge: true })`, issue 079),
-	 * not a side effect of a stream frame.
+	 * is the app's decision (`removeWorkspace(id, { purge: true })`), not a side
+	 * effect of a stream frame.
 	 */
 	private async onWorkspaceDropped(
 		workspaceId: string,

@@ -22,7 +22,7 @@ import (
 // recordingPerms captures the Principal each hook was handed, so a spec can
 // assert what the engine passed rather than what the hook could have dug out
 // of ctx itself. It embeds AllowAll: only the hooks it records are overridden,
-// which also exercises the partial-implementation pattern (issue 070).
+// which also exercises the partial-implementation pattern.
 type recordingPerms struct {
 	server.AllowAll
 	mu       sync.Mutex
@@ -64,7 +64,7 @@ func (p *recordingPerms) seen() (mutate, read, epoch []server.Principal) {
 		append([]server.Principal(nil), p.epoch...)
 }
 
-var _ = Describe("Authentication seam (issues 062, 063)", func() {
+var _ = Describe("Authentication seam", func() {
 	const ws = "w1"
 
 	var (

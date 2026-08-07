@@ -180,8 +180,8 @@ type Limits struct {
 	// set is re-applied). A request above this is InvalidArgument. Default 4.
 	MaxFollowDepth int
 	// Maximum number of rows a single request's reference-following closure may
-	// contain. Overflow aborts the pull as resource_exhausted (bounded working
-	// sets, issue 048). Also bounds the Cursor.closure key-set. Default 10000.
+	// contain. Overflow aborts the pull as resource_exhausted, keeping working
+	// sets bounded. Also bounds the Cursor.closure key-set. Default 10000.
 	MaxClosureSize int
 	// Maximum source rows a single reverse-follow hop may match (one parent's
 	// children). Overflow is resource_exhausted; protects against a popular
@@ -1299,9 +1299,9 @@ func (info *entityInfo) mergeTextFields(
 // canonicalizeTextFields validates every text field msg carries and re-encodes
 // it canonically in place. This is the ingress guard for client-supplied
 // values — junk bytes in a text field would otherwise store a row every decoder
-// rejects (issue 029's brick, reachable by an ordinary write), and
-// canonicalizing keeps byte-equality short-circuits (the client watch, Merge's
-// fast path) meaningful.
+// rejects, bricking readers by way of an ordinary write, and canonicalizing
+// keeps byte-equality short-circuits (the client watch, Merge's fast path)
+// meaningful.
 //
 // fragmentOK decides, per field path, whether delta-state bytes are acceptable
 // there; a nil func means "full documents only". Fragments are legal exactly

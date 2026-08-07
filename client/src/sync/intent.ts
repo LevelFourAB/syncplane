@@ -6,11 +6,11 @@ import type { KVRead, KVStore, KVWrite } from '../kv/store.js';
 import type { Mutex } from '../mutex.js';
 
 /**
- * Cross-tab sync intent (the lean resolution of issue 023). Every tab sharing
- * a KV store writes a small record at `intent/<tabId>` describing what it
- * needs from sync — which workspaces it holds, each one's subscription set, and
- * the mutation ids its undo/redo stacks still reference — plus a heartbeat
- * timestamp. Each tab then syncs with the UNION of all live tabs' intent:
+ * Cross-tab sync intent. Every tab sharing a KV store writes a small record at
+ * `intent/<tabId>` describing what it needs from sync — which workspaces it
+ * holds, each one's subscription set, and the mutation ids its undo/redo stacks
+ * still reference — plus a heartbeat timestamp. Each tab then syncs with the
+ * UNION of all live tabs' intent:
  *
  *  - Union scopes: every tab syncs the same workspaces with the same
  *    per-workspace subscription set, so the server never sees two tabs

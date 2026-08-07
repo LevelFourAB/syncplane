@@ -36,9 +36,9 @@ function scope(subs: Subscription[]): Map<string, Subscription[]> {
 }
 
 // Two full Coordinators ("tabs") over one shared MemoryKVStore + ChainMutex —
-// the lean multi-tab model of issue 023: every tab syncs, correctness comes
-// from shared intent records (subscription/undo-ref union) and the monotonic
-// cursor gate. No locks, no channels: plain Node suffices.
+// the lean multi-tab model: every tab syncs, correctness comes from shared
+// intent records (subscription/undo-ref union) and the monotonic cursor gate.
+// No locks, no channels: plain Node suffices.
 
 function sub(entity: string): Subscription {
 	return create(SubscriptionSchema, { entity });

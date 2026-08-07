@@ -91,7 +91,7 @@ func (g *midStreamGate) CanAccessWorkspace(_ context.Context, _ server.Principal
 	return nil
 }
 
-var _ = Describe("Workspace-access authorization (issue 064)", func() {
+var _ = Describe("Workspace-access authorization", func() {
 	const (
 		mine    = "w-mine"
 		theirs  = "w-theirs"

@@ -47,8 +47,8 @@ async function indexed(tx: KVRead): Promise<string[]> {
 }
 
 // Exercises the streaming bootstrap end-to-end against a fake server, with the
-// emphasis on the property issue 011 is about: local writes (which share the
-// kv mutex) must NOT block while the snapshot streams.
+// emphasis on the property that matters: local writes (which share the kv
+// mutex) must NOT block while the snapshot streams.
 
 const registry = new EntityRegistry([ TodoSchema ]);
 
@@ -511,8 +511,8 @@ describe('streaming bootstrap', () => {
 // A COLD bootstrap — no cursor, so no installed snapshot — writes its rows
 // straight into confirmed state instead of staging them. Staging exists to keep
 // readers on the old snapshot until the new one is whole, and a workspace that
-// has none has nothing to keep them on; paying a second put and a delete per row
-// for that is the cost issue 118 is about.
+// has none has nothing to keep them on; staging it anyway would cost a second
+// put and a delete per row for nothing.
 
 describe('cold bootstrap', () => {
 	it('writes the snapshot straight into confirmed state', async () => {

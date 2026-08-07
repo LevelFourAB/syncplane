@@ -86,9 +86,9 @@ export interface SchemaSkewInfo {
  *
  * The client does not purge the local copy on its own: deleting a user's rows
  * off one server verdict is a decision an app has to make, not a side effect of
- * reading a frame (issue 079). What it does do is stop syncing that workspace,
- * so the app can act on this status — `client.removeWorkspace(id, { purge:
- * true })` is the purge when it decides to.
+ * reading a frame. What it does do is stop syncing that workspace, so the app
+ * can act on this status — `client.removeWorkspace(id, { purge: true })` is the
+ * purge when it decides to.
  */
 export type WorkspaceAccess = 'granted' | 'revoked';
 

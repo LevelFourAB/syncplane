@@ -46,7 +46,7 @@ func (p *countingPerms) calls() int {
 	return p.mutate
 }
 
-var _ = Describe("Permissions hook scheduling (issue 017)", func() {
+var _ = Describe("Permissions hook scheduling", func() {
 	var (
 		ctx    context.Context
 		client syncplanev1connect.SyncServiceClient

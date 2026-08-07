@@ -19,7 +19,7 @@ const WS = 'ws';
 
 // Drives the Coordinator's paged pull (doPull) against a fake server whose
 // second page fails, to pin down that already-committed earlier pages still
-// notify watchers (issue 014).
+// notify watchers.
 
 function serverRow(key: string, version: bigint, title: string): RowChange {
 	return create(RowChangeSchema, {

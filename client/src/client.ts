@@ -734,9 +734,8 @@ export interface RemoveWorkspaceOptions {
 	 * Also delete the workspace's local data: its confirmed rows, optimistic
 	 * overlay, bootstrap staging, cursor, watermarks and every mutation still
 	 * queued for it. Use this when access was revoked and the app has decided the
-	 * copy must not stay on the device (issue 079); without it the client merely
-	 * stops syncing and the rows remain readable until the workspace is added
-	 * back.
+	 * copy must not stay on the device; without it the client merely stops
+	 * syncing and the rows remain readable until the workspace is added back.
 	 *
 	 * The queued mutations are handed back in RemoveWorkspaceResult.discarded —
 	 * that is the only copy left, so an app that wants to keep unsent work must
@@ -1949,8 +1948,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		for (const mgr of managers) mgr.onRejected(info.mutationId);
 		// Refresh this tab's intent record from the trimmed stacks. Own-tab
 		// only: a peer tab whose stacks reference the rejected mutation never
-		// hears about it (documented follow-up in issue 023 — needs a
-		// broadcast channel; its record merely over-protects until then).
+		// hears about it — reaching it would need a broadcast channel, and its
+		// record merely over-protects until then.
 		if (managers.length > 0) {
 			void this.intentReg?.updateRefs(
 				info.workspaceId,

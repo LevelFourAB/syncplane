@@ -114,7 +114,7 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		// (The pull path additionally pins a store epoch into the cursor to
 		// catch a foreign store whose seq sits ABOVE the consumer's; feed
 		// cursors are persisted by the connector and carry no epoch yet, so
-		// that lineage-swap case remains a known gap here — see issue 058.)
+		// that lineage-swap case remains a known gap here.)
 		if after.Seq > current {
 			next = Cursor{Seq: current}
 			return ErrCursorTooOld

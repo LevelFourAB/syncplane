@@ -1,8 +1,7 @@
 // String-boundary text writes across the wire: TS string writes converge
 // with Go EntityTx string writes (via the testserver's /debug/textstring
-// endpoint, a stand-in for a connector/admin writer), and the PUT clobber
-// repro from issue 097 — a PUT racing an in-flight PATCH — no longer
-// interleaves or duplicates text on either side.
+// endpoint, a stand-in for a connector/admin writer), and a PUT racing an
+// in-flight PATCH neither interleaves nor duplicates text on either side.
 
 import { inject } from 'vitest';
 import { describe, expect, it } from 'vitest';
