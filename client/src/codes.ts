@@ -84,9 +84,14 @@ export const CodeWorkspaceAccessRevoked = 'workspace_access_revoked';
 
 /**
  * A push batch's mutation ids were not contiguous with the server's watermark
- * for this client, so NOTHING in the batch applied. The client resends in order
- * from its watermark; the next pull resyncs the watermark and rebase drops
- * whatever was already acked.
+ * for this client, so NOTHING in the batch applied, and that workspace's queue
+ * stopped moving until the two line up again. The client recovers either way:
+ * ids at or below the watermark are dropped by the next pull's rebase, and a
+ * queue stranded above it is renumbered onto the watermark and resent.
+ *
+ * Also surfaces on `status().lastError` for the cycle that saw it — the queue
+ * did not move, which is not something a client should report as a healthy
+ * sync.
  *
  * Workspace-scoped, like the code above: it appears on `WorkspaceResults`, not
  * on any single mutation.

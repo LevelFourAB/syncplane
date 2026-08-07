@@ -207,6 +207,22 @@ export interface LeadershipEvent extends EventBase {
 	leader: boolean;
 }
 
+/**
+ * A workspace's pending queue was renumbered so it resumes at the server's
+ * mutation-id watermark. Always a recovery, and rare: something discarded a
+ * queued mutation the server never saw, and the ids above the hole it left
+ * could not be pushed until they moved down onto it. Every still-queued
+ * mutation has a new id afterwards.
+ */
+export interface ResequenceEvent extends EventBase {
+	type: 'resequence';
+	workspaceId: string;
+	/** The id the queue now starts at: the server's watermark plus one. */
+	firstId: bigint;
+	/** Mutations renumbered. */
+	mutations: number;
+}
+
 /** Everything the coordinator reports. Switch on `type`. */
 export type SyncEvent =
 	| PushEvent
@@ -215,7 +231,8 @@ export type SyncEvent =
 	| RebaseEvent
 	| PokeEvent
 	| StreamEvent
-	| LeadershipEvent;
+	| LeadershipEvent
+	| ResequenceEvent;
 
 /** Handler passed as `onSyncEvent`. */
 export type SyncEventHandler = (event: SyncEvent) => void;

@@ -82,6 +82,10 @@ export const metaLastMutationId = (workspaceId: string): string =>
  * in-memory guard it survives a lost push response and is visible to every tab —
  * which is what keeps compaction from silently dropping or double-applying
  * mutations.
+ *
+ * A resequence lowers it (see resequencePending): the ids it renumbers were
+ * refused by the server rather than applied, so leaving the mark above them
+ * would freeze compaction out of a queue the server never took.
  */
 export const metaPushedThrough = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}pushedThrough`;

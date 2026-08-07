@@ -6,7 +6,7 @@ import { CodePoisonDropped } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { MutationStatus, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCursor, metaLastMutationId } from '../../src/keys.js';
+import { metaCursor, metaLastMutationId, metaPushedThrough } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
@@ -128,6 +128,16 @@ describe('coordinator poison backstop', () => {
 			expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
 		]);
 		expect(await pendingIds()).toEqual([]);
+		// Nothing is left to renumber, but the counter still named the dropped id.
+		// Left there, the next local write would mint an id past the watermark the
+		// server stopped at and gap the workspace all over again.
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaLastMutationId(WS))).toBe('0');
+			expect(await tx.get(metaPushedThrough(WS))).toBe('0');
+		} finally {
+			tx.release();
+		}
 
 		await coord.stop();
 	});
@@ -252,6 +262,54 @@ describe('coordinator poison backstop', () => {
 			expect.objectContaining({ mutationId: 1n, errorCode: 'BAD', errorMessage: 'no good' }),
 		]);
 		expect(await pendingIds()).toEqual([ 2n ]);
+
+		await coord.stop();
+	});
+
+	it('renumbers the tail down over a dropped head', async () => {
+		// A dead-letter discards an id the server never acked, so its watermark
+		// stays below the tail. Left at their old ids, the survivors would gap
+		// past it and the workspace would never push again.
+		const def = registry.bySchema(TodoSchema);
+		const seedTx = await kv.write();
+		for (const id of [ 2n, 3n ]) {
+			const crud = buildPut(def, TodoSchema, create(TodoSchema, { id: `t${id}`, title: 'keep' }));
+			const m = create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: id,
+				payload: { case: 'crud', value: crud },
+			});
+			await enqueuePending(seedTx, WS, m);
+			await applyMutationLocally(seedTx, registry, {}, WS, m, new TouchSet());
+		}
+		await seedTx.put(metaLastMutationId(WS), '3');
+		await seedTx.commit();
+
+		const coord = newCoordinator(
+			fakeTransport(() => {
+				throw new ConnectError('unknown entity', Code.InvalidArgument);
+			}),
+			3,
+		);
+
+		// Cycle 1 pushes the whole queue, 2 and 3 isolate the head, and the third
+		// confirmed failure dead-letters it.
+		await cycle(coord);
+		await cycle(coord);
+		await cycle(coord);
+
+		expect(rejections).toEqual([
+			expect.objectContaining({ mutationId: 1n, errorCode: CodePoisonDropped }),
+		]);
+		// The survivors close the hole rather than keeping ids 2 and 3.
+		expect(await pendingIds()).toEqual([ 1n, 2n ]);
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaLastMutationId(WS))).toBe('2');
+			expect(await tx.get(metaPushedThrough(WS))).toBe('0');
+		} finally {
+			tx.release();
+		}
 
 		await coord.stop();
 	});

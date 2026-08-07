@@ -1,4 +1,5 @@
 import {
+	clone,
 	type DescMessage,
 	fromBinary,
 	type Message,
@@ -8,7 +9,12 @@ import {
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
 import { syncableEntities } from '../entities.js';
-import { type CrudMutation, CrudOp, type Mutation } from '../gen/syncplane/v1/mutation_pb.js';
+import {
+	type CrudMutation,
+	CrudOp,
+	type Mutation,
+	MutationSchema,
+} from '../gen/syncplane/v1/mutation_pb.js';
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
 import {
 	confirmedKey,
@@ -17,6 +23,7 @@ import {
 	metaCursor,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
+	metaLastMutationId,
 	metaServerSeq,
 	overlayKey,
 	type OverlayRecord,
@@ -43,9 +50,10 @@ import { reportError } from '../report.js';
 import { applyTextDeltas, TextDeltaUnusableError } from '../sync/textdelta.js';
 import { isFragment } from '../text/index.js';
 import { TouchSet } from '../touch.js';
+import { writePushedThrough } from './compact.js';
 import { markIndexesBuilt } from './index-build.js';
 import { deletePrefixes, type IndexCache, indexedRecord } from './index-maintain.js';
-import { dropAcked, readPending } from './queue.js';
+import { dropAcked, enqueuePending, readPending } from './queue.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve
@@ -900,6 +908,93 @@ export async function rebase(
 		const pendingCount = await finalizeRebase(tx, registry, mirrors, workspaceId, input, touched);
 		await tx.commit();
 		return { touched, pendingCount };
+	} catch (err) {
+		tx.release();
+		throw err;
+	}
+}
+
+/** Outcome of resequencePending. */
+export interface ResequenceResult extends RebaseResult {
+	/** Old mutation id → new id, for remapping undo bookkeeping. */
+	remap: ReadonlyMap<bigint, bigint>;
+	/** False when the queue already started at the requested id. */
+	changed: boolean;
+}
+
+/**
+ * Renumbers a workspace's pending queue to start at `firstId`, closing a hole
+ * below it. Order and payloads are preserved; only ids move.
+ *
+ * Mutation ids must reach the server contiguously from its per-(workspace,
+ * client) watermark, and only an ack can retire one. A queue whose head sits
+ * ABOVE a hole is therefore unreachable on its own: every push is refused for
+ * the gap, and no ack can close a hole the server never learned about. This is
+ * the way back — but only for a caller that knows the server has taken nothing
+ * from `firstId` on, since renumbering an id the server already applied would
+ * re-send it under a new one. A refused batch applies nothing, so the refusal
+ * itself is that proof. The pushed-through watermark comes back down to
+ * `firstId - 1` with the queue for the same reason: those ids were never taken,
+ * and leaving it high would freeze compaction out of the whole queue.
+ *
+ * The overlay and text log are rebuilt from the renumbered queue, because both
+ * record the id that wrote them. `changed` reports whether any mutation moved:
+ * it is false for a queue already starting at `firstId`, for one the server is
+ * ahead of (dropAcked handles that), and for an empty queue — which still
+ * writes both marks back down, since the counter is what the next local write
+ * mints from.
+ *
+ * Run under the kv mutex.
+ */
+export async function resequencePending(
+	kv: KVStore,
+	registry: EntityRegistry,
+	mirrors: MirrorMap,
+	workspaceId: string,
+	firstId: bigint,
+): Promise<ResequenceResult> {
+	const touched = new TouchSet();
+	const tx = await kv.write();
+	try {
+		const pending = await readPending(tx, workspaceId);
+		const head = pending[0];
+		if (head !== undefined && firstId >= head.mutationId) {
+			// The server is at or ahead of the head: not a hole, and renumbering
+			// upward would manufacture the very gap this closes. dropAcked retires
+			// those ids instead.
+			tx.release();
+			return { touched, pendingCount: pending.length, remap: new Map(), changed: false };
+		}
+		// Every old key goes before any new one is written: the ranges overlap
+		// whenever the queue is longer than the hole, and a write-then-delete
+		// order would drop the entry it had just moved.
+		const remap = new Map<bigint, bigint>();
+		const renumbered: Mutation[] = [];
+		let nextId = firstId;
+		for (const m of pending) {
+			await tx.del(pendingKey(workspaceId, m.mutationId));
+			const moved = clone(MutationSchema, m);
+			moved.mutationId = nextId;
+			remap.set(m.mutationId, nextId);
+			renumbered.push(moved);
+			nextId += 1n;
+		}
+		for (const m of renumbered) await enqueuePending(tx, workspaceId, m);
+		// The counter follows the queue down even when the queue is empty: it is
+		// what the next local write mints from, and an id above the watermark gaps
+		// the workspace again on the very next edit.
+		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
+		await writePushedThrough(tx, workspaceId, firstId - 1n);
+		if (renumbered.length > 0) {
+			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);
+		}
+		await tx.commit();
+		return {
+			touched,
+			pendingCount: renumbered.length,
+			remap,
+			changed: renumbered.length > 0,
+		};
 	} catch (err) {
 		tx.release();
 		throw err;

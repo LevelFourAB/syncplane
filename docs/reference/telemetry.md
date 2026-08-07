@@ -273,12 +273,22 @@ const client = new SyncClient({
 | `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                         |
 | `stream`     | `state`, `reason`                                                                                        |
 | `leadership` | `leader`                                                                                                 |
+| `resequence` | `workspaceId`, `firstId`, `mutations`                                                                    |
 
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`
 from `error`, so an error rate does not track connectivity.
 
 Counting `poke` against `pull` is what separates changes that took the realtime
 path from ones that waited for the poll floor.
+
+A `resequence` is always a recovery and should be rare: a queued mutation was
+discarded locally before the server ever saw it, and the ids above the hole it
+left had to move down onto the server's watermark before the workspace could
+push again. Until they did, that workspace's queue was frozen — a cycle
+reporting `mutation_id_gap` on its status is the same condition seen from the
+other side. Repeated ones point at whatever keeps discarding mutations, which is
+the poison backstop (`poisonThreshold`) or a server whose watermarks moved
+backwards.
 
 A `bootstrap` reports its three phases as well as its total: `streamMs` waiting
 on the server's snapshot, `stageMs` writing the chunks it delivered into the

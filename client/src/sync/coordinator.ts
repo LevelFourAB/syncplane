@@ -51,6 +51,7 @@ import {
 	promoteStaged,
 	rebase,
 	type RebaseResult,
+	resequencePending,
 	rollbackRejected,
 	stageServerChanges,
 	wipeConfirmedState,
@@ -315,8 +316,9 @@ export interface CoordinatorOptions {
 	 */
 	undoRefIds?: (workspaceId: string) => ReadonlySet<bigint>;
 	/**
-	 * Notified after compaction renumbers a workspace's never-pushed tail, so
-	 * undo bookkeeping can remap the ids it references.
+	 * Notified whenever a workspace's queued mutation ids are renumbered — by
+	 * compaction folding its never-pushed tail, or by a resequence closing a
+	 * mutation-id hole — so undo bookkeeping can remap the ids it references.
 	 */
 	onCompacted?: (workspaceId: string, remap: ReadonlyMap<bigint, bigint>) => void;
 	/**
@@ -360,6 +362,12 @@ interface WorkspaceSync {
 	 * (SyncClient.removeWorkspace with purge, issue 079).
 	 */
 	revoked: boolean;
+	/**
+	 * The server refused this workspace's queue for a mutation-id gap and has
+	 * not taken it since. Cleared once a push is accepted or the queue is
+	 * resequenced onto the server's watermark; see recoverGap.
+	 */
+	gapped?: boolean;
 }
 
 /**
@@ -859,6 +867,14 @@ export class Coordinator {
 				} catch (err) {
 					errors.push(err);
 				}
+				// Snapshotted BEFORE the pulls, which clear the flag: the queue did
+				// not move this cycle whether or not the recovery below repairs it
+				// for the next one, and a cycle that shipped nothing must not report
+				// success (the failure is otherwise invisible — a refusal rides as a
+				// code on an RPC that succeeded).
+				const gapped = syncable
+					.map(([ ws ]) => ws)
+					.filter((ws) => this.workspaces.get(ws)?.gapped);
 				for (const [ ws, subs ] of syncable) {
 					if (this.workspaces.get(ws)?.revoked) continue;
 					try {
@@ -867,6 +883,7 @@ export class Coordinator {
 						if (!this.noteRevoked(ws, err)) errors.push(err);
 					}
 				}
+				for (const ws of gapped) errors.push(gapError(ws));
 			}
 			if (errors.length > 0) throw errors[0];
 		});
@@ -1234,8 +1251,13 @@ export class Coordinator {
 						remaining.delete(sent.workspaceId);
 						if (wsResult.errorCode === CodeMutationIdGap) {
 							// The server is ahead of or behind our queue (e.g. a restored
-							// backup). The next pull resyncs the watermark and rebase drops
-							// anything already acked; stop pushing, surface nothing.
+							// backup, or a locally dropped mutation it never saw). Stop
+							// pushing and let this cycle's pull settle which: ids at or
+							// below the watermark are dropped by rebase, and a queue
+							// stranded above it is renumbered onto the watermark. Recorded
+							// rather than retried, because a re-push of the same ids can
+							// only be refused the same way.
+							if (state) state.gapped = true;
 							continue;
 						}
 						if (wsResult.errorCode === CodeWorkspaceAccessRevoked) {
@@ -1252,8 +1274,12 @@ export class Coordinator {
 						);
 					}
 
-					// A clean (or rejecting) response means the head is not poison.
-					if (state) state.poison = undefined;
+					// A clean (or rejecting) response means the head is not poison, and
+					// that the server took the ids as numbered.
+					if (state) {
+						state.poison = undefined;
+						state.gapped = false;
+					}
 					for (const result of wsResult.results) {
 						if (result.status === MutationStatus.REJECTED) {
 							const m = inFlight.get(`${sent.workspaceId}\u0000${result.mutationId}`);
@@ -1386,6 +1412,59 @@ export class Coordinator {
 			// above already remapped the in-memory stacks, so refresh from those.
 			void intent?.updateRefs(workspaceId, this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS);
 		}
+	}
+
+	/**
+	 * Renumbers a workspace's queue to resume at `firstId` and carries the
+	 * bookkeeping that names mutation ids across the move: the undo stacks (via
+	 * onCompacted, which exists for exactly this remap) and this tab's intent
+	 * record. Returns whether anything moved.
+	 *
+	 * Only ever called with an id the server has provably not taken — the id a
+	 * failed push dropped, or the watermark a pull just reported — because
+	 * renumbering onto an applied id would re-send it as a new mutation.
+	 */
+	private async resequence(workspaceId: string, firstId: bigint): Promise<boolean> {
+		const result = await this.opts.kvMutex.run(() =>
+			resequencePending(
+				this.opts.kv,
+				this.opts.registry,
+				this.opts.mirrors,
+				workspaceId,
+				firstId,
+			)
+		);
+		if (!result.changed) return false;
+		this.opts.onCompacted?.(workspaceId, result.remap);
+		this.opts.status.setPendingCount(workspaceId, result.pendingCount);
+		// The record's ref ids name the old numbering; onCompacted above already
+		// remapped the in-memory stacks, so refresh from those.
+		void this.opts.intent?.updateRefs(workspaceId, this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS);
+		this.emit({
+			type: 'resequence',
+			workspaceId,
+			firstId,
+			mutations: result.pendingCount,
+		});
+		await this.opts.notify(result.touched);
+		return true;
+	}
+
+	/**
+	 * Settles a queue the server refused for a mutation-id gap, using the
+	 * watermark the just-finished pull reported.
+	 *
+	 * A queue stranded ABOVE the watermark is the unrecoverable half of the
+	 * refusal: the pull's rebase can only retire ids at or below it, so a hole
+	 * below the head closes only by renumbering. The pull is the arbiter either
+	 * way — once it has run, whatever it left is contiguous with the watermark
+	 * or is about to be made so — so the flag clears here regardless.
+	 */
+	private async recoverGap(workspaceId: string, lastAcked: bigint): Promise<void> {
+		const state = this.workspaces.get(workspaceId);
+		if (!state?.gapped) return;
+		state.gapped = false;
+		await this.resequence(workspaceId, lastAcked + 1n);
 	}
 
 	/**
@@ -1726,6 +1805,10 @@ export class Coordinator {
 		err: ConnectError,
 	): Promise<void> {
 		await this.rollbackPending(workspaceId, [ m.mutationId ]);
+		// This id died on an RPC error, so the server never applied it and its
+		// watermark stops one below. Left where they are, the survivors would gap
+		// past that watermark and the workspace could never push again.
+		await this.resequence(workspaceId, m.mutationId);
 		this.opts.onMutationRejected?.({
 			workspaceId,
 			mutationId: m.mutationId,
@@ -1736,6 +1819,9 @@ export class Coordinator {
 	}
 
 	private async doPull(workspaceId: string, subs: Subscription[]): Promise<void> {
+		// The watermark the last page reported, which is what a queue refused for
+		// a mutation-id gap has to be renumbered onto once paging is done.
+		let lastAcked = 0n;
 		for (;;) {
 			const cursor = await this.cursor(workspaceId);
 			// Timed from issuing the request to the page being committed locally,
@@ -1766,6 +1852,7 @@ export class Coordinator {
 				});
 				throw err;
 			}
+			lastAcked = resp.lastAckedMutationId;
 			const { reset } = await this.applyServerPage(workspaceId, resp, subs);
 			this.emit({
 				type: 'pull',
@@ -1776,9 +1863,12 @@ export class Coordinator {
 				durationMs: performance.now() - started,
 				outcome: 'ok',
 			});
+			// A reset re-bootstrapped instead of paging, and a bootstrap leaves the
+			// queue alone: the next cycle's push re-reports any gap.
 			if (reset) return;
 			if (!resp.hasMore) break;
 		}
+		await this.recoverGap(workspaceId, lastAcked);
 	}
 
 	/**
@@ -2798,6 +2888,20 @@ function errorInfo(err: unknown): SyncErrorInfo {
 		};
 	}
 	return { message: err instanceof Error ? err.message : String(err) };
+}
+
+/**
+ * The failure a mutation-id gap is, in the shape the status surface reads. The
+ * server reports it as a code on a workspace's batch result rather than as an
+ * RPC error, so nothing else in the cycle would carry it.
+ */
+function gapError(workspaceId: string): ConnectError {
+	const err = new ConnectError(
+		`workspace "${workspaceId}": the server refused this client's queue for a mutation-id gap`,
+		Code.FailedPrecondition,
+	);
+	err.metadata.set(ErrorCodeMetadataKey, CodeMutationIdGap);
+	return err;
 }
 
 /**

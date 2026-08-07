@@ -28,6 +28,7 @@ standing condition that retrying cannot clear.
 | A purge discarded a queued mutation                        | `onMutationRejected` + the `removeWorkspace` result | `workspace_purged`                                                         |
 | A local format upgrade could not salvage a queued mutation | `onMutationRejected` + `lastError` (a count)        | `format_upgraded`                                                          |
 | A sync cycle failed                                        | `status().lastError`                                | the server's code, else `unavailable` / `internal`                         |
+| A workspace's queue was refused for a mutation-id gap      | `status().lastError` + a `resequence` sync event    | `mutation_id_gap`                                                          |
 | A watch could not be registered                            | `status().lastError`                                | `watch_failed`                                                             |
 | A text handle could not merge remote state                 | `TextHandle.status()` + `TextHandle.onError`        | `text_merge_failed`                                                        |
 | Access to a workspace was withdrawn                        | `status().workspaces[id].access`                    | —                                                                          |
