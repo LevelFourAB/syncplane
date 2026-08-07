@@ -33,6 +33,13 @@ this is the part an implementer must not get wrong.
   `(entity, key, field)`, are the opposite: not an optimization. Losing one lets
   a replica holding pre-compaction state put purged tombstones back, so they must
   be **as durable as the row**.
+- **Client verdicts** (`ClientRejections` / `SetClientRejections`) belong to the
+  same per-client record as the idempotency watermark, and `CollectIdleClients`
+  must drop both together. They are what lets a resend that follows a lost push
+  response be answered with the original rejection instead of a bare ack, so
+  keeping them past the watermark would answer for a client the watermark no
+  longer knows — and dropping them while it remains loses the verdict the resend
+  came for.
 - **Write attribution.** `PutRow` and `DeleteRow` take a `storage.Actor` — two
   strings, `Subject` (the authenticated caller) and `System` (the label a
   trusted write gave itself) — which is stored with the row and returned by

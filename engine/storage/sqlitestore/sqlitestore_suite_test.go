@@ -54,6 +54,9 @@ var _ = Describe("SQLite schema versioning", func() {
 	// deliberate.
 	const applicationID = 0x73796E63
 	const baselineVersion = 1
+	// The version a database this binary creates or upgrades ends at: the
+	// baseline plus every migration since. Bump it with each migration added.
+	const latestVersion = 2
 
 	// foreign creates a database holding one table under the given stamps,
 	// standing in for whatever a binary other than this one left behind.
@@ -101,7 +104,10 @@ var _ = Describe("SQLite schema versioning", func() {
 		Expect(db.QueryRow(`PRAGMA application_id`).Scan(&appID)).To(Succeed())
 		Expect(appID).To(Equal(applicationID))
 		Expect(db.QueryRow(`PRAGMA user_version`).Scan(&version)).To(Succeed())
-		Expect(version).To(Equal(baselineVersion))
+		// Past the baseline: applyBaseline stamps the frozen schema, and the
+		// migrations run on top of it, so a fresh database ends at the same shape
+		// an upgraded one does instead of missing every column added since.
+		Expect(version).To(Equal(latestVersion))
 	})
 
 	It("refuses a database from a schema lineage that predates the stamp", func() {
@@ -120,8 +126,35 @@ var _ = Describe("SQLite schema versioning", func() {
 	})
 
 	It("refuses a database newer than the binary", func() {
-		_, err := sqlitestore.Open(foreign("future.db", applicationID, baselineVersion+1))
+		_, err := sqlitestore.Open(foreign("future.db", applicationID, latestVersion+1))
 		Expect(err).To(MatchError(ContainSubstring("newer than this binary")))
+	})
+
+	It("upgrades a database left at an older version", func() {
+		ctx := context.Background()
+		path := filepath.Join(GinkgoT().TempDir(), "upgrade.db")
+
+		// A store this binary created, wound back to the baseline with the
+		// column the migration adds removed — what a database written by the
+		// binary that shipped the baseline looks like.
+		store, err := sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(store.Close()).To(Succeed())
+		db, err := sql.Open("sqlite", path)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = db.Exec(fmt.Sprintf(`
+			ALTER TABLE clients DROP COLUMN rejections;
+			PRAGMA user_version = %d;
+		`, baselineVersion))
+		Expect(err).NotTo(HaveOccurred())
+		Expect(db.Close()).To(Succeed())
+
+		store, err = sqlitestore.Open(path)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})
+		})).To(Succeed())
 	})
 })
 

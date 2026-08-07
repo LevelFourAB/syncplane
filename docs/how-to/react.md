@@ -146,8 +146,9 @@ with no default throws a hook-level error naming the fix.
   mutation, one per member for a batch), and `info.mutator` names the custom
   mutator when it was one. The handler is held in a ref, so an inline arrow does
   not resubscribe. Only the hook's resolved workspace is delivered by default;
-  pass `{ allWorkspaces: true }` for an app-wide surface. Rejections are
-  best-effort, not durable — see [Handle failures](handle-failures.md).
+  pass `{ allWorkspaces: true }` for an app-wide surface. A rejection whose push
+  response was lost arrives a cycle late — see
+  [Handle failures](handle-failures.md).
 
 - **`useText(key, field, opts?)`** — see
   [Use collaborative text](use-collaborative-text.md#in-react).

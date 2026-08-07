@@ -425,11 +425,9 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * rejection or a client-side poison drop (code "poison_dropped"). The info
 	 * names the workspace the mutation was queued for.
 	 *
-	 * Best-effort, not durable. A rejection bumps the server watermark (it is an
-	 * ack), so if the push *response* is lost the retry comes back
-	 * ALREADY_APPLIED: this callback never fires and the optimistic edit is
-	 * silently dropped at the next rebase. Apps that need guaranteed feedback
-	 * must persist results keyed by client/mutation id until acknowledged.
+	 * A rejection whose push response was lost is not dropped: the server records
+	 * the verdict with the watermark it bumps and replays it to the resend, so
+	 * this fires a sync cycle later than it otherwise would.
 	 */
 	onMutationRejected?: (info: RejectionInfo) => void;
 	/** Called whenever the sync status changes (also available via onStatusChange). */
@@ -1990,8 +1988,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * single-owner form a client is constructed with, and this is the
 	 * multi-listener one, so a UI layer can attach and detach with a component's
 	 * lifetime without owning (or stealing) the option. Same split as
-	 * `onStatusChange`, and every caveat on the option holds here too:
-	 * best-effort, not durable.
+	 * `onStatusChange`.
 	 */
 	onMutationRejected(cb: (info: RejectionInfo) => void): () => void {
 		this.rejectionListeners.add(cb);

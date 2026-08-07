@@ -122,11 +122,20 @@ rolls back everything that mutation wrote while the rest of the batch commits. A
 rejected mutation is still an **ack** — the client drops it and fires
 `onMutationRejected` — but it consumes no sequence number.
 
-That callback is best-effort, not durable. Because the rejection only bumps the
-idempotency watermark, a lost push response degrades to a silent drop: the retry
-comes back `ALREADY_APPLIED` and the edit vanishes at the next rebase. Apps
-needing guaranteed feedback must persist results keyed by client/mutation id
-until acknowledged.
+A rejection survives a lost push response. The verdict is recorded against the
+client's watermark in the same transaction that bumps it, so the resend is
+answered `REJECTED` with the original code and message rather than a bare
+`ALREADY_APPLIED` that would drop the edit unexplained. On the client, a queue
+whose push went unanswered keeps its acked mutations through the next rebase
+instead of retiring them on the watermark alone — otherwise the resend that
+collects the verdict would never happen. The callback therefore fires one sync
+cycle later than it would have.
+
+Two bounds are worth knowing, both reached only by a client that is no longer
+really trying: verdicts are dropped oldest-first past 64 KiB of code and message
+text per client, and they are pruned with the watermark row itself once
+idle-client GC collects it (`WithGC`), after which a resend re-applies through
+watermark adoption instead.
 
 ## Atomic batches
 

@@ -20,10 +20,8 @@ import type { UseWorkspaceOptions } from '../types.js';
  * per-workspace view should not toast another workspace's failure; pass
  * `{ allWorkspaces: true }` for an app-wide surface.
  *
- * Rejections are best-effort, not durable: a push whose RESPONSE was lost comes
- * back ALREADY_APPLIED on retry, and then nothing fires here at all. An app that
- * owes the user a guarantee has to persist its own record (see the caveat on
- * `SyncClientOptions.onMutationRejected`).
+ * A rejection whose push response was lost still arrives, one sync cycle later,
+ * once the resend collects the verdict the server recorded.
  */
 export function useOnMutationRejected(
 	handler: (info: RejectionInfo) => void,

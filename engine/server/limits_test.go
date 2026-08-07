@@ -73,8 +73,12 @@ var _ = Describe("Limits", func() {
 			Expect(pulled.GetPatch().GetChanges()).To(BeEmpty(), "rejected mutator writes must roll back")
 			Expect(pulled.GetLastAckedMutationId()).To(BeEquivalentTo(1), "rejection still advances the watermark")
 
+			// The watermark covers the id, so the mutator does not run again —
+			// the retry is answered from the recorded verdict.
 			retry := push(customMutation("c1", 1, "write_then_reject", &todov1.Todo{Id: "w1", Title: "ghost"}))
-			Expect(retry[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			Expect(retry[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(retry[0].GetErrorCode()).To(Equal(server.CodeConflict))
+			Expect(pull(nil, 0).GetPatch().GetChanges()).To(BeEmpty())
 		})
 
 		It("does not let a rejected mutation consume a sequence", func() {
@@ -243,9 +247,10 @@ var _ = Describe("Limits", func() {
 			Expect(result.GetErrorCode()).To(Equal(server.CodeInvalidArgument))
 
 			// The rejection is an ack: the watermark advanced, so a resend is
-			// already-applied and the queue drains.
-			Expect(push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "x"}))[0].GetStatus()).
-				To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			// answered from the record rather than applied, and the queue drains.
+			resend := push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "x"}))
+			Expect(resend[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(resend[0].GetSeq()).To(BeZero())
 		})
 
 		It("rejects oversized field masks without aborting the batch", func() {

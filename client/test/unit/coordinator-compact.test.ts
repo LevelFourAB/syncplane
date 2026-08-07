@@ -15,7 +15,11 @@ import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
-import { Coordinator, type CoordinatorOptions } from '../../src/sync/coordinator.js';
+import {
+	Coordinator,
+	type CoordinatorOptions,
+	type RejectionInfo,
+} from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { WatcherHub } from '../../src/watch.js';
 import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfake.js';
@@ -254,6 +258,69 @@ describe('coordinator push: compaction + chunking', () => {
 		expect(pushes.at(-1)!.map((m) => m.mutationId)).toEqual([ 1n, 2n ]);
 		const remaps = (coord as unknown as { remaps: ReadonlyMap<bigint, bigint>[] }).remaps;
 		expect(remaps).toHaveLength(0);
+
+		await coord.stop();
+	});
+
+	it('keeps an unanswered push queued past a pull that acks it', async () => {
+		// The push commits and the response is lost. The server's watermark now
+		// covers the mutation, so the pull that follows would rebase it away as
+		// acked — taking with it a rejection this client never saw. It stays
+		// queued until a re-push says what became of it.
+		await seed([ put(1n, 't1') ]);
+		let pulls = 0;
+		let seen = 0;
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push(req) {
+					pushes.push(pushedMutations(req));
+					if (seen++ === 0) throw new Error('push response lost');
+					return pushResults(
+						req,
+						pushedMutations(req).map((m) => ({
+							mutationId: m.mutationId,
+							status: MutationStatus.REJECTED,
+							errorCode: 'conflict',
+							errorMessage: 'stale version',
+						})),
+					);
+				},
+				pull() {
+					pulls++;
+					return {
+						patch: { changes: [], dropEntities: [] },
+						nextCursor: new Uint8Array([ 1 ]),
+						lastAckedMutationId: 1n,
+						reset: false,
+						hasMore: false,
+						seq: 0n,
+					};
+				},
+				// eslint-disable-next-line require-yield
+				async *bootstrap() {
+					throw new Error('bootstrap should not run with a seeded cursor');
+				},
+				query() {
+					return { rows: [] };
+				},
+			});
+		});
+		const rejections: RejectionInfo[] = [];
+		const coord = newCoordinator(transport, {
+			onMutationRejected: (info) => rejections.push(info),
+		});
+
+		// The cycle pulls even though the push failed, and the pull acks id 1 —
+		// which must not retire it.
+		await expect(coord.syncNow()).rejects.toThrow();
+		expect(pulls).toBe(1);
+		expect(await pendingIds()).toEqual([ 1n ]);
+
+		// The re-push collects the verdict, and only then is it dropped.
+		await coord.syncNow();
+		expect(pushes).toHaveLength(2);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'conflict' ]);
+		expect(await pendingIds()).toEqual([]);
 
 		await coord.stop();
 	});

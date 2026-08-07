@@ -50,11 +50,12 @@ lifetime ([Build a UI with React](react.md#the-hooks)); outside a constructor,
 `client.onMutationRejected(cb)` subscribes and returns an unsubscribe, so several
 listeners can coexist with the option above.
 
-> **This callback is best-effort, not durable.** A rejection only bumps the
-> idempotency watermark, so a lost push response degrades to a silent drop: the
-> retry comes back `ALREADY_APPLIED` and the edit vanishes at the next rebase.
-> An app that needs guaranteed feedback must persist results keyed by
-> client/mutation id until acknowledged.
+A rejection whose push response was lost still reaches the handler: the server
+records the verdict with the watermark and replays it to the resend, and the
+client keeps the mutation queued until that resend collects it
+([the convergence model](../explanation/convergence-model.md#rejections-are-results-not-errors)).
+It arrives one sync cycle late, so a handler that closes a dialog or drops a
+draft should be safe to run after a delay.
 
 ## Show connectivity
 

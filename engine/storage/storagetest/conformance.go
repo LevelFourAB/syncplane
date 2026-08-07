@@ -1262,6 +1262,91 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("records client rejections and replaces them wholesale", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientRejections("c1", []storage.ClientRejection{
+					{MutationID: 4, Code: "conflict", Message: "stale version"},
+					{MutationID: 7, Code: "permission_denied", Message: "not yours"},
+				})).To(Succeed())
+				Expect(tx.SetClientRejections("c2", []storage.ClientRejection{
+					{MutationID: 1, Code: "invalid_argument"},
+				})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.ClientRejection{
+					{MutationID: 4, Code: "conflict", Message: "stale version"},
+					{MutationID: 7, Code: "permission_denied", Message: "not yours"},
+				}))
+
+				recs, err = tx.ClientRejections("c2")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(HaveLen(1))
+
+				recs, err = tx.ClientRejections("never-seen")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty(), "an unknown client has no verdicts, and that is not an error")
+			})
+
+			// A replacement, not a merge: the engine keeps the whole list.
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientRejections("c1", []storage.ClientRejection{
+					{MutationID: 9, Code: "conflict"},
+				})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(Equal([]storage.ClientRejection{{MutationID: 9, Code: "conflict"}}))
+			})
+
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientRejections("c1", nil)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty())
+			})
+		})
+
+		It("keeps a client's watermark and its rejections independent", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("c1", 3)).To(Succeed())
+				Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 3, Code: "conflict"}})).To(Succeed())
+			})
+			// Neither write may clobber the other's column.
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("c1", 4)).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				id, err := tx.ClientLastMutationID("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(id).To(BeEquivalentTo(4))
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(HaveLen(1))
+			})
+		})
+
+		It("drops a pruned client's rejections with its watermark", func() {
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("idle", 1)).To(Succeed())
+				Expect(tx.SetClientRejections("idle", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+			})
+			write("ws1", func(tx storage.WriteTx) {
+				removed, err := tx.CollectIdleClients(time.Now().Add(time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(removed).To(Equal(1))
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("idle")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(BeEmpty())
+			})
+		})
+
 		It("rolls back the whole transaction when fn errors", func() {
 			boom := errors.New("boom")
 			err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {

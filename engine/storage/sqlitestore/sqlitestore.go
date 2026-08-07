@@ -55,6 +55,7 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"runtime"
@@ -274,7 +275,12 @@ CREATE TABLE consumer_shadows (
 // bumped inside that transaction. A structural change appends here and leaves
 // schema alone, so a database in the field reaches the new shape by the same
 // steps a fresh one skips.
-var migrations = []string{}
+var migrations = []string{
+	// Verdicts on refused mutations, so a retry that follows a lost push
+	// response is answered with the rejection instead of a bare ack. NULL until
+	// a client has had something refused, which is the common case.
+	`ALTER TABLE clients ADD COLUMN rejections BLOB;`,
+}
 
 // Store implements storage.Adapter. Stores derived via Namespace share the
 // underlying pools; only the Store returned by Open owns (and closes) them.
@@ -559,8 +565,9 @@ func (s *Store) Namespace(ns string) storage.Adapter {
 	return &Store{read: s.read, write: s.write, ns: ns}
 }
 
-// migrate creates the schema in an empty database and brings an existing one
-// up to baselineVersion+len(migrations).
+// migrate brings a database up to baselineVersion+len(migrations), creating the
+// baseline first if it is empty. A fresh database runs the same migrations an
+// existing one does, so the two end at the same shape.
 //
 // A database from another lineage — a different application_id, or a version
 // outside the range this binary knows — is refused rather than opened: writing
@@ -573,12 +580,17 @@ func migrate(db *sql.DB) error {
 	}
 	if appID == 0 {
 		// Either a file with nothing in it yet, or one this lineage never
-		// stamped; applyBaseline tells those apart.
-		return applyBaseline(db)
-	}
-	if appID != applicationID {
+		// stamped; applyBaseline tells those apart. It stamps the BASELINE, so
+		// the loop below still runs: schema is frozen at the shape it was first
+		// published with, and a fresh database reaches the current one by
+		// replaying the same migrations a database in the field does.
+		if err := applyBaseline(db); err != nil {
+			return err
+		}
+	} else if appID != applicationID {
 		return fmt.Errorf("sqlitestore: database application_id %#x is not a syncplane store (want %#x)", appID, applicationID)
 	}
+
 	var version int
 	if err := db.QueryRow(`PRAGMA user_version`).Scan(&version); err != nil {
 		return fmt.Errorf("sqlitestore: read user_version: %w", err)
@@ -1038,6 +1050,25 @@ func (t *sqliteTx) ClientLastMutationID(clientID string) (uint64, error) {
 		return 0, nil
 	}
 	return id, err
+}
+
+func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection, error) {
+	var blob []byte
+	err := t.tx.QueryRow(
+		`SELECT rejections FROM clients WHERE namespace = ? AND workspace_id = ? AND client_id = ?`,
+		t.ns, t.ws, clientID,
+	).Scan(&blob)
+	if errors.Is(err, sql.ErrNoRows) || len(blob) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recs []storage.ClientRejection
+	if err := json.Unmarshal(blob, &recs); err != nil {
+		return nil, fmt.Errorf("sqlitestore: decode rejections for client %q: %w", clientID, err)
+	}
+	return recs, nil
 }
 
 func (t *sqliteTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
@@ -1566,6 +1597,27 @@ func (t *sqliteTx) SetClientLastMutationID(clientID string, mutationID uint64) e
 		 ON CONFLICT (namespace, workspace_id, client_id)
 		 DO UPDATE SET last_mutation_id = excluded.last_mutation_id, updated_at = excluded.updated_at`,
 		t.ns, t.ws, clientID, mutationID, time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (t *sqliteTx) SetClientRejections(clientID string, recs []storage.ClientRejection) error {
+	if err := t.register(); err != nil {
+		return err
+	}
+	var blob []byte
+	if len(recs) > 0 {
+		var err error
+		if blob, err = json.Marshal(recs); err != nil {
+			return fmt.Errorf("sqlitestore: encode rejections for client %q: %w", clientID, err)
+		}
+	}
+	_, err := t.tx.Exec(
+		`INSERT INTO clients (namespace, workspace_id, client_id, rejections, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (namespace, workspace_id, client_id)
+		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
+		t.ns, t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
 	return err
 }

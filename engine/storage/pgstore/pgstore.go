@@ -251,6 +251,10 @@ var migrations = []string{
 		PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
 	);
 	`,
+	// 2: verdicts on refused mutations, so a retry that follows a lost push
+	// response is answered with the rejection instead of a bare ack. NULL until
+	// a client has had something refused, which is the common case.
+	`ALTER TABLE clients ADD COLUMN rejections BYTEA;`,
 }
 
 // migrationLockKey serializes schema migration across nodes. Several servers

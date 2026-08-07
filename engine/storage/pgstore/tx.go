@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -215,6 +216,26 @@ func (t *pgTx) ClientLastMutationID(clientID string) (uint64, error) {
 		return 0, nil
 	}
 	return uint64(id), err
+}
+
+func (t *pgTx) ClientRejections(clientID string) ([]storage.ClientRejection, error) {
+	var blob []byte
+	err := t.tx.QueryRow(t.ctx,
+		`SELECT rejections FROM clients
+		 WHERE namespace = $1 AND workspace_id = $2 AND client_id = $3`,
+		t.ns, t.ws, clientID,
+	).Scan(&blob)
+	if errors.Is(err, pgx.ErrNoRows) || len(blob) == 0 {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var recs []storage.ClientRejection
+	if err := json.Unmarshal(blob, &recs); err != nil {
+		return nil, fmt.Errorf("pgstore: decode rejections for client %q: %w", clientID, err)
+	}
+	return recs, nil
 }
 
 func (t *pgTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
@@ -742,6 +763,27 @@ func (t *pgTx) SetClientLastMutationID(clientID string, mutationID uint64) error
 		 ON CONFLICT (namespace, workspace_id, client_id)
 		 DO UPDATE SET last_mutation_id = excluded.last_mutation_id, updated_at = excluded.updated_at`,
 		t.ns, t.ws, clientID, int64(mutationID), time.Now().UnixMilli(),
+	)
+	return err
+}
+
+func (t *pgTx) SetClientRejections(clientID string, recs []storage.ClientRejection) error {
+	if err := t.register(); err != nil {
+		return err
+	}
+	var blob []byte
+	if len(recs) > 0 {
+		var err error
+		if blob, err = json.Marshal(recs); err != nil {
+			return fmt.Errorf("pgstore: encode rejections for client %q: %w", clientID, err)
+		}
+	}
+	_, err := t.tx.Exec(t.ctx,
+		`INSERT INTO clients (namespace, workspace_id, client_id, rejections, updated_at)
+		 VALUES ($1, $2, $3, $4, $5)
+		 ON CONFLICT (namespace, workspace_id, client_id)
+		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
+		t.ns, t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
 	return err
 }

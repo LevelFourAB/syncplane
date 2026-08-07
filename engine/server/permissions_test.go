@@ -88,16 +88,61 @@ var _ = Describe("Permissions and custom mutations", func() {
 		It("acks rejections: the watermark advances and the queue continues", func() {
 			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "forbidden fruit"}))
 
-			// Retry of the rejected id is ALREADY_APPLIED, and the next id applies.
+			// Retry of the rejected id replays the verdict, and the next id applies.
 			resp := push(
 				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "forbidden fruit"}),
 				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}),
 			)
-			Expect(resp[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			Expect(resp[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
 			Expect(resp[1].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
 
 			Expect(pull().GetLastAckedMutationId()).To(BeEquivalentTo(2))
 			Expect(titles(pull().GetPatch().GetChanges())).To(Equal([]string{"fine"}))
+		})
+
+		It("replays the verdict when the push response was lost", func() {
+			// The rejection commits and bumps the watermark, then the response
+			// never reaches the client. Answering the retry with a bare
+			// ALREADY_APPLIED would drop the edit with no explanation, so the
+			// recorded verdict answers instead — code and message intact.
+			first := push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}))
+			Expect(first[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+
+			retry := push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}))
+			Expect(retry[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(retry[0].GetErrorCode()).To(Equal(first[0].GetErrorCode()))
+			Expect(retry[0].GetErrorMessage()).To(Equal(first[0].GetErrorMessage()))
+			Expect(retry[0].GetSeq()).To(BeZero(), "a replayed rejection consumes no sequence")
+
+			Expect(pull().GetPatch().GetChanges()).To(BeEmpty(), "the replay must not write either")
+		})
+
+		It("keeps replaying a verdict while later ids ride along unacked", func() {
+			// Every response is lost, so the queue head stays put while new
+			// mutations pile up behind it. The verdict must survive the batches
+			// that follow it, not just the one that recorded it.
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}))
+			push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}),
+			)
+			resp := push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}),
+				putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3", Title: "also fine"}),
+			)
+			Expect(resp[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(resp[1].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			Expect(resp[2].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+		})
+
+		It("keeps each client's verdicts to itself", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "very forbidden"}))
+			push(putMutation("c2", 1, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}))
+
+			resp := push(putMutation("c2", 1, "todo", "t2", &todov1.Todo{Id: "t2", Title: "fine"}))
+			Expect(resp[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED),
+				"c2 applied its id 1; c1's rejection of the same id is none of its business")
 		})
 
 		It("enforces the policy on a write buried inside a batch and rolls the batch back", func() {

@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest';
+import { createConnectTransport } from '@connectrpc/connect-node';
+import { describe, expect, inject, it } from 'vitest';
 
 import type { RejectionInfo } from '../../src/client.js';
 import { CodeConflict } from '../../src/codes.js';
@@ -69,6 +70,61 @@ describe('expected-version CAS', () => {
 			expect(todo?.title).toBe('moved by A');
 			expect(todo?.completed).toBe(true);
 		}
+
+		await a.close();
+		await b.close();
+	});
+
+	it('reports a rejection whose push response never arrived', async () => {
+		// The server commits the rejection and bumps the watermark, then the
+		// response is lost. Without a record of the verdict the retry would come
+		// back already-applied and the edit would vanish with no callback — the
+		// silent drop this covers.
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		const rejections: RejectionInfo[] = [];
+		let dropPushResponse = false;
+		const b = newClient(ws, {
+			onMutationRejected: (info) => rejections.push(info),
+			transport: createConnectTransport({
+				baseUrl: inject('serverUrl'),
+				httpVersion: '1.1',
+				interceptors: [ (next) => async (req) => {
+					const res = await next(req);
+					if (dropPushResponse && req.method.name === 'Push') {
+						dropPushResponse = false;
+						throw new Error('connection lost after the server committed');
+					}
+					return res;
+				} ],
+			}),
+		});
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(TodoSchema, { id: 't1', title: 'original' });
+		await a.syncNow();
+		await b.syncNow();
+		const base = (await b.getRow(TodoSchema, 't1'))!.version;
+
+		await a.mutate.patch(TodoSchema, 't1', { title: 'moved by A' });
+		await a.syncNow();
+
+		// B's guard is already stale, so this push is refused server-side — and
+		// B never sees the answer.
+		await b.mutate.patch(TodoSchema, 't1', { title: 'edited by B' }, { expectedVersion: base });
+		dropPushResponse = true;
+		await expect(b.syncNow()).rejects.toThrow();
+		expect(rejections).toEqual([]);
+		expect(await b.pendingCount()).toBe(1);
+
+		// The resend is answered from the recorded verdict, not a bare ack.
+		await b.syncNow();
+		expect(rejections).toHaveLength(1);
+		expect(rejections[0]?.errorCode).toBe(CodeConflict);
+		expect(rejections[0]?.targets).toEqual([ { entity: 'todo', key: 't1' } ]);
+		expect(await b.pendingCount()).toBe(0);
+		expect((await b.get(TodoSchema, 't1'))?.title).toBe('moved by A');
 
 		await a.close();
 		await b.close();

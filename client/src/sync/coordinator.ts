@@ -478,6 +478,15 @@ export class Coordinator {
 	 */
 	private splitPush = false;
 	/**
+	 * Workspaces whose last push shipped mutations the server never answered for
+	 * — a response lost after the write, so what became of them is unknown here.
+	 * Their queues hold on to acked mutations (rebase's deferAcked) until the
+	 * next push says what happened: the server's watermark already covers those
+	 * ids, so dropping them on that alone would retire a rejection nobody ever
+	 * saw. Cleared when that push starts.
+	 */
+	private unresolvedPush = new Set<string>();
+	/**
 	 * Rows (fullStateKey) whose collaborative-text writes must ship whole
 	 * documents because the server refused a delta-state fragment for them. In
 	 * memory only and never cleared: a session that hit the fallback once has
@@ -1061,6 +1070,8 @@ export class Coordinator {
 		// safely write against, so hold the queues (they keep growing locally) until
 		// the revisions line up and the skew clears.
 		if (this.pushBlocked) return;
+		// Whatever the last cycle could not resolve, this one is about to re-ship.
+		this.unresolvedPush.clear();
 		// Seed the watermark of any workspace added since start() before reading it
 		// below: absent parses as 0, and compaction against 0 would renumber an
 		// inherited queue the server may already have applied.
@@ -1238,6 +1249,12 @@ export class Coordinator {
 						// mutation toward the head where isolation can dead-letter it.
 						return;
 					}
+					// The batch may well have committed — a response can be lost after
+					// the write — so these mutations must be re-pushed to learn what
+					// became of them. Until then their queues keep acked ids rather
+					// than rebasing them away against a watermark that has already
+					// moved past a verdict this client never received.
+					for (const s of shipped) this.unresolvedPush.add(s.workspaceId);
 					throw err; // network / unknown: retry the whole cycle with backoff.
 				}
 
@@ -2074,7 +2091,13 @@ export class Coordinator {
 				// mutation's confirmed change may land in a later page, and dropping
 				// mid-drain would transiently regress its row for direct get/scan
 				// calls (and persist that regression across a crash).
-				deferAcked: page.hasMore,
+				//
+				// Held for the same reason while a push of this workspace went
+				// unanswered — this path also runs off the live stream, which does
+				// not wait for the cycle — because the server's watermark covers
+				// mutations whose verdicts the re-push has yet to collect, and a
+				// rejection among them would leave with them.
+				deferAcked: page.hasMore || this.unresolvedPush.has(workspaceId),
 				// Gates the page against the workspace's stored seq inside the rebase
 				// transaction: a stale page (a concurrent tab already pulled past
 				// it) is dropped whole — rows AND cursor — instead of regressing

@@ -55,7 +55,7 @@ var _ = storagetest.ConformanceNamespaced("postgres", func() (storage.Adapter, s
 var _ = Describe("Postgres migrations", func() {
 	ctx := context.Background()
 
-	It("applies the baseline once and reopens onto the same data", func() {
+	It("applies every migration once and reopens onto the same data", func() {
 		dsn := pgtest.DSN()
 
 		store, err := pgstore.Open(ctx, dsn)
@@ -90,7 +90,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1}), "the baseline, recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2}), "every migration, each recorded exactly once")
 	})
 
 	It("lets several nodes Open the same database at once", func() {

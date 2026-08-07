@@ -176,6 +176,27 @@ type IdempotencyRecord struct {
 	Result []byte
 }
 
+// ClientRejection is the durable verdict on one mutation the server refused. A
+// rejection is an ack — it bumps the client's watermark without writing
+// anything — so without a record of it, a client that never received the push
+// response gets a bare "already applied" on its retry and drops the edit with no
+// explanation. The record is what lets the retry be answered with the original
+// verdict instead.
+//
+// Records are stored per client alongside the watermark, so CollectIdleClients
+// drops them with it.
+type ClientRejection struct {
+	// MutationID is the refused mutation's id, unique per client and never
+	// reused, which is what makes a record safe to keep past the retry it was
+	// written for.
+	MutationID uint64
+	// Code is the machine-readable rejection code (the engine's CodeConflict,
+	// CodePermissionDenied, or one an app's own hook invented).
+	Code string
+	// Message is the human-readable reason, as the rejecting hook worded it.
+	Message string
+}
+
 // ConsumerPosition is one effect consumer's durable progress through a
 // workspace's change feed: the position it has fully acted on, in the same
 // (Seq, Entity, Key) order ScanChanges pages by. Entity and Key are empty on a
@@ -369,6 +390,10 @@ type ReadTx interface {
 	// ClientLastMutationID returns the per-client idempotency watermark
 	// (0 if the client is unknown).
 	ClientLastMutationID(clientID string) (uint64, error)
+	// ClientRejections returns the verdicts recorded for clientID, ordered by
+	// MutationID ascending. An unknown client, or one that has had nothing
+	// refused, has none.
+	ClientRejections(clientID string) ([]ClientRejection, error)
 	// IdempotencyRecord returns what the trusted write that claimed key did, and
 	// whether the key has been claimed at all. Keys are per workspace, exactly
 	// like everything else this transaction sees.
@@ -476,6 +501,15 @@ type WriteTx interface {
 	DeleteRow(entity, key string, version uint64, actor Actor) error
 	// SetClientLastMutationID bumps the idempotency watermark.
 	SetClientLastMutationID(clientID string, mutationID uint64) error
+	// SetClientRejections replaces every verdict recorded for clientID with recs
+	// (see ReadTx.ClientRejections). An empty slice clears them. The engine
+	// bounds what it stores, so an adapter may keep the slice whole.
+	//
+	// It creates the client's watermark row if it does not exist yet, which also
+	// refreshes what CollectIdleClients considers idle — the same coupling
+	// SetClientLastMutationID has, and for the same reason: the two halves of a
+	// client's state must expire together.
+	SetClientRejections(clientID string, recs []ClientRejection) error
 	// InSavepoint runs fn inside a nested savepoint. If fn returns an error,
 	// every write fn made (including allocated sequences) rolls back and the
 	// error propagates; on nil the savepoint is released into the enclosing

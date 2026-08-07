@@ -29,7 +29,9 @@ import (
 // the rest of the batch — and the watermark bump for the rejected mutation —
 // still commits.
 //
-// Per-client watermark rules: mutation_id <= watermark is ALREADY_APPLIED;
+// Per-client watermark rules: mutation_id <= watermark is ALREADY_APPLIED, or
+// REJECTED again if that id's verdict is still on record (which is what keeps a
+// lost push response from turning a rejection into a silent drop);
 // mutation_id == watermark+1 applies (or REJECTS — both bump the watermark,
 // a rejection is an ack); a gap fails that workspace's batch so the client can
 // resend it in order.
@@ -165,6 +167,22 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		adopted = adopted[:0]
 		// Watermarks per client, loaded lazily and tracked as we bump them.
 		watermarks := map[string]uint64{}
+		// Recorded verdicts per client, loaded lazily by rejectionsOf and marked
+		// dirty when this batch adds one. Reset with the rest: a retried attempt
+		// must re-read rather than build on what an abandoned one collected.
+		verdicts := map[string][]storage.ClientRejection{}
+		dirty := map[string]bool{}
+		rejectionsOf := func(clientID string) ([]storage.ClientRejection, error) {
+			if recs, ok := verdicts[clientID]; ok {
+				return recs, nil
+			}
+			recs, err := tx.ClientRejections(clientID)
+			if err != nil {
+				return nil, err
+			}
+			verdicts[clientID] = recs
+			return recs, nil
+		}
 		for i, m := range muts {
 			if m.GetClientId() == "" || m.GetMutationId() == 0 {
 				badArg = "mutation needs client_id and mutation_id >= 1"
@@ -182,10 +200,25 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 
 			switch {
 			case m.GetMutationId() <= last:
-				results = append(results, &syncplanev1.MutationResult{
+				// The watermark already covers this id, so nothing is applied
+				// either way — but if it was covered by a REJECTION, the client
+				// is resending precisely because it never learned that. Replay
+				// the verdict rather than the bare ack that would make the edit
+				// disappear unexplained.
+				recs, err := rejectionsOf(m.GetClientId())
+				if err != nil {
+					return err
+				}
+				result := &syncplanev1.MutationResult{
 					MutationId: m.GetMutationId(),
 					Status:     syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED,
-				})
+				}
+				if r, ok := findRejection(recs, m.GetMutationId()); ok {
+					result.Status = syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED
+					result.ErrorCode = r.Code
+					result.ErrorMessage = r.Message
+				}
+				results = append(results, result)
 				continue
 			case last == 0:
 				// Watermark adoption: 0 means either a brand-new client
@@ -235,6 +268,20 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					ErrorCode:    r.Code,
 					ErrorMessage: r.Message,
 				}
+				// Record the verdict so a resend of this id — which is what the
+				// client does when it never sees this response — is answered
+				// with it. Outside the savepoint, like the watermark bump it
+				// accompanies.
+				recs, err := rejectionsOf(m.GetClientId())
+				if err != nil {
+					return err
+				}
+				verdicts[m.GetClientId()] = append(recs, storage.ClientRejection{
+					MutationID: m.GetMutationId(),
+					Code:       r.Code,
+					Message:    r.Message,
+				})
+				dirty[m.GetClientId()] = true
 			default:
 				return applyErr
 			}
@@ -246,6 +293,13 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 			watermarks[m.GetClientId()] = m.GetMutationId()
 			results = append(results, result)
+		}
+		// One write per client, after the loop: a batch that rejects several of
+		// one client's mutations records them together.
+		for clientID := range dirty {
+			if err := tx.SetClientRejections(clientID, trimRejections(verdicts[clientID])); err != nil {
+				return err
+			}
 		}
 		return nil
 	})
@@ -291,6 +345,40 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		)
 	}
 	return out
+}
+
+// maxRejectionRecordBytes bounds the code and message text one client's
+// recorded verdicts may cost, because both are written by the rejecting hook
+// and a client can provoke as many rejections per push as the batch limit
+// allows. Verdicts past the bound are dropped oldest-first and their ids fall
+// back to a bare ALREADY_APPLIED ack — the behaviour of a client that has
+// pushed tens of thousands of refused mutations without ever reading a
+// response, which no working client does.
+const maxRejectionRecordBytes = 64 << 10
+
+// findRejection looks a mutation id up among a client's recorded verdicts.
+func findRejection(recs []storage.ClientRejection, mutationID uint64) (storage.ClientRejection, bool) {
+	for _, r := range recs {
+		if r.MutationID == mutationID {
+			return r, true
+		}
+	}
+	return storage.ClientRejection{}, false
+}
+
+// trimRejections drops the oldest verdicts from an ascending list until it fits
+// maxRejectionRecordBytes, keeping the newest one whatever it costs: a verdict
+// too large to record at all is the only case where a resend would learn
+// nothing, and it is the case where the client is still waiting for an answer.
+func trimRejections(recs []storage.ClientRejection) []storage.ClientRejection {
+	budget := maxRejectionRecordBytes
+	for i := len(recs) - 1; i >= 0; i-- {
+		budget -= len(recs[i].Code) + len(recs[i].Message)
+		if budget < 0 {
+			return recs[min(i+1, len(recs)-1):]
+		}
+	}
+	return recs
 }
 
 // recordMutationResults accounts one batch's per-mutation outcomes. This is

@@ -92,7 +92,10 @@ healthy one from outside. Watch the rejection rate, not the error rate.
 On `push.mutations`, `outcome` is `ok` for applied and `skipped` for
 `ALREADY_APPLIED` — an idempotent replay. A rising `skipped` share means
 clients are resending: a queue that is not draining, or acks that are not
-landing.
+landing. A resend of a mutation that was _rejected_ counts on
+`push.rejections` instead, each time the recorded verdict is replayed, so a
+client resending a refused mutation inflates the rejection rate rather than the
+skip rate.
 
 `rejection_code` is bounded by the codes your app passes to `server.Reject`.
 **Do not interpolate variable data into a rejection code** — a code carrying a
