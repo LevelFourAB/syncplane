@@ -238,15 +238,23 @@ function bytesEqual(a: Uint8Array, b: Uint8Array): boolean {
 
 /** Opens a live handle. The row must exist (PATCH is not an upsert). */
 export async function openTextHandle(deps: TextHandleDeps): Promise<TextHandle> {
-	const initial = await deps.load();
-	if (initial === undefined) {
-		throw new Error('text: row not found — create the row before opening a text handle');
-	}
 	// One lease per handle, held until close(). Two handles over the same field
 	// — two tabs, or an editor binding mounted twice — build two independent
 	// documents, and two documents sharing a peer allocate colliding item ids.
+	//
+	// The lease is taken BEFORE the row is read, not after. A free slot is
+	// recycled immediately (text/peer.ts), and what makes that safe is that the
+	// next holder builds its document from a store already holding the previous
+	// holder's writes. Reading first leaves a window in which the previous holder
+	// writes and releases between the two, leaving this handle to speak its peer
+	// through a document that has not seen those writes — and to allocate the
+	// counters they used.
 	const lease = await deps.acquirePeer();
 	try {
+		const initial = await deps.load();
+		if (initial === undefined) {
+			throw new Error('text: row not found — create the row before opening a text handle');
+		}
 		return buildHandle(deps, initial, lease);
 	} catch (err) {
 		lease.release();
@@ -430,7 +438,17 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 	 * replaces them.
 	 */
 	function rebuildOnCompaction(incoming: TextDoc, prev: TextDoc, prevText: string): void {
+		// replaceWith takes the incoming state's version vector wholesale, and that
+		// vector knows nothing of the edits this handle has queued but not yet had
+		// confirmed. Re-inserting the text from there would allocate counters this
+		// peer has already spoken, so the ids the queue is still carrying would
+		// each name two items at two positions — which is not a state any merge can
+		// reconcile. Raising the rebuilt document past what this peer has said is
+		// what the server's three-way text writer does for the same reason (see
+		// ApplyTextStrings in engine/server/textwrite.go).
+		const spoken = doc.versionVector();
 		doc.replaceWith(incoming);
+		doc.observeVersion(spoken);
 		const { deleted, inserted } = doc.setString(prevText);
 		emit({ ops: [], marksChanged: prev.marks.length > 0 || doc.marks.length > 0 }, prevText);
 		if (deleted.length > 0 || inserted.length > 0) {
@@ -626,8 +644,12 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 				subscribers.clear();
 				errorListeners.clear();
 				unwatch?.();
-				// Frees the peer slot for the next handle on this device.
-				lease.release();
+				// The peer slot goes back to the pool once these writes are in the
+				// store, not now: the next handle to take it builds its document from
+				// that store, and a document missing them would allocate the counters
+				// they already used. Attached here rather than to the promise below so
+				// that a second close() does not free the slot a second time.
+				void writeChain.then(() => lease.release(), () => lease.release());
 			}
 			// The chain is drained, not cut: its links are PATCHes for edits the
 			// user already made, and a closed handle is not a reason to drop them.

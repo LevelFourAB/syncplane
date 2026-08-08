@@ -90,6 +90,59 @@ describe('a live handle whose field the server compacts', () => {
 		handle.close();
 	});
 
+	it('allocates counters past the edits it has already queued', async () => {
+		const server = trimmed();
+		const stored = encodeTextDoc(server);
+		const h = harness(stored);
+		const handle = await openTextHandle(h.deps);
+
+		await handle.insert(0, 'a');
+		await handle.insert(handle.value.length, 'a');
+		await flush();
+		const spoken = handle.doc.versionVector().get('p0')!;
+		h.patches.length = 0;
+
+		const compacted = decodeTextDoc(stored, '');
+		compactDoc(compacted);
+		h.deliver(encodeTextDoc(compacted));
+		await flush();
+
+		// The compacted state's version vector knows nothing of the two edits, so
+		// rebuilding from it and allocating afresh would hand the re-inserted
+		// characters ids the queue is still carrying — one id, two items, two
+		// positions.
+		const pushed = decodeTextDoc(h.patches[0]!, '');
+		for (const n of pushed.byId.values()) {
+			if (n.id.peer === 'p0') expect(n.id.counter).toBeGreaterThan(spoken);
+		}
+	});
+
+	it('keeps merging when a PATCH it queued before the rebuild comes back', async () => {
+		const server = trimmed();
+		const stored = encodeTextDoc(server);
+		const h = harness(stored);
+		const handle = await openTextHandle(h.deps);
+
+		// The same character in two places: what turns a reused id into a
+		// disagreement about placement rather than about content.
+		await handle.insert(0, 'a');
+		await handle.insert(handle.value.length, 'a');
+		await flush();
+		const queued = [ ...h.patches ];
+
+		const compacted = decodeTextDoc(stored, '');
+		compactDoc(compacted);
+		h.deliver(encodeTextDoc(compacted));
+		await flush();
+
+		// Compaction refuses those PATCHes, but not before the overlay has folded
+		// them into the row this handle is watching.
+		h.deliver(applyFragmentBytes(encodeTextDoc(compacted), queued[0]!));
+
+		expect(handle.status().state).toBe('open');
+		handle.close();
+	});
+
 	it('pushes nothing when it held no unsynced edits', async () => {
 		const server = trimmed();
 		const h = harness(encodeTextDoc(server));

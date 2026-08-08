@@ -188,7 +188,58 @@ describe('a handle handed state it cannot merge', () => {
 	});
 });
 
+describe('opening a handle', () => {
+	it('leases its writer identity before it reads the row', async () => {
+		const h = harness(docBytes('seed', 'hello'));
+		const order: string[] = [];
+		const handle = await openTextHandle({
+			...h.deps,
+			acquirePeer: () => {
+				order.push('lease');
+				return h.deps.acquirePeer();
+			},
+			load: () => {
+				order.push('load');
+				return h.deps.load();
+			},
+		});
+
+		// A slot is recycled as soon as it is free (text/peer.ts), so the snapshot
+		// this handle builds on has to be one that already covers everything the
+		// previous holder wrote under the same peer. Reading first leaves a window
+		// for those writes to land in between.
+		expect(order).toEqual([ 'lease', 'load' ]);
+		await handle.close();
+	});
+
+	it('returns the slot when there is no row to open', async () => {
+		const h = harness(docBytes('seed', 'hello'));
+		await expect(
+			openTextHandle({ ...h.deps, load: () => Promise.resolve(undefined) }),
+		).rejects.toThrow(/row not found/);
+		expect(h.released).toBe(1);
+	});
+});
+
 describe('closing a handle', () => {
+	it('holds its writer identity until the drained writes are in the store', async () => {
+		const h = harness(docBytes('seed', 'hello'));
+		const handle = await openTextHandle(h.deps);
+		h.holdPatches();
+		void handle.insert(5, '!');
+
+		const closing = handle.close();
+		await Promise.resolve();
+		// Recycling the slot here would hand the peer to a document built from a
+		// store that has not seen this edit, which would then allocate the very
+		// counters it carries.
+		expect(h.released).toBe(0);
+
+		h.releasePatches();
+		await closing;
+		expect(h.released).toBe(1);
+	});
+
 	it('resolves once the writes queued before it have been enqueued', async () => {
 		const h = harness(docBytes('seed', 'hello'));
 		const handle = await openTextHandle(h.deps);

@@ -213,19 +213,22 @@ export function compactDoc(doc: TextDoc): CompactResult {
 }
 
 /**
- * Whether `incoming` is a compacted view of state `local` still holds in full:
- * it lacks items OR MARK OPERATIONS local carries at ids its own version vector
- * covers, which no ordinary remote state can do — a replica that has seen an id
- * either has it or purged it.
+ * Whether `incoming` is state a live document must rebuild onto rather than
+ * merge with: it lacks items OR MARK OPERATIONS `local` carries at ids its own
+ * version vector covers. Merging is a union, so folding such a state in would
+ * put back precisely what it no longer holds.
+ *
+ * Two things produce it. A server compaction is one: it purges the tombstones
+ * and mark ops a document can no longer need. A dropped local mutation is the
+ * other — a fragment carries its source document's FULL version vector, so a
+ * state that has absorbed a later fragment covers the ids of an earlier one that
+ * was rejected while carrying none of its items.
  *
  * Both halves matter. A compaction that reclaimed only mark ops leaves every
  * item in place, so an item-only check reads it as ordinary state and the
  * handle merges instead of rebuilding — which puts the reclaimed ops straight
  * back, locally and in every write that follows, while the server keeps
  * skipping them. The two sides then never agree on the document's marks.
- *
- * A local edit nobody has seen yet never trips this, because the incoming
- * vector cannot cover a counter it has never been told about.
  */
 export function purgedByRemote(local: TextDoc, incoming: TextDoc): boolean {
 	for (const n of local.byId.values()) {
