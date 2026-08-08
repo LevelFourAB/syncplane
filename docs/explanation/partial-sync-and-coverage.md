@@ -14,7 +14,7 @@ entity.
 ## Window maintenance is exact, not best-effort
 
 The cursor carries the window's membership as a key-set, and every pull with
-anything to deliver recomputes the window and diffs it against that set:
+anything to deliver brings the window up to date and diffs it against that set:
 
 - rows that **entered** arrive as values,
 - rows that **left** arrive as tombstones and leave the local store.
@@ -62,11 +62,45 @@ with no window and no follow has a cursor smaller than any page it rides on,
 which never clears that bar — those streams checkpoint on every frame, and the
 setting changes nothing for them.
 
-## What a window does not bound
+## What a bounded membership costs the server
 
-It bounds the **client**, not the server. Computing an `orderBy` window costs
-what the equivalent `Query` costs — a range read where an index serves the
-predicate and ordering, and a full entity scan where none does.
+A window bounds the **client** by construction: what it holds, bootstraps and
+materializes. Bounding what the SERVER does per pull takes more, because a
+window and a follow closure are both memberships that cannot be decided one row
+at a time — resolve either from scratch and the cost is the size of the set, not
+the size of what changed. On a shared workspace under constant writes, where no
+pull ever sits at the head, that is one pass over every connected client's whole
+working set per write, which is the wrong shape for the deployment windows exist
+for.
+
+So a pull that can see **every** row written since its cursor maintains both
+sets from those rows instead:
+
+- A **window** carries its members and the position of the weakest of them, so a
+  changed row's membership is one comparison. Only a row entering or leaving a
+  full window costs a read, and then a bounded ordered walk either side of that
+  position rather than a pass over the window. A `byRecency` window costs no
+  read at all: its ordering is the workspace sequence, so anything written since
+  the cursor enters at the front and the tail falls off a list the cursor
+  already holds in order.
+- A **follow closure** over a reverse relation ("every issue of this project")
+  is decidable from the member's own reference field, so a changed row settles
+  itself and only a seed that entered or left the base scope is walked again —
+  including a seed that moved without being written, which is what a window
+  refilling does.
+
+Resolving from scratch stays the fallback and every case the maintained path
+declines takes it: a page that truncates, a cursor resuming inside a
+same-version group, a subscription set that no longer lines up with the
+cursor's, a window that would have to locate a tail it never had, a follow path
+that walks forward or through more than one segment. The two must produce the
+same page, and `Limits.DisableMembershipMaintenance` forces the fallback so that
+property is tested rather than assumed.
+
+What stays unbounded is the FIRST resolution, and the fallbacks with it:
+computing an `orderBy` window from scratch costs what the equivalent `Query`
+costs — a range read where an index serves the predicate and ordering, and a
+full entity scan where none does.
 
 ## Coverage: knowing when the answer is partial
 

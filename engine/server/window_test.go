@@ -528,9 +528,14 @@ var _ = Describe("Windowed subscriptions", func() {
 
 			var decoded syncplanecursorv1.Cursor
 			Expect(proto.Unmarshal(cursor, &decoded)).To(Succeed())
-			Expect(decoded.GetWindow().GetEntries()).To(HaveLen(1))
-			Expect(decoded.GetWindow().GetEntries()[0].GetEntity()).To(Equal("widget"))
-			Expect(decoded.GetWindow().GetEntries()[0].GetKeys()).To(Equal([]string{"a", "b"}))
+			Expect(decoded.GetWindows()).To(HaveLen(1))
+			state := decoded.GetWindows()[0]
+			Expect(state.GetSubscription()).To(BeZero())
+			Expect(state.GetKeys()).To(Equal([]string{"a", "b"}))
+			// The tail's position rides with the keys: it is what lets the next
+			// pull decide a changed row's membership by comparison instead of
+			// resolving the window again.
+			Expect(state.GetBoundary()).NotTo(BeEmpty())
 		})
 	})
 })

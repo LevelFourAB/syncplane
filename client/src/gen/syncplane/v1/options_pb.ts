@@ -99,8 +99,8 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
   createPolicy: CreatePolicy;
 
   /**
-   * Who may UPDATE rows of this entity in place. Unset allows anyone the app's
-   * permission policy admits.
+   * Who may UPDATE rows of this entity in place. Unset allows anyone the
+   * app's permission policy admits.
    *
    * It covers every PATCH (which never upserts) and every PUT that could land
    * on an existing row. A caller that only means to create a row on an entity

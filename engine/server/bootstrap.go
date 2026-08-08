@@ -107,13 +107,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		if err != nil {
 			return err
 		}
-		var windowSet *syncplanecursorv1.ClosureSet
 		emitter.windowMembers, err = emitter.buildWindows(tx)
 		if err != nil {
 			return err
-		}
-		if len(emitter.windows) > 0 {
-			windowSet = emitter.windowMembers.keySet()
 		}
 		var closureSet *syncplanecursorv1.ClosureSet
 		if emitter.followEntities != nil {
@@ -150,7 +146,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				storeEpoch: storeEpoch,
 				subs:       msg.GetSubscriptions(),
 				closure:    closureSet,
-				window:     windowSet,
+				windows:    emitter.windowStates(),
 			})
 			begin.Seq = current
 		}

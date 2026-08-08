@@ -43,14 +43,66 @@ type cursorState struct {
 	resync *syncplanecursorv1.ResyncState
 	// closure is the reference-following closure key-set the cursor was issued
 	// under (Cursor.closure): the exact set of rows the client holds via follow
-	// beyond its base scope. The next following pull rebuilds the closure and
-	// diffs it against this set. nil on legacy cursors and non-following
-	// subscriptions ⇒ empty ⇒ behaves as today.
+	// beyond its base scope. The next following pull brings the closure up to
+	// date against current rows — maintaining it from this set where it can,
+	// walking it again where it cannot — and diffs the result against this set.
+	// nil on legacy cursors and non-following subscriptions ⇒ empty.
 	closure *syncplanecursorv1.ClosureSet
-	// window is the same thing for windowed subscriptions (Cursor.window): the
-	// exact rows the client holds via Subscription.window. nil on legacy
-	// cursors and non-windowed subscriptions.
+	// window is the windowed membership as ONE set (Cursor.window), which is
+	// what cursors issued before windows were maintained per window carry.
+	// Populated only from such a cursor; this server issues windows instead.
 	window *syncplanecursorv1.ClosureSet
+	// windows is the windowed membership split per window (Cursor.windows),
+	// each with the position separating it from the rest of its ordering. That
+	// split is what lets the next pull maintain a window from the rows that
+	// changed rather than resolve it again. nil on non-windowed subscriptions
+	// and on cursors older than the field.
+	windows []*syncplanecursorv1.WindowState
+}
+
+// windowSet is the window membership the cursor carries, in whichever form it
+// carries it. Entity names come from the cursor's own subscription list, which
+// is the list its window states index into — never from the request's, which
+// may have moved on.
+func (c cursorState) windowSet() map[closureKey]bool {
+	if len(c.windows) == 0 {
+		return closureSetMembership(c.window)
+	}
+	out := map[closureKey]bool{}
+	for _, st := range c.windows {
+		i := int(st.GetSubscription())
+		if i >= len(c.subs) {
+			continue
+		}
+		entity := c.subs[i].GetEntity()
+		for _, k := range st.GetKeys() {
+			out[closureKey{entity: entity, key: k}] = true
+		}
+	}
+	return out
+}
+
+// windowSeedsMoved is the membership difference between the window set a cursor
+// carried and the one this pull resolved, in both directions.
+//
+// A follow closure seeded from a window moves with it, and it moves for rows
+// that were never written: a member evicted by an entering row, or one that
+// rose into the window when another left, has the same version it always had
+// and so appears in no change scan. Naming those rows is what keeps a
+// maintained closure from stranding the followers of a seed that quietly left.
+func windowSeedsMoved(old map[closureKey]bool, now closureRows) []closureKey {
+	var moved []closureKey
+	for ck := range now {
+		if !old[ck] {
+			moved = append(moved, ck)
+		}
+	}
+	for ck := range old {
+		if !now.has(ck.entity, ck.key) {
+			moved = append(moved, ck)
+		}
+	}
+	return moved
 }
 
 func decodeCursor(raw []byte) (cursorState, error) {
@@ -72,6 +124,7 @@ func decodeCursor(raw []byte) (cursorState, error) {
 		resync:        c.GetResync(),
 		closure:       c.GetClosure(),
 		window:        c.GetWindow(),
+		windows:       c.GetWindows(),
 	}, nil
 }
 
@@ -87,6 +140,7 @@ func encodeCursor(st cursorState) []byte {
 		Resync:        st.resync,
 		Closure:       st.closure,
 		Window:        st.window,
+		Windows:       st.windows,
 	})
 	if err != nil {
 		panic(err) // cannot fail for a message of valid in-memory protos
@@ -368,10 +422,84 @@ func sameFollowSpecs(a, b []*syncplanev1.Subscription) bool {
 	return true
 }
 
+// sameSubscriptions reports whether a cursor's subscription set is this
+// request's, position for position. Maintaining a membership set against a
+// cursor needs that, and sub_hash does not give it: the hash is
+// order-independent and excludes the follow spec, so two requests can hash
+// alike while their windows line up differently or reach different rows.
+//
+// Unequal costs one rebuild rather than a wrong answer, and settles itself —
+// the cursor that pull issues records the set as sent, so the pull after it
+// lines up.
+func sameSubscriptions(a, b []*syncplanev1.Subscription) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if !proto.Equal(a[i], b[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// maxMaintainedChanges bounds the rows one pull holds in memory to maintain its
+// membership sets from. Past it the page is a backlog rather than a step, and a
+// set the size of the client's working set costs no more to rebuild than to
+// decide row by row against a change list as long as itself.
+const maxMaintainedChanges = 512
+
+// changeSet reads the rows written since the cursor, in ScanChanges order, and
+// reports whether that is ALL of them. An incomplete set comes back empty.
+//
+// Maintaining a membership set is a function of what moved, so it is only sound
+// over a complete set: a page that stops short leaves rows unaccounted for that
+// the sets would have moved on. Two things make it incomplete — a backlog
+// longer than maxMaintainedChanges, and a cursor resuming inside a same-version
+// group, whose membership was issued at an earlier position than its own seq
+// names, so the rows between the two are in no scan this cursor can start.
+//
+// A complete set is also the whole page, which is why the rows come back: it
+// stopped short of the limit, so nothing follows it and nothing is re-read.
+func (s *Server) changeSet(tx storage.ReadTx, cur cursorState, limit int) ([]storage.Row, bool, error) {
+	if cur.partialEntity != "" {
+		return nil, false, nil
+	}
+	budget := min(limit, maxMaintainedChanges)
+	var rows []storage.Row
+	if err := tx.ScanChanges(cur.seq, "", "", budget+1, func(row storage.Row) error {
+		rows = append(rows, row)
+		return nil
+	}); err != nil {
+		return nil, false, err
+	}
+	if len(rows) > budget {
+		return nil, false, nil
+	}
+	return rows, true, nil
+}
+
+// deliverPage feeds one page's rows to fn: straight from the change set the
+// membership work already read where that set is complete, and from a fresh
+// scan otherwise. The scan always offers one row past the limit, because seeing
+// it is how truncation is detected — a complete change set stopped short of the
+// limit and so has none.
+func deliverPage(tx storage.ReadTx, cur cursorState, changes []storage.Row, complete bool, limit int, fn func(storage.Row) error) error {
+	if complete {
+		for _, row := range changes {
+			if err := fn(row); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return tx.ScanChanges(cur.seq, cur.partialEntity, cur.partialKey, limit+1, fn)
+}
+
 // pullPage serves one forward pull page from cur under a read snapshot: the
-// shared reset checks + last_acked (pullPreamble), the closure rebuild, the
-// ScanChanges + classify pass, the closure diff at a clean version boundary,
-// and the next cursor. It does NOT handle delta resync — callers dispatch that
+// shared reset checks + last_acked (pullPreamble), the window and closure
+// refresh, the classify pass over the page's rows, the membership diffs at a
+// clean version boundary, and the next cursor. It does NOT handle delta resync — callers dispatch that
 // before invoking pullPage. The returned cursorState is the position the page
 // advanced to (meaningful only when the response is neither reset nor closes
 // the stream early); Subscribe carries it forward across notifications.
@@ -386,7 +514,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		resp.NextCursor = rawCursor
 		return resp, cur, reset, nil
 	}
-	// An idle poll must not pay for a rebuild. Both bounded membership sets —
+	// An idle poll must not pay for either set. Both of them —
 	// the window and the follow closure — are functions of the workspace's rows
 	// and this request's read filters, and neither can have moved since the
 	// cursor was issued: it already sits at the current sequence, so no row has
@@ -395,11 +523,10 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// cursor carries are the sets a rebuild would produce, and the scan below
 	// has nothing to deliver either — every row is at or below cur.seq.
 	//
-	// This is the case a FOLLOWING subscription pays most often. The closure is
-	// recomputed statelessly on every following pull (there is no row history to
-	// diff against), so without this a polling client on a quiet workspace paid
-	// a full seed pass plus a graph walk, once per poll interval, to be told
-	// nothing had happened.
+	// It stays worth doing even though the sets below are usually maintained
+	// rather than rebuilt: maintenance still reads the change scan, resolves the
+	// hops it has to and re-encodes both sets onto a cursor, and a poll with
+	// nothing to say should cost none of that.
 	//
 	// Two things the sequence alone does not settle:
 	//
@@ -420,21 +547,57 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		resp.Seq = next.seq
 		return resp, next, resetNone, nil
 	}
-	// Windowed subscriptions: compute each window's membership BEFORE the scan
+	// Both bounded membership sets move only where rows moved, so read what
+	// changed first: a COMPLETE change set is what lets them be maintained
+	// rather than resolved from scratch, and it is the page besides.
+	//
+	// A subscription with neither a window nor a follow spec has no membership
+	// to maintain and its pull is already O(change), so it never pays for this
+	// — the page is the plain scan it always was.
+	var (
+		changes  []storage.Row
+		complete bool
+	)
+	if !s.limits.DisableMembershipMaintenance && (len(emitter.windows) > 0 || emitter.followEntities != nil) {
+		if changes, complete, err = s.changeSet(tx, cur, limit); err != nil {
+			return nil, cursorState{}, resetNone, err
+		}
+	}
+	// Maintaining also needs the cursor's subscription set to line up with this
+	// request's: the window states index into it, and a follow spec that moved
+	// describes a different closure than the one on the cursor. Either way the
+	// answer is to resolve both sets from scratch, which is always legal.
+	maintain := complete && sameSubscriptions(cur.subs, subs)
+
+	// Windowed subscriptions: resolve each window's membership BEFORE the scan
 	// so classify is window-aware, and before the closure below, which seeds
 	// from window members. See window.go.
-	emitter.windowMembers, err = emitter.buildWindows(tx)
+	oldWindow := cur.windowSet()
+	if maintain {
+		emitter.windowMembers, err = emitter.refreshWindows(tx, cur.windows, changes)
+	} else {
+		emitter.windowMembers, err = emitter.buildWindows(tx)
+	}
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
-	// Reference-following: rebuild the closure against current rows BEFORE
-	// the scan so classify is closure-aware (a changed follow-target must
+	// Reference-following: bring the closure up to date against current rows
+	// BEFORE the scan so classify is closure-aware (a changed follow-target must
 	// not be tombstoned). The closure is populated only on this normal path
 	// — never during resync, where it stays empty. See closure.go.
 	if emitter.followEntities != nil {
-		emitter.closure, err = emitter.buildClosure(tx, subs)
-		if err != nil {
-			return nil, cursorState{}, resetNone, err
+		maintained := false
+		if maintain {
+			emitter.closure, maintained, err = emitter.maintainClosure(
+				tx, cur.closure, subs, changes, windowSeedsMoved(oldWindow, emitter.windowMembers))
+			if err != nil {
+				return nil, cursorState{}, resetNone, err
+			}
+		}
+		if !maintained {
+			if emitter.closure, err = emitter.buildClosure(tx, subs); err != nil {
+				return nil, cursorState{}, resetNone, err
+			}
 		}
 	}
 	// Collaborative-text fields of rows written past the cursor ship as delta
@@ -448,7 +611,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// emitting it.
 	scanned := 0
 	var lastScanned storage.Row
-	if err := tx.ScanChanges(cur.seq, cur.partialEntity, cur.partialKey, limit+1, func(row storage.Row) error {
+	deliver := func(row storage.Row) error {
 		scanned++
 		if scanned > limit {
 			resp.HasMore = true
@@ -478,7 +641,8 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			// Skip: the client holds no state for this entity.
 		}
 		return nil
-	}); err != nil {
+	}
+	if err := deliverPage(tx, cur, changes, complete, limit, deliver); err != nil {
 		emitter.deltas = false
 		return nil, cursorState{}, resetNone, err
 	}
@@ -496,6 +660,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		next.partialKey = lastScanned.Key
 		next.closure = cur.closure
 		next.window = cur.window
+		next.windows = cur.windows
 	} else {
 		next.seq = current
 		// Clean boundary: reconcile both bounded membership sets. Each emits
@@ -503,16 +668,16 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// that entered; members that left and nothing else holds), then stamps
 		// its new key-set. See emitMembershipDiff.
 		if emitter.followEntities != nil {
-			if err := emitter.emitMembershipDiff(tx, cur.closure, emitter.closure, cur.seq, resp.Patch); err != nil {
+			if err := emitter.emitMembershipDiff(tx, closureSetMembership(cur.closure), emitter.closure, cur.seq, resp.Patch); err != nil {
 				return nil, cursorState{}, resetNone, err
 			}
 			next.closure = emitter.closure.keySet()
 		}
 		if len(emitter.windows) > 0 {
-			if err := emitter.emitMembershipDiff(tx, cur.window, emitter.windowMembers, cur.seq, resp.Patch); err != nil {
+			if err := emitter.emitMembershipDiff(tx, oldWindow, emitter.windowMembers, cur.seq, resp.Patch); err != nil {
 				return nil, cursorState{}, resetNone, err
 			}
-			next.window = emitter.windowMembers.keySet()
+			next.windows = emitter.windowStates()
 		}
 	}
 	resp.NextCursor = encodeCursor(next)

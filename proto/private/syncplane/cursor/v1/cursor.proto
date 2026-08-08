@@ -56,19 +56,53 @@ message Cursor {
 	fixed64 store_epoch = 8;
 	// The reference-following closure the cursor was issued under: the exact
 	// set of (entity, key) rows the client holds via `follow` beyond its base
-	// scope. The next pull rebuilds the closure against current data and diffs
-	// it against this set, emitting rows that entered and tombstoning rows that
-	// left (and are not otherwise base-visible). Absent on non-following
-	// subscriptions ⇒ empty. Bounded by the server's MaxClosureSize, so the
-	// cursor stays bounded.
+	// scope. The next pull brings the closure up to date against current data
+	// and diffs it against this set, emitting rows that entered and tombstoning
+	// rows that left (and are not otherwise base-visible) — which is also what
+	// makes the set the INPUT to that update, since a member nothing touched
+	// carries straight over. Absent on non-following subscriptions ⇒ empty.
+	// Bounded by the server's MaxClosureSize, so the cursor stays bounded.
 	ClosureSet closure = 9;
-	// The windowed membership the cursor was issued under: the exact rows the
-	// client holds via a Subscription.window. The next pull recomputes each
-	// window and diffs it against this set, so rows that fell off the tail are
-	// dropped precisely rather than lingering. Absent on non-windowed
-	// subscriptions ⇒ empty. Bounded by the server's MaxWindowSize per
-	// windowed subscription.
+	// The windowed membership the cursor was issued under, as ONE set across
+	// every window: the exact rows the client holds via a Subscription.window.
+	// The next pull diffs its recomputed membership against this, so rows that
+	// fell off the tail are dropped precisely rather than lingering.
+	//
+	// Written only by servers that predate `windows`, and read only from such a
+	// cursor; a cursor carrying `windows` leaves this empty and the union is
+	// derived. Both forms diff identically — the split one additionally says
+	// which window holds what, which is what maintaining a window costs less
+	// than rebuilding it.
 	ClosureSet window = 10;
+	// The windowed membership split per window, one entry per
+	// Subscription.window in `subscriptions` order. Absent on non-windowed
+	// subscriptions and on cursors older than this field. Bounded by the
+	// server's MaxWindowSize per windowed subscription.
+	repeated WindowState windows = 11;
+}
+
+// WindowState is one Subscription.window's membership plus the position of its
+// weakest member. The position is what lets a pull decide a changed row's
+// membership by COMPARISON — is it ahead of the tail? — instead of resolving
+// the window from scratch, which costs a read per member however little moved.
+message WindowState {
+	// Index into Cursor.subscriptions of the windowed subscription this
+	// describes. A pull that cannot line its own subscription list up with the
+	// cursor's, position for position, rebuilds instead of maintaining.
+	uint32 subscription = 1;
+	// Member row keys of that subscription's entity.
+	//
+	// Ordered best-first for a by_recency window, where the order is
+	// maintainable for free — every row written since the cursor outranks every
+	// member, so entering rows go to the front and evictions come off the tail.
+	// An order_by window cannot place an entering row without reading its
+	// neighbours, so it locates the tail with `boundary` instead and leaves
+	// these sorted.
+	repeated string keys = 2;
+	// The weakest member's position in the window's order_by ordering, as the
+	// bytes query.Order.Cursor produces. Empty for a by_recency window (which
+	// needs no comparison, see `keys`) and for an empty window.
+	bytes boundary = 3;
 }
 
 // ClosureSet records a bounded membership set as a per-entity list of row

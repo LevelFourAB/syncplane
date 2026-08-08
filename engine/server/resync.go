@@ -152,7 +152,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			// now holds the new membership and the cursor must say so. Carrying
 			// the old set forward would make the catch-up pull re-diff a
 			// membership the client no longer has.
-			window: newEm.windowMembers.keySet(),
+			windows: newEm.windowStates(),
 		})
 	} else {
 		st := cur

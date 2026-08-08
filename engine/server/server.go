@@ -232,6 +232,16 @@ type Limits struct {
 	// and any divergence is a bug in the encoding or the planner. It is also
 	// the operational escape hatch if one ever is.
 	DisableIndexes bool
+	// DisableMembershipMaintenance forces every pull to resolve a window and a
+	// follow closure from scratch, as if the cursor said nothing about the
+	// previous one.
+	//
+	// It exists for the same differential test DisableIndexes does, and for the
+	// same reason: maintaining a membership set from what changed is a pure
+	// optimization over rebuilding it, so the two must produce identical pages
+	// however the workspace is driven, and any divergence is a bug in the
+	// maintenance rules rather than a tuning question.
+	DisableMembershipMaintenance bool
 }
 
 // maxIndexEntriesPerRow and maxIndexScanCandidates read the defaults through

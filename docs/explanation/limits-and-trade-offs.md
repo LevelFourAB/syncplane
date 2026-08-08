@@ -97,6 +97,13 @@ pure optimization, and the indexed and scanning paths must produce identical
 results.** `Limits.DisableIndexes` forces the fallback, which is how the property
 is tested rather than assumed.
 
+Both costs above are what a window or a closure costs to resolve FROM SCRATCH,
+which a pull does only when it cannot maintain what the cursor already carries —
+see [partial sync](partial-sync-and-coverage.md#what-a-bounded-membership-costs-the-server).
+Maintenance is held to the same rule as index use, and tested the same way:
+`Limits.DisableMembershipMaintenance` forces the rebuild, and the two must
+produce identical pages however the workspace is driven.
+
 The cost is paid on writes, on both sides. A write that maintains indexes
 re-encodes and re-stores that row's whole entry set rather than diffing it —
 neither side has the previous row value in hand on a PATCH or a DELETE, so

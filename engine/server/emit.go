@@ -138,7 +138,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 		return e, nil
 	}
 	e.scopes = make(map[string]*entityScope, len(subs))
-	for _, sub := range subs {
+	for i, sub := range subs {
 		info, ok := srv.catalogPtr().entities[sub.GetEntity()]
 		if !ok {
 			return nil, connect.NewError(connect.CodeInvalidArgument,
@@ -157,7 +157,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 			e.scopes[info.name] = sc
 		}
 		if sub.GetWindow() != nil {
-			cw, err := compileWindow(info, sub, srv.limits)
+			cw, err := compileWindow(info, sub, i, srv.limits)
 			if err != nil {
 				return nil, err
 			}
