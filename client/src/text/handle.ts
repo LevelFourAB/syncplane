@@ -505,7 +505,8 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 			const prev = decodeTextDoc(prevEnc, ''); // diff base only
 			const prevText = prev.plainText();
 			const { deleted, inserted } = doc.setString(text);
-			emit(diffText(prev, doc), prevText);
+			const delta = diffText(prev, doc);
+			emit(delta, prevText);
 			// Both arrays arrive in application order (hunks right to left).
 			// Inverses keep that order: inserted ids are deleted by id, and
 			// reinsert targets are anchors, so no step invalidates another's
@@ -527,7 +528,12 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 			items.push(...deletedIds(deleted));
 			// setString diffs minimally, so a whole-value writer that rewrites the
 			// field on every keystroke still queues one keystroke's worth of state.
-			return push({ items, marks: [] }, inverse);
+			return push({ items, marks: [] }, inverse, {
+				// Same word rule insert applies, read off the diff rather than the
+				// argument: the caller passes the whole value, which almost always
+				// contains whitespace that has nothing to do with this edit.
+				keepChainOpen: !delta.ops.some((op) => 'insert' in op && /\s/.test(op.insert)),
+			});
 		},
 
 		async mark(start, end, key, value, expand = ExpandNone) {

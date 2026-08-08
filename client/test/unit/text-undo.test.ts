@@ -139,6 +139,34 @@ describe('text undo', () => {
 		await client.close();
 	});
 
+	// A whole-value writer — useText().setText, or a rich-text binding
+	// serialising its document — rewrites the whole field on every keystroke, so
+	// the word rule has to come off the diff rather than off the argument.
+	it('coalesces a whole-value writer into one undo group per word', async () => {
+		const client = newClient();
+		await client.db.widget.mutate.put({ id: 'w1', body: bodyDoc('seed', '') });
+		const handle = await client.db.widget.text('w1', 'body');
+
+		let typed = '';
+		for (const ch of 'one two') {
+			typed += ch;
+			await handle.setString(typed);
+		}
+		expect(handle.value).toBe('one two');
+
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => {
+			expect(handle.value).toBe('one ');
+		});
+		expect(await client.undo()).toBe(true);
+		await vi.waitFor(() => {
+			expect(handle.value).toBe('');
+		});
+
+		handle.close();
+		await client.close();
+	});
+
 	// A run of backspaces coalesces into ONE undo group holding several
 	// reinsert inverses over the same field. They all materialise before any of
 	// them is enqueued, so each has to continue from the document the previous
