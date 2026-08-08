@@ -255,6 +255,20 @@ var migrations = []string{
 	// response is answered with the rejection instead of a bare ack. NULL until
 	// a client has had something refused, which is the common case.
 	`ALTER TABLE clients ADD COLUMN rejections BYTEA;`,
+	// Cursor-state entries: the membership sets of issued pull cursors, keyed
+	// by the (id, gen) reference the cursor carries. See cursorstate.go for
+	// the pruning that keeps the table bounded.
+	`
+	CREATE TABLE cursor_state (
+		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
+		workspace_id TEXT COLLATE "C" NOT NULL,
+		id           BIGINT NOT NULL,
+		gen          BIGINT NOT NULL,
+		state        BYTEA NOT NULL,
+		written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+		PRIMARY KEY (namespace, workspace_id, id, gen)
+	);
+	`,
 }
 
 // migrationLockKey serializes schema migration across nodes. Several servers

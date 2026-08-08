@@ -116,16 +116,32 @@ a write transaction, and so what contends.
 away and re-downloads the workspace, and it is invisible at the RPC layer —
 just another successful pull. `reset_reason` is one of:
 
-| Reason                               | Means                                                     |
-| ------------------------------------ | --------------------------------------------------------- |
-| `cursor_below_horizon`               | The client fell behind GC. **This tunes `WithGC`.**       |
-| `store_provenance_mismatch`          | The cursor came from a different store (restored backup). |
-| `resync_invalidated_by_scope_change` | A scope change landed mid-resync. Routine.                |
-| `old_visibility_unreconstructable`   | The old scope could not be rebuilt. Routine.              |
+| Reason                               | Means                                                                                           |
+| ------------------------------------ | ----------------------------------------------------------------------------------------------- |
+| `cursor_below_horizon`               | The client fell behind GC. **This tunes `WithGC`.**                                             |
+| `store_provenance_mismatch`          | The cursor came from a different store (restored backup).                                       |
+| `resync_invalidated_by_scope_change` | A scope change landed mid-resync. Routine.                                                      |
+| `old_visibility_unreconstructable`   | The old scope could not be rebuilt. Routine.                                                    |
+| `cursor_state_evicted`               | The cursor-state store no longer holds the cursor's sets. **This sizes the store** — see below. |
 
 `subscribe.streams` is a level, not a rate: browsers cap concurrent connections
 per host, so how many streams are held open is what says whether clients have
 connection slots left.
+
+### Cursor state
+
+| Instrument                            | Type    | Unit        |
+| ------------------------------------- | ------- | ----------- |
+| `syncplane.cursor_state.misses`       | counter | `{miss}`    |
+| `syncplane.cursor_state.put_failures` | counter | `{failure}` |
+
+Every miss is a client reset (it also shows in `pull.resets` as
+`cursor_state_evicted`): the store evicted an entry a client still references,
+so it is sized too small, its retention is shorter than clients stay away, or —
+for an in-process store — the process restarted. A put failure is milder:
+the affected cursor inlines its sets and clients keep working, but they pay
+the wire cost the store exists to remove, so a sustained rate means the store
+is unreachable.
 
 ### Notify fan-out
 
@@ -267,16 +283,16 @@ const client = new SyncClient({
 });
 ```
 
-| Event        | Carries                                                                                                     |
-| ------------ | ----------------------------------------------------------------------------------------------------------- |
-| `push`       | `workspaceIds`, `mutations`, `applied`, `rejected`, `durationMs`, `outcome`                                 |
-| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `outcome`                                       |
-| `bootstrap`  | `workspaceId`, `rows`, `resumed`, `durationMs`, `streamMs`, `stageMs`, `swapMs`, `swapWrites`, `outcome`    |
-| `rebase`     | `workspaceId`, `acked`, `replayed`, `durationMs`                                                            |
-| `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                            |
-| `stream`     | `state`, `reason`                                                                                           |
-| `leadership` | `leader`                                                                                                    |
-| `resequence` | `workspaceId`, `firstId`, `mutations`                                                                       |
+| Event        | Carries                                                                                                               |
+| ------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `push`       | `workspaceIds`, `mutations`, `applied`, `rejected`, `durationMs`, `outcome`                                           |
+| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `outcome`                                                 |
+| `bootstrap`  | `workspaceId`, `rows`, `resumed`, `durationMs`, `streamMs`, `stageMs`, `swapMs`, `swapWrites`, `outcome`              |
+| `rebase`     | `workspaceId`, `acked`, `replayed`, `durationMs`                                                                      |
+| `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                                      |
+| `stream`     | `state`, `reason`                                                                                                     |
+| `leadership` | `leader`                                                                                                              |
+| `resequence` | `workspaceId`, `firstId`, `mutations`                                                                                 |
 | `query`      | `origin`, `entity`, `workspaceId`, `path`, `index`, `declined`, `candidates`, `rows`, `total`, `durationMs`, `waitMs` |
 
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`

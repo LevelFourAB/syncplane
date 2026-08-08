@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
+	"github.com/levelfourab/syncplane/engine/server"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 )
@@ -48,7 +49,12 @@ var _ = Describe("Sparse subscribe cursors", func() {
 	BeforeEach(func() {
 		ctx, cancel = context.WithCancel(context.Background())
 		nextMut = 0
-		srv := newTestServer()
+		// Cursor state disabled, so cursors inline their membership sets:
+		// withholding only ever fires on a cursor that outweighs its page, and
+		// with a store every cursor is a slim reference the policy correctly
+		// never skips. This suite pins the degraded mode, which is also every
+		// server without a store.
+		srv := newTestServer(server.WithCursorStateStore(nil))
 		path, handler := srv.Handler()
 		mux := http.NewServeMux()
 		mux.Handle(path, handler)

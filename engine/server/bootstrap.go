@@ -74,7 +74,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// what survives is a snapshot this request could actually continue (see
 	// bootstrapresume.go). Whether the cursor is still servable needs the
 	// workspace position, so that half waits for the tx below.
-	resume, err := decodeBootstrapResume(msg.GetResume())
+	resume, err := s.decodeBootstrapResume(ctx, msg.GetWorkspaceId(), msg.GetResume())
 	if err != nil {
 		return err
 	}
@@ -139,7 +139,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			}
 		}
 		if resume == nil {
-			begin.Cursor = encodeCursor(cursorState{
+			st := cursorState{
 				seq:        current,
 				subHash:    wantHash,
 				epoch:      epoch,
@@ -147,7 +147,8 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				subs:       msg.GetSubscriptions(),
 				closure:    closureSet,
 				windows:    emitter.windowStates(),
-			})
+			}
+			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)
 			begin.Seq = current
 		}
 		if msg.GetClientId() != "" {

@@ -17,6 +17,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/internal/lww"
@@ -372,6 +373,13 @@ type Server struct {
 	perms    Permissions
 	authn    Authenticator
 	notifier pubsub.Notifier
+	// cursorState holds the bulky membership tail of issued cursors so the
+	// wire carries a reference instead (see encodeCursor). Nil disables the
+	// indirection: every cursor inlines its sets, exactly as cursors always
+	// have. cursorStateSet records that WithCursorStateStore was called, so an
+	// explicit nil wins over the adapter-provided default New would install.
+	cursorState    cursorstate.Store
+	cursorStateSet bool
 	// coalescer is the wrapper New installed over notifier, kept so Close can
 	// stop its timers. Nil when coalescing is disabled (WithNotifyCoalescing(0)),
 	// in which case notifier is whatever the caller supplied, untouched.
@@ -480,6 +488,22 @@ func WithPermissions(p Permissions) Option {
 // on a timer to notice work another node's writes created.
 func WithNotifier(n pubsub.Notifier) Option {
 	return func(s *Server) error { s.notifier = n; return nil }
+}
+
+// WithCursorStateStore installs the store that keeps the membership tail of
+// issued cursors — the subscription set and the windowed/closure key-sets —
+// so a cursor on the wire is a fixed-size reference instead of restating
+// everything the client holds. See the cursorstate package for the contract:
+// entries are immutable, eviction is licensed, and a client whose entry was
+// evicted is reset onto a fresh bootstrap.
+//
+// Without this option the server asks its storage adapter for a store
+// (cursorstate.Provider), so adapters that can back one give slim cursors
+// with no configuration. Passing nil disables the indirection entirely:
+// every cursor inlines its sets, which is also the fallback whenever a
+// store write fails.
+func WithCursorStateStore(st cursorstate.Store) Option {
+	return func(s *Server) error { s.cursorState = st; s.cursorStateSet = true; return nil }
 }
 
 // WithHeartbeat sets the Subscribe stream heartbeat interval (default 30s).
@@ -615,6 +639,11 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	for _, opt := range opts {
 		if err := opt(s); err != nil {
 			return nil, err
+		}
+	}
+	if !s.cursorStateSet {
+		if p, ok := store.(cursorstate.Provider); ok {
+			s.cursorState = p.CursorStateStore()
 		}
 	}
 	// Telemetry is resolved before anything can record on it: the background

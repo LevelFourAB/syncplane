@@ -62,6 +62,7 @@ arbitrary root.
 | `WithHeartbeat(d)`              | 30s        | `Subscribe` heartbeat; also how often a live stream re-checks access.                                                                                                                                                                                                                                          |
 | `WithNotifyCoalescing(w)`       | —          | Coalesces commit notifications; 0 disables.                                                                                                                                                                                                                                                                    |
 | `WithNotifier(n)`               | in-process | Replaces the in-process poke fan-out with one shared across nodes — `pgnotify` ships such an implementation over Postgres `LISTEN`/`NOTIFY`. A replacement should implement `pubsub.Activity` too, or background consumers lose the signal that announces a new workspace and fall back to listing on a timer. |
+| `WithCursorStateStore(st)`      | adapter    | Where the membership tail of issued cursors lives, so the wire carries a reference instead of restating it. Defaults to a store the adapter provides (both shipped adapters do); `nil` disables the indirection and every cursor inlines its sets. See [Cursor state](#cursor-state).                          |
 | `WithGC(retention, interval)`   | —          | Tombstone retention and background pass interval; `interval <= 0` is manual-only.                                                                                                                                                                                                                              |
 | `WithTextDeltaRetention(d)`     | 1h         | How long the collaborative-text delta log is kept.                                                                                                                                                                                                                                                             |
 | `WithIdempotencyRetention(d)`   | 24h        | How long claimed `MutateIdempotent` keys are kept.                                                                                                                                                                                                                                                             |
@@ -577,3 +578,33 @@ default; `pgstore.Open(ctx, dsn)` backs several nodes off one database. Either
 way `root.Namespace(id)` derives one view per app from a single open store. See
 [Storage adapter contract](storage-adapter.md) and
 [Run more than one node](../how-to/run-multiple-nodes.md).
+
+## Cursor state
+
+A pull cursor's bulk is membership: a windowed or reference-following client's
+cursor names every row it holds, which at the limits is hundreds of kilobytes
+riding on every pull request, every pull page and every persisted checkpoint.
+With a cursor-state store the server writes those sets once and the cursor
+carries a fixed-size reference; the entry is rewritten only when membership
+actually moves.
+
+The store is a cache with licensed eviction, not a system of record: a client
+presenting a reference whose entry is gone is reset onto a fresh bootstrap,
+exactly as one below the tombstone horizon is, and a failed write falls back to
+inlining the sets in the cursor — the indirection is an optimization, never a
+dependency. What an implementation choice buys:
+
+- **Adapter-provided** (the default; both shipped adapters implement
+  `cursorstate.Provider`) — entries live in the same database as the rows,
+  survive restarts, and on `pgstore` are shared across nodes. Superseded and
+  aged entries are pruned on write; nothing to configure.
+- **`cursorstate.NewMemory(maxBytes)`** — in-process, for tests and
+  single-node deployments that accept the cost: a restart forgets every entry,
+  so every connected client re-bootstraps at once.
+- **Your own `cursorstate.Store`** (Redis, memcached, …) — implement two
+  methods over immutable entries. Entries hold row keys (not values); weigh
+  that before pointing the store at shared infrastructure if keys are
+  sensitive in your domain.
+
+`syncplane.cursor_state.misses` is the health signal: every miss is a client
+re-download. See [Telemetry](telemetry.md#cursor-state).

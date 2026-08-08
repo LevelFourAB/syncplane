@@ -52,6 +52,17 @@ var _ = storagetest.ConformanceNamespaced("postgres", func() (storage.Adapter, s
 	}
 })
 
+var _ = storagetest.CursorState("postgres", func() storage.Adapter {
+	return open()
+})
+
+var _ = storagetest.CursorStateNamespaced("postgres", func() (storage.Adapter, storage.Adapter, func()) {
+	root := open()
+	return root.Namespace("a"), root.Namespace("b"), func() {
+		Expect(root.Close()).To(Succeed())
+	}
+})
+
 var _ = Describe("Postgres migrations", func() {
 	ctx := context.Background()
 
@@ -90,7 +101,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3}), "every migration, each recorded exactly once")
 	})
 
 	It("lets several nodes Open the same database at once", func() {

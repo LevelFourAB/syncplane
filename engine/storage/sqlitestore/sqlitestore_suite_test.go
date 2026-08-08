@@ -47,6 +47,20 @@ var _ = storagetest.ConformanceNamespaced("sqlite", func() (storage.Adapter, sto
 	}
 })
 
+var _ = storagetest.CursorState("sqlite", func() storage.Adapter {
+	store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"))
+	Expect(err).NotTo(HaveOccurred())
+	return store
+})
+
+var _ = storagetest.CursorStateNamespaced("sqlite", func() (storage.Adapter, storage.Adapter, func()) {
+	root, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"))
+	Expect(err).NotTo(HaveOccurred())
+	return root.Namespace("a"), root.Namespace("b"), func() {
+		Expect(root.Close()).To(Succeed())
+	}
+})
+
 var _ = Describe("SQLite schema versioning", func() {
 	// The stamps a database created by this binary carries, spelled out rather
 	// than read from the package: changing either is a compatibility break for
@@ -56,7 +70,7 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 2
+	const latestVersion = 3
 
 	// foreign creates a database holding one table under the given stamps,
 	// standing in for whatever a binary other than this one left behind.
@@ -134,9 +148,9 @@ var _ = Describe("SQLite schema versioning", func() {
 		ctx := context.Background()
 		path := filepath.Join(GinkgoT().TempDir(), "upgrade.db")
 
-		// A store this binary created, wound back to the baseline with the
-		// column the migration adds removed — what a database written by the
-		// binary that shipped the baseline looks like.
+		// A store this binary created, wound back to the baseline with
+		// everything the migrations add removed — what a database written by
+		// the binary that shipped the baseline looks like.
 		store, err := sqlitestore.Open(path)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(store.Close()).To(Succeed())
@@ -144,6 +158,7 @@ var _ = Describe("SQLite schema versioning", func() {
 		Expect(err).NotTo(HaveOccurred())
 		_, err = db.Exec(fmt.Sprintf(`
 			ALTER TABLE clients DROP COLUMN rejections;
+			DROP TABLE cursor_state;
 			PRAGMA user_version = %d;
 		`, baselineVersion))
 		Expect(err).NotTo(HaveOccurred())

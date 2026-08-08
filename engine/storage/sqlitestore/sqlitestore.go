@@ -280,6 +280,18 @@ var migrations = []string{
 	// response is answered with the rejection instead of a bare ack. NULL until
 	// a client has had something refused, which is the common case.
 	`ALTER TABLE clients ADD COLUMN rejections BLOB;`,
+	// Cursor-state entries: the membership sets of issued pull cursors, keyed
+	// by the (id, gen) reference the cursor carries. See cursorstate.go for
+	// the pruning that keeps the table bounded.
+	`CREATE TABLE cursor_state (
+		namespace    TEXT NOT NULL DEFAULT '',
+		workspace_id TEXT NOT NULL,
+		id           INTEGER NOT NULL,
+		gen          INTEGER NOT NULL,
+		state        BLOB NOT NULL,
+		written_at   INTEGER NOT NULL,
+		PRIMARY KEY (namespace, workspace_id, id, gen)
+	);`,
 }
 
 // Store implements storage.Adapter. Stores derived via Namespace share the

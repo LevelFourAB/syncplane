@@ -182,6 +182,23 @@ database can back several apps. Both adapters expose this as `root.Namespace(id)
 and a `WithNamespace(id)` option; `Close` on a derived store is a no-op, because
 the root owns the handle.
 
+## Cursor state (optional)
+
+An adapter may additionally implement `cursorstate.Provider` — one method
+returning a `cursorstate.Store` backed by its own database — and a server
+constructed on it then stores issued cursors' membership sets instead of
+restating them on the wire (see [Cursor state](server.md#cursor-state)). The
+seam sits outside the `storage.Adapter` contract because it tolerates far
+weaker guarantees than row storage does: entries are immutable, eviction is
+licensed, and a miss costs one client one re-bootstrap. Both shipped adapters
+implement it; `storagetest.CursorState` and `storagetest.CursorStateNamespaced`
+encode the expectations. An adapter without it still works — every cursor
+inlines its sets, as all cursors did before the seam existed.
+
+Implementations must not serve `Get`/`Put` through their own transactional
+API: the server calls them while it holds an open read snapshot on the same
+adapter.
+
 ## Adapters
 
 - **`sqlitestore`** — the default, and the one that needs no infrastructure. A

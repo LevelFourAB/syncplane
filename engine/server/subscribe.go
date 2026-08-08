@@ -263,7 +263,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		}
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
-	cur, err := decodeCursor(want.GetCursor())
+	cur, err := s.decodeCursor(ctx, ws, want.GetCursor())
 	if err != nil {
 		// An undecodable cursor cannot be advanced from; a clean snapshot can.
 		return nil, syncplanev1.WorkspaceDropped_REASON_RESET, err
@@ -386,7 +386,9 @@ func (s *Server) mergeSignals(ctx context.Context, scopes []*subScope) <-chan st
 // rides on, so every frame checkpoints exactly as it did before sparse
 // cursors existed; only a cursor carrying a whole membership set is large
 // enough to be worth skipping, and even then never for longer than it takes
-// the skipped rows to add up to it.
+// the skipped rows to add up to it. With a cursor-state store installed every
+// cursor is a fixed-size reference (see encodeCursor), so no frame clears the
+// bar and withholding fires only on servers running without one.
 func (sc *subScope) checkpointDue(pageBytes, cursorBytes int) bool {
 	if !sc.sparseCursor || !sc.cursorSent {
 		return true

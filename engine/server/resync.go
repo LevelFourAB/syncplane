@@ -133,7 +133,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		// Keep any same-version sub-position from the cursor that entered the
 		// resync: the catch-up pull resumes from the original seq under the
 		// new scope and must not skip the undelivered tail of a split group.
-		resp.NextCursor = encodeCursor(cursorState{
+		st := cursorState{
 			seq:     cur.seq,
 			subHash: wantHash,
 			epoch:   epoch,
@@ -153,7 +153,11 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			// the old set forward would make the catch-up pull re-diff a
 			// membership the client no longer has.
 			windows: newEm.windowStates(),
-		})
+		}
+		// Same state lineage, new entry: the sets moved with the scope, but
+		// they are still this client's succession of cursors.
+		st.stateID, st.stateGen, st.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
 		st := cur
 		st.resync = &syncplanecursorv1.ResyncState{
@@ -162,7 +166,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			ToSubHash:     wantHash,
 			ToFilterEpoch: epoch,
 		}
-		resp.NextCursor = encodeCursor(st)
+		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	}
 	// Either way the client must pull again: mid-resync to continue the
 	// scan, after completion to catch up from the original seq.

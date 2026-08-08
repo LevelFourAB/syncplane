@@ -79,6 +79,44 @@ message Cursor {
 	// subscriptions and on cursors older than this field. Bounded by the
 	// server's MaxWindowSize per windowed subscription.
 	repeated WindowState windows = 11;
+	// Reference to an externally stored StoredSets entry holding what fields
+	// 4, 9, 10 and 11 would otherwise inline. When set, those fields are empty
+	// and the sets live in the server's cursor-state store; the cursor itself
+	// stays a few dozen bytes however large the client's membership grows.
+	// A referenced entry the store no longer holds resets the client, exactly
+	// as a cursor below the tombstone horizon does — which is why servers
+	// without a store, and entries too small to be worth a store round trip,
+	// keep inlining instead.
+	StateRef sets_ref = 12;
+}
+
+// StateRef names one immutable entry in the cursor-state store. The pair is
+// the identity: id is the lineage a client's successive cursors share (minted
+// when a snapshot starts, carried forward on every reissue, and what lets a
+// store prune a lineage's superseded entries), gen distinguishes the entries
+// within it and is random rather than sequential, so two pulls advancing the
+// same cursor concurrently write two entries instead of colliding on one.
+message StateRef {
+	fixed64 id = 1;
+	fixed64 gen = 2;
+}
+
+// StoredSets is the bulky tail of a Cursor, stored once instead of restated
+// on every page: the subscription set and both bounded membership key-sets.
+// Encoded deterministically — each key list sorted unless its order is
+// meaningful, as closureRows.keySet and rowEmitter.windowStates emit them —
+// so equal membership produces equal bytes and a reissued cursor keeps its
+// ref instead of writing a new entry.
+message StoredSets {
+	// Cursor.subscriptions.
+	repeated syncplane.v1.Subscription subscriptions = 1;
+	// Cursor.closure.
+	ClosureSet closure = 2;
+	// Cursor.windows.
+	repeated WindowState windows = 3;
+	// Cursor.window — carried only when adopting a cursor from a server that
+	// predates `windows`, so nothing is lost in the exchange.
+	ClosureSet window = 4;
 }
 
 // WindowState is one Subscription.window's membership plus the position of its

@@ -96,7 +96,16 @@ type Cursor struct {
 	// Subscription.window in `subscriptions` order. Absent on non-windowed
 	// subscriptions and on cursors older than this field. Bounded by the
 	// server's MaxWindowSize per windowed subscription.
-	Windows       []*WindowState `protobuf:"bytes,11,rep,name=windows,proto3" json:"windows,omitempty"`
+	Windows []*WindowState `protobuf:"bytes,11,rep,name=windows,proto3" json:"windows,omitempty"`
+	// Reference to an externally stored StoredSets entry holding what fields
+	// 4, 9, 10 and 11 would otherwise inline. When set, those fields are empty
+	// and the sets live in the server's cursor-state store; the cursor itself
+	// stays a few dozen bytes however large the client's membership grows.
+	// A referenced entry the store no longer holds resets the client, exactly
+	// as a cursor below the tombstone horizon does — which is why servers
+	// without a store, and entries too small to be worth a store round trip,
+	// keep inlining instead.
+	SetsRef       *StateRef `protobuf:"bytes,12,opt,name=sets_ref,json=setsRef,proto3" json:"sets_ref,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -208,6 +217,150 @@ func (x *Cursor) GetWindows() []*WindowState {
 	return nil
 }
 
+func (x *Cursor) GetSetsRef() *StateRef {
+	if x != nil {
+		return x.SetsRef
+	}
+	return nil
+}
+
+// StateRef names one immutable entry in the cursor-state store. The pair is
+// the identity: id is the lineage a client's successive cursors share (minted
+// when a snapshot starts, carried forward on every reissue, and what lets a
+// store prune a lineage's superseded entries), gen distinguishes the entries
+// within it and is random rather than sequential, so two pulls advancing the
+// same cursor concurrently write two entries instead of colliding on one.
+type StateRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            uint64                 `protobuf:"fixed64,1,opt,name=id,proto3" json:"id,omitempty"`
+	Gen           uint64                 `protobuf:"fixed64,2,opt,name=gen,proto3" json:"gen,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateRef) Reset() {
+	*x = StateRef{}
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateRef) ProtoMessage() {}
+
+func (x *StateRef) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateRef.ProtoReflect.Descriptor instead.
+func (*StateRef) Descriptor() ([]byte, []int) {
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *StateRef) GetId() uint64 {
+	if x != nil {
+		return x.Id
+	}
+	return 0
+}
+
+func (x *StateRef) GetGen() uint64 {
+	if x != nil {
+		return x.Gen
+	}
+	return 0
+}
+
+// StoredSets is the bulky tail of a Cursor, stored once instead of restated
+// on every page: the subscription set and both bounded membership key-sets.
+// Encoded deterministically — each key list sorted unless its order is
+// meaningful, as closureRows.keySet and rowEmitter.windowStates emit them —
+// so equal membership produces equal bytes and a reissued cursor keeps its
+// ref instead of writing a new entry.
+type StoredSets struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Cursor.subscriptions.
+	Subscriptions []*v1.Subscription `protobuf:"bytes,1,rep,name=subscriptions,proto3" json:"subscriptions,omitempty"`
+	// Cursor.closure.
+	Closure *ClosureSet `protobuf:"bytes,2,opt,name=closure,proto3" json:"closure,omitempty"`
+	// Cursor.windows.
+	Windows []*WindowState `protobuf:"bytes,3,rep,name=windows,proto3" json:"windows,omitempty"`
+	// Cursor.window — carried only when adopting a cursor from a server that
+	// predates `windows`, so nothing is lost in the exchange.
+	Window        *ClosureSet `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StoredSets) Reset() {
+	*x = StoredSets{}
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StoredSets) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StoredSets) ProtoMessage() {}
+
+func (x *StoredSets) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StoredSets.ProtoReflect.Descriptor instead.
+func (*StoredSets) Descriptor() ([]byte, []int) {
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *StoredSets) GetSubscriptions() []*v1.Subscription {
+	if x != nil {
+		return x.Subscriptions
+	}
+	return nil
+}
+
+func (x *StoredSets) GetClosure() *ClosureSet {
+	if x != nil {
+		return x.Closure
+	}
+	return nil
+}
+
+func (x *StoredSets) GetWindows() []*WindowState {
+	if x != nil {
+		return x.Windows
+	}
+	return nil
+}
+
+func (x *StoredSets) GetWindow() *ClosureSet {
+	if x != nil {
+		return x.Window
+	}
+	return nil
+}
+
 // WindowState is one Subscription.window's membership plus the position of its
 // weakest member. The position is what lets a pull decide a changed row's
 // membership by COMPARISON — is it ahead of the tail? — instead of resolving
@@ -237,7 +390,7 @@ type WindowState struct {
 
 func (x *WindowState) Reset() {
 	*x = WindowState{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -249,7 +402,7 @@ func (x *WindowState) String() string {
 func (*WindowState) ProtoMessage() {}
 
 func (x *WindowState) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -262,7 +415,7 @@ func (x *WindowState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WindowState.ProtoReflect.Descriptor instead.
 func (*WindowState) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{1}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *WindowState) GetSubscription() uint32 {
@@ -300,7 +453,7 @@ type ClosureSet struct {
 
 func (x *ClosureSet) Reset() {
 	*x = ClosureSet{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -312,7 +465,7 @@ func (x *ClosureSet) String() string {
 func (*ClosureSet) ProtoMessage() {}
 
 func (x *ClosureSet) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -325,7 +478,7 @@ func (x *ClosureSet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClosureSet.ProtoReflect.Descriptor instead.
 func (*ClosureSet) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *ClosureSet) GetEntries() []*ClosureSet_Entry {
@@ -357,7 +510,7 @@ type ResyncState struct {
 
 func (x *ResyncState) Reset() {
 	*x = ResyncState{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -369,7 +522,7 @@ func (x *ResyncState) String() string {
 func (*ResyncState) ProtoMessage() {}
 
 func (x *ResyncState) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -382,7 +535,7 @@ func (x *ResyncState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncState.ProtoReflect.Descriptor instead.
 func (*ResyncState) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *ResyncState) GetEntity() string {
@@ -436,7 +589,7 @@ type BootstrapPosition struct {
 
 func (x *BootstrapPosition) Reset() {
 	*x = BootstrapPosition{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -448,7 +601,7 @@ func (x *BootstrapPosition) String() string {
 func (*BootstrapPosition) ProtoMessage() {}
 
 func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -461,7 +614,7 @@ func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapPosition.ProtoReflect.Descriptor instead.
 func (*BootstrapPosition) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *BootstrapPosition) GetDone() []string {
@@ -495,7 +648,7 @@ type ClosureSet_Entry struct {
 
 func (x *ClosureSet_Entry) Reset() {
 	*x = ClosureSet_Entry{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -507,7 +660,7 @@ func (x *ClosureSet_Entry) String() string {
 func (*ClosureSet_Entry) ProtoMessage() {}
 
 func (x *ClosureSet_Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -520,7 +673,7 @@ func (x *ClosureSet_Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClosureSet_Entry.ProtoReflect.Descriptor instead.
 func (*ClosureSet_Entry) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{2, 0}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{4, 0}
 }
 
 func (x *ClosureSet_Entry) GetEntity() string {
@@ -541,7 +694,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xed\x03\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xa7\x04\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -556,7 +709,17 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\aclosure\x18\t \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\aclosure\x127\n" +
 	"\x06window\x18\n" +
 	" \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\x12:\n" +
-	"\awindows\x18\v \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\"a\n" +
+	"\awindows\x18\v \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x128\n" +
+	"\bsets_ref\x18\f \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\asetsRef\",\n" +
+	"\bStateRef\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x10\n" +
+	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\xfe\x01\n" +
+	"\n" +
+	"StoredSets\x12@\n" +
+	"\rsubscriptions\x18\x01 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x129\n" +
+	"\aclosure\x18\x02 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\aclosure\x12:\n" +
+	"\awindows\x18\x03 \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x127\n" +
+	"\x06window\x18\x04 \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\"a\n" +
 	"\vWindowState\x12\"\n" +
 	"\fsubscription\x18\x01 \x01(\rR\fsubscription\x12\x12\n" +
 	"\x04keys\x18\x02 \x03(\tR\x04keys\x12\x1a\n" +
@@ -589,28 +752,35 @@ func file_syncplane_cursor_v1_cursor_proto_rawDescGZIP() []byte {
 	return file_syncplane_cursor_v1_cursor_proto_rawDescData
 }
 
-var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_syncplane_cursor_v1_cursor_proto_goTypes = []any{
 	(*Cursor)(nil),            // 0: syncplane.cursor.v1.Cursor
-	(*WindowState)(nil),       // 1: syncplane.cursor.v1.WindowState
-	(*ClosureSet)(nil),        // 2: syncplane.cursor.v1.ClosureSet
-	(*ResyncState)(nil),       // 3: syncplane.cursor.v1.ResyncState
-	(*BootstrapPosition)(nil), // 4: syncplane.cursor.v1.BootstrapPosition
-	(*ClosureSet_Entry)(nil),  // 5: syncplane.cursor.v1.ClosureSet.Entry
-	(*v1.Subscription)(nil),   // 6: syncplane.v1.Subscription
+	(*StateRef)(nil),          // 1: syncplane.cursor.v1.StateRef
+	(*StoredSets)(nil),        // 2: syncplane.cursor.v1.StoredSets
+	(*WindowState)(nil),       // 3: syncplane.cursor.v1.WindowState
+	(*ClosureSet)(nil),        // 4: syncplane.cursor.v1.ClosureSet
+	(*ResyncState)(nil),       // 5: syncplane.cursor.v1.ResyncState
+	(*BootstrapPosition)(nil), // 6: syncplane.cursor.v1.BootstrapPosition
+	(*ClosureSet_Entry)(nil),  // 7: syncplane.cursor.v1.ClosureSet.Entry
+	(*v1.Subscription)(nil),   // 8: syncplane.v1.Subscription
 }
 var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
-	6, // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
-	3, // 1: syncplane.cursor.v1.Cursor.resync:type_name -> syncplane.cursor.v1.ResyncState
-	2, // 2: syncplane.cursor.v1.Cursor.closure:type_name -> syncplane.cursor.v1.ClosureSet
-	2, // 3: syncplane.cursor.v1.Cursor.window:type_name -> syncplane.cursor.v1.ClosureSet
-	1, // 4: syncplane.cursor.v1.Cursor.windows:type_name -> syncplane.cursor.v1.WindowState
-	5, // 5: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	6, // [6:6] is the sub-list for method output_type
-	6, // [6:6] is the sub-list for method input_type
-	6, // [6:6] is the sub-list for extension type_name
-	6, // [6:6] is the sub-list for extension extendee
-	0, // [0:6] is the sub-list for field type_name
+	8,  // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
+	5,  // 1: syncplane.cursor.v1.Cursor.resync:type_name -> syncplane.cursor.v1.ResyncState
+	4,  // 2: syncplane.cursor.v1.Cursor.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	4,  // 3: syncplane.cursor.v1.Cursor.window:type_name -> syncplane.cursor.v1.ClosureSet
+	3,  // 4: syncplane.cursor.v1.Cursor.windows:type_name -> syncplane.cursor.v1.WindowState
+	1,  // 5: syncplane.cursor.v1.Cursor.sets_ref:type_name -> syncplane.cursor.v1.StateRef
+	8,  // 6: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
+	4,  // 7: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	3,  // 8: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
+	4,  // 9: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
+	7,  // 10: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	11, // [11:11] is the sub-list for method output_type
+	11, // [11:11] is the sub-list for method input_type
+	11, // [11:11] is the sub-list for extension type_name
+	11, // [11:11] is the sub-list for extension extendee
+	0,  // [0:11] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_cursor_v1_cursor_proto_init() }
@@ -624,7 +794,7 @@ func file_syncplane_cursor_v1_cursor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_cursor_v1_cursor_proto_rawDesc), len(file_syncplane_cursor_v1_cursor_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

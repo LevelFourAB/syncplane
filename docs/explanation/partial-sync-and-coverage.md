@@ -13,7 +13,7 @@ entity.
 
 ## Window maintenance is exact, not best-effort
 
-The cursor carries the window's membership as a key-set, and every pull with
+The cursor records the window's membership as a key-set, and every pull with
 anything to deliver brings the window up to date and diffs it against that set:
 
 - rows that **entered** arrive as values,
@@ -39,13 +39,30 @@ recomputation entirely: nothing has been written, so no membership can have
 moved, and the cursor's key-set is carried forward as issued. A polling client
 on a quiet workspace therefore costs nothing to tell "nothing happened".
 
+## The cursor references its membership instead of restating it
+
+Membership is what makes a cursor big: a window at its limit carries that many
+row keys, and a reference-following closure can carry far more. Exactness
+demands that the set be _stored_ — a diff needs the previous membership, and
+nothing else can reproduce it — but not that it be stored in the cursor. With
+a cursor-state store the server keeps the sets under an opaque reference, the
+cursor on the wire stays a few dozen bytes however large the client's holdings
+grow, and a new entry is written only when membership actually moves: an idle
+poll costs one store read and reissues the reference it was handed.
+
+The store is allowed to forget. A cursor whose entry was evicted resets the
+client onto a fresh bootstrap — the same recovery as falling below the
+tombstone GC horizon, and the reason eviction must be rare rather than
+impossible. When the store is down or absent the cursor inlines the sets
+exactly as every cursor once did, so the indirection degrades to extra bytes,
+never to a wrong answer.
+
 ## The cursor is a checkpoint on a stream, not a per-frame receipt
 
-Membership is what makes the cursor big: a window at its limit carries that many
-row keys, and a reference-following closure can carry far more. On `Pull` that
-cost is unavoidable — the client hands the cursor back, so it has to hold the
-set. On `Subscribe` it is not: the server keeps the scope's position itself, and
-the cursor on a frame exists only so the client can resume from it later.
+A server running without a cursor-state store still has fat cursors, and on
+`Subscribe` their cost is avoidable even then: the server keeps the scope's
+position itself, and the cursor on a frame exists only so the client can
+resume from it later.
 
 So a client that sets `sparse_cursor` gets the cursor as a periodic checkpoint
 instead of on every frame, and the steady-state cost of a live subscription

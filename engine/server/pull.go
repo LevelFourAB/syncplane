@@ -1,7 +1,11 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"log/slog"
 
@@ -9,6 +13,7 @@ import (
 	"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -58,6 +63,19 @@ type cursorState struct {
 	// changed rather than resolve it again. nil on non-windowed subscriptions
 	// and on cursors older than the field.
 	windows []*syncplanecursorv1.WindowState
+	// stateID/stateGen name the cursor-state entry subs, closure, window and
+	// windows were loaded from (Cursor.sets_ref); stateBlob keeps that entry's
+	// bytes so encodeCursor can tell an unchanged membership — which reuses
+	// the ref — from a moved one, which writes a new entry under the same
+	// lineage. All zero when the cursor inlined its sets.
+	stateID   uint64
+	stateGen  uint64
+	stateBlob []byte
+	// stateEvicted marks a cursor whose referenced entry the store no longer
+	// holds. The sets above are then empty and unusable, and pullPreamble
+	// turns the cursor into a reset — the same recovery as falling below the
+	// tombstone horizon.
+	stateEvicted bool
 }
 
 // windowSet is the window membership the cursor carries, in whichever form it
@@ -105,7 +123,13 @@ func windowSeedsMoved(old map[closureKey]bool, now closureRows) []closureKey {
 	return moved
 }
 
-func decodeCursor(raw []byte) (cursorState, error) {
+// decodeCursor parses a client's cursor and, when it references a cursor-state
+// entry, resolves the entry into the returned state. A reference the store no
+// longer answers is not an error: the scalars still decode, stateEvicted is
+// set, and pullPreamble converts it into a reset. Only a transient store
+// failure surfaces as an error, so the client retries instead of re-downloading
+// a workspace it could have kept.
+func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (cursorState, error) {
 	if len(raw) == 0 {
 		return cursorState{}, nil
 	}
@@ -113,7 +137,7 @@ func decodeCursor(raw []byte) (cursorState, error) {
 	if err := proto.Unmarshal(raw, &c); err != nil {
 		return cursorState{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bad cursor: %w", err))
 	}
-	return cursorState{
+	st := cursorState{
 		seq:           c.GetSeq(),
 		subHash:       c.GetSubHash(),
 		epoch:         c.GetFilterEpoch(),
@@ -125,27 +149,132 @@ func decodeCursor(raw []byte) (cursorState, error) {
 		closure:       c.GetClosure(),
 		window:        c.GetWindow(),
 		windows:       c.GetWindows(),
-	}, nil
+	}
+	ref := c.GetSetsRef()
+	if ref.GetId() == 0 {
+		return st, nil
+	}
+	st.stateID, st.stateGen = ref.GetId(), ref.GetGen()
+	if s.cursorState == nil {
+		// The server was reconfigured without a store; entries it once wrote
+		// are unreachable, which to the client is indistinguishable from
+		// eviction.
+		st.stateEvicted = true
+		return st, nil
+	}
+	blob, err := s.cursorState.Get(ctx, ws, cursorstate.Ref{ID: st.stateID, Gen: st.stateGen})
+	if errors.Is(err, cursorstate.ErrNotFound) {
+		s.tel().cursorStateMisses.Add(ctx, 1)
+		st.stateEvicted = true
+		return st, nil
+	}
+	if err != nil {
+		return cursorState{}, connect.NewError(connect.CodeUnavailable, fmt.Errorf("cursor state: %w", err))
+	}
+	var sets syncplanecursorv1.StoredSets
+	if err := proto.Unmarshal(blob, &sets); err != nil {
+		// A corrupt entry cannot be advanced from any more than a missing one.
+		s.tel().cursorStateMisses.Add(ctx, 1)
+		st.stateEvicted = true
+		return st, nil
+	}
+	st.subs = sets.GetSubscriptions()
+	st.closure = sets.GetClosure()
+	st.window = sets.GetWindow()
+	st.windows = sets.GetWindows()
+	st.stateBlob = blob
+	return st, nil
 }
 
-func encodeCursor(st cursorState) []byte {
-	raw, err := proto.Marshal(&syncplanecursorv1.Cursor{
+// cursorStateInlineLimit is the sets size below which encodeCursor inlines
+// them even with a store installed: a cursor smaller than this costs less to
+// restate than the store round trip every later pull would pay to resolve it.
+const cursorStateInlineLimit = 1024
+
+// encodeCursor renders the position the caller assembled in st. With a
+// cursor-state store the bulky sets travel as a reference: an unchanged
+// membership reuses the ref st was decoded with, a moved one writes a new
+// entry under the same lineage, and st is updated so the caller can carry the
+// new ref into its next page. Without a store — or when the write fails — the
+// sets are inlined, which every decode path accepts forever; the indirection
+// is an optimization, never a dependency.
+func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) []byte {
+	c := &syncplanecursorv1.Cursor{
 		Seq:           st.seq,
 		SubHash:       st.subHash,
 		FilterEpoch:   st.epoch,
 		StoreEpoch:    st.storeEpoch,
 		PartialEntity: st.partialEntity,
 		PartialKey:    st.partialKey,
-		Subscriptions: st.subs,
 		Resync:        st.resync,
-		Closure:       st.closure,
-		Window:        st.window,
-		Windows:       st.windows,
-	})
+	}
+	if !s.storeSets(ctx, ws, st, c) {
+		c.Subscriptions = st.subs
+		c.Closure = st.closure
+		c.Window = st.window
+		c.Windows = st.windows
+	}
+	raw, err := proto.Marshal(c)
 	if err != nil {
 		panic(err) // cannot fail for a message of valid in-memory protos
 	}
 	return raw
+}
+
+// storeSets moves st's sets into the cursor-state store and stamps the ref
+// onto c, reporting whether it did; false means the caller must inline them.
+func (s *Server) storeSets(ctx context.Context, ws string, st *cursorState, c *syncplanecursorv1.Cursor) bool {
+	if s.cursorState == nil {
+		return false
+	}
+	blob, err := proto.Marshal(&syncplanecursorv1.StoredSets{
+		Subscriptions: st.subs,
+		Closure:       st.closure,
+		Windows:       st.windows,
+		Window:        st.window,
+	})
+	if err != nil {
+		panic(err) // cannot fail for a message of valid in-memory protos
+	}
+	// The sets encode deterministically (each key list sorted — see keySet and
+	// windowStates), so equal bytes mean equal membership and the entry the
+	// cursor came from still describes it: reissue the ref, write nothing.
+	// This is what keeps an idle poll, and every page that only advances seq,
+	// free of store writes.
+	if st.stateID != 0 && st.stateBlob != nil && bytes.Equal(blob, st.stateBlob) {
+		c.SetsRef = &syncplanecursorv1.StateRef{Id: st.stateID, Gen: st.stateGen}
+		return true
+	}
+	if len(blob) <= cursorStateInlineLimit {
+		return false
+	}
+	ref := cursorstate.Ref{ID: st.stateID, Gen: randNonZero()}
+	if ref.ID == 0 {
+		ref.ID = randNonZero()
+	}
+	if err := s.cursorState.Put(ctx, ws, ref, blob); err != nil {
+		s.tel().cursorStatePutFailures.Add(ctx, 1)
+		s.log().LogAttrs(ctx, slog.LevelDebug, "cursor state write failed; inlining sets",
+			slog.String("workspace", ws), slog.String("error", err.Error()))
+		return false
+	}
+	st.stateID, st.stateGen, st.stateBlob = ref.ID, ref.Gen, blob
+	c.SetsRef = &syncplanecursorv1.StateRef{Id: ref.ID, Gen: ref.Gen}
+	return true
+}
+
+// randNonZero returns a uniformly random nonzero uint64 for cursor-state
+// identifiers. Zero is excluded because the wire treats it as "no ref".
+func randNonZero() uint64 {
+	for {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			panic(err) // the platform CSPRNG does not fail
+		}
+		if v := binary.LittleEndian.Uint64(b[:]); v != 0 {
+			return v
+		}
+	}
 }
 
 // resetReason names why a pull forces the client to re-bootstrap, so the log
@@ -160,6 +289,7 @@ const (
 	resetProvenance        resetReason = "store_provenance_mismatch"
 	resetStaleResync       resetReason = "resync_invalidated_by_scope_change"
 	resetResyncUnavailable resetReason = "old_visibility_unreconstructable"
+	resetStateEvicted      resetReason = "cursor_state_evicted"
 )
 
 // logReset emits the re-bootstrap event at the level its reason warrants.
@@ -186,7 +316,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	if err != nil {
 		return nil, err
 	}
-	cur, err := decodeCursor(msg.GetCursor())
+	cur, err := s.decodeCursor(ctx, msg.GetWorkspaceId(), msg.GetCursor())
 	if err != nil {
 		return nil, err
 	}
@@ -398,6 +528,13 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, clientID strin
 	if len(rawCursor) > 0 && (cur.seq > current || (cur.storeEpoch != 0 && cur.storeEpoch != storeEpoch)) {
 		return current, storeEpoch, resetProvenance, nil
 	}
+	// The cursor referenced a state entry the store no longer holds, so the
+	// membership sets it was issued under are gone and nothing exact can be
+	// diffed against them. Judged after horizon and provenance: those reasons
+	// explain WHY a cursor is old enough for its entry to have expired.
+	if cur.stateEvicted {
+		return current, storeEpoch, resetStateEvicted, nil
+	}
 	return current, storeEpoch, resetNone, nil
 }
 
@@ -543,7 +680,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// exactly as it would on the normal path below.
 		next := cur
 		next.subHash, next.epoch, next.storeEpoch, next.subs = wantHash, epoch, storeEpoch, subs
-		resp.NextCursor = encodeCursor(next)
+		resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 		resp.Seq = next.seq
 		return resp, next, resetNone, nil
 	}
@@ -648,6 +785,10 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	}
 	emitter.deltas = false
 	next := cursorState{subHash: wantHash, epoch: epoch, storeEpoch: storeEpoch, subs: subs}
+	// Continue the cursor's state lineage: pages that carry the sets forward
+	// unchanged reuse the entry they were decoded from, and a page that moved
+	// them writes its entry under the same id (see storeSets).
+	next.stateID, next.stateGen, next.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
 	if resp.HasMore {
 		// Resume just past the last delivered row. The (entity, key)
 		// sub-position lets the next pull pick up the rest of a group
@@ -680,7 +821,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			next.windows = emitter.windowStates()
 		}
 	}
-	resp.NextCursor = encodeCursor(next)
+	resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 	resp.Seq = next.seq
 	return resp, next, resetNone, nil
 }

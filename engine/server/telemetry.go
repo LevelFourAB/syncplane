@@ -107,6 +107,18 @@ type metrics struct {
 	// retention is set correctly for how long clients actually stay away.
 	pullResets metric.Int64Counter
 
+	// cursorStateMisses counts cursors referencing a state entry the store no
+	// longer holds. Every miss is a client re-bootstrap, so a nonzero rate
+	// means the store evicts entries clients still present — it is sized too
+	// small, its TTL is shorter than clients stay away, or (for an in-process
+	// store) the process restarted.
+	cursorStateMisses metric.Int64Counter
+	// cursorStatePutFailures counts state entries that could not be written.
+	// Each failure falls back to inlining the sets in the cursor, so clients
+	// keep working — this is the signal that they are paying wire costs the
+	// store was installed to remove.
+	cursorStatePutFailures metric.Int64Counter
+
 	// streams tracks Subscribe streams currently open. An up-down counter
 	// rather than a counter because what matters is the level, not the rate.
 	streams metric.Int64UpDownCounter
@@ -145,19 +157,21 @@ type metrics struct {
 // contract a dashboard is written against — a rename here is a breaking change
 // for whoever is graphing it, and it should be visible as one.
 const (
-	metricPushMutations      = "syncplane.push.mutations"
-	metricPushRejections     = "syncplane.push.rejections"
-	metricPushBatchDuration  = "syncplane.push.batch.duration"
-	metricPullChanges        = "syncplane.pull.changes"
-	metricPullResets         = "syncplane.pull.resets"
-	metricSubscribeStreams   = "syncplane.subscribe.streams"
-	metricNotifyRequested    = "syncplane.notify.requested"
-	metricNotifyPublished    = "syncplane.notify.published"
-	metricGCDuration         = "syncplane.gc.duration"
-	metricGCWorkspaces       = "syncplane.gc.workspaces"
-	metricGCCollected        = "syncplane.gc.collected"
-	metricIndexBuildDuration = "syncplane.index.build.duration"
-	metricIndexBuildRows     = "syncplane.index.build.rows"
+	metricPushMutations          = "syncplane.push.mutations"
+	metricPushRejections         = "syncplane.push.rejections"
+	metricPushBatchDuration      = "syncplane.push.batch.duration"
+	metricPullChanges            = "syncplane.pull.changes"
+	metricPullResets             = "syncplane.pull.resets"
+	metricCursorStateMisses      = "syncplane.cursor_state.misses"
+	metricCursorStatePutFailures = "syncplane.cursor_state.put_failures"
+	metricSubscribeStreams       = "syncplane.subscribe.streams"
+	metricNotifyRequested        = "syncplane.notify.requested"
+	metricNotifyPublished        = "syncplane.notify.published"
+	metricGCDuration             = "syncplane.gc.duration"
+	metricGCWorkspaces           = "syncplane.gc.workspaces"
+	metricGCCollected            = "syncplane.gc.collected"
+	metricIndexBuildDuration     = "syncplane.index.build.duration"
+	metricIndexBuildRows         = "syncplane.index.build.rows"
 )
 
 // newMetrics declares the server's instruments. A failure here is a
@@ -181,6 +195,12 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 		pullResets: b.Int64Counter(metricPullResets,
 			metric.WithDescription("Clients told to re-bootstrap, by reason."),
 			metric.WithUnit("{reset}")),
+		cursorStateMisses: b.Int64Counter(metricCursorStateMisses,
+			metric.WithDescription("Cursors referencing an evicted cursor-state entry."),
+			metric.WithUnit("{miss}")),
+		cursorStatePutFailures: b.Int64Counter(metricCursorStatePutFailures,
+			metric.WithDescription("Cursor-state entries that could not be written."),
+			metric.WithUnit("{failure}")),
 		streams: b.Int64UpDownCounter(metricSubscribeStreams,
 			metric.WithDescription("Subscribe streams currently open."),
 			metric.WithUnit("{stream}")),

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"context"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -43,11 +44,11 @@ type bootstrapResume struct {
 // server cannot parse is a client error rather than a reason to silently start
 // over: it can only come from a client corrupting what it was handed, and
 // failing loudly is what surfaces that.
-func decodeBootstrapResume(r *syncplanev1.BootstrapResume) (*bootstrapResume, error) {
+func (s *Server) decodeBootstrapResume(ctx context.Context, ws string, r *syncplanev1.BootstrapResume) (*bootstrapResume, error) {
 	if r == nil || len(r.GetCursor()) == 0 {
 		return nil, nil
 	}
-	cur, err := decodeCursor(r.GetCursor())
+	cur, err := s.decodeCursor(ctx, ws, r.GetCursor())
 	if err != nil {
 		return nil, err
 	}
@@ -87,6 +88,12 @@ func (r *bootstrapResume) acceptable(wantHash, epoch uint64) bool {
 // one it can finish.
 func (r *bootstrapResume) servable(horizon, current, storeEpoch uint64) bool {
 	if r.cur.seq < horizon || r.cur.seq > current {
+		return false
+	}
+	// The membership sets the snapshot was taken under are gone from the
+	// cursor-state store, so the healing pull would reset on this cursor —
+	// the same verdict the horizon check reaches for an over-aged one.
+	if r.cur.stateEvicted {
 		return false
 	}
 	return r.cur.storeEpoch == 0 || r.cur.storeEpoch == storeEpoch
