@@ -87,6 +87,133 @@ func (DeletePolicy) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{0}
 }
 
+// CreatePolicy says which callers may create rows of an entity. Like
+// DeletePolicy it is enforced before the app's permission policy, on every path
+// that authorizes a write.
+//
+// Which writes it governs is decided from the write alone, without reading the
+// row: a PUT asserting expected_version 0 is a create, and a PUT asserting no
+// version is create-or-update and must satisfy this and UpdatePolicy both.
+type CreatePolicy int32
+
+const (
+	// Any caller the permission policy admits may create.
+	CreatePolicy_CREATE_POLICY_UNSPECIFIED CreatePolicy = 0
+	// Same as unset, for schemas that prefer to say so.
+	CreatePolicy_CREATE_POLICY_ALLOW CreatePolicy = 1
+	// Only writes made under the engine's Trusted bypass may create — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	CreatePolicy_CREATE_POLICY_TRUSTED_ONLY CreatePolicy = 2
+)
+
+// Enum value maps for CreatePolicy.
+var (
+	CreatePolicy_name = map[int32]string{
+		0: "CREATE_POLICY_UNSPECIFIED",
+		1: "CREATE_POLICY_ALLOW",
+		2: "CREATE_POLICY_TRUSTED_ONLY",
+	}
+	CreatePolicy_value = map[string]int32{
+		"CREATE_POLICY_UNSPECIFIED":  0,
+		"CREATE_POLICY_ALLOW":        1,
+		"CREATE_POLICY_TRUSTED_ONLY": 2,
+	}
+)
+
+func (x CreatePolicy) Enum() *CreatePolicy {
+	p := new(CreatePolicy)
+	*p = x
+	return p
+}
+
+func (x CreatePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (CreatePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_syncplane_v1_options_proto_enumTypes[1].Descriptor()
+}
+
+func (CreatePolicy) Type() protoreflect.EnumType {
+	return &file_syncplane_v1_options_proto_enumTypes[1]
+}
+
+func (x CreatePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use CreatePolicy.Descriptor instead.
+func (CreatePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{1}
+}
+
+// UpdatePolicy says which callers may modify existing rows of an entity. Like
+// DeletePolicy it is enforced before the app's permission policy, on every path
+// that authorizes a write.
+//
+// It governs the PATCH and PUT primitives, not modification as an outcome: a
+// custom mutator's rows are covered by the verdict on its invocation rather
+// than authorized one by one, so an app that wants a client-initiated edit of a
+// protected entity — an author editing their own comment, say — writes a
+// mutator, checks ownership in the body, and authorizes the invocation by name.
+// Row-level rules are what a schema enum cannot express.
+type UpdatePolicy int32
+
+const (
+	// Any caller the permission policy admits may update.
+	UpdatePolicy_UPDATE_POLICY_UNSPECIFIED UpdatePolicy = 0
+	// Same as unset, for schemas that prefer to say so.
+	UpdatePolicy_UPDATE_POLICY_ALLOW UpdatePolicy = 1
+	// Only writes made under the engine's Trusted bypass may update — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	UpdatePolicy_UPDATE_POLICY_TRUSTED_ONLY UpdatePolicy = 2
+)
+
+// Enum value maps for UpdatePolicy.
+var (
+	UpdatePolicy_name = map[int32]string{
+		0: "UPDATE_POLICY_UNSPECIFIED",
+		1: "UPDATE_POLICY_ALLOW",
+		2: "UPDATE_POLICY_TRUSTED_ONLY",
+	}
+	UpdatePolicy_value = map[string]int32{
+		"UPDATE_POLICY_UNSPECIFIED":  0,
+		"UPDATE_POLICY_ALLOW":        1,
+		"UPDATE_POLICY_TRUSTED_ONLY": 2,
+	}
+)
+
+func (x UpdatePolicy) Enum() *UpdatePolicy {
+	p := new(UpdatePolicy)
+	*p = x
+	return p
+}
+
+func (x UpdatePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (UpdatePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_syncplane_v1_options_proto_enumTypes[2].Descriptor()
+}
+
+func (UpdatePolicy) Type() protoreflect.EnumType {
+	return &file_syncplane_v1_options_proto_enumTypes[2]
+}
+
+func (x UpdatePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use UpdatePolicy.Descriptor instead.
+func (UpdatePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+}
+
 // EntityOptions declares a message as a syncable entity.
 type EntityOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -125,7 +252,26 @@ type EntityOptions struct {
 	ServerOnly bool `protobuf:"varint,5,opt,name=server_only,json=serverOnly,proto3" json:"server_only,omitempty"`
 	// Record an append-only history of this entity's field changes. See
 	// HistoryOptions.
-	History       *HistoryOptions `protobuf:"bytes,6,opt,name=history,proto3" json:"history,omitempty"`
+	History *HistoryOptions `protobuf:"bytes,6,opt,name=history,proto3" json:"history,omitempty"`
+	// Who may CREATE rows of this entity. Unset allows anyone the app's
+	// permission policy admits.
+	//
+	// A write counts as a create when it provably cannot land on an existing
+	// row: a PUT asserting expected_version 0. A PUT that asserts no version is
+	// create-or-update and must satisfy this AND update_policy.
+	CreatePolicy CreatePolicy `protobuf:"varint,7,opt,name=create_policy,json=createPolicy,proto3,enum=syncplane.v1.CreatePolicy" json:"create_policy,omitempty"`
+	// Who may UPDATE rows of this entity in place. Unset allows anyone the app's
+	// permission policy admits.
+	//
+	// It covers every PATCH (which never upserts) and every PUT that could land
+	// on an existing row. A caller that only means to create a row on an entity
+	// restricting updates must say so by asserting expected_version 0 —
+	// otherwise the write is refused, because an unguarded PUT would replace a
+	// row if one were there.
+	//
+	// Collaborative-text fields are edited by PATCH, so an entity carrying one
+	// needs updates allowed for its text to be editable by clients at all.
+	UpdatePolicy  UpdatePolicy `protobuf:"varint,8,opt,name=update_policy,json=updatePolicy,proto3,enum=syncplane.v1.UpdatePolicy" json:"update_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -200,6 +346,20 @@ func (x *EntityOptions) GetHistory() *HistoryOptions {
 		return x.History
 	}
 	return nil
+}
+
+func (x *EntityOptions) GetCreatePolicy() CreatePolicy {
+	if x != nil {
+		return x.CreatePolicy
+	}
+	return CreatePolicy_CREATE_POLICY_UNSPECIFIED
+}
+
+func (x *EntityOptions) GetUpdatePolicy() UpdatePolicy {
+	if x != nil {
+		return x.UpdatePolicy
+	}
+	return UpdatePolicy_UPDATE_POLICY_UNSPECIFIED
 }
 
 // HistoryOptions opts an entity into server-side field history: a PUT or PATCH
@@ -552,7 +712,7 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\x8b\x02\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\x8d\x03\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
@@ -561,7 +721,9 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\rdelete_policy\x18\x04 \x01(\x0e2\x1a.syncplane.v1.DeletePolicyR\fdeletePolicy\x12\x1f\n" +
 	"\vserver_only\x18\x05 \x01(\bR\n" +
 	"serverOnly\x126\n" +
-	"\ahistory\x18\x06 \x01(\v2\x1c.syncplane.v1.HistoryOptionsR\ahistory\"\x10\n" +
+	"\ahistory\x18\x06 \x01(\v2\x1c.syncplane.v1.HistoryOptionsR\ahistory\x12?\n" +
+	"\rcreate_policy\x18\a \x01(\x0e2\x1a.syncplane.v1.CreatePolicyR\fcreatePolicy\x12?\n" +
+	"\rupdate_policy\x18\b \x01(\x0e2\x1a.syncplane.v1.UpdatePolicyR\fupdatePolicy\"\x10\n" +
 	"\x0eHistoryOptions\"2\n" +
 	"\bIndexKey\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
@@ -580,7 +742,15 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
-	"\x1aDELETE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
+	"\x1aDELETE_POLICY_TRUSTED_ONLY\x10\x02*f\n" +
+	"\fCreatePolicy\x12\x1d\n" +
+	"\x19CREATE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13CREATE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
+	"\x1aCREATE_POLICY_TRUSTED_ONLY\x10\x02*f\n" +
+	"\fUpdatePolicy\x12\x1d\n" +
+	"\x19UPDATE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
+	"\x13UPDATE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
+	"\x1aUPDATE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
 	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
@@ -596,32 +766,36 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_options_proto_rawDescData
 }
 
-var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
 var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
-	(*EntityOptions)(nil),               // 1: syncplane.v1.EntityOptions
-	(*HistoryOptions)(nil),              // 2: syncplane.v1.HistoryOptions
-	(*IndexKey)(nil),                    // 3: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 4: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 5: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 6: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 7: google.protobuf.FieldOptions
+	(CreatePolicy)(0),                   // 1: syncplane.v1.CreatePolicy
+	(UpdatePolicy)(0),                   // 2: syncplane.v1.UpdatePolicy
+	(*EntityOptions)(nil),               // 3: syncplane.v1.EntityOptions
+	(*HistoryOptions)(nil),              // 4: syncplane.v1.HistoryOptions
+	(*IndexKey)(nil),                    // 5: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 6: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 7: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 8: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 9: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	4, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
-	0, // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
-	2, // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
-	3, // 3: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	6, // 4: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	7, // 5: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	1, // 6: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	5, // 7: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	8, // [8:8] is the sub-list for method output_type
-	8, // [8:8] is the sub-list for method input_type
-	6, // [6:8] is the sub-list for extension type_name
-	4, // [4:6] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	6,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	0,  // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
+	4,  // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	1,  // 3: syncplane.v1.EntityOptions.create_policy:type_name -> syncplane.v1.CreatePolicy
+	2,  // 4: syncplane.v1.EntityOptions.update_policy:type_name -> syncplane.v1.UpdatePolicy
+	5,  // 5: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	8,  // 6: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	9,  // 7: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	3,  // 8: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	7,  // 9: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	10, // [10:10] is the sub-list for method output_type
+	10, // [10:10] is the sub-list for method input_type
+	8,  // [8:10] is the sub-list for extension type_name
+	6,  // [6:8] is the sub-list for extension extendee
+	0,  // [0:6] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -634,7 +808,7 @@ func file_syncplane_v1_options_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
-			NumEnums:      1,
+			NumEnums:      3,
 			NumMessages:   5,
 			NumExtensions: 2,
 			NumServices:   0,

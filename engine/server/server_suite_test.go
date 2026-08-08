@@ -32,6 +32,8 @@ func TestServer(t *testing.T) {
 func testEntities() server.Option {
 	return server.WithEntities(&todov1.Todo{}, &testdatav1.Widget{}, &testdatav1.Pair{},
 		&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{}, &testdatav1.Ledger{},
+		// The write-policy fixtures: server-owned rows and append-only rows.
+		&testdatav1.Activity{}, &testdatav1.Comment{},
 		// Both opt into field history, which also brings the engine's
 		// server-only history entity into every spec's catalog — the state an
 		// app that uses the feature runs in.

@@ -2,9 +2,11 @@ import { create, fromBinary, getOption, hasOption, toBinary } from '@bufbuild/pr
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
+	CreatePolicy,
 	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
+	UpdatePolicy,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import {
 	entityDefOf,
@@ -77,13 +79,41 @@ describe('schema builder', () => {
 		expect(getOption(blob, fieldBehaviorExt).opaque).toBe(true);
 	});
 
-	it('defaults delete_policy to ALLOW and carries trustedOnly through to the option', () => {
-		expect(getOption(bundle.descMessage('todo'), entityExt).deletePolicy)
-			.toBe(DeletePolicy.ALLOW);
+	it('defaults every write policy to ALLOW and carries trustedOnly through to the options', () => {
+		const todo = getOption(bundle.descMessage('todo'), entityExt);
+		expect(todo.createPolicy).toBe(CreatePolicy.ALLOW);
+		expect(todo.updatePolicy).toBe(UpdatePolicy.ALLOW);
+		expect(todo.deletePolicy).toBe(DeletePolicy.ALLOW);
 
 		const ledger = entity('ledger', { id: text().key() }, { deletePolicy: 'trustedOnly' });
-		const desc = defineSchema(ledger).descMessage('ledger');
-		expect(getOption(desc, entityExt).deletePolicy).toBe(DeletePolicy.TRUSTED_ONLY);
+		expect(getOption(defineSchema(ledger).descMessage('ledger'), entityExt).deletePolicy)
+			.toBe(DeletePolicy.TRUSTED_ONLY);
+
+		// Server-owned: the server writes these rows and clients only read them.
+		const activity = entity('activity', { id: text().key() }, {
+			createPolicy: 'trustedOnly',
+			updatePolicy: 'trustedOnly',
+			deletePolicy: 'trustedOnly',
+		});
+		const activityOpts = getOption(defineSchema(activity).descMessage('activity'), entityExt);
+		expect(activityOpts.createPolicy).toBe(CreatePolicy.TRUSTED_ONLY);
+		expect(activityOpts.updatePolicy).toBe(UpdatePolicy.TRUSTED_ONLY);
+		expect(activityOpts.deletePolicy).toBe(DeletePolicy.TRUSTED_ONLY);
+
+		// Append-only: creating stays open, editing does not.
+		const comment = entity('comment', { id: text().key() }, { updatePolicy: 'trustedOnly' });
+		const commentOpts = getOption(defineSchema(comment).descMessage('comment'), entityExt);
+		expect(commentOpts.createPolicy).toBe(CreatePolicy.ALLOW);
+		expect(commentOpts.updatePolicy).toBe(UpdatePolicy.TRUSTED_ONLY);
+	});
+
+	it('reads the write policies onto the EntityDef every local write consults', () => {
+		const comment = entity('comment', { id: text().key() }, { updatePolicy: 'trustedOnly' });
+		const def = entityDefOf(defineSchema(comment).descMessage('comment'));
+
+		expect(def.policies).toEqual({ create: 'allow', update: 'trustedOnly', delete: 'allow' });
+		expect(entityDefOf(bundle.descMessage('todo')).policies)
+			.toEqual({ create: 'allow', update: 'allow', delete: 'allow' });
 	});
 
 	it('round-trips a value through the runtime descriptor', () => {

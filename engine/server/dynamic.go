@@ -52,6 +52,13 @@ type DynamicEntity struct {
 	// Names must be unique within the entity and must not start with "__",
 	// which is reserved for indexes the engine derives for itself.
 	Indexes []DynamicIndex
+	// CreatePolicy, UpdatePolicy and DeletePolicy mirror the same-named
+	// (syncplane.v1.entity) options, enforced identically for a dynamic entity
+	// and a compiled one. The zero value of each admits any caller the app's
+	// permission policy admits.
+	CreatePolicy syncplanev1.CreatePolicy
+	UpdatePolicy syncplanev1.UpdatePolicy
+	DeletePolicy syncplanev1.DeletePolicy
 }
 
 // DynamicIndex is one declared secondary index of a dynamic entity, mirroring
@@ -281,9 +288,12 @@ func dynamicEntityProto(
 		return nil, err
 	}
 	proto.SetExtension(mopts, syncplanev1.E_Entity, &syncplanev1.EntityOptions{
-		Name:      spec.Name,
-		KeyFields: spec.KeyFields,
-		Index:     indexes,
+		Name:         spec.Name,
+		KeyFields:    spec.KeyFields,
+		Index:        indexes,
+		CreatePolicy: spec.CreatePolicy,
+		UpdatePolicy: spec.UpdatePolicy,
+		DeletePolicy: spec.DeletePolicy,
 	})
 	dp.Options = mopts
 

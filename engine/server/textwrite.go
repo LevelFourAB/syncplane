@@ -115,8 +115,9 @@ func textFieldChainByPath(desc protoreflect.MessageDescriptor, path string) ([]p
 type WriteOption func(*writeOpts)
 
 type writeOpts struct {
-	texts map[string]string
-	peer  string
+	texts    map[string]string
+	peer     string
+	expected *uint64
 }
 
 // WithTextString sets a collaborative-text field from a plain string instead
@@ -145,6 +146,22 @@ func WithTextString(field, value string) WriteOption {
 // ApplyTextStrings).
 func WithTextPeer(peer string) WriteOption {
 	return func(o *writeOpts) { o.peer = peer }
+}
+
+// WithExpectedVersion makes a Put a compare-and-swap: the stored row's version
+// must equal version or the write is rejected as a conflict (CodeConflict, an
+// *Rejection AsRejection recovers). An absent or deleted row reads as version
+// 0, so WithExpectedVersion(0) means "only if the row does not exist".
+//
+// Beyond conflict detection it is how a server-side write states its intent to
+// an entity that restricts updates or creates: an unguarded PUT could land
+// either way, so it is refused where either policy is TRUSTED_ONLY, while
+// version 0 is provably a create and a non-zero version provably an update (see
+// CreatePolicy and UpdatePolicy).
+//
+// Ignored by Patch, which takes its expected version as an argument.
+func WithExpectedVersion(version uint64) WriteOption {
+	return func(o *writeOpts) { o.expected = &version }
 }
 
 func collectWriteOpts(opts []WriteOption) (writeOpts, error) {

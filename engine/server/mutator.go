@@ -220,6 +220,11 @@ func (e *EntityTx) Get(dst proto.Message, key string) (bool, error) {
 // same way, so restoring a record needs no option naming its fields. It still
 // requires WithTextPeer: without one the write fails rather than writing under
 // an invented identity.
+//
+// WithExpectedVersion makes the write a compare-and-swap and is also how it
+// states create-or-update intent to an entity restricting either (see
+// CreatePolicy); without one the write is unguarded and follows arrival order
+// like any other.
 func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
@@ -235,7 +240,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}
 	// Authorize the submitted value, before the text merge below rewrites it —
 	// the bytes a client would have put on the wire.
-	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, msg, nil, nil); err != nil {
+	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, msg, nil, o.expected); err != nil {
 		return err
 	}
 	var (
@@ -246,13 +251,26 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		row  storage.Row
 		live bool
 	)
-	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil {
+	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil {
 		var rowErr error
 		row, rowErr = e.tx.GetRow(info.name, key)
 		if rowErr != nil && rowErr != storage.ErrNotFound {
 			return rowErr
 		}
 		live = rowErr == nil && !row.Deleted
+		// WithExpectedVersion turns the write into a compare-and-swap, checked
+		// before any merge so a stale write conflicts deterministically. Mirrors
+		// Patch: an absent or deleted row reads as version 0.
+		if o.expected != nil {
+			var current uint64
+			if live {
+				current = row.Version
+			}
+			if current != *o.expected {
+				return Reject(CodeConflict, fmt.Sprintf(
+					"entity %q: expected version %d but row %q is at version %d", info.name, *o.expected, key, current))
+			}
+		}
 		var base proto.Message
 		if live {
 			// A stored row that will not decode (see poison.go) is no base: Put

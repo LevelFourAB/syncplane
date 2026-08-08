@@ -273,10 +273,17 @@ come from the snapshot taken before the closure ran: they do not see the
 closure's own recorded writes, and `Get` on a key you have written is an error
 rather than a stale row. `EntityTx` offers `Get`, `Put`, `Patch`, `Delete`,
 `Scan`, `Query`, `Seq` and `ScanPage(prototype, afterKey, limit, fn)`. Write
-options on both: `WithTextString(field, value)` and `WithTextPeer(peer)`. A text
-field of the written message holding a plain-string value
-(`text.EncodePlainString`, what a field-history record carries) resolves the same
-way and needs the same `WithTextPeer`; on `Patch` it does not widen the mask.
+options on both: `WithTextString(field, value)`, `WithTextPeer(peer)` and
+`WithExpectedVersion(v)`. A text field of the written message holding a
+plain-string value (`text.EncodePlainString`, what a field-history record
+carries) resolves the same way and needs the same `WithTextPeer`; on `Patch` it
+does not widen the mask.
+
+`WithExpectedVersion` makes a `Put` a compare-and-swap — the stored row must be
+at that version, an absent or deleted row reading as version 0 — and is how a
+server-side write states create-or-update intent to an entity whose
+[write policies](../reference/proto-options.md#delete-policy) restrict either.
+`Patch` takes its expected version as an argument instead.
 
 Neither consults a client watermark. See
 [Write from server-side code](../how-to/server-side-writes.md).

@@ -408,12 +408,17 @@ func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pr
 // stored document rather than replacing it. That merge happens against the row
 // as it stands at apply time, not as the snapshot saw it, which is what keeps a
 // concurrent editor's work from being dropped.
+//
+// WithExpectedVersion makes it a compare-and-swap against the row at apply
+// time, so the conflict surfaces from Apply rather than from this call. The
+// version read through this same closure is the right thing to pass.
 func (a *ApplyTx) Put(msg proto.Message, opts ...WriteOption) error {
 	info, err := a.info(msg)
 	if err != nil {
 		return err
 	}
-	if _, err := collectWriteOpts(opts); err != nil {
+	o, err := collectWriteOpts(opts)
+	if err != nil {
 		return err
 	}
 	key := info.keyOf(msg.ProtoReflect())
@@ -422,7 +427,14 @@ func (a *ApplyTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}
 	// Clone: the caller may keep mutating msg after recording it, and the write
 	// that lands must be the one that was authorized.
-	a.record(intent{op: syncplanev1.CrudOp_CRUD_OP_PUT, info: info, key: key, msg: proto.Clone(msg), opts: opts})
+	a.record(intent{
+		op:       syncplanev1.CrudOp_CRUD_OP_PUT,
+		info:     info,
+		key:      key,
+		msg:      proto.Clone(msg),
+		expected: o.expected,
+		opts:     opts,
+	})
 	return nil
 }
 

@@ -400,6 +400,37 @@ reserves the real DELETE for erasure, where purging the history is the point
 rather than the limitation. See
 [Recover a deleted row](../how-to/recover-a-deleted-row.md).
 
+## Write policies classify a write, not its effect
+
+`create_policy`, `update_policy` and `delete_policy` are decided from the
+mutation alone — its op and whether it asserts an `expected_version` — before
+the write transaction opens. No storage read, no row. That is what lets one
+check cover every write path at once and cost nothing on the hot path, and it is
+why an unguarded PUT (which could create or replace, and cannot be told apart)
+must satisfy both create and update to be admitted. Classifying it as one or the
+other would open a hole in the opposite direction: with creates restricted and
+updates allowed, calling it an update would let any client create rows with a
+plain `put()`.
+
+Two consequences follow from being syntactic rather than semantic.
+
+A batch applies in order inside one savepoint, so `DELETE(k)` followed by
+`PUT(k, expected_version: 0)` is authorized as a delete and a create — both
+truthfully — and lands as a replacement of the row. `update_policy` constrains
+in-place edits; pairing it with `delete_policy` is what closes the loop.
+
+And the policies range over caller class, not over rows. "Only the author may
+edit their comment" is not a rule any schema enum can carry, because the verdict
+depends on the row and on who is asking. It belongs in `CanMutate` when
+ownership is derivable from the key, or in a mutator body when it needs the
+stored row — which is the same escape hatch that makes a restricted entity
+writable at all.
+
+Two smaller edges fall out of the same rule. Undo inverts a DELETE into an
+unguarded PUT, so undoing a delete on an entity that restricts updates is
+refused. And collaborative-text edits are PATCHes, so an entity carrying a
+`text: true` field needs updates allowed for clients to edit its text at all.
+
 ## Custom mergers must satisfy the contract
 
 Fields marked `opaque: true` are replaced whole during merges on both sides — the

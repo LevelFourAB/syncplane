@@ -27,8 +27,11 @@ import {
 	CustomMutationSchema,
 } from './gen/syncplane/v1/mutation_pb.js';
 import {
+	CreatePolicy,
+	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
+	UpdatePolicy,
 } from './gen/syncplane/v1/options_pb.js';
 import {
 	rowKey,
@@ -71,6 +74,21 @@ export interface EntityDef {
 	 * same registry — not to be synced.
 	 */
 	serverOnly: boolean;
+	/**
+	 * The entity's (syncplane.v1.entity) write policies. `'trustedOnly'` means
+	 * the server refuses that class of write to every caller it authorizes, so
+	 * the client refuses it at the call site rather than applying it to the
+	 * overlay and rolling it back on the rejection ack (see assertWritePolicy).
+	 */
+	policies: WritePolicies;
+}
+
+/** Who may perform each class of write on an entity, mirroring the
+ * syncplane.v1 CreatePolicy/UpdatePolicy/DeletePolicy enums. */
+export interface WritePolicies {
+	create: 'allow' | 'trustedOnly';
+	update: 'allow' | 'trustedOnly';
+	delete: 'allow' | 'trustedOnly';
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -114,7 +132,80 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		keyFields,
 		indexes: indexesOf(schema, opts),
 		serverOnly: opts.serverOnly,
+		policies: {
+			create: opts.createPolicy === CreatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
+			update: opts.updatePolicy === UpdatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
+			delete: opts.deletePolicy === DeletePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
+		},
 	};
+}
+
+/**
+ * Throws if the entity's write policies forbid this write, which is the same
+ * decision the server makes in Server.checkWritePolicy — a client that
+ * classified differently would either block a legal write or enqueue one only
+ * to have it rejected. The shared vectors in testdata/writepolicy pin the two
+ * against each other.
+ *
+ * Classification is a pure function of the write, so it needs no row read:
+ * PATCH never upserts and is an update; a PUT asserting version 0 is provably a
+ * create and one asserting any other version provably an update; a PUT
+ * asserting nothing could land either way and so needs both policies to admit
+ * it. Calling an unguarded PUT a create or an update instead would let it
+ * through where the opposite policy forbids it.
+ */
+export function assertWritePolicy(
+	def: EntityDef,
+	op: CrudOp,
+	expectedVersion: bigint | undefined,
+): void {
+	const refuse = (why: string): never => {
+		throw new Error(`entity "${def.name}": ${why}`);
+	};
+	const creates = def.policies.create === 'trustedOnly';
+	const updates = def.policies.update === 'trustedOnly';
+	switch (op) {
+		case CrudOp.DELETE:
+			if (def.policies.delete === 'trustedOnly') {
+				refuse('deletePolicy is trustedOnly, so only a trusted server-side write may delete its rows');
+			}
+			return;
+		case CrudOp.PATCH:
+			if (updates) {
+				refuse('updatePolicy is trustedOnly, so only a trusted server-side write may modify its rows');
+			}
+			return;
+		case CrudOp.PUT:
+			if (expectedVersion === undefined) {
+				if (creates && updates) {
+					refuse(
+						'createPolicy and updatePolicy are trustedOnly, so only a trusted server-side write may '
+							+ 'write its rows',
+					);
+				}
+				if (creates) {
+					refuse(
+						'createPolicy is trustedOnly, and a put() without an expectedVersion would create the row '
+							+ "if it were absent; pass the row's current version to assert an update",
+					);
+				}
+				if (updates) {
+					refuse(
+						'updatePolicy is trustedOnly, and a put() without an expectedVersion would replace the row '
+							+ 'if it were present; pass expectedVersion 0n to assert a create',
+					);
+				}
+			} else if (expectedVersion === 0n) {
+				if (creates) {
+					refuse('createPolicy is trustedOnly, so only a trusted server-side write may create its rows');
+				}
+			} else if (updates) {
+				refuse('updatePolicy is trustedOnly, so only a trusted server-side write may modify its rows');
+			}
+			return;
+		default:
+			return;
+	}
 }
 
 /**

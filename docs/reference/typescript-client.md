@@ -1158,24 +1158,40 @@ What the client index does and does not cover:
 Set `debugVerifyIndexReads` (or `SYNC_DEBUG_VERIFY_TOUCHES=1`) to run both paths
 on every query and throw if they disagree.
 
-### Delete policy
+### Write policies
 
-The same options object carries `deletePolicy`, which decides who may delete
-rows of the entity. It defaults to `'allow'`:
+The same options object carries `createPolicy`, `updatePolicy` and
+`deletePolicy`, which decide who may write rows of the entity. Each defaults to
+`'allow'`:
 
 ```ts
-const project = schema.entity('project', {
+const comment = schema.entity('comment', {
 	id: schema.text().key(),
-	name: schema.text(),
-}, { deletePolicy: 'trustedOnly' });
+	body: schema.text(),
+}, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
 ```
 
-`'trustedOnly'` takes the DELETE primitive away from clients entirely: a
-`del()` on such an entity comes back as a `permission_denied` rejection, which
-the client acks and drops like any other. Deletion stays reachable through a
-custom mutator, whose rows are covered by the verdict on the invocation, and
-through trusted server-side writes. See
-[Delete policy](proto-options.md#delete-policy) for the full semantics.
+`'trustedOnly'` takes that write away from clients entirely, leaving it to
+custom mutators — whose rows are covered by the verdict on the invocation — and
+to trusted server-side writes.
+
+The client enforces this locally: `put`, `patch`, `del` and everything built on
+them (`update`, the typed `db` facade) **throw** for a write the schema forbids,
+before it reaches the pending queue. A forbidden write therefore never applies
+to the optimistic overlay and is never rolled back, and the error names the
+entity and the option that refused it.
+
+Which policy a write must satisfy follows from the write alone. A `patch` is an
+update. A `del` is a delete. A `put` carrying `{ expectedVersion: 0n }` is a
+create, one carrying any other version is an update, and one carrying none could
+land either way — so it needs create and update to be permitted both. Creating a
+row of an append-only entity therefore takes an explicit assertion:
+
+```ts
+await client.mutate.put(CommentSchema, { id, body }, { expectedVersion: 0n });
+```
+
+See [Write policies](proto-options.md#delete-policy) for the full semantics.
 
 > **Field order is significant** — fields get proto numbers 1..N in declaration order.
 > Evolution is append-only; reordering/removing breaks wire compatibility.

@@ -96,21 +96,36 @@ the two.
 ## Per-entity options
 
 The third argument to `entity()` carries what is not a field. `indexes`
-declares composite secondary indexes; `deletePolicy` decides who may delete
-rows:
+declares composite secondary indexes; `createPolicy`, `updatePolicy` and
+`deletePolicy` decide who may write rows:
 
 ```ts
-const project = schema.entity('project', {
+// Server-owned: the server records these rows, clients only read them.
+const activity = schema.entity('activity', {
 	id: schema.text().key(),
-	name: schema.text(),
-}, { deletePolicy: 'trustedOnly' });
+	what: schema.text(),
+}, {
+	createPolicy: 'trustedOnly',
+	updatePolicy: 'trustedOnly',
+	deletePolicy: 'trustedOnly',
+});
+
+// Append-only: a client may post a comment but not silently edit or remove one.
+const comment = schema.entity('comment', {
+	id: schema.text().key(),
+	body: schema.text(),
+}, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
 ```
 
-`'trustedOnly'` lowers to `delete_policy: DELETE_POLICY_TRUSTED_ONLY`, so a
-runtime-registered entity is protected exactly as a compiled one is — clients
-get a `permission_denied` rejection for a DELETE, and deletion is left to
-trusted server-side writes and custom mutators. See
-[Delete policy](../reference/proto-options.md#delete-policy).
+`'trustedOnly'` lowers to the matching `*_TRUSTED_ONLY` proto option, so a
+runtime-registered entity is protected exactly as a compiled one is — that class
+of write is left to trusted server-side writes and custom mutators.
+
+The client refuses such a write at the call site rather than applying it
+optimistically, so `comment.mutate.del(...)` throws. Creating an append-only row
+takes `{ expectedVersion: 0n }` on the `put()`: an unguarded put could replace an
+existing row, which the entity forbids. See
+[Write policies](../reference/proto-options.md#delete-policy).
 
 ## The same power from Go
 

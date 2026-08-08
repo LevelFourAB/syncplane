@@ -84,6 +84,10 @@ func main() {
 			// entity into the catalog: integration tests read it back through
 			// queryServer and restore from it with an ordinary PATCH.
 			&testdatav1.Historied{},
+			// Comment restricts updates and deletes: integration tests verify
+			// that the client's local refusal and the server's rejection
+			// classify the same write the same way.
+			&testdatav1.Comment{},
 		),
 	)
 	if *gcInterval > 0 || *gcRetention > 0 {

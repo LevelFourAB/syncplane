@@ -21,7 +21,9 @@ message Todo {
 | `name`          | Logical entity name used on the wire and in storage (e.g. `"todo"`).                                |
 | `key_fields`    | Field names, in order, whose values form the row key. Singular scalars.                             |
 | `index`         | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
-| `delete_policy` | Who may DELETE rows of this entity. See [Delete policy](#delete-policy).                            |
+| `create_policy` | Who may create rows of this entity. See [Write policies](#delete-policy).                           |
+| `update_policy` | Who may modify existing rows of this entity. See [Write policies](#delete-policy).                  |
+| `delete_policy` | Who may DELETE rows of this entity. See [Write policies](#delete-policy).                           |
 | `server_only`   | The entity's rows never sync to a client. See [Server-only entities](#server-only-entities).        |
 | `history`       | Record an append-only history of field changes. See [Field history](#field-history).                |
 
@@ -33,38 +35,85 @@ A message carrying this option is an **entity**. That is also what makes a
 message-typed field elsewhere a _reference_ to it — reference detection is
 annotation-free.
 
-### Delete policy
+<a id="delete-policy"></a>
 
-`delete_policy` decides who may issue a `DELETE` against the entity. Unset (or
-`DELETE_POLICY_ALLOW`) allows anyone the app's permission policy admits, which
-is how every entity behaves that says nothing.
+### Write policies
+
+Three options decide who may write an entity's rows: `create_policy`,
+`update_policy` and `delete_policy`. Each is unset by default, which allows
+anyone the app's permission policy admits — how every entity behaves that says
+nothing.
 
 ```proto
-message Project {
+// Server-owned: the server records these rows, clients only read them.
+message Activity {
 	option (syncplane.v1.entity) = {
-		name: "project"
+		name: "activity"
 		key_fields: [ "id" ]
+		create_policy: CREATE_POLICY_TRUSTED_ONLY
+		update_policy: UPDATE_POLICY_TRUSTED_ONLY
+		delete_policy: DELETE_POLICY_TRUSTED_ONLY
+	};
+	string id = 1;
+}
+
+// Append-only: a client may post a comment but not silently edit or remove one.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		update_policy: UPDATE_POLICY_TRUSTED_ONLY
 		delete_policy: DELETE_POLICY_TRUSTED_ONLY
 	};
 	string id = 1;
 }
 ```
 
-`DELETE_POLICY_TRUSTED_ONLY` refuses the DELETE to every caller the server
+`*_TRUSTED_ONLY` refuses that class of write to every caller the server
 authorizes, with a `permission_denied` rejection. That includes the in-process
 API — `Apply` and `Mutate` from an app handler are held to the same policy as a
 sync client — and leaves only writes made under the `Trusted` bypass: a
 connector, a migration, a cron job.
 
-The engine checks it before the app's `Permissions.CanMutate` hook runs, on
+The engine checks these before the app's `Permissions.CanMutate` hook runs, on
 every path that authorizes a write, so the rule is stated once in the schema
 rather than restated in each deployment's policy.
 
-It governs the DELETE _primitive_, not deletion as an outcome. A custom
-mutator's rows are covered by the verdict on its invocation rather than
-authorized one by one, so an app that wants a client-initiated delete of a
-protected entity writes a mutator, puts the cascade handling and checks it needs
-in the body, and authorizes the invocation by name:
+#### Which policy a write must satisfy
+
+The check runs before the write transaction opens and never reads the row, so
+it classifies from the write alone. `expected_version` is what makes that
+possible: an absent or tombstoned row reads as version 0, so `expected_version:
+0` means "apply only if the row does not exist".
+
+| Write                                    | Must satisfy                                 |
+| ---------------------------------------- | -------------------------------------------- |
+| `PATCH`                                  | `update_policy` — a PATCH never upserts      |
+| `DELETE`                                 | `delete_policy`                              |
+| `PUT` with `expected_version` 0          | `create_policy` — provably a create          |
+| `PUT` with a non-zero `expected_version` | `update_policy` — provably an update         |
+| `PUT` with no `expected_version`         | **both** `create_policy` and `update_policy` |
+
+An unguarded PUT is create-or-update and cannot be told apart, so it is
+permitted only when it would be permitted either way. A client writing to an
+entity that restricts updates must therefore assert `expected_version: 0` to say
+it means to create — from Go, `server.WithExpectedVersion(0)` on the `Put`.
+
+The TypeScript client applies the same table locally and throws at the call
+site, so a write that can never land never enters the pending queue.
+
+#### What they do not cover
+
+They range over caller class — trusted bypass versus any authorized caller — not
+over rows. "Only edit your own comment" is not expressible here; it belongs in
+`CanMutate` when ownership is derivable from the key, or in a mutator body when
+it needs the stored row.
+
+They govern the write _primitives_, not the outcome. A custom mutator's rows are
+covered by the verdict on its invocation rather than authorized one by one, so
+an app that wants a client-initiated delete or edit of a protected entity writes
+a mutator, puts the cascade handling and checks it needs in the body, and
+authorizes the invocation by name:
 
 ```go
 server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
@@ -74,7 +123,14 @@ server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
 	})
 ```
 
-Reach for this on the rows a cascade hangs off. It removes the only
+Two more limits are worth knowing. A batch applies in order inside one
+savepoint, so `DELETE(k)` followed by `PUT(k, expected_version: 0)` passes as a
+create and lands as a replace — `update_policy` constrains in-place edits, and
+closing that loop takes `delete_policy` alongside it. And collaborative-text
+fields are edited by PATCH, so an entity carrying one needs updates allowed for
+clients to edit its text at all.
+
+Reach for `delete_policy` on the rows a cascade hangs off: it removes the only
 irreversible verb the wire has, rather than making its damage recoverable after
 the fact.
 

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxItABCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IncKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCCpmCgxEZWxldGVQb2xpY3kSHQoZREVMRVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0RFTEVURV9QT0xJQ1lfQUxMT1cQARIeChpERUxFVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIrYCCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeSIQCg5IaXN0b3J5T3B0aW9ucyImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IncKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCCpmCgxEZWxldGVQb2xpY3kSHQoZREVMRVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0RFTEVURV9QT0xJQ1lfQUxMT1cQARIeChpERUxFVEVfUE9MSUNZX1RSVVNURURfT05MWRACKmYKDENyZWF0ZVBvbGljeRIdChlDUkVBVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTQ1JFQVRFX1BPTElDWV9BTExPVxABEh4KGkNSRUFURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMVXBkYXRlUG9saWN5Eh0KGVVQREFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNVUERBVEVfUE9MSUNZX0FMTE9XEAESHgoaVVBEQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAjpWCgZlbnRpdHkSHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtIcDIAEoCzIbLnN5bmNwbGFuZS52MS5FbnRpdHlPcHRpb25zUgZlbnRpdHk6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -85,6 +85,35 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: syncplane.v1.HistoryOptions history = 6;
    */
   history?: HistoryOptions | undefined;
+
+  /**
+   * Who may CREATE rows of this entity. Unset allows anyone the app's
+   * permission policy admits.
+   *
+   * A write counts as a create when it provably cannot land on an existing
+   * row: a PUT asserting expected_version 0. A PUT that asserts no version is
+   * create-or-update and must satisfy this AND update_policy.
+   *
+   * @generated from field: syncplane.v1.CreatePolicy create_policy = 7;
+   */
+  createPolicy: CreatePolicy;
+
+  /**
+   * Who may UPDATE rows of this entity in place. Unset allows anyone the app's
+   * permission policy admits.
+   *
+   * It covers every PATCH (which never upserts) and every PUT that could land
+   * on an existing row. A caller that only means to create a row on an entity
+   * restricting updates must say so by asserting expected_version 0 —
+   * otherwise the write is refused, because an unguarded PUT would replace a
+   * row if one were there.
+   *
+   * Collaborative-text fields are edited by PATCH, so an entity carrying one
+   * needs updates allowed for its text to be editable by clients at all.
+   *
+   * @generated from field: syncplane.v1.UpdatePolicy update_policy = 8;
+   */
+  updatePolicy: UpdatePolicy;
 };
 
 /**
@@ -341,6 +370,95 @@ export enum DeletePolicy {
  */
 export const DeletePolicySchema: GenEnum<DeletePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 0);
+
+/**
+ * CreatePolicy says which callers may create rows of an entity. Like
+ * DeletePolicy it is enforced before the app's permission policy, on every path
+ * that authorizes a write.
+ *
+ * Which writes it governs is decided from the write alone, without reading the
+ * row: a PUT asserting expected_version 0 is a create, and a PUT asserting no
+ * version is create-or-update and must satisfy this and UpdatePolicy both.
+ *
+ * @generated from enum syncplane.v1.CreatePolicy
+ */
+export enum CreatePolicy {
+  /**
+   * Any caller the permission policy admits may create.
+   *
+   * @generated from enum value: CREATE_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Same as unset, for schemas that prefer to say so.
+   *
+   * @generated from enum value: CREATE_POLICY_ALLOW = 1;
+   */
+  ALLOW = 1,
+
+  /**
+   * Only writes made under the engine's Trusted bypass may create — a
+   * connector, a migration, a cron job. Everything holding a caller to
+   * authorize is refused, including the in-process API, which is deliberately
+   * held to the same policy as a sync client.
+   *
+   * @generated from enum value: CREATE_POLICY_TRUSTED_ONLY = 2;
+   */
+  TRUSTED_ONLY = 2,
+}
+
+/**
+ * Describes the enum syncplane.v1.CreatePolicy.
+ */
+export const CreatePolicySchema: GenEnum<CreatePolicy> = /*@__PURE__*/
+  enumDesc(file_syncplane_v1_options, 1);
+
+/**
+ * UpdatePolicy says which callers may modify existing rows of an entity. Like
+ * DeletePolicy it is enforced before the app's permission policy, on every path
+ * that authorizes a write.
+ *
+ * It governs the PATCH and PUT primitives, not modification as an outcome: a
+ * custom mutator's rows are covered by the verdict on its invocation rather
+ * than authorized one by one, so an app that wants a client-initiated edit of a
+ * protected entity — an author editing their own comment, say — writes a
+ * mutator, checks ownership in the body, and authorizes the invocation by name.
+ * Row-level rules are what a schema enum cannot express.
+ *
+ * @generated from enum syncplane.v1.UpdatePolicy
+ */
+export enum UpdatePolicy {
+  /**
+   * Any caller the permission policy admits may update.
+   *
+   * @generated from enum value: UPDATE_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Same as unset, for schemas that prefer to say so.
+   *
+   * @generated from enum value: UPDATE_POLICY_ALLOW = 1;
+   */
+  ALLOW = 1,
+
+  /**
+   * Only writes made under the engine's Trusted bypass may update — a
+   * connector, a migration, a cron job. Everything holding a caller to
+   * authorize is refused, including the in-process API, which is deliberately
+   * held to the same policy as a sync client.
+   *
+   * @generated from enum value: UPDATE_POLICY_TRUSTED_ONLY = 2;
+   */
+  TRUSTED_ONLY = 2,
+}
+
+/**
+ * Describes the enum syncplane.v1.UpdatePolicy.
+ */
+export const UpdatePolicySchema: GenEnum<UpdatePolicy> = /*@__PURE__*/
+  enumDesc(file_syncplane_v1_options, 2);
 
 /**
  * Field numbers 50100/50101 are unregistered; fine for internal use.

@@ -160,16 +160,23 @@ body writes are not authorized individually, exactly as on the push path.
 
 ## Some rules belong in the schema, not the policy
 
-`(syncplane.v1.entity).delete_policy` says who may delete rows of an entity, and
-the engine enforces it before `CanMutate` runs, on every path that authorizes a
-write. `DELETE_POLICY_TRUSTED_ONLY` refuses the DELETE to every caller the
-server authorizes — sync clients and the in-process API alike — leaving it to
-trusted writes and to custom mutators.
+`(syncplane.v1.entity)` carries three write policies — `create_policy`,
+`update_policy` and `delete_policy` — and the engine enforces them before
+`CanMutate` runs, on every path that authorizes a write. `*_TRUSTED_ONLY`
+refuses that class of write to every caller the server authorizes — sync clients
+and the in-process API alike — leaving it to trusted writes and to custom
+mutators. Two shapes come up constantly: a server-owned entity restricts all
+three, and an append-only one restricts updates and deletes while leaving
+creation open.
 
-Prefer it over the equivalent branch in `CanMutate` for entities that should
-never be deleted by a client. It states the rule once, next to the entity it
-protects, rather than in each deployment's policy where a forgotten branch fails
-open. See [Delete policy](../reference/proto-options.md#delete-policy).
+Prefer them over the equivalent branch in `CanMutate` for rules that hold for
+every deployment. They state the rule once, next to the entity it protects,
+rather than in each deployment's policy where a forgotten branch fails open.
+
+What they cannot say is anything about a specific row: they range over caller
+class, not over rows. "Only edit your own comment" stays in `CanMutate` when
+ownership is derivable from the key, or in a mutator body when it needs the
+stored row. See [Write policies](../reference/proto-options.md#delete-policy).
 
 ## What is not gated
 

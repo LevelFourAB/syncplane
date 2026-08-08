@@ -44,6 +44,25 @@ message EntityOptions {
 	// Record an append-only history of this entity's field changes. See
 	// HistoryOptions.
 	HistoryOptions history = 6;
+	// Who may CREATE rows of this entity. Unset allows anyone the app's
+	// permission policy admits.
+	//
+	// A write counts as a create when it provably cannot land on an existing
+	// row: a PUT asserting expected_version 0. A PUT that asserts no version is
+	// create-or-update and must satisfy this AND update_policy.
+	CreatePolicy create_policy = 7;
+	// Who may UPDATE rows of this entity in place. Unset allows anyone the
+	// app's permission policy admits.
+	//
+	// It covers every PATCH (which never upserts) and every PUT that could land
+	// on an existing row. A caller that only means to create a row on an entity
+	// restricting updates must say so by asserting expected_version 0 —
+	// otherwise the write is refused, because an unguarded PUT would replace a
+	// row if one were there.
+	//
+	// Collaborative-text fields are edited by PATCH, so an entity carrying one
+	// needs updates allowed for its text to be editable by clients at all.
+	UpdatePolicy update_policy = 8;
 }
 
 // HistoryOptions opts an entity into server-side field history: a PUT or PATCH
@@ -97,6 +116,47 @@ enum DeletePolicy {
 	// authorize is refused, including the in-process API, which is deliberately
 	// held to the same policy as a sync client.
 	DELETE_POLICY_TRUSTED_ONLY = 2;
+}
+
+// CreatePolicy says which callers may create rows of an entity. Like
+// DeletePolicy it is enforced before the app's permission policy, on every path
+// that authorizes a write.
+//
+// Which writes it governs is decided from the write alone, without reading the
+// row: a PUT asserting expected_version 0 is a create, and a PUT asserting no
+// version is create-or-update and must satisfy this and UpdatePolicy both.
+enum CreatePolicy {
+	// Any caller the permission policy admits may create.
+	CREATE_POLICY_UNSPECIFIED = 0;
+	// Same as unset, for schemas that prefer to say so.
+	CREATE_POLICY_ALLOW = 1;
+	// Only writes made under the engine's Trusted bypass may create — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	CREATE_POLICY_TRUSTED_ONLY = 2;
+}
+
+// UpdatePolicy says which callers may modify existing rows of an entity. Like
+// DeletePolicy it is enforced before the app's permission policy, on every path
+// that authorizes a write.
+//
+// It governs the PATCH and PUT primitives, not modification as an outcome: a
+// custom mutator's rows are covered by the verdict on its invocation rather
+// than authorized one by one, so an app that wants a client-initiated edit of a
+// protected entity — an author editing their own comment, say — writes a
+// mutator, checks ownership in the body, and authorizes the invocation by name.
+// Row-level rules are what a schema enum cannot express.
+enum UpdatePolicy {
+	// Any caller the permission policy admits may update.
+	UPDATE_POLICY_UNSPECIFIED = 0;
+	// Same as unset, for schemas that prefer to say so.
+	UPDATE_POLICY_ALLOW = 1;
+	// Only writes made under the engine's Trusted bypass may update — a
+	// connector, a migration, a cron job. Everything holding a caller to
+	// authorize is refused, including the in-process API, which is deliberately
+	// held to the same policy as a sync client.
+	UPDATE_POLICY_TRUSTED_ONLY = 2;
 }
 
 // IndexKey is one component of an index, in the order it sorts.

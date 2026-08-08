@@ -146,6 +146,6 @@ exactly what erasure has to reach.
 
 - [Restore a field to a previous value](restore-a-field.md) — the field-history
   half.
-- [Proto options → Delete policy](../reference/proto-options.md#delete-policy).
+- [Proto options → Write policies](../reference/proto-options.md#delete-policy).
 - [Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-is-a-restore-mechanism-not-an-audit-log)
   — why history cannot do this on its own.

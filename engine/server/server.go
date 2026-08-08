@@ -45,10 +45,13 @@ type entityInfo struct {
 	// this is the ONE list that decides an entity's index write cost.
 	indexes []compiledIndex
 	mergers lww.Mergers
-	// deletePolicy is the entity's (syncplane.v1.entity).delete_policy. The
-	// engine checks it alongside CanMutate (see Server.authorizeWrite); it is
-	// held here rather than re-read from the descriptor because it is consulted
-	// once per authorized write.
+	// createPolicy, updatePolicy and deletePolicy are the entity's
+	// (syncplane.v1.entity) write policies. The engine checks them alongside
+	// CanMutate (see Server.authorizeWrite); they are held here rather than
+	// re-read from the descriptor because they are consulted once per
+	// authorized write.
+	createPolicy syncplanev1.CreatePolicy
+	updatePolicy syncplanev1.UpdatePolicy
 	deletePolicy syncplanev1.DeletePolicy
 	// serverOnly is (syncplane.v1.entity).server_only: the entity's rows never
 	// reach a client. Enforced at the row emitter, which is the chokepoint
@@ -771,6 +774,8 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	info := &entityInfo{
 		name:         eo.GetName(),
 		msgType:      mt,
+		createPolicy: eo.GetCreatePolicy(),
+		updatePolicy: eo.GetUpdatePolicy(),
 		deletePolicy: eo.GetDeletePolicy(),
 		serverOnly:   eo.GetServerOnly(),
 		history:      eo.GetHistory(),

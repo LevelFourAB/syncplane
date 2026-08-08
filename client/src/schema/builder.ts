@@ -55,6 +55,7 @@ import {
 } from '@bufbuild/protobuf/wkt';
 
 import {
+	CreatePolicy,
 	DeletePolicy,
 	entity as entityExt,
 	EntityOptionsSchema,
@@ -63,6 +64,7 @@ import {
 	file_syncplane_v1_options,
 	IndexKeySchema,
 	IndexSpecSchema,
+	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
 import { validateEntityName } from '../naming.js';
 
@@ -429,22 +431,31 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly fields: F;
 	/** Composite secondary indexes declared on the entity, in declaration order. */
 	readonly indexes: readonly IndexDecl[];
+	/** Who may create rows of this entity; see {@link EntityOptions.createPolicy}. */
+	readonly createPolicy: PolicyDecl;
+	/** Who may update rows of this entity; see {@link EntityOptions.updatePolicy}. */
+	readonly updatePolicy: PolicyDecl;
 	/** Who may delete rows of this entity; see {@link EntityOptions.deletePolicy}. */
-	readonly deletePolicy: DeletePolicyDecl;
+	readonly deletePolicy: PolicyDecl;
 	/** @internal synthesized proto full name, e.g. "sync.dynamic.Todo". */
 	readonly typeName: string;
 }
 
 /**
- * Who may DELETE rows of an entity, mirroring syncplane.v1.DeletePolicy.
+ * Who may perform one class of write on an entity, mirroring
+ * syncplane.v1.CreatePolicy, UpdatePolicy and DeletePolicy.
  *
  * `'allow'` is the default and the behaviour of every other entity: anyone the
- * app's permission policy admits may delete. `'trustedOnly'` refuses the DELETE
- * primitive to every caller the server authorizes — sync clients and the
- * in-process API alike — leaving deletion to trusted server-side writes and to
- * custom mutators, whose rows are covered by the verdict on the invocation.
+ * app's permission policy admits may write. `'trustedOnly'` refuses that write
+ * to every caller the server authorizes — sync clients and the in-process API
+ * alike, and the client refuses it locally rather than applying it optimistically
+ * — leaving the write to trusted server-side code and to custom mutators, whose
+ * rows are covered by the verdict on the invocation.
  */
-export type DeletePolicyDecl = 'allow' | 'trustedOnly';
+export type PolicyDecl = 'allow' | 'trustedOnly';
+
+/** Alias of {@link PolicyDecl}, kept for the `deletePolicy` option it was named for. */
+export type DeletePolicyDecl = PolicyDecl;
 
 /**
  * One composite secondary index, mirroring syncplane.v1.IndexSpec. Declare one
@@ -526,6 +537,8 @@ export function entity<F extends Fields>(
 		name,
 		fields,
 		indexes,
+		createPolicy: options?.createPolicy ?? 'allow',
+		updatePolicy: options?.updatePolicy ?? 'allow',
 		deletePolicy: options?.deletePolicy ?? 'allow',
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
@@ -548,7 +561,30 @@ export interface EntityOptions {
 	 * fact. Deletion stays reachable through a custom mutator, where the app
 	 * can put the cascade handling and checks it wants.
 	 */
-	deletePolicy?: DeletePolicyDecl;
+	deletePolicy?: PolicyDecl;
+	/**
+	 * Who may create rows of this entity. Defaults to `'allow'`.
+	 *
+	 * `'trustedOnly'` marks the entity server-owned: clients read its rows and
+	 * the server writes them, without every deployment's permission policy
+	 * having to remember to say so. A client that tries is refused at the call
+	 * site.
+	 */
+	createPolicy?: PolicyDecl;
+	/**
+	 * Who may modify existing rows of this entity in place. Defaults to
+	 * `'allow'`.
+	 *
+	 * `'trustedOnly'` alongside a permissive `createPolicy` makes an entity
+	 * append-only: a client may post a row but not silently edit one afterwards,
+	 * leaving edits to a custom mutator that can check who is asking. Such a
+	 * client must assert `expectedVersion: 0n` on its `put()` to say it means to
+	 * create — an unguarded put could replace a row, so it is refused.
+	 *
+	 * Collaborative-text fields are edited by PATCH, so an entity carrying one
+	 * cannot have its text edited by clients while this is `'trustedOnly'`.
+	 */
+	updatePolicy?: PolicyDecl;
 }
 
 /**
@@ -717,6 +753,12 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 		create(EntityOptionsSchema, {
 			name: e.name,
 			keyFields: keyFieldNames,
+			createPolicy: e.createPolicy === 'trustedOnly'
+				? CreatePolicy.TRUSTED_ONLY
+				: CreatePolicy.ALLOW,
+			updatePolicy: e.updatePolicy === 'trustedOnly'
+				? UpdatePolicy.TRUSTED_ONLY
+				: UpdatePolicy.ALLOW,
 			deletePolicy: e.deletePolicy === 'trustedOnly'
 				? DeletePolicy.TRUSTED_ONLY
 				: DeletePolicy.ALLOW,

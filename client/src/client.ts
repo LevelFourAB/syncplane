@@ -58,6 +58,7 @@ import { MemoryKVStore } from './kv/memory.js';
 import type { KVStore } from './kv/store.js';
 import {
 	applyTextStringsToCrud,
+	assertWritePolicy,
 	attachTextStrings,
 	buildBatch,
 	buildCustom,
@@ -1526,6 +1527,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			opts?: PatchOptions,
 		): Promise<void> => {
 			const def = this.entityRegistry.bySchema(schema);
+			assertWritePolicy(def, CrudOp.PATCH, opts?.expectedVersion);
 			const { init: cleaned, texts } = extractTextStrings(schema, init);
 			// The mask derives from the ORIGINAL init so extracted text
 			// fields keep their entry (explicit paths pass through).
@@ -1544,6 +1546,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return {
 			put: async (schema, value, opts) => {
 				const def = this.entityRegistry.bySchema(schema);
+				assertWritePolicy(def, CrudOp.PUT, opts?.expectedVersion);
 				// String-valued text fields ride a side map to enqueue, where
 				// they diff against the merged row under a leased peer.
 				const { init, texts } = extractTextStrings(schema, value);
@@ -1592,6 +1595,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			},
 			del: async (schema, key, opts) => {
 				const def = this.entityRegistry.bySchema(schema);
+				assertWritePolicy(def, CrudOp.DELETE, opts?.expectedVersion);
 				await sink(buildDelete(def, key, opts?.expectedVersion));
 			},
 		};
