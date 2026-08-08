@@ -23,16 +23,22 @@
 //     version vector it allocates past already covers them. The slot pool and
 //     the clientId also live and die together: wiping the store mints a fresh
 //     clientId, and the retired peers are never spoken again.
-//   - Without Web Locks (Node, SSR, older browsers) the registry is
-//     in-process. That is the same degradation the rest of the client accepts
-//     there, and it is sound for the same reason: those runtimes hold private
-//     stores instead of sharing one across contexts.
+//   - Without Web Locks the registry is in-process, which carries the guarantee
+//     only where the contexts sharing this process are the contexts sharing the
+//     store — Node and SSR, whose clients hold private stores. A browser with no
+//     lock manager is the opposite: its tabs share one IndexedDB while neither
+//     can see the other's registry, so both would take slot 0. Slots are
+//     therefore not handed out there at all, and each document instance gets an
+//     unrecycled `<clientId>:u<id>` identity instead — unique without
+//     coordinating with anyone, at one permanent peer-table entry per document
+//     it writes to.
 //
 // Slots stay dense, so a device that edits one document at a time always speaks
 // `<clientId>:0` and a document's peer table does not grow with the number of
 // sessions that have touched it.
 
 import { isServerRuntime } from '../env.js';
+import { newId } from '../id.js';
 
 /** A held writer identity, released when its document instance goes away. */
 export interface PeerLease {
@@ -44,7 +50,7 @@ export interface PeerLease {
 
 /** Hands out unique writer identities for one device (one clientId). */
 export interface PeerLeases {
-	/** Takes the lowest free slot. Never returns a peer another live lease holds. */
+	/** A writer identity no other live lease on this device holds. */
 	acquire(): Promise<PeerLease>;
 }
 
@@ -116,8 +122,12 @@ function holdWebLock(name: string): Promise<(() => void) | undefined> {
  * has to pass the same one, or two of them hand out the same peer.
  */
 export function createPeerLeases(clientId: string, lockPrefix: string): PeerLeases {
+	const serverRuntime = isServerRuntime();
 	const webLocks = typeof navigator !== 'undefined' && navigator.locks !== undefined
-		&& !isServerRuntime();
+		&& !serverRuntime;
+	// Either a slot means the same thing in every context that shares the store,
+	// or it cannot be handed out at all (see the file comment).
+	const slotted = webLocks || serverRuntime;
 	const hold = (slot: number): Promise<(() => void) | undefined> =>
 		webLocks
 			? holdWebLock(`${lockPrefix}:${clientId}:${slot}`)
@@ -125,22 +135,27 @@ export function createPeerLeases(clientId: string, lockPrefix: string): PeerLeas
 
 	return {
 		async acquire(): Promise<PeerLease> {
-			for (let slot = 0; slot < MAX_SLOTS; slot++) {
-				const release = await hold(slot);
-				if (release === undefined) continue;
-				let released = false;
-				return {
-					peer: `${clientId}:${slot}`,
-					release: () => {
-						if (released) return;
-						released = true;
-						release();
-					},
-				};
+			if (slotted) {
+				for (let slot = 0; slot < MAX_SLOTS; slot++) {
+					const release = await hold(slot);
+					if (release === undefined) continue;
+					let released = false;
+					return {
+						peer: `${clientId}:${slot}`,
+						release: () => {
+							if (released) return;
+							released = true;
+							release();
+						},
+					};
+				}
 			}
-			// Every slot is live. Still unique, but unleased: nothing recycles it,
-			// so it costs each document it writes to one permanent peer-table entry.
-			return { peer: `${clientId}:u${crypto.randomUUID()}`, release: () => {} };
+			// No slot to be had: every one is live, or this runtime cannot say which
+			// are. Still unique, but unleased — nothing recycles it, so it costs each
+			// document it writes to one permanent peer-table entry. Not
+			// crypto.randomUUID: the browsers that reach this path for the second
+			// reason predate it.
+			return { peer: `${clientId}:u${newId()}`, release: () => {} };
 		},
 	};
 }

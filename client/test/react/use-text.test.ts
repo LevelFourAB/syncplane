@@ -185,21 +185,22 @@ describe('useText', () => {
 		await client.close();
 	});
 
-	it('closes the handle on unmount, freeing the writer peer', async () => {
+	it('closes the handle on unmount and reopens the field cleanly', async () => {
 		const client = newClient();
 		await client.mutate.put(NoteSchema, { id: 'n1', body: bodyDoc('seed', 'hello') });
 		const { result, unmount } = renderHook(() => db.note.useText('n1', 'body'), {
 			wrapper: providerWrapper(client),
 		});
 		await waitFor(() => expect(result.current.value).toBe('hello'));
-		const peer = result.current.handle!.doc.peer;
-
 		unmount();
 		expect(() => result.current.handle!.insert(0, 'x')).toThrow(/handle is closed/);
 
-		// The lease is back: the next handle on this device takes the same slot.
+		// A handle opened afterwards holds a writer identity of its own and edits
+		// with it. Whether that identity is the recycled slot depends on there
+		// being a lock manager, which jsdom has none of — see test/unit/text-peer.
 		const next = await client.db.note.text('n1', 'body');
-		expect(next.doc.peer).toBe(peer);
+		await next.insert(0, 'X');
+		expect(next.value).toBe('Xhello');
 		next.close();
 		await client.close();
 	});

@@ -481,9 +481,15 @@ export class TextDoc {
 	 * incoming state is not a superset of what the handle holds, so merging it
 	 * would keep characters the server dropped, and callers hold the handle's
 	 * `doc` by reference and must keep seeing the same object.
+	 *
+	 * The writer peer's counter survives: it is raised back to cover what it
+	 * covered before, so edits made after this still allocate past every id this
+	 * document has minted. Items, marks and the rest of the version vector are
+	 * other's.
 	 */
 	replaceWith(other: TextDoc): void {
 		this.byId.clear();
+		const spoken = this.vv.get(this.peer);
 		this.vv.clear();
 		this.marks = [];
 		// Source node -> its copy, keyed by node identity rather than by item key,
@@ -519,6 +525,7 @@ export class TextDoc {
 		relink(other.root, this.root);
 		for (const m of other.marks) this.marks.push({ ...m });
 		for (const [ p, c ] of other.vv) this.vv.set(p, c);
+		if (spoken !== undefined) this.bumpVV(this.peer, spoken);
 		this.invalidateOrder();
 	}
 

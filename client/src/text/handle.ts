@@ -438,17 +438,7 @@ function buildHandle(deps: TextHandleDeps, initial: Uint8Array, lease: PeerLease
 	 * replaces them.
 	 */
 	function rebuildOnCompaction(incoming: TextDoc, prev: TextDoc, prevText: string): void {
-		// replaceWith takes the incoming state's version vector wholesale, and that
-		// vector knows nothing of the edits this handle has queued but not yet had
-		// confirmed. Re-inserting the text from there would allocate counters this
-		// peer has already spoken, so the ids the queue is still carrying would
-		// each name two items at two positions — which is not a state any merge can
-		// reconcile. Raising the rebuilt document past what this peer has said is
-		// what the server's three-way text writer does for the same reason (see
-		// ApplyTextStrings in engine/server/textwrite.go).
-		const spoken = doc.versionVector();
 		doc.replaceWith(incoming);
-		doc.observeVersion(spoken);
 		const { deleted, inserted } = doc.setString(prevText);
 		emit({ ops: [], marksChanged: prev.marks.length > 0 || doc.marks.length > 0 }, prevText);
 		if (deleted.length > 0 || inserted.length > 0) {

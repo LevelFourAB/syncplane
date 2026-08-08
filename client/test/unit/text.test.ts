@@ -623,6 +623,21 @@ describe('fragments', () => {
 		expect(range.start).toBe(11);
 	});
 
+	it('replaceWith keeps allocating past what this writer has already said', () => {
+		const d = new TextDoc('writer');
+		const spoken = d.insert(0, 'hello');
+
+		// State from before those edits — what a document rebuilding onto a
+		// compacted row is handed. Its vector cannot know what this writer minted
+		// after it, and re-minting from there would name items twice.
+		const older = new TextDoc('seed');
+		older.insert(0, 'hi');
+		d.replaceWith(older);
+
+		const next = d.insert(0, 'x');
+		expect(next.start).toBeGreaterThan(spoken.start + spoken.count - 1);
+	});
+
 	it('pairwise fragment sync equals full-state merge over random histories', () => {
 		const alphabet = [ ...'abcdefghijklmnopqrstuvwxyzåäö🎉' ];
 		for (let seed = 100; seed < 110; seed++) {

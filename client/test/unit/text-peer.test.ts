@@ -127,4 +127,26 @@ describe('peer leases', () => {
 			b.release();
 		});
 	});
+
+	describe('in a browser with no lock manager', () => {
+		it('mints an identity nothing else can be handed', async () => {
+			// Web Locks is what makes a slot mean the same thing in every tab. A
+			// browser without it still shares one IndexedDB across its tabs, so the
+			// in-process registry would hand slot 0 to every one of them — the
+			// shared peer this module exists to prevent.
+			vi.stubGlobal('navigator', { userAgent: 'Mozilla/5.0 (no lock manager)' });
+			const tabA = createPeerLeases('shared', 'sync:textpeer');
+			const tabB = createPeerLeases('shared', 'sync:textpeer');
+
+			const a = await tabA.acquire();
+			const b = await tabB.acquire();
+			expect(a.peer).not.toBe(b.peer);
+			expect(a.peer.startsWith('shared:u')).toBe(true);
+
+			// Nor is it recycled: a slot may only be reused when something can say
+			// the slot is free, and here nothing can.
+			a.release();
+			expect((await tabA.acquire()).peer).not.toBe(a.peer);
+		});
+	});
 });

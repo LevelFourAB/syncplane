@@ -144,6 +144,19 @@ Each open handle leases one (`<client_id>:<slot>`) for as long as it lives and
 returns it on `close()`, so two tabs — or two editor bindings in one tab — never
 collide, and slots recycle instead of growing the document's peer table.
 
+Recycling is what the ordering around a lease protects. A handle takes its lease
+before it reads its row and returns it only once the edits it queued are in the
+store, so whoever takes the slot next always builds on state that already covers
+what the previous holder wrote — and therefore allocates past it. The same
+discipline governs the two writers that are not handles: an undo replay and a
+string-valued write each hold a lease across the transaction that persists them.
+
+A slot only means the same thing in every tab because it is a Web Lock. A
+browser without a lock manager still shares one IndexedDB across its tabs, so
+there each handle takes an unrecycled `<client_id>:u<id>` identity instead:
+unique with nothing to coordinate against, at one peer-table entry per document
+it writes to.
+
 Server-side writers keep the same invariant and the same bound: a connector
 holds one identity for its lifetime (pin `WriterID` to keep it across restarts),
 the admin UI one per handler. They may reuse it because they diff against the
