@@ -267,16 +267,17 @@ const client = new SyncClient({
 });
 ```
 
-| Event        | Carries                                                                                                  |
-| ------------ | -------------------------------------------------------------------------------------------------------- |
-| `push`       | `workspaceIds`, `mutations`, `applied`, `rejected`, `durationMs`, `outcome`                              |
-| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `outcome`                                    |
-| `bootstrap`  | `workspaceId`, `rows`, `resumed`, `durationMs`, `streamMs`, `stageMs`, `swapMs`, `swapWrites`, `outcome` |
-| `rebase`     | `workspaceId`, `acked`, `replayed`, `durationMs`                                                         |
-| `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                         |
-| `stream`     | `state`, `reason`                                                                                        |
-| `leadership` | `leader`                                                                                                 |
-| `resequence` | `workspaceId`, `firstId`, `mutations`                                                                    |
+| Event        | Carries                                                                                                     |
+| ------------ | ----------------------------------------------------------------------------------------------------------- |
+| `push`       | `workspaceIds`, `mutations`, `applied`, `rejected`, `durationMs`, `outcome`                                 |
+| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `outcome`                                       |
+| `bootstrap`  | `workspaceId`, `rows`, `resumed`, `durationMs`, `streamMs`, `stageMs`, `swapMs`, `swapWrites`, `outcome`    |
+| `rebase`     | `workspaceId`, `acked`, `replayed`, `durationMs`                                                            |
+| `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                            |
+| `stream`     | `state`, `reason`                                                                                           |
+| `leadership` | `leader`                                                                                                    |
+| `resequence` | `workspaceId`, `firstId`, `mutations`                                                                       |
+| `query`      | `origin`, `entity`, `workspaceId`, `path`, `index`, `declined`, `candidates`, `rows`, `total`, `durationMs`, `waitMs` |
 
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`
 from `error`, so an error rate does not track connectivity.
@@ -315,7 +316,65 @@ workspace. A run of resumed bootstraps says snapshots are not surviving the
 network they are served over; the cost of each retry is bounded to what was still
 missing, which is the point, but the retries themselves are worth watching.
 
+### Local reads
+
+Every event above belongs to the sync cycle. `query` belongs to the local store:
+what one read cost, once per read — `origin: 'query'` for `query()`/`queryAll()`,
+`origin: 'watch'` for a watcher's first read. A watcher maintains its result per
+commit afterwards rather than re-reading, so one subscription reports one event
+and no more.
+
+`path` is the field to aggregate on. An index answers in time proportional to
+the **result**, a scan in time proportional to the **entity**, and nothing about
+the rows says which happened — both return the same answer. When `path` is
+`scan`, `declined` says why:
+
+| `declined`        | Meaning                                               |
+| ----------------- | ----------------------------------------------------- |
+| `cross-workspace` | `queryAll`/`watchQueryAll`; no index spans workspaces |
+| `no-query`        | a `watch()` with no query, which is the whole entity  |
+| `no-index`        | the entity declares none                              |
+| `not-built`       | declared, still building for this workspace           |
+| `no-plan`         | none matches this filter and ordering                 |
+| `budget`          | the walk exceeded its candidate ceiling and fell back |
+
+`not-built` after a bootstrap or a schema change is expected and ends on its own
+once the background build finishes; see
+[Making a query cheap](../how-to/query-data.md#making-a-query-cheap). `budget` is
+the one to alert on: an index served the query until the workspace grew past the
+walk's ceiling, and the same code is a full scan from then on.
+
+On the index path, `candidates` counts the positions the walk visited. Against
+`rows` it is how much of the walk the result did not use — a filter the range
+could not express, or a repeated field putting one position per element on a
+row — and a ratio drifting upward is a query on its way to `budget`.
+
+`durationMs` runs from the call to the answer. `waitMs` is the part of it the
+read spent waiting for a concurrent commit — a rebase, a bootstrap swap, an index
+build — so a `waitMs` that moves under write load is contention rather than query
+cost. Reference hydration (`include`) is in neither; the reference queries it
+runs report their own events.
+
+Reads never wait on each other, only on writes, but they do interleave on one
+thread — so their durations overlap. Six watches mounting in the same tick each
+span nearly the whole burst: 136 rows and 88ms of work between them reads as six
+queries of ~88ms, and a threshold sized for one read's work fires on all six at
+once. Durations summed across a burst therefore exceed the wall time it took, and
+the largest may be reporting its neighbours' work. Aggregate `durationMs - waitMs`
+rather than thresholding it; to attribute cost to a single query, measure it while
+nothing else reads.
+
+Only queries report. `get()` reads one key, `scan()` is the whole entity by
+definition, and `queryServer()` is an RPC rather than a local read — none of the
+three emits an event.
+
+Leave `debugVerifyIndexReads` (and `SYNC_DEBUG_VERIFY_TOUCHES`) off while
+measuring — they run the scan alongside the index path on every read, which is
+in `durationMs`.
+
+### Delivery
+
 `onStatusChange` reports the current state for **rendering**; these report
 occurrences for **aggregating**. The handler runs synchronously inside the sync
-cycle — a throw is reported and swallowed, but a slow handler delays the cycle,
-so aggregate rather than await.
+cycle or the read that fired it — a throw is reported and swallowed, but a slow
+handler delays that work, so aggregate rather than await.

@@ -1,7 +1,8 @@
 /**
- * The client's observability seam: a typed stream of what the background
- * coordinator did, for apps that want to measure sync rather than only react
- * to its status.
+ * The client's observability seam: a typed stream of what the client did — the
+ * background coordinator's sync cycle, and the local reads its queries are
+ * answered from — for apps that want to measure it rather than only react to
+ * its status.
  *
  * This is deliberately NOT an OpenTelemetry integration. `syncplane` ships to
  * browsers, where every dependency is bytes the app pays for on first load, and
@@ -22,16 +23,18 @@
  *
  * # Delivery
  *
- * Best-effort and synchronous, on whatever task the coordinator was already
- * running. The handler is invoked in isolation — a throw is reported and
- * swallowed, never mistaken for a failed sync cycle — but a SLOW handler
- * delays the sync cycle it fired from. Aggregate in the handler; do not await
- * anything in it.
+ * Best-effort and synchronous, on whatever task already produced the event — a
+ * sync cycle, or the read a query was answered from. The handler is invoked in
+ * isolation — a throw is reported and swallowed, never mistaken for a failed
+ * sync cycle or a failed read — but a SLOW handler delays the work it fired
+ * from. Aggregate in the handler; do not await anything in it.
  *
  * Events are diagnostics, not a ledger: they are dropped on reload, are not
  * persisted, and carry no ordering guarantee beyond the order they occurred in
  * this tab. Nothing about correctness depends on anyone listening.
  */
+
+import { safeInvoke } from '../report.js';
 
 /** Common shape of every event. */
 interface EventBase {
@@ -223,7 +226,97 @@ export interface ResequenceEvent extends EventBase {
 	mutations: number;
 }
 
-/** Everything the coordinator reports. Switch on `type`. */
+/**
+ * Why a query read rows from the entity rather than from a secondary index.
+ *
+ * A decline is never a wrong answer: an index that cannot reproduce the scan's
+ * result exactly declines, and the scan is the definition.
+ *
+ * - `cross-workspace` — the read spans every workspace, whose combined ordering
+ *   no single workspace's index reproduces.
+ * - `no-query` — a `watch()` with no query, which is the whole entity by
+ *   definition.
+ * - `no-index` — the entity declares no index.
+ * - `not-built` — an index is declared but not built for this workspace yet.
+ *   Builds run in the background, so a burst of these after a bootstrap or a
+ *   schema change ends on its own.
+ * - `no-plan` — no declared index matches this query's filter and ordering.
+ * - `budget` — the walk found more candidate positions than it will read rows
+ *   for and fell back. A filter the index range could not express is what
+ *   spends that budget.
+ */
+export type QueryDeclineReason =
+	| 'cross-workspace'
+	| 'no-query'
+	| 'no-index'
+	| 'not-built'
+	| 'no-plan'
+	| 'budget';
+
+/**
+ * One local query was answered from the store, by an index or by a scan.
+ *
+ * The read-path counterpart to the events above: those measure what the server
+ * cost, this measures what the store cost. `path` is the field to aggregate on
+ * — an index reads rows in proportion to the RESULT, a scan in proportion to
+ * the ENTITY — and nothing in a result says which of the two happened, since
+ * both return the same rows.
+ */
+export interface QueryEvent extends EventBase {
+	type: 'query';
+	/**
+	 * What issued the read: a one-shot `query()`/`queryAll()`, or a watcher
+	 * taking its first result. One subscription reports exactly one `watch`
+	 * event — what follows is maintained per commit rather than re-read — so a
+	 * stream of them means watchers are being re-registered.
+	 */
+	origin: 'query' | 'watch';
+	entity: string;
+	/** The workspace read, or undefined for a cross-workspace read. */
+	workspaceId?: string;
+	path: 'index' | 'scan';
+	/** The index that served the read. Present exactly when `path` is `index`. */
+	index?: string;
+	/** Present exactly when `path` is `scan`. */
+	declined?: QueryDeclineReason;
+	/**
+	 * Index positions the walk visited. Present exactly when `path` is `index`.
+	 *
+	 * Read against `rows` it is how much of the walk the result did not use — a
+	 * filter the range could not express, or a repeated field putting one
+	 * position per element on a row, both widen the gap. A ratio drifting upward
+	 * is a query on its way to the candidate budget, and past it to a scan.
+	 */
+	candidates?: number;
+	/**
+	 * Rows the read produced — the page for a `query`, and for a `watch` the
+	 * whole match set it goes on to maintain, which its window is a slice of.
+	 */
+	rows: number;
+	/** Matches before the page was cut; see RowSet.total. */
+	total: number;
+	/**
+	 * Wall time from the call to the answer, `waitMs` included.
+	 *
+	 * Concurrent reads OVERLAP: several issued in the same tick each span most of
+	 * the burst, so durations across one sum to more than the burst took and the
+	 * largest may be reporting its neighbours' work. Aggregate rather than
+	 * threshold, and subtract `waitMs` to drop the part contention explains.
+	 *
+	 * Reference hydration (`include`) is not part of it; the reference queries it
+	 * runs report their own events.
+	 */
+	durationMs: number;
+	/**
+	 * Wall time the read spent waiting for a concurrent commit before it could
+	 * begin. Reads never wait on each other, only on writes — a rebase, a
+	 * bootstrap swap, an index build — so this rises under write load while the
+	 * read itself is unchanged.
+	 */
+	waitMs: number;
+}
+
+/** Everything the client reports. Switch on `type`. */
 export type SyncEvent =
 	| PushEvent
 	| PullEvent
@@ -232,7 +325,8 @@ export type SyncEvent =
 	| PokeEvent
 	| StreamEvent
 	| LeadershipEvent
-	| ResequenceEvent;
+	| ResequenceEvent
+	| QueryEvent;
 
 /** Handler passed as `onSyncEvent`. */
 export type SyncEventHandler = (event: SyncEvent) => void;
@@ -250,3 +344,48 @@ export type SyncEventHandler = (event: SyncEvent) => void;
 type Unstamped<T> = T extends unknown ? Omit<T, 'at'> : never;
 
 export type UnstampedSyncEvent = Unstamped<SyncEvent>;
+
+/** A QueryEvent as its producers build it; see UnstampedSyncEvent. */
+export type UnstampedQueryEvent = Omit<QueryEvent, 'at'>;
+
+/**
+ * Stamps and delivers one event, in isolation: a handler that throws is
+ * reported and swallowed rather than failing the work that emitted it. A no-op
+ * when no handler is installed.
+ *
+ * The `at` stamp is filled in here so every event agrees on one clock and no
+ * call site has to reach for it.
+ */
+export function emitSyncEvent(
+	handler: SyncEventHandler | undefined,
+	event: UnstampedSyncEvent,
+): void {
+	if (!handler) return;
+	safeInvoke(handler, { ...event, at: Date.now() } as SyncEvent, 'onSyncEvent');
+}
+
+/**
+ * Builds a query event from what the read reported about itself, resolving
+ * `path` and the fields that ride on it. A `report.declined` means the rows
+ * came from a scan; the index fields are then absent rather than undefined.
+ */
+export function queryEventOf(
+	base: {
+		origin: QueryEvent['origin'];
+		entity: string;
+		workspaceId?: string;
+		rows: number;
+		total: number;
+		durationMs: number;
+		waitMs: number;
+	},
+	report: { index?: string; declined?: QueryDeclineReason; candidates: number },
+): UnstampedQueryEvent {
+	return {
+		type: 'query',
+		...base,
+		...(report.declined === undefined
+			? { path: 'index', index: report.index, candidates: report.candidates }
+			: { path: 'scan', declined: report.declined }),
+	};
+}

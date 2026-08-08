@@ -48,6 +48,7 @@ import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import { foldTextLog, type Row } from '../read.js';
+import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow } from './ast.js';
 import { compareRows, evalCond } from './evaluate.js';
 import { upperBound } from './indexkey.js';
@@ -77,6 +78,23 @@ export interface IndexedRow<T> {
 	bytes: Uint8Array;
 }
 
+/**
+ * Where a read's rows came from, for a caller that reports it (see QueryEvent
+ * in sync/events.ts).
+ *
+ * queryByIndex writes through the object it is handed rather than returning
+ * one, so `undefined` keeps its single meaning of "scan instead". Exactly one
+ * of `index` and `declined` is set when it returns; a caller that declines
+ * before calling — a watch with no query, an unknown entity — sets `declined`
+ * itself.
+ */
+export interface IndexReport {
+	index?: string;
+	declined?: QueryDeclineReason;
+	/** Index positions walked; 0 unless an index was actually consulted. */
+	candidates: number;
+}
+
 /** An index-served page, with the matches it was cut from. */
 export interface IndexedPage<T> {
 	rows: IndexedRow<T>[];
@@ -102,10 +120,12 @@ export async function queryByIndex<D extends DescMessage>(
 	compiled: CompiledQuery,
 	workspaceId: string | undefined,
 	window?: PageWindow,
+	report?: IndexReport,
 ): Promise<IndexedPage<MessageShape<D>> | undefined> {
 	// A cross-workspace query would need a k-way merge whose tie-break differs
 	// from the scan path's; see the header.
-	if (workspaceId === undefined || indexes.length === 0) return undefined;
+	if (workspaceId === undefined) return decline(report, 'cross-workspace');
+	if (indexes.length === 0) return decline(report, 'no-index');
 
 	const built: CompiledIndex[] = [];
 	for (const idx of indexes) {
@@ -113,14 +133,14 @@ export async function queryByIndex<D extends DescMessage>(
 			built.push(idx);
 		}
 	}
-	if (built.length === 0) return undefined;
+	if (built.length === 0) return decline(report, 'not-built');
 
 	const plan = planQuery(
 		built.map((idx) => ({ name: idx.name, encoder: idx.encoder })),
 		compiled.where,
 		compiled.orderBy,
 	);
-	if (plan === undefined) return undefined;
+	if (plan === undefined) return decline(report, 'no-plan');
 	const chosen = built.find((idx) => idx.name === plan.index)!;
 
 	// The overlay first, so its size bounds how far the confirmed walk has to
@@ -168,7 +188,7 @@ export async function queryByIndex<D extends DescMessage>(
 				seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi,
 			)
 		) {
-			if (++walked > MAX_INDEX_CANDIDATES) return undefined;
+			if (++walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
 			// A position of THIS index can only sit on a row of this entity and
 			// workspace — that is what its prefix means, and the bounds above are
 			// inside it. The guard is a fence against a record that acquired one
@@ -215,6 +235,11 @@ export async function queryByIndex<D extends DescMessage>(
 		}
 	}
 
+	if (report) {
+		report.index = chosen.name;
+		report.candidates = walked;
+	}
+
 	const out = [ ...confirmed, ...overlayRows ];
 	if (compiled.orderBy && compiled.orderBy.length > 0) {
 		const orderBy = compiled.orderBy;
@@ -240,6 +265,19 @@ export async function queryByIndex<D extends DescMessage>(
 		total,
 		hasMore: end !== undefined && total > end,
 	};
+}
+
+/** Records why the index was not used and returns the "scan instead" answer. */
+function decline(
+	report: IndexReport | undefined,
+	reason: QueryDeclineReason,
+	walked = 0,
+): undefined {
+	if (report) {
+		report.declined = reason;
+		report.candidates = walked;
+	}
+	return undefined;
 }
 
 /**

@@ -100,7 +100,7 @@ import {
 	pageWindowOf,
 	type QueryCursor,
 } from './query/cursor.js';
-import { assertSameResult, queryByIndex } from './query/execute.js';
+import { assertSameResult, type IndexReport, queryByIndex } from './query/execute.js';
 import {
 	type CompiledQuery,
 	compileQuery,
@@ -137,7 +137,8 @@ import {
 	type RejectionInfo,
 	type RejectionTarget,
 } from './sync/coordinator.js';
-import type { SyncEventHandler } from './sync/events.js';
+import type { SyncEventHandler, UnstampedSyncEvent } from './sync/events.js';
+import { emitSyncEvent, queryEventOf } from './sync/events.js';
 import { IntentRegistry } from './sync/intent.js';
 import {
 	type SchemaSkewAction,
@@ -180,7 +181,10 @@ export type {
 	PokeEvent,
 	PullEvent,
 	PushEvent,
+	QueryDeclineReason,
+	QueryEvent,
 	RebaseEvent,
+	ResequenceEvent,
 	StreamEvent,
 	SyncEvent,
 	SyncEventHandler,
@@ -455,19 +459,20 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	/** Called whenever the sync status changes (also available via onStatusChange). */
 	onStatusChange?: (status: SyncStatus) => void;
 	/**
-	 * Observability seam: a typed stream of what the background coordinator did
-	 * — pushes, pulls, rebases, bootstraps, stream open/close, leadership — each
-	 * with its own duration and counts.
+	 * Observability seam: a typed stream of what the client did — pushes, pulls,
+	 * rebases, bootstraps, stream open/close, leadership, and every local query
+	 * — each with its own duration and counts.
 	 *
-	 * This is what to measure sync with. `onStatusChange` reports the current
-	 * state for rendering; these report occurrences for aggregating, which is
-	 * the only way to get at latency and at the things a successful RPC hides
-	 * (a push whose mutations were all rejected is a 200 OK).
+	 * This is what to measure sync and local reads with. `onStatusChange`
+	 * reports the current state for rendering; these report occurrences for
+	 * aggregating, which is the only way to get at latency and at the things a
+	 * successful call hides (a push whose mutations were all rejected is a 200
+	 * OK; a query that fell back from an index to a scan is an ordinary result).
 	 *
 	 * Deliberately not an OpenTelemetry integration — the client ships to
 	 * browsers, so the vendor choice stays with the app. Map these to whatever
 	 * you already run. See sync/events.ts; the handler runs synchronously inside
-	 * the sync cycle, so it must not block.
+	 * the sync cycle or the read that fired it, so it must not block.
 	 */
 	onSyncEvent?: SyncEventHandler;
 	/** Fallback poll interval in ms; 0 disables. Default 60s. */
@@ -1764,6 +1769,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				debugVerifyTouches: this.opts.debugVerifyTouches,
 				coverageOf: (entity, workspaceId) => this.coverage.coverageOf(entity, workspaceId),
 				indexes: (entity) => this.indexes.for(entity),
+				onRead: (event) => this.emit(event),
 			});
 			hub.setRefClient(this.refClient());
 			// close() may have torn down during the kv await. Do not resurrect the
@@ -1982,6 +1988,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				this.indexBuilds.delete(workspaceId);
 			}
 		})();
+	}
+
+	/** Reports one read-path event, on the seam the coordinator reports sync on. */
+	private emit(event: UnstampedSyncEvent): void {
+		emitSyncEvent(this.opts.onSyncEvent, event);
 	}
 
 	/**
@@ -2627,7 +2638,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			);
 		}
 		const kv = await this.kv();
+		const report: IndexReport = { candidates: 0 };
+		const started = performance.now();
+		let entered = started;
 		const page = await this.kvMutex.runShared(async () => {
+			entered = performance.now();
 			const tx = await kv.read();
 			try {
 				// An index narrows which rows are read; it never changes which
@@ -2643,6 +2658,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					compiled,
 					workspaceId,
 					window,
+					report,
 				);
 				const scan = async () =>
 					runQueryPage(
@@ -2666,6 +2682,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				tx.release();
 			}
 		});
+		this.emit(
+			queryEventOf({
+				origin: 'query',
+				entity: def.name,
+				workspaceId,
+				rows: page.rows.length,
+				total: page.total,
+				durationMs: performance.now() - started,
+				waitMs: entered - started,
+			}, report),
+		);
 		// Coverage is the BASE entity's: a query answers from what synced, and
 		// hydration only decorates the rows it found.
 		const coverage = this.coverage.coverageOf(def.name, workspaceId);

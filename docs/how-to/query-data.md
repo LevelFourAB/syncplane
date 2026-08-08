@@ -166,6 +166,26 @@ in every index it has, on both sides. An index over a repeated field stores one
 entry per element, so that cost grows with the list — `MaxIndexEntriesPerRow` is
 the ceiling, and a write past it fails rather than storing a partial index.
 
+Because a decline changes nothing about the answer, nothing in a result says
+which path served it. `onSyncEvent` does: every local read reports a `query`
+event carrying `path` (`index` or `scan`), the index that served it, and — when
+it scanned — the reason it did.
+
+```ts
+const client = new SyncClient({
+	url,
+	entities,
+	onSyncEvent: (e) => {
+		if (e.type === 'query' && e.declined) {
+			metrics.increment('query.scan', 1, { entity: e.entity, reason: e.declined });
+		}
+	},
+});
+```
+
+See [Telemetry](../reference/telemetry.md#local-reads) for the reasons and what
+each one asks you to do about it.
+
 ## Paging a live result
 
 `offset`/`limit` inside a query are fixed for the life of a watch. To page

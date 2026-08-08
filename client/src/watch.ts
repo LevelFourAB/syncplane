@@ -10,11 +10,13 @@ import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
 import type { PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
-import { queryByIndex } from './query/execute.js';
+import { type IndexReport, queryByIndex } from './query/execute.js';
 import { compareRows, type CompiledQuery, evalCond, runQuery } from './query/index.js';
 import { readMergedRowWithVersion, type Row, scanMergedRows, type ScopedRow } from './read.js';
 import { hydrate, type IncludeSpec, type RefClient } from './refs.js';
 import { safeInvoke } from './report.js';
+import type { QueryDeclineReason, UnstampedQueryEvent } from './sync/events.js';
+import { queryEventOf } from './sync/events.js';
 import type { TouchSet } from './touch.js';
 
 /**
@@ -310,6 +312,12 @@ export interface WatcherHubOptions {
 	 * which is what a hub built without the client's index cache should do.
 	 */
 	indexes?: (entity: string) => CompiledIndex[];
+	/**
+	 * Reports each watcher's first read, so live queries aggregate alongside
+	 * one-shot ones. Only the first read: what follows is maintained per commit
+	 * rather than re-read.
+	 */
+	onRead?: (event: UnstampedQueryEvent) => void;
 }
 
 /**
@@ -482,10 +490,14 @@ export class WatcherHub {
 	/** Reads one watcher's result for the first time, from an index or a scan. */
 	private async emitTo(watcher: Watcher): Promise<void> {
 		if (!this.watchers.has(watcher)) return;
+		const report: IndexReport = { candidates: 0 };
+		const started = performance.now();
+		let entered = started;
 		const at = await this.mutex.runShared(async () => {
+			entered = performance.now();
 			const tx = await this.kv.read();
 			try {
-				watcher.matches = await this.seedFromIndex(tx, watcher)
+				watcher.matches = await this.seedFromIndex(tx, watcher, report)
 					?? buildMatches(watcher, await this.scanScope(tx, watcher));
 				if (this.verifyTouches) await this.verifyMatches(tx, watcher);
 				this.pruneScope(scanScope(watcher));
@@ -494,6 +506,18 @@ export class WatcherHub {
 				tx.release();
 			}
 		});
+		const matched = watcher.matches?.ordered.length ?? 0;
+		this.opts.onRead?.(
+			queryEventOf({
+				origin: 'watch',
+				entity: watcher.entity,
+				workspaceId: watcher.workspaceId,
+				rows: matched,
+				total: matched,
+				durationMs: performance.now() - started,
+				waitMs: entered - started,
+			}, report),
+		);
 		await this.emit(watcher, 0, true, at);
 	}
 
@@ -572,12 +596,19 @@ export class WatcherHub {
 	 * commit would put a read back on the commit path, which is the cost this
 	 * class exists to remove.
 	 */
-	private async seedFromIndex(tx: KVRead, watcher: Watcher): Promise<MatchSet | undefined> {
+	private async seedFromIndex(
+		tx: KVRead,
+		watcher: Watcher,
+		report: IndexReport,
+	): Promise<MatchSet | undefined> {
 		const indexes = this.opts.indexes;
-		if (indexes === undefined || watcher.query === undefined) return undefined;
-		if (watcher.workspaceId === undefined) return undefined;
+		if (watcher.query === undefined) return declined(report, 'no-query');
+		if (watcher.workspaceId === undefined) return declined(report, 'cross-workspace');
+		// A hub built without the client's index cache has none to consult, and an
+		// entity outside the registry has none either.
+		if (indexes === undefined) return declined(report, 'no-index');
 		const def = this.registry.get(watcher.entity);
-		if (def === undefined) return undefined;
+		if (def === undefined) return declined(report, 'no-index');
 		const found = await queryByIndex(
 			tx,
 			this.registry,
@@ -587,6 +618,7 @@ export class WatcherHub {
 			{ where: watcher.query.where, orderBy: watcher.query.orderBy },
 			watcher.workspaceId,
 			watcher.bounds,
+			report,
 		);
 		if (found === undefined) return undefined;
 		const scoped = this.scopeRows(scanScope(watcher));
@@ -880,6 +912,15 @@ function record(watcher: Watcher, splice: RowSplice<unknown>): void {
 /** Hands one result to a watcher's callback, isolating anything it throws. */
 function deliver(watcher: Watcher, rows: RowSet<unknown>, delta: WatchDelta<unknown>): void {
 	safeInvoke((r: RowSet<unknown>) => watcher.cb(r, delta), rows, 'watch callback');
+}
+
+/**
+ * Records why a first read never reached the index and returns the "scan
+ * instead" answer, for the checks the hub makes before queryByIndex sees them.
+ */
+function declined(report: IndexReport, reason: QueryDeclineReason): undefined {
+	report.declined = reason;
+	return undefined;
 }
 
 /** Derives a watcher's whole match set from a scope, given in scan order. */

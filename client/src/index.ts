@@ -85,6 +85,23 @@ export * as schema from './schema/builder.js';
 // database the previous prefix left behind.
 export { DEFAULT_STORAGE_PREFIX, storageNames } from './storagenames.js';
 export type { StorageNames } from './storagenames.js';
+// The observability seam. Types only: events arrive through
+// SyncClientOptions.onSyncEvent and are never constructed by an app.
+export type {
+	BootstrapEvent,
+	LeadershipEvent,
+	PokeEvent,
+	PullEvent,
+	PushEvent,
+	QueryDeclineReason,
+	QueryEvent,
+	RebaseEvent,
+	ResequenceEvent,
+	StreamEvent,
+	SyncEvent,
+	SyncEventHandler,
+	SyncEventOutcome,
+} from './sync/events.js';
 export {
 	COMMENT_PREFIX,
 	commentIdOf,

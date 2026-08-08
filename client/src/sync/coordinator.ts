@@ -60,18 +60,14 @@ import {
 	wipeConfirmedState,
 } from '../optimistic/rebase.js';
 import { readMergedRow } from '../read.js';
-import { reportError, safeCall, safeInvoke } from '../report.js';
+import { reportError, safeCall } from '../report.js';
 import type { StorageNames } from '../storagenames.js';
 import { decodeTextDoc, encodeTextDoc, textOf } from '../text/index.js';
 import { createPeerLeases, type PeerLeases } from '../text/peer.js';
 import { TouchSet } from '../touch.js';
 import { Backoff, sleep } from './backoff.js';
-import type {
-	SyncEvent,
-	SyncEventHandler,
-	SyncEventOutcome,
-	UnstampedSyncEvent,
-} from './events.js';
+import type { SyncEventHandler, SyncEventOutcome, UnstampedSyncEvent } from './events.js';
+import { emitSyncEvent } from './events.js';
 import { HydrationTracker } from './hydration.js';
 import type { IntentRegistry, ScopeMap } from './intent.js';
 import {
@@ -979,18 +975,9 @@ export class Coordinator {
 		}
 	}
 
-	/**
-	 * Reports one observability event. Nothing downstream depends on the
-	 * handler, so it runs in isolation and a throw is reported rather than
-	 * mistaken for a failed sync cycle.
-	 *
-	 * The `at` stamp is filled in here so every event agrees on its clock and no
-	 * call site has to remember.
-	 */
+	/** Reports one observability event; see emitSyncEvent. */
 	private emit(event: UnstampedSyncEvent): void {
-		const handler = this.opts.onSyncEvent;
-		if (!handler) return;
-		safeInvoke(handler, { ...event, at: Date.now() } as SyncEvent, 'onSyncEvent');
+		emitSyncEvent(this.opts.onSyncEvent, event);
 	}
 
 	/** Classifies a caught error for an event's `outcome`. */
