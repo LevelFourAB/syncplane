@@ -19,9 +19,9 @@
 // hidden ⇒ every tab degrades to the per-tab poll floor, identical to a frozen
 // leader today).
 //
-// The lock name is dedicated to stream leadership and is NEVER nested with the
-// kv mutex lock — the leader loop only drives the stream + rebase, which take
-// the kv mutex independently.
+// The leadership lock is dedicated to it and is NEVER nested with the kv mutex
+// lock — the leader loop only drives the stream + rebase, which take the kv
+// mutex independently.
 
 import { isServerRuntime } from '../env.js';
 import { reportError } from '../report.js';
@@ -86,19 +86,20 @@ export interface ReopenHandlers {
  * "reopen the stream" ping (the browser Subscribe stream is unidirectional and
  * its scope is fixed for its life, so a subscription change on any tab must
  * reach whichever tab holds the leader stream) and a "tab departed" notice (so
- * a surviving tab reaps the departed tab's intent record promptly). A no-op on
+ * a surviving tab reaps the departed tab's intent record promptly). Runs on the
+ * BroadcastChannel named `channelName` (StorageNames.reopenChannel). A no-op on
  * a server runtime (private stores, no shared leader) or without
  * BroadcastChannel (every tab then runs its own stream and re-scopes itself
  * directly, and orphan records age out by TTL).
  */
 export function startReopenSignal(
-	accountId: string,
+	channelName: string,
 	handlers: ReopenHandlers,
 ): ReopenSignal {
 	if (isServerRuntime() || typeof BroadcastChannel === 'undefined') {
 		return { signal: () => {}, announceDeparture: () => {}, stop: () => {} };
 	}
-	const channel = new BroadcastChannel(`sync:reopen:${accountId}`);
+	const channel = new BroadcastChannel(channelName);
 	const post = (msg: unknown): void => {
 		try {
 			channel.postMessage(msg);
@@ -122,13 +123,14 @@ export function startReopenSignal(
 }
 
 /**
- * Starts visibility-aware cross-tab stream leadership. Returns undefined on a
+ * Starts visibility-aware cross-tab stream leadership on the Web Lock named
+ * `lockName` (StorageNames.streamLock). Returns undefined on a
  * server runtime (where clients do not share a store, so leadership would
  * starve all but one) or when the platform lacks Web Locks; callers then run
  * their own session-long stream loop.
  */
 export function startStreamLeadership(
-	accountId: string,
+	lockName: string,
 	hooks: StreamLeadershipHooks,
 ): StreamLeadership | undefined {
 	if (
@@ -143,7 +145,6 @@ export function startStreamLeadership(
 	) {
 		return undefined;
 	}
-	const name = `sync:stream:${accountId}`;
 	const hasDoc = typeof document !== 'undefined';
 	// Treat a context without a Document (a worker) as always visible: it never
 	// suspends on visibility and should hold a session-long term.
@@ -170,7 +171,7 @@ export function startStreamLeadership(
 		const t = new AbortController();
 		term = t;
 		void navigator.locks
-			.request(name, { signal: t.signal }, async () => {
+			.request(lockName, { signal: t.signal }, async () => {
 				if (stopped || t.signal.aborted) return;
 				await hooks.runLeaderLoop(t.signal);
 			})

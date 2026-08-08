@@ -19,6 +19,7 @@ import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex, type Mutex } from '../../src/mutex.js';
 import { scanMergedRows } from '../../src/read.js';
+import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { WatcherHub } from '../../src/watch.js';
@@ -128,7 +129,7 @@ function newCoordinator(kv: MemoryKVStore, kvMutex: Mutex, transport: Transport)
 		transport,
 		kv,
 		kvMutex,
-		accountId: 'acct',
+		storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 		scopes: new Map([ [ WS, [] ] ]),
 		clientId: 'c1',
 		registry,

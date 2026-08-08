@@ -17,6 +17,7 @@ import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
 import { applyMutationLocally } from '../../src/optimistic/rebase.js';
+import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { TouchSet } from '../../src/touch.js';
@@ -152,7 +153,7 @@ describe('coordinator mutation-id gap recovery', () => {
 			transport: engine.transport(),
 			kv,
 			kvMutex,
-			accountId: 'acct',
+			storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 			scopes: new Map([ [ WS, [] ] ]),
 			clientId: CLIENT,
 			registry,

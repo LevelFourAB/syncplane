@@ -121,6 +121,12 @@ import {
 	resolveReverse,
 } from './refs.js';
 import { reportError, safeInvoke } from './report.js';
+import {
+	DEFAULT_STORAGE_PREFIX,
+	type StorageNames,
+	storageNames,
+	validateStoragePrefix,
+} from './storagenames.js';
 import { type ChangeShare, startChangeShare } from './sync/changeshare.js';
 import {
 	chunkBySize,
@@ -407,6 +413,21 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * SyncClients for separate accounts.
 	 */
 	accountId?: string;
+	/**
+	 * Stem of every name this client claims on the origin — the IndexedDB
+	 * database, the Web Locks, the BroadcastChannels — under which the account
+	 * partitions them (see storagenames.ts). Defaults to `sync`. Must be
+	 * letters, digits, `_` and `-`, starting with a letter or digit.
+	 *
+	 * Set it to keep two clients on one origin apart when they cannot be given
+	 * distinct account ids, or to keep this client's names clear of another
+	 * library's. Changing it for an existing app points the client at a fresh,
+	 * empty database and leaves the old one on disk: the client bootstraps from
+	 * the server and never reads or deletes what the previous prefix wrote —
+	 * pending mutations included. Deleting the abandoned database (or migrating
+	 * anything out of it first) is the app's to do.
+	 */
+	storagePrefix?: string;
 	/** Defaults to IndexedDB in browsers, in-memory elsewhere. */
 	kvStore?: KVStore;
 	/** Generated schemas of all syncable entities. */
@@ -1180,6 +1201,11 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
 export class SyncClient<const E extends readonly DescMessage[] = readonly DescMessage[]> {
 	/** Store partition; see SyncClientOptions.accountId. */
 	readonly accountId: string;
+	/**
+	 * The origin-scoped names this client claims, derived from the account and
+	 * SyncClientOptions.storagePrefix.
+	 */
+	readonly storageNames: StorageNames;
 	private opts: SyncClientOptions<E>;
 	/** @internal shared with the workspace scopes. */
 	readonly entityRegistry: EntityRegistry;
@@ -1240,7 +1266,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const workspaces = resolveWorkspaces(opts);
 		this.opts = opts;
 		this.accountId = resolveAccountId(opts, workspaces);
-		this.kvMutex = createKvMutex(`sync:${this.accountId}`);
+		const prefix = opts.storagePrefix ?? DEFAULT_STORAGE_PREFIX;
+		validateStoragePrefix(prefix);
+		this.storageNames = storageNames(prefix, this.accountId);
+		this.kvMutex = createKvMutex(this.storageNames.kvLock);
 		if (opts.onStatusChange) this.statusTracker.onChange(opts.onStatusChange);
 		this.entityRegistry = new EntityRegistry(opts.entities);
 		if (opts.mergers) this.entityRegistry.setMergers(opts.mergers);
@@ -1698,10 +1727,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * @internal
 	 */
 	private textPeerLeases(): Promise<PeerLeases> {
-		this.peerLeasesPromise ??= this.clientId().then(createPeerLeases, (err: unknown) => {
-			this.peerLeasesPromise = undefined;
-			throw err;
-		});
+		this.peerLeasesPromise ??= this.clientId().then(
+			(clientId) => createPeerLeases(clientId, this.storageNames.textPeerLocks),
+			(err: unknown) => {
+				this.peerLeasesPromise = undefined;
+				throw err;
+			},
+		);
 		return this.peerLeasesPromise;
 	}
 
@@ -1709,7 +1741,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.kvPromise ??= this.opts.kvStore
 			? Promise.resolve(this.opts.kvStore)
 			: typeof indexedDB !== 'undefined'
-			? IDBKVStore.open(`sync:${this.accountId}`)
+			? IDBKVStore.open(this.storageNames.store)
 			: Promise.resolve(new MemoryKVStore());
 		return this.kvPromise;
 	}
@@ -1741,7 +1773,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			this.hubInstance = hub;
 			// A commit in another tab updates the shared store but only that tab's
 			// hub; mirror its touched set into ours so our watchers stay fresh.
-			this.changeShare = startChangeShare(this.accountId, (tokens) => {
+			this.changeShare = startChangeShare(this.storageNames.changeChannel, (tokens) => {
 				void hub.notify(TouchSet.fromTokens(tokens));
 			});
 			return hub;
@@ -1828,7 +1860,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			transport,
 			kv: await this.kv(),
 			kvMutex: this.kvMutex,
-			accountId: this.accountId,
+			storageNames: this.storageNames,
 			clientId: await this.clientId(),
 			registry: this.entityRegistry,
 			indexes: this.indexes,

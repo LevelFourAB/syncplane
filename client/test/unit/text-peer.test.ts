@@ -23,7 +23,7 @@ function fakeLocks() {
 			held.delete(name);
 		}
 	};
-	return { request, heldCount: () => held.size };
+	return { request, heldCount: () => held.size, heldNames: () => [ ...held ] };
 }
 
 /** Lets the lock fake's release path (an await inside request) run. */
@@ -37,7 +37,7 @@ describe('peer leases', () => {
 	});
 
 	it('never hands the same peer to two live holders', async () => {
-		const leases = createPeerLeases('c1');
+		const leases = createPeerLeases('c1', 'sync:textpeer');
 		const held = await Promise.all([ leases.acquire(), leases.acquire(), leases.acquire() ]);
 		const peers = held.map((l) => l.peer);
 		expect(new Set(peers).size).toBe(3);
@@ -46,7 +46,7 @@ describe('peer leases', () => {
 	});
 
 	it('keeps slots dense and recycles them', async () => {
-		const leases = createPeerLeases('c2');
+		const leases = createPeerLeases('c2', 'sync:textpeer');
 		const first = await leases.acquire();
 		expect(first.peer).toBe('c2:0');
 		const second = await leases.acquire();
@@ -63,7 +63,7 @@ describe('peer leases', () => {
 	});
 
 	it('is idempotent on release', async () => {
-		const leases = createPeerLeases('c3');
+		const leases = createPeerLeases('c3', 'sync:textpeer');
 		const lease = await leases.acquire();
 		lease.release();
 		lease.release();
@@ -77,8 +77,8 @@ describe('peer leases', () => {
 	});
 
 	it('separates two clientIds', async () => {
-		const one = await createPeerLeases('cA').acquire();
-		const two = await createPeerLeases('cB').acquire();
+		const one = await createPeerLeases('cA', 'sync:textpeer').acquire();
+		const two = await createPeerLeases('cB', 'sync:textpeer').acquire();
 		expect(one.peer).not.toBe(two.peer);
 		one.release();
 		two.release();
@@ -88,7 +88,7 @@ describe('peer leases', () => {
 		it('holds one lock per live lease and drops it on release', async () => {
 			const locks = fakeLocks();
 			vi.stubGlobal('navigator', { locks });
-			const leases = createPeerLeases('c4');
+			const leases = createPeerLeases('c4', 'sync:textpeer');
 
 			const a = await leases.acquire();
 			const b = await leases.acquire();
@@ -106,11 +106,20 @@ describe('peer leases', () => {
 			c.release();
 		});
 
+		it('names its locks under the given prefix', async () => {
+			const locks = fakeLocks();
+			vi.stubGlobal('navigator', { locks });
+			const lease = await createPeerLeases('c5', 'app2:textpeer').acquire();
+
+			expect(locks.heldNames()).toEqual([ 'app2:textpeer:c5:0' ]);
+			lease.release();
+		});
+
 		it('gives two clients sharing a clientId disjoint peers', async () => {
 			// The multi-tab case: same device, same clientId, one lock manager.
 			vi.stubGlobal('navigator', { locks: fakeLocks() });
-			const tabA = createPeerLeases('shared');
-			const tabB = createPeerLeases('shared');
+			const tabA = createPeerLeases('shared', 'sync:textpeer');
+			const tabB = createPeerLeases('shared', 'sync:textpeer');
 			const a = await tabA.acquire();
 			const b = await tabB.acquire();
 			expect(a.peer).not.toBe(b.peer);

@@ -109,13 +109,18 @@ function holdWebLock(name: string): Promise<(() => void) | undefined> {
 	});
 }
 
-/** Slot pool for one clientId. One per SyncClient; peers are `<clientId>:<slot>`. */
-export function createPeerLeases(clientId: string): PeerLeases {
+/**
+ * Slot pool for one clientId. One per SyncClient; peers are
+ * `<clientId>:<slot>`. `lockPrefix` is the stem of the per-slot Web Lock names
+ * (StorageNames.textPeerLocks): every context that may load the same documents
+ * has to pass the same one, or two of them hand out the same peer.
+ */
+export function createPeerLeases(clientId: string, lockPrefix: string): PeerLeases {
 	const webLocks = typeof navigator !== 'undefined' && navigator.locks !== undefined
 		&& !isServerRuntime();
 	const hold = (slot: number): Promise<(() => void) | undefined> =>
 		webLocks
-			? holdWebLock(`syncplane:textpeer:${clientId}:${slot}`)
+			? holdWebLock(`${lockPrefix}:${clientId}:${slot}`)
 			: Promise.resolve(holdLocal(clientId, slot));
 
 	return {

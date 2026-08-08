@@ -27,19 +27,20 @@ export interface ChangeShare {
 }
 
 /**
- * Starts cross-tab change sharing scoped to `accountId` — the store partition,
- * so exactly the tabs sharing a store share the channel. `onRemoteChange` fires
+ * Starts cross-tab change sharing over the BroadcastChannel named `channelName`
+ * (StorageNames.changeChannel), which is derived from the store partition so
+ * exactly the tabs sharing a store share the channel. `onRemoteChange` fires
  * with the raw tokens (see keys.touchKey / keys.rowTouchKey) each time another
  * tab broadcasts a commit; TouchSet.fromTokens turns them back into a touch set.
  */
 export function startChangeShare(
-	accountId: string,
+	channelName: string,
 	onRemoteChange: (tokens: Set<string>) => void,
 ): ChangeShare {
 	if (isServerRuntime() || typeof BroadcastChannel === 'undefined') {
 		return { broadcast: () => {}, stop: () => {} };
 	}
-	const channel = new BroadcastChannel(`sync:change:${accountId}`);
+	const channel = new BroadcastChannel(channelName);
 	channel.onmessage = (ev) => {
 		const tokens = ev.data as unknown;
 		if (Array.isArray(tokens) && tokens.length > 0) {

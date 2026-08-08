@@ -61,6 +61,7 @@ import {
 } from '../optimistic/rebase.js';
 import { readMergedRow } from '../read.js';
 import { reportError, safeCall, safeInvoke } from '../report.js';
+import type { StorageNames } from '../storagenames.js';
 import { decodeTextDoc, encodeTextDoc, textOf } from '../text/index.js';
 import { createPeerLeases, type PeerLeases } from '../text/peer.js';
 import { TouchSet } from '../touch.js';
@@ -205,11 +206,12 @@ export interface CoordinatorOptions {
 	kv: KVStore;
 	kvMutex: Mutex;
 	/**
-	 * Store partition this coordinator drives. Names the cross-tab channels and
-	 * the stream-leadership lock, so exactly the tabs sharing a store coordinate
-	 * with each other — regardless of which workspaces each of them holds.
+	 * The origin-scoped names of the store this coordinator drives (see
+	 * storagenames.ts). They carry the store partition, so exactly the tabs
+	 * sharing a store coordinate with each other — regardless of which
+	 * workspaces each of them holds.
 	 */
-	accountId: string;
+	storageNames: StorageNames;
 	clientId: string;
 	registry: EntityRegistry;
 	mirrors: MirrorMap;
@@ -656,7 +658,7 @@ export class Coordinator {
 		// re-scopes even when the change originated elsewhere, and for a peer tab's
 		// departure so we reap its record and re-scope. Started regardless of
 		// leadership: any tab may be (or become) the leader.
-		this.reopenSignal = startReopenSignal(this.opts.accountId, {
+		this.reopenSignal = startReopenSignal(this.opts.storageNames.reopenChannel, {
 			onReopen: () => this.reopenSubscribe(),
 			onDeparted: (tabId) => this.onPeerDeparted(tabId),
 		});
@@ -679,7 +681,7 @@ export class Coordinator {
 			// workspace, so the connection count does not grow with workspace count.
 			// Elsewhere (server runtime / no Web Locks) every instance runs its own
 			// session-long stream, bounded only by the global stop signal.
-			this.leadership = startStreamLeadership(this.opts.accountId, {
+			this.leadership = startStreamLeadership(this.opts.storageNames.streamLock, {
 				// Bracketed around the leader loop rather than hooked into the lock
 				// itself: holding the lock IS the term, so the loop's lifetime is
 				// exactly the leadership. A tab that never leads emits nothing,
@@ -1732,7 +1734,10 @@ export class Coordinator {
 		// One lease for the whole batch: every document is read and rewritten
 		// inside the transaction below, which is exactly the serialized
 		// read-then-edit that lets a writer keep one peer (see text/peer.ts).
-		const lease = await (this.peerLeases ??= createPeerLeases(this.opts.clientId)).acquire();
+		const lease = await (this.peerLeases ??= createPeerLeases(
+			this.opts.clientId,
+			this.opts.storageNames.textPeerLocks,
+		)).acquire();
 		const touched = new TouchSet();
 		try {
 			await this.opts.kvMutex.run(async () => {

@@ -7,6 +7,7 @@ import { metaCursor } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
+import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { StatusTracker, type SyncStatus } from '../../src/sync/status.js';
 import { pushResults } from './pushfake.js';
@@ -56,7 +57,7 @@ describe('coordinator status notifications', () => {
 			transport,
 			kv,
 			kvMutex: createKvMutex('test'),
-			accountId: 'acct',
+			storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 			scopes: new Map([ [ WS, [] ] ]),
 			clientId: 'c1',
 			registry,

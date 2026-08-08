@@ -26,6 +26,7 @@ import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { enqueuePending } from '../../src/optimistic/queue.js';
 import { applyMutationLocally } from '../../src/optimistic/rebase.js';
 import { scanMergedRows } from '../../src/read.js';
+import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { TouchSet } from '../../src/touch.js';
@@ -159,7 +160,7 @@ function newCoordinator(
 		transport,
 		kv,
 		kvMutex,
-		accountId: 'acct',
+		storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 		scopes: new Map([ [ WS, [] ] ]),
 		clientId: 'c1',
 		registry,
@@ -751,7 +752,7 @@ describe('cold bootstrap hydration', () => {
 			transport,
 			kv,
 			kvMutex,
-			accountId: 'acct',
+			storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 			scopes: new Map([ [ WS, [] ] ]),
 			clientId: 'c1',
 			registry: twoEntities,

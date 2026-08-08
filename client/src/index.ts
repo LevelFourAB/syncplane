@@ -81,6 +81,10 @@ export type { HydratedRow, IncludeSpec } from './refs.js';
 export { fetchSchema, registerSchema } from './schema/admin.js';
 export type { RegisterOptions, RegisterResult } from './schema/admin.js';
 export * as schema from './schema/builder.js';
+// Exported so an app that changes storagePrefix can name (and delete) the
+// database the previous prefix left behind.
+export { DEFAULT_STORAGE_PREFIX, storageNames } from './storagenames.js';
+export type { StorageNames } from './storagenames.js';
 export {
 	COMMENT_PREFIX,
 	commentIdOf,

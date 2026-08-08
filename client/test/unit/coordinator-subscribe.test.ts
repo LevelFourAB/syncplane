@@ -21,6 +21,7 @@ import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { readMergedRow } from '../../src/read.js';
+import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator, type CoordinatorOptions } from '../../src/sync/coordinator.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { pushApplied, pushedMutations, pushFailed, pushResults } from './pushfake.js';
@@ -117,7 +118,7 @@ describe('coordinator subscribe stream', () => {
 				transport,
 				kv,
 				kvMutex,
-				accountId: 'acct',
+				storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
 				clientId: 'c1',
 				registry,
 				mirrors: {},
