@@ -36,6 +36,37 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		r.release();
 	});
 
+	it('reads a batch of keys, parallel to the request', async () => {
+		store = await open();
+		const w = await store.write();
+		await w.put('a', 1);
+		await w.put('b', 2);
+		await w.commit();
+
+		const r = await store.read();
+		// Order and arity follow the request, not the store: missing keys hold
+		// their slot and a duplicate is answered twice.
+		expect(await r.getMany([ 'b', 'missing', 'a', 'b' ])).toEqual([ 2, undefined, 1, 2 ]);
+		expect(await r.getMany([])).toEqual([]);
+		r.release();
+	});
+
+	it('a write transaction’s getMany sees its own buffered writes', async () => {
+		store = await open();
+		const setup = await store.write();
+		await setup.put('k', 'old');
+		await setup.put('gone', 'x');
+		await setup.commit();
+
+		const w = await store.write();
+		await w.put('k', 'new');
+		await w.put('fresh', 'v');
+		await w.del('gone');
+		expect(await w.getMany([ 'k', 'gone', 'fresh', 'missing' ]))
+			.toEqual([ 'new', undefined, 'v', undefined ]);
+		w.release();
+	});
+
 	it('stores binary values', async () => {
 		store = await open();
 		const w = await store.write();
@@ -133,6 +164,67 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		for await (const [ key ] of r.scan('\uffff\uffff')) seen.push(key);
 		expect(seen).toEqual([ '\uffff\uffff', '\uffff\uffffz' ]);
 		r.release();
+	});
+
+	// Scans continue past one request in the IDB backend (see SCAN_CHUNK), and
+	// the continuation — an exclusive lower bound at the last key yielded — is
+	// the one place it could drop or repeat an entry.
+	it('scans a range longer than one request', async () => {
+		store = await open();
+		const w = await store.write();
+		const total = 600;
+		for (let i = 0; i < total; i++) {
+			await w.put(`p/${String(i).padStart(4, '0')}`, i);
+		}
+		await w.put('q/after', 'other');
+		await w.commit();
+
+		const r = await store.read();
+		const seen: string[] = [];
+		for await (const [ key ] of r.scan('p/')) seen.push(key);
+		expect(seen).toHaveLength(total);
+		expect(new Set(seen).size).toBe(total);
+		expect(seen[0]).toBe('p/0000');
+		expect(seen[total - 1]).toBe(`p/${String(total - 1).padStart(4, '0')}`);
+		expect(seen).toEqual([ ...seen ].sort());
+		r.release();
+	});
+
+	// The same continuation, read through a write transaction whose buffered
+	// writes land before, inside, on top of, and past the committed range — the
+	// shapes a streaming merge with the committed scan could misorder or lose.
+	it('merges buffered writes into a scan longer than one request', async () => {
+		store = await open();
+		const setup = await store.write();
+		const total = 600;
+		for (let i = 0; i < total; i++) {
+			await setup.put(`p/${String(2 * i + 1).padStart(4, '0')}`, 'committed');
+		}
+		await setup.commit();
+
+		const w = await store.write();
+		await w.put('p/0000', 'before the first committed key');
+		await w.put('p/0600', 'between committed keys');
+		await w.put('p/0333', 'overwrites a committed key');
+		await w.put('p/9999', 'past the last committed key');
+		await w.del('p/0335');
+		await w.del('p/absent');
+		const seen = new Map<string, unknown>();
+		for await (const [ key, value ] of w.scan('p/')) {
+			expect(seen.has(key)).toBe(false);
+			seen.set(key, value);
+		}
+		w.release();
+
+		const keys = [ ...seen.keys() ];
+		expect(keys).toEqual([ ...keys ].sort());
+		expect(seen.size).toBe(total + 3 - 1);
+		expect(seen.get('p/0000')).toBe('before the first committed key');
+		expect(seen.get('p/0600')).toBe('between committed keys');
+		expect(seen.get('p/0333')).toBe('overwrites a committed key');
+		expect(seen.get('p/9999')).toBe('past the last committed key');
+		expect(seen.has('p/0335')).toBe(false);
+		expect(seen.get('p/0001')).toBe('committed');
 	});
 
 	it('write transactions see their own buffered writes', async () => {
@@ -246,6 +338,56 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 			await w.commit();
 		});
 
+		it('counts positions the way indexScan yields them', async () => {
+			store = await open();
+			await seedPositions(store);
+			const r = await store.read();
+			try {
+				// Per POSITION, not per record: x holds two in the first range.
+				expect(await r.indexCount('i/a/', 'i/a0')).toBe(3);
+				expect(await r.indexCount('i/a/2', 'i/a/3')).toBe(1);
+				expect(await r.indexCount('i/a/2')).toBe(3);
+				expect(await r.indexCount(undefined, 'i/a/2')).toBe(1);
+				expect(await r.indexCount()).toBe(4);
+				expect(await r.indexCount('i/a/2', 'i/a/2')).toBe(0);
+				expect(await r.indexCount('i/b', 'i/a')).toBe(0);
+			} finally {
+				r.release();
+			}
+		});
+
+		// A repeated element of an indexed field encodes to the same position
+		// twice. IDB's multiEntry index keeps one entry per distinct element, so
+		// the other backend has to collapse the repeat too — for the scan and for
+		// the count, which reads the range's size as its row count when nothing
+		// fans out past the equality prefix.
+		it('a position listed twice is one position', async () => {
+			store = await open();
+			const w = await store.write();
+			await w.put('c/dup', { v: 'dup', ix: [ 'i/a/1', 'i/a/1', 'i/a/2' ] });
+			await w.commit();
+			expect(await positions(store, 'i/a/', 'i/a0')).toEqual([ 'c/dup', 'c/dup' ]);
+			const r = await store.read();
+			try {
+				expect(await r.indexCount('i/a/', 'i/a0')).toBe(2);
+			} finally {
+				r.release();
+			}
+		});
+
+		it('a write transaction’s indexCount sees its own buffered positions', async () => {
+			store = await open();
+			await seedPositions(store);
+			const w = await store.write();
+			await w.put('c/w', { v: 'w', ix: [ 'i/a/0' ] });
+			await w.put('c/x', { v: 'x', ix: [ 'i/a/9' ] });
+			await w.del('c/y');
+			// The seed's range held [x, y, x]; the buffer added w, collapsed x to
+			// one position and removed y — a count of committed state says 3.
+			expect(await w.indexCount('i/a/', 'i/a0')).toBe(2);
+			w.release();
+		});
+
 		// The read path pulls a page out of a range far wider than it, and stops.
 		// A backend that materialized the whole range first would pass every
 		// assertion above and still be the thing issues/117 set out to remove.
@@ -302,6 +444,52 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		expect(await r.get('a')).toBe(1);
 		expect(await r.get('b')).toBe(2);
 		r.release();
+	});
+});
+
+/**
+ * The correctness tests above cannot pin LAZINESS: a backend that materialized
+ * a whole range up front would pass every one of them. This pins it for the
+ * IDB backend by counting what it asks the store for — a scan abandoned after
+ * a few entries must cost one bounded request, not the range. It is what keeps
+ * the index build's batch loop (read BUILD_BATCH rows, stop) from re-reading
+ * the remainder of the entity every batch, the same property indexScan already
+ * pins behaviorally in "stops when the caller does".
+ */
+describe('IDBKVStore scan laziness', () => {
+	it('asks for one bounded chunk when the caller stops early', async () => {
+		const store = await IDBKVStore.open(`kv-lazy-${dbCounter++}`);
+		const w = await store.write();
+		for (let i = 0; i < 600; i++) {
+			await w.put(`p/${String(i).padStart(4, '0')}`, i);
+		}
+		await w.commit();
+
+		const counts: (number | undefined)[] = [];
+		const original = IDBObjectStore.prototype.getAll;
+		IDBObjectStore.prototype.getAll = function(
+			this: IDBObjectStore,
+			query?: IDBValidKey | IDBKeyRange | null,
+			count?: number,
+		) {
+			counts.push(count);
+			return original.call(this, query, count);
+		};
+		try {
+			const r = await store.read();
+			const seen: string[] = [];
+			for await (const [ key ] of r.scan('p/')) {
+				seen.push(key);
+				if (seen.length === 3) break;
+			}
+			r.release();
+			expect(seen).toEqual([ 'p/0000', 'p/0001', 'p/0002' ]);
+		} finally {
+			IDBObjectStore.prototype.getAll = original;
+		}
+		expect(counts).toHaveLength(1);
+		expect(counts[0]).toBeTypeOf('number');
+		await store.close();
 	});
 });
 

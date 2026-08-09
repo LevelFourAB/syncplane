@@ -224,7 +224,9 @@ describe('query events', () => {
 
 	it('reports the budget decline, which no result would show', async () => {
 		// The cliff this event exists for: the same query, the same index, the
-		// same correct rows — and past a size threshold it is a full scan.
+		// same correct rows — and past a size threshold it is a full scan. No
+		// ordering, so every match's row must be read to re-create key order,
+		// and it is the row reads that overrun the ceiling.
 		const { client, queries } = await bigClient(10_100);
 		try {
 			await run(client, { where: (i) => i.state.eq('open') });
@@ -235,6 +237,31 @@ describe('query events', () => {
 		// The walk stopped at the ceiling, so its count carries no information the
 		// reason does not.
 		expect(queries()[0]).not.toHaveProperty('candidates');
+	});
+
+	it('serves an ordered page from a range wider than the budget', async () => {
+		// The counterpart that keeps the ceiling honest: the same range, but an
+		// ordered plan with a limit settles its page after a handful of ROW
+		// reads and then only counts positions toward `total`. Counting is
+		// O(positions of the range) with no row reads at all, so the ceiling —
+		// which exists to stop runaway reads — must not apply to it, or a busy
+		// entity's most selective indexed query becomes a permanent full scan.
+		const { client, queries } = await bigClient(10_100);
+		try {
+			await run(client, {
+				where: (i) => i.state.eq('open'),
+				orderBy: (i) => [ i.rank.desc() ],
+				limit: 5,
+			});
+		} finally {
+			await client.close();
+		}
+		expect(queries()[0]).toMatchObject({
+			path: 'index',
+			index: 'by_state_rank',
+			rows: 5,
+			total: 10_100,
+		});
 	});
 
 	it('counts the page it delivered, and the matches behind it', async () => {
@@ -330,6 +357,39 @@ describe('query events', () => {
 		// The read itself did the same work both times; only the wait moved.
 		expect(blocked.durationMs - blocked.waitMs).toBeLessThan(HOLD_MS * 0.5);
 		expect(free.waitMs).toBeLessThan(HOLD_MS * 0.5);
+	});
+
+	it('reports the background build, after which queries stop scanning', async () => {
+		// Seeded but never built: the state a bootstrap swap leaves behind, which
+		// the background build is responsible for ending — and the event is the
+		// only way an app can see it end. Driven through the same private entry
+		// start() and the swap use, without a coordinator in the way.
+		const { client, events, queries } = await clientWith(false);
+		try {
+			(client as unknown as { startIndexBuild(ws?: string): void }).startIndexBuild(WS);
+			await vi.waitUntil(() => events.some((e) => e.type === 'indexing'));
+			const built = events.find((e) => e.type === 'indexing')!;
+			expect(built).toMatchObject({ type: 'indexing', workspaceId: WS, rows: 3 });
+			expect(built.durationMs).toBeGreaterThanOrEqual(0);
+			await run(client, { where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ] });
+			expect(queries()[0]).toMatchObject({ path: 'index', index: 'by_state_rank' });
+		} finally {
+			await client.close();
+		}
+	});
+
+	it('reports a build that found everything built, as the zero-row pass it was', async () => {
+		const { client, events } = await clientWith(true);
+		try {
+			(client as unknown as { startIndexBuild(ws?: string): void }).startIndexBuild(WS);
+			await vi.waitUntil(() => events.some((e) => e.type === 'indexing'));
+			expect(events.find((e) => e.type === 'indexing')).toMatchObject({
+				workspaceId: WS,
+				rows: 0,
+			});
+		} finally {
+			await client.close();
+		}
 	});
 
 	it('answers the query even when the handler throws', async () => {

@@ -1965,12 +1965,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const state = { again: false };
 		this.indexBuilds.set(workspaceId, state);
 		void (async () => {
+			const started = performance.now();
+			let rows = 0;
+			let ready = false;
 			try {
 				const kv = await this.kv();
 				do {
 					state.again = false;
 					if (this.closed) return;
-					await buildIndexes(
+					const built = await buildIndexes(
 						kv,
 						(fn) => this.kvMutex.run(fn),
 						this.entityRegistry,
@@ -1980,8 +1983,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						// build over a large store cannot outlive its store.
 						() => this.closed,
 					);
+					rows += built.rows;
+					ready = built.ready;
 				}
 				while (state.again);
+				// Only a run that ended with every marker claimed reports: a pass
+				// that had nothing to walk yet (no snapshot installed) or was
+				// stopped by close() has not made the indexes ready, and the run
+				// that follows the bootstrap is the one that will say so.
+				if (ready && !this.closed) {
+					this.emit({
+						type: 'indexing',
+						workspaceId,
+						rows,
+						durationMs: performance.now() - started,
+					});
+				}
 			} catch (err) {
 				reportError('secondary index build', err);
 			} finally {

@@ -55,11 +55,24 @@ export const BUILD_BATCH = 200;
 /** Runs a write transaction under the store's cross-tab lock. */
 export type RunLocked = <T>(fn: () => Promise<T>) => Promise<T>;
 
+/** What one pass over a workspace (or one entity of it) did. */
+export interface BuildResult {
+	/** Confirmed rows rewritten with their positions. */
+	rows: number;
+	/**
+	 * Whether every index ended the pass MARKED built. False when the pass had
+	 * nothing it could claim: no snapshot installed yet, the client stopping
+	 * mid-walk, or a bootstrap replacing the rows underneath it — all states
+	 * whose next pass is what finishes the job.
+	 */
+	ready: boolean;
+}
+
 /**
  * Brings every index of every registered entity up to date for one workspace
- * and marks each built. Indexes already marked under their current spec are
- * skipped, so a repeat pass over an unchanged workspace costs one key lookup
- * per index.
+ * and marks each built. `rows` is 0 when every index was already marked;
+ * indexes already marked under their current spec are skipped, so a repeat
+ * pass over an unchanged workspace costs one key lookup per index.
  *
  * Safe to call at any time and safe to abandon: it never claims a marker it has
  * not earned. `stopped` is polled between batches so a client closing mid-walk
@@ -72,13 +85,18 @@ export async function buildIndexes(
 	indexes: IndexCache,
 	workspaceId: string,
 	stopped?: () => boolean,
-): Promise<void> {
+): Promise<BuildResult> {
+	let rows = 0;
+	let ready = true;
 	for (const entity of registry.names()) {
 		const compiled = indexes.for(entity);
 		if (compiled.length === 0) continue;
-		if (stopped?.()) return;
-		await buildEntity(kv, runLocked, registry, entity, compiled, workspaceId, stopped);
+		if (stopped?.()) return { rows, ready: false };
+		const built = await buildEntity(kv, runLocked, registry, entity, compiled, workspaceId, stopped);
+		rows += built.rows;
+		ready &&= built.ready;
 	}
+	return { rows, ready };
 }
 
 /**
@@ -169,7 +187,7 @@ async function buildEntity(
 	compiled: CompiledIndex[],
 	workspaceId: string,
 	stopped?: () => boolean,
-): Promise<void> {
+): Promise<BuildResult> {
 	const markers = compiled.map((idx) => metaIndexBuilt(workspaceId, entity, idx.name, idx.specHash));
 
 	const tx = await kv.read();
@@ -184,14 +202,14 @@ async function buildEntity(
 	} finally {
 		tx.release();
 	}
-	if (allBuilt) return;
+	if (allBuilt) return { rows: 0, ready: true };
 
 	// Walk the entity in batches, resuming by row key. Maintenance is already
 	// live, so a row written while this runs gets its entries from the write
 	// path — the build only has to visit rows that existed before it started,
 	// and revisiting one is harmless.
 	const def = registry.get(entity);
-	if (def === undefined) return;
+	if (def === undefined) return { rows: 0, ready: false };
 	const prefix = confirmedWsPrefix(entity, workspaceId);
 	// The snapshot this walk describes. A bootstrap landing mid-walk replaces
 	// every row underneath it, which would leave the batches already visited
@@ -199,15 +217,17 @@ async function buildEntity(
 	// this still matches at the end. See metaSnapshotGen.
 	const { installed, gen: startedAt } = await readInstalledSnapshot(kv, workspaceId);
 	// Nothing to describe yet: no snapshot is installed, so walking would either
-	// index an empty workspace or race a bootstrap filling it.
-	if (!installed) return;
+	// index an empty workspace or race a bootstrap filling it. Not `ready`: no
+	// marker exists, and the pass that follows the bootstrap is what earns one.
+	if (!installed) return { rows: 0, ready: false };
 	// Resume where the last attempt stopped. Without this a walk is worth
 	// nothing until it finishes: a client whose session is shorter than the walk
 	// would restart the entity every time and never claim an index, while paying
 	// a full walk's writes each session.
 	let after = await readBuildCursor(kv, workspaceId, entity, startedAt);
+	let walked = 0;
 	for (;;) {
-		if (stopped?.()) return;
+		if (stopped?.()) return { rows: walked, ready: false };
 		const done = await runLocked(async () => {
 			const wtx = await kv.write();
 			try {
@@ -268,6 +288,7 @@ async function buildEntity(
 				}
 				await wtx.commit();
 				after = last ?? after;
+				walked += batch.length;
 				return batch.length < BUILD_BATCH;
 			} catch (err) {
 				wtx.release();
@@ -277,7 +298,7 @@ async function buildEntity(
 		if (done) break;
 	}
 
-	await runLocked(async () => {
+	const claimed = await runLocked(async () => {
 		const wtx = await kv.write();
 		try {
 			// Under the same lock a bootstrap takes, so this reads either the
@@ -295,7 +316,7 @@ async function buildEntity(
 				|| !(await wtx.has(metaCursor(workspaceId)))
 			) {
 				wtx.release();
-				return;
+				return false;
 			}
 			// A superseded declaration leaves a marker nothing looks up. Its
 			// POSITIONS are already gone — the walk above rewrote every row with
@@ -315,9 +336,11 @@ async function buildEntity(
 			// build happened to finish.
 			await wtx.del(metaIndexBuildCursor(workspaceId, entity));
 			await wtx.commit();
+			return true;
 		} catch (err) {
 			wtx.release();
 			throw err;
 		}
 	});
+	return { rows: walked, ready: claimed };
 }

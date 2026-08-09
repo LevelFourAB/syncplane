@@ -40,7 +40,13 @@ export const INDEX_FIELD = 'ix';
 const NO_POSITIONS: readonly string[] = [];
 
 /**
- * The index positions a stored value occupies, in the order it lists them.
+ * The index positions a stored value occupies, in the order it lists them —
+ * minus repeats, because the positions are a SET: IndexedDB's multiEntry index
+ * stores one entry per distinct element, so a backend walking the raw list has
+ * to collapse repeats the same way or the two would disagree on what a range
+ * holds. (A repeated element of an indexed field encodes to the same position
+ * twice, which is where a repeat comes from.)
+ *
  * Empty for anything that is not an object carrying INDEX_FIELD as an array —
  * values reaching a store are not all records, so this has to tolerate
  * whatever a caller put there.
@@ -48,7 +54,9 @@ const NO_POSITIONS: readonly string[] = [];
 export function positionsOf(value: unknown): readonly string[] {
 	if (typeof value !== 'object' || value === null) return NO_POSITIONS;
 	const ix = (value as Record<string, unknown>)[INDEX_FIELD];
-	return Array.isArray(ix) ? ix as string[] : NO_POSITIONS;
+	if (!Array.isArray(ix)) return NO_POSITIONS;
+	const set = new Set(ix as string[]);
+	return set.size === ix.length ? ix as string[] : [ ...set ];
 }
 
 export interface KVStore {
@@ -66,6 +74,16 @@ export interface KVStore {
 
 export interface KVRead {
 	get(key: string): Promise<unknown | undefined>;
+	/**
+	 * Reads several keys at once. The result is parallel to `keys`: one entry
+	 * per requested key, `undefined` where the key is absent. Duplicate keys are
+	 * answered independently.
+	 *
+	 * Semantically `Promise.all(keys.map(get))`; it exists because a backend can
+	 * answer the whole batch in one transaction where per-key gets each open
+	 * their own.
+	 */
+	getMany(keys: readonly string[]): Promise<(unknown | undefined)[]>;
 	has(key: string): Promise<boolean>;
 	/** Yields entries whose key starts with `prefix`, in ascending key order. */
 	scan(prefix: string): AsyncIterable<[key: string, value: unknown]>;
@@ -97,6 +115,16 @@ export interface KVRead {
 	 * tail a caller never pulled. Stopping the iteration stops the work.
 	 */
 	indexScan(lo?: string, hi?: string): AsyncIterable<string>;
+	/**
+	 * The number of index positions in [lo, hi) — how many entries an indexScan
+	 * over the same range would yield, counted per POSITION exactly as indexScan
+	 * yields. An undefined bound is open on that end.
+	 *
+	 * It exists because counting is the one range read that needs none of the
+	 * range's contents: IndexedDB answers it from the B-tree in a single request,
+	 * where walking the range materializes every key in it.
+	 */
+	indexCount(lo?: string, hi?: string): Promise<number>;
 	release(): void;
 }
 
@@ -129,6 +157,10 @@ export class CountingWrite implements KVWrite {
 		return this.inner.get(key);
 	}
 
+	getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
+		return this.inner.getMany(keys);
+	}
+
 	has(key: string): Promise<boolean> {
 		return this.inner.has(key);
 	}
@@ -143,6 +175,10 @@ export class CountingWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexCount(lo?: string, hi?: string): Promise<number> {
+		return this.inner.indexCount(lo, hi);
 	}
 
 	async put(key: string, value: unknown): Promise<void> {

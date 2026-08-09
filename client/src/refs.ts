@@ -150,6 +150,12 @@ function refPointsAt(
  * relations scan the source. Nested includes recurse into the resolved rows.
  * Each row's references resolve inside that row's own workspace, so hydrating a
  * cross-workspace result set stays correct row by row.
+ *
+ * Point lookups are deduplicated across the whole call: a page of rows
+ * referencing one shared target reads it once, and rows referencing it get the
+ * same resolved row. The scope is one hydrate — reads under it are not a
+ * snapshot (each takes its own shared read), so a longer-lived cache could
+ * serve a row staler than the store.
  */
 export async function hydrate(
 	client: RefClient,
@@ -158,7 +164,39 @@ export async function hydrate(
 	rows: Row<Message>[],
 	include: IncludeSpec,
 ): Promise<HydratedRow[]> {
+	return hydrateAll(memoized(client), registry, entity, rows, include);
+}
+
+async function hydrateAll(
+	client: RefClient,
+	registry: EntityRegistry,
+	entity: string,
+	rows: Row<Message>[],
+	include: IncludeSpec,
+): Promise<HydratedRow[]> {
 	return Promise.all(rows.map((row) => hydrateRow(client, registry, entity, row, include)));
+}
+
+/**
+ * A RefClient whose getRow answers repeats — and concurrent duplicates, by
+ * sharing the promise — from a cache. Queries pass through: a reverse relation
+ * repeats within one hydration only when several rows share a target, where a
+ * forward ref repeats per row.
+ */
+function memoized(client: RefClient): RefClient {
+	const cache = new Map<string, Promise<Row<Message> | undefined>>();
+	return {
+		getRow: (schema, workspaceId, key) => {
+			const at = `${schema.typeName}\u0000${workspaceId}\u0000${key}`;
+			let row = cache.get(at);
+			if (row === undefined) {
+				row = client.getRow(schema, workspaceId, key);
+				cache.set(at, row);
+			}
+			return row;
+		},
+		query: (schema, workspaceId, q) => client.query(schema, workspaceId, q),
+	};
 }
 
 async function hydrateRow(
@@ -211,7 +249,7 @@ async function hydrateForward(
 	if (resolved === undefined) return undefined;
 	if (Array.isArray(resolved)) return hydrateList(client, registry, targetEntity, resolved, nested);
 	if (nested === true) return toHydrated(resolved);
-	return (await hydrate(client, registry, targetEntity, [ resolved ], nested))[0];
+	return (await hydrateAll(client, registry, targetEntity, [ resolved ], nested))[0];
 }
 
 async function hydrateList(
@@ -222,7 +260,7 @@ async function hydrateList(
 	nested: true | IncludeSpec,
 ): Promise<HydratedRow[]> {
 	if (nested === true) return rows.map(toHydrated);
-	return hydrate(client, registry, entity, rows, nested);
+	return hydrateAll(client, registry, entity, rows, nested);
 }
 
 function toHydrated(row: Row<Message>): HydratedRow {

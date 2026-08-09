@@ -4,6 +4,7 @@ import { SERVER_URL_ENV, TIERS_ENV } from './global-setup.js';
 import type {
 	EventRecord,
 	FirstReadSummary,
+	IndexBuildView,
 	OpenOptions,
 	ReadOp,
 	ReadResult,
@@ -207,6 +208,10 @@ export class BenchTab {
 
 	read(op: ReadOp): Promise<ReadResult> {
 		return this.page.evaluate((o) => window.benchHarness.read(o), op);
+	}
+
+	waitForIndexes(timeoutMs = 600_000): Promise<IndexBuildView> {
+		return this.page.evaluate((t) => window.benchHarness.waitForIndexes(t), timeoutMs);
 	}
 
 	counts(): Promise<RowCounts> {

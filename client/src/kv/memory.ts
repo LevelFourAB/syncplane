@@ -43,6 +43,10 @@ class MemoryRead implements KVRead {
 		return this.snapshot.get(key);
 	}
 
+	async getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
+		return keys.map((k) => this.snapshot.get(k));
+	}
+
 	async has(key: string): Promise<boolean> {
 		return this.snapshot.has(key);
 	}
@@ -87,6 +91,16 @@ class MemoryRead implements KVRead {
 			a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : a[1] !== b[1] ? (a[1] < b[1] ? -1 : 1) : 0
 		);
 		for (const [ , k ] of pairs) yield k;
+	}
+
+	async indexCount(lo?: string, hi?: string): Promise<number> {
+		let n = 0;
+		for (const v of this.snapshot.values()) {
+			for (const position of positionsOf(v)) {
+				if ((lo === undefined || position >= lo) && (hi === undefined || position < hi)) n++;
+			}
+		}
+		return n;
 	}
 
 	release(): void {

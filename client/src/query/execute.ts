@@ -56,13 +56,27 @@ import type { IndexRange, QueryPlan } from './plan.js';
 import { planQuery } from './plan.js';
 
 /**
- * How many index positions one query may walk. An index narrows the candidates; a
- * residual predicate the range could not express still rejects some of them,
- * and in the worst case rejects nearly all — at which point the walk has become
- * a scan with extra reads. Past this the query falls back rather than failing,
- * because an optimization that gives up must not change the answer.
+ * How many ROWS one query may read through an index. An index narrows the
+ * candidates; a residual predicate the range could not express still rejects
+ * some of them, and in the worst case rejects nearly all — at which point the
+ * walk has become a scan with extra reads. Past this the query falls back
+ * rather than failing, because an optimization that gives up must not change
+ * the answer.
+ *
+ * Rows, not positions: an ordered plan that has settled its page keeps walking
+ * only to COUNT what remains (see `beyond`), which reads keys in bulk and no
+ * rows. Charging that walk here would turn the most selective indexed query on
+ * a large entity into a permanent full scan the moment its range outgrew the
+ * ceiling.
  */
 const MAX_INDEX_CANDIDATES = 10000;
+
+/**
+ * Candidate rows one getMany reads at a time. Large enough that a typical page
+ * costs one batch, small enough that the reads a settled walk turns out not to
+ * have needed stay bounded by one batch.
+ */
+const READ_BATCH = 64;
 
 /**
  * A result row together with the merged-view bytes it was decoded from — the
@@ -127,12 +141,13 @@ export async function queryByIndex<D extends DescMessage>(
 	if (workspaceId === undefined) return decline(report, 'cross-workspace');
 	if (indexes.length === 0) return decline(report, 'no-index');
 
-	const built: CompiledIndex[] = [];
-	for (const idx of indexes) {
-		if (await tx.has(metaIndexBuilt(workspaceId, def.name, idx.name, idx.specHash))) {
-			built.push(idx);
-		}
-	}
+	const built = (await Promise.all(
+		indexes.map(async (idx) =>
+			(await tx.has(metaIndexBuilt(workspaceId, def.name, idx.name, idx.specHash)))
+				? idx
+				: undefined
+		),
+	)).filter((idx): idx is CompiledIndex => idx !== undefined);
 	if (built.length === 0) return decline(report, 'not-built');
 
 	const plan = planQuery(
@@ -177,18 +192,53 @@ export async function queryByIndex<D extends DescMessage>(
 	const confirmed: IndexedRow<MessageShape<D>>[] = [];
 	const seen = new Set<string>();
 	let walked = 0;
+	// Row reads so far — what MAX_INDEX_CANDIDATES bounds; see its comment.
+	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
+	// Whether every position in the range is one distinct live match, which is
+	// what lets a settled walk count the remainder in one indexCount request
+	// instead of walking it. Each condition removes a way that could fail: a
+	// residual rejects rows, a window rejects the boundary tie group its seek
+	// admits, a shadowed row is answered by the overlay instead, an unpinned
+	// fan-out gives one row several positions, and a second range can repeat a
+	// row the first already yielded.
+	const countable = plan.residual === undefined
+		&& window === undefined
+		&& shadowed.size === 0
+		&& plan.ranges.length === 1
+		&& plan.distinctPerRange;
+	// Candidate row keys not yet read. Rows are fetched in getMany batches — one
+	// backend transaction per batch rather than per row — and classified when the
+	// batch flushes, in position order, so the outcome per row is the same as
+	// reading them one at a time.
+	let batch: string[] = [];
+	const flush = async (): Promise<void> => {
+		if (batch.length === 0) return;
+		const keys = batch;
+		batch = [];
+		for (const entry of await readConfirmedMany(tx, registry, def, schema, workspaceId, keys)) {
+			// A position and its row are one record, so a position cannot outlive
+			// its row — and a reader holds the shared lock, so no commit lands
+			// between the index read and this one. The guard stays because
+			// answering from a row that is not there would be silent and wrong.
+			if (entry === undefined) continue;
+			if (!matches(entry.row.value, plan.residual, schema)) continue;
+			// The seek bound deliberately drops the cursor's row-key half, so
+			// the boundary position is inside the range and this is what rejects
+			// it — the seek narrows, the comparison decides.
+			if (window && !window.within(entry.row.value, entry.row.key)) continue;
+			if (budget !== undefined && plan.ordered && confirmed.length >= budget) beyond++;
+			else confirmed.push(entry);
+		}
+	};
 
-	for (const range of plan.ranges) {
+	ranges: for (const range of plan.ranges) {
 		const seek = seekRange(plan, range, window);
-		for await (
-			const cKey of tx.indexScan(
-				seek.lo === undefined ? prefix : prefix + seek.lo,
-				seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi,
-			)
-		) {
-			if (++walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+		const lo = seek.lo === undefined ? prefix : prefix + seek.lo;
+		const hi = seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi;
+		for await (const cKey of tx.indexScan(lo, hi)) {
+			walked++;
 			// A position of THIS index can only sit on a row of this entity and
 			// workspace — that is what its prefix means, and the bounds above are
 			// inside it. The guard is a fence against a record that acquired one
@@ -208,32 +258,35 @@ export async function queryByIndex<D extends DescMessage>(
 			if (shadowed.has(key)) continue;
 			// An ordered plan yields matches in result order, so once enough of
 			// them are in hand no later one can reach the page — bounded above by
-			// how many the overlay could displace. What follows is still counted:
-			// `total` is the whole match set, not the page.
-			const settled = budget !== undefined && plan.ordered && confirmed.length >= budget;
+			// how many the overlay could displace. A batched key is in hand only
+			// when nothing left can reject its row; with a residual or a window
+			// the row still decides, so only flushed rows count.
+			const inHand = confirmed.length
+				+ (plan.residual === undefined && window === undefined ? batch.length : 0);
+			const settled = budget !== undefined && plan.ordered && inHand >= budget;
 			// With nothing left for the row to decide, a position IS a match, so
 			// counting the rest of the range costs no row reads at all. A residual
 			// predicate takes that away — the row is the only thing that can
 			// settle it — which is the price of reporting a total here.
 			if (settled && plan.residual === undefined) {
+				if (countable) {
+					// Assigned, not accumulated: the count covers every position past
+					// the ones in hand, including any a too-large flush has already
+					// classified as beyond — adding would count those twice. The
+					// flush below still classifies the in-hand tail, and either way
+					// the total comes out as the range's position count.
+					beyond = (await tx.indexCount(lo, hi)) - inHand;
+					break ranges;
+				}
 				beyond++;
 				continue;
 			}
-			const entry = await readConfirmed(tx, registry, def, schema, workspaceId, key);
-			// A position and its row are one record, so a position cannot outlive
-			// its row — and a reader holds the shared lock, so no commit lands
-			// between the index read and this one. The guard stays because
-			// answering from a row that is not there would be silent and wrong.
-			if (entry === undefined) continue;
-			if (!matches(entry.row.value, plan.residual, schema)) continue;
-			// The seek bound deliberately drops the cursor's row-key half, so
-			// the boundary position is inside the range and this is what rejects
-			// it — the seek narrows, the comparison decides.
-			if (window && !window.within(entry.row.value, key)) continue;
-			if (settled) beyond++;
-			else confirmed.push(entry);
+			if (++reads > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+			batch.push(key);
+			if (batch.length >= READ_BATCH) await flush();
 		}
 	}
+	await flush();
 
 	if (report) {
 		report.index = chosen.name;
@@ -344,23 +397,32 @@ function successorOf(prefix: string): string | undefined {
 	return undefined;
 }
 
-async function readConfirmed<D extends DescMessage>(
+/**
+ * Reads and decodes a batch of confirmed rows in one getMany. The result is
+ * parallel to `keys`; a missing row is undefined in its slot, so a caller
+ * classifying entries sees them in position order.
+ */
+async function readConfirmedMany<D extends DescMessage>(
 	tx: KVRead,
 	registry: EntityRegistry,
 	def: EntityDef,
 	schema: D,
 	workspaceId: string,
-	key: string,
-): Promise<IndexedRow<MessageShape<D>> | undefined> {
-	const record = await tx.get(confirmedKey(def.name, workspaceId, key)) as
-		| ConfirmedRecord
-		| undefined;
-	if (record === undefined) return undefined;
-	const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
-	return {
-		row: { key, value: decoded.value, workspaceId, version: BigInt(record.ver) },
-		bytes: decoded.bytes,
-	};
+	keys: readonly string[],
+): Promise<(IndexedRow<MessageShape<D>> | undefined)[]> {
+	const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
+	const out: (IndexedRow<MessageShape<D>> | undefined)[] = new Array(keys.length);
+	for (let i = 0; i < keys.length; i++) {
+		const record = records[i] as ConfirmedRecord | undefined;
+		if (record === undefined) continue;
+		const key = keys[i]!;
+		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		out[i] = {
+			row: { key, value: decoded.value, workspaceId, version: BigInt(record.ver) },
+			bytes: decoded.bytes,
+		};
+	}
+	return out;
 }
 
 /**

@@ -84,6 +84,9 @@ export interface EventRecord {
 	/** stream, leadership */
 	state?: string;
 	leader?: boolean;
+	/** query: the index that answered, or why the read scanned instead. */
+	index?: string;
+	declined?: string;
 }
 
 /**
@@ -159,6 +162,24 @@ export interface ReadResult {
 	complete: boolean;
 	/** Why not, when it did not: 'unsubscribed' | 'predicate' | 'window'. */
 	bounds: string[];
+	/**
+	 * How the store answered: the index's name, or `scan:<reason>` for a read
+	 * that fell back (see QueryDeclineReason). Absent for operations that do
+	 * not go through the query path at all (get, scan). An indexed shape
+	 * reporting `scan:not-built` is measuring the fallback, not the index —
+	 * the number is real either way, but it prices a different plan.
+	 */
+	path?: string;
+}
+
+/** What waiting on the background index build cost, and what the build did. */
+export interface IndexBuildView {
+	/** From the call until the build's completion event had been recorded. */
+	waitedMs: number;
+	/** The build's own wall time, from its `indexing` event. */
+	buildMs: number;
+	/** Rows the build rewrote; 0 when every index was already built. */
+	rows: number;
 }
 
 /** Rows the local store holds, per entity. */
@@ -194,6 +215,14 @@ export interface BenchHarnessApi {
 	/** Swaps scope and syncs the difference. */
 	setScope(scope: ScopeName, opts?: ScopeOptions): Promise<SyncSummary>;
 	read(op: ReadOp): Promise<ReadResult>;
+	/**
+	 * Resolves when the workspace's background index build has completed —
+	 * the `indexing` event the client emits — so a read after this prices the
+	 * index, not the scan it stands in for while the build runs. Rejects after
+	 * `timeoutMs`: a spec that meant to measure the built state must not
+	 * silently measure the other one.
+	 */
+	waitForIndexes(timeoutMs: number): Promise<IndexBuildView>;
 	counts(): Promise<RowCounts>;
 	storage(): Promise<StorageView>;
 	writeBytes(): Promise<WriteBytesView>;

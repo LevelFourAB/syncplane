@@ -293,6 +293,7 @@ const client = new SyncClient({
 | `stream`     | `state`, `reason`                                                                                                     |
 | `leadership` | `leader`                                                                                                              |
 | `resequence` | `workspaceId`, `firstId`, `mutations`                                                                                 |
+| `indexing`   | `workspaceId`, `rows`, `durationMs`                                                                                   |
 | `query`      | `origin`, `entity`, `workspaceId`, `path`, `index`, `declined`, `candidates`, `rows`, `total`, `durationMs`, `waitMs` |
 
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`
@@ -345,17 +346,22 @@ the **result**, a scan in time proportional to the **entity**, and nothing about
 the rows says which happened — both return the same answer. When `path` is
 `scan`, `declined` says why:
 
-| `declined`        | Meaning                                               |
-| ----------------- | ----------------------------------------------------- |
-| `cross-workspace` | `queryAll`/`watchQueryAll`; no index spans workspaces |
-| `no-query`        | a `watch()` with no query, which is the whole entity  |
-| `no-index`        | the entity declares none                              |
-| `not-built`       | declared, still building for this workspace           |
-| `no-plan`         | none matches this filter and ordering                 |
-| `budget`          | the walk exceeded its candidate ceiling and fell back |
+| `declined`        | Meaning                                                |
+| ----------------- | ------------------------------------------------------ |
+| `cross-workspace` | `queryAll`/`watchQueryAll`; no index spans workspaces  |
+| `no-query`        | a `watch()` with no query, which is the whole entity   |
+| `no-index`        | the entity declares none                               |
+| `not-built`       | declared, still building for this workspace            |
+| `no-plan`         | none matches this filter and ordering                  |
+| `budget`          | the walk read more rows than its ceiling and fell back |
 
 `not-built` after a bootstrap or a schema change is expected and ends on its own
-once the background build finishes; see
+once the background build finishes — the `indexing` event is that moment: it
+fires once per workspace when every declared index has become usable, with the
+rows the build indexed (`rows: 0` when there was nothing to do, the normal shape
+at every start after the first) and what it cost. The window between a
+bootstrap and its `indexing` event is the window a dashboard should expect
+`not-built` scans in; see
 [Making a query cheap](../how-to/query-data.md#making-a-query-cheap). `budget` is
 the one to alert on: an index served the query until the workspace grew past the
 walk's ceiling, and the same code is a full scan from then on.
@@ -363,7 +369,10 @@ walk's ceiling, and the same code is a full scan from then on.
 On the index path, `candidates` counts the positions the walk visited. Against
 `rows` it is how much of the walk the result did not use — a filter the range
 could not express, or a repeated field putting one position per element on a
-row — and a ratio drifting upward is a query on its way to `budget`.
+row — and a ratio drifting upward is a query on its way to `budget`. A limited
+query whose ordering the index supplies stops walking once its page is settled
+and counts the rest of the range in one request, so a healthy one reports
+`candidates` near its page size however many rows match.
 
 `durationMs` runs from the call to the answer. `waitMs` is the part of it the
 read spent waiting for a concurrent commit — a rebase, a bootstrap swap, an index

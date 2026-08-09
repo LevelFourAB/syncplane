@@ -25,10 +25,29 @@ import { report } from './report.js';
  *     separates decode cost that is the row's shape from decode cost that is the
  *     row's size.
  *
+ * Reads are taken AFTER the background index build has finished (which the
+ * spec waits for, and reports as its own scenario): a bootstrap promotes its
+ * snapshot unindexed, so until the build claims the markers every one of these
+ * queries scans — a real state, but a different measurement. The `path` column
+ * is the receipt: it names the index that served each read, or `scan:<reason>`
+ * when one did not.
+ *
  * Read-only, like every spec numbered below 05.
  */
 
 const LIMIT = 50;
+
+/**
+ * One cell naming how the store answered: the serving index, or `scan:<reason>`
+ * for a fallback (see ReadResult.path). The cold and warm reads can legitimately
+ * differ — the background index build claims an index between them — and a cell
+ * like `scan:not-built>by_project_updated` is that moment caught in the act:
+ * the cold number priced the fallback, the warm one the index.
+ */
+function pathLabel(cold?: string, warm?: string): string {
+	if (cold === warm) return warm ?? '';
+	return `${cold ?? ''}>${warm ?? ''}`;
+}
 
 function readOps(t: ReturnType<typeof tier>): { name: string; op: ReadOp }[] {
 	const projectId = 'project-00000000';
@@ -56,6 +75,13 @@ test.describe('local reads', () => {
 			});
 			try {
 				await tab.start();
+				const build = await tab.waitForIndexes();
+				report({
+					scenario: 'index build',
+					tier: t.name,
+					scope: 'full',
+					metrics: { rows: build.rows, buildMs: build.buildMs, waitedMs: build.waitedMs },
+				});
 				for (const { name, op } of readOps(t)) {
 					// Twice: the first call pays for whatever the store, the
 					// index and the decoder cache lazily. An app issues the same
@@ -74,6 +100,7 @@ test.describe('local reads', () => {
 							warmMs: warm.ms,
 							rows: warm.rows,
 							complete: warm.complete,
+							path: pathLabel(cold.path, warm.path),
 						},
 					});
 				}
@@ -93,6 +120,13 @@ test.describe('local reads', () => {
 			});
 			try {
 				await tab.start();
+				const build = await tab.waitForIndexes();
+				report({
+					scenario: 'index build',
+					tier: t.name,
+					scope: 'window',
+					metrics: { rows: build.rows, buildMs: build.buildMs, waitedMs: build.waitedMs },
+				});
 				for (const { name, op } of readOps(t)) {
 					const cold = await tab.read(op);
 					const warm = await tab.read(op);
@@ -111,6 +145,7 @@ test.describe('local reads', () => {
 							// and coverage is how an app finds that out.
 							complete: warm.complete,
 							bounds: warm.bounds.join('+'),
+							path: pathLabel(cold.path, warm.path),
 						},
 					});
 				}

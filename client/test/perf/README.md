@@ -32,6 +32,13 @@ The file numbers are the run order, and they matter: everything below `05` only
 reads, so it measures the corpus in exactly the state the seeder left it.
 `05` and `06` write, and `06` deletes rows and advances the tombstone horizon.
 
+`02-reads` waits for the background index build before measuring — a bootstrap
+installs its snapshot unindexed, and reads taken while the build runs price the
+scan fallback plus lock contention rather than the store. The wait itself is
+reported (`index build`: how long the walk took and the rows it rewrote), and
+each read's `path` column names the index that served it or `scan:<reason>`
+when one did not — the receipt that a number measured the plan it claims to.
+
 The two numbers to read first are `firstReadMs` and `completeMs` from
 `01-bootstrap`: when the app could paint, and when the local store provably held
 the whole scope. The gap between them is what grows as a corpus does.

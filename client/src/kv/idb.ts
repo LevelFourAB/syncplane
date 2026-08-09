@@ -165,22 +165,15 @@ function emptyRange(lo?: string, hi?: string): boolean {
 
 /**
  * A half-open [lo, hi) key range; null when both ends are open. The range must
- * not be empty (see emptyRange) — there is no IDBKeyRange for that.
+ * not be empty (see emptyRange) — there is no IDBKeyRange for that. `loOpen`
+ * excludes `lo` itself, which is how a chunked scan asks for "every key after
+ * the last one yielded".
  */
-function boundRange(lo?: string, hi?: string): IDBKeyRange | null {
+function boundRange(lo?: string, hi?: string, loOpen = false): IDBKeyRange | null {
 	if (lo === undefined && hi === undefined) return null;
-	if (hi === undefined) return IDBKeyRange.lowerBound(lo!, false);
+	if (hi === undefined) return IDBKeyRange.lowerBound(lo!, loOpen);
 	if (lo === undefined) return IDBKeyRange.upperBound(hi, true);
-	return IDBKeyRange.bound(lo, hi, false, true);
-}
-
-function prefixRange(prefix: string): IDBKeyRange | null {
-	if (prefix === '') return null;
-	const upper = successor(prefix);
-	// A prefix of nothing but U+FFFF has no successor: no string sorts above
-	// it, so the scan is bounded below only.
-	if (upper === undefined) return IDBKeyRange.lowerBound(prefix, false);
-	return IDBKeyRange.bound(prefix, upper, false, true);
+	return IDBKeyRange.bound(lo, hi, loOpen, true);
 }
 
 /**
@@ -210,6 +203,23 @@ function successor(s: string): string | undefined {
  */
 const INDEX_SCAN_CHUNK = 128;
 
+/**
+ * Entries one scan/scanRange request materializes before yielding, and the cap
+ * requests grow toward.
+ *
+ * Like indexScan, a scan takes its range in bounded getAll requests rather
+ * than a cursor (which cannot survive the app awaits between yields) or one
+ * unbounded getAll (which materializes a range the caller may abandon after a
+ * page — the index build reads BUILD_BATCH rows of an entity per batch, and an
+ * unbounded request would read the whole remainder every time). Unlike
+ * indexScan there is no re-read on continuation: primary keys are unique, so
+ * the next request resumes EXCLUSIVELY after the last key yielded. Growing
+ * geometrically keeps a full-entity scan at a handful of requests while an
+ * early-stopping caller pays one small one.
+ */
+const SCAN_CHUNK = 256;
+const SCAN_CHUNK_MAX = 8192;
+
 /** Orders (position, key) pairs the way an IDB index does: by index key, ties
  * broken on the record's primary key. */
 function comparePositions(a: readonly [string, string], b: readonly [string, string]): number {
@@ -232,34 +242,60 @@ class IDBRead implements KVRead {
 		return requestDone(this.store().get(key));
 	}
 
+	async getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
+		if (keys.length === 0) return [];
+		// All requests are issued before the first await, so they share ONE
+		// transaction — which is the point: a page of N rows costs one
+		// transaction rather than N.
+		const store = this.store();
+		return Promise.all(keys.map((k) => requestDone(store.get(k))));
+	}
+
 	async has(key: string): Promise<boolean> {
 		const count = await requestDone(this.store().count(key));
 		return count > 0;
 	}
 
 	async *scan(prefix: string): AsyncIterable<[string, unknown]> {
-		// Read keys+values in one shot; cursors cannot survive app awaits.
-		const store = this.store();
-		const range = prefixRange(prefix);
-		const [ keys, values ] = await Promise.all([
-			requestDone(store.getAllKeys(range)),
-			requestDone(store.getAll(range)),
-		]);
-		for (let i = 0; i < keys.length; i++) {
-			yield [ keys[i] as string, values[i] ];
-		}
+		// [prefix, successor(prefix)) selects exactly the keys `startsWith`
+		// selects, for any key content including U+FFFF (see successor). An
+		// all-U+FFFF prefix has no successor: no string sorts above it, so the
+		// range is bounded below only.
+		yield* this.ranged(prefix === '' ? undefined : prefix, successor(prefix));
 	}
 
 	async *scanRange(lo?: string, hi?: string): AsyncIterable<[string, unknown]> {
 		if (emptyRange(lo, hi)) return;
-		const store = this.store();
-		const range = boundRange(lo, hi);
-		const [ keys, values ] = await Promise.all([
-			requestDone(store.getAllKeys(range)),
-			requestDone(store.getAll(range)),
-		]);
-		for (let i = 0; i < keys.length; i++) {
-			yield [ keys[i] as string, values[i] ];
+		yield* this.ranged(lo, hi);
+	}
+
+	/**
+	 * The shared body of scan and scanRange: [lo, hi) in SCAN_CHUNK-sized
+	 * getAll requests, continuing exclusively after the last key yielded. Each
+	 * request opens its own transaction; the client holds a shared lock across
+	 * a logical read, so no commit lands between them (see the class docs).
+	 */
+	protected async *ranged(lo?: string, hi?: string): AsyncIterable<[string, unknown]> {
+		let want = SCAN_CHUNK;
+		let from = lo;
+		let fromOpen = false;
+		for (;;) {
+			const store = this.store();
+			const range = boundRange(from, hi, fromOpen);
+			// Keys and values in two requests on ONE transaction, so they describe
+			// the same rows.
+			const [ keys, values ] = await Promise.all([
+				requestDone(store.getAllKeys(range, want)),
+				requestDone(store.getAll(range, want)),
+			]);
+			for (let i = 0; i < keys.length; i++) {
+				yield [ keys[i] as string, values[i] ];
+			}
+			// Short of what was asked for means the range is exhausted.
+			if (keys.length < want) return;
+			from = keys[keys.length - 1] as string;
+			fromOpen = true;
+			if (want < SCAN_CHUNK_MAX) want *= 2;
 		}
 	}
 
@@ -289,6 +325,13 @@ class IDBRead implements KVRead {
 		}
 	}
 
+	async indexCount(lo?: string, hi?: string): Promise<number> {
+		if (emptyRange(lo, hi)) return 0;
+		const range = boundRange(lo, hi);
+		const index = this.store().index(INDEX_FIELD);
+		return requestDone(range === null ? index.count() : index.count(range));
+	}
+
 	release(): void {
 		// short-lived transactions; nothing held
 	}
@@ -304,6 +347,22 @@ class IDBWrite extends IDBRead implements KVWrite {
 		if (this.deleted.has(key)) return undefined;
 		if (this.pending.has(key)) return this.pending.get(key);
 		return super.get(key);
+	}
+
+	override async getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
+		const out = new Array<unknown | undefined>(keys.length);
+		const misses: number[] = [];
+		for (let i = 0; i < keys.length; i++) {
+			const k = keys[i]!;
+			if (this.deleted.has(k)) out[i] = undefined;
+			else if (this.pending.has(k)) out[i] = this.pending.get(k);
+			else misses.push(i);
+		}
+		if (misses.length > 0) {
+			const got = await super.getMany(misses.map((i) => keys[i]!));
+			for (let j = 0; j < misses.length; j++) out[misses[j]!] = got[j];
+		}
+		return out;
 	}
 
 	override async has(key: string): Promise<boolean> {
@@ -365,22 +424,51 @@ class IDBWrite extends IDBRead implements KVWrite {
 		for (const [ , k ] of pairs) yield k;
 	}
 
-	/** Overlays this transaction's uncommitted writes and deletes onto a
-	 * committed-state iteration, so a scan sees what the caller just wrote. */
+	/**
+	 * Counted through this class's own indexScan rather than the store's index,
+	 * for the same reason indexScan above folds the buffer in: the count must
+	 * agree with what the scan would yield. Same cost note applies — nothing on
+	 * a hot path counts an index inside a write transaction.
+	 */
+	override async indexCount(lo?: string, hi?: string): Promise<number> {
+		let n = 0;
+		for await (const _ of this.indexScan(lo, hi)) n++;
+		return n;
+	}
+
+	/**
+	 * Overlays this transaction's uncommitted writes and deletes onto a
+	 * committed-state iteration, so a scan sees what the caller just wrote.
+	 *
+	 * A merge-join of the two sorted streams rather than a materialized map:
+	 * the committed side is pulled only as far as the caller reads, which is
+	 * what keeps a scan a caller abandons after a page — the index build reads
+	 * one batch of an entity per transaction — from materializing the rest of
+	 * the range. Both sides are key-ordered (the buffered side by sorting here,
+	 * which is O(pending) and small), and pending/deleted are disjoint by
+	 * construction (see put/del), so each committed key resolves in one step.
+	 */
 	private async *mergeBuffered(
 		committed: AsyncIterable<[string, unknown]>,
 		selects: (key: string) => boolean,
 	): AsyncIterable<[string, unknown]> {
-		const merged = new Map<string, unknown>();
-		for await (const [ k, v ] of committed) merged.set(k, v);
-		for (const [ k, v ] of this.pending) {
-			if (selects(k)) merged.set(k, v);
+		const adds = [ ...this.pending.keys() ].filter(selects).sort();
+		let next = 0;
+		for await (const [ k, v ] of committed) {
+			while (next < adds.length && adds[next]! < k) {
+				yield [ adds[next]!, this.pending.get(adds[next]!) ];
+				next++;
+			}
+			if (next < adds.length && adds[next] === k) {
+				yield [ k, this.pending.get(k) ];
+				next++;
+				continue;
+			}
+			if (this.deleted.has(k)) continue;
+			yield [ k, v ];
 		}
-		for (const k of this.deleted) {
-			if (selects(k)) merged.delete(k);
-		}
-		for (const k of [ ...merged.keys() ].sort()) {
-			yield [ k, merged.get(k) ];
+		for (; next < adds.length; next++) {
+			yield [ adds[next]!, this.pending.get(adds[next]!) ];
 		}
 	}
 

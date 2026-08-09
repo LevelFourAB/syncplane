@@ -227,6 +227,28 @@ export interface ResequenceEvent extends EventBase {
 }
 
 /**
+ * The background index build finished for a workspace: its `not-built` scan
+ * declines end, and a query issued after this event is answered from the
+ * indexes that cover it.
+ *
+ * Fires on the tab that ran the build, once per build. A build overtaken by a
+ * bootstrap — which replaces the rows being indexed — starts over and still
+ * reports once, at the end. A build that found everything already indexed
+ * reports `rows: 0`, the normal shape at every start() after the first, so
+ * "indexes are ready" is the first event per workspace rather than the first
+ * with rows. A client that closes mid-build, or has never synced the
+ * workspace, reports nothing.
+ */
+export interface IndexBuildEvent extends EventBase {
+	type: 'indexing';
+	workspaceId: string;
+	/** Rows this build indexed; 0 when every index was already built. */
+	rows: number;
+	/** Wall time of the build, queueing behind other writers included. */
+	durationMs: number;
+}
+
+/**
  * Why a query read rows from the entity rather than from a secondary index.
  *
  * A decline is never a wrong answer: an index that cannot reproduce the scan's
@@ -241,9 +263,10 @@ export interface ResequenceEvent extends EventBase {
  *   Builds run in the background, so a burst of these after a bootstrap or a
  *   schema change ends on its own.
  * - `no-plan` — no declared index matches this query's filter and ordering.
- * - `budget` — the walk found more candidate positions than it will read rows
- *   for and fell back. A filter the index range could not express is what
- *   spends that budget.
+ * - `budget` — the walk had to READ more rows than its ceiling allows and fell
+ *   back. A filter the index range could not express spends that budget, as
+ *   does an unordered plan, which reads every match to re-create the scan's
+ *   order; positions an ordered plan merely counts toward `total` do not.
  */
 export type QueryDeclineReason =
 	| 'cross-workspace'
@@ -326,6 +349,7 @@ export type SyncEvent =
 	| StreamEvent
 	| LeadershipEvent
 	| ResequenceEvent
+	| IndexBuildEvent
 	| QueryEvent;
 
 /** Handler passed as `onSyncEvent`. */

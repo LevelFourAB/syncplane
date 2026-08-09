@@ -108,6 +108,17 @@ export interface QueryPlan {
 	 * prefix.
 	 */
 	prefix?: string;
+	/**
+	 * Whether, within any ONE of `ranges`, every position belongs to a
+	 * different row. True when each component that fans out sits inside the
+	 * equality prefix: pinned, an element contributes one fixed value, so a row
+	 * cannot spread across the unpinned tail (repeats of the pinned element
+	 * encode to the SAME position, which the store keeps once — see
+	 * kv/store.ts positionsOf). Across several ranges a row can still repeat.
+	 *
+	 * It is what lets a caller read a range's position count as a row count.
+	 */
+	distinctPerRange: boolean;
 }
 
 /** One candidate index: its name and the encoder over its components. */
@@ -354,6 +365,7 @@ function planAgainst(
 			residual: residualOf(terms, used),
 			ordered,
 			...(prefixes.length === 1 ? { prefix: prefixes[0]! } : {}),
+			distinctPerRange: comps.every((c, ci) => c.fans.length === 0 || ci < pinned),
 		},
 		score: pinned,
 	};

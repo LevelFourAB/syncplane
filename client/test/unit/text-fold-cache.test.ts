@@ -41,11 +41,13 @@ function cloningRead(tx: KVRead): KVRead {
 	};
 	return {
 		get: async (key) => copy(await tx.get(key)),
+		getMany: async (keys) => (await tx.getMany(keys)).map(copy),
 		has: (key) => tx.has(key),
 		async *scan(prefix) {
 			for await (const [ k, v ] of tx.scan(prefix)) yield [ k, copy(v) ];
 		},
 		indexScan: (lo, hi) => tx.indexScan(lo, hi),
+		indexCount: (lo, hi) => tx.indexCount(lo, hi),
 		async *scanRange(lo, hi) {
 			for await (const [ k, v ] of tx.scanRange(lo, hi)) yield [ k, copy(v) ];
 		},

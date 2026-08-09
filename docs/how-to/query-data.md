@@ -150,10 +150,13 @@ What an index cannot serve, so don't declare one hoping it will:
 
 Two things to know about how this behaves. **A new index is not usable
 immediately** — a background pass walks the entity first, and until it finishes
-every query scans, which is correct and merely slower. And **using an index
-never changes an answer**: every query has a legal scan fallback and the two
-produce identical results, which is what lets either side decline any plan it is
-unsure of.
+every query scans, which is correct and merely slower. On the client the same
+applies after every bootstrap, since a snapshot installs unindexed; the
+`indexing` event ([telemetry](../reference/telemetry.md#local-reads)) fires when
+the pass has finished and queries stop scanning. And **using an index never
+changes an answer**: every query has a legal scan fallback and the two produce
+identical results, which is what lets either side decline any plan it is unsure
+of.
 
 The same indexes serve the **local** `query()` too, for a workspace-scoped query
 the planner covers, and the first read of a `watchQuery()` on the same terms; a

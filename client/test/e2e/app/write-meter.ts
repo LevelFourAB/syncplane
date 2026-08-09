@@ -154,6 +154,10 @@ class MeteredWrite implements KVWrite {
 		return this.inner.get(key);
 	}
 
+	getMany(keys: readonly string[]): Promise<(unknown | undefined)[]> {
+		return this.inner.getMany(keys);
+	}
+
 	has(key: string): Promise<boolean> {
 		return this.inner.has(key);
 	}
@@ -168,6 +172,10 @@ class MeteredWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexCount(lo?: string, hi?: string): Promise<number> {
+		return this.inner.indexCount(lo, hi);
 	}
 
 	async put(key: string, value: unknown): Promise<void> {

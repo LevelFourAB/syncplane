@@ -223,8 +223,21 @@ async function measured(fn: () => Promise<void>): Promise<SyncSummary> {
 	return summarize(from, performance.now() - started);
 }
 
+/**
+ * How the store answered the reads since `from`: the serving index's name, or
+ * `scan:<reason>` for a query that fell back. Undefined when nothing emitted a
+ * query event (get and scan do not). One read issues one query, so the first
+ * event is the read's own.
+ */
+function pathOf(from: number): string | undefined {
+	const event = recorded.slice(from).find((e) => e.type === 'query');
+	if (event === undefined) return undefined;
+	return event.index ?? `scan:${event.declined ?? 'unknown'}`;
+}
+
 async function runRead(op: ReadOp): Promise<ReadResult> {
 	const c = current();
+	const from = recorded.length;
 	const started = performance.now();
 	let rows: { length: number; coverage: { complete: boolean; bounds: string[] } };
 	switch (op.kind) {
@@ -291,6 +304,7 @@ async function runRead(op: ReadOp): Promise<ReadResult> {
 		rows: rows.length,
 		complete: rows.coverage.complete,
 		bounds: rows.coverage.bounds,
+		path: pathOf(from),
 	};
 }
 
@@ -402,6 +416,24 @@ const harness: BenchHarnessApi = {
 
 	read(op: ReadOp) {
 		return runRead(op);
+	},
+
+	async waitForIndexes(timeoutMs: number) {
+		const started = performance.now();
+		for (;;) {
+			const done = recorded.find((e) => e.type === 'indexing');
+			if (done !== undefined) {
+				return {
+					waitedMs: performance.now() - started,
+					buildMs: done.durationMs ?? 0,
+					rows: done.rows ?? 0,
+				};
+			}
+			if (performance.now() - started > timeoutMs) {
+				throw new Error(`bench harness: indexes not built within ${timeoutMs}ms`);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
 	},
 
 	async counts(): Promise<RowCounts> {
