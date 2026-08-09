@@ -36,6 +36,18 @@ fan-out-and-merge: every workspace's rows of an entity sit under one key prefix,
 so ordering and limits apply to the merged set. Every row names where it lives,
 which is also how a write routes back.
 
+In React that live read is `db.todo.useQueryAll(query, opts?)` — one
+subscription over the whole client:
+
+```tsx
+const everywhere = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) });
+const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
+```
+
+Writing back does not go through a hook: a mutate hook binds to one workspace,
+so a component that writes into whichever workspace a row came from takes
+`useSyncClient()` and calls `client.ws(row.workspaceId).db.todo.mutate`.
+
 What does **not** cross a workspace is anything the server sequences per
 partition — a write, a `transact()` batch, an undo step, a reference,
 `queryServer` — nor a bootstrap.

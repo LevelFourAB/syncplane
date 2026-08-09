@@ -47,6 +47,7 @@ export type {
 	ReactEntityApis,
 	RowCasOptions,
 	UndoTarget,
+	UseQueryAllOptions,
 	UseQueryOptions,
 	UseRowCasOptions,
 	UseRowMaskedPatchOptions,

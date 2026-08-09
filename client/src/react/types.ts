@@ -61,6 +61,17 @@ export interface UseQueryOptions extends UseWatchOptions {
 }
 
 /**
+ * Options for `useQueryAll`. `UseQueryOptions` without the workspace selector or
+ * the undo target: the read spans every workspace and the hook does not write.
+ */
+export interface UseQueryAllOptions {
+	/** Hydrate result rows against this include tree (folded into the identity). */
+	include?: IncludeSpec;
+	/** Page of the merged result to render; see UseQueryOptions.window. */
+	window?: WatchWindow;
+}
+
+/**
  * Options for `useRow`. `include` is shared with every other useRow on the same
  * entity and workspace: the include tree is part of the shared subscription's
  * identity, so two different trees are two subscriptions.
@@ -155,6 +166,16 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useSuspenseQuery(
 		query: Query<MessageShape<D>>,
 		opts?: UseQueryOptions,
+	): WatchResult<MessageShape<D>>;
+	/**
+	 * `useQuery` over every workspace the client holds, as one subscription. Each
+	 * row carries the `workspaceId` it came from, which is what groups the result
+	 * and routes a write back; ordering and limits apply to the merged set rather
+	 * than per workspace (see `client.watchQueryAll`).
+	 */
+	useQueryAll(
+		query: Query<MessageShape<D>>,
+		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	/** `useRow` that suspends until the entity's first callback (see useSuspenseQuery). */

@@ -106,6 +106,22 @@ with no default throws a hook-level error naming the fix.
   arrive; rows already delivered stay put. `{ include }` hydrates references and
   is folded into the subscription identity.
 
+- **`useQueryAll(query, opts?)`** — the same read over **every** workspace the
+  client holds, as one subscription rather than one per workspace. Each row
+  carries the `workspaceId` it came from, which is what groups the result and
+  routes a write back through `client.ws(row.workspaceId)`. Reach for it when
+  the workspaces are a list the app learns at runtime: a hook per workspace is a
+  hook count that depends on the data, which hooks cannot have. It takes no
+  `workspaceId` and has no suspense flavor. See
+  [Hold several workspaces on one client](multiple-workspaces.md).
+
+  ```tsx
+  const everywhere = db.todo.useQueryAll({
+  	where: (t) => t.completed.eq(false),
+  });
+  const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
+  ```
+
 - **`useRow(key, opts?)`** — `{ row, loading, hydrating, error, patch, update,
   del }`, where the writers go through per-field last-writer-wins like every
   other mutate call. Pass `{ cas: true }` to guard one on the row's current

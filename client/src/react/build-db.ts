@@ -1,6 +1,7 @@
 import type { DescMessage } from '@bufbuild/protobuf';
 
 import { useMutateHook } from './hooks/use-mutate.js';
+import { useQueryAllHook } from './hooks/use-query-all.js';
 import { useQueryHook } from './hooks/use-query.js';
 import { useRowHook } from './hooks/use-row.js';
 import { useTextHook } from './hooks/use-text.js';
@@ -30,6 +31,7 @@ export function buildReactDb<E extends readonly DescMessage[]>(entities: E): Rea
 		apis[key] = {
 			useQuery: (query, opts) => useQueryHook(schema, query, opts),
 			useSuspenseQuery: (query, opts) => useQueryHook(schema, query, opts, true),
+			useQueryAll: (query, opts) => useQueryAllHook(schema, query, opts),
 			useRow: (rowKey, opts) => useRowHook(schema, rowKey, opts),
 			useSuspenseRow: (rowKey, opts) => useRowHook(schema, rowKey, opts, true),
 			useMutate: (opts) => useMutateHook(schema, opts),
