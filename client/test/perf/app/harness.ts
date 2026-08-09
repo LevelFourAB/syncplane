@@ -22,14 +22,24 @@ import {
 	ProjectSchema,
 	UserSchema,
 } from '../../../src/gen/syncplane/bench/v1/bench_pb.js';
-import { subscription, type SubscriptionSpec, SyncClient } from '../../../src/index.js';
+import {
+	type Query,
+	type QueryCursor,
+	subscription,
+	type SubscriptionSpec,
+	SyncClient,
+	type WatchHandle,
+} from '../../../src/index.js';
 import { IDBKVStore } from '../../../src/kv/idb.js';
 import { WriteMeter } from '../../e2e/app/write-meter.js';
 import {
 	type BenchHarnessApi,
 	type EventRecord,
 	type FirstReadSummary,
+	type LocalWriteStats,
 	type OpenOptions,
+	type PageWalkOp,
+	type PageWalkResult,
 	type ReadOp,
 	type ReadResult,
 	type RowCounts,
@@ -37,6 +47,8 @@ import {
 	type ScopeOptions,
 	type StorageView,
 	type SyncSummary,
+	type WatchSpec,
+	type WatchView,
 } from '../harness-api.js';
 
 /** The spawned benchserver's address, handed over as ?server=... by BenchTab. */
@@ -64,6 +76,16 @@ let scopeOpts: ScopeOptions = {};
 let recorded: EventRecord[] = [];
 /** Serial number for locally queued writes, so each one is a distinct value. */
 let writeSeq = 0;
+/** Watches openWatches holds, in spec order; WatchView indexes match. */
+let watches: { handle: WatchHandle; callbacks: number; rows: number }[] = [];
+
+/**
+ * Body a `put` write carries. Sized to the corpus's issue bodies rather than
+ * empty, because a put ships and stores the whole row and a body-less one
+ * would flatter the number.
+ */
+const PUT_BODY = 'Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod '
+	.repeat(4);
 
 function current(): SyncClient {
 	if (client === undefined) throw new Error('bench harness: no client open');
@@ -173,6 +195,8 @@ function summarize(from: number, wallMs: number): SyncSummary {
 		pulls: count('pull'),
 		pullChanges: per('pull', (e) => e.changes),
 		pullMs: per('pull', (e) => e.durationMs),
+		pullRequestMs: per('pull', (e) => e.requestMs),
+		pullApplyMs: per('pull', (e) => e.applyMs),
 		resets: events.filter((e) => e.type === 'pull' && e.reset === true).length,
 		pushes: count('push'),
 		pushMutations: per('push', (e) => e.mutations),
@@ -233,6 +257,11 @@ function pathOf(from: number): string | undefined {
 	const event = recorded.slice(from).find((e) => e.type === 'query');
 	if (event === undefined) return undefined;
 	return event.index ?? `scan:${event.declined ?? 'unknown'}`;
+}
+
+/** Positions the first query since `from` walked; see QueryEvent.candidates. */
+function candidatesOf(from: number): number | undefined {
+	return recorded.slice(from).find((e) => e.type === 'query')?.candidates;
 }
 
 async function runRead(op: ReadOp): Promise<ReadResult> {
@@ -305,7 +334,29 @@ async function runRead(op: ReadOp): Promise<ReadResult> {
 		complete: rows.coverage.complete,
 		bounds: rows.coverage.bounds,
 		path: pathOf(from),
+		candidates: candidatesOf(from),
 	};
+}
+
+type IssueShape = import('../../../src/gen/syncplane/bench/v1/bench_pb.js').Issue;
+
+/**
+ * The ordered, indexed query a page walk runs. Same shapes as runRead's board
+ * and triage, so a page's cost is comparable to the one-shot number 02 reports.
+ */
+function walkQuery(op: PageWalkOp): Query<IssueShape> {
+	switch (op.kind) {
+		case 'boardPages':
+			return {
+				where: (i) => i.project.id.eq(op.projectId),
+				orderBy: (i) => [ i.updatedAtMs.desc() ],
+			};
+		case 'triagePages':
+			return {
+				where: (i) => i.state.eq('open'),
+				orderBy: (i) => [ i.priority.desc() ],
+			};
+	}
 }
 
 const harness: BenchHarnessApi = {
@@ -479,6 +530,169 @@ const harness: BenchHarnessApi = {
 		return performance.now() - started;
 	},
 
+	async localWrites(op, count, firstIndex): Promise<LocalWriteStats> {
+		const c = current();
+		const durations: number[] = [];
+		const startedAll = performance.now();
+		for (let i = firstIndex; i < firstIndex + count; i++) {
+			const id = `issue-${String(i).padStart(8, '0')}`;
+			const started = performance.now();
+			if (op === 'patch') {
+				// updatedAtMs included, unlike queueWrites: an edit that moves the
+				// row's recency is what makes the ordered indexes do work, and an
+				// edit that does not would price a write no board ever sees.
+				await c.mutate.patch(IssueSchema, id, {
+					title: `local ${writeSeq++}`,
+					updatedAtMs: BigInt(Date.now()),
+				});
+			} else {
+				await c.mutate.put(IssueSchema, {
+					id,
+					title: `put ${writeSeq++}`,
+					body: PUT_BODY,
+					state: 'open',
+					priority: i % 5,
+					estimate: i % 8,
+					project: { id: firstKey('project') },
+					labels: [ 'label-00000001', 'label-00000002' ],
+					updatedAtMs: BigInt(Date.now()),
+					createdAtMs: BigInt(Date.now()),
+				});
+			}
+			durations.push(performance.now() - started);
+		}
+		const totalMs = performance.now() - startedAll;
+		durations.sort((a, b) => a - b);
+		const at = (q: number) =>
+			durations[Math.min(durations.length - 1, Math.floor(q * durations.length))] ?? 0;
+		return { totalMs, p50Ms: at(0.5), p95Ms: at(0.95), maxMs: at(1) };
+	},
+
+	async openWatches(specs: WatchSpec[]): Promise<void> {
+		const c = current();
+		const firsts: Promise<void>[] = [];
+		for (const spec of specs) {
+			const view = { handle: undefined as unknown as WatchHandle, callbacks: 0, rows: 0 };
+			let first!: () => void;
+			firsts.push(
+				new Promise<void>((resolve) => {
+					first = resolve;
+				}),
+			);
+			const cb = (rows: { length: number }) => {
+				view.callbacks++;
+				view.rows = rows.length;
+				first();
+			};
+			switch (spec.kind) {
+				case 'board':
+					view.handle = c.watchQuery(IssueSchema, {
+						where: (i) => i.project.id.eq(spec.projectId),
+						orderBy: (i) => [ i.updatedAtMs.desc() ],
+						limit: spec.limit,
+					}, cb);
+					break;
+				case 'triage':
+					view.handle = c.watchQuery(IssueSchema, {
+						where: (i) => i.state.eq('open'),
+						orderBy: (i) => [ i.priority.desc() ],
+						limit: spec.limit,
+					}, cb);
+					break;
+				case 'byLabel':
+					view.handle = c.watchQuery(IssueSchema, {
+						where: (i) => i.labels.has(spec.label),
+						orderBy: (i) => [ i.updatedAtMs.desc() ],
+						limit: spec.limit,
+					}, cb);
+					break;
+				case 'issues':
+					view.handle = c.watch(IssueSchema, cb);
+					break;
+				case 'flat':
+					view.handle = c.watch(FlatSchema, cb);
+					break;
+			}
+			watches.push(view);
+		}
+		await Promise.all(firsts);
+	},
+
+	async watchStats(): Promise<WatchView[]> {
+		return watches.map((w) => ({ callbacks: w.callbacks, rows: w.rows }));
+	},
+
+	async resetWatchStats(): Promise<void> {
+		for (const w of watches) w.callbacks = 0;
+	},
+
+	async waitForWatch(index: number, minCallbacks: number, timeoutMs: number): Promise<number> {
+		const started = performance.now();
+		for (;;) {
+			const w = watches[index];
+			if (w === undefined) throw new Error(`bench harness: no watch at index ${index}`);
+			if (w.callbacks >= minCallbacks) return performance.now() - started;
+			if (performance.now() - started > timeoutMs) {
+				throw new Error(
+					`bench harness: watch ${index} at ${w.callbacks}/${minCallbacks} after ${timeoutMs}ms`,
+				);
+			}
+			await new Promise((resolve) => setTimeout(resolve, 2));
+		}
+	},
+
+	async closeWatches(): Promise<void> {
+		for (const w of watches) w.handle.close();
+		watches = [];
+	},
+
+	async paginate(op: PageWalkOp): Promise<PageWalkResult> {
+		const c = current();
+		const q = walkQuery(op);
+		const pageMs: number[] = [];
+		// Per page, not per walk: a walk whose first page was served by an index
+		// can still fall back on a deeper one, and one aggregated label would
+		// hide exactly that.
+		const paths: (string | undefined)[] = [];
+		let rows = 0;
+		let total = 0;
+		let after: QueryCursor | undefined;
+		for (let p = 0; p < op.pages; p++) {
+			const from = recorded.length;
+			const started = performance.now();
+			const page = await c.query(IssueSchema, {
+				...q,
+				limit: op.limit,
+				...(op.total === false ? { total: false as const } : {}),
+				...(after === undefined ? {} : { after }),
+			});
+			pageMs.push(performance.now() - started);
+			paths.push(pathOf(from));
+			rows += page.length;
+			// The first page's total is the whole match set; a page behind `after`
+			// counts only what its bounds admit, which is not the number a
+			// scroller sizes with.
+			if (p === 0) total = page.total ?? 0;
+			if (page.endCursor === undefined || !page.hasMore) break;
+			after = page.endCursor;
+		}
+		const startedOffset = performance.now();
+		await c.query(IssueSchema, {
+			...q,
+			limit: op.limit,
+			...(op.total === false ? { total: false as const } : {}),
+			offset: (pageMs.length - 1) * op.limit,
+		});
+		const distinct = [ ...new Set(paths) ];
+		return {
+			pageMs,
+			rows,
+			total,
+			offsetMs: performance.now() - startedOffset,
+			path: distinct.length === 1 ? distinct[0] : distinct.join('|'),
+		};
+	},
+
 	pendingCount() {
 		return current().pendingCount();
 	},
@@ -512,6 +726,8 @@ const harness: BenchHarnessApi = {
 	},
 
 	async close() {
+		for (const w of watches) w.handle.close();
+		watches = [];
 		await client?.close();
 		client = undefined;
 		meter = undefined;

@@ -93,6 +93,14 @@ export interface PullEvent extends EventBase {
 	reset: boolean;
 	/** Wall time from issuing the pull to the page being committed locally. */
 	durationMs: number;
+	/**
+	 * `durationMs` split in two: waiting on the server's response, and applying
+	 * it locally (rebase included). They move independently — a slow link and a
+	 * slow store are the same total and different problems — and are absent on
+	 * a pull that errored before either could be measured.
+	 */
+	requestMs?: number;
+	applyMs?: number;
 	outcome: SyncEventOutcome;
 }
 
@@ -316,8 +324,9 @@ export interface QueryEvent extends EventBase {
 	 * whole match set it goes on to maintain, which its window is a slice of.
 	 */
 	rows: number;
-	/** Matches before the page was cut; see RowSet.total. */
-	total: number;
+	/** Matches before the page was cut; see RowSet.total. Absent when the
+	 * query opted out with `total: false`. */
+	total?: number;
 	/**
 	 * Wall time from the call to the answer, `waitMs` included.
 	 *
@@ -399,7 +408,7 @@ export function queryEventOf(
 		entity: string;
 		workspaceId?: string;
 		rows: number;
-		total: number;
+		total: number | undefined;
 		durationMs: number;
 		waitMs: number;
 	},

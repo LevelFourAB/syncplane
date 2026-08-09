@@ -46,4 +46,5 @@ export type {
 	RepeatedMessageOps,
 	RepeatedScalarOps,
 	StringOps,
+	TotalOf,
 } from './types.js';

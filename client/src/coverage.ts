@@ -47,12 +47,13 @@ export interface Coverage {
  * `JSON.stringify`, `Object.keys` and structural equality checks. The type is
  * the only thing that widened.
  */
-export type RowSet<T> = Row<T>[] & {
+export type RowSet<T, Total extends number | undefined = number> = Row<T>[] & {
 	readonly coverage: Coverage;
 	/**
 	 * Matching rows in the LOCAL store before the page was cut — what `length`
 	 * would have been without `offset`/`limit`, and what sizes a scroller over a
-	 * paged result. Equal to `length` when the read was not paged.
+	 * paged result. Equal to `length` when the read was not paged, and undefined
+	 * when the query opted out with `total: false`.
 	 *
 	 * Local is the operative word: it counts what `coverage` admits, not what
 	 * the server holds. A result bounded by a subscription reports the rows this
@@ -60,7 +61,7 @@ export type RowSet<T> = Row<T>[] & {
 	 * carrying `after`/`before` counts the matches INSIDE those bounds, since a
 	 * row outside them is not a match of that query at all.
 	 */
-	readonly total: number;
+	readonly total: Total;
 	/**
 	 * Positions of the first and last row, for paging on: pass `endCursor` back
 	 * as `after` for the next page, `startCursor` as `before` for the previous
@@ -90,9 +91,9 @@ export const UNKNOWN: Coverage = Object.freeze({ complete: false, bounds: [] });
  * A readonly result array carrying its coverage and total — the shape the React
  * bridge hands to components, which must not mutate what they render.
  */
-export type ReadonlyRowSet<T> = readonly Row<T>[] & {
+export type ReadonlyRowSet<T, Total extends number | undefined = number> = readonly Row<T>[] & {
 	readonly coverage: Coverage;
-	readonly total: number;
+	readonly total: Total;
 	readonly startCursor?: QueryCursor;
 	readonly endCursor?: QueryCursor;
 	readonly hasMore: boolean;
@@ -102,12 +103,14 @@ export type ReadonlyRowSet<T> = readonly Row<T>[] & {
  * What a read knows about the page it cut, beyond the rows themselves.
  *
  * `total` defaults to `rows.length`, which is correct for every unpaged read; a
- * paged one passes what it counted. The cursors are omitted by a read that
- * cannot mint them (a cross-workspace query, whose positions would not be
- * comparable against one workspace's ordering).
+ * paged one passes what it counted, or `'uncounted'` for a query that opted out
+ * with `total: false` — the one value that makes the result's total undefined.
+ * The cursors are omitted by a read that cannot mint them (a cross-workspace
+ * query, whose positions would not be comparable against one workspace's
+ * ordering).
  */
 export interface PageInfo {
-	total?: number;
+	total?: number | 'uncounted';
 	startCursor?: QueryCursor;
 	endCursor?: QueryCursor;
 	hasMore?: boolean;
@@ -131,7 +134,7 @@ export function withCoverage<T>(
 	});
 	return Object.defineProperties(rows, {
 		coverage: hidden(coverage),
-		total: hidden(page.total ?? rows.length),
+		total: hidden(page.total === 'uncounted' ? undefined : page.total ?? rows.length),
 		startCursor: hidden(page.startCursor),
 		endCursor: hidden(page.endCursor),
 		hasMore: hidden(page.hasMore ?? false),

@@ -9,7 +9,7 @@ import type {
 } from '../client.js';
 import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
-import type { Query } from '../query/index.js';
+import type { Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { IncludeSpec } from '../refs.js';
 import type { WatchWindow } from '../watch.js';
@@ -152,10 +152,10 @@ export interface UseRowResult<T> extends WatchState {
 /** Schema-bound React hooks for one entity, mirroring `client.db[key]`. */
 export interface ReactEntityApi<D extends DescMessage> {
 	/** Rows plus `loading`/`error`; `[]` until the first callback. */
-	useQuery(
-		query: Query<MessageShape<D>>,
+	useQuery<const Q extends Query<MessageShape<D>>>(
+		query: Q,
 		opts?: UseQueryOptions,
-	): WatchResult<MessageShape<D>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>>;
 	/**
 	 * `useQuery` that suspends until the first callback instead of reporting
 	 * `loading`. A separate hook rather than an option because the choice selects
@@ -163,20 +163,20 @@ export interface ReactEntityApi<D extends DescMessage> {
 	 * failed subscription throws here for an error boundary, since a suspended
 	 * component has no render to carry an error state.
 	 */
-	useSuspenseQuery(
-		query: Query<MessageShape<D>>,
+	useSuspenseQuery<const Q extends Query<MessageShape<D>>>(
+		query: Q,
 		opts?: UseQueryOptions,
-	): WatchResult<MessageShape<D>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>>;
 	/**
 	 * `useQuery` over every workspace the client holds, as one subscription. Each
 	 * row carries the `workspaceId` it came from, which is what groups the result
 	 * and routes a write back; ordering and limits apply to the merged set rather
 	 * than per workspace (see `client.watchQueryAll`).
 	 */
-	useQueryAll(
-		query: Query<MessageShape<D>>,
+	useQueryAll<const Q extends Query<MessageShape<D>>>(
+		query: Q,
 		opts?: UseQueryAllOptions,
-	): WatchResult<MessageShape<D>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	/** `useRow` that suspends until the entity's first callback (see useSuspenseQuery). */
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;

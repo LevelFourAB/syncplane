@@ -386,6 +386,38 @@ describe('paging a maintained result', () => {
 		handle.close();
 	});
 
+	it('withholds the total a query opted out of', async () => {
+		// The maintained match set makes the count free, but what a watcher
+		// delivers must not depend on which path serves it — a one-shot query
+		// with total: false reports undefined, so this does too.
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		for (let i = 0; i < 7; i++) {
+			await applyServer(kv, [ serverRow(`w${i}`, 1n, { id: `w${i}`, count: i }) ]);
+		}
+		const totals: (number | undefined)[] = [];
+		const more: boolean[] = [];
+		const handle = hub.watch(
+			WidgetSchema,
+			WS,
+			(rows) => {
+				totals.push(rows.total);
+				more.push(rows.hasMore);
+			},
+			compileQuery<Widget>({
+				where: (w) => w.count.gt(1),
+				orderBy: (w) => [ w.count.asc() ],
+				total: false,
+			}),
+			undefined,
+			{ limit: 2 },
+		);
+		await flush();
+		expect(totals.at(-1)).toBeUndefined();
+		expect(more.at(-1)).toBe(true);
+		handle.close();
+	});
+
 	it('moves the window without reading the store', async () => {
 		const { kv, rowScans } = countingStore();
 		for (let i = 0; i < 10; i++) {

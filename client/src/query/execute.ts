@@ -79,6 +79,14 @@ const MAX_INDEX_CANDIDATES = 10000;
 const READ_BATCH = 64;
 
 /**
+ * Cap on the shadowed rows whose confirmed records a query reads so the count
+ * shortcut can subtract their positions (see countAssist below). Past it a
+ * point read per pending row rivals the range walk the shortcut avoids, and
+ * the walk needs no cap to stay correct.
+ */
+const SHADOW_COUNT_CAP = 2048;
+
+/**
  * A result row together with the merged-view bytes it was decoded from — the
  * same bytes a scan would have read, collaborative-text log folded in.
  *
@@ -112,8 +120,9 @@ export interface IndexReport {
 /** An index-served page, with the matches it was cut from. */
 export interface IndexedPage<T> {
 	rows: IndexedRow<T>[];
-	/** Matches before the page was cut; see RowSet.total. */
-	total: number;
+	/** Matches before the page was cut; see RowSet.total. Undefined exactly
+	 * when the query carried `total: false`. */
+	total: number | undefined;
 	/** Whether matches remain past the end `limit` counted from. */
 	hasMore: boolean;
 }
@@ -162,7 +171,7 @@ export async function queryByIndex<D extends DescMessage>(
 	// go: only an overlay row can displace a confirmed one from the result.
 	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
-	const overlayRows: IndexedRow<MessageShape<D>>[] = [];
+	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
 	for await (const [ k, v ] of tx.scan(oPrefix)) {
 		const key = k.slice(oPrefix.length);
 		shadowed.add(key);
@@ -171,18 +180,50 @@ export async function queryByIndex<D extends DescMessage>(
 		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
 		if (!matches(decoded.value, compiled.where, schema)) continue;
 		if (window && !window.within(decoded.value, key)) continue;
-		// The confirmed base version survives an optimistic edit — it is what a
-		// compare-and-swap writes back — so it is read rather than zeroed. A row
-		// that exists only optimistically has no base, hence 0n. The scan path
-		// resolves it the same way.
-		const base = await tx.get(confirmedKey(def.name, workspaceId, key)) as
-			| ConfirmedRecord
-			| undefined;
-		overlayRows.push({
-			row: { key, value: decoded.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
-			bytes: decoded.bytes,
-		});
+		kept.push({ key, ...decoded });
 	}
+	// Whether the count shortcut below can survive the overlay: a shadowed
+	// row's confirmed positions are still in the store's index — the overlay
+	// does not touch the confirmed record — so the count can keep them out by
+	// subtracting the positions the records themselves carry (ConfirmedRecord.ix,
+	// the field the store's index is built from). That takes every shadowed
+	// row's confirmed record, not only the matching ones, and is capped for it
+	// (SHADOW_COUNT_CAP).
+	const wantTotal = compiled.total !== false;
+	const countAssist = wantTotal
+		&& shadowed.size > 0
+		&& shadowed.size <= SHADOW_COUNT_CAP
+		&& compiled.limit !== undefined
+		&& !window?.backward
+		&& plan.ordered
+		&& plan.residual === undefined
+		&& (window === undefined || window.seek.before === undefined)
+		&& plan.ranges.length === 1
+		&& plan.distinctPerRange;
+	// The confirmed base version survives an optimistic edit — it is what a
+	// compare-and-swap writes back — so it is read rather than zeroed. A row
+	// that exists only optimistically has no base, hence 0n. The scan path
+	// resolves it the same way. One getMany rather than a get per row: the
+	// bases are per overlay row, and a well-fed pending queue would otherwise
+	// turn them into a queue-sized run of point reads on every query. Under
+	// countAssist the read widens from the matching overlay rows to every
+	// shadowed one, because the subtraction needs each row's positions.
+	const baseKeys = countAssist ? [ ...shadowed ] : kept.map((c) => c.key);
+	const baseRecords = await tx.getMany(
+		baseKeys.map((k) => confirmedKey(def.name, workspaceId, k)),
+	);
+	const bases = new Map<string, ConfirmedRecord>();
+	for (let i = 0; i < baseKeys.length; i++) {
+		const record = baseRecords[i] as ConfirmedRecord | undefined;
+		if (record !== undefined) bases.set(baseKeys[i]!, record);
+	}
+	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c) => {
+		const base = bases.get(c.key);
+		return {
+			row: { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
+			bytes: c.bytes,
+		};
+	});
 
 	const budget = candidateBudget(compiled, overlayRows.length, window);
 	const prefix = indexPositionPrefix(def.name, chosen.name, chosen.specHash, workspaceId);
@@ -196,16 +237,28 @@ export async function queryByIndex<D extends DescMessage>(
 	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
-	// Whether every position in the range is one distinct live match, which is
-	// what lets a settled walk count the remainder in one indexCount request
+	// Flushed rows the page window rejected — the after-boundary tie group.
+	// The remainder count has to subtract them: they are positions of the
+	// range without being matches of the query.
+	let windowRejected = 0;
+	// Whether every position past a settled walk is one distinct live match,
+	// which is what lets the walk count the remainder in one indexCount request
 	// instead of walking it. Each condition removes a way that could fail: a
-	// residual rejects rows, a window rejects the boundary tie group its seek
-	// admits, a shadowed row is answered by the overlay instead, an unpinned
-	// fan-out gives one row several positions, and a second range can repeat a
-	// row the first already yielded.
+	// residual rejects rows, an unpinned fan-out gives one row several
+	// positions, and a second range can repeat a row the first already yielded.
+	// A shadowed row is answered by the overlay instead — survivable only when
+	// countAssist read the positions the count must take back out.
+	//
+	// A forward page window is compatible: its seek admits the tie group at the
+	// AFTER boundary, but those positions sit at the start of the range, and a
+	// settled walk is provably past them — settling takes `budget` flushed rows
+	// that passed `within`, and within one workspace index order agrees with
+	// the comparator, so every position after an accepted one is accepted. A
+	// `before` bound breaks that: the tie group its seek keeps inside the range
+	// sits at the END, in exactly the remainder the count would claim.
 	const countable = plan.residual === undefined
-		&& window === undefined
-		&& shadowed.size === 0
+		&& (window === undefined || window.seek.before === undefined)
+		&& (shadowed.size === 0 || countAssist)
 		&& plan.ranges.length === 1
 		&& plan.distinctPerRange;
 	// Candidate row keys not yet read. Rows are fetched in getMany batches — one
@@ -227,7 +280,10 @@ export async function queryByIndex<D extends DescMessage>(
 			// The seek bound deliberately drops the cursor's row-key half, so
 			// the boundary position is inside the range and this is what rejects
 			// it — the seek narrows, the comparison decides.
-			if (window && !window.within(entry.row.value, entry.row.key)) continue;
+			if (window && !window.within(entry.row.value, entry.row.key)) {
+				windowRejected++;
+				continue;
+			}
 			if (budget !== undefined && plan.ordered && confirmed.length >= budget) beyond++;
 			else confirmed.push(entry);
 		}
@@ -269,13 +325,36 @@ export async function queryByIndex<D extends DescMessage>(
 			// predicate takes that away — the row is the only thing that can
 			// settle it — which is the price of reporting a total here.
 			if (settled && plan.residual === undefined) {
+				// With the total opted out the walk only owes hasMore, and this
+				// position settles it: not seen, not shadowed, no residual left to
+				// reject its row — one distinct live match past the page. A `before`
+				// bound is the exception (its end tie group could still fail
+				// `within`), so that shape keeps walking.
+				if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
+					beyond = 1;
+					break ranges;
+				}
 				if (countable) {
+					// Shadowed rows' confirmed positions are in the count — whether
+					// the walk already skipped them or never reached them — without
+					// being matches. Each one inside the counted range comes back
+					// out; under distinctPerRange that is at most one per row,
+					// exactly what the walk would have skipped.
+					let shadowedInRange = 0;
+					for (const record of bases.values()) {
+						for (const p of record.ix ?? []) {
+							if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
+						}
+					}
 					// Assigned, not accumulated: the count covers every position past
 					// the ones in hand, including any a too-large flush has already
 					// classified as beyond — adding would count those twice. The
 					// flush below still classifies the in-hand tail, and either way
-					// the total comes out as the range's position count.
-					beyond = (await tx.indexCount(lo, hi)) - inHand;
+					// the total comes out as the range's position count, less the
+					// boundary positions a page window rejected and the shadowed
+					// positions the overlay answers for.
+					beyond = (await tx.indexCount(lo, hi))
+						- confirmed.length - batch.length - windowRejected - shadowedInRange;
 					break ranges;
 				}
 				beyond++;
@@ -301,7 +380,11 @@ export async function queryByIndex<D extends DescMessage>(
 		// No ordering: the scan path returns rows in key order, so this must too.
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
-	const total = out.length + beyond;
+	// `matched` still counts what the walk classified even when the total is
+	// opted out — hasMore rides on it, and the fast exit above left `beyond` at
+	// 1 for exactly that comparison.
+	const matched = out.length + beyond;
+	const total = wantTotal ? matched : undefined;
 	if (compiled.limit !== undefined && window?.backward) {
 		// A backward page takes its limit from the END of the bounded range.
 		// `beyond` is always 0 here — candidateBudget declines to settle early
@@ -316,7 +399,7 @@ export async function queryByIndex<D extends DescMessage>(
 	return {
 		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
 		total,
-		hasMore: end !== undefined && total > end,
+		hasMore: end !== undefined && matched > end,
 	};
 }
 
@@ -463,11 +546,11 @@ const matches = (value: unknown, cond: Cond | undefined, schema: DescMessage): b
  * Only reachable under the debug flag; see SyncClientOptions.debugVerifyIndexReads.
  */
 export function assertSameResult(
-	indexed: { rows: readonly Row<unknown>[]; total: number },
-	scanned: { rows: readonly Row<unknown>[]; total: number },
+	indexed: { rows: readonly Row<unknown>[]; total: number | undefined },
+	scanned: { rows: readonly Row<unknown>[]; total: number | undefined },
 	entity: string,
 ): void {
-	const describe = (page: { rows: readonly Row<unknown>[]; total: number }): string =>
+	const describe = (page: { rows: readonly Row<unknown>[]; total: number | undefined }): string =>
 		`${page.rows.map((r) => `${r.workspaceId}/${r.key}@${r.version}`).join(', ')}] of ${page.total}`;
 	const differs = indexed.total !== scanned.total
 		|| indexed.rows.length !== scanned.rows.length

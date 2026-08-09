@@ -109,6 +109,7 @@ import {
 	type Query,
 	type QueryRef,
 	runQueryPage,
+	type TotalOf,
 } from './query/index.js';
 import { condToProto, orderKeyToProto } from './query/proto.js';
 import { prepareQuery, toWirePaths } from './query/wire.js';
@@ -729,16 +730,16 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 		key: string,
 	): Promise<Row<MessageShape<D>> | undefined>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
-	query<D extends DescMessage>(
+	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): WatchHandle;
-	watchQuery<D extends DescMessage>(
+	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: { include?: IncludeSpec },
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(
@@ -821,24 +822,24 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
-	query<D extends DescMessage>(
+	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>>;
-	queryServer<D extends DescMessage>(
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-	): Promise<RowSet<MessageShape<D>>>;
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	watch<D extends DescMessage>(
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
 	): WatchHandle;
-	watchQuery<D extends DescMessage>(
+	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(
@@ -1038,18 +1039,18 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		return this.client.scanIn(this.workspaceId, schema);
 	}
 
-	query<D extends DescMessage>(
+	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.client.queryIn(this.workspaceId, schema, q, opts);
 	}
 
-	queryServer<D extends DescMessage>(
+	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-	): Promise<RowSet<MessageShape<D>>> {
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.client.queryServerIn(this.workspaceId, schema, q);
 	}
 
@@ -1069,16 +1070,16 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		);
 	}
 
-	watchQuery<D extends DescMessage>(
+	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle {
 		return this.client.registerWatch(
 			this.workspaceId,
 			schema,
-			cb,
+			cb as WatchCallback<MessageShape<D>>,
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
@@ -2607,11 +2608,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * scan, under its own shared reads, so it never nests inside the query's read
 	 * tx.
 	 */
-	query<D extends DescMessage>(
+	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.queryIn(this.defaultScope().workspaceId, schema, q, opts);
 	}
 
@@ -2621,21 +2622,21 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * fan-out-and-merge, because all the rows live in one store under one prefix.
 	 * References still resolve within each row's own workspace.
 	 */
-	queryAll<D extends DescMessage>(
+	queryAll<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.queryIn(undefined, schema, q, opts);
 	}
 
 	/** @internal */
-	async queryIn<D extends DescMessage>(
+	async queryIn<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		workspaceId: string | undefined,
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const compiled = prepareQuery(schema, compileQuery(q));
@@ -2714,7 +2715,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// hydration only decorates the rows it found.
 		const coverage = this.coverage.coverageOf(def.name, workspaceId);
 		const info = pageInfoOf(cursors, def.name, page);
-		if (!opts?.include) return withCoverage(page.rows, coverage, info);
+		if (!opts?.include) {
+			return withCoverage(page.rows, coverage, info) as RowSet<MessageShape<D>, TotalOf<Q>>;
+		}
 		const hydrated = (await hydrate(
 			this.refClient(),
 			this.entityRegistry,
@@ -2722,7 +2725,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			page.rows as Row<Message>[],
 			opts.include,
 		)) as unknown as HydratedRow<MessageShape<D>>[];
-		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage, info);
+		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage, info) as RowSet<
+			MessageShape<D>,
+			TotalOf<Q>
+		>;
 	}
 
 	/**
@@ -2814,19 +2820,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Single-workspace by construction: a query is one predicate against one
 	 * partition, so there is no cross-workspace form of it on the wire.
 	 */
-	queryServer<D extends DescMessage>(
+	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-	): Promise<RowSet<MessageShape<D>>> {
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.queryServerIn(this.defaultScope().workspaceId, schema, q);
 	}
 
 	/** @internal */
-	async queryServerIn<D extends DescMessage>(
+	async queryServerIn<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		workspaceId: string,
 		schema: D,
-		q: Query<MessageShape<D>>,
-	): Promise<RowSet<MessageShape<D>>> {
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const compiled = prepareQuery(schema, compileQuery(q));
@@ -2869,29 +2875,32 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				: COMPLETE,
 			{
 				hasMore: resp.hasMore,
+				// The wire carries no match count, so the default total is the page
+				// itself; an opt-out reports undefined like the local paths do.
+				...(compiled.total === false ? { total: 'uncounted' as const } : {}),
 				...(resp.startCursor.length > 0
 					? { startCursor: cursorFromBytes(resp.startCursor) }
 					: {}),
 				...(resp.endCursor.length > 0 ? { endCursor: cursorFromBytes(resp.endCursor) } : {}),
 			},
-		);
+		) as RowSet<MessageShape<D>, TotalOf<Q>>;
 	}
 
 	/**
 	 * Live query: emits the query result after every commit that touches the
 	 * entity, suppressing callbacks when the result is unchanged.
 	 */
-	watchQuery<D extends DescMessage>(
+	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
 		return this.registerWatch(
 			this.defaultScope().workspaceId,
 			schema,
-			cb,
+			cb as WatchCallback<MessageShape<D>>,
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
@@ -2903,17 +2912,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * Like watchQuery(), but live across every workspace. The result set is
 	 * re-emitted after any commit touching the entity in any workspace.
 	 */
-	watchQueryAll<D extends DescMessage>(
+	watchQueryAll<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
 		return this.registerWatch(
 			undefined,
 			schema,
-			cb,
+			cb as WatchCallback<MessageShape<D>>,
 			prepareQuery(schema, compileQuery(q)),
 			opts?.include,
 			opts?.onError,
@@ -3636,15 +3645,18 @@ function workspaceOfMutationCounterKey(key: string): string | undefined {
 function pageInfoOf<T>(
 	cursors: OrderCursors | undefined,
 	entity: string,
-	page: { rows: Row<T>[]; total: number; hasMore: boolean },
+	page: { rows: Row<T>[]; total: number | undefined; hasMore: boolean },
 ): PageInfo {
+	// Both paths leave total undefined exactly when the query opted out, which
+	// withCoverage must not confuse with "unpaged, report rows.length".
+	const total = page.total ?? 'uncounted';
 	if (cursors === undefined || page.rows.length === 0) {
-		return { total: page.total, hasMore: page.hasMore };
+		return { total, hasMore: page.hasMore };
 	}
 	const first = page.rows[0]!;
 	const last = page.rows[page.rows.length - 1]!;
 	return {
-		total: page.total,
+		total,
 		hasMore: page.hasMore,
 		startCursor: cursors.encode(entity, first.value, first.key),
 		endCursor: cursors.encode(entity, last.value, last.key),

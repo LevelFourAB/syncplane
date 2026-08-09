@@ -169,7 +169,7 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
  * same query — which is what makes a divergence a bug rather than a difference
  * in setup.
  */
-async function clientWith(built: boolean, overlay?: Issue[]) {
+async function clientWith(built: boolean, overlay?: Issue[], deletes?: string[]) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
 	await seedConfirmed(kv, indexes);
@@ -187,6 +187,7 @@ async function clientWith(built: boolean, overlay?: Issue[]) {
 	// Local writes land in the optimistic overlay, which the index deliberately
 	// does not cover — so these exercise the confirmed/overlay merge.
 	for (const row of overlay ?? []) await client.mutate.put(IssueSchema, row as never);
+	for (const key of deletes ?? []) await client.mutate.del(IssueSchema, key);
 	return client;
 }
 
@@ -202,7 +203,7 @@ const run = (client: SyncClient<never>, q: Query<Issue>): Promise<RowSet<Issue>>
 	client.query(IssueSchema, q as never) as unknown as Promise<RowSet<Issue>>;
 
 /** The two arms of one query, as comparable plain data. */
-async function both(q: Query<Issue>, overlay?: Issue[]) {
+async function both(q: Query<Issue>, overlay?: Issue[], deletes?: string[]) {
 	// `total` is part of the answer, so it is part of what the two arms have to
 	// agree on: an index that early-exits still has to count what it skipped.
 	const shape = (rows: RowSet<Issue>) => ({
@@ -214,8 +215,8 @@ async function both(q: Query<Issue>, overlay?: Issue[]) {
 		})),
 		total: rows.total,
 	});
-	const scanned = await clientWith(false, overlay);
-	const indexed = await clientWith(true, overlay);
+	const scanned = await clientWith(false, overlay, deletes);
+	const indexed = await clientWith(true, overlay, deletes);
 	try {
 		return {
 			scanned: shape(await run(scanned, q)),
@@ -624,6 +625,198 @@ describe('index-served local queries', () => {
 				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [ 'ui' ], custom: {} },
 			],
 		);
+
+		// The shapes below settle inside a range that still holds shadowed
+		// positions, which is where the count shortcut answers the remainder —
+		// with the overlay's confirmed positions taken back out (countAssist in
+		// query/execute.ts). Every way a shadowed position relates to the counted
+		// range gets a case: in it, out of it, absent, and tombstoned.
+		same(
+			'a shadowed row in the counted remainder stays out of the total',
+			{ where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ], limit: 1 },
+			[ 'i2' ],
+			[
+				// i1 leaves the match set only optimistically; its confirmed
+				// position under "open" is still in the index the count reads.
+				{ id: 'i1', title: 'one', state: 'wip', rank: 5, done: false, labels: [ 'ui' ], custom: {} },
+			],
+		);
+
+		same(
+			'a shadowed row outside the counted range is not subtracted',
+			{ where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ], limit: 1 },
+			[ 'i2' ],
+			[
+				// i3's confirmed position sits under "done" — a range the count
+				// never covers, so nothing of it may come back out.
+				{
+					id: 'i3',
+					title: 'three',
+					state: 'done',
+					rank: 8,
+					done: true,
+					labels: [ 'bug' ],
+					custom: { priority: { number: 1, tag: '' } },
+				},
+			],
+		);
+
+		same(
+			'an overlay edit that keeps matching, through the fan-out index',
+			{ where: (i) => i.labels.has('ui'), orderBy: (i) => [ i.rank.desc() ], limit: 1 },
+			[ 'i2' ],
+			[
+				// i5 still matches from the overlay while its confirmed "ui"
+				// position is in the counted remainder — the row must appear once
+				// and be counted once.
+				{ id: 'i5', title: 'five', state: 'done', rank: 8, done: false, labels: [ 'ui' ], custom: {} },
+			],
+		);
+
+		same(
+			'an overlay-only insert on top of the counted remainder',
+			{ where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ], limit: 1 },
+			[ 'i9' ],
+			[
+				// No confirmed base, so nothing to subtract — the row only adds.
+				{ id: 'i9', title: 'nine', state: 'open', rank: 99, done: false, labels: [], custom: {} },
+			],
+		);
+
+		it('a local delete stays out of the total the count reports', async () => {
+			const q: Query<Issue> = {
+				where: (i) => i.state.eq('open'),
+				orderBy: (i) => [ i.rank.desc() ],
+				limit: 1,
+			};
+			const { scanned, indexed } = await both(q, undefined, [ 'i1' ]);
+			expect(indexed).toEqual(scanned);
+			expect(scanned.rows.map((r) => r.key)).toEqual([ 'i2' ]);
+			expect(scanned.total).toBe(2);
+		});
+
+		it('answers the remainder with a count, not a walk, through a pending overlay', async () => {
+			// The differential cases above stay green whichever path answers; this
+			// is the receipt that the shortcut actually fired — without it a typo
+			// in countAssist would quietly put every overlay read back on the walk.
+			const kv = new MemoryKVStore();
+			const indexes = new IndexCache(registry);
+			await seedConfirmed(kv, indexes);
+			const mutex = new ChainMutex();
+			await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+			const client = new SyncClient({
+				workspaceId: WS,
+				kvStore: kv,
+				entities: [ IssueSchema ],
+				streamEnabled: false,
+				pollIntervalMs: 0,
+			}) as unknown as SyncClient<never>;
+			try {
+				await client.mutate.put(IssueSchema, {
+					id: 'i1',
+					title: 'one',
+					state: 'wip',
+					rank: 5,
+					done: false,
+					labels: [ 'ui' ],
+					custom: {},
+				} as never);
+				const tx = await kv.read();
+				let counted = 0;
+				const counting = new Proxy(tx, {
+					get(target, prop, receiver) {
+						if (prop === 'indexCount') {
+							return (lo?: string, hi?: string) => {
+								counted++;
+								return target.indexCount(lo, hi);
+							};
+						}
+						const value = Reflect.get(target, prop, receiver);
+						return typeof value === 'function' ? value.bind(target) : value;
+					},
+				});
+				try {
+					const ask = (q: Query<Issue>) =>
+						queryByIndex(
+							counting,
+							registry,
+							registry.get('issue')!,
+							IssueSchema,
+							indexes.for('issue'),
+							prepareQuery(IssueSchema, compileQuery(q)),
+							WS,
+						);
+					const page = await ask({
+						where: (i) => i.state.eq('open'),
+						orderBy: (i) => [ i.rank.desc() ],
+						limit: 1,
+					});
+					expect(counted).toBe(1);
+					expect(page?.rows.map((r) => r.row.key)).toEqual([ 'i2' ]);
+					expect(page?.total).toBe(2);
+					expect(page?.hasMore).toBe(true);
+
+					// total: false owes no count at all — same page, same hasMore,
+					// no indexCount request and no total.
+					const uncounted = await ask({
+						where: (i) => i.state.eq('open'),
+						orderBy: (i) => [ i.rank.desc() ],
+						limit: 1,
+						total: false,
+					});
+					expect(counted).toBe(1);
+					expect(uncounted?.rows.map((r) => r.row.key)).toEqual([ 'i2' ]);
+					expect(uncounted?.total).toBeUndefined();
+					expect(uncounted?.hasMore).toBe(true);
+				} finally {
+					tx.release();
+				}
+			} finally {
+				await client.close();
+			}
+		});
+	});
+
+	describe('with the total opted out', () => {
+		// `total: false` changes what the result reports, never which rows: the
+		// differential still compares the two arms whole, and both must land on
+		// an undefined total.
+		same(
+			'returns the same rows and no total',
+			{ where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ], limit: 1, total: false },
+			[ 'i2' ],
+		);
+
+		same(
+			'through a pending overlay',
+			{ where: (i) => i.state.eq('open'), orderBy: (i) => [ i.rank.desc() ], limit: 1, total: false },
+			[ 'i2' ],
+			[
+				{ id: 'i1', title: 'one', state: 'wip', rank: 5, done: false, labels: [ 'ui' ], custom: {} },
+			],
+		);
+
+		it('reports an exact hasMore without counting', async () => {
+			const client = await clientWith(true);
+			try {
+				const q: Query<Issue> = {
+					where: (i) => i.state.eq('open'),
+					orderBy: (i) => [ i.rank.desc() ],
+					limit: 2,
+					total: false,
+				};
+				const first = await run(client, q);
+				expect(first.map((r) => r.key)).toEqual([ 'i2', 'i1' ]);
+				expect(first.total).toBeUndefined();
+				expect(first.hasMore).toBe(true);
+				const rest = await run(client, { ...q, after: first.endCursor });
+				expect(rest.map((r) => r.key)).toEqual([ 'i4' ]);
+				expect(rest.total).toBeUndefined();
+				expect(rest.hasMore).toBe(false);
+			} finally {
+				await client.close();
+			}
+		});
 	});
 
 	describe('keyset paging', () => {
@@ -690,3 +883,23 @@ describe('index-served local queries', () => {
 		});
 	});
 });
+
+/**
+ * Type-level pins for the total opt-out: `total: false` in the query literal
+ * types the result's total as undefined, and its absence keeps `number`.
+ * Checked by `tsc --noEmit`, never executed.
+ */
+async function _totalTypes(client: SyncClient<never>): Promise<void> {
+	const counted = await client.query(IssueSchema, { limit: 1 });
+	const countedTotal: number = counted.total;
+	const uncounted = await client.query(IssueSchema, { limit: 1, total: false });
+	const uncountedTotal: undefined = uncounted.total;
+	// @ts-expect-error the total was opted out, so it is not a number
+	const wrong: number = uncounted.total;
+	client.watchQuery(IssueSchema, { limit: 1, total: false }, (rows) => {
+		const watched: undefined = rows.total;
+		void watched;
+	});
+	void [ countedTotal, uncountedTotal, wrong ];
+}
+void _totalTypes;

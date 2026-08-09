@@ -255,4 +255,20 @@ export interface Query<M> {
 	 * Rows come back in `orderBy` order whichever bounds are set.
 	 */
 	before?: QueryCursor;
+	/**
+	 * Whether the result reports `total`. `false` makes it undefined — counting
+	 * the matches past the page costs time linear in their number, which on a
+	 * large match set is most of what an indexed page pays — while the rows,
+	 * cursors and `hasMore` are unaffected. Pass it on every page whose consumer
+	 * does not size anything with the total.
+	 * @defaultValue true
+	 */
+	total?: boolean;
 }
+
+/**
+ * What a result's `total` is for a given query: `undefined` once the query
+ * opts out with `total: false`, `number` otherwise. A flag only known at
+ * runtime types as `number`; guard the read where the flag can be false.
+ */
+export type TotalOf<Q> = Q extends { total: false } ? undefined : number;

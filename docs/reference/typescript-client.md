@@ -171,7 +171,7 @@ them stay out of `JSON.stringify`, `Object.keys` and structural equality.
 ```ts
 type RowSet<T> = Row<T>[] & {
 	readonly coverage: Coverage;
-	readonly total: number;
+	readonly total: number; // undefined when the query set `total: false`
 	readonly startCursor?: QueryCursor; // position of the first row; absent when empty
 	readonly endCursor?: QueryCursor; // position of the last row
 	readonly hasMore: boolean; // matches remain past the end `limit` counted from
@@ -187,6 +187,13 @@ outside them is not a match of that query. An index that stops early on a `limit
 still walks the rest of its range to count — positions only, with no row reads,
 unless a residual predicate is left over, in which case only the row can settle a
 match and the rest of the range is read too.
+
+That count is the one part of an indexed page whose cost grows with the match
+set rather than the page, and `total: false` in the query turns it off: `total`
+comes back undefined (typed `undefined` when the flag is a literal in the query)
+while the rows, cursors and `hasMore` are unchanged. Pass it on every page whose
+consumer does not size anything with the total — cursor pages after the first
+are the usual case, since a scroller sized itself on page one.
 
 `startCursor`/`endCursor` are opaque `QueryCursor` tokens: base64url strings, so
 they survive `JSON.stringify` and drop into a URL. Pass `endCursor` back as
@@ -378,6 +385,7 @@ interface Query<M> {
 	offset?: number;
 	after?: QueryCursor;
 	before?: QueryCursor;
+	total?: boolean; // default true; false skips the match count (see §2)
 }
 ```
 
@@ -678,6 +686,10 @@ cursors bound what the query MATCHES, and the window then slices what is left by
 rank. So a live query with an `after` reports a `total` counting only the rows
 past that position, and `setWindow` moves inside them. Every emitted page carries
 `startCursor`/`endCursor` for the rows it delivered.
+
+A watch honours `total: false` like a one-shot query — its pages report an
+undefined `total` — so a query can move between the two paths without changing
+what its consumer receives.
 
 #### Deltas
 

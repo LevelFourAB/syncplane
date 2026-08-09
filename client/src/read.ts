@@ -285,6 +285,39 @@ export async function readMergedRowWithVersion(
 	return { v: await foldTextLog(tx, registry, entity, workspaceId, key, base), version };
 }
 
+/**
+ * Resolves many rows of one entity overlay-first, like readMergedRowWithVersion
+ * row by row, in one getMany for all the overlay and confirmed records
+ * together. The result is parallel to `keys`; a missing row is undefined in
+ * its slot.
+ */
+export async function readMergedRowsWithVersion(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	keys: readonly { workspaceId: string; key: string }[],
+): Promise<(MergedRow | undefined)[]> {
+	const records = await tx.getMany([
+		...keys.map(({ workspaceId, key }) => overlayKey(entity, workspaceId, key)),
+		...keys.map(({ workspaceId, key }) => confirmedKey(entity, workspaceId, key)),
+	]);
+	const out: (MergedRow | undefined)[] = new Array(keys.length);
+	for (let i = 0; i < keys.length; i++) {
+		const overlay = records[i] as OverlayRecord | undefined;
+		const confirmed = records[keys.length + i] as ConfirmedRecord | undefined;
+		const base = overlay !== undefined
+			? (overlay.del ? undefined : overlay.v)
+			: confirmed?.v;
+		if (base === undefined) continue;
+		const { workspaceId, key } = keys[i]!;
+		out[i] = {
+			v: await foldTextLog(tx, registry, entity, workspaceId, key, base),
+			version: confirmed ? BigInt(confirmed.ver) : 0n,
+		};
+	}
+	return out;
+}
+
 /** A merged-view row plus the workspace it belongs to. */
 export interface ScopedRow extends MergedRow {
 	workspaceId: string;

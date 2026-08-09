@@ -1,6 +1,6 @@
 import type { DescMessage, MessageShape } from '@bufbuild/protobuf';
 import type { ReadonlyRowSet } from '../../coverage.js';
-import { compileQuery, type Query } from '../../query/index.js';
+import { compileQuery, type Query, type TotalOf } from '../../query/index.js';
 import type { WatchHandle } from '../../watch.js';
 import { useSyncClient } from '../context.js';
 import type { WatchResult } from '../result.js';
@@ -30,11 +30,11 @@ const QUERY_ALL_PREFIX = 'qa:';
  *
  * The result is `[]` with `loading` true until the first callback.
  */
-export function useQueryAllHook<D extends DescMessage>(
+export function useQueryAllHook<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 	schema: D,
-	query: Query<MessageShape<D>>,
+	query: Q,
 	opts?: UseQueryAllOptions,
-): WatchResult<MessageShape<D>> {
+): WatchResult<MessageShape<D>, TotalOf<Q>> {
 	const client = useSyncClient();
 	const compiled = compileQuery(query);
 	const include = opts?.include;
@@ -46,11 +46,16 @@ export function useQueryAllHook<D extends DescMessage>(
 	const subscribe = (
 		onRows: (rows: ReadonlyRowSet<MessageShape<D>>) => void,
 		onError: (error: unknown) => void,
-	): WatchHandle => client.watchQueryAll(schema, query, onRows, { include, onError, window });
+	): WatchHandle =>
+		client.watchQueryAll(schema, query as Query<MessageShape<D>>, onRows, {
+			include,
+			onError,
+			window,
+		});
 	return useWatchStore<MessageShape<D>>({
 		identity,
 		subscribe,
 		client,
 		window,
-	});
+	}) as WatchResult<MessageShape<D>, TotalOf<Q>>;
 }

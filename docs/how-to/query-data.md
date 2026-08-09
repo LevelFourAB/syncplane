@@ -91,6 +91,11 @@ alone, `limit` counts backward from it, so it returns the page preceding the one
 the cursor came from. Setting both reads a bounded range, and `total` then counts
 the matches inside it.
 
+Counting the matches costs time linear in their number, and every page pays it
+again. When nothing sizes itself with the total — a walk like the one above
+needs only `hasMore` — add `total: false` to the query and the count is skipped;
+on a large match set that is most of a deep page's cost.
+
 A cursor is a base64url string: it survives `JSON.stringify` and drops into a
 URL, which is what a pager actually does with one. It is tied to the entity and
 the ordering it was issued under; replaying it against a different one is an

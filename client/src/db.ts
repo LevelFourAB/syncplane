@@ -17,7 +17,7 @@ import type {
 import type { RowSet } from './coverage.js';
 import { newId } from './id.js';
 import type { EntityDef, EntityRegistry, PatchInit, TextInit } from './mutations.js';
-import type { Query } from './query/index.js';
+import type { Query, TotalOf } from './query/index.js';
 import type { Row } from './read.js';
 import type { IncludeSpec } from './refs.js';
 import type { TextHandle } from './text/handle.js';
@@ -87,10 +87,10 @@ export interface EntityApi<D extends DescMessage> {
 	 * "every row there is", and only that flag can tell the two apart.
 	 */
 	scan(): Promise<RowSet<MessageShape<D>>>;
-	query(
-		q: Query<MessageShape<D>>,
+	query<const Q extends Query<MessageShape<D>>>(
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	/**
 	 * Runs the query AGAINST THE SERVER instead of the local store — the way to
 	 * reach rows partial sync did not bring down (search across everything, open
@@ -102,11 +102,13 @@ export interface EntityApi<D extends DescMessage> {
 	 *
 	 * Unavailable inside a transaction, which has no network of its own.
 	 */
-	queryServer(q: Query<MessageShape<D>>): Promise<RowSet<MessageShape<D>>>;
+	queryServer<const Q extends Query<MessageShape<D>>>(
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	watch(cb: WatchCallback<MessageShape<D>>, opts?: WatchOptions): WatchHandle;
-	watchQuery(
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+	watchQuery<const Q extends Query<MessageShape<D>>>(
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	/**
@@ -167,25 +169,25 @@ interface SchemaApi {
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
-	query<D extends DescMessage>(
+	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
+		q: Q,
 		opts?: { include?: IncludeSpec },
-	): Promise<RowSet<MessageShape<D>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	/** Absent on facades with no transport of their own (transactions). */
-	queryServer?<D extends DescMessage>(
+	queryServer?<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-	): Promise<RowSet<MessageShape<D>>>;
+		q: Q,
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	watch<D extends DescMessage>(
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		opts?: WatchOptions,
 	): WatchHandle;
-	watchQuery<D extends DescMessage>(
+	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
-		q: Query<MessageShape<D>>,
-		cb: WatchCallback<MessageShape<D>>,
+		q: Q,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(

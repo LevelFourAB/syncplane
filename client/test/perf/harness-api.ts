@@ -72,6 +72,9 @@ export interface EventRecord {
 	/** pull, poke */
 	changes?: number;
 	hasMore?: boolean;
+	/** pull: durationMs split into waiting on the server and applying locally. */
+	requestMs?: number;
+	applyMs?: number;
 	/** pull: the client fell behind the horizon and must re-bootstrap. */
 	reset?: boolean;
 	/** push */
@@ -87,6 +90,10 @@ export interface EventRecord {
 	/** query: the index that answered, or why the read scanned instead. */
 	index?: string;
 	declined?: string;
+	/** query: index positions the walk visited. */
+	candidates?: number;
+	/** query: wall time spent queued behind a concurrent commit. */
+	waitMs?: number;
 }
 
 /**
@@ -113,6 +120,9 @@ export interface SyncSummary {
 	pulls: number;
 	pullChanges: number;
 	pullMs: number;
+	/** `pullMs` split: waiting on the server, and applying its pages locally. */
+	pullRequestMs: number;
+	pullApplyMs: number;
 	/** Pulls that forced a re-bootstrap. Non-zero is the expensive path. */
 	resets: number;
 	pushes: number;
@@ -155,6 +165,67 @@ export type ReadOp =
 	| { kind: 'unindexed'; limit: number }
 	| { kind: 'get'; issueId: string };
 
+/**
+ * One live query a bench holds open. The query shapes mirror ReadOp's, because
+ * the interesting comparison is one-shot cost against maintained cost of the
+ * same read. `flat` watches an entity no write scenario touches — the control
+ * that prices what a commit costs a watcher it cannot affect.
+ */
+export type WatchSpec =
+	| { kind: 'board'; projectId: string; limit: number }
+	| { kind: 'triage'; limit: number }
+	| { kind: 'byLabel'; label: string; limit: number }
+	/** Entity watch over every issue — fires on ANY issue change, which is what
+	 * makes it the waiter for change latency without knowing the row. */
+	| { kind: 'issues' }
+	| { kind: 'flat' };
+
+/**
+ * One open watch's deliveries. A callback fires only when the delivered page
+ * MOVED, so `callbacks` counts visible updates — maintenance work that ended in
+ * "nothing changed" is invisible here and shows up as sync wall time instead.
+ */
+export interface WatchView {
+	/** Deliveries since the watch opened or the last resetWatchStats. */
+	callbacks: number;
+	/** Rows the latest delivery carried. */
+	rows: number;
+}
+
+/**
+ * Latency distribution of `count` awaited local writes. Percentiles rather
+ * than a mean: one slow write among two hundred is a stall a user feels, and a
+ * mean buries it.
+ */
+export interface LocalWriteStats {
+	totalMs: number;
+	p50Ms: number;
+	p95Ms: number;
+	maxMs: number;
+}
+
+/**
+ * A page walk over one ordered, indexed query. `total: false` runs every page
+ * with the match count opted out, which is the shape an app that only follows
+ * `hasMore` pays.
+ */
+export type PageWalkOp =
+	| { kind: 'boardPages'; projectId: string; limit: number; pages: number; total?: false }
+	| { kind: 'triagePages'; limit: number; pages: number; total?: false };
+
+export interface PageWalkResult {
+	/** ms per page, in walk order — the shape says whether depth costs. */
+	pageMs: number[];
+	/** Rows delivered across the whole walk. */
+	rows: number;
+	/** The match total the first page reported; 0 when the walk opted out. */
+	total: number;
+	/** ms to reach the final page's rank in one query via `offset` instead. */
+	offsetMs: number;
+	/** How the store answered, as in ReadResult.path (first page's event). */
+	path?: string;
+}
+
 export interface ReadResult {
 	ms: number;
 	rows: number;
@@ -170,6 +241,11 @@ export interface ReadResult {
 	 * the number is real either way, but it prices a different plan.
 	 */
 	path?: string;
+	/**
+	 * Index positions the walk visited, when an index answered. Against `ms` it
+	 * says whether a slow read walked too far or paid elsewhere.
+	 */
+	candidates?: number;
 }
 
 /** What waiting on the background index build cost, and what the build did. */
@@ -237,6 +313,35 @@ export interface BenchHarnessApi {
 	 * currently sits.
 	 */
 	queueWrites(count: number, firstIndex: number): Promise<number>;
+	/**
+	 * `count` sequential local writes, each awaited — the latency an event
+	 * handler sees. `put` writes whole issues at `firstIndex` on (a fresh index
+	 * range inserts, a seeded one replaces); `patch` masks title+updatedAtMs.
+	 * Unlike queueWrites this prices the write itself, so run it online or
+	 * offline according to what the scenario is measuring.
+	 */
+	localWrites(op: 'put' | 'patch', count: number, firstIndex: number): Promise<LocalWriteStats>;
+	/**
+	 * Opens one watch per spec, in order — WatchView indexes match. Resolves
+	 * after every watch has delivered its first page, so measurements that
+	 * follow start from a settled hub.
+	 */
+	openWatches(specs: WatchSpec[]): Promise<void>;
+	watchStats(): Promise<WatchView[]>;
+	resetWatchStats(): Promise<void>;
+	/**
+	 * Resolves when watch `index` has delivered at least `minCallbacks` since
+	 * the last reset. Returns ms waited — with a live stream, watch-observed
+	 * change latency.
+	 */
+	waitForWatch(index: number, minCallbacks: number, timeoutMs: number): Promise<number>;
+	closeWatches(): Promise<void>;
+	/**
+	 * Walks `op.pages` pages of an ordered query by feeding each page's
+	 * endCursor back as `after`, then jumps to the final page's rank once more
+	 * via `offset` — the two ways an app reaches a deep rank, priced together.
+	 */
+	paginate(op: PageWalkOp): Promise<PageWalkResult>;
 	pendingCount(): Promise<number>;
 	/**
 	 * Waits until `issueId`'s title starts with `prefix`, polling the local

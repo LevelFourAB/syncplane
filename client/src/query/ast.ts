@@ -46,6 +46,7 @@ export interface CompiledQuery {
 	offset?: number;
 	after?: QueryCursor;
 	before?: QueryCursor;
+	total?: boolean;
 }
 
 /**

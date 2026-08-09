@@ -76,6 +76,7 @@ export type {
 	QueryCursor,
 	QueryRef,
 	Scalar,
+	TotalOf,
 } from './query/index.js';
 export type { HydratedRow, IncludeSpec } from './refs.js';
 export { fetchSchema, registerSchema } from './schema/admin.js';

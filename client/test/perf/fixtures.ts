@@ -5,7 +5,10 @@ import type {
 	EventRecord,
 	FirstReadSummary,
 	IndexBuildView,
+	LocalWriteStats,
 	OpenOptions,
+	PageWalkOp,
+	PageWalkResult,
 	ReadOp,
 	ReadResult,
 	RowCounts,
@@ -13,6 +16,8 @@ import type {
 	ScopeOptions,
 	StorageView,
 	SyncSummary,
+	WatchSpec,
+	WatchView,
 	WriteBytesView,
 } from './harness-api.js';
 import type { Wire } from './report.js';
@@ -142,14 +147,21 @@ export async function withWire<T>(fn: () => Promise<T>): Promise<{ result: T; wi
 	return { result, wire: wireDelta(before, await wireStats()) };
 }
 
-/** Server-side writes against a seeded corpus; see benchserver's writeHandler. */
+/**
+ * Server-side writes against a seeded corpus; see benchserver's writeHandler.
+ * Returns the index of the first issue touched, so a later call can target the
+ * same rows — deleting exactly what an earlier insert created, rather than the
+ * seeded range every op defaults to.
+ */
 export async function serverWrite(
 	tierName: string,
 	op: 'patch' | 'insert' | 'delete',
 	count: number,
 	/** Title prefix for a patch, so a waiter can distinguish this write. */
 	marker?: string,
-): Promise<void> {
+	/** Index of the first issue to touch, overriding the op's default range. */
+	first?: number,
+): Promise<{ first: number }> {
 	const res = await fetch(new URL('/debug/write', serverUrl()), {
 		method: 'POST',
 		body: JSON.stringify({
@@ -158,9 +170,11 @@ export async function serverWrite(
 			op,
 			count,
 			marker,
+			first,
 		}),
 	});
 	if (!res.ok) throw new Error(`/debug/write responded ${res.status}: ${await res.text()}`);
+	return await res.json() as { first: number };
 }
 
 /** One GC pass, which is how the tombstone horizon is made to overtake a client. */
@@ -235,6 +249,40 @@ export class BenchTab {
 			(a) => window.benchHarness.queueWrites(a.count, a.firstIndex),
 			{ count, firstIndex },
 		);
+	}
+
+	localWrites(op: 'put' | 'patch', count: number, firstIndex: number): Promise<LocalWriteStats> {
+		return this.page.evaluate(
+			(a) => window.benchHarness.localWrites(a.op, a.count, a.firstIndex),
+			{ op, count, firstIndex },
+		);
+	}
+
+	openWatches(specs: WatchSpec[]): Promise<void> {
+		return this.page.evaluate((s) => window.benchHarness.openWatches(s), specs);
+	}
+
+	watchStats(): Promise<WatchView[]> {
+		return this.page.evaluate(() => window.benchHarness.watchStats());
+	}
+
+	resetWatchStats(): Promise<void> {
+		return this.page.evaluate(() => window.benchHarness.resetWatchStats());
+	}
+
+	waitForWatch(index: number, minCallbacks: number, timeoutMs = 30_000): Promise<number> {
+		return this.page.evaluate(
+			(a) => window.benchHarness.waitForWatch(a.index, a.minCallbacks, a.timeoutMs),
+			{ index, minCallbacks, timeoutMs },
+		);
+	}
+
+	closeWatches(): Promise<void> {
+		return this.page.evaluate(() => window.benchHarness.closeWatches());
+	}
+
+	paginate(op: PageWalkOp): Promise<PageWalkResult> {
+		return this.page.evaluate((o) => window.benchHarness.paginate(o), op);
 	}
 
 	pendingCount(): Promise<number> {

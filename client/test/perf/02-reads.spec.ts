@@ -101,6 +101,7 @@ test.describe('local reads', () => {
 							rows: warm.rows,
 							complete: warm.complete,
 							path: pathLabel(cold.path, warm.path),
+							candidates: warm.candidates ?? '',
 						},
 					});
 				}
@@ -146,6 +147,7 @@ test.describe('local reads', () => {
 							complete: warm.complete,
 							bounds: warm.bounds.join('+'),
 							path: pathLabel(cold.path, warm.path),
+							candidates: warm.candidates ?? '',
 						},
 					});
 				}

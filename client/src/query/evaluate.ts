@@ -469,7 +469,9 @@ export function runQuery<T>(
 /**
  * `runQuery`, with the number of rows that matched before the page was cut and
  * whether any were left over — both free here, because the whole match set
- * exists either way.
+ * exists either way. A query carrying `total: false` still gets `undefined`
+ * for it: the number costs nothing on this path, but the index path it must
+ * agree with cannot say the same.
  *
  * `window` is the query's cursor bounds (see pageWindowOf). Rows outside them
  * are not matches at all: `total` counts what is INSIDE the bounds, so a paged
@@ -480,7 +482,7 @@ export function runQueryPage<T>(
 	q: CompiledQuery,
 	schema?: DescMessage,
 	window?: PageWindow,
-): { rows: Row<T>[]; total: number; hasMore: boolean } {
+): { rows: Row<T>[]; total: number | undefined; hasMore: boolean } {
 	let out = q.where
 		? rows.filter((r) => evalCond(r.value, q.where as Cond, schema))
 		: rows.slice();
@@ -489,7 +491,7 @@ export function runQueryPage<T>(
 		const orderBy = q.orderBy;
 		out = out.sort((a, b) => compareRows(a, b, orderBy, schema));
 	}
-	const total = out.length;
+	const total = q.total === false ? undefined : out.length;
 	return { ...pageOf(out, q, window), total };
 }
 

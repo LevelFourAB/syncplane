@@ -134,6 +134,10 @@ func writeHandler(srv *server.Server) http.Handler {
 			// before it — with a fixed title, the second round of a latency
 			// measurement matches the first round's value and reports zero.
 			Marker string `json:"marker"`
+			// Index of the first issue to touch, overriding the op's default
+			// range. What lets a caller delete exactly the rows an earlier
+			// insert created: the insert's response carries the index it chose.
+			First *int `json:"first"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -155,15 +159,30 @@ func writeHandler(srv *server.Server) http.Handler {
 		// there lands inside whatever scope a partial-sync client is holding.
 		// "insert" writes past the seeded range, at keys nothing has used yet.
 		var first int
-		switch req.Op {
-		case "patch", "delete":
+		switch {
+		case req.First != nil:
+			// An explicit range is the caller's responsibility: it may name
+			// inserted rows past the seeded range, so no tier bound applies.
+			// Not offered for "insert" — inserted keys are allocated here, and a
+			// caller-chosen one could collide with a later allocation.
+			if req.Op != "patch" && req.Op != "delete" {
+				http.Error(w, fmt.Sprintf("first is only valid for patch and delete, not %q", req.Op),
+					http.StatusBadRequest)
+				return
+			}
+			if *req.First < 0 {
+				http.Error(w, "first must not be negative", http.StatusBadRequest)
+				return
+			}
+			first = *req.First
+		case req.Op == "patch" || req.Op == "delete":
 			first = tier.Issues - req.Count
 			if first < 0 {
 				http.Error(w, fmt.Sprintf("tier %s holds %d issues, cannot touch %d",
 					tier.Name, tier.Issues, req.Count), http.StatusBadRequest)
 				return
 			}
-		case "insert":
+		case req.Op == "insert":
 			first = tier.Issues + nextInsert(req.Workspace, req.Count)
 		default:
 			http.Error(w, fmt.Sprintf("unknown op %q", req.Op), http.StatusBadRequest)
@@ -179,8 +198,9 @@ func writeHandler(srv *server.Server) http.Handler {
 		}
 		writeJSON(w, struct {
 			Written int   `json:"written"`
+			First   int   `json:"first"`
 			TookMs  int64 `json:"tookMs"`
-		}{req.Count, time.Since(started).Milliseconds()})
+		}{req.Count, first, time.Since(started).Milliseconds()})
 	})
 }
 

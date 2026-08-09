@@ -1981,6 +1981,7 @@ export class Coordinator {
 				throw err;
 			}
 			lastAcked = resp.lastAckedMutationId;
+			const responded = performance.now();
 			const { reset } = await this.applyServerPage(workspaceId, resp, subs);
 			this.emit({
 				type: 'pull',
@@ -1989,6 +1990,8 @@ export class Coordinator {
 				hasMore: resp.hasMore,
 				reset,
 				durationMs: performance.now() - started,
+				requestMs: responded - started,
+				applyMs: performance.now() - responded,
 				outcome: 'ok',
 			});
 			// A reset re-bootstrapped instead of paging, and a bootstrap leaves the

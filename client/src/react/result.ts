@@ -43,7 +43,9 @@ export interface WatchState {
 }
 
 /** A row set that also reports whether it has loaded (see WatchState). */
-export type WatchResult<T> = ReadonlyRowSet<T> & WatchState;
+export type WatchResult<T, Total extends number | undefined = number> =
+	& ReadonlyRowSet<T, Total>
+	& WatchState;
 
 /**
  * Stamps loading/hydrating/error onto a row set in place, mirroring

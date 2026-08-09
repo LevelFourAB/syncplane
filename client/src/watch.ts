@@ -12,7 +12,7 @@ import type { PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
 import { type IndexReport, queryByIndex } from './query/execute.js';
 import { compareRows, type CompiledQuery, evalCond, runQuery } from './query/index.js';
-import { readMergedRowWithVersion, type Row, scanMergedRows, type ScopedRow } from './read.js';
+import { readMergedRowsWithVersion, type Row, scanMergedRows, type ScopedRow } from './read.js';
 import { hydrate, type IncludeSpec, type RefClient } from './refs.js';
 import { safeInvoke } from './report.js';
 import type { QueryDeclineReason, UnstampedQueryEvent } from './sync/events.js';
@@ -32,7 +32,10 @@ import type { TouchSet } from './touch.js';
  * array, for a consumer maintaining its own list. Ignoring it is always
  * correct; the array is the whole answer either way.
  */
-export type WatchCallback<T> = (rows: RowSet<T>, delta: WatchDelta<T>) => void;
+export type WatchCallback<T, Total extends number | undefined = number> = (
+	rows: RowSet<T, Total>,
+	delta: WatchDelta<T>,
+) => void;
 
 /** The page of a result a watch delivers. Both bounds are row counts. */
 export interface WatchWindow {
@@ -537,16 +540,15 @@ export class WatcherHub {
 		if (keys === undefined) return { rebuild: true, rows: await this.scanScope(tx, sample) };
 		const scoped = this.scopeRows(scope);
 		const changed = new Map<string, ResultRow | undefined>();
-		for (const { workspaceId, key } of keys) {
+		// One batched read for the whole commit rather than a point read per
+		// changed row — this runs inside the shared lock every reader queues on,
+		// so a 200-row pull would otherwise hold it for 400 sequential gets.
+		const merged = await readMergedRowsWithVersion(tx, this.registry, sample.entity, keys);
+		for (let i = 0; i < keys.length; i++) {
+			const { workspaceId, key } = keys[i]!;
 			const id = rowId(workspaceId, key);
-			const merged = await readMergedRowWithVersion(
-				tx,
-				this.registry,
-				sample.entity,
-				workspaceId,
-				key,
-			);
-			if (merged === undefined) {
+			const view = merged[i];
+			if (view === undefined) {
 				scoped.rows.delete(id);
 				changed.set(id, undefined);
 				continue;
@@ -556,7 +558,7 @@ export class WatcherHub {
 				scoped.rows.get(id),
 				id,
 				suffixOf(sample, workspaceId, key),
-				{ v: merged.v, version: merged.version, workspaceId, key },
+				{ v: view.v, version: view.version, workspaceId, key },
 			);
 			scoped.rows.set(id, row);
 			changed.set(id, row);
@@ -1040,7 +1042,13 @@ function pageInfo(
 	total: number,
 	end: number,
 ): PageInfo {
-	const info: PageInfo = { total, hasMore: end !== Infinity && total > end };
+	// The maintained match set makes the count free, but a query that opted out
+	// still gets undefined: what a watcher delivers must not depend on which
+	// path — one-shot or maintained — happens to serve it.
+	const info: PageInfo = {
+		total: watcher.query?.total === false ? 'uncounted' : total,
+		hasMore: end !== Infinity && total > end,
+	};
 	if (watcher.cursors === undefined || rows.length === 0) return info;
 	const first = rows[0]!;
 	const last = rows[rows.length - 1]!;

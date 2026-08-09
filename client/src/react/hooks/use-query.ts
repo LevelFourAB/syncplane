@@ -1,6 +1,6 @@
 import type { DescMessage, MessageShape } from '@bufbuild/protobuf';
 import type { ReadonlyRowSet } from '../../coverage.js';
-import { compileQuery, type Query } from '../../query/index.js';
+import { compileQuery, type Query, type TotalOf } from '../../query/index.js';
 import type { WatchHandle } from '../../watch.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
 import type { WatchResult } from '../result.js';
@@ -22,12 +22,12 @@ import type { UseQueryOptions } from '../types.js';
  * The result is `[]` with `loading` true until the first callback (or, on the
  * suspense hook, the render waits for it instead).
  */
-export function useQueryHook<D extends DescMessage>(
+export function useQueryHook<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 	schema: D,
-	query: Query<MessageShape<D>>,
+	query: Q,
 	opts?: UseQueryOptions,
 	suspense?: boolean,
-): WatchResult<MessageShape<D>> {
+): WatchResult<MessageShape<D>, TotalOf<Q>> {
 	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId);
 	const compiled = compileQuery(query);
@@ -48,12 +48,17 @@ export function useQueryHook<D extends DescMessage>(
 	const subscribe = (
 		onRows: (rows: ReadonlyRowSet<MessageShape<D>>) => void,
 		onError: (error: unknown) => void,
-	): WatchHandle => scope.watchQuery(schema, query, onRows, { include, onError, window });
+	): WatchHandle =>
+		scope.watchQuery(schema, query as Query<MessageShape<D>>, onRows, {
+			include,
+			onError,
+			window,
+		});
 	return useWatchStore<MessageShape<D>>({
 		identity,
 		subscribe,
 		client,
 		suspense,
 		window,
-	});
+	}) as WatchResult<MessageShape<D>, TotalOf<Q>>;
 }

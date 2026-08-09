@@ -286,7 +286,7 @@ const client = new SyncClient({
 | Event        | Carries                                                                                                               |
 | ------------ | --------------------------------------------------------------------------------------------------------------------- |
 | `push`       | `workspaceIds`, `mutations`, `applied`, `rejected`, `durationMs`, `outcome`                                           |
-| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `outcome`                                                 |
+| `pull`       | `workspaceId`, `changes`, `hasMore`, `reset`, `durationMs`, `requestMs`, `applyMs`, `outcome`                         |
 | `bootstrap`  | `workspaceId`, `rows`, `resumed`, `durationMs`, `streamMs`, `stageMs`, `swapMs`, `swapWrites`, `outcome`              |
 | `rebase`     | `workspaceId`, `acked`, `replayed`, `durationMs`                                                                      |
 | `poke`       | `workspaceId`, `changes` (stream-delivered only)                                                                      |
