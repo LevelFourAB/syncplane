@@ -244,7 +244,11 @@ await client.db.todo.mutate.del(key, opts?)
 
 - **`put`** replaces the whole row.
 - **`patch`** merges by field mask (per-field last-writer-wins). `opts.paths`
-  defaults to the keys present in `init`.
+  defaults to the keys present in `init`. It does not create rows: a `patch`
+  whose row is absent or deleted changes nothing locally and is rejected as
+  `conflict`. The client warns on the console, naming the entity, key and
+  workspace, when a `patch` has no row to land on — most often a key belonging
+  to a different entity than the one it was written through.
 - **`update`** is read-modify-write: it reads the row, hands a draft to
   `recipe`, and PATCHes the fields the recipe changed. See below.
 - **`create`** (facade only) is `put` with an auto-minted id. Requires a single

@@ -58,6 +58,19 @@ export function reportError(message: string, err: unknown): void {
 	}
 }
 
+/**
+ * Reports API misuse over console.warn: a call the library carried out as asked
+ * that cannot do what the caller meant. For mistakes whose only other sign
+ * arrives too far from the call to be traced back to it.
+ */
+export function reportMisuse(message: string): void {
+	try {
+		console.warn(`[sync] ${message}`);
+	} catch {
+		// A console that itself throws must not take down the caller either.
+	}
+}
+
 function reportCallbackError(context: string, err: unknown): void {
 	reportError(`${context} threw; ignoring`, err);
 }

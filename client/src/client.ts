@@ -121,7 +121,7 @@ import {
 	type RefClient,
 	resolveReverse,
 } from './refs.js';
-import { reportError, safeInvoke } from './report.js';
+import { reportError, reportMisuse, safeInvoke } from './report.js';
 import {
 	DEFAULT_STORAGE_PREFIX,
 	type StorageNames,
@@ -3160,7 +3160,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							// and the apply reuses it rather than reading and decoding a
 							// second time. Left unread, the apply decides for itself — its
 							// text-log fast path never needs it.
-							await applyCrudLocally(
+							const outcome = await applyCrudLocally(
 								tx,
 								this.entityRegistry,
 								workspaceId,
@@ -3169,6 +3169,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								priorRead ? { bytes: priorBytes } : undefined,
 								{ mutationId, index: crudIndex },
 							);
+							if (outcome === 'no-target') warnPatchWithoutTarget(crud, workspaceId);
 						}
 						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
 						await enqueuePending(tx, workspaceId, mutation);
@@ -3535,6 +3536,28 @@ function requireUndo<E extends readonly DescMessage[]>(scope: WorkspaceScope<E>)
 		throw new Error('undo is not enabled: pass the `undo` option to SyncClient');
 	}
 	return mgr;
+}
+
+/**
+ * Reports a PATCH the app just issued against a row that is not there.
+ *
+ * Warned about here, on the app's own write, rather than inside
+ * applyCrudLocally: a replay during rebase reaches the same outcome whenever
+ * the server has deleted a row the queue still patches, and that is delete-wins
+ * working rather than a mistake anyone can act on.
+ *
+ * Worth a warning at all because the write is queued and applies nowhere, so
+ * the only other sign is a `conflict` rejection a round trip later. Keys are
+ * opaque strings on the wire, which is what lets the usual cause — a key
+ * belonging to a different entity than the one it was written through — reach
+ * the server at all.
+ */
+function warnPatchWithoutTarget(crud: CrudMutation, workspaceId: string): void {
+	reportMisuse(
+		`patch of ${crud.entity} "${crud.key}" in workspace "${workspaceId}" has no row to apply to, `
+			+ 'so it was not applied locally and the server will reject it as a conflict. A patch does '
+			+ 'not create rows: check that the key names a row of this entity, or write it with put().',
+	);
 }
 
 /** Flattens sets of pinned mutation ids into one. */

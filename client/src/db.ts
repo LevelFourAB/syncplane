@@ -132,6 +132,9 @@ export interface EntityApi<D extends DescMessage> {
 		 * Merges the given fields into a row, leaving every other field alone.
 		 * `init` carries the fields to change, not a whole row — see PatchInit,
 		 * and `update` for read-modify-write.
+		 *
+		 * Does not create rows: a patch of a row that is absent or deleted changes
+		 * nothing locally and is rejected as `conflict`. Use `put` to create.
 		 */
 		patch(key: string, init: PatchInit<D>, opts?: PatchOptions): Promise<void>;
 		/**

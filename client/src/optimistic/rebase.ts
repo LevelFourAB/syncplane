@@ -122,6 +122,18 @@ class KVMirrorTx implements MirrorTx {
 }
 
 /**
+ * What one local apply did to the overlay. `no-target` is delete-wins: a PATCH
+ * whose row is absent or locally deleted wrote nothing, and the server rejects
+ * the queued mutation as a conflict. Only a PATCH ever reports it; every other
+ * op writes.
+ *
+ * What it means is the caller's to decide. A `no-target` on an app's own write
+ * names a row that is not there; on a replay during rebase it is the ordinary
+ * outcome for a queued PATCH the server has since deleted.
+ */
+export type LocalApplyOutcome = 'applied' | 'no-target';
+
+/**
  * Applies one CRUD op to the optimistic overlay of `workspaceId`. Shared by the
  * crud and batch cases of applyMutationLocally and by the client's batch
  * undo-capture loop, so all three stay in lockstep with the server's applyCrud.
@@ -140,7 +152,7 @@ export async function applyCrudLocally(
 	touched: TouchSet,
 	prior?: { bytes: Uint8Array | undefined },
 	slot?: TextLogSlot,
-): Promise<void> {
+): Promise<LocalApplyOutcome> {
 	const def = registry.get(crud.entity);
 	if (!def) throw new Error(`unknown entity "${crud.entity}"`);
 	const readPrior = async (): Promise<Uint8Array | undefined> =>
@@ -172,7 +184,7 @@ export async function applyCrudLocally(
 			// was folded from must go — or the next read would apply those edits a
 			// second time. (Idempotent for the document, but it would grow forever.)
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
-			return;
+			return 'applied';
 		}
 		case CrudOp.PATCH: {
 			// A keystroke: every field the mask names is collaborative text, and the
@@ -180,8 +192,9 @@ export async function applyCrudLocally(
 			// Appending that fragment IS the whole optimistic write — no row is
 			// rewritten, so what a keystroke costs on disk stops scaling with the
 			// document. The read path folds it back (read.ts).
-			if (slot !== undefined && await appendTextLog(tx, registry, def, workspaceId, crud, slot)) {
-				return;
+			if (slot !== undefined) {
+				const fast = await appendTextLog(tx, registry, def, workspaceId, crud, slot);
+				if (fast !== 'fallthrough') return fast;
 			}
 			const baseBytes = await readPrior();
 			// Delete-wins (mirrors the server's applyCrud PATCH policy): a PATCH
@@ -189,7 +202,7 @@ export async function applyCrudLocally(
 			// server rejects it as a conflict, so we must not materialize a ghost in
 			// the overlay. Skip; the rejection rolls the pending mutation back on
 			// the next push.
-			if (baseBytes === undefined) return;
+			if (baseBytes === undefined) return 'no-target';
 			const paths = crud.fieldMask?.paths ?? [];
 			const mergers = registry.mergersFor(def.name);
 			const base = fromBinary(def.schema, baseBytes);
@@ -203,13 +216,13 @@ export async function applyCrudLocally(
 			const record: OverlayRecord = { v: toBinary(def.schema, merged) };
 			await tx.put(overlayKey(def.name, workspaceId, crud.key), record);
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
-			return;
+			return 'applied';
 		}
 		case CrudOp.DELETE: {
 			const record: OverlayRecord = { del: true };
 			await tx.put(overlayKey(def.name, workspaceId, crud.key), record);
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
-			return;
+			return 'applied';
 		}
 		default:
 			throw new Error(`unknown crud op ${crud.op}`);
@@ -228,8 +241,9 @@ export interface TextLogSlot {
 }
 
 /**
- * Appends a PATCH's text fragments to the row's log, or returns false to let
- * the caller fall through to the whole-row path.
+ * Appends a PATCH's text fragments to the row's log, or returns `fallthrough`
+ * to send the caller down the whole-row path. `no-target` is delete-wins,
+ * reached without decoding the row.
  *
  * The fast path is deliberately narrow, because it is the one shape where
  * appending is equivalent to merging: the mask must name text fields ONLY, and
@@ -238,9 +252,6 @@ export interface TextLogSlot {
  * document (a string-valued write, or a re-send after the server asked for full
  * state) is not a delta of anything and would resurrect superseded text if
  * applied over the base rather than replacing it.
- *
- * Delete-wins still holds: a PATCH of an absent or locally deleted row is a
- * no-op here exactly as it is below, checked without decoding the row.
  */
 async function appendTextLog(
 	tx: KVWrite,
@@ -249,31 +260,31 @@ async function appendTextLog(
 	workspaceId: string,
 	crud: CrudMutation,
 	slot: TextLogSlot,
-): Promise<boolean> {
+): Promise<LocalApplyOutcome | 'fallthrough'> {
 	const paths = crud.fieldMask?.paths ?? [];
-	if (paths.length === 0) return false;
+	if (paths.length === 0) return 'fallthrough';
 	const textPaths = registry.textPathsOf(def.name);
-	if (textPaths.length === 0 || !paths.every((p) => textPaths.includes(p))) return false;
+	if (textPaths.length === 0 || !paths.every((p) => textPaths.includes(p))) return 'fallthrough';
 	let src;
 	try {
 		src = fromBinary(def.schema, crud.value);
 	} catch {
-		return false;
+		return 'fallthrough';
 	}
 	const fragments: [string, Uint8Array][] = [];
 	for (const path of paths) {
 		const bytes = textFieldBytes(def.schema, path, src);
-		if (bytes === undefined || !isFragment(bytes)) return false;
+		if (bytes === undefined || !isFragment(bytes)) return 'fallthrough';
 		fragments.push([ path, bytes ]);
 	}
-	if (!(await rowPresent(tx, def.name, workspaceId, crud.key))) return true;
+	if (!(await rowPresent(tx, def.name, workspaceId, crud.key))) return 'no-target';
 	for (const [ path, bytes ] of fragments) {
 		await tx.put(
 			overlayTextKey(def.name, workspaceId, crud.key, path, slot.mutationId, slot.index),
 			bytes,
 		);
 	}
-	return true;
+	return 'applied';
 }
 
 /**
