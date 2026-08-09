@@ -296,6 +296,59 @@ func (ci *compiledIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
 	return ready && hash == ci.specHash, nil
 }
 
+// rowBatch resolves row keys to rows a batch at a time, so that a walk over k
+// candidates costs k/size reads instead of k. That is a rounding error on
+// sqlitestore and the dominant cost on any adapter whose point read is a
+// network round trip, which is why every path that discovers keys before it
+// needs the rows — an index walk, a repeated forward ref, a membership diff —
+// goes through this rather than reading each key as it finds it.
+//
+// Rows reach emit in the order the keys were added, because that order is
+// load-bearing at every caller: it is the order a scan fallback yields, and
+// therefore the order the two paths have to agree on.
+//
+// A caller that gives up mid-walk simply stops adding. Keys still buffered were
+// never offered to emit, so dropping them leaves the caller exactly where it
+// started — the same property the decline paths already rely on.
+type rowBatch struct {
+	tx     storage.ReadTx
+	entity string
+	// size is the buffered-key count at which add resolves. It bounds the rows
+	// held at once, not the total a walk may resolve, and a caller may lower it
+	// mid-walk once it knows it needs fewer.
+	size int
+	keys []string
+	// emit receives every row that exists, tombstones included: whether a
+	// tombstone is a result or a row to skip is the caller's question. A key
+	// with no row at all never reaches it.
+	emit func(storage.Row) error
+}
+
+// add buffers one key, resolving the batch when it is full.
+func (b *rowBatch) add(key string) error {
+	b.keys = append(b.keys, key)
+	if len(b.keys) < b.size {
+		return nil
+	}
+	return b.flush()
+}
+
+// flush resolves whatever is buffered and empties the batch. It must run once
+// after the last add, or that batch's rows are never offered.
+func (b *rowBatch) flush() error {
+	if len(b.keys) == 0 {
+		return nil
+	}
+	err := b.tx.GetRows(b.entity, b.keys, b.emit)
+	b.keys = b.keys[:0]
+	return err
+}
+
+// maxRowBatch caps how many rows one batch holds. It bounds the memory a walk
+// over a large range needs at once; past it, more keys per read stop buying
+// anything a caller notices.
+const maxRowBatch = 256
+
 // queryByIndex answers a query from a secondary index when one serves it,
 // reporting whether it did. A false return is not "no rows" — it is "the
 // caller must scan", which is always a legal thing to do and is what every
@@ -304,6 +357,11 @@ func (ci *compiledIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
 // The rows it offers are exactly the rows a scan would offer, in whatever
 // order the caller's heap and sort then impose. That equivalence is the
 // contract: the index changes which rows are CONSIDERED, never which match.
+//
+// An entry names a row key; the row itself is re-read, because the entry says
+// where a row pointed when it was written and this snapshot decides whether it
+// still exists. Those re-reads go through a rowBatch, so the walk costs reads
+// proportional to candidates/batch rather than one per candidate.
 //
 // Two decline paths deserve naming. An index whose build has not finished
 // covers part of the entity, so using it would silently drop rows. And a walk
@@ -322,9 +380,10 @@ func (ci *compiledIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
 //
 // A plan the planner reports Ordered yields rows already in the query's order,
 // which buys two things nothing else can. The walk SEEKS to pg's cursor instead
-// of starting at the range's own bound, and it STOPS as soon as filled reports
+// of starting at the range's own bound, and it STOPS as soon as want reports
 // the page can take no more — so an ordered query costs O(limit) rather than
-// O(range), cursor or not.
+// O(range), cursor or not. want also sizes the candidate batch, so reading
+// ahead never overshoots the page by more than the rows it still had room for.
 //
 // Both are optimizations over a comparison that stays authoritative: the seek
 // bound deliberately drops the cursor's row-key half (see Order.CursorPrefix),
@@ -338,7 +397,7 @@ func queryByIndex(
 	pg page,
 	limits Limits,
 	consider func(storage.Row, *query.Compiled) error,
-	filled func() bool,
+	want func() int,
 	discard func(),
 ) (bool, error) {
 	// Declining before consider ever ran discards nothing, so applying the rule
@@ -392,14 +451,42 @@ func queryByIndex(
 	if plan.Ordered && pg.backward {
 		scanOrder = storage.ScanDesc
 	}
+	batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
+		if row.Deleted {
+			// Entries are cleared on delete, so this means an entry outlived
+			// its row. Skipping keeps the answer identical to the scan's; a
+			// rebuild drops the entry.
+			return nil
+		}
+		return consider(row, residual)
+	}}
 	for _, r := range plan.Ranges {
+		// The batch carries across ranges, so the fill check at a boundary has
+		// to see what the previous range buffered — keys still buffered were
+		// never offered, and want would be answering for the page before them.
+		if err := batch.flush(); err != nil {
+			return false, err
+		}
+		if plan.Ordered && want() == 0 {
+			return true, nil
+		}
 		lo, hi, err := seekRange(plan, order, pg, r)
 		if err != nil {
 			return false, err
 		}
 		err = tx.ScanIndex(info.name, plan.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
-			if plan.Ordered && filled() {
-				return errPageFilled
+			if plan.Ordered {
+				// want only moves during a flush, and a flush empties the
+				// batch, so this is reached with nothing buffered — which is
+				// what makes stopping here drop no row the page still wanted.
+				// Sizing the batch to what is left is the other half: the walk
+				// reads ahead by a batch, so a batch larger than the page's
+				// remaining room would resolve rows it must then throw away.
+				room := want()
+				if room == 0 {
+					return errPageFilled
+				}
+				batch.size = min(room, maxRowBatch)
 			}
 			seen++
 			if seen > budget {
@@ -409,30 +496,23 @@ func queryByIndex(
 				return nil
 			}
 			seenRows[rowKey] = struct{}{}
-			row, err := tx.GetRow(info.name, rowKey)
-			if errors.Is(err, storage.ErrNotFound) {
-				return nil
-			}
-			if err != nil {
-				return err
-			}
-			if row.Deleted {
-				// Entries are cleared on delete, so this means an entry
-				// outlived its row. Skipping keeps the answer identical to the
-				// scan's; a rebuild drops the entry.
-				return nil
-			}
-			return consider(row, residual)
+			return batch.add(rowKey)
 		})
 		if errors.Is(err, errPageFilled) {
 			return true, nil
 		}
 		if errors.Is(err, errIndexBudget) {
+			// Buffered keys are dropped unread: they were never offered, so
+			// the scan the caller falls back to is the only thing that will
+			// offer them.
 			return decline()
 		}
 		if err != nil {
 			return false, err
 		}
+	}
+	if err := batch.flush(); err != nil {
+		return false, err
 	}
 	return true, nil
 }

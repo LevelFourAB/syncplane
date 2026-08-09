@@ -26,6 +26,7 @@ package server
 import (
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"connectrpc.com/connect"
@@ -495,8 +496,9 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 	if pred != nil {
 		discard := func() { seeds = nil }
 		served, err := queryByIndex(tx, info, pred, nil, page{}, e.srv.limits, consider,
-			// No page, so nothing can fill and the walk runs the whole range.
-			func() bool { return false }, discard)
+			// No page to fill: every seed is wanted, so the walk runs the whole
+			// range and its candidate batches are sized by the cap alone.
+			func() int { return math.MaxInt }, discard)
 		if err != nil {
 			return nil, err
 		}
@@ -604,8 +606,13 @@ func (e *rowEmitter) followSegment(tx storage.ReadTx, g *refGraph, holder fronti
 }
 
 // followForward resolves a holder's forward ref (singular or repeated) to its
-// live, readable target rows via key point-lookups. Missing targets (orphans)
-// and read-filtered targets are silently dropped.
+// live, readable target rows. Missing targets (orphans) and read-filtered
+// targets are silently dropped.
+//
+// The stubs name their targets outright, so a repeated ref is a batch of keys
+// known before any of them is read (see rowBatch) rather than a lookup per
+// element. Targets come back in the field's order, which is the order the
+// caller walks onward in.
 func (e *rowEmitter) followForward(tx storage.ReadTx, holder frontierRow, fr *forwardRefRel) ([]resolved, error) {
 	if !holder.msg.Has(fr.fd) {
 		return nil, nil
@@ -616,15 +623,9 @@ func (e *rowEmitter) followForward(tx storage.ReadTx, holder frontierRow, fr *fo
 		return nil, err
 	}
 	var out []resolved
-	resolveStub := func(stub protoreflect.Message) error {
-		key := targetInfo.keyOf(stub)
-		row, err := tx.GetRow(fr.targetEntity, key)
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil // orphan: target not synced here / never existed
-		}
-		if err != nil {
-			return err
-		}
+	batch := &rowBatch{tx: tx, entity: fr.targetEntity, size: maxRowBatch, emit: func(row storage.Row) error {
+		// A key with no row at all is an orphan the batch already dropped:
+		// a target never synced here, or one that never existed.
 		if row.Deleted {
 			return nil
 		}
@@ -635,19 +636,23 @@ func (e *rowEmitter) followForward(tx storage.ReadTx, holder frontierRow, fr *fo
 		if filter != nil && !filter(row.Key, msg) {
 			return nil // permission prune — and we cannot follow through it
 		}
-		out = append(out, resolved{row: row, front: frontierRow{entity: fr.targetEntity, key: key, msg: msg.ProtoReflect()}})
+		out = append(out, resolved{row: row, front: frontierRow{entity: fr.targetEntity, key: row.Key, msg: msg.ProtoReflect()}})
 		return nil
+	}}
+	addStub := func(stub protoreflect.Message) error {
+		return batch.add(targetInfo.keyOf(stub))
 	}
 	if fr.fd.IsList() {
 		list := holder.msg.Get(fr.fd).List()
 		for i := 0; i < list.Len(); i++ {
-			if err := resolveStub(list.Get(i).Message()); err != nil {
+			if err := addStub(list.Get(i).Message()); err != nil {
 				return nil, err
 			}
 		}
-		return out, nil
+	} else if err := addStub(holder.msg.Get(fr.fd).Message()); err != nil {
+		return nil, err
 	}
-	if err := resolveStub(holder.msg.Get(fr.fd).Message()); err != nil {
+	if err := batch.flush(); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -739,7 +744,9 @@ func (e *rowEmitter) followReverse(tx storage.ReadTx, holder frontierRow, rr *re
 //
 // Rows are re-read rather than trusted from the entry: the entry says a row
 // pointed here when it was written, and this transaction's snapshot is what
-// decides whether it still exists and whether this caller may see it.
+// decides whether it still exists and whether this caller may see it. The
+// re-reads are batched (see rowBatch), so a wide fan-out costs reads
+// proportional to matches/batch rather than one per match.
 func (e *rowEmitter) followReverseIndexed(
 	tx storage.ReadTx,
 	holder frontierRow,
@@ -787,18 +794,7 @@ func (e *rowEmitter) followReverseIndexed(
 	// answer.
 	seen := 0
 	overflow := errors.New("index candidate bound")
-	err = tx.ScanIndex(rr.sourceEntity, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
-		seen++
-		if seen > limits.maxIndexScanCandidates() {
-			return overflow
-		}
-		row, err := tx.GetRow(rr.sourceEntity, rowKey)
-		if errors.Is(err, storage.ErrNotFound) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
+	batch := &rowBatch{tx: tx, entity: rr.sourceEntity, size: maxRowBatch, emit: func(row storage.Row) error {
 		if row.Deleted {
 			// Entries are cleared on delete, so this only happens if an entry
 			// outlived its row — a rebuild will drop it, and skipping keeps the
@@ -810,11 +806,23 @@ func (e *rowEmitter) followReverseIndexed(
 			return nil // quarantined: its ref cannot be read, so it points nowhere
 		}
 		return collect(row, msg.ProtoReflect(), msg)
+	}}
+	err = tx.ScanIndex(rr.sourceEntity, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+		seen++
+		if seen > limits.maxIndexScanCandidates() {
+			return overflow
+		}
+		return batch.add(rowKey)
 	})
 	if errors.Is(err, overflow) {
+		// The buffered keys go with it: declining hands everything back, and
+		// the scan the caller falls back to re-collects them.
 		return decline()
 	}
 	if err != nil {
+		return false, err
+	}
+	if err := batch.flush(); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -1161,34 +1169,48 @@ func (e *rowEmitter) emitMembershipDiff(tx storage.ReadTx, oldSet map[closureKey
 		}
 		patch.Changes = append(patch.Changes, rowChange(row))
 	}
-	// Removals: members the cursor carried that the set no longer holds.
+	// Removals: members the cursor carried that the set no longer holds. They
+	// are grouped by entity and resolved in batches, because a client whose
+	// window or closure turned over wholesale leaves as many of these as the
+	// set is wide, and one read per departed member is what makes a large drop
+	// expensive on a networked adapter. A key with no row at all never
+	// existed, so the batch dropping it is the right answer: the client holds
+	// nothing for it.
+	byEntity := map[string][]string{}
 	for ck := range oldSet {
 		if now.has(ck.entity, ck.key) {
 			continue
 		}
-		row, err := tx.GetRow(ck.entity, ck.key)
-		if errors.Is(err, storage.ErrNotFound) {
-			continue // never existed; the client holds nothing to drop
+		byEntity[ck.entity] = append(byEntity[ck.entity], ck.key)
+	}
+	for entity, keys := range byEntity {
+		batch := &rowBatch{tx: tx, entity: entity, size: maxRowBatch, emit: func(row storage.Row) error {
+			if row.Version > seq {
+				return nil // changed & left: the incremental scan tombstoned or kept it
+			}
+			if row.Deleted {
+				patch.Changes = append(patch.Changes, rowChange(row)) // tombstone at its version
+				return nil
+			}
+			// A still-live row that left the set drops only if base scope does
+			// not also hold it (classify's membership checks cannot fire here:
+			// the key is in neither the new closure nor the new window).
+			class, err := e.classify(row)
+			if err != nil {
+				return err
+			}
+			if class != rowVisible {
+				patch.Changes = append(patch.Changes, hiddenChange(row))
+			}
+			return nil
+		}}
+		for _, key := range keys {
+			if err := batch.add(key); err != nil {
+				return err
+			}
 		}
-		if err != nil {
+		if err := batch.flush(); err != nil {
 			return err
-		}
-		if row.Version > seq {
-			continue // changed & left: the incremental scan tombstoned or kept it
-		}
-		if row.Deleted {
-			patch.Changes = append(patch.Changes, rowChange(row)) // tombstone at its version
-			continue
-		}
-		// A still-live row that left the set drops only if base scope does not
-		// also hold it (classify's membership checks cannot fire here: ck is in
-		// neither the new closure nor the new window).
-		class, err := e.classify(row)
-		if err != nil {
-			return err
-		}
-		if class != rowVisible {
-			patch.Changes = append(patch.Changes, hiddenChange(row))
 		}
 	}
 	return nil

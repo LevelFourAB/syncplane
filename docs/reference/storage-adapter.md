@@ -16,14 +16,35 @@ this is the part an implementer must not get wrong.
 - **Scans must tolerate re-entrant reads.** A scan callback may issue any read
   on the transaction that is scanning, and it must see the same snapshot as the
   scan. The engine does this on its hot paths: `ScanIndex`'s callback re-reads
-  each candidate row to apply read filters, and `ScanChanges`'s callback reads
-  `FieldDeltas` to ship a text delta instead of a whole document. SQLite allows
-  several open statements per connection, so it satisfies this for free; a
-  driver that cannot interleave statements on one connection (pgx with a result
-  set still open, a single-stream remote protocol) must **buffer or page the
-  scan** instead of holding one result set open across the callback. Writes are
-  the opposite: the engine collects a scan's rows and rewrites them after it
-  returns, so an adapter need not tolerate a write during iteration.
+  its candidate rows through `GetRows` to apply read filters, and
+  `ScanChanges`'s callback reads `FieldDeltas` to ship a text delta instead of a
+  whole document. SQLite allows several open statements per connection, so it
+  satisfies this for free; a driver that cannot interleave statements on one
+  connection (pgx with a result set still open, a single-stream remote protocol)
+  must **buffer or page the scan** instead of holding one result set open across
+  the callback. Writes are the opposite: the engine collects a scan's rows and
+  rewrites them after it returns, so an adapter need not tolerate a write during
+  iteration.
+
+  `GetRows` is a yielding read as well, so the same rule applies to it: its
+  callback may read the transaction, and nothing may be left open across it.
+- **`GetRows(entity, keys, fn)` yields in the caller's key order.** It is the
+  batch form of `GetRow` — same rows, same tombstones, same actors — and the
+  order is the part an adapter can get wrong silently. The engine feeds it keys
+  collected from an index walk, whose order _is_ the order the query answers in,
+  so an adapter that yields storage order (what `WHERE key = ANY(…)` returns)
+  answers ordered queries wrongly with no error anywhere. Reorder against the
+  requested keys before yielding.
+
+  A key with no row is **skipped**, not reported — the batch form of
+  `ErrNotFound` — and a repeated key yields its row once per occurrence, which
+  is what a repeated forward ref naming the same target twice expects.
+
+  It exists to save round trips, so an adapter that has none (SQLite: the
+  database is in the process) may loop over `GetRow` and lose nothing. One where
+  a point read crosses the network must answer it with a single statement —
+  that is why the method is on the interface at all, since an index-served read
+  otherwise costs a round trip per candidate row.
 - **The text delta log** (`PutFieldDelta` / `FieldDeltas` / `PruneFieldDeltas`)
   is an append-only side table keyed by `(entity, key, field, seq)`, read back
   oldest-first over a sequence span. It is an optimization, so an adapter is
@@ -43,8 +64,8 @@ this is the part an implementer must not get wrong.
 - **Write attribution.** `PutRow` and `DeleteRow` take a `storage.Actor` — two
   strings, `Subject` (the authenticated caller) and `System` (the label a
   trusted write gave itself) — which is stored with the row and returned by
-  **every** read that yields a `Row`: `GetRow`, `ScanEntity`, `ScanEntityAfter`,
-  `ScanChanges`. Store both as given; a zero `Actor` means "unattributed" and
+  **every** read that yields a `Row`: `GetRow`, `GetRows`, `ScanEntity`,
+  `ScanEntityAfter`, `ScanChanges`. Store both as given; a zero `Actor` means "unattributed" and
   must not be filled in from anything the adapter knows. Populating it on some
   read paths and not others is the one failure that misleads silently, because a
   missing actor is indistinguishable from an unattributed write.

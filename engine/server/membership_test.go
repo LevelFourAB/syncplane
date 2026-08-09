@@ -37,10 +37,12 @@ func (a *readCountingAdapter) WithReadTx(ctx context.Context, workspaceID string
 	})
 }
 
-func (a *readCountingAdapter) bump(kind string) {
+func (a *readCountingAdapter) bump(kind string) { a.add(kind, 1) }
+
+func (a *readCountingAdapter) add(kind string, n int) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.counts[kind]++
+	a.counts[kind] += n
 }
 
 func (a *readCountingAdapter) reset() {
@@ -63,6 +65,16 @@ type readCountingTx struct {
 func (t *readCountingTx) GetRow(entity, key string) (storage.Row, error) {
 	t.owner.bump("get")
 	return t.ReadTx.GetRow(entity, key)
+}
+
+// GetRows counts the batch read twice over: "batch" is what a networked
+// adapter pays a round trip for, and "batchkeys" is how many rows it resolved
+// — the ratio between them is what batching buys, and neither number alone
+// says it.
+func (t *readCountingTx) GetRows(entity string, keys []string, fn func(storage.Row) error) error {
+	t.owner.bump("batch")
+	t.owner.add("batchkeys", len(keys))
+	return t.ReadTx.GetRows(entity, keys, fn)
 }
 
 func (t *readCountingTx) ScanEntity(entity string, fn func(storage.Row) error) error {

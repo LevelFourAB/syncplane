@@ -25,9 +25,9 @@
 //   - Re-entrant reads during a scan: a scan callback MAY issue any ReadTx
 //     read against the transaction it is scanning, and those reads see the
 //     same snapshot as the scan. This is not hypothetical — the engine
-//     re-reads each candidate row from inside ScanIndex to apply read filters,
-//     and reads FieldDeltas from inside ScanChanges to ship a text delta
-//     instead of a whole document — so an adapter whose driver cannot
+//     re-reads each batch of candidate rows (GetRows) from inside ScanIndex to
+//     apply read filters, and reads FieldDeltas from inside ScanChanges to ship
+//     a text delta instead of a whole document — so an adapter whose driver cannot
 //     interleave statements on one connection (a pgx result set held open, a
 //     single-stream remote protocol) must buffer or page the scan rather than
 //     hold one result set open across fn. Writes are the other way round: the
@@ -40,8 +40,8 @@
 //     must leave no trace — above all no entry for ListWorkspaceIDs, which
 //     nothing ever removes (see WithWriteTx).
 //   - Actor round-trip: the Actor handed to PutRow/DeleteRow is stored with the
-//     row and returned by EVERY read that yields a Row (GetRow, both entity
-//     scans, ScanChanges). Uniform because a Row whose Actor is populated on
+//     row and returned by EVERY read that yields a Row (GetRow, GetRows, both
+//     entity scans, ScanChanges). Uniform because a Row whose Actor is populated on
 //     some paths and silently zero on others reads as "unattributed" and
 //     misleads the caller rather than failing; an adapter that cannot store it
 //     yet must say so, not drop it.
@@ -348,6 +348,26 @@ type ReadTx interface {
 	// GetRow returns the row (or tombstone) for entity/key.
 	// Returns ErrNotFound if the row has never existed.
 	GetRow(entity, key string) (Row, error)
+	// GetRows yields the rows (or tombstones) for keys of one entity, in the
+	// order keys lists them. A key with no row is SKIPPED rather than reported
+	// — the batch equivalent of ErrNotFound, and why there is no way to tell
+	// which key a yielded row answers other than its own Key. A repeated key
+	// yields its row once per occurrence; an empty keys yields nothing.
+	//
+	// The order is the contract. Callers resolve keys collected from an index
+	// walk, whose output order is the row order they must produce, so an
+	// adapter that yields storage order instead answers ordered queries wrongly
+	// with no error anywhere.
+	//
+	// It exists because a point read per key is a round trip per key on a
+	// networked adapter: the engine resolves index candidates in batches
+	// through this so an indexed read costs round trips proportional to
+	// batches, not to candidates. An adapter with no batch read may loop over
+	// GetRow and lose nothing.
+	//
+	// fn may issue reads on this transaction, exactly as a scan callback may,
+	// so an adapter must not hold a result set open across it.
+	GetRows(entity string, keys []string, fn func(Row) error) error
 	// ScanEntity yields all live (non-tombstone) rows of an entity in key
 	// order. Keys compare by byte (Unicode code point) value — the order Go's
 	// < gives — NOT a locale collation; afterKey paging shares this order with

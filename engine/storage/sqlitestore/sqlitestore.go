@@ -935,6 +935,27 @@ func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	return row, nil
 }
 
+// GetRows loops over GetRow rather than issuing one statement with an IN list.
+// The batch read exists to save round trips, and there are none here — the
+// database is in the process — so a variadic statement would buy nothing and
+// cost a query plan that changes with the batch size. Looping also leaves no
+// result set open across fn, which the contract lets fn read through.
+func (t *sqliteTx) GetRows(entity string, keys []string, fn func(storage.Row) error) error {
+	for _, key := range keys {
+		row, err := t.GetRow(entity, key)
+		if errors.Is(err, storage.ErrNotFound) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := fn(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (t *sqliteTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 	return t.ScanEntityAfter(entity, "", 0, fn)
 }

@@ -118,6 +118,61 @@ func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 	return row, nil
 }
 
+// GetRows answers the whole batch with one statement. This is the method the
+// adapter exists to make cheap: the engine resolves an index walk's candidates
+// through it, and a point read per candidate would be a round trip per
+// candidate on a walk that is otherwise a single range read.
+//
+// The result set is drained and closed before the first callback runs, for the
+// reason scanCursor buffers — fn may read this transaction, and pgx cannot run
+// a second query on a connection whose result set is still open.
+func (t *pgTx) GetRows(entity string, keys []string, fn func(storage.Row) error) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	byKey, err := t.readRowsByKey(entity, keys)
+	if err != nil {
+		return err
+	}
+	// Yield in the caller's order, not the one Postgres returned: keys carries
+	// the index walk's order, which is the row order the caller has to produce.
+	for _, key := range keys {
+		row, ok := byKey[key]
+		if !ok {
+			continue // no row: the batch form of ErrNotFound
+		}
+		if err := fn(row); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
+	rows, err := t.tx.Query(t.ctx,
+		`SELECT key, value, version, deleted, actor_subject, actor_system
+		 FROM rows
+		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = ANY($4)`,
+		t.ns, t.ws, entity, keys,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byKey := make(map[string]storage.Row, len(keys))
+	for rows.Next() {
+		r := storage.Row{Entity: entity}
+		var version int64
+		if err := rows.Scan(&r.Key, &r.Value, &version, &r.Deleted,
+			&r.Actor.Subject, &r.Actor.System); err != nil {
+			return nil, err
+		}
+		r.Version = uint64(version)
+		byKey[r.Key] = r
+	}
+	return byKey, rows.Err()
+}
+
 // decodeEntityRow reads the column set the two key-ordered entity scans select.
 // It runs with the result set open, so it only Scans (see scanCursor).
 func decodeEntityRow(entity string) func(pgx.Rows) (storage.Row, error) {

@@ -302,6 +302,104 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		// GetRows is a batch of point reads, and the engine resolves index-walk
+		// candidates through it — so the two things it must not get wrong are
+		// the ORDER it yields (the walk's order is the row order the query
+		// answers in) and what it does with a key that has no row (skip, the
+		// batch form of ErrNotFound).
+		Describe("batch row reads", func() {
+			collect := func(tx storage.ReadTx, entity string, keys ...string) []storage.Row {
+				GinkgoHelper()
+				var got []storage.Row
+				Expect(tx.GetRows(entity, keys, func(r storage.Row) error {
+					got = append(got, r)
+					return nil
+				})).To(Succeed())
+				return got
+			}
+			keysOf := func(rows []storage.Row) []string {
+				var keys []string
+				for _, r := range rows {
+					keys = append(keys, r.Key)
+				}
+				return keys
+			}
+
+			BeforeEach(func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "a", []byte("va"), 1, storage.Actor{Subject: "user-7"})).To(Succeed())
+					Expect(tx.PutRow("widget", "b", []byte("vb"), 2, storage.Actor{})).To(Succeed())
+					Expect(tx.PutRow("widget", "c", []byte("vc"), 3, storage.Actor{})).To(Succeed())
+					Expect(tx.DeleteRow("widget", "c", 4, storage.Actor{System: "gc"})).To(Succeed())
+					Expect(tx.PutRow("todo", "a", []byte("t"), 5, storage.Actor{})).To(Succeed())
+				})
+			})
+
+			It("yields rows in the order the keys were asked for, not storage order", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(keysOf(collect(tx, "widget", "b", "a"))).To(Equal([]string{"b", "a"}),
+						"an index walk's order is the order its query answers in")
+				})
+			})
+
+			It("skips keys with no row rather than reporting them", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(keysOf(collect(tx, "widget", "a", "missing", "b"))).To(Equal([]string{"a", "b"}))
+					Expect(collect(tx, "widget", "missing")).To(BeEmpty())
+					Expect(collect(tx, "widget")).To(BeEmpty())
+				})
+			})
+
+			It("yields a repeated key once per occurrence", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(keysOf(collect(tx, "widget", "a", "a"))).To(Equal([]string{"a", "a"}),
+						"a repeated forward ref asks twice and expects two targets")
+				})
+			})
+
+			It("yields tombstones, exactly as GetRow does", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					rows := collect(tx, "widget", "c")
+					Expect(rows).To(HaveLen(1))
+					Expect(rows[0].Deleted).To(BeTrue())
+					Expect(rows[0].Version).To(BeEquivalentTo(4))
+					Expect(rows[0].Actor).To(Equal(storage.Actor{System: "gc"}))
+				})
+			})
+
+			It("returns the same row GetRow does, actor included", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					want, err := tx.GetRow("widget", "a")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(collect(tx, "widget", "a")).To(Equal([]storage.Row{want}))
+				})
+			})
+
+			It("scopes keys to the entity and the workspace", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					rows := collect(tx, "todo", "a")
+					Expect(rows).To(HaveLen(1))
+					Expect(rows[0].Value).To(Equal([]byte("t")), "a bare key means nothing outside its entity")
+				})
+				read("ws2", func(tx storage.ReadTx) {
+					Expect(collect(tx, "widget", "a", "b")).To(BeEmpty())
+				})
+			})
+
+			It("stops at the first callback error and reports it", func() {
+				boom := errors.New("boom")
+				read("ws1", func(tx storage.ReadTx) {
+					var seen []string
+					err := tx.GetRows("widget", []string{"a", "b"}, func(r storage.Row) error {
+						seen = append(seen, r.Key)
+						return boom
+					})
+					Expect(err).To(MatchError(boom))
+					Expect(seen).To(Equal([]string{"a"}))
+				})
+			})
+		})
+
 		It("scans entities in key order, scoped to the entity", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "b", []byte("2"), 1, storage.Actor{})).To(Succeed())
@@ -715,6 +813,38 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Entry("ascending", storage.ScanAsc, []string{"k1", "k2", "k3"}),
 				Entry("descending", storage.ScanDesc, []string{"k3", "k2", "k1"}),
 			)
+
+			It("serves GetRows from inside a ScanIndex callback (the batched indexed-query shape)", func() {
+				// The engine collects the walk's candidates and resolves them a
+				// batch at a time, so the batch read is issued from inside the
+				// callback exactly as the point read was.
+				eachTx(func(tx storage.ReadTx) {
+					var resolved []string
+					Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+						return tx.GetRows("widget", []string{rowKey, "k3"}, func(row storage.Row) error {
+							resolved = append(resolved, row.Key)
+							Expect(row.Value).To(Equal([]byte("v-" + row.Key)))
+							return nil
+						})
+					})).To(Succeed())
+					Expect(resolved).To(Equal([]string{"k1", "k3", "k2", "k3", "k3", "k3"}),
+						"the walk must survive its callback's batch reads, in the order it asked for")
+				})
+			})
+
+			It("serves reads from inside a GetRows callback", func() {
+				// A batch read is itself a yielding read, so an adapter that
+				// holds its result set open across the callback breaks the same
+				// way a scan would.
+				eachTx(func(tx storage.ReadTx) {
+					var keys []string
+					Expect(tx.GetRows("widget", []string{"k1", "k2"}, func(r storage.Row) error {
+						keys = append(keys, r.Key)
+						return expectSameRow(tx, r)
+					})).To(Succeed())
+					Expect(keys).To(Equal([]string{"k1", "k2"}))
+				})
+			})
 
 			It("serves re-entrant reads through a scan longer than one internal batch", func() {
 				// Every spec above scans three rows, which an adapter reading its

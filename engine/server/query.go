@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 
 	"connectrpc.com/connect"
@@ -279,7 +280,7 @@ func queryRows(
 	// fall through to the scan below, and h.reset is how a decline hands the
 	// heap back empty: the scan re-offers every row the walk already offered,
 	// and the heap does not dedupe.
-	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, h.full, h.reset); err != nil {
+	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, h.want, h.reset); err != nil {
 		return nil, false, err
 	} else if !served {
 		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
@@ -348,11 +349,19 @@ type topK struct {
 	rows       []qrow
 }
 
-// full reports that the heap cannot admit a better row than it already holds.
-// An ordered index walk uses it to stop early: the rows it has are the page,
-// and everything past them sorts worse.
-func (h *topK) full() bool {
-	return !h.unbounded && h.cap > 0 && len(h.rows) >= h.cap
+// want reports how many more rows the heap can admit before it holds the whole
+// page. Zero is the stop signal an ordered index walk reads: the rows it has
+// are the page, and everything past them sorts worse.
+//
+// A positive count is also how far ahead such a walk may read — it resolves
+// candidates in batches, and a batch bigger than this fetches rows the page
+// cannot use. A heap that retains nothing (unbounded, or no cap at all) bounds
+// neither, so it wants an unlimited number.
+func (h *topK) want() int {
+	if h.unbounded || h.cap <= 0 {
+		return math.MaxInt
+	}
+	return max(0, h.cap-len(h.rows))
 }
 
 // reset drops every row kept so far, leaving the heap as newly built. It is the
