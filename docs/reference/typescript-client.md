@@ -661,6 +661,36 @@ view.close();
 - Callbacks must **not mutate** received rows (shared between same-entity watchers).
 - Cross-tab: a commit in another tab re-fires this tab's watchers (via BroadcastChannel).
 
+#### Watching rows by key — `watchRows`
+
+```ts
+type KeyedRows<T> = ReadonlyMap<string, Row<T> | undefined>;
+type KeyedWatchCallback<T> = (rows: KeyedRows<T>, coverage: Coverage) => void;
+
+interface KeyedWatchHandle {
+	close(): void;
+	setKeys(keys: Iterable<string>): void;
+}
+
+const view = client.watchRows(Todo, [ 't1', 't2' ], (rows) => { ... }, { include?, onError? });
+view.setKeys([ 't2', 't3' ]);
+```
+
+- For "what is at these keys", where `watch()` would derive the whole entity to
+  find them. One point read per key at subscribe and, per commit, one per watched
+  key that commit named — no scan at any point, and nothing held in memory but
+  the watched rows.
+- Each callback is a **merge**, not a replacement: it carries the keys that
+  moved, mapped to the row or to `undefined` where the key names no row. A key
+  absent from the map has not changed. The first callback carries every key it
+  was asked for, `undefined` included — "no such row" is an answer, not silence.
+- `coverage` is the **entity's**. While `hydrating` is among its bounds an absent
+  row may still be downloading; a coverage change alone fires a callback with an
+  empty map, which is how that resolves.
+- `setKeys` reads the added keys only — keys already watched keep their rows —
+  and calls made within one turn are read as a single batch.
+- A commit naming an entity without its rows re-reads every watched key.
+
 #### Paging a live result — `setWindow`
 
 `opts.window` replaces any `offset`/`limit` the query carries, and unlike them it
@@ -1356,9 +1386,19 @@ interface ReactEntityApi<D> {
 	): WatchResult<MessageShape<D>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
+	useRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
+	useSuspenseRows(
+		keys: readonly string[],
+		opts?: UseRowsOptions,
+	): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>; // { put, patch, update, del }
 	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;
 }
+
+// One slot per requested key, in the order asked for, plus the same load state.
+type UseRowsResultFor<D> =
+	& readonly (Row<MessageShape<D>> | undefined)[]
+	& WatchState;
 
 // The array client.query returns, plus how the watch behind it is doing.
 type WatchResult<T> = ReadonlyRowSet<T> & WatchState;
@@ -1386,8 +1426,17 @@ interface WatchState {
   Reach for `update` to save an edit to the row the hook just handed back —
   patching `row` itself is a compile error, for the reason in
   [Which write verb](#which-write-verb).
-- Every `useRow` on one (workspace, entity, include) shares a single subscription
-  and a key index; a commit re-renders only the hooks whose own row moved.
+- `useRows` returns one slot per requested key, in the order given, `undefined`
+  where the key names no row. The array is always that length, including before
+  anything has been read, so `rows[i]` names `keys[i]` from the first render;
+  `loading` stays true until every key has been answered. `keys` may be a fresh
+  array every render and is not retained. The array keeps its identity while
+  nothing in it moves.
+- Every `useRow` and `useRows` on one (workspace, entity, include) shares a
+  single subscription, which reads exactly the keys they hold — one point read
+  per key at mount and, per commit, one per watched key that commit named. A
+  commit re-renders only the hooks whose own row moved, and nothing about a row
+  hook scales with the size of the entity.
 - **`opts.window`** (`{ offset?, limit? }`) pages the result the subscription
   already holds, so moving it costs a slice rather than a re-read and does not
   resubscribe — the virtualization path, with `rows.total` sizing the scroller. An

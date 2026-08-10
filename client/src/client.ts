@@ -162,6 +162,9 @@ import {
 	type UndoScopeOptions,
 } from './undo.js';
 import {
+	type KeyedWatchCallback,
+	type KeyedWatchHandle,
+	type KeyedWatchOptions,
 	type WatchCallback,
 	type WatchDelta,
 	WatcherHub,
@@ -172,6 +175,9 @@ import {
 
 /** The handle a watch on a closed client gets: nothing subscribed, nothing to stop. */
 const INERT_WATCH: WatchHandle = Object.freeze({ close: () => {}, setWindow: () => {} });
+
+/** The keyed-watch counterpart of INERT_WATCH. */
+const INERT_KEYED_WATCH: KeyedWatchHandle = Object.freeze({ close: () => {}, setKeys: () => {} });
 
 export type { MirrorTx, MutatorMirror } from './optimistic/rebase.js';
 export type { Row } from './read.js';
@@ -842,6 +848,26 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
+	/**
+	 * Watches rows by key, delivering each key as it is first read and again
+	 * whenever it moves (see KeyedWatchCallback).
+	 *
+	 * Costs one point read per key, and per commit one read per watched key that
+	 * commit named — nothing here scales with the size of the entity. The key set
+	 * moves through the handle, so a view can follow what it shows without
+	 * resubscribing.
+	 *
+	 * Throws synchronously if `schema` names an entity this client does not hold;
+	 * a watch that cannot be established at all is reported on `opts.onError` and
+	 * never delivers. Rows are shared with the entity's other watchers and reused
+	 * across commits, so a callback must not mutate what it receives.
+	 */
+	watchRows<D extends DescMessage>(
+		schema: D,
+		keys: Iterable<string>,
+		cb: KeyedWatchCallback<MessageShape<D>>,
+		opts?: KeyedWatchOptions,
+	): KeyedWatchHandle;
 	resolveRef<D extends DescMessage>(
 		holderSchema: D,
 		fieldLocalName: string,
@@ -1084,6 +1110,22 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			opts?.include,
 			opts?.onError,
 			opts?.window,
+		);
+	}
+
+	watchRows<D extends DescMessage>(
+		schema: D,
+		keys: Iterable<string>,
+		cb: KeyedWatchCallback<MessageShape<D>>,
+		opts?: KeyedWatchOptions,
+	): KeyedWatchHandle {
+		return this.client.registerKeyedWatch(
+			this.workspaceId,
+			schema,
+			keys,
+			cb,
+			opts?.include,
+			opts?.onError,
 		);
 	}
 
@@ -1659,8 +1701,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				});
 			},
 			watch: (cb) => {
-				const handle = scope.watch(schema, (rows) => {
-					cb(fieldOf(rows.find((r) => r.key === rowKey)?.value));
+				const handle = scope.watchRows(schema, [ rowKey ], (rows) => {
+					if (!rows.has(rowKey)) return;
+					cb(fieldOf(rows.get(rowKey)?.value));
 				});
 				return () => handle.close();
 			},
@@ -2561,6 +2604,67 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			setWindow: (next) => {
 				window = next;
 				handle?.setWindow(next);
+			},
+		};
+	}
+
+	watchRows<D extends DescMessage>(
+		schema: D,
+		keys: Iterable<string>,
+		cb: KeyedWatchCallback<MessageShape<D>>,
+		opts?: KeyedWatchOptions,
+	): KeyedWatchHandle {
+		return this.registerKeyedWatch(
+			this.defaultScope().workspaceId,
+			schema,
+			keys,
+			cb,
+			opts?.include,
+			opts?.onError,
+		);
+	}
+
+	/**
+	 * Shared registration for watchRows(). Deferred and guarded exactly as
+	 * registerWatch is; see there for why the schema is checked synchronously and
+	 * a hub failure lands on the status channel.
+	 * @internal
+	 */
+	registerKeyedWatch<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		keys: Iterable<string>,
+		cb: KeyedWatchCallback<MessageShape<D>>,
+		include?: IncludeSpec,
+		onError?: (error: unknown) => void,
+	): KeyedWatchHandle {
+		if (this.closed) return INERT_KEYED_WATCH;
+		this.entityRegistry.bySchema(schema);
+		let handle: KeyedWatchHandle | undefined;
+		let cancelled = false;
+		// Keys set before the hub resolved are not lost: they become the set the
+		// watch registers with, so they cost no extra read.
+		let current = [ ...keys ];
+		void this.hub().then((hub) => {
+			if (cancelled) return;
+			handle = hub.watchKeys(schema, workspaceId, current, cb, include);
+		}).catch((err) => {
+			this.statusTracker.update({
+				lastError: {
+					code: CodeWatchFailed,
+					message: err instanceof Error ? err.message : String(err),
+				},
+			});
+			if (!cancelled && onError) safeInvoke(onError, err, 'watch onError callback');
+		});
+		return {
+			close: () => {
+				cancelled = true;
+				handle?.close();
+			},
+			setKeys: (next) => {
+				current = [ ...next ];
+				handle?.setKeys(current);
 			},
 		};
 	}

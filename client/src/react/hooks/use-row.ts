@@ -2,12 +2,9 @@ import type { DescMessage, MessageInitShape, MessageShape } from '@bufbuild/prot
 import { useCallback, useMemo } from 'react';
 
 import type { UpdateRecipe } from '../../client.js';
-import type { ReadonlyRowSet } from '../../coverage.js';
 import type { PatchInit } from '../../mutations.js';
-import type { WatchHandle } from '../../watch.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
-import { useRowStore } from '../row-store.js';
-import { stableHash } from '../stable-hash.js';
+import { rowWatchIdentity, rowWatchOf, useRowStore } from '../row-store.js';
 import type {
 	RowCasOptions,
 	UseRowCasOptions,
@@ -40,9 +37,11 @@ function withGuard<O extends RowCasOptions & { expectedVersion?: bigint }>(
  * Writes go through per-field LWW; `{ cas: true }` guards one on the row's
  * current `version` (see RowCasOptions).
  *
- * Every useRow on the same workspace/entity/include shares ONE entity watch and
- * a key index in front of it (see row-store.ts), so a list of row hooks costs
- * one subscription, and a commit re-renders only the hooks whose own row moved.
+ * Every useRow and useRows on the same workspace/entity/include shares ONE
+ * keyed watch over the union of their keys (see row-store.ts), so a list of row
+ * hooks costs one subscription and one point read per row, a commit re-renders
+ * only the hooks whose own row moved, and nothing here scales with the size of
+ * the entity.
  */
 export function useRowHook<D extends DescMessage>(
 	schema: D,
@@ -53,23 +52,12 @@ export function useRowHook<D extends DescMessage>(
 	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
 	const include = opts?.include;
-	// Identity of the SHARED watch: the row key is deliberately absent, since
-	// every key on this entity is served from one subscription. Distinct
-	// namespace from useQuery so the two never alias.
-	const identity = stableHash(
-		`row\u0000${scope.workspaceId}\u0000${schema.typeName}`,
-		undefined,
-		include,
-	);
-	// Not memoized, for the reason in use-query: the store re-subscribes on
-	// `identity`, which already folds in the include spec.
-	const subscribe = (
-		onRows: (rows: ReadonlyRowSet<MessageShape<D>>) => void,
-		onError: (error: unknown) => void,
-	): WatchHandle => scope.watch(schema, onRows, { include, onError });
+	const identity = rowWatchIdentity(scope.workspaceId, schema.typeName, include);
 	const cell = useRowStore<MessageShape<D>>({
 		identity,
-		subscribe,
+		// Not memoized, for the reason in use-query: the store re-subscribes on
+		// `identity`, which already folds in the include spec.
+		subscribe: rowWatchOf(scope, schema, include),
 		client,
 		key,
 		suspense,

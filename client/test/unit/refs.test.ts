@@ -352,4 +352,46 @@ describe('watch include reactivity', () => {
 		unsub.close();
 		await client.close();
 	});
+
+	it('hydrates a keyed watch, and re-delivers its keys when a target moves', async () => {
+		// A keyed watch has the same blind spot as a query watch: the changed
+		// project is nowhere in the issue rows it holds, so the keys have to be
+		// re-delivered on a target change even though none of them moved.
+		const client = newClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 't', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i2', title: 'u', project: { id: 'p1' } });
+
+		const seen: (string | undefined)[][] = [];
+		const handle = client.ws('ws1').watchRows(
+			IssueSchema,
+			[ 'i1', 'i2' ],
+			(rows) => {
+				seen.push([ ...rows.values() ].map((row) => {
+					const refs = (row as
+						| (Row<Message> & {
+							refs: Record<string, Row<Message> | undefined>;
+						})
+						| undefined)?.refs;
+					return (refs?.project?.value as { name: string } | undefined)?.name;
+				}));
+			},
+			{ include: { project: true } },
+		);
+		await flush();
+		expect(seen.at(-1)).toEqual([ 'A', 'A' ]);
+
+		await client.db.project.mutate.put({ id: 'p1', name: 'B' });
+		await flush();
+		expect(seen.at(-1)).toEqual([ 'B', 'B' ]);
+
+		// Any project change reaches the watcher — which project a row points at is
+		// not something the touch set says — so this over-fires, and must still be
+		// right about what it hands back.
+		await client.db.project.mutate.put({ id: 'p2', name: 'C' });
+		await flush();
+		expect(seen.at(-1)).toEqual([ 'B', 'B' ]);
+		handle.close();
+		await client.close();
+	});
 });

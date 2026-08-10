@@ -39,7 +39,7 @@ export type { UseUndoResult } from './hooks/use-undo.js';
 export { useWorkspaceStatus } from './hooks/use-workspace-status.js';
 export { SyncProvider } from './provider.js';
 export type { SyncProviderProps } from './provider.js';
-export type { WatchResult, WatchState } from './result.js';
+export type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
 export type { RowCell } from './row-store.js';
 export type {
 	EntityMutate,
@@ -55,6 +55,8 @@ export type {
 	UseRowPatchOptions,
 	UseRowResult,
 	UseRowResultFor,
+	UseRowsOptions,
+	UseRowsResultFor,
 	UseRowUpdateOptions,
 	UseWatchOptions,
 	UseWorkspaceOptions,

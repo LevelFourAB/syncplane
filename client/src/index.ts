@@ -163,6 +163,10 @@ export type { TextInverseOp } from './text/undo-ops.js';
 // inversion it runs on are not part of the surface; only the option types are.
 export type { UndoOptions, UndoScopeOptions } from './undo.js';
 export type {
+	KeyedRows,
+	KeyedWatchCallback,
+	KeyedWatchHandle,
+	KeyedWatchOptions,
 	RowSplice,
 	WatchCallback,
 	WatchDelta,

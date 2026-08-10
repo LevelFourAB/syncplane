@@ -132,10 +132,29 @@ with no default throws a hook-level error naming the fix.
   this key is not one.
 
   Every `useRow` on the same workspace, entity and `include` shares **one**
-  subscription with a key index in front of it, so a list of row hooks costs one
-  watch, and a commit re-renders only the hooks whose own row moved.
+  subscription, which reads exactly the keys those hooks hold. A list of row
+  hooks therefore costs one watch and one point read per row — nothing about it
+  scales with how big the entity is — and a commit re-renders only the hooks
+  whose own row moved.
 
-- **`useSuspenseQuery(query, opts?)` / `useSuspenseRow(key, opts?)`** — the same
+- **`useRows(keys, opts?)`** — the same subscription, read as a set: one result
+  slot per key, in the order given, `undefined` where a key names no row.
+  `loading` stays true until every key has been answered. Reach for it when the
+  keys come from data rather than from the component tree, since a list of
+  `useRow` calls cannot change length between renders.
+
+  ```tsx
+  const selected = db.todo.useRows(selectedIds);
+  const titles = selected.filter((row) => row !== undefined).map((row) =>
+  	row.value.title
+  );
+  ```
+
+  Growing `keys` reads the added keys alone; the rows already held are not
+  re-read, and the returned array keeps its identity while nothing in it moves.
+
+- **`useSuspenseQuery(query, opts?)` / `useSuspenseRow(key, opts?)` /
+  `useSuspenseRows(keys, opts?)`** — the same
   hooks, waiting for the first callback instead of reporting `loading`. They are
   separate hooks rather than an option because the choice picks a fixed hook path
   and must not change between renders of a call site. A subscription that fails

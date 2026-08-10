@@ -14,7 +14,7 @@ import type { Row } from '../read.js';
 import type { IncludeSpec } from '../refs.js';
 import type { WatchWindow } from '../watch.js';
 import type { UseTextResult } from './hooks/use-text.js';
-import type { WatchResult, WatchState } from './result.js';
+import type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
 
 /**
  * The workspace selector every hook accepts. Resolution order is this option,
@@ -77,6 +77,9 @@ export interface UseQueryAllOptions {
  * identity, so two different trees are two subscriptions.
  */
 export type UseRowOptions = UseWatchOptions;
+
+/** Options for `useRows`; the same shared subscription as `useRow` (see UseRowOptions). */
+export type UseRowsOptions = UseRowOptions;
 
 /** The stable per-entity mutate facade (identical to `client.db[key].mutate`). */
 export interface EntityMutate<D extends DescMessage> {
@@ -178,8 +181,17 @@ export interface ReactEntityApi<D extends DescMessage> {
 		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>, TotalOf<Q>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
-	/** `useRow` that suspends until the entity's first callback (see useSuspenseQuery). */
+	/** `useRow` that suspends until this key's first callback (see useSuspenseQuery). */
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
+	/**
+	 * Rows for several keys at once, one slot per key in the order given, sharing
+	 * the subscription `useRow` uses. Reach for it over a list of `useRow` calls
+	 * when the keys come from data (a set of ids, a selection) rather than from
+	 * the component tree — a hook list cannot change length between renders.
+	 */
+	useRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
+	/** `useRows` that suspends until every requested key has been answered. */
+	useSuspenseRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>;
 	/** Live view of a collaborative text field (see useTextHook). */
 	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;
@@ -193,6 +205,13 @@ export interface UseRowResultFor<D extends DescMessage> extends WatchState {
 	update(recipe: UpdateRecipe<D>, opts?: UseRowUpdateOptions): Promise<void>;
 	del(opts?: UseRowCasOptions): Promise<void>;
 }
+
+/**
+ * `useRows`'s result: one slot per requested key, in the order they were given
+ * (see KeyedRowsResult). `loading` stays true until every one of them has been
+ * answered, so a partially-filled array is never mistaken for a settled one.
+ */
+export type UseRowsResultFor<D extends DescMessage> = KeyedRowsResult<MessageShape<D>>;
 
 /** Per-entity hook map keyed exactly like `client.db` (no pluralization). */
 export type ReactEntityApis<E extends readonly DescMessage[]> = {

@@ -210,22 +210,23 @@ describe('useRow load state', () => {
 		// the entity's coverage has to.
 		const client = newClient();
 		const scope = client.ws('ws1');
-		let emit!: (rows: RowSet<unknown>) => void;
-		vi.spyOn(scope, 'watch').mockImplementation(
-			((_s: unknown, cb: (rows: RowSet<unknown>) => void) => {
+		let emit!: (rows: Map<string, undefined>, coverage: Coverage) => void;
+		vi.spyOn(scope, 'watchRows').mockImplementation(
+			((_s: unknown, _keys: unknown, cb: (rows: Map<string, undefined>, c: Coverage) => void) => {
 				emit = cb;
-				return { close: () => {}, setWindow: () => {} };
-			}) as unknown as typeof scope.watch,
+				return { close: () => {}, setKeys: () => {} };
+			}) as unknown as typeof scope.watchRows,
 		);
 		const { result } = renderHook(() => db.todo.useRow('t1'), { wrapper: wrapper(client) });
 		await flush();
 
-		act(() => emit(withCoverage([], { complete: false, bounds: [ 'hydrating' ] })));
+		const absent = new Map<string, undefined>([ [ 't1', undefined ] ]);
+		act(() => emit(absent, { complete: false, bounds: [ 'hydrating' ] }));
 		expect(result.current.loading).toBe(false);
 		expect(result.current.hydrating).toBe(true);
 		expect(result.current.row).toBeUndefined();
 
-		act(() => emit(withCoverage([], { complete: true, bounds: [] })));
+		act(() => emit(new Map(), { complete: true, bounds: [] }));
 		expect(result.current.hydrating).toBe(false);
 		expect(result.current.row).toBeUndefined();
 

@@ -9,6 +9,7 @@
 // structural comparisons — the same contract withCoverage() documents.
 
 import { type Coverage, type ReadonlyRowSet, UNKNOWN, withCoverage } from '../coverage.js';
+import type { Row } from '../read.js';
 
 /** Whether a watch-backed result has arrived, and why it will not. */
 export interface WatchState {
@@ -68,6 +69,36 @@ export function withState<T>(
 		},
 		error: { value: error, enumerable: false, configurable: true },
 	}) as WatchResult<T>;
+}
+
+/**
+ * One row per requested key, in the order they were asked for, with the load
+ * state stamped on (see WatchState). There is always exactly one slot per key,
+ * including before anything has been read; a slot is `undefined` where the key
+ * names no row, or — while `loading` or `hydrating` — where its answer has not
+ * come back yet.
+ *
+ * There is no coverage or total on it, unlike WatchResult: a key set is not a
+ * result cut from a larger one, so there is nothing for either to report.
+ */
+export type KeyedRowsResult<T> = readonly (Row<T> | undefined)[] & WatchState;
+
+/**
+ * Stamps loading/hydrating/error onto a row-per-key array in place. `hydrating`
+ * is passed rather than derived, since the array carries no coverage to derive
+ * it from — it belongs to the entity behind the keys.
+ */
+export function withKeyedState<T>(
+	rows: (Row<T> | undefined)[],
+	loading: boolean,
+	hydrating: boolean,
+	error: Error | undefined,
+): KeyedRowsResult<T> {
+	return Object.defineProperties(rows, {
+		loading: { value: loading, enumerable: false, configurable: true },
+		hydrating: { value: hydrating, enumerable: false, configurable: true },
+		error: { value: error, enumerable: false, configurable: true },
+	}) as unknown as KeyedRowsResult<T>;
 }
 
 /**
