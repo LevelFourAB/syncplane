@@ -220,6 +220,30 @@ Implementations must not serve `Get`/`Put` through their own transactional
 API: the server calls them while it holds an open read snapshot on the same
 adapter.
 
+## Leases (optional)
+
+An adapter may implement `lease.Provider` — one method returning a
+`lease.Locker` — and every process sharing the store then dedups its
+background work out of one lease space: the GC and index sweeps and effects
+drains take a per-`(role, workspace)` try-lock around each pass. The seam
+tolerates weaker guarantees than row storage: a lease may vanish without its
+holder noticing, and callers treat a locker error as "proceed unleased", so an
+implementation buys deduplication, never correctness. Both shipped adapters
+implement it — `sqlitestore` process-locally (its file admits one process,
+which makes that complete) and `pgstore` with session advisory locks on a
+dedicated connection, so a node's leases die with its connection rather than
+waiting out a TTL. `storagetest.Leases` and `storagetest.LeasesNamespaced`
+encode the expectations.
+
+## Wrapping adapters
+
+A wrapper that delegates to an inner adapter (`otelstore` is the shipped
+example) satisfies `storage.Adapter` by forwarding, but that does not carry
+optional capabilities such as `cursorstate.Provider` — they sit outside the
+interface. A wrapper exposes them by implementing `Unwrap() storage.Adapter`;
+the engine probes with `storage.As`, which follows the chain, so a capability
+keeps working however deeply the adapter is wrapped.
+
 ## Adapters
 
 - **`sqlitestore`** — the default, and the one that needs no infrastructure. A
@@ -234,7 +258,7 @@ adapter.
   on the same connection.
 
 Choosing `pgstore` is necessary but not sufficient for multi-node: pokes still
-need a shared notifier (`pgnotify`), and effects still fire once per node. See
+need a shared notifier (`pgnotify`). See
 [Run more than one node](../how-to/run-multiple-nodes.md).
 
 ### Tuning `sqlitestore`
@@ -263,8 +287,3 @@ failing with `SQLITE_BUSY_SNAPSHOT`, the reader pool is `query_only`, and
 before a power loss or kernel panic (not a process crash) for not paying an
 fsync per transaction. A client whose mutation is acked and then lost that way
 will not resend it, since an ack retires the pending entry.
-
-## Deferred, by design
-
-Multi-node GC coordination. The pass is idempotent, so every node may run it;
-an advisory lock would only avoid the duplicate work.

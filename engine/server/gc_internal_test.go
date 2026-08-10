@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/levelfourab/syncplane/engine/lease"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
@@ -59,7 +60,7 @@ func TestCollectAllGarbageSkipsFailingWorkspaces(t *testing.T) {
 		ids:    []string{"a", "b", "c"},
 		failOn: map[string]bool{"b": true},
 	}
-	s := &Server{store: store, gc: &gcLoop{retention: time.Hour, configured: true}}
+	s := &Server{store: store, leases: lease.NewLocal(), gc: &gcLoop{retention: time.Hour, configured: true}}
 
 	err := s.collectAllGarbage(context.Background())
 	if err == nil {
@@ -84,7 +85,7 @@ func TestCollectAllGarbageStopsOnCancel(t *testing.T) {
 			cancel()
 		}
 	}
-	s := &Server{store: store, gc: &gcLoop{retention: time.Hour, configured: true}}
+	s := &Server{store: store, leases: lease.NewLocal(), gc: &gcLoop{retention: time.Hour, configured: true}}
 
 	err := s.collectAllGarbage(ctx)
 	if !errors.Is(err, context.Canceled) {

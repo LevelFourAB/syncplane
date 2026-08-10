@@ -77,8 +77,9 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // interval <= 0 configures retention for manual CollectGarbage calls only.
 // Call Close to stop the background goroutine.
 //
-// Multi-node note: every node may run the pass — it is idempotent — but
-// coordinating via an advisory lock would avoid duplicate work (deferred).
+// Multi-node note: every node may run the pass — it is idempotent — and each
+// workspace's collection runs under a per-workspace lease (see WithLeases), so
+// nodes sharing a lease-providing store divide the sweep rather than repeat it.
 func WithGC(retention, interval time.Duration) Option {
 	return func(s *Server) error {
 		if s.gc == nil {
@@ -463,7 +464,16 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		release, run := s.tryLease(ctx, leaseRoleGC, id)
+		if !run {
+			// Another node holds the lease and is collecting this workspace;
+			// counted so an operator can see the fleet dividing the sweep.
+			s.tel().gcWorkspaces.Add(ctx, 1, metric.WithAttributes(
+				telemetry.AttrOutcome.String(telemetry.OutcomeSkipped)))
+			continue
+		}
 		cerr := s.CollectGarbage(ctx, id)
+		release()
 		// Per-workspace, because the pass swallows individual failures and
 		// carries on: without this, one workspace that fails every pass
 		// forever is indistinguishable from a clean sweep in everything except

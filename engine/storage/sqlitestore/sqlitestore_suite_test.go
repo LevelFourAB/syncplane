@@ -61,6 +61,24 @@ var _ = storagetest.CursorStateNamespaced("sqlite", func() (storage.Adapter, sto
 	}
 })
 
+// The same store handed back twice: one process is the whole sharing a
+// single-process adapter's model permits, so it is also the whole lease space.
+var _ = storagetest.Leases("sqlite", func() (storage.Adapter, storage.Adapter, func()) {
+	store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"))
+	Expect(err).NotTo(HaveOccurred())
+	return store, store, func() {
+		Expect(store.Close()).To(Succeed())
+	}
+})
+
+var _ = storagetest.LeasesNamespaced("sqlite", func() (storage.Adapter, storage.Adapter, func()) {
+	root, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"))
+	Expect(err).NotTo(HaveOccurred())
+	return root.Namespace("a"), root.Namespace("b"), func() {
+		Expect(root.Close()).To(Succeed())
+	}
+})
+
 var _ = Describe("SQLite schema versioning", func() {
 	// The stamps a database created by this binary carries, spelled out rather
 	// than read from the package: changing either is a compatibility break for

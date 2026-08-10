@@ -89,10 +89,10 @@
 // process) and pgstore (PostgreSQL, several nodes over one database, different
 // workspaces committing concurrently).
 //
-// Deferred work, recorded here so future adapters plan for it:
-//
-//   - Multi-node GC coordination: every node may run the GC pass (it is
-//     idempotent), but an advisory lock would avoid duplicate work.
+// Adapters may additionally implement the optional capability interfaces
+// cursorstate.Provider and lease.Provider — both shipped adapters do — which
+// servers resolve through storage.As, so wrapping adapters stay transparent by
+// implementing Unwrap.
 package storage
 
 import (
@@ -302,6 +302,28 @@ type Adapter interface {
 	// next page or the next call.
 	ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error)
 	Close() error
+}
+
+// As returns the first adapter in a's wrapper chain that implements T. It
+// checks a itself, then follows Unwrap() Adapter methods until a match or the
+// end of the chain. Use it instead of a direct type assertion when probing for
+// an optional capability such as cursorstate.Provider: a wrapping adapter
+// (instrumentation, caching) forwards the Adapter methods but not the
+// capability interfaces of what it wraps, and exposes those by implementing
+// Unwrap instead.
+func As[T any](a Adapter) (T, bool) {
+	for a != nil {
+		if t, ok := any(a).(T); ok {
+			return t, true
+		}
+		u, ok := a.(interface{ Unwrap() Adapter })
+		if !ok {
+			break
+		}
+		a = u.Unwrap()
+	}
+	var zero T
+	return zero, false
 }
 
 // ScanOrder is the direction an index walk yields entries in.

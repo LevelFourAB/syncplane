@@ -28,8 +28,11 @@ import (
 // halfway simply leaves the index unready and is retried on the next pass.
 //
 // A build is idempotent, so re-running one costs time and nothing else. That
-// is what lets it be a background sweep with no coordination: the pass may run
-// on several nodes, may be interrupted, and may overlap itself.
+// is what lets it be a background sweep whose only coordination is advisory:
+// each workspace's build runs under a per-workspace lease (see WithLeases), so
+// nodes sharing a lease-providing store divide the sweep — but the pass may
+// still run on several nodes, be interrupted, or overlap itself, and none of
+// that is wrong.
 
 // indexBuildLoop periodically brings every workspace's indexes up to date. It
 // reuses the shape of the GC loop — a ticker goroutine, cancelled by Close,
@@ -122,7 +125,13 @@ func (s *Server) buildAllIndexes(ctx context.Context) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if err := s.BuildIndexes(ctx, id); err != nil {
+		release, run := s.tryLease(ctx, leaseRoleIndexes, id)
+		if !run {
+			continue
+		}
+		err := s.BuildIndexes(ctx, id)
+		release()
+		if err != nil {
 			errs = append(errs, fmt.Errorf("workspace %s: %w", id, err))
 		}
 	}

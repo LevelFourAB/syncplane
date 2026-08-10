@@ -24,6 +24,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/internal/telemetry"
+	"github.com/levelfourab/syncplane/engine/lease"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -380,6 +381,10 @@ type Server struct {
 	// explicit nil wins over the adapter-provided default New would install.
 	cursorState    cursorstate.Store
 	cursorStateSet bool
+	// leases dedups per-workspace background work across the nodes sharing the
+	// store (see the lease package). Never nil once New returns: the adapter's
+	// locker when it provides one, a process-local one otherwise.
+	leases lease.Locker
 	// coalescer is the wrapper New installed over notifier, kept so Close can
 	// stop its timers. Nil when coalescing is disabled (WithNotifyCoalescing(0)),
 	// in which case notifier is whatever the caller supplied, untouched.
@@ -504,6 +509,27 @@ func WithNotifier(n pubsub.Notifier) Option {
 // store write fails.
 func WithCursorStateStore(st cursorstate.Store) Option {
 	return func(s *Server) error { s.cursorState = st; s.cursorStateSet = true; return nil }
+}
+
+// WithLeases installs the lease.Locker the server and its background
+// consumers dedup per-workspace work with: the GC and index sweeps skip a
+// workspace whose lease another node holds, and an effects runtime built on
+// this server leases each (consumer, workspace) drain the same way.
+//
+// Without this option the server asks its storage adapter for a locker
+// (lease.Provider) — both shipped adapters provide one — and falls back to a
+// process-local locker, which dedups nothing across nodes. Leases are
+// advisory: a locker error
+// makes the guarded work proceed unleased, so the option changes how often
+// idempotent work duplicates, never whether it happens.
+func WithLeases(l lease.Locker) Option {
+	return func(s *Server) error {
+		if l == nil {
+			return fmt.Errorf("server: WithLeases requires a locker")
+		}
+		s.leases = l
+		return nil
+	}
 }
 
 // WithHeartbeat sets the Subscribe stream heartbeat interval (default 30s).
@@ -642,8 +668,15 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		}
 	}
 	if !s.cursorStateSet {
-		if p, ok := store.(cursorstate.Provider); ok {
+		if p, ok := storage.As[cursorstate.Provider](store); ok {
 			s.cursorState = p.CursorStateStore()
+		}
+	}
+	if s.leases == nil {
+		if p, ok := storage.As[lease.Provider](store); ok {
+			s.leases = p.Leases()
+		} else {
+			s.leases = lease.NewLocal()
 		}
 	}
 	// Telemetry is resolved before anything can record on it: the background
@@ -678,6 +711,17 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	}
 	s.indexBuild.start(s)
 	return s, nil
+}
+
+// Leases returns the lease.Locker this server dedups per-workspace background
+// work with — the one WithLeases installed, or the resolved default. Never
+// nil. Background consumers built on the server (an effects runtime, an
+// application worker reacting to this server's workspaces) should lease their
+// per-workspace work here so every process sharing the store dedups in one
+// space; the lease package documents role naming and what a lease does and
+// does not guarantee.
+func (s *Server) Leases() lease.Locker {
+	return s.leases
 }
 
 // applyDeclarations installs what the declaration options recorded, in

@@ -63,6 +63,80 @@ var _ = storagetest.CursorStateNamespaced("postgres", func() (storage.Adapter, s
 	}
 })
 
+// Two opens of one database stand in for two server nodes sharing a lease
+// space — the deployment the leases exist for.
+var _ = storagetest.Leases("postgres", func() (storage.Adapter, storage.Adapter, func()) {
+	dsn := pgtest.DSN()
+	a, err := pgstore.Open(context.Background(), dsn)
+	Expect(err).NotTo(HaveOccurred())
+	b, err := pgstore.Open(context.Background(), dsn)
+	Expect(err).NotTo(HaveOccurred())
+	return a, b, func() {
+		Expect(a.Close()).To(Succeed())
+		Expect(b.Close()).To(Succeed())
+	}
+})
+
+var _ = storagetest.LeasesNamespaced("postgres", func() (storage.Adapter, storage.Adapter, func()) {
+	root := open()
+	return root.Namespace("a"), root.Namespace("b"), func() {
+		Expect(root.Close()).To(Succeed())
+	}
+})
+
+var _ = Describe("Postgres leases", func() {
+	ctx := context.Background()
+
+	It("frees a node's leases when its store closes", func() {
+		// The failover story: leases are session advisory locks, so a node
+		// that crashes or shuts down releases everything it held the moment
+		// its connection dies — no TTL to wait out.
+		dsn := pgtest.DSN()
+		holder, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		survivor, err := pgstore.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(survivor.Close()).To(Succeed()) })
+
+		_, ok, err := holder.Leases().TryAcquire(ctx, "gc", "ws1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+
+		_, ok, err = survivor.Leases().TryAcquire(ctx, "gc", "ws1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeFalse())
+
+		Expect(holder.Close()).To(Succeed())
+		Eventually(func() bool {
+			release, ok, err := survivor.Leases().TryAcquire(ctx, "gc", "ws1")
+			if err != nil || !ok {
+				return false
+			}
+			release()
+			return true
+		}, 5*time.Second).Should(BeTrue())
+	})
+
+	It("scopes leases to the schema, so deployments sharing a database stay apart", func() {
+		// Two DSNs from pgtest differ only in search_path — the same shape as
+		// a staging and a production deployment on one database server.
+		a, err := pgstore.Open(ctx, pgtest.DSN())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(a.Close()).To(Succeed()) })
+		b, err := pgstore.Open(ctx, pgtest.DSN())
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(b.Close()).To(Succeed()) })
+
+		_, ok, err := a.Leases().TryAcquire(ctx, "gc", "ws1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+
+		_, ok, err = b.Leases().TryAcquire(ctx, "gc", "ws1")
+		Expect(err).NotTo(HaveOccurred())
+		Expect(ok).To(BeTrue())
+	})
+})
+
 var _ = Describe("Postgres migrations", func() {
 	ctx := context.Background()
 

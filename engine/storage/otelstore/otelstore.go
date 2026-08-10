@@ -104,6 +104,12 @@ func (s *store) Namespace(name string) storage.Adapter {
 	return &store{Adapter: s.Adapter.Namespace(name), mx: s.mx}
 }
 
+// Unwrap returns the wrapped adapter. Embedding promotes only the methods of
+// storage.Adapter, so a capability the inner adapter implements alongside it —
+// cursorstate.Provider, say — is invisible on the wrapper; Unwrap is how
+// storage.As reaches it.
+func (s *store) Unwrap() storage.Adapter { return s.Adapter }
+
 // WithReadTx times the read transaction as a whole.
 func (s *store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
 	return s.observe(ctx, workspaceID, "read", func(ctx context.Context) error {

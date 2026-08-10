@@ -22,11 +22,13 @@
 //
 // # Single instance
 //
-// Nothing leases a workspace to one connector. Two processes converging the
-// same workspace both egress to the source, so run exactly one instance until
-// leasing lands. A rolling deploy counts: the outgoing process converges while
-// the incoming one starts, and Close waiting on in-flight passes narrows that
-// window without closing it.
+// Nothing leases a workspace to one connector, and the bookkeeping that keeps
+// a write from echoing — cursors and shadows — lives in the connector's own
+// State rather than the engine's store, where a second instance would not see
+// it. Two processes converging the same workspace both egress to the source,
+// so run exactly one instance. A rolling deploy counts: the outgoing process
+// converges while the incoming one starts, and Close waiting on in-flight
+// passes narrows that window without closing it.
 package connect
 
 import (

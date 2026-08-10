@@ -2,6 +2,7 @@ package effects
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -151,7 +152,7 @@ func (rt *Runtime) runPass(ctx context.Context, p *pair) {
 	p.run.Unlock()
 
 	logger := rt.logger.With("consumer", p.key.consumer, "workspace", p.key.workspace)
-	if err != nil && ctx.Err() == nil {
+	if err != nil && ctx.Err() == nil && !errors.Is(err, ErrLeaseHeld) {
 		logger.LogAttrs(ctx, slog.LevelError, "effect pass failed", slog.Any("err", err))
 	}
 
@@ -164,6 +165,18 @@ func (rt *Runtime) runPass(ctx context.Context, p *pair) {
 		return
 	}
 	p.state = pairIdle
+	if errors.Is(err, ErrLeaseHeld) {
+		// Someone else's turn, not a failure: no backoff, no health, and no
+		// reason to stay resident. If the holder dies mid-drain the position
+		// it never advanced brings the workspace back on a later sweep.
+		logger.LogAttrs(ctx, slog.LevelDebug, "pass skipped; lease held elsewhere")
+		if p.dirty {
+			rt.scheduleLocked(p)
+			return
+		}
+		rt.evictLocked(p)
+		return
+	}
 	if err != nil {
 		if delay := time.Until(h.NextAttempt); !h.NextAttempt.IsZero() && delay > 0 {
 			p.state = pairParked

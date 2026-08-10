@@ -286,12 +286,18 @@ share the file. The storage interface has always permitted the concurrency, and
 `pgstore` takes it — different workspaces commit in parallel, and any number of
 nodes share the database.
 
-What multi-node still does not give you, even with both:
-
-- **Effects fire once per node**, not once. A consumer running on three nodes
-  reacts three times, which is silent rather than convergent.
-- **GC has no cross-node coordination.** The pass is idempotent so every node
-  may run it; they duplicate the work.
+**Background work dedups by lease, and only by lease.** Each GC pass, index
+build and effects drain takes an advisory per-workspace lease (`pgstore` backs
+it with advisory locks, so it comes free with the store), which makes nodes
+divide the sweeps and makes single-fire the common case for effects. It is
+deliberately not fencing: a lease can vanish with a dropped connection and its
+holder keeps working, and a locker error makes the pass run unleased rather
+than not at all. The alternative — leases that correctness depends on — needs
+fencing tokens checked on every write, heartbeats, and an answer for what a
+workspace does while its holder is dead but not yet expired. The engine's
+background work is idempotent anyway, so it buys none of that; a duplicated
+pass costs time, and a duplicated effect delivery is the at-least-once
+contract handlers already carry.
 
 Sizing, single node: one process, one SQLite file, tens of apps at human-paced
 write rates. See [the scale envelope](../how-to/host-multiple-apps.md#scale-envelope)

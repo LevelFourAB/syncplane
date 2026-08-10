@@ -289,6 +289,9 @@ type Store struct {
 	pool  *pgxpool.Pool
 	ns    string
 	owner bool
+	// leases backs the lease.Provider implementation (see leases.go), shared
+	// by every derived namespace so they lease out of one space.
+	leases *pgLeases
 }
 
 // Option configures Open.
@@ -342,7 +345,9 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &Store{pool: pool, ns: cfg.ns, owner: true}, nil
+	// The lease session dials lazily, on the first TryAcquire, so a
+	// deployment that never leases never pays the connection.
+	return &Store{pool: pool, ns: cfg.ns, owner: true, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
 }
 
 // migrate brings the database up to len(migrations), under an advisory lock so
@@ -411,7 +416,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 // Open owns the pool and must outlive every derived store. The server-global
 // schema catalog is shared across namespaces.
 func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{pool: s.pool, ns: ns}
+	return &Store{pool: s.pool, ns: ns, leases: s.leases}
 }
 
 // Close closes the pool if this store owns it (came from Open); on a
@@ -420,6 +425,7 @@ func (s *Store) Close() error {
 	if !s.owner {
 		return nil
 	}
+	s.leases.close()
 	s.pool.Close()
 	return nil
 }

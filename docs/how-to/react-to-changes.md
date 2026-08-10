@@ -195,18 +195,25 @@ The tombstone horizon is therefore the bound on how long a consumer may be down.
 Size [`WithGC`](../reference/server.md) retention accordingly. A consumer
 stranded below the horizon is eventually collected by the GC pass, loudly.
 
-## Single instance
+## Running more than one instance
 
-The position lives in the engine's store, but nothing leases a workspace to one
-drainer. Two processes running the same consumer each drain the feed and each
-fire the handler. **Run exactly one instance of a given consumer** — in a
-multi-node deployment, that means a single dedicated process rather than every
-node serving traffic.
+Every pass takes a per-`(consumer, workspace)` lease from the server's locker
+(`server.Leases`), so instances of the same consumer against one store divide
+the workspaces rather than each draining every one. With `pgstore` the lease
+space is the shared database and this needs no configuration; with an adapter
+that provides no locker the lease is process-local and dedups nothing across
+processes.
 
-That includes overlap during a **rolling deploy**: the outgoing process keeps
-draining while the incoming one starts, so effects duplicate across the handover.
+The lease is advisory, so **single delivery is the common case, not a
+guarantee** — at-least-once stands, and handlers stay idempotent. In
+particular a **rolling deploy** can still overlap: a lease lost to a dropped
+connection frees the workspace while the old holder is mid-pass.
 `Runtime.Close` waits for in-flight passes, which narrows the window without
 closing it — stop before starting if duplicate delivery is expensive.
+
+A skipped pass leaves the consumer's position untouched, which is what brings
+the workspace back on a later sweep if the lease holder dies without
+finishing. `Drain` reports the skip as `effects.ErrLeaseHeld`.
 
 ## Related
 

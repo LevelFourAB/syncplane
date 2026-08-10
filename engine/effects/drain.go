@@ -24,7 +24,9 @@ import (
 // Backoff is ignored — the caller asked — and, like a worker, it drains the feed
 // to exhaustion before returning. It does honour the per-workspace ordering
 // contract: if a worker is mid-pass on this same pair, Drain waits for it rather
-// than running a second pass alongside it.
+// than running a second pass alongside it. It also honours the cross-process
+// one, returning ErrLeaseHeld without draining when another process holds this
+// consumer's lease on the workspace.
 func (rt *Runtime) Drain(ctx context.Context, consumer, workspaceID string) error {
 	rt.mu.Lock()
 	c, ok := rt.consumers[consumer]
@@ -51,8 +53,24 @@ func (rt *Runtime) Drain(ctx context.Context, consumer, workspaceID string) erro
 }
 
 // pass is one drain plus the health it produces. A cancelled context is a
-// shutdown rather than a failure, and is not recorded as one.
+// shutdown rather than a failure, and is not recorded as one. A pass whose
+// lease another process holds returns ErrLeaseHeld without draining or
+// recording anything.
 func (rt *Runtime) pass(ctx context.Context, c *consumer, workspaceID string) (Health, error) {
+	release, ok, err := rt.srv.Leases().TryAcquire(ctx, "effects/"+c.name, workspaceID)
+	switch {
+	case err != nil:
+		// A lease dedups delivery; it does not license skipping it. A locker
+		// the runtime cannot reach must not stop reactions, so the pass runs
+		// unleased and at-least-once carries the duplicate risk it always has.
+		rt.logger.LogAttrs(ctx, slog.LevelWarn, "lease unavailable; draining unleased",
+			slog.String("consumer", c.name), slog.String("workspace", workspaceID), slog.Any("err", err))
+	case !ok:
+		return Health{}, ErrLeaseHeld
+	default:
+		defer release()
+	}
+
 	// A pass is the natural span: it is one consumer's unit of work on one
 	// workspace, it is where sink I/O happens, and it is what backoff schedules.
 	// It has no parent — the write that triggered it committed in another

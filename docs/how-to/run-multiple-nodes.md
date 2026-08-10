@@ -86,18 +86,27 @@ Pokes reach every node, so a write on any node wakes clients on all of them.
 Different workspaces commit concurrently instead of serializing behind one
 writer connection.
 
-Three things do not change, and are worth planning around rather than
+Background work divides across nodes by per-workspace leases. `pgstore` backs
+them with advisory locks, so a server built on it dedups with no
+configuration: the GC and index sweeps skip a workspace another node is
+collecting, and an effects runtime leases each (consumer, workspace) drain the
+same way. A node that crashes releases everything it held with its connection
+— there is no lease TTL to wait out. The leases are advisory, which cuts both
+ways: work stays correct without them, and none of it may _depend_ on them —
+delivery to an effect handler is still at-least-once, and a rolling deploy can
+still hand one change to two processes. See
+[Limits and trade-offs](../explanation/limits-and-trade-offs.md) for why the
+engine dedups rather than fences.
+
+Two things do not change, and are worth planning around rather than
 discovering:
 
-- **Effects fire once per node, not once.** A consumer registered on three
-  nodes reacts three times to the same change. Until there is a workspace
-  ownership lease, run effect consumers in a single dedicated process rather
-  than on every node serving traffic.
-- **GC duplicates work.** Every node may run the pass — it is idempotent — and
-  they all do.
-- **Connectors keep their cursor in connector-owned state**, whose shipped
-  default is a local SQLite file. A connector does not follow the engine onto
-  Postgres; give it its own durable state or run it in one place.
+- **Effect handlers must stay idempotent.** The lease makes single delivery
+  the common case across nodes; it does not make it a guarantee.
+- **Connectors do not take leases**, and they keep their cursors and shadows in
+  connector-owned state — shipped default, a local SQLite file — which a second
+  instance never sees. Two instances converging one workspace echo each other's
+  writes, so run a connector in exactly one process.
 
 ## Delivery is best-effort, on purpose
 

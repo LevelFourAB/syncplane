@@ -65,6 +65,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
+	"github.com/levelfourab/syncplane/engine/lease"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -302,6 +303,9 @@ type Store struct {
 	write *sql.DB
 	ns    string
 	owner bool
+	// leases backs the lease.Provider implementation (see leases.go), shared
+	// by every derived namespace so they lease out of one space.
+	leases *lease.Local
 
 	// The maintenance loop, owned by the Store Open returned: stop asks it to
 	// return and done reports that it has. Both are nil on a derived store and
@@ -472,7 +476,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 		}
 		read.SetConnMaxIdleTime(readIdleTimeout)
 	}
-	s := &Store{read: read, write: write, ns: cfg.ns, owner: true}
+	s := &Store{read: read, write: write, ns: cfg.ns, owner: true, leases: lease.NewLocal()}
 	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
 	// gets before Close.
@@ -574,7 +578,7 @@ func isMemory(path string) bool {
 // no-op — the Store returned by Open owns the handle and must outlive every
 // derived store. The server-global schema catalog is shared across namespaces.
 func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{read: s.read, write: s.write, ns: ns}
+	return &Store{read: s.read, write: s.write, ns: ns, leases: s.leases}
 }
 
 // migrate brings a database up to baselineVersion+len(migrations), creating the

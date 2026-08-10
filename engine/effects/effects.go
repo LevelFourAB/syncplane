@@ -69,18 +69,23 @@
 // are proportional to workspaces that have been written, neither is on the path
 // a reaction takes, and GC collects the positions of consumers that have gone.
 //
-// # Single instance
+// # Several instances
 //
-// The cursor is engine-owned, but nothing yet leases a workspace to one drainer.
-// Two processes running the same consumer each drain the feed and each fire the
-// handler, so run exactly one instance of a given consumer until leasing lands.
-// A rolling deploy counts: the outgoing process drains while the incoming one
-// starts, and Close waiting on in-flight passes narrows that window without
-// closing it.
+// Every pass runs under a per-(consumer, workspace) lease from the server's
+// locker (server.Leases), so processes running the same consumer against one
+// store divide the workspaces instead of each draining every one. The lease is
+// advisory: it can be lost without the holder noticing, and a locker the
+// runtime cannot reach makes the pass run unleased. Single delivery is
+// therefore the common case, not a contract — at-least-once stands, and a
+// rolling deploy or a lost lease can still hand one change to two processes.
+// The dedup is only as wide as the locker's: with a process-local one (the
+// fallback when the adapter is not a lease.Provider) concurrent processes
+// still each fire the handler.
 package effects
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -94,6 +99,15 @@ import (
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
+
+// ErrLeaseHeld reports a pass that was skipped because another drainer —
+// usually the same consumer on another node — holds the (consumer, workspace)
+// lease and is mid-drain on the same work. Drain returns it; the background
+// loops treat it as someone else's turn and leave the position, the health
+// record and the backoff state alone. The position not advancing is what
+// brings the workspace back on a later sweep if the holder dies without
+// finishing.
+var ErrLeaseHeld = errors.New("effects: another drainer holds the lease for this consumer and workspace")
 
 // Config wires a Runtime to a server.
 type Config struct {

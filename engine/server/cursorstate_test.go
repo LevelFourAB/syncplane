@@ -19,6 +19,7 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage/otelstore"
 )
 
 // fakeStateStore is a map-backed cursorstate.Store the specs steer: failPuts
@@ -261,5 +262,15 @@ var _ = Describe("Cursor state store", func() {
 		plain := serve(newTestServer())
 		fill(plain)
 		Expect(decode(bootstrapCursor(plain)).GetSetsRef().GetId()).NotTo(BeZero())
+	})
+
+	It("finds the adapter-provided store through a wrapping adapter", func() {
+		// syncplaned wraps the root adapter in otelstore before building
+		// servers on it; the provider must stay discoverable through the wrap.
+		wrapped, err := otelstore.Wrap(newTestStore())
+		Expect(err).NotTo(HaveOccurred())
+		instrumented := serve(mustNewServer(wrapped, testEntities()))
+		fill(instrumented)
+		Expect(decode(bootstrapCursor(instrumented)).GetSetsRef().GetId()).NotTo(BeZero())
 	})
 })
