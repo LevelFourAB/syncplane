@@ -40,6 +40,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Sync an external store (connectors)](how-to/sync-an-external-store.md)
 - [Host multiple apps in one process](how-to/host-multiple-apps.md)
 - [Run more than one node](how-to/run-multiple-nodes.md)
+- [Deploy for high availability](how-to/deploy-for-high-availability.md)
 - [Observe the engine (OpenTelemetry)](how-to/observe-the-engine.md)
 
 **Client**

@@ -108,6 +108,10 @@ discovering:
   instance never sees. Two instances converging one workspace echo each other's
   writes, so run a connector in exactly one process.
 
+Surviving the loss of one of those nodes, or of the database under them, is a
+separate concern: see
+[Deploy for high availability](deploy-for-high-availability.md).
+
 ## Delivery is best-effort, on purpose
 
 A missed poke costs one poll interval, never a lost write. `pgnotify` leans on
