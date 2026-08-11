@@ -691,6 +691,50 @@ view.setKeys([ 't2', 't3' ]);
   and calls made within one turn are read as a single batch.
 - A commit naming an entity without its rows re-reads every watched key.
 
+#### Watching rows across workspaces — `watchRowsAll`
+
+```ts
+interface RowRef {
+	workspaceId: string;
+	key: string;
+}
+type ScopedKeyedRow<T> = RowRef & { row: Row<T> | undefined };
+type ScopedKeyedRows<T> = readonly ScopedKeyedRow<T>[];
+type ScopedKeyedWatchCallback<T> = (
+	rows: ScopedKeyedRows<T>,
+	coverage: Coverage,
+) => void;
+
+interface ScopedKeyedWatchHandle {
+	close(): void;
+	setRefs(refs: Iterable<RowRef>): void;
+}
+
+const refs = [ { workspaceId: 'personal', key: 't1' }, { workspaceId: 'work', key: 't9' } ];
+const view = client.watchRowsAll(Todo, refs, (rows) => { ... }, { include?, onError? });
+view.setRefs([ ...refs, { workspaceId: 'work', key: 't10' } ]);
+```
+
+- `watchRows` addressed by bare key within one workspace; this names each row by
+  workspace **and** key, so the refs may span every workspace the client holds
+  and the same key in two of them is two independent rows. It is on the client,
+  not on `client.ws(...)`.
+- The cross-workspace counterpart of `watchQueryAll` for a set that comes from
+  outside the entity — a pinned list, a feed, ids held elsewhere — where no
+  predicate describes the membership.
+- Deliveries are entries rather than a map, and merge exactly as `watchRows`
+  does: a ref absent from a batch has not changed, and the first callback carries
+  every ref it was asked for, absent rows included.
+- One subscription and one batched read serve the whole set however many
+  workspaces it spans. Per commit it re-reads only the watched refs that commit
+  named; a commit naming an entity without its rows re-reads the refs **in that
+  commit's workspace** and no others.
+- `coverage` is the entity's across every workspace: complete only where it is
+  complete in each of them.
+- Rows are shared with the entity's other cross-workspace watchers, which is a
+  different pool from the one the per-workspace watchers share: a row watched
+  both ways is read and decoded twice.
+
 #### Paging a live result — `setWindow`
 
 `opts.window` replaces any `offset`/`limit` the query carries, and unlike them it
@@ -1391,6 +1435,10 @@ interface ReactEntityApi<D> {
 		keys: readonly string[],
 		opts?: UseRowsOptions,
 	): UseRowsResultFor<D>;
+	useRowsAll(
+		refs: readonly RowRef[],
+		opts?: UseRowsAllOptions,
+	): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>; // { put, patch, update, del }
 	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;
 }
@@ -1437,6 +1485,15 @@ interface WatchState {
   per key at mount and, per commit, one per watched key that commit named. A
   commit re-renders only the hooks whose own row moved, and nothing about a row
   hook scales with the size of the entity.
+- `useRowsAll` is `useRows` over `RowRef`s (`{ workspaceId, key }`) instead of
+  bare keys, so one call site holds rows from several workspaces — the set no
+  `useQueryAll` predicate describes. Result shape, ordering and load state match
+  `useRows`; `opts` is `{ include }` only, the enclosing `<WorkspaceProvider>` is
+  ignored, and there is no suspense flavor — all matching `useQueryAll`. Every
+  `useRowsAll` on one (entity, include) shares one cross-workspace subscription,
+  separate from the per-workspace one above: a row read through both is read
+  twice. Writes route back through `client.ws(row.workspaceId)`; see
+  [`watchRowsAll`](#watching-rows-across-workspaces--watchrowsall).
 - **`opts.window`** (`{ offset?, limit? }`) pages the result the subscription
   already holds, so moving it costs a slice rather than a re-read and does not
   resubscribe — the virtualization path, with `rows.total` sizing the scroller. An

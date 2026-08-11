@@ -44,6 +44,18 @@ const everywhere = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) });
 const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
 ```
 
+When the set is not a predicate but a list of specific rows — a personal task
+list, a pinned set — name them by ref instead. `client.watchRowsAll(schema,
+refs, cb, opts?)` and `db.todo.useRowsAll(refs, opts?)` take
+`{ workspaceId, key }` and cost one point read per ref rather than a scan:
+
+```tsx
+const tasks = db.todo.useRowsAll([
+	{ workspaceId: 'personal', key: 't1' },
+	{ workspaceId: 'work', key: 't9' },
+]);
+```
+
 Writing back does not go through a hook: a mutate hook binds to one workspace,
 so a component that writes into whichever workspace a row came from takes
 `useSyncClient()` and calls `client.ws(row.workspaceId).db.todo.mutate`.

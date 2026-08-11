@@ -165,6 +165,9 @@ import {
 	type KeyedWatchCallback,
 	type KeyedWatchHandle,
 	type KeyedWatchOptions,
+	type RowRef,
+	type ScopedKeyedWatchCallback,
+	type ScopedKeyedWatchHandle,
 	type WatchCallback,
 	type WatchDelta,
 	WatcherHub,
@@ -177,7 +180,10 @@ import {
 const INERT_WATCH: WatchHandle = Object.freeze({ close: () => {}, setWindow: () => {} });
 
 /** The keyed-watch counterpart of INERT_WATCH. */
-const INERT_KEYED_WATCH: KeyedWatchHandle = Object.freeze({ close: () => {}, setKeys: () => {} });
+const INERT_REF_WATCH: ScopedKeyedWatchHandle = Object.freeze({
+	close: () => {},
+	setRefs: () => {},
+});
 
 export type { MirrorTx, MutatorMirror } from './optimistic/rebase.js';
 export type { Row } from './read.js';
@@ -2625,29 +2631,54 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Shared registration for watchRows(). Deferred and guarded exactly as
-	 * registerWatch is; see there for why the schema is checked synchronously and
-	 * a hub failure lands on the status channel.
+	 * Like watchRows(), but the refs may name rows in any workspace this client
+	 * holds — the cross-workspace counterpart of watchQueryAll() for a set that
+	 * comes from outside the entity rather than from a predicate.
+	 *
+	 * Every ref carries its own workspace, so a key present in two workspaces is
+	 * two independent refs. One subscription and one batched read serve the whole
+	 * set however many workspaces it spans, and a commit re-reads only the
+	 * watched refs it named.
+	 *
+	 * Throws synchronously if `schema` names an entity this client does not hold;
+	 * a watch that cannot be established at all is reported on `opts.onError` and
+	 * never delivers. Rows are shared with the entity's other cross-workspace
+	 * watchers and reused across commits, so a callback must not mutate what it
+	 * receives.
+	 */
+	watchRowsAll<D extends DescMessage>(
+		schema: D,
+		refs: Iterable<RowRef>,
+		cb: ScopedKeyedWatchCallback<MessageShape<D>>,
+		opts?: KeyedWatchOptions,
+	): ScopedKeyedWatchHandle {
+		return this.registerRefWatch(undefined, schema, refs, cb, opts?.include, opts?.onError);
+	}
+
+	/**
+	 * Shared registration for watchRows() and watchRowsAll(). Deferred and
+	 * guarded exactly as registerWatch is; see there for why the schema is
+	 * checked synchronously and a hub failure lands on the status channel.
 	 * @internal
 	 */
-	registerKeyedWatch<D extends DescMessage>(
-		workspaceId: string,
+	registerRefWatch<D extends DescMessage>(
+		workspaceId: string | undefined,
 		schema: D,
-		keys: Iterable<string>,
-		cb: KeyedWatchCallback<MessageShape<D>>,
+		refs: Iterable<RowRef>,
+		cb: ScopedKeyedWatchCallback<MessageShape<D>>,
 		include?: IncludeSpec,
 		onError?: (error: unknown) => void,
-	): KeyedWatchHandle {
-		if (this.closed) return INERT_KEYED_WATCH;
+	): ScopedKeyedWatchHandle {
+		if (this.closed) return INERT_REF_WATCH;
 		this.entityRegistry.bySchema(schema);
-		let handle: KeyedWatchHandle | undefined;
+		let handle: ScopedKeyedWatchHandle | undefined;
 		let cancelled = false;
-		// Keys set before the hub resolved are not lost: they become the set the
+		// Refs set before the hub resolved are not lost: they become the set the
 		// watch registers with, so they cost no extra read.
-		let current = [ ...keys ];
+		let current = [ ...refs ];
 		void this.hub().then((hub) => {
 			if (cancelled) return;
-			handle = hub.watchKeys(schema, workspaceId, current, cb, include);
+			handle = hub.watchRefs(schema, workspaceId, current, cb, include);
 		}).catch((err) => {
 			this.statusTracker.update({
 				lastError: {
@@ -2662,9 +2693,42 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				cancelled = true;
 				handle?.close();
 			},
-			setKeys: (next) => {
+			setRefs: (next) => {
 				current = [ ...next ];
-				handle?.setKeys(current);
+				handle?.setRefs(current);
+			},
+		};
+	}
+
+	/**
+	 * Shared registration for the workspace-scoped watchRows(), which names its
+	 * rows by bare key and is delivered a keyed map rather than refs.
+	 * @internal
+	 */
+	registerKeyedWatch<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		keys: Iterable<string>,
+		cb: KeyedWatchCallback<MessageShape<D>>,
+		include?: IncludeSpec,
+		onError?: (error: unknown) => void,
+	): KeyedWatchHandle {
+		const handle = this.registerRefWatch(
+			workspaceId,
+			schema,
+			[ ...keys ].map((key) => ({ workspaceId, key })),
+			(rows, coverage) => {
+				const map = new Map<string, Row<MessageShape<D>> | undefined>();
+				for (const { key, row } of rows) map.set(key, row);
+				cb(map, coverage);
+			},
+			include,
+			onError,
+		);
+		return {
+			close: () => handle.close(),
+			setKeys: (next) => {
+				handle.setRefs([ ...next ].map((key) => ({ workspaceId, key })));
 			},
 		};
 	}

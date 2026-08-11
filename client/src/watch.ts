@@ -137,8 +137,60 @@ export interface KeyedWatchHandle {
 	setKeys(keys: Iterable<string>): void;
 }
 
+/**
+ * Names one row of an entity: the workspace it lives in, and its key within
+ * that workspace. A bare key does not identify a row outside a workspace scope.
+ */
+export interface RowRef {
+	workspaceId: string;
+	key: string;
+}
+
+/** One ref a cross-workspace keyed watch reports, with the row it now names. */
+export interface ScopedKeyedRow<T> extends RowRef {
+	/** Undefined where the ref names no row in the local store. */
+	row: Row<T> | undefined;
+}
+
+/**
+ * What one cross-workspace keyed-watch callback carries: the watched refs whose
+ * row moved, each with its current row.
+ *
+ * Merges into what the consumer holds, as `KeyedRows` does: a ref is carried
+ * when it is first read and whenever it moves after that, so a ref absent from
+ * the batch has not changed. Order is unspecified.
+ */
+export type ScopedKeyedRows<T> = readonly ScopedKeyedRow<T>[];
+
+/**
+ * Receives the watched refs that moved, together with how much of the entity
+ * the local store holds across every workspace — complete only where it is
+ * complete in each of them (see KeyedWatchCallback for what the coverage says
+ * about an absent row).
+ */
+export type ScopedKeyedWatchCallback<T> = (
+	rows: ScopedKeyedRows<T>,
+	coverage: Coverage,
+) => void;
+
+/**
+ * Controls a live cross-workspace keyed watch.
+ *
+ * Both methods are safe to call before the first callback arrives, and after
+ * `close`.
+ */
+export interface ScopedKeyedWatchHandle {
+	/** Stops delivering rows. Idempotent. */
+	close(): void;
+	/** Replaces the watched ref set; see KeyedWatchHandle.setKeys for the cost. */
+	setRefs(refs: Iterable<RowRef>): void;
+}
+
 /** A handle to a keyed watch that was never established (a closed client). */
-const INERT_KEYED: KeyedWatchHandle = Object.freeze({ close: () => {}, setKeys: () => {} });
+const INERT_KEYED: ScopedKeyedWatchHandle = Object.freeze({
+	close: () => {},
+	setRefs: () => {},
+});
 
 /** Options for `watchRows`. A keyed watch has no result order to page through. */
 export interface KeyedWatchOptions {
@@ -307,23 +359,32 @@ interface Watcher {
 interface KeyWatcher {
 	schema: DescMessage;
 	entity: string;
-	/** Keyed watches are workspace-scoped: a row key is unique within one. */
-	workspaceId: string;
-	keys: Set<string>;
-	/** Keys awaiting their first read; flushed as one batch (see scheduleAdds). */
+	/**
+	 * The workspace every watched ref lives in, or undefined for a watch whose
+	 * refs may name any of them. It is only ever the scan scope and the touch
+	 * filter — each ref carries its own workspace regardless.
+	 */
+	workspaceId?: string;
+	/**
+	 * The watched refs, by row id (see rowId). Every map below is keyed the same
+	 * way, so a cross-workspace watcher holding the same key in two workspaces
+	 * keeps them apart.
+	 */
+	refs: Map<string, RowRef>;
+	/** Refs awaiting their first read; flushed as one batch (see scheduleAdds). */
 	added: Set<string>;
 	/** Whether a flush of `added` is already scheduled. */
 	flushing: boolean;
-	/** The rows behind the watched keys. A watched key absent here has no row. */
+	/** The rows behind the watched refs. A watched ref absent here has no row. */
 	held: Map<string, ResultRow>;
 	/**
-	 * Keys changed since the last delivered callback, with the row they changed
+	 * Refs changed since the last delivered callback, with the row they changed
 	 * to. It accumulates for the same reason Watcher.pending does: a callback can
 	 * be dropped by a newer dispatch, and these deliveries are diffs, so a
-	 * dropped one would otherwise lose the keys it carried.
+	 * dropped one would otherwise lose the refs it carried.
 	 */
 	pending: Map<string, ResultRow | undefined>;
-	cb: KeyedWatchCallback<unknown>;
+	cb: ScopedKeyedWatchCallback<unknown>;
 	include?: IncludeSpec;
 	/** Entities this watcher's hydration reaches; see Watcher.reaches. */
 	reaches: ReadonlySet<string>;
@@ -530,32 +591,39 @@ export class WatcherHub {
 	}
 
 	/**
-	 * Watches an explicit set of row keys of one entity in one workspace.
+	 * Watches an explicit set of rows of one entity, named by ref.
 	 *
-	 * Nothing is scanned: the keys are read as point lookups, and a commit
-	 * re-reads only the watched keys it named. Registration is cheap enough to
-	 * start empty and grow through KeyedWatchHandle.setKeys, which is what a
-	 * screen of row-by-key views does as its components mount.
+	 * With a `workspaceId` every ref must name that workspace and the watcher
+	 * shares its scan scope (and so its decode cache) with the other watchers of
+	 * it; with none, the refs may span workspaces and the watcher draws on the
+	 * cross-workspace scope instead.
+	 *
+	 * Nothing is scanned either way: the refs are read as point lookups in one
+	 * batch, and a commit re-reads only the watched refs it named. Registration
+	 * is cheap enough to start empty and grow through
+	 * ScopedKeyedWatchHandle.setRefs, which is what a screen of row-by-key views
+	 * does as its components mount.
 	 */
-	watchKeys<D extends DescMessage>(
+	watchRefs<D extends DescMessage>(
 		schema: D,
-		workspaceId: string,
-		keys: Iterable<string>,
-		cb: KeyedWatchCallback<MessageShape<D>>,
+		workspaceId: string | undefined,
+		refs: Iterable<RowRef>,
+		cb: ScopedKeyedWatchCallback<MessageShape<D>>,
 		include?: IncludeSpec,
-	): KeyedWatchHandle {
+	): ScopedKeyedWatchHandle {
 		if (this.closed) return INERT_KEYED;
 		const def = this.registry.bySchema(schema);
+		const initial = refMap(refs);
 		const watcher: KeyWatcher = {
 			schema,
 			entity: def.name,
 			workspaceId,
-			keys: new Set(keys),
-			added: new Set(keys),
+			refs: initial,
+			added: new Set(initial.keys()),
 			flushing: false,
 			held: new Map(),
 			pending: new Map(),
-			cb: cb as KeyedWatchCallback<unknown>,
+			cb: cb as ScopedKeyedWatchCallback<unknown>,
 			include,
 			reaches: this.reachableEntities(def.name, include),
 			emittedAt: 0,
@@ -567,34 +635,34 @@ export class WatcherHub {
 				if (!this.keyWatchers.delete(watcher)) return;
 				this.pruneScope(scanScope(watcher));
 			},
-			setKeys: (next) => this.setKeys(watcher, next),
+			setRefs: (next) => this.setRefs(watcher, next),
 		};
 	}
 
-	/** Replaces a keyed watcher's key set; see KeyedWatchHandle.setKeys. */
-	private setKeys(watcher: KeyWatcher, next: Iterable<string>): void {
+	/** Replaces a keyed watcher's ref set; see ScopedKeyedWatchHandle.setRefs. */
+	private setRefs(watcher: KeyWatcher, next: Iterable<RowRef>): void {
 		if (!this.keyWatchers.has(watcher)) return;
-		const wanted = new Set(next);
-		for (const key of watcher.keys) {
-			if (wanted.has(key)) continue;
-			watcher.held.delete(key);
-			watcher.pending.delete(key);
-			watcher.added.delete(key);
+		const wanted = refMap(next);
+		for (const id of watcher.refs.keys()) {
+			if (wanted.has(id)) continue;
+			watcher.held.delete(id);
+			watcher.pending.delete(id);
+			watcher.added.delete(id);
 		}
 		let grew = false;
-		for (const key of wanted) {
-			if (watcher.keys.has(key)) continue;
-			watcher.added.add(key);
+		for (const id of wanted.keys()) {
+			if (watcher.refs.has(id)) continue;
+			watcher.added.add(id);
 			grew = true;
 		}
-		watcher.keys = wanted;
+		watcher.refs = wanted;
 		if (grew) this.scheduleAdds(watcher);
 	}
 
 	/**
 	 * Schedules the read of everything in `added`, coalescing the calls made
 	 * within one turn into a single batch. A list of row views mounting together
-	 * issues one setKeys per component; without this each would be its own read.
+	 * issues one setRefs per component; without this each would be its own read.
 	 */
 	private scheduleAdds(watcher: KeyWatcher): void {
 		if (watcher.flushing) return;
@@ -612,10 +680,10 @@ export class WatcherHub {
 			// longer queued for a read.
 			const tx = await this.kv.read();
 			try {
-				const keys = [ ...watcher.added ];
-				if (keys.length === 0) return 0;
+				const ids = [ ...watcher.added ];
+				if (ids.length === 0) return 0;
 				watcher.added.clear();
-				await this.readKeys(tx, watcher, keys, true);
+				await this.readRefs(tx, watcher, ids, true);
 				return ++this.readSeq;
 			} finally {
 				tx.release();
@@ -626,55 +694,63 @@ export class WatcherHub {
 	}
 
 	/**
-	 * Reads some of a keyed watcher's keys back and records what moved. `first`
-	 * marks the read that answers a key for the very first time, which is
+	 * Reads some of a keyed watcher's refs back and records what moved. `first`
+	 * marks the read that answers a ref for the very first time, which is
 	 * delivered whatever it found — including that the row is absent, the answer
 	 * a consumer cannot infer from silence.
 	 */
-	private async readKeys(
+	private async readRefs(
 		tx: KVRead,
 		watcher: KeyWatcher,
-		keys: readonly string[],
+		ids: readonly string[],
 		first: boolean,
 	): Promise<void> {
-		const wanted = keys.filter((key) => watcher.keys.has(key));
+		const wanted: RowRef[] = [];
+		const wantedIds: string[] = [];
+		for (const id of ids) {
+			const ref = watcher.refs.get(id);
+			if (ref === undefined) continue;
+			wanted.push(ref);
+			wantedIds.push(id);
+		}
 		if (wanted.length === 0) return;
 		const scoped = this.scopeRows(scanScope(watcher));
 		const merged = await readMergedRowsWithVersion(
 			tx,
 			this.registry,
 			watcher.entity,
-			wanted.map((key) => ({ workspaceId: watcher.workspaceId, key })),
+			wanted,
 		);
 		for (let i = 0; i < wanted.length; i++) {
-			const key = wanted[i]!;
-			const id = rowId(watcher.workspaceId, key);
+			const { workspaceId, key } = wanted[i]!;
+			const id = wantedIds[i]!;
 			const view = merged[i];
 			if (view === undefined) {
-				const had = watcher.held.delete(key);
+				const had = watcher.held.delete(id);
 				scoped.rows.delete(id);
-				if (first || had) watcher.pending.set(key, undefined);
+				if (first || had) watcher.pending.set(id, undefined);
 				continue;
 			}
-			const row = resultRow(watcher.schema, scoped.rows.get(id), id, key, {
-				v: view.v,
-				version: view.version,
-				workspaceId: watcher.workspaceId,
-				key,
-			});
+			const row = resultRow(
+				watcher.schema,
+				scoped.rows.get(id),
+				id,
+				suffixOf(watcher, workspaceId, key),
+				{ v: view.v, version: view.version, workspaceId, key },
+			);
 			scoped.rows.set(id, row);
 			// The same object means the same bytes and version, so nothing a
-			// consumer holding this key can see has moved.
-			const moved = watcher.held.get(key) !== row;
-			watcher.held.set(key, row);
-			if (first || moved) watcher.pending.set(key, row);
+			// consumer holding this ref can see has moved.
+			const moved = watcher.held.get(id) !== row;
+			watcher.held.set(id, row);
+			if (first || moved) watcher.pending.set(id, row);
 		}
 	}
 
 	/**
-	 * Hands one keyed watcher the keys that moved, unless nothing did.
+	 * Hands one keyed watcher the refs that moved, unless nothing did.
 	 *
-	 * `force` re-delivers every key it holds: an include watcher whose hydration
+	 * `force` re-delivers every ref it holds: an include watcher whose hydration
 	 * targets moved has a changed view over rows that did not move themselves,
 	 * which nothing in `pending` would report.
 	 */
@@ -692,8 +768,20 @@ export class WatcherHub {
 			|| !sameCoverage(watcher.lastCoverage, coverage);
 		const taken = force ? forcedEntries(watcher) : [ ...watcher.pending ];
 		if (taken.length === 0 && !coverageMoved) return;
-		const rows = new Map<string, Row<unknown> | undefined>();
-		const present = taken.filter((e): e is [string, ResultRow] => e[1] !== undefined);
+		// One slot per taken ref, in the order taken, so the hydrate below can be
+		// scattered back positionally. A ref dropped by a concurrent setRefs no
+		// longer resolves and is skipped.
+		const rows: ScopedKeyedRow<unknown>[] = [];
+		const slots = new Map<string, number>();
+		for (const [ id ] of taken) {
+			const ref = watcher.refs.get(id);
+			if (ref === undefined) continue;
+			slots.set(id, rows.length);
+			rows.push({ workspaceId: ref.workspaceId, key: ref.key, row: undefined });
+		}
+		const present = taken.filter((e): e is [string, ResultRow] =>
+			e[1] !== undefined && slots.has(e[0])
+		);
 		if (watcher.include && this.refClient && present.length > 0) {
 			// Hydrated after the read tx closed (own shared reads).
 			const hydrated = await hydrate(
@@ -704,26 +792,30 @@ export class WatcherHub {
 				watcher.include,
 			);
 			// A newer dispatch may have claimed the watcher (and already fired) while
-			// this one hydrated; its rows win, and it carried these keys too — they
+			// this one hydrated; its rows win, and it carried these refs too — they
 			// are still in `pending`, which this path has not touched.
 			if (!this.keyWatchers.has(watcher) || watcher.emittedAt !== at) return;
-			for (const [ key ] of taken) rows.set(key, undefined);
-			present.forEach(([ key ], i) => rows.set(key, hydrated[i] as Row<unknown>));
+			present.forEach(([ id ], i) => {
+				rows[slots.get(id)!]!.row = hydrated[i] as Row<unknown>;
+			});
 		} else {
-			for (const [ key, held ] of taken) rows.set(key, held?.row);
+			for (const [ id, held ] of taken) {
+				const slot = slots.get(id);
+				if (slot !== undefined) rows[slot]!.row = held?.row;
+			}
 		}
 		watcher.lastCoverage = coverage;
 		// Only what this callback carries, and only if a later read has not already
 		// replaced it: an edit that landed during the hydrate above belongs to a
 		// dispatch that has yet to deliver it.
-		for (const [ key, held ] of taken) {
-			if (watcher.pending.has(key) && watcher.pending.get(key) === held) {
-				watcher.pending.delete(key);
+		for (const [ id, held ] of taken) {
+			if (watcher.pending.has(id) && watcher.pending.get(id) === held) {
+				watcher.pending.delete(id);
 			}
 		}
 		safeInvoke(
-			(r: KeyedRows<unknown>) => watcher.cb(r, coverage),
-			rows as KeyedRows<unknown>,
+			(r: ScopedKeyedRows<unknown>) => watcher.cb(r, coverage),
+			rows as ScopedKeyedRows<unknown>,
 			'watch callback',
 		);
 	}
@@ -779,7 +871,7 @@ export class WatcherHub {
 				// After the scans above, so a keyed watcher sharing a scope with a
 				// rebuilt result reuses the rows that rebuild just decoded.
 				for (const w of keyed) {
-					await this.readKeys(tx, w, touchedKeys(w, pairs), false);
+					await this.readRefs(tx, w, touchedRefs(w, pairs), false);
 					keyedPending.push({ watcher: w, force: touchesInclude(w, pairs) });
 					if (this.verifyTouches) await this.verifyKeys(tx, w);
 					this.pruneScope(scanScope(w));
@@ -1123,31 +1215,27 @@ export class WatcherHub {
 	 * naming it in its TouchSet.
 	 */
 	private async verifyKeys(tx: KVRead, watcher: KeyWatcher): Promise<void> {
-		const keys = [ ...watcher.keys ].filter((key) => !watcher.added.has(key));
-		const merged = await readMergedRowsWithVersion(
-			tx,
-			this.registry,
-			watcher.entity,
-			keys.map((key) => ({ workspaceId: watcher.workspaceId, key })),
-		);
-		const fail = (key: string, why: string): never => {
+		const ids = [ ...watcher.refs.keys() ].filter((id) => !watcher.added.has(id));
+		const refs = ids.map((id) => watcher.refs.get(id)!);
+		const merged = await readMergedRowsWithVersion(tx, this.registry, watcher.entity, refs);
+		const fail = (ref: RowRef, why: string): never => {
 			throw new Error(
-				`keyed watch diverged for ${watcher.entity}/${watcher.workspaceId}/${key}: ${why}\n`
+				`keyed watch diverged for ${watcher.entity}/${ref.workspaceId}/${ref.key}: ${why}\n`
 					+ 'A commit path changed the row without reporting it (see TouchSet).',
 			);
 		};
-		for (let i = 0; i < keys.length; i++) {
-			const key = keys[i]!;
+		for (let i = 0; i < ids.length; i++) {
+			const ref = refs[i]!;
 			const want = merged[i];
-			const have = watcher.held.get(key);
+			const have = watcher.held.get(ids[i]!);
 			if (want === undefined) {
-				if (have !== undefined) fail(key, 'held a row the store no longer has');
+				if (have !== undefined) fail(ref, 'held a row the store no longer has');
 				continue;
 			}
-			if (have === undefined) fail(key, 'holds no row where the store has one');
-			if (!bytesEqual(have!.bytes, want.v)) fail(key, 'holds different bytes than the store');
+			if (have === undefined) fail(ref, 'holds no row where the store has one');
+			if (!bytesEqual(have!.bytes, want.v)) fail(ref, 'holds different bytes than the store');
 			if (have!.row.version !== want.version) {
-				fail(key, `holds version ${have!.row.version}, the store has ${want.version}`);
+				fail(ref, `holds version ${have!.row.version}, the store has ${want.version}`);
 			}
 		}
 	}
@@ -1193,27 +1281,45 @@ interface Reach {
 	reaches: ReadonlySet<string>;
 }
 
-/**
- * The watched keys a commit named, or all of them when it named an entity
- * without its rows — a wildcard says the changed keys are unknown, which for a
- * keyed watcher means every key it holds could have moved.
- */
-function touchedKeys(watcher: KeyWatcher, pairs: readonly TouchedPair[]): string[] {
-	const out: string[] = [];
-	for (const pair of pairs) {
-		if (pair.entity !== watcher.entity || pair.workspaceId !== watcher.workspaceId) continue;
-		if (pair.keys === undefined) return [ ...watcher.keys ];
-		for (const key of pair.keys) {
-			if (watcher.keys.has(key)) out.push(key);
-		}
-	}
+/** Indexes refs by row id, which is also what deduplicates a repeated ref. */
+function refMap(refs: Iterable<RowRef>): Map<string, RowRef> {
+	const out = new Map<string, RowRef>();
+	for (const ref of refs) out.set(rowId(ref.workspaceId, ref.key), ref);
 	return out;
 }
 
-/** Every key a forced emit re-delivers: what is held, with pending changes over it. */
+/**
+ * The watched refs a commit named, by row id.
+ *
+ * A pair that names an entity without its rows is a wildcard: the changed keys
+ * are unknown, so every ref the watcher holds IN THAT PAIR'S WORKSPACE could
+ * have moved. A cross-workspace watcher's refs in the other workspaces are
+ * untouched by it, which is why this accumulates per pair rather than giving up
+ * on the whole set.
+ */
+function touchedRefs(watcher: KeyWatcher, pairs: readonly TouchedPair[]): string[] {
+	const out = new Set<string>();
+	for (const pair of pairs) {
+		if (pair.entity !== watcher.entity) continue;
+		if (watcher.workspaceId !== undefined && pair.workspaceId !== watcher.workspaceId) continue;
+		if (pair.keys === undefined) {
+			for (const [ id, ref ] of watcher.refs) {
+				if (ref.workspaceId === pair.workspaceId) out.add(id);
+			}
+			continue;
+		}
+		for (const key of pair.keys) {
+			const id = rowId(pair.workspaceId, key);
+			if (watcher.refs.has(id)) out.add(id);
+		}
+	}
+	return [ ...out ];
+}
+
+/** Every ref a forced emit re-delivers: what is held, with pending changes over it. */
 function forcedEntries(watcher: KeyWatcher): [string, ResultRow | undefined][] {
 	const out = new Map<string, ResultRow | undefined>(watcher.held);
-	for (const [ key, row ] of watcher.pending) out.set(key, row);
+	for (const [ id, row ] of watcher.pending) out.set(id, row);
 	return [ ...out ];
 }
 
@@ -1499,7 +1605,11 @@ function decodeRow(schema: DescMessage, bytes: Uint8Array): unknown {
  * key that follows the scan prefix, so it is byte-for-byte what scanMergedRows
  * ordered on.
  */
-function suffixOf(watcher: Watcher, workspaceId: string, key: string): string {
+function suffixOf(
+	watcher: { workspaceId?: string },
+	workspaceId: string,
+	key: string,
+): string {
 	return watcher.workspaceId === undefined ? `${wsSegment(workspaceId)}/${key}` : key;
 }
 

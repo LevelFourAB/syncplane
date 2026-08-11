@@ -12,7 +12,7 @@ import type { PatchInit } from '../mutations.js';
 import type { Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { IncludeSpec } from '../refs.js';
-import type { WatchWindow } from '../watch.js';
+import type { RowRef, WatchWindow } from '../watch.js';
 import type { UseTextResult } from './hooks/use-text.js';
 import type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
 
@@ -80,6 +80,16 @@ export type UseRowOptions = UseWatchOptions;
 
 /** Options for `useRows`; the same shared subscription as `useRow` (see UseRowOptions). */
 export type UseRowsOptions = UseRowOptions;
+
+/**
+ * Options for `useRowsAll`. `UseRowsOptions` without the workspace selector or
+ * the undo target: every ref names its own workspace and the hook does not
+ * write.
+ */
+export interface UseRowsAllOptions {
+	/** Hydrate result rows against this include tree (folded into the identity). */
+	include?: IncludeSpec;
+}
 
 /** The stable per-entity mutate facade (identical to `client.db[key].mutate`). */
 export interface EntityMutate<D extends DescMessage> {
@@ -192,6 +202,13 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
 	/** `useRows` that suspends until every requested key has been answered. */
 	useSuspenseRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
+	/**
+	 * `useRows` over rows named by workspace and key, so one call site can hold
+	 * rows from several workspaces at once — a list assembled outside the entity,
+	 * which no `useQueryAll` predicate describes. Each row carries the
+	 * `workspaceId` it came from, which is what routes a write back.
+	 */
+	useRowsAll(refs: readonly RowRef[], opts?: UseRowsAllOptions): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>;
 	/** Live view of a collaborative text field (see useTextHook). */
 	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;

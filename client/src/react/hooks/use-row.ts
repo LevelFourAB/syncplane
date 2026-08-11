@@ -59,7 +59,7 @@ export function useRowHook<D extends DescMessage>(
 		// `identity`, which already folds in the include spec.
 		subscribe: rowWatchOf(scope, schema, include),
 		client,
-		key,
+		ref: { workspaceId: scope.workspaceId, key },
 		suspense,
 	});
 

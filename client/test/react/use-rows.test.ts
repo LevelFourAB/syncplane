@@ -49,10 +49,12 @@ function watcherCount(client: SyncClient): number {
 /** The keys the shared keyed watch is currently reading. */
 function watchedKeys(client: SyncClient): string[] {
 	const hub = (client as unknown as {
-		hubInstance?: { keyWatchers: Set<{ keys: Set<string> }> };
+		hubInstance?: { keyWatchers: Set<{ refs: Map<string, { key: string }> }> };
 	}).hubInstance;
 	const out: string[] = [];
-	for (const w of hub?.keyWatchers ?? []) out.push(...w.keys);
+	for (const w of hub?.keyWatchers ?? []) {
+		for (const ref of w.refs.values()) out.push(ref.key);
+	}
 	return out.sort();
 }
 

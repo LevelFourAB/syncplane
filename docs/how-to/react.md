@@ -153,6 +153,30 @@ with no default throws a hook-level error naming the fix.
   Growing `keys` reads the added keys alone; the rows already held are not
   re-read, and the returned array keeps its identity while nothing in it moves.
 
+- **`useRowsAll(refs, opts?)`** — `useRows` over rows named by workspace **and**
+  key, so one call site can hold rows from several workspaces at once. This is
+  the cross-workspace read `useQueryAll` cannot express: a set assembled outside
+  the entity — a personal task list, a pinned set, ids stored somewhere else —
+  that no predicate describes. The same key in two workspaces is two refs and
+  two slots.
+
+  ```tsx
+  // `pinned` is [{ workspaceId, key }, ...], held wherever the app keeps it.
+  const tasks = db.todo.useRowsAll(pinned);
+  const byWorkspace = Map.groupBy(
+  	tasks.filter((row) => row !== undefined),
+  	(row) => row.workspaceId,
+  );
+  ```
+
+  It ignores the enclosing `<WorkspaceProvider>`, takes no `workspaceId` and has
+  no suspense flavor, matching `useQueryAll`. Each row names the workspace it
+  came from, which is what routes a write back through
+  `client.ws(row.workspaceId)`. Every `useRowsAll` on one entity and `include`
+  shares a single cross-workspace subscription; that one is separate from the
+  per-workspace subscription `useRow`/`useRows` share, so a row read through both
+  is read twice.
+
 - **`useSuspenseQuery(query, opts?)` / `useSuspenseRow(key, opts?)` /
   `useSuspenseRows(keys, opts?)`** — the same
   hooks, waiting for the first callback instead of reporting `loading`. They are

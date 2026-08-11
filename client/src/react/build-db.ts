@@ -4,6 +4,7 @@ import { useMutateHook } from './hooks/use-mutate.js';
 import { useQueryAllHook } from './hooks/use-query-all.js';
 import { useQueryHook } from './hooks/use-query.js';
 import { useRowHook } from './hooks/use-row.js';
+import { useRowsAllHook } from './hooks/use-rows-all.js';
 import { useRowsHook } from './hooks/use-rows.js';
 import { useTextHook } from './hooks/use-text.js';
 import type { ReactEntityApi, ReactEntityApis } from './types.js';
@@ -37,6 +38,7 @@ export function buildReactDb<E extends readonly DescMessage[]>(entities: E): Rea
 			useSuspenseRow: (rowKey, opts) => useRowHook(schema, rowKey, opts, true),
 			useRows: (rowKeys, opts) => useRowsHook(schema, rowKeys, opts),
 			useSuspenseRows: (rowKeys, opts) => useRowsHook(schema, rowKeys, opts, true),
+			useRowsAll: (refs, opts) => useRowsAllHook(schema, refs, opts),
 			useMutate: (opts) => useMutateHook(schema, opts),
 			useText: (rowKey, field, opts) => useTextHook(schema, rowKey, field, opts),
 		};

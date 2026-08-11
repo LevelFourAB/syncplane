@@ -25,7 +25,7 @@ import { ChainMutex } from '../../src/mutex.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import type { Row } from '../../src/read.js';
 import { TouchSet } from '../../src/touch.js';
-import { type KeyedRows, WatcherHub } from '../../src/watch.js';
+import { type RowRef, type ScopedKeyedRows, WatcherHub } from '../../src/watch.js';
 
 const registry = new EntityRegistry([ WidgetSchema ]);
 const WS = 'ws1';
@@ -57,12 +57,20 @@ function tombstone(key: string, version: bigint): RowChange {
 	});
 }
 
-async function applyServer(kv: MemoryKVStore, changes: RowChange[]): Promise<TouchSet> {
+async function applyServerIn(
+	kv: MemoryKVStore,
+	workspaceId: string,
+	changes: RowChange[],
+): Promise<TouchSet> {
 	const touched = new TouchSet();
 	const tx = await kv.write();
-	await applyServerChanges(tx, registry, WS, changes, touched);
+	await applyServerChanges(tx, registry, workspaceId, changes, touched);
 	await tx.commit();
 	return touched;
+}
+
+function applyServer(kv: MemoryKVStore, changes: RowChange[]): Promise<TouchSet> {
+	return applyServerIn(kv, WS, changes);
 }
 
 /** Counts walks of the confirmed row keyspace — what a full entity read costs. */
@@ -90,13 +98,27 @@ interface Watched {
 	handle: { close(): void; setKeys(keys: Iterable<string>): void };
 }
 
+/**
+ * A watch over one workspace, addressed by bare key — the shape every spec in
+ * the first block below reads in, with the refs the hub takes built here.
+ */
 async function watchKeys(hub: WatcherHub, keys: string[]): Promise<Watched> {
+	const refsOf = (ks: Iterable<string>): { workspaceId: string; key: string }[] =>
+		[ ...ks ].map((key) => ({ workspaceId: WS, key }));
 	const seen: Delivery[] = [];
-	const handle = hub.watchKeys(WidgetSchema, WS, keys, (rows: KeyedRows<Widget>) => {
-		seen.push(new Map(rows));
-	});
+	const handle = hub.watchRefs(
+		WidgetSchema,
+		WS,
+		refsOf(keys),
+		(rows: ScopedKeyedRows<Widget>) => {
+			seen.push(new Map(rows.map((r) => [ r.key, r.row ])));
+		},
+	);
 	await flush();
-	return { seen, handle };
+	return {
+		seen,
+		handle: { close: () => handle.close(), setKeys: (ks) => handle.setRefs(refsOf(ks)) },
+	};
 }
 
 /** The keys one delivery carried, sorted; `!` marks a key delivered as absent. */
@@ -267,9 +289,14 @@ describe('keyed watches', () => {
 			coverageOf: () => coverage,
 		});
 		const seen: { keys: string[]; coverage: Coverage }[] = [];
-		const handle = hub.watchKeys(WidgetSchema, WS, [ 'ghost' ], (rows, c) => {
-			seen.push({ keys: [ ...rows.keys() ], coverage: c });
-		});
+		const handle = hub.watchRefs(
+			WidgetSchema,
+			WS,
+			[ { workspaceId: WS, key: 'ghost' } ],
+			(rows, c) => {
+				seen.push({ keys: rows.map((r) => r.key), coverage: c });
+			},
+		);
 		await flush();
 		expect(seen.at(-1)!.coverage.bounds).toEqual([ 'hydrating' ]);
 
@@ -294,5 +321,161 @@ describe('keyed watches', () => {
 		await hub.notify(await applyServer(kv, [ serverRow('a', 2n, { id: 'a', count: 2 }) ]));
 
 		expect(seen).toHaveLength(before);
+	});
+});
+
+// The same watch with no workspace scope: every ref names its own workspace, so
+// the same key in two of them is two rows, and a commit in one says nothing
+// about the others.
+describe('cross-workspace keyed watches', () => {
+	/** One delivery, as `<workspace>/<key>` entries; `!` marks a ref delivered as absent. */
+	function carriedRefs(rows: ScopedKeyedRows<Widget> | undefined): string[] {
+		if (rows === undefined) return [];
+		return rows
+			.map((r) => `${r.workspaceId}/${r.key}${r.row === undefined ? '!' : ''}`)
+			.sort();
+	}
+
+	async function watchAll(hub: WatcherHub, refs: RowRef[]) {
+		const seen: ScopedKeyedRows<Widget>[] = [];
+		const handle = hub.watchRefs(
+			WidgetSchema,
+			undefined,
+			refs,
+			(rows: ScopedKeyedRows<Widget>) => {
+				seen.push(rows);
+			},
+		);
+		await flush();
+		return { seen, handle };
+	}
+
+	it('keeps the same key in two workspaces apart', async () => {
+		const kv = new MemoryKVStore();
+		const hub = verifyingHub(kv);
+		await applyServerIn(kv, 'ws1', [ serverRow('a', 1n, { id: 'a', count: 1 }) ]);
+		await applyServerIn(kv, 'ws2', [ serverRow('a', 1n, { id: 'a', count: 2 }) ]);
+
+		const { seen, handle } = await watchAll(hub, [
+			{ workspaceId: 'ws1', key: 'a' },
+			{ workspaceId: 'ws2', key: 'a' },
+			{ workspaceId: 'ws3', key: 'a' },
+		]);
+
+		expect(carriedRefs(seen[0])).toEqual([ 'ws1/a', 'ws2/a', 'ws3/a!' ]);
+		const byWorkspace = new Map(seen[0]!.map((r) => [ r.workspaceId, r.row?.value.count ]));
+		expect(byWorkspace.get('ws1')).toBe(1);
+		expect(byWorkspace.get('ws2')).toBe(2);
+		handle.close();
+	});
+
+	it('carries only the ref a commit moved, in the workspace it moved it', async () => {
+		const kv = new MemoryKVStore();
+		const hub = verifyingHub(kv);
+		await applyServerIn(kv, 'ws1', [ serverRow('a', 1n, { id: 'a', count: 1 }) ]);
+		await applyServerIn(kv, 'ws2', [ serverRow('a', 1n, { id: 'a', count: 2 }) ]);
+		const { seen, handle } = await watchAll(hub, [
+			{ workspaceId: 'ws1', key: 'a' },
+			{ workspaceId: 'ws2', key: 'a' },
+		]);
+		const first = seen[0]!.find((r) => r.workspaceId === 'ws1')!.row;
+
+		await hub.notify(
+			await applyServerIn(kv, 'ws2', [ serverRow('a', 2n, { id: 'a', count: 20 }) ]),
+		);
+
+		expect(carriedRefs(seen.at(-1))).toEqual([ 'ws2/a' ]);
+		expect(seen.at(-1)![0]!.row?.value.count).toBe(20);
+		// ws1's row was never re-read, so a consumer still holds the object it had.
+		expect(first).toBeDefined();
+		handle.close();
+	});
+
+	it('re-reads only the touched workspace when a commit names an entity wholesale', async () => {
+		const kv = new MemoryKVStore();
+		const hub = verifyingHub(kv);
+		await applyServerIn(kv, 'ws1', [ serverRow('a', 1n, { id: 'a', count: 1 }) ]);
+		await applyServerIn(kv, 'ws2', [ serverRow('b', 1n, { id: 'b', count: 2 }) ]);
+		const { seen, handle } = await watchAll(hub, [
+			{ workspaceId: 'ws1', key: 'a' },
+			{ workspaceId: 'ws2', key: 'b' },
+		]);
+
+		await applyServerIn(kv, 'ws2', [ serverRow('b', 2n, { id: 'b', count: 20 }) ]);
+		// A wildcard says "something in this entity moved" without naming rows. It
+		// makes every ref in ITS workspace suspect and none of the others.
+		const wildcard = new TouchSet();
+		wildcard.entity('ws2', 'widget');
+		await hub.notify(wildcard);
+
+		expect(carriedRefs(seen.at(-1))).toEqual([ 'ws2/b' ]);
+		expect(seen.at(-1)![0]!.row?.value.count).toBe(20);
+		handle.close();
+	});
+
+	it('stays silent for a commit in a workspace it holds no ref in', async () => {
+		const kv = new MemoryKVStore();
+		const hub = verifyingHub(kv);
+		await applyServerIn(kv, 'ws1', [ serverRow('a', 1n, { id: 'a', count: 1 }) ]);
+		const { seen, handle } = await watchAll(hub, [ { workspaceId: 'ws1', key: 'a' } ]);
+		const before = seen.length;
+
+		await hub.notify(
+			await applyServerIn(kv, 'ws2', [ serverRow('a', 1n, { id: 'a', count: 9 }) ]),
+		);
+
+		expect(seen).toHaveLength(before);
+		handle.close();
+	});
+
+	it('reads only the refs setRefs adds, and drops the ones it removes', async () => {
+		const kv = new MemoryKVStore();
+		const hub = verifyingHub(kv);
+		await applyServerIn(kv, 'ws1', [ serverRow('a', 1n, { id: 'a', count: 1 }) ]);
+		await applyServerIn(kv, 'ws2', [ serverRow('a', 1n, { id: 'a', count: 2 }) ]);
+		const { seen, handle } = await watchAll(hub, [ { workspaceId: 'ws1', key: 'a' } ]);
+		expect(carriedRefs(seen.at(-1))).toEqual([ 'ws1/a' ]);
+
+		handle.setRefs([ { workspaceId: 'ws1', key: 'a' }, { workspaceId: 'ws2', key: 'a' } ]);
+		await flush();
+		expect(carriedRefs(seen.at(-1))).toEqual([ 'ws2/a' ]);
+
+		handle.setRefs([ { workspaceId: 'ws2', key: 'a' } ]);
+		await hub.notify(
+			await applyServerIn(kv, 'ws1', [ serverRow('a', 2n, { id: 'a', count: 10 }) ]),
+		);
+		const after = seen.length;
+		await flush();
+		expect(seen).toHaveLength(after);
+		handle.close();
+	});
+
+	it('reads refs spanning several workspaces in one batch', async () => {
+		const { kv, rowScans } = countingStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: false });
+		for (const ws of [ 'ws1', 'ws2', 'ws3' ]) {
+			for (let i = 0; i < 20; i++) {
+				await applyServerIn(kv, ws, [ serverRow(`w${i}`, 1n, { id: `w${i}`, count: i }) ]);
+			}
+		}
+		let reads = 0;
+		const read = kv.read.bind(kv);
+		vi.spyOn(kv, 'read').mockImplementation(async () => {
+			reads++;
+			return read();
+		});
+
+		const { seen, handle } = await watchAll(hub, [
+			{ workspaceId: 'ws1', key: 'w3' },
+			{ workspaceId: 'ws2', key: 'w7' },
+			{ workspaceId: 'ws3', key: 'w11' },
+		]);
+
+		// One transaction and no scan for the whole set, however many workspaces
+		// the refs span.
+		expect(reads).toBe(1);
+		expect(rowScans()).toBe(0);
+		expect(carriedRefs(seen[0])).toEqual([ 'ws1/w3', 'ws2/w7', 'ws3/w11' ]);
+		handle.close();
 	});
 });

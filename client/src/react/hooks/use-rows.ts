@@ -30,7 +30,7 @@ export function useRowsHook<D extends DescMessage>(
 		identity: rowWatchIdentity(scope.workspaceId, schema.typeName, include),
 		subscribe: rowWatchOf(scope, schema, include),
 		client,
-		keys,
+		refs: keys.map((key) => ({ workspaceId: scope.workspaceId, key })),
 		suspense,
 	});
 }

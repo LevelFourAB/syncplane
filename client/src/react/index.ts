@@ -55,6 +55,7 @@ export type {
 	UseRowPatchOptions,
 	UseRowResult,
 	UseRowResultFor,
+	UseRowsAllOptions,
 	UseRowsOptions,
 	UseRowsResultFor,
 	UseRowUpdateOptions,
