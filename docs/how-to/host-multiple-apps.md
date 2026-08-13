@@ -138,8 +138,9 @@ id: workspace ids are namespaced per app, so two apps that both have a workspace
 `team` would otherwise wake each other's clients and serve each other's rooms.
 
 ```go
-notifier, _ := pgnotify.Open(ctx, dsn)
-bus, _ := pgpresence.Open(ctx, dsn)
+link, _ := pglisten.Open(ctx, dsn)
+notifier, _ := pgnotify.New(ctx, link)
+bus, _ := pgpresence.New(ctx, link)
 
 server.WithAppOptions(func(appID string) []server.Option {
 	return []server.Option{
@@ -149,6 +150,8 @@ server.WithAppOptions(func(appID string) []server.Option {
 })
 ```
 
-A namespaced view shares the transport it came from, and closing one is a no-op
-— the value `Open` returned owns the connections and must outlive every view.
+A namespaced view shares the fan-out it came from, and closing one is a no-op —
+the value `Open` or `New` returned owns it and must outlive every view. Both
+fan-outs sit on one `pglisten.Conn`, which owns the connections and must outlive
+them in turn.
 `cmd/syncplaned` wires both this way whenever its DSN selects Postgres.

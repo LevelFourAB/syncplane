@@ -36,9 +36,17 @@
 // node's id and a node discards its own events on the way back in, because —
 // unlike a content-free poke — delivering a broadcast twice would show it twice.
 //
-// Receiving is one DEDICATED connection (never a pooled one — it is held for
-// the process's lifetime) parked in WaitForNotification, feeding what it
-// receives into a presence.Local per namespace.
+// The transport underneath is engine/pglisten: one connection parked on the
+// channel, one issuing pg_notify, and the reconnect loop over both. What
+// arrives feeds a presence.Local per namespace.
+//
+// Open dials its own transport. A deployment that also runs pgnotify passes
+// both a shared one instead, halving the connections either would open alone:
+//
+//	link, err := pglisten.Open(ctx, dsn)
+//	...
+//	defer link.Close()
+//	bus, err := pgpresence.New(ctx, link)
 //
 // # Namespaces
 //
@@ -63,14 +71,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"sync"
-	"time"
 
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
-
+	"github.com/levelfourab/syncplane/engine/pglisten"
 	"github.com/levelfourab/syncplane/engine/presence"
 )
 
@@ -78,14 +82,10 @@ import (
 // otherwise. One channel carries every namespace and every topic; the payload's
 // routing prefix separates them.
 //
-// It is deliberately not pgnotify's channel. A node running only the notifier
-// would otherwise receive presence payloads it cannot decode and log every one
-// of them as a broken notification.
+// It differs from pgnotify's channel so the two can share one transport: a
+// pglisten.Conn delivers a payload only to the listener registered for its
+// channel, so neither package ever sees the other's traffic.
 const DefaultChannel = "syncplane_presence"
-
-// maxPayload is Postgres's NOTIFY payload limit, less room to be sure the
-// routing prefix fits alongside the body.
-const maxPayload = 7900
 
 // publishQueue bounds what is waiting to reach the database. State folds per
 // (namespace, topic, session), so it is sized by active PARTICIPANTS rather
@@ -98,26 +98,23 @@ const publishQueue = 4096
 // one. See engine/internal/naming.
 const fieldSep = "\x1f"
 
-// channelName is what LISTEN will accept unquoted. The channel is interpolated
-// into the statement (LISTEN takes no parameters), so it is validated rather
-// than trusted.
-var channelName = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
-
-// Bus is a presence.Bus backed by LISTEN/NOTIFY. The value returned by Open
-// owns the connections; values from Namespace are views sharing them.
+// Bus is a presence.Bus backed by LISTEN/NOTIFY. The value returned by Open or
+// New owns the publisher goroutine; values from Namespace are views sharing it.
 type Bus struct {
 	core  *core
 	ns    string
 	owner bool
 }
 
-// core is the state every namespace view shares: the connections, the listener
-// and publisher goroutines, and one presence.Local per namespace.
+// core is the state every namespace view shares: the transport, the publisher
+// goroutine, and one presence.Local per namespace.
 type core struct {
-	pool    *pgxpool.Pool
-	dsn     string
+	link    *pglisten.Conn
 	channel string
 	logger  *slog.Logger
+	// ownsLink records that Open dialled the transport, so Close takes it down
+	// with the bus. A transport handed to New belongs to the caller.
+	ownsLink bool
 	// nodeID identifies this process on the channel, so its own events can be
 	// discarded on the way back in rather than delivered a second time.
 	nodeID string
@@ -142,7 +139,7 @@ type nsTopic struct {
 	topic presence.Topic
 }
 
-// Option configures Open.
+// Option configures Open and New.
 type Option func(*config)
 
 type config struct {
@@ -157,84 +154,108 @@ func WithChannel(name string) Option {
 	return func(c *config) { c.channel = name }
 }
 
-// WithLogger installs the logger used for the transport's own trouble —
-// reconnects, dropped events. Defaults to slog.Default.
+// WithLogger installs the logger used for this package's own trouble —
+// undecodable events, failed publishes. Defaults to slog.Default. Open passes
+// it on to the transport it dials; a transport handed to New keeps whatever
+// logger it was opened with.
 func WithLogger(l *slog.Logger) Option {
 	return func(c *config) { c.logger = l }
 }
 
-// Open connects to the Postgres named by dsn and starts listening.
+func settings(opts []Option) config {
+	cfg := config{channel: DefaultChannel, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// Open connects to the Postgres named by dsn and starts listening, on a
+// transport of its own that Close takes down with it.
 //
 // The listener connection is established before returning, so a bad DSN or an
 // unreachable database fails here rather than degrading silently into a bus
 // that never delivers.
 func Open(ctx context.Context, dsn string, opts ...Option) (*Bus, error) {
-	cfg := config{channel: DefaultChannel, logger: slog.Default()}
-	for _, opt := range opts {
-		opt(&cfg)
+	cfg := settings(opts)
+	// Checked before dialling, so a misconfigured channel costs no connection.
+	if err := pglisten.ValidateChannel(cfg.channel); err != nil {
+		return nil, fmt.Errorf("pgpresence: %w", err)
 	}
-	if !channelName.MatchString(cfg.channel) {
-		return nil, fmt.Errorf("pgpresence: channel %q must match %s", cfg.channel, channelName)
-	}
-
-	pool, err := pgxpool.New(ctx, dsn)
+	link, err := pglisten.Open(ctx, dsn, pglisten.WithLogger(cfg.logger))
 	if err != nil {
-		return nil, fmt.Errorf("pgpresence: connect: %w", err)
+		return nil, fmt.Errorf("pgpresence: %w", err)
 	}
-	// Fail fast on an unusable database rather than discovering it on the first
-	// publish, when there is no caller left to report it to.
-	listener, err := listen(ctx, dsn, cfg.channel)
+	b, err := start(ctx, link, cfg, true)
 	if err != nil {
-		pool.Close()
+		_ = link.Close()
 		return nil, err
 	}
+	return b, nil
+}
 
+// New builds a bus on an existing transport, so a process also running pgnotify
+// opens one pair of connections rather than two.
+//
+// New blocks until the channel is subscribed, which spans a reconnect if the
+// database is down; ctx bounds that wait. link must outlive the bus — Close
+// stops publishing and delivery but leaves the transport running.
+func New(ctx context.Context, link *pglisten.Conn, opts ...Option) (*Bus, error) {
+	cfg := settings(opts)
+	if err := pglisten.ValidateChannel(cfg.channel); err != nil {
+		return nil, fmt.Errorf("pgpresence: %w", err)
+	}
+	return start(ctx, link, cfg, false)
+}
+
+// start mints the node id, registers the channel and brings the publisher
+// goroutine up.
+func start(ctx context.Context, link *pglisten.Conn, cfg config, ownsLink bool) (*Bus, error) {
 	var node [8]byte
 	if _, err := rand.Read(node[:]); err != nil {
-		_ = listener.Close(ctx)
-		pool.Close()
 		return nil, fmt.Errorf("pgpresence: node id: %w", err)
 	}
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c := &core{
-		pool:    pool,
-		dsn:     dsn,
-		channel: cfg.channel,
-		logger:  cfg.logger,
-		nodeID:  hex.EncodeToString(node[:]),
-		cancel:  cancel,
-		locals:  make(map[string]*presence.Local),
-		subs:    make(map[nsTopic]int),
+		link:     link,
+		channel:  cfg.channel,
+		logger:   cfg.logger,
+		ownsLink: ownsLink,
+		nodeID:   hex.EncodeToString(node[:]),
+		cancel:   cancel,
+		locals:   make(map[string]*presence.Local),
+		subs:     make(map[nsTopic]int),
 	}
 	c.q.init()
 
-	c.wg.Add(2)
-	go func() { defer c.wg.Done(); c.listenLoop(runCtx, listener) }()
+	if err := link.Listen(ctx, cfg.channel, listener{core: c}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("pgpresence: %w", err)
+	}
+
+	c.wg.Add(1)
 	go func() { defer c.wg.Done(); c.publishLoop(runCtx) }()
 
 	return &Bus{core: c, owner: true}, nil
 }
 
-// listen opens a dedicated connection and subscribes it to the channel. It is
-// deliberately NOT a pooled connection: the subscription lives as long as the
-// process, and a pooled one would either be held out of the pool forever or
-// returned and silently unsubscribed.
-func listen(ctx context.Context, dsn, channel string) (*pgx.Conn, error) {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("pgpresence: connect listener: %w", err)
-	}
-	if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
-		_ = conn.Close(ctx)
-		return nil, fmt.Errorf("pgpresence: listen on %q: %w", channel, err)
-	}
-	return conn, nil
-}
+// listener routes the transport's callbacks into the bus.
+type listener struct{ core *core }
+
+func (l listener) Notification(payload string) { l.core.deliver(payload) }
+
+// Reconnected does nothing, and there is nothing it could do: a poke is
+// content-free and can be re-sent from nothing, while a presence event WAS the
+// state. What fills the gap instead is the announce loop each node runs for the
+// sessions whose streams it holds — so a reconnect costs the other nodes a
+// stale roster for at most one announce interval, and costs any broadcast sent
+// during the gap entirely.
+func (l listener) Reconnected() {}
 
 // Namespace returns a view of the bus scoped to one app namespace, sharing the
-// connections. Close on a derived view is a no-op — the Bus returned by Open
-// owns the transport and must outlive every view.
+// transport. Close on a derived view is a no-op — the value returned by Open or
+// New owns the fan-out and must outlive every view.
 //
 // The namespace travels in the routing prefix, so it must not contain
 // U+001F; one that does is refused at Publish rather than here.
@@ -242,8 +263,9 @@ func (b *Bus) Namespace(ns string) *Bus {
 	return &Bus{core: b.core, ns: ns}
 }
 
-// Close stops the listener and publisher and releases the connections. It is
-// idempotent, and a no-op on a Namespace-derived view.
+// Close stops publishing and delivery. It is idempotent, and a no-op on a
+// Namespace-derived view. A bus from Open closes its transport; one from New
+// leaves the caller's alone.
 func (b *Bus) Close() error {
 	if !b.owner {
 		return nil
@@ -259,7 +281,9 @@ func (b *Bus) Close() error {
 	b.core.cancel()
 	b.core.q.wake()
 	b.core.wg.Wait()
-	b.core.pool.Close()
+	if b.core.ownsLink {
+		return b.core.link.Close()
+	}
 	return nil
 }
 
@@ -281,9 +305,9 @@ func (b *Bus) Publish(_ context.Context, ev presence.Event) error {
 		return err
 	}
 	line := b.core.nodeID + fieldSep + b.ns + fieldSep + routingPrefix(ev.Topic) + fieldSep + body
-	if len(line) > maxPayload {
+	if len(line) > pglisten.MaxPayload {
 		return fmt.Errorf("pgpresence: event is %d bytes, over the %d the NOTIFY payload can carry",
-			len(line), maxPayload)
+			len(line), pglisten.MaxPayload)
 	}
 
 	// Local first, and synchronously: same-node watchers must not wait on a
@@ -321,10 +345,14 @@ func (c *core) localFor(ns string) *presence.Local {
 
 // lookup returns the namespace's fan-out without creating one. Incoming events
 // go through this so another node's namespaces — apps this process does not
-// host — cannot grow the map.
+// host — cannot grow the map, and so a bus closed while its transport keeps
+// running stops delivering.
 func (c *core) lookup(ns string) *presence.Local {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	return c.locals[ns]
 }
 
@@ -424,7 +452,7 @@ func (c *core) publishLoop(ctx context.Context) {
 		if !ok {
 			return
 		}
-		if _, err := c.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, c.channel, item.line); err != nil {
+		if err := c.link.Publish(ctx, c.channel, item.line); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -433,60 +461,6 @@ func (c *core) publishLoop(ctx context.Context) {
 			// one announce interval.
 			c.logger.Warn("pgpresence: publish failed", "topic", item.topic.String(), "error", err)
 		}
-	}
-}
-
-// listenLoop delivers events until the bus is closed, reconnecting whenever the
-// listener connection fails.
-//
-// There is no re-poke on reconnect, and there cannot be one: a poke is
-// content-free and can be re-sent from nothing, while a presence event WAS the
-// state. What fills the gap instead is the announce loop each node runs for the
-// sessions whose streams it holds — so a reconnect costs the other nodes a
-// stale roster for at most one announce interval, and costs any broadcast sent
-// during the gap entirely.
-func (c *core) listenLoop(ctx context.Context, conn *pgx.Conn) {
-	defer func() {
-		if conn != nil {
-			_ = conn.Close(context.WithoutCancel(ctx))
-		}
-	}()
-	backoff := 100 * time.Millisecond
-	const maxBackoff = 5 * time.Second
-
-	for {
-		if conn == nil {
-			var err error
-			conn, err = listen(ctx, c.dsn, c.channel)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				c.logger.Warn("pgpresence: listener reconnect failed", "error", err, "retry_in", backoff)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if backoff *= 2; backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-				continue
-			}
-			backoff = 100 * time.Millisecond
-		}
-
-		notification, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			_ = conn.Close(context.WithoutCancel(ctx))
-			conn = nil
-			if ctx.Err() != nil {
-				return
-			}
-			c.logger.Warn("pgpresence: listener connection lost", "error", err)
-			continue
-		}
-		c.deliver(notification.Payload)
 	}
 }
 
@@ -633,5 +607,9 @@ func (q *queue) pop(ctx context.Context) (queued, bool) {
 	}
 }
 
-// Compile-time proof that a view satisfies the seam the server plugs into.
-var _ presence.Bus = (*Bus)(nil)
+// Compile-time proof that a view satisfies the seam the server plugs into, and
+// that the transport's callback contract is met.
+var (
+	_ presence.Bus      = (*Bus)(nil)
+	_ pglisten.Listener = listener{}
+)

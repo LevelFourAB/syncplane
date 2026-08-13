@@ -1,6 +1,7 @@
-// Package pgtest supplies the live Postgres the pgstore and pgnotify suites
-// run against. It is test-only support code, shared because both of those
-// packages need the same database and neither should own the other's container.
+// Package pgtest supplies the live Postgres the pgstore, pglisten, pgnotify and
+// pgpresence suites run against. It is test-only support code, shared because
+// every one of those packages needs the same database and none should own the
+// others' container.
 //
 // A suite calls DSN() wherever it would otherwise hardcode a connection string.
 // The database comes from one of two places:

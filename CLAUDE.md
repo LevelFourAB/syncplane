@@ -51,7 +51,11 @@ the `Query` RPC and app-side queries), `text/` (the collaborative text CRDT),
 `connect/` (bidirectional connectors to external stores), `effects/`
 (server-side reactions to committed writes, over the change feed), `notify/`
 (shared poke fan-out for multi-node deployments; `pgnotify/` over Postgres
-`LISTEN`/`NOTIFY`), `internal/` (`lww` field-mask merge semantics, `naming`,
+`LISTEN`/`NOTIFY`), `presence/` (the ephemeral plane — rooms, presence and
+broadcast, none of it durable; `pgpresence/` is the multi-node bus and
+`presencetest/` the suite one must pass), `pglisten/` (the `LISTEN`/`NOTIFY`
+transport `pgnotify` and `pgpresence` are both built on, and share one of when a
+node runs both), `internal/` (`lww` field-mask merge semantics, `naming`,
 `pubsub`, `pgtest` — all engine-only).
 `engine/client/` is reserved for a future Go client; not built yet.
 
@@ -73,9 +77,10 @@ also used by `engine/`), `clilog/` (flag-driven logger shared by the commands),
 
 `client/src/`: `kv/` (IndexedDB + in-memory backends, multi-tab safety via Web
 Locks), `optimistic/` (pending queue, rebase, compaction), `sync/` (background
-coordinator, cross-tab poke/change sharing), `read.ts` (the merged view every
-reader goes through), `text/` (TS mirror of `engine/text`), `query/`, `db.ts`
-(the schema-bound per-entity API), `react/`.
+coordinator, cross-tab poke/change sharing, and `presence.ts` for the second
+plane's own stream and leadership), `read.ts` (the merged view every reader goes
+through), `room.ts` (the `Room` handle apps hold), `text/` (TS mirror of
+`engine/text`), `query/`, `db.ts` (the schema-bound per-entity API), `react/`.
 
 Read the package docs and the code for specifics — they are documented at the
 point of code, and that documentation is authoritative over any summary here.

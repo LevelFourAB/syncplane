@@ -82,19 +82,21 @@ holds state that has to be reconciled afterwards.
 
 Each node opens:
 
-| Connections    | What for                                                                         |
-| -------------- | -------------------------------------------------------------------------------- |
-| `WithMaxConns` | the `pgstore` pool; a write holds one while waiting on its workspace's lock      |
-| 1              | the lease session, dialled on first use and shared by every app namespace        |
-| 1              | `pgnotify`'s `LISTEN` connection                                                 |
-| 1              | `pgnotify`'s publisher pool — sized by pgx's default but driven by one goroutine |
-| 1              | `pgpresence`'s `LISTEN` connection, when the app uses rooms                      |
-| 1              | `pgpresence`'s publisher pool, likewise                                          |
+| Connections    | What for                                                                    |
+| -------------- | --------------------------------------------------------------------------- |
+| `WithMaxConns` | the `pgstore` pool; a write holds one while waiting on its workspace's lock |
+| 1              | the lease session, dialled on first use and shared by every app namespace   |
+| 1              | `pglisten`'s `LISTEN` connection, parked for the process's lifetime         |
+| 1              | `pglisten`'s publisher, dialled on the first notification                   |
+
+The last two are the whole fan-out budget, not one pair per plane: `pgnotify`
+and `pgpresence` register different channels on the same `pglisten.Conn`, so a
+node running both pays for two connections rather than four. Handing each its
+own DSN instead — `pgnotify.Open` and `pgpresence.Open` — doubles the pair.
+Neither connection is pooled, so neither needs sizing.
 
 Size `WithMaxConns` against your `max_connections` divided by node count, minus
 the fixed connections above, and leave headroom for the standby's own clients.
-Neither `pgstore` nor `pgnotify` exposes a pool to share, which is why the
-presence bus adds its own pair rather than reusing one.
 
 ### Connection poolers
 

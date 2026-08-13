@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
+	"github.com/levelfourab/syncplane/engine/pglisten"
 	"github.com/levelfourab/syncplane/engine/presence/pgpresence"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
@@ -146,12 +147,21 @@ func main() {
 	// apps that both have a workspace "team" would otherwise wake each other's
 	// clients and serve each other's rooms.
 	if postgres {
-		notifier, err := pgnotify.Open(context.Background(), *dbPath, pgnotify.WithLogger(logger))
+		// One transport for both: they carry different payloads on different
+		// channels, but a LISTEN connection can hold both subscriptions and a
+		// publisher can issue both notifications, which halves what this
+		// process adds to the database's connection budget.
+		link, err := pglisten.Open(context.Background(), *dbPath, pglisten.WithLogger(logger))
+		if err != nil {
+			clilog.Fatal(logger, "open notify transport", err)
+		}
+		defer link.Close()
+		notifier, err := pgnotify.New(context.Background(), link)
 		if err != nil {
 			clilog.Fatal(logger, "open notifier", err)
 		}
 		defer notifier.Close()
-		bus, err := pgpresence.Open(context.Background(), *dbPath, pgpresence.WithLogger(logger))
+		bus, err := pgpresence.New(context.Background(), link)
 		if err != nil {
 			clilog.Fatal(logger, "open presence bus", err)
 		}

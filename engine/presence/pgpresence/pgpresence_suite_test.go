@@ -10,6 +10,8 @@ import (
 	. "github.com/onsi/gomega"
 
 	"github.com/levelfourab/syncplane/engine/internal/pgtest"
+	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
+	"github.com/levelfourab/syncplane/engine/pglisten"
 	"github.com/levelfourab/syncplane/engine/presence"
 	"github.com/levelfourab/syncplane/engine/presence/pgpresence"
 	"github.com/levelfourab/syncplane/engine/presence/presencetest"
@@ -197,6 +199,64 @@ var _ = Describe("pgpresence", func() {
 		bus := newBus()
 		err := bus.Namespace("a\x1fb").Publish(ctx, state(topic("x"), "s1", 1, ""))
 		Expect(err).To(MatchError(ContainSubstring("field separator")))
+	})
+
+	It("delivers on a transport it did not open", func() {
+		dsn := pgtest.ServerDSN()
+		channel := pgtest.UniqueName("sp_pres")
+
+		link, err := pglisten.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(link.Close()).To(Succeed()) })
+
+		receiver, err := pgpresence.New(ctx, link, pgpresence.WithChannel(channel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(receiver.Close()).To(Succeed()) })
+
+		sender := newBus(pgpresence.WithChannel(channel))
+		t := topic("handed-in")
+		ch, _ := receiver.Subscribe(t)
+		Expect(sender.Publish(ctx, state(t, "s1", 1, "hello"))).To(Succeed())
+		Eventually(ch, 5*time.Second).Should(Receive())
+	})
+
+	It("shares one transport with the poke fan-out", func() {
+		// The reason the transport is a package of its own: a node running both
+		// planes opens one pair of connections rather than two, and the channel
+		// each registers is what keeps their traffic apart.
+		dsn := pgtest.ServerDSN()
+		presenceChannel := pgtest.UniqueName("sp_pres")
+		pokeChannel := pgtest.UniqueName("sp_chan")
+
+		link, err := pglisten.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(link.Close()).To(Succeed()) })
+
+		bus, err := pgpresence.New(ctx, link, pgpresence.WithChannel(presenceChannel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(bus.Close()).To(Succeed()) })
+		notifier, err := pgnotify.New(ctx, link, pgnotify.WithChannel(pokeChannel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(notifier.Close()).To(Succeed()) })
+
+		// The other node keeps them on separate transports, so what is asserted
+		// below crossed the database rather than a local fan-out.
+		senderBus := newBus(pgpresence.WithChannel(presenceChannel))
+		senderNotifier, err := pgnotify.Open(ctx, dsn, pgnotify.WithChannel(pokeChannel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(senderNotifier.Close()).To(Succeed()) })
+
+		t := topic("shared")
+		events, _ := bus.Subscribe(t)
+		pokes, _ := notifier.Subscribe("ws")
+
+		Expect(senderBus.Publish(ctx, state(t, "s1", 1, "here"))).To(Succeed())
+		Eventually(events, 5*time.Second).Should(Receive())
+		Consistently(pokes, "300ms").ShouldNot(Receive(),
+			"a presence event must not surface as a poke")
+
+		senderNotifier.Notify("ws")
+		Eventually(pokes, 5*time.Second).Should(Receive())
 	})
 
 	It("rejects a channel name LISTEN could not take unquoted", func() {

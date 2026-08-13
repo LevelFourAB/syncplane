@@ -33,13 +33,19 @@ if err != nil {
 }
 defer store.Close()
 
-notifier, err := pgnotify.Open(ctx, os.Getenv("DATABASE_URL"))
+link, err := pglisten.Open(ctx, os.Getenv("DATABASE_URL"))
+if err != nil {
+	log.Fatal(err)
+}
+defer link.Close()
+
+notifier, err := pgnotify.New(ctx, link)
 if err != nil {
 	log.Fatal(err)
 }
 defer notifier.Close()
 
-bus, err := pgpresence.Open(ctx, os.Getenv("DATABASE_URL"))
+bus, err := pgpresence.New(ctx, link)
 if err != nil {
 	log.Fatal(err)
 }
@@ -53,10 +59,15 @@ srv, err := server.New(
 )
 ```
 
-Each of the two `LISTEN`/`NOTIFY` transports holds a connection pool for
-publishing plus one dedicated connection parked in `WaitForNotification` —
-neither `pgstore` nor the other exposes a pool to share — so budget four
-connection sets per process rather than two.
+`pglisten` is the `LISTEN`/`NOTIFY` transport under both: one connection parked
+in `WaitForNotification` and one issuing `pg_notify`, neither pooled. Sharing it
+is what keeps a node running both planes at two connections instead of four —
+each package registers its own channel and sees only that channel's traffic.
+`link` must outlive both, and closing either of them leaves it running.
+
+Either package also takes a DSN directly (`pgnotify.Open`, `pgpresence.Open`)
+and opens a transport of its own, which is the shorter wiring when a process
+runs only one of them.
 
 `Open` applies any outstanding migrations, under an advisory lock — so every
 node runs the same code at boot and they race safely. There is no separate
@@ -171,22 +182,24 @@ Postgres would wake each other's clients for workspaces they do not have, so
 give them separate channels:
 
 ```go
-pgnotify.Open(ctx, dsn, pgnotify.WithChannel("syncplane_poke_staging"))
-pgpresence.Open(ctx, dsn, pgpresence.WithChannel("syncplane_presence_staging"))
+pgnotify.New(ctx, link, pgnotify.WithChannel("syncplane_poke_staging"))
+pgpresence.New(ctx, link, pgpresence.WithChannel("syncplane_presence_staging"))
 ```
 
 The two default to different channels (`syncplane_poke` and
-`syncplane_presence`) and must stay apart: a node running only the notifier
-would otherwise receive presence payloads it cannot decode.
+`syncplane_presence`) and must stay apart, because the channel is what routes a
+payload to the decoder that understands it — a poke and a presence event share
+one connection but nothing else.
 
 `pgstore` needs no equivalent: point the two at different databases, or at
 different schemas via the DSN's `search_path`.
 
 ## Testing against a real Postgres
 
-The `pgstore` and `pgnotify` suites run against a container started by
-testcontainers, and **skip** when no Docker is reachable — Postgres is not a
-build dependency of this repo. To run them against a server you already have:
+The `pgstore`, `pglisten`, `pgnotify` and `pgpresence` suites run against a
+container started by testcontainers, and **skip** when no Docker is reachable —
+Postgres is not a build dependency of this repo. To run them against a server
+you already have:
 
 ```sh
 SYNCPLANE_TEST_PG_DSN=postgres://user:pass@localhost:5432/syncplane task test:go

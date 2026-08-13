@@ -14,6 +14,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub/pubsubtest"
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
+	"github.com/levelfourab/syncplane/engine/pglisten"
 )
 
 func TestPgnotify(t *testing.T) {
@@ -126,6 +127,52 @@ var _ = Describe("pgnotify", func() {
 		_, cancel, ok := pubsub.SubscribeActivity(capped)
 		Expect(ok).To(BeTrue(), "the wrapper must not hide the notifier's Activity support")
 		cancel()
+	})
+
+	It("delivers on a transport it did not open", func() {
+		// What New is for: a process also running pgpresence hands both the
+		// same transport and opens one pair of connections rather than two.
+		dsn := pgtest.ServerDSN()
+		channel := pgtest.UniqueName("sp_chan")
+
+		link, err := pglisten.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(link.Close()).To(Succeed()) })
+
+		receiver, err := pgnotify.New(ctx, link, pgnotify.WithChannel(channel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(receiver.Close()).To(Succeed()) })
+
+		sender := newNotifier(pgnotify.WithChannel(channel))
+		ch, _ := receiver.Subscribe("ws")
+		sender.Notify("ws")
+		Eventually(ch, 5*time.Second).Should(Receive())
+	})
+
+	It("leaves a transport it did not open running after Close", func() {
+		// The caller may still be using it, which is the whole point of handing
+		// one in. Two notifiers on one transport stand in for the notifier and
+		// the presence bus a real deployment shares it between.
+		dsn := pgtest.ServerDSN()
+		link, err := pglisten.Open(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(link.Close()).To(Succeed()) })
+
+		first, err := pgnotify.New(ctx, link, pgnotify.WithChannel(pgtest.UniqueName("sp_chan")))
+		Expect(err).NotTo(HaveOccurred())
+
+		channel := pgtest.UniqueName("sp_chan")
+		second, err := pgnotify.New(ctx, link, pgnotify.WithChannel(channel))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(second.Close()).To(Succeed()) })
+
+		Expect(first.Close()).To(Succeed())
+
+		sender := newNotifier(pgnotify.WithChannel(channel))
+		ch, _ := second.Subscribe("ws")
+		sender.Notify("ws")
+		Eventually(ch, 5*time.Second).Should(Receive(),
+			"closing one consumer must not take the shared transport down")
 	})
 
 	It("rejects a channel name it would have to interpolate unsafely", func() {

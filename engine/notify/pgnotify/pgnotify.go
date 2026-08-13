@@ -16,7 +16,7 @@
 // poll interval. Three places lean on that licence — a full publish queue drops
 // rather than blocks, a notification published while the listener is
 // reconnecting is gone (Postgres buffers nothing across a dropped LISTEN), and
-// a payload over the 8000-byte NOTIFY limit is skipped.
+// a payload over the NOTIFY size limit is skipped.
 //
 // # Shape
 //
@@ -27,11 +27,19 @@
 // wakeup and nothing else — signals are content-free and coalesce, so no
 // node-id de-duplication is needed.
 //
-// Receiving is one DEDICATED connection (never a pooled one — it is held for
-// the process's lifetime) parked in WaitForNotification, feeding what it
-// receives into a pubsub.Local per namespace. Local already implements the
-// per-workspace fan-out, the coalescing send buffer and the Activity extension,
-// so this package adds a transport and inherits the semantics.
+// The transport underneath is engine/pglisten: one connection parked on the
+// channel, one issuing pg_notify, and the reconnect loop over both. What
+// arrives feeds a pubsub.Local per namespace, which already implements the
+// per-workspace fan-out, the coalescing send buffer and the Activity extension
+// — so this package adds a wire format and inherits the semantics.
+//
+// Open dials its own transport. A deployment that also runs pgpresence passes
+// both a shared one instead, halving the connections either would open alone:
+//
+//	link, err := pglisten.Open(ctx, dsn)
+//	...
+//	defer link.Close()
+//	notifier, err := pgnotify.New(ctx, link)
 //
 // # Namespaces
 //
@@ -61,50 +69,39 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"sync"
-	"time"
-
-	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
+	"github.com/levelfourab/syncplane/engine/pglisten"
 )
 
 // DefaultChannel is the LISTEN/NOTIFY channel used unless WithChannel says
 // otherwise. One channel carries every namespace; the payload separates them.
 const DefaultChannel = "syncplane_poke"
 
-// maxPayload is Postgres's NOTIFY payload limit, less room for the JSON
-// envelope. A workspace id long enough to hit this is pathological, and the
-// alternative to skipping it is failing a write path over a poke.
-const maxPayload = 7900
-
 // publishQueue bounds what is waiting to reach the database. It holds at most
 // one entry per (namespace, workspace) — see queue — so it is sized by active
 // workspaces rather than by write rate.
 const publishQueue = 4096
 
-// channelName is what LISTEN will accept unquoted. The channel is interpolated
-// into the statement (LISTEN takes no parameters), so it is validated rather
-// than trusted.
-var channelName = regexp.MustCompile(`^[a-z_][a-z0-9_]*$`)
-
 // Notifier is a pubsub.Notifier backed by LISTEN/NOTIFY. The value returned by
-// Open owns the connections; values from Namespace are views sharing them.
+// Open or New owns the publisher goroutine; values from Namespace are views
+// sharing it.
 type Notifier struct {
 	core  *core
 	ns    string
 	owner bool
 }
 
-// core is the state every namespace view shares: the connections, the listener
-// and publisher goroutines, and one pubsub.Local per namespace.
+// core is the state every namespace view shares: the transport, the publisher
+// goroutine, and one pubsub.Local per namespace.
 type core struct {
-	pool    *pgxpool.Pool
-	dsn     string
+	link    *pglisten.Conn
 	channel string
 	logger  *slog.Logger
+	// ownsLink records that Open dialled the transport, so Close takes it down
+	// with the notifier. A transport handed to New belongs to the caller.
+	ownsLink bool
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -122,7 +119,7 @@ type core struct {
 
 type nsWorkspace struct{ ns, ws string }
 
-// Option configures Open.
+// Option configures Open and New.
 type Option func(*config)
 
 type config struct {
@@ -137,82 +134,106 @@ func WithChannel(name string) Option {
 	return func(c *config) { c.channel = name }
 }
 
-// WithLogger installs the logger used for the transport's own trouble —
-// reconnects, dropped notifications. Defaults to slog.Default.
+// WithLogger installs the logger used for this package's own trouble —
+// undecodable notifications, dropped ones, failed publishes. Defaults to
+// slog.Default. Open passes it on to the transport it dials; a transport handed
+// to New keeps whatever logger it was opened with.
 func WithLogger(l *slog.Logger) Option {
 	return func(c *config) { c.logger = l }
 }
 
-// Open connects to the Postgres named by dsn and starts listening.
+func settings(opts []Option) config {
+	cfg := config{channel: DefaultChannel, logger: slog.Default()}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// Open connects to the Postgres named by dsn and starts listening, on a
+// transport of its own that Close takes down with it.
 //
 // The listener connection is established before returning, so a bad DSN or an
 // unreachable database fails here rather than degrading silently into a
 // notifier that never delivers.
 func Open(ctx context.Context, dsn string, opts ...Option) (*Notifier, error) {
-	cfg := config{channel: DefaultChannel, logger: slog.Default()}
-	for _, opt := range opts {
-		opt(&cfg)
+	cfg := settings(opts)
+	// Checked before dialling, so a misconfigured channel costs no connection.
+	if err := pglisten.ValidateChannel(cfg.channel); err != nil {
+		return nil, fmt.Errorf("pgnotify: %w", err)
 	}
-	if !channelName.MatchString(cfg.channel) {
-		return nil, fmt.Errorf("pgnotify: channel %q must match %s", cfg.channel, channelName)
-	}
-
-	pool, err := pgxpool.New(ctx, dsn)
+	link, err := pglisten.Open(ctx, dsn, pglisten.WithLogger(cfg.logger))
 	if err != nil {
-		return nil, fmt.Errorf("pgnotify: connect: %w", err)
+		return nil, fmt.Errorf("pgnotify: %w", err)
 	}
-	// Fail fast on an unusable database rather than discovering it on the first
-	// write, when there is no caller left to report it to.
-	listener, err := listen(ctx, dsn, cfg.channel)
+	n, err := start(ctx, link, cfg, true)
 	if err != nil {
-		pool.Close()
+		_ = link.Close()
 		return nil, err
 	}
+	return n, nil
+}
 
+// New builds a notifier on an existing transport, so a process also running
+// pgpresence opens one pair of connections rather than two.
+//
+// New blocks until the channel is subscribed, which spans a reconnect if the
+// database is down; ctx bounds that wait. link must outlive the notifier —
+// Close stops publishing and delivery but leaves the transport running.
+func New(ctx context.Context, link *pglisten.Conn, opts ...Option) (*Notifier, error) {
+	cfg := settings(opts)
+	if err := pglisten.ValidateChannel(cfg.channel); err != nil {
+		return nil, fmt.Errorf("pgnotify: %w", err)
+	}
+	return start(ctx, link, cfg, false)
+}
+
+// start registers the channel and brings the publisher goroutine up.
+func start(ctx context.Context, link *pglisten.Conn, cfg config, ownsLink bool) (*Notifier, error) {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	c := &core{
-		pool:    pool,
-		dsn:     dsn,
-		channel: cfg.channel,
-		logger:  cfg.logger,
-		cancel:  cancel,
-		locals:  make(map[string]*pubsub.Local),
-		subs:    make(map[nsWorkspace]int),
+		link:     link,
+		channel:  cfg.channel,
+		logger:   cfg.logger,
+		ownsLink: ownsLink,
+		cancel:   cancel,
+		locals:   make(map[string]*pubsub.Local),
+		subs:     make(map[nsWorkspace]int),
 	}
 	c.q.init()
 
-	c.wg.Add(2)
-	go func() { defer c.wg.Done(); c.listenLoop(runCtx, listener) }()
+	if err := link.Listen(ctx, cfg.channel, listener{core: c}); err != nil {
+		cancel()
+		return nil, fmt.Errorf("pgnotify: %w", err)
+	}
+
+	c.wg.Add(1)
 	go func() { defer c.wg.Done(); c.publishLoop(runCtx) }()
 
 	return &Notifier{core: c, owner: true}, nil
 }
 
-// listen opens a dedicated connection and subscribes it to the channel. It is
-// deliberately NOT a pooled connection: the subscription lives as long as the
-// process, and a pooled one would either be held out of the pool forever or
-// returned and silently unsubscribed.
-func listen(ctx context.Context, dsn, channel string) (*pgx.Conn, error) {
-	conn, err := pgx.Connect(ctx, dsn)
-	if err != nil {
-		return nil, fmt.Errorf("pgnotify: connect listener: %w", err)
-	}
-	if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
-		_ = conn.Close(ctx)
-		return nil, fmt.Errorf("pgnotify: listen on %q: %w", channel, err)
-	}
-	return conn, nil
-}
+// listener routes the transport's callbacks into the notifier.
+type listener struct{ core *core }
+
+func (l listener) Notification(payload string) { l.core.deliver(payload) }
+
+// Reconnected re-pokes every workspace someone is watching. Nothing replays
+// what the gap swallowed, and a poke is content-free — so re-sending one costs
+// a wasted pull at worst, where leaving it out costs those clients a poll
+// interval.
+func (l listener) Reconnected() { l.core.repoke() }
 
 // Namespace returns a view of the notifier scoped to one app namespace, sharing
-// the connections. Close on a derived view is a no-op — the Notifier returned
-// by Open owns the transport and must outlive every view.
+// the transport. Close on a derived view is a no-op — the value returned by
+// Open or New owns the fan-out and must outlive every view.
 func (n *Notifier) Namespace(ns string) *Notifier {
 	return &Notifier{core: n.core, ns: ns}
 }
 
-// Close stops the listener and publisher and releases the connections. It is
-// idempotent, and a no-op on a Namespace-derived view.
+// Close stops publishing and delivery. It is idempotent, and a no-op on a
+// Namespace-derived view. A notifier from Open closes its transport; one from
+// New leaves the caller's alone.
 func (n *Notifier) Close() error {
 	if !n.owner {
 		return nil
@@ -228,7 +249,9 @@ func (n *Notifier) Close() error {
 	n.core.cancel()
 	n.core.q.wake()
 	n.core.wg.Wait()
-	n.core.pool.Close()
+	if n.core.ownsLink {
+		return n.core.link.Close()
+	}
 	return nil
 }
 
@@ -279,10 +302,14 @@ func (c *core) localFor(ns string) *pubsub.Local {
 
 // lookup returns the namespace's fan-out without creating one. Incoming
 // notifications go through this so another node's namespaces — apps this
-// process does not host — cannot grow the map.
+// process does not host — cannot grow the map, and so a notifier closed while
+// its transport keeps running stops delivering.
 func (c *core) lookup(ns string) *pubsub.Local {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if c.closed {
+		return nil
+	}
 	return c.locals[ns]
 }
 
@@ -315,6 +342,18 @@ type payload struct {
 	WS string `json:"ws"`
 }
 
+// deliver routes one received notification to its namespace's fan-out.
+func (c *core) deliver(raw string) {
+	var p payload
+	if err := json.Unmarshal([]byte(raw), &p); err != nil {
+		c.logger.Warn("pgnotify: undecodable notification", "error", err)
+		return
+	}
+	if local := c.lookup(p.NS); local != nil {
+		local.Notify(p.WS)
+	}
+}
+
 // publishLoop drains the queue onto the database. Publishing happens here
 // rather than in Notify so that Notify never blocks on the network — it is
 // called from write paths, and the local fan-out has already happened by the
@@ -330,79 +369,20 @@ func (c *core) publishLoop(ctx context.Context) {
 			c.logger.Error("pgnotify: encode notification", "error", err)
 			continue
 		}
-		if len(body) > maxPayload {
+		if len(body) > pglisten.MaxPayload {
+			// A workspace id long enough to hit this is pathological, and the
+			// alternative to skipping it is failing a write path over a poke.
 			c.logger.Warn("pgnotify: notification exceeds the NOTIFY payload limit; dropping",
 				"workspace", key.ws, "bytes", len(body))
 			continue
 		}
-		if _, err := c.pool.Exec(ctx, `SELECT pg_notify($1, $2)`, c.channel, string(body)); err != nil {
+		if err := c.link.Publish(ctx, c.channel, string(body)); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			// Best-effort: subscribers on other nodes fall back to polling, and
 			// this node's own subscribers were served before the entry queued.
 			c.logger.Warn("pgnotify: publish failed", "workspace", key.ws, "error", err)
-		}
-	}
-}
-
-// listenLoop delivers notifications until the notifier is closed, reconnecting
-// whenever the listener connection fails.
-func (c *core) listenLoop(ctx context.Context, conn *pgx.Conn) {
-	defer func() {
-		if conn != nil {
-			_ = conn.Close(context.WithoutCancel(ctx))
-		}
-	}()
-	backoff := 100 * time.Millisecond
-	const maxBackoff = 5 * time.Second
-
-	for {
-		if conn == nil {
-			var err error
-			conn, err = listen(ctx, c.dsn, c.channel)
-			if err != nil {
-				if ctx.Err() != nil {
-					return
-				}
-				c.logger.Warn("pgnotify: listener reconnect failed", "error", err, "retry_in", backoff)
-				select {
-				case <-ctx.Done():
-					return
-				case <-time.After(backoff):
-				}
-				if backoff *= 2; backoff > maxBackoff {
-					backoff = maxBackoff
-				}
-				continue
-			}
-			backoff = 100 * time.Millisecond
-			// Postgres buffers nothing across a dropped LISTEN, so anything
-			// published while this connection was down is simply gone. Poke
-			// every workspace someone is watching rather than leave those
-			// clients sitting until their next poll — the signals are
-			// content-free, so a spurious one costs a wasted pull at worst.
-			c.repoke()
-		}
-
-		notification, err := conn.WaitForNotification(ctx)
-		if err != nil {
-			_ = conn.Close(context.WithoutCancel(ctx))
-			conn = nil
-			if ctx.Err() != nil {
-				return
-			}
-			c.logger.Warn("pgnotify: listener connection lost", "error", err)
-			continue
-		}
-
-		var p payload
-		if err := json.Unmarshal([]byte(notification.Payload), &p); err != nil {
-			c.logger.Warn("pgnotify: undecodable notification", "error", err)
-			continue
-		}
-		if local := c.lookup(p.NS); local != nil {
-			local.Notify(p.WS)
 		}
 	}
 }
@@ -491,9 +471,11 @@ func (q *queue) pop(ctx context.Context) (nsWorkspace, bool) {
 	}
 }
 
-// Compile-time proof that a view satisfies both the notifier seam and the
-// optional extension effects reaches through pubsub.SubscribeActivity.
+// Compile-time proof that a view satisfies the notifier seam, the optional
+// extension effects reaches through pubsub.SubscribeActivity, and the
+// transport's callback contract.
 var (
-	_ pubsub.Notifier = (*Notifier)(nil)
-	_ pubsub.Activity = (*Notifier)(nil)
+	_ pubsub.Notifier   = (*Notifier)(nil)
+	_ pubsub.Activity   = (*Notifier)(nil)
+	_ pglisten.Listener = listener{}
 )
