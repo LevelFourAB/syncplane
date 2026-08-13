@@ -504,10 +504,20 @@ Clients must not interpret them.
 
 Browsers cap around six concurrent HTTP/1.1 connections per host. A client's
 stream count does not grow with its workspaces — `Subscribe` multiplexes them
-onto one connection — so the cap only binds when a page runs several
-`SyncClient`s against one host, which means several accounts (a credential is
-attached per request, so two accounts cannot share a stream). Serve h2c if you
-expect that.
+onto one connection — but it does grow with the number of **planes** it uses:
+an app using [rooms](rooms.md) holds a second long-lived stream per account
+(`Watch`), because room membership changes on navigation and folding it into
+`Subscribe`'s fixed scope set would force a data-stream reopen every time.
+
+So the budget is one stream per plane per account, up to two. Several
+`SyncClient`s against one host means several accounts (a credential is attached
+per request, so two accounts cannot share a stream), and with rooms that binds
+at roughly three accounts rather than six.
+
+Ways out, in order of preference: serve h2c, which removes the cap entirely;
+set `presenceEnabled: false` on the clients that do not render presence, which
+trades the second connection for one unary keepalive per open room per announce
+interval; or run fewer clients per page.
 
 ## The option field numbers are unregistered
 

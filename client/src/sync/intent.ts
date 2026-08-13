@@ -79,8 +79,12 @@ export interface IntentRegistryOptions {
 }
 
 export class IntentRegistry {
-	/** Ephemeral per-instance id; never persisted across reloads. */
-	readonly tabId: string = crypto.randomUUID();
+	/**
+	 * Ephemeral per-instance id; never persisted across reloads. Supplied by
+	 * the owning SyncClient, which uses the same value as its presence session
+	 * id — one per-tab identity rather than two.
+	 */
+	readonly tabId: string;
 	private readonly kv: KVStore;
 	private readonly kvMutex: Mutex;
 	private readonly heartbeatMs: number;
@@ -100,7 +104,8 @@ export class IntentRegistry {
 	private seeded = false;
 	private deleted = false;
 
-	constructor(kv: KVStore, kvMutex: Mutex, opts?: IntentRegistryOptions) {
+	constructor(tabId: string, kv: KVStore, kvMutex: Mutex, opts?: IntentRegistryOptions) {
+		this.tabId = tabId;
 		this.kv = kv;
 		this.kvMutex = kvMutex;
 		this.heartbeatMs = opts?.heartbeatMs ?? HEARTBEAT_MS;

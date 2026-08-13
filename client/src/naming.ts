@@ -92,6 +92,46 @@ export function validateWorkspaceId(id: string): void {
 }
 
 /**
+ * Caps the name half of a room topic. The name rides in every presence event on
+ * the server's bus, alongside the workspace id, the anchor key, the publisher's
+ * subject and the app's own state — and a bus over Postgres LISTEN/NOTIFY has
+ * to fit all of that in one 7900-byte payload, with the state expanded by
+ * base64. 128 leaves that budget to the state, which is the part an app cannot
+ * shorten.
+ */
+export const MAX_ROOM_NAME_BYTES = 128;
+
+/**
+ * Throws unless `name` satisfies the room-name rule: non-empty, encodable as
+ * UTF-8, free of ASCII control characters, and at most MAX_ROOM_NAME_BYTES
+ * long.
+ *
+ * Rooms are addressed by whatever string an app picks, so the rule is a
+ * character rule rather than an identifier rule: `doc:42/cursors` and
+ * `Board — Sprint 14` are both fine, and nothing declares a room ahead of time.
+ * Control characters are refused because the cross-tab room protocol separates
+ * its fields with them and because the name reaches server logs.
+ *
+ * Comparison is bytewise, with no case folding and no normalization, so `Notes`
+ * and `notes` are two rooms.
+ */
+export function validateRoomName(name: string): void {
+	if (name === '') throw new Error('room name is empty');
+	const bytes = utf8Length('room name', name);
+	if (bytes > MAX_ROOM_NAME_BYTES) {
+		throw new Error(`room name is ${bytes} bytes, the limit is ${MAX_ROOM_NAME_BYTES}`);
+	}
+	for (let i = 0; i < name.length; i++) {
+		const c = name.charCodeAt(i);
+		if (c < 0x20 || c === 0x7f) {
+			throw new Error(
+				`room name contains the control character \\u${c.toString(16).padStart(4, '0')}`,
+			);
+		}
+	}
+}
+
+/**
  * An entity's wire name — (syncplane.v1.entity).name, and CrudMutation.entity —
  * must be a non-empty identifier: an ASCII letter or underscore followed by
  * letters, digits or underscores.
@@ -175,7 +215,7 @@ export function validateRowKey(entity: string, key: string): void {
 	if (key === '') {
 		throw new Error(`entity "${entity}": row key is empty: every key field must be set`);
 	}
-	const bytes = utf8Length(entity, key);
+	const bytes = utf8Length(`entity "${entity}": row key`, key);
 	if (bytes > MAX_ROW_KEY_BYTES) {
 		throw new Error(
 			`entity "${entity}": row key is ${bytes} bytes, the limit is ${MAX_ROW_KEY_BYTES}`,
@@ -194,26 +234,27 @@ export function validateRowKey(entity: string, key: string): void {
 }
 
 /**
- * UTF-8 byte length of a key, throwing on an unpaired surrogate (which has no
- * UTF-8 form — see validateRowKey). Counted rather than encoded: keys are
- * derived on every write, and the common case is short and ASCII.
+ * UTF-8 byte length of `s`, throwing on an unpaired surrogate (which has no
+ * UTF-8 form — see validateRowKey). `what` names the subject in that error.
+ * Counted rather than encoded: keys are derived on every write, and the common
+ * case is short and ASCII.
  */
-function utf8Length(entity: string, key: string): number {
+function utf8Length(what: string, s: string): number {
 	let bytes = 0;
-	for (let i = 0; i < key.length; i++) {
-		const c = key.charCodeAt(i);
+	for (let i = 0; i < s.length; i++) {
+		const c = s.charCodeAt(i);
 		if (c < 0x80) bytes += 1;
 		else if (c < 0x800) bytes += 2;
 		else if (c < 0xd800 || c > 0xdfff) bytes += 3;
 		else {
 			// A high surrogate followed by a low one is one 4-byte code point;
 			// anything else — a lone high, a bare low — cannot encode.
-			const next = c < 0xdc00 && i + 1 < key.length ? key.charCodeAt(i + 1) : 0;
+			const next = c < 0xdc00 && i + 1 < s.length ? s.charCodeAt(i + 1) : 0;
 			if (next >= 0xdc00 && next <= 0xdfff) {
 				bytes += 4;
 				i++;
 			} else {
-				throw new Error(`entity "${entity}": row key has an unpaired surrogate at index ${i}`);
+				throw new Error(`${what} has an unpaired surrogate at index ${i}`);
 			}
 		}
 	}

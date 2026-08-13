@@ -38,6 +38,7 @@ import (
 	"time"
 
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
+	"github.com/levelfourab/syncplane/engine/presence/pgpresence"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/otelstore"
@@ -135,21 +136,31 @@ func main() {
 	}
 
 	// A Postgres store is the deployment that can have a second node, and on a
-	// second node the in-process notifier stops reaching half the clients. The
-	// same database already carries LISTEN/NOTIFY, so there is nothing further
-	// to configure and no reason to make the operator ask for it.
+	// second node both in-process fan-outs stop reaching half the clients: the
+	// notifier leaves them polling for changes, and the presence bus shows each
+	// of them only the participants its own node is serving. The same database
+	// already carries LISTEN/NOTIFY, so there is nothing further to configure
+	// and no reason to make the operator ask for either.
 	//
 	// Per app rather than shared: workspace ids are namespaced per app, so two
 	// apps that both have a workspace "team" would otherwise wake each other's
-	// clients.
+	// clients and serve each other's rooms.
 	if postgres {
 		notifier, err := pgnotify.Open(context.Background(), *dbPath, pgnotify.WithLogger(logger))
 		if err != nil {
 			clilog.Fatal(logger, "open notifier", err)
 		}
 		defer notifier.Close()
+		bus, err := pgpresence.Open(context.Background(), *dbPath, pgpresence.WithLogger(logger))
+		if err != nil {
+			clilog.Fatal(logger, "open presence bus", err)
+		}
+		defer bus.Close()
 		managerOpts = append(managerOpts, server.WithAppOptions(func(appID string) []server.Option {
-			return []server.Option{server.WithNotifier(notifier.Namespace(appID))}
+			return []server.Option{
+				server.WithNotifier(notifier.Namespace(appID)),
+				server.WithPresenceBus(bus.Namespace(appID)),
+			}
 		}))
 	}
 

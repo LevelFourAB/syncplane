@@ -39,6 +39,13 @@ import (
 // streamingProcedures are the procedures whose responses this compresses. Both
 // are server-streaming; unary is left to connect-go, which already handles it
 // and would double-encode if this joined in.
+//
+// PresenceService.Watch is the third server-streaming procedure and is
+// deliberately absent. A room frame is a cursor position, not a snapshot: there
+// is nothing repetitive for deflate to find, the frames matter most when they
+// arrive soonest, and the gzip writer's few hundred KB of state would be held
+// for the life of every watching client rather than for the length of a
+// bootstrap.
 var streamingProcedures = map[string]bool{
 	syncplanev1connect.SyncServiceBootstrapProcedure: true,
 	syncplanev1connect.SyncServiceSubscribeProcedure: true,

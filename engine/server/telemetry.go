@@ -145,6 +145,30 @@ type metrics struct {
 	// enough to be given up on.
 	gcCollected metric.Int64Counter
 
+	// roomStreams tracks Watch streams currently open, and roomsJoined the
+	// (stream, room) pairs currently held across them. Both are up-down
+	// counters because the level is what matters — a browser spends its
+	// per-host connection budget on streams held, not streams opened, and an
+	// app using rooms holds a second one per account alongside Subscribe.
+	//
+	// The ratio between them is the one worth watching: rooms per stream is
+	// what a re-gate tick costs, since every live room re-runs its gate.
+	roomStreams metric.Int64UpDownCounter
+	roomsJoined metric.Int64UpDownCounter
+	// roomParticipants distributes how many participants a room had when it was
+	// joined, after redaction and truncation. Rooms crowding the cap is what
+	// turns a snapshot into a page of wire traffic per join.
+	roomParticipants metric.Int64Histogram
+	// roomPublishes counts accepted publishes, by kind. State dominates in
+	// normal use; a message rate that outgrows it is an app treating the
+	// at-most-once plane as a queue.
+	roomPublishes metric.Int64Counter
+	// roomEventsDropped counts frames a stream never received, by reason. The
+	// plane is at-most-once by contract and presence heals within one announce
+	// interval — but broadcasts do not, so a nonzero rate is exactly the
+	// messages an app lost.
+	roomEventsDropped metric.Int64Counter
+
 	// indexBuildDuration times one backfill batch, by outcome.
 	indexBuildDuration metric.Float64Histogram
 	// indexBuildRows counts rows backfilled into a secondary index. Until an
@@ -172,6 +196,11 @@ const (
 	metricGCCollected            = "syncplane.gc.collected"
 	metricIndexBuildDuration     = "syncplane.index.build.duration"
 	metricIndexBuildRows         = "syncplane.index.build.rows"
+	metricRoomStreams            = "syncplane.rooms.streams"
+	metricRoomsJoined            = "syncplane.rooms.joined"
+	metricRoomParticipants       = "syncplane.rooms.participants"
+	metricRoomPublishes          = "syncplane.rooms.publishes"
+	metricRoomEventsDropped      = "syncplane.rooms.events.dropped"
 )
 
 // newMetrics declares the server's instruments. A failure here is a
@@ -225,6 +254,21 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 		indexBuildRows: b.Int64Counter(metricIndexBuildRows,
 			metric.WithDescription("Rows backfilled into a secondary index."),
 			metric.WithUnit("{row}")),
+		roomStreams: b.Int64UpDownCounter(metricRoomStreams,
+			metric.WithDescription("Room Watch streams currently open."),
+			metric.WithUnit("{stream}")),
+		roomsJoined: b.Int64UpDownCounter(metricRoomsJoined,
+			metric.WithDescription("Rooms currently joined, summed over open streams."),
+			metric.WithUnit("{room}")),
+		roomParticipants: b.Int64Histogram(metricRoomParticipants,
+			metric.WithDescription("Participants in a room when it was joined."),
+			metric.WithUnit("{participant}")),
+		roomPublishes: b.Int64Counter(metricRoomPublishes,
+			metric.WithDescription("Room publishes accepted, by kind."),
+			metric.WithUnit("{publish}")),
+		roomEventsDropped: b.Int64Counter(metricRoomEventsDropped,
+			metric.WithDescription("Room events a stream never received, by reason."),
+			metric.WithUnit("{event}")),
 	}
 	return m, b.Err()
 }

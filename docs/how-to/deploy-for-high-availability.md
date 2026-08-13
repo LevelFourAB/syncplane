@@ -41,9 +41,13 @@ connection lifetime instead, so rebalancing happens when you choose.
 browser's ~6-connection HTTP/1.1 cap only binds when one page holds several
 clients — which means several accounts.
 
-**Drain on SIGTERM.** `Close` stops the GC goroutine, the index backfill and the
-notify-coalescing timers, and stopping the timers is what keeps a shared
-notifier from receiving a publish after the process announced it was done. It
+**Drain on SIGTERM.** `Close` stops the GC goroutine, the index backfill, the
+room registry's announce sweep and the notify-coalescing timers. Stopping the
+timers is what keeps a shared notifier from receiving a publish after the
+process announced it was done, and closing the registry likewise stops it
+announcing presence for sessions this process no longer serves — so the rooms
+it was holding empty out on the other nodes within one announce interval rather
+than showing ghosts. It
 does not close what you own:
 
 ```go
@@ -54,6 +58,7 @@ signal.Notify(sigs, syscall.SIGTERM, os.Interrupt)
 httpServer.Shutdown(drainCtx) // let open streams close
 mgr.Close()
 notifier.Close()
+bus.Close() // when the app uses rooms
 store.Close()
 ```
 
@@ -83,9 +88,13 @@ Each node opens:
 | 1              | the lease session, dialled on first use and shared by every app namespace        |
 | 1              | `pgnotify`'s `LISTEN` connection                                                 |
 | 1              | `pgnotify`'s publisher pool — sized by pgx's default but driven by one goroutine |
+| 1              | `pgpresence`'s `LISTEN` connection, when the app uses rooms                      |
+| 1              | `pgpresence`'s publisher pool, likewise                                          |
 
 Size `WithMaxConns` against your `max_connections` divided by node count, minus
-the three fixed connections, and leave headroom for the standby's own clients.
+the fixed connections above, and leave headroom for the standby's own clients.
+Neither `pgstore` nor `pgnotify` exposes a pool to share, which is why the
+presence bus adds its own pair rather than reusing one.
 
 ### Connection poolers
 
@@ -153,12 +162,15 @@ makes visible instead of a silent stream of dropped fields.
 
 ## Checklist
 
-- `pgstore` **and** `pgnotify` — one without the other is a half-deployment
+- `pgstore` **and** `pgnotify` — one without the other is a half-deployment, and
+  `pgpresence` too if the app uses rooms (an in-process bus splits every roster
+  across nodes, and unlike pokes it never converges)
 - No session affinity; LB idle timeout above `WithHeartbeat`; h2c if a page runs
   several clients
-- SIGTERM → HTTP drain → `Close` the manager, then the notifier, then the store
-- `WithMaxConns` sized against `max_connections`, plus three fixed connections
-  per node
+- SIGTERM → HTTP drain → `Close` the manager, then the notifier and bus, then
+  the store
+- `WithMaxConns` sized against `max_connections`, plus the fixed connections per
+  node
 - No transaction-mode pooler anywhere in front of the engine
 - Connectors in their own deployment at one replica
 - Override `CanAccessWorkspace` — the default `AllowAll` leaves a shared

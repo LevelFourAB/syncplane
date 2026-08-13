@@ -31,6 +31,9 @@ export {
 	CodeMutationIdGap,
 	CodePermissionDenied,
 	CodePoisonDropped,
+	CodeRoomClosed,
+	CodeRoomDropped,
+	CodeRoomOffline,
 	CodeTextMergeFailed,
 	CodeUnavailable,
 	CodeWatchFailed,
@@ -79,6 +82,18 @@ export type {
 	TotalOf,
 } from './query/index.js';
 export type { HydratedRow, IncludeSpec } from './refs.js';
+// The ephemeral plane. jsonCodec is the default and is exported so an app can
+// wrap it; a cursor room passes encodeAnchor() bytes through its own instead.
+export { jsonCodec, RoomSendError } from './room.js';
+export type {
+	Peer,
+	Room,
+	RoomCodec,
+	RoomError,
+	RoomMessage,
+	RoomOptions,
+	RoomStatus,
+} from './room.js';
 export { fetchSchema, registerSchema } from './schema/admin.js';
 export type { RegisterOptions, RegisterResult } from './schema/admin.js';
 export * as schema from './schema/builder.js';

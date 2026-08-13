@@ -25,6 +25,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/internal/telemetry"
 	"github.com/levelfourab/syncplane/engine/lease"
+	"github.com/levelfourab/syncplane/engine/presence"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -234,6 +235,32 @@ type Limits struct {
 	// and any divergence is a bug in the encoding or the planner. It is also
 	// the operational escape hatch if one ever is.
 	DisableIndexes bool
+	// Maximum rooms one Watch stream may carry. Each costs a bus subscription,
+	// a join gate and — for an anchored room — a row read on every re-gate, so
+	// this bounds what one stream commits the server to. A client watching more
+	// rooms than this opens a second stream. Default 64.
+	MaxRoomsPerStream int
+	// Maximum bytes of one participant's presence state. It is the app's own
+	// payload, and it rides in every announcement of that record — so unlike a
+	// row, its cost is per interval rather than per write, and it has to fit
+	// whatever the presence bus can carry (a Postgres NOTIFY payload is capped
+	// at 8000 bytes, base64 included). Default 4 KiB.
+	MaxPresenceStateBytes int
+	// Maximum bytes of one broadcast message, under the same bus ceiling as
+	// MaxPresenceStateBytes. Default 4 KiB.
+	MaxBroadcastBytes int
+	// Maximum items in one Publish request. Items are independent, so this
+	// bounds the gate calls and bus publishes one round trip can ask for.
+	// Default 32.
+	MaxPublishItems int
+	// Maximum participants a room keeps. Beyond it the room keeps the lowest
+	// session ids, reports its snapshot truncated, and turns further sessions
+	// away — lowest rather than newest so two nodes serving the same over-full
+	// room show the same people.
+	//
+	// It is a rendering bound as much as a memory one: a roster nobody can read
+	// is not worth the announcement traffic that maintains it. Default 128.
+	MaxParticipantsPerRoom int
 	// DisableMembershipMaintenance forces every pull to resolve a window and a
 	// follow closure from scratch, as if the cursor said nothing about the
 	// previous one.
@@ -311,6 +338,21 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxIndexScanCandidates <= 0 {
 		l.MaxIndexScanCandidates = 10000
 	}
+	if l.MaxRoomsPerStream <= 0 {
+		l.MaxRoomsPerStream = 64
+	}
+	if l.MaxPresenceStateBytes <= 0 {
+		l.MaxPresenceStateBytes = 4 << 10
+	}
+	if l.MaxBroadcastBytes <= 0 {
+		l.MaxBroadcastBytes = 4 << 10
+	}
+	if l.MaxPublishItems <= 0 {
+		l.MaxPublishItems = 32
+	}
+	if l.MaxParticipantsPerRoom <= 0 {
+		l.MaxParticipantsPerRoom = 128
+	}
 	return l
 }
 
@@ -374,6 +416,20 @@ type Server struct {
 	perms    Permissions
 	authn    Authenticator
 	notifier pubsub.Notifier
+	// presenceBus fans room events out to the other nodes; rooms is this node's
+	// view built on top of it, and roomSweep is the goroutine driving the
+	// registry's announce-and-expire pass. See engine/presence.
+	presenceBus  presence.Bus
+	roomAnnounce time.Duration
+	rooms        *presence.Registry
+	roomSweep    *roomSweeper
+	// roomSessions binds a session id to the principal that opened its Watch
+	// stream, so a Publish naming somebody else's session is refused. It is
+	// node-local, like the streams it tracks.
+	roomSessions *sessionBindings
+	// roomAnchors memoizes the anchor-row read the join gate performs, so a hot
+	// document costs one read per interval rather than one per watcher.
+	roomAnchors *anchorCache
 	// cursorState holds the bulky membership tail of issued cursors so the
 	// wire carries a reference instead (see encodeCursor). Nil disables the
 	// indirection: every cursor inlines its sets, exactly as cursors always
@@ -493,6 +549,40 @@ func WithPermissions(p Permissions) Option {
 // on a timer to notice work another node's writes created.
 func WithNotifier(n pubsub.Notifier) Option {
 	return func(s *Server) error { s.notifier = n; return nil }
+}
+
+// WithPresenceBus replaces the in-process fan-out for the ephemeral plane —
+// rooms, presence and broadcast. The default is presence.NewLocal(), which
+// reaches only this process, so a multi-node deployment that leaves it in place
+// shows each client the participants its own node happens to be serving.
+//
+// engine/presence/pgpresence is one over Postgres LISTEN/NOTIFY. A bus is
+// per-app in the same way a notifier is: workspace ids are namespaced per app,
+// so a Manager hosting several must give each its own namespaced view.
+func WithPresenceBus(b presence.Bus) Option {
+	return func(s *Server) error {
+		if b != nil {
+			s.presenceBus = b
+		}
+		return nil
+	}
+}
+
+// WithRoomAnnounce sets how often a node re-announces the presence records of
+// the sessions whose Watch streams it holds (default 5s), and with it how
+// quickly a session that vanished without saying so disappears from everyone
+// else's roster — three announce intervals.
+//
+// It is the ephemeral plane's whole liveness mechanism, so it trades screen
+// accuracy against bus traffic: the cost is one event per locally-held record
+// per interval, and the benefit is a shorter ghost.
+func WithRoomAnnounce(d time.Duration) Option {
+	return func(s *Server) error {
+		if d > 0 {
+			s.roomAnnounce = d
+		}
+		return nil
+	}
 }
 
 // WithCursorStateStore installs the store that keeps the membership tail of
@@ -654,6 +744,8 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		mutators:       make(map[string]*mutatorInfo),
 		perms:          AllowAll{},
 		notifier:       pubsub.NewLocal(),
+		presenceBus:    presence.NewLocal(),
+		roomAnnounce:   presence.DefaultAnnounce,
 		heartbeat:      30 * time.Second,
 		notifyWindow:   50 * time.Millisecond,
 		chunkSize:      256,
@@ -703,6 +795,12 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	s.notifier = pubsub.NewCoalescing(s.notifier, s.notifyWindow)
 	s.coalescer, _ = s.notifier.(*pubsub.Coalescing)
 	s.notifier = &countingNotifier{inner: s.notifier, count: s.tel().notifyRequested}
+	s.rooms = presence.NewRegistry(s.presenceBus, presence.Options{
+		Announce:        s.roomAnnounce,
+		MaxParticipants: s.limits.MaxParticipantsPerRoom,
+	})
+	s.roomSessions = newSessionBindings()
+	s.roomAnchors = newAnchorCache(s.heartbeat)
 	if err := s.applyDeclarations(); err != nil {
 		return nil, err
 	}
@@ -710,6 +808,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		s.gc.start(s)
 	}
 	s.indexBuild.start(s)
+	s.roomSweep = startRoomSweeper(s)
 	return s, nil
 }
 
@@ -749,26 +848,18 @@ func (s *Server) applyDeclarations() error {
 	return nil
 }
 
-// Handler returns the mount path and HTTP handler for the sync service.
-// HTTP/1.1 suffices (unary + server-streaming only). WithReadMaxBytes is the
-// front door for MaxRequestBytes: it bounds every request body (and its
-// decompressed size) before the body is buffered or unmarshaled, so the
-// documented per-request limits no longer sit behind an unbounded read.
+// interceptors returns the chain every mounted service shares, outermost
+// first.
 //
-// Interceptor order is outermost-first, so authentication (when a
-// WithAuthenticator is installed) runs inside the logging interceptor: a
-// rejected request is still logged, with its unauthenticated code, and the
-// handler never sees it.
+// Authentication (when a WithAuthenticator is installed) runs inside the
+// logging interceptor: a rejected request is still logged, with its
+// unauthenticated code, and the handler never sees it.
 //
-// Telemetry sits outside even the logging interceptor. It extracts the
-// incoming W3C trace context and opens the RPC span, so everything further in
-// — the auth rejection, the handler's own spans, and the trace_id the log
-// lines carry — belongs to one trace rather than starting a second one.
-//
-// The returned handler gzips streaming responses for clients that ask for it
-// with Accept-Encoding, which is how a browser asks — see compress.go for why
-// Connect's own compression does not cover them.
-func (s *Server) Handler() (string, http.Handler) {
+// Telemetry sits outside even the logging interceptor. It extracts the incoming
+// W3C trace context and opens the RPC span, so everything further in — the auth
+// rejection, the handler's own spans, and the trace_id the log lines carry —
+// belongs to one trace rather than starting a second one.
+func (s *Server) interceptors() []connect.Interceptor {
 	interceptors := []connect.Interceptor{}
 	if s.otelInterceptor != nil {
 		interceptors = append(interceptors, s.otelInterceptor)
@@ -777,24 +868,72 @@ func (s *Server) Handler() (string, http.Handler) {
 	if s.authn != nil {
 		interceptors = append(interceptors, &authInterceptor{authn: s.authn})
 	}
+	return interceptors
+}
+
+// Handler returns the mount path and HTTP handler for the sync service.
+// HTTP/1.1 suffices (unary + server-streaming only). WithReadMaxBytes is the
+// front door for MaxRequestBytes: it bounds every request body (and its
+// decompressed size) before the body is buffered or unmarshaled, so the
+// documented per-request limits no longer sit behind an unbounded read.
+//
+// The returned handler gzips streaming responses for clients that ask for it
+// with Accept-Encoding, which is how a browser asks — see compress.go for why
+// Connect's own compression does not cover them.
+//
+// A server mounted this way serves the sync plane and nothing else. Use
+// Handlers to mount every service it offers, rooms included.
+func (s *Server) Handler() (string, http.Handler) {
 	path, handler := syncplanev1connect.NewSyncServiceHandler(s,
 		connect.WithReadMaxBytes(s.limits.MaxRequestBytes),
-		connect.WithInterceptors(interceptors...))
+		connect.WithInterceptors(s.interceptors()...))
 	return path, compressStreams(handler)
 }
 
-// HTTPHandler returns the sync service already mounted at its own path, for
-// the common case where it is the only thing this listener serves:
+// PresenceHandler returns the mount path and HTTP handler for the presence
+// service — the ephemeral plane, see engine/presence.
+//
+// It shares the sync service's interceptor chain and request-size bound, and
+// deliberately does NOT gzip its stream: room frames are small and
+// latency-sensitive, and a gzip writer would cost a few hundred KB of deflate
+// state for every watching client.
+func (s *Server) PresenceHandler() (string, http.Handler) {
+	return syncplanev1connect.NewPresenceServiceHandler(s,
+		connect.WithReadMaxBytes(s.limits.MaxRequestBytes),
+		connect.WithInterceptors(s.interceptors()...))
+}
+
+// Handlers returns every Connect service this server mounts, keyed by mount
+// path. Mount all of them on a mux that also carries the app's own routes:
+//
+//	for path, h := range srv.Handlers() {
+//		mux.Handle(path, h)
+//	}
+//
+// Ranging over this rather than naming the services one at a time is what keeps
+// a deployment from silently missing one the engine gains later.
+func (s *Server) Handlers() map[string]http.Handler {
+	syncPath, sync := s.Handler()
+	presencePath, presence := s.PresenceHandler()
+	return map[string]http.Handler{
+		syncPath:     sync,
+		presencePath: presence,
+	}
+}
+
+// HTTPHandler returns every service already mounted at its own path, for the
+// common case where this server is the only thing the listener serves:
 //
 //	http.ListenAndServe(addr, srv.HTTPHandler())
 //
-// Connect routes by full method path, so the service cannot be served at an
-// arbitrary root — mounting is not optional, only who does it. Use Handler
-// instead to mount it on a mux that also carries the app's own routes.
+// Connect routes by full method path, so a service cannot be served at an
+// arbitrary root — mounting is not optional, only who does it. Use Handlers
+// instead to mount them on a mux that also carries the app's own routes.
 func (s *Server) HTTPHandler() http.Handler {
-	path, handler := s.Handler()
 	mux := http.NewServeMux()
-	mux.Handle(path, handler)
+	for path, h := range s.Handlers() {
+		mux.Handle(path, h)
+	}
 	return mux
 }
 

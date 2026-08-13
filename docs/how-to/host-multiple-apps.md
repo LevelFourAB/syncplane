@@ -129,3 +129,26 @@ need more than one node. The way out is
 but with poll latency). Nothing above the storage seam changes when that
 happens — `Manager`, namespaces and the authentication wiring are unaffected.
 See [Run more than one node](run-multiple-nodes.md).
+
+## Fan-out is per app, not per host
+
+A shared notifier and a shared presence bus are opened once for the process and
+then **namespaced per app**, for the reason the policy above is bound to an app
+id: workspace ids are namespaced per app, so two apps that both have a workspace
+`team` would otherwise wake each other's clients and serve each other's rooms.
+
+```go
+notifier, _ := pgnotify.Open(ctx, dsn)
+bus, _ := pgpresence.Open(ctx, dsn)
+
+server.WithAppOptions(func(appID string) []server.Option {
+	return []server.Option{
+		server.WithNotifier(notifier.Namespace(appID)),
+		server.WithPresenceBus(bus.Namespace(appID)),
+	}
+})
+```
+
+A namespaced view shares the transport it came from, and closing one is a no-op
+— the value `Open` returned owns the connections and must outlive every view.
+`cmd/syncplaned` wires both this way whenever its DSN selects Postgres.

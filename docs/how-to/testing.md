@@ -34,8 +34,8 @@ task test:e2e BROWSER=firefox -- -g "hands over"          # any installed engine
 `task test:e2e` is not part of `task ci`: it drives a real browser, which
 `task test:e2e:install` downloads once (~100 MB). It covers what only a browser
 can — cross-tab change sharing, stream leadership and its handover when a tab
-hides, mutation-id minting across tabs, and an IndexedDB store surviving the tab
-that made it.
+hides, mutation-id minting across tabs, rooms sharing one `Watch` stream across
+an account's tabs, and an IndexedDB store surviving the tab that made it.
 
 Node has no shared lock manager, so outside a browser the client falls back to
 an in-process mutex, declines stream leadership and leases peers locally.
@@ -50,6 +50,14 @@ pool over Web Locks, and two tabs of one app share a store, a queue and a
 reaching the same document; string writes meeting a typist; the wire cost of an
 edit in both directions, asserted against the server's own byte counters; and a
 live handle healing when the server compacts the field under it.
+
+[Rooms](../explanation/rooms.md) are multi-tab in the same way and for the same
+reason: the account holds one `Watch` stream however many tabs and rooms are
+open, elected on its own Web Lock and shared over a `BroadcastChannel`. The
+specs prove exactly one stream is open across three tabs, that a settled account
+stops reopening it, that a follower's rooms and its presence reach the server
+through the leader, and that closing the leader tab hands the stream over
+without anyone else seeing the account leave.
 
 Chromium by default. The suite uses no engine-specific APIs, so it runs on all
 three — worth doing before a release, since Web Locks and IndexedDB are exactly

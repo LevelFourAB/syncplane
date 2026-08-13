@@ -81,10 +81,11 @@ func main() {
 	}
 	defer srv.Close()
 
-	path, handler := srv.Handler()
 	stats := newWireStats()
 	mux := http.NewServeMux()
-	mux.Handle(path, stats.wrap(handler))
+	for path, handler := range srv.Handlers() {
+		mux.Handle(path, stats.wrap(handler))
+	}
 	mux.Handle("/debug/stats", stats)
 	mux.Handle("/debug/tiers", tiersHandler())
 	mux.Handle("/debug/seed", seedHandler(srv, logger))

@@ -79,6 +79,8 @@ arbitrary root.
 | `WithMerger(proto, path, fn)`   | —          | Declares a merge hook for an opaque field.                                                                                                                                                                                                                                                                                   |
 | `WithHistoryFilter(fn)`         | —          | Admits, rejects or rewrites every field-history record. See [Field history](#field-history).                                                                                                                                                                                                                                 |
 | `WithHistorySession(d)`         | 5m         | How long one row's field-history record stays open to later writes by the same actor; `HistorySessionOff` records every write. See [Field history](#field-history).                                                                                                                                                          |
+| `WithPresenceBus(b)`            | in-process | Fan-out for the ephemeral plane. The default reaches only this process; a multi-node deployment installs a shared one (`engine/presence/pgpresence`). See [Rooms](#rooms).                                                                                                                                                   |
+| `WithRoomAnnounce(d)`           | 5s         | How often a node re-announces the presence records it is responsible for, and so how quickly a session that vanished without saying so disappears — three intervals. See [Rooms](#rooms).                                                                                                                                    |
 
 ### Limits
 
@@ -101,6 +103,11 @@ Every field defaults when left non-positive.
 | `MaxWindowSize`           | 1000    | Rows a single `Subscription.window` may hold. Must stay well under `MaxPullChanges`: a window that swaps wholesale emits up to 2N changes in one page.                                                                                                                                |
 | `MaxIndexEntriesPerRow`   | 1024    | Secondary-index entries one row may occupy across its entity's indexes — the per-write cost of indexing that entity. An index over a repeated field stores one entry per element, so this is also the ceiling on how long an indexed list may get. Exceeding it fails the write.      |
 | `MaxIndexScanCandidates`  | 10000   | Index entries one range scan may walk while a read filter rejects candidates. Overflow falls back to a scan rather than failing.                                                                                                                                                      |
+| `MaxRoomsPerStream`       | 64      | Rooms one `Watch` stream may carry, and separately the sessions it may keep alive on other tabs' behalf. Each costs a bus subscription, a join gate, and — when anchored — a row read per re-gate tick.                                                                               |
+| `MaxPresenceStateBytes`   | 4 KiB   | One participant's presence state. Unlike a row it costs per announce interval rather than per write, and it has to fit whatever the presence bus can carry (a Postgres NOTIFY payload caps at 8000 bytes, base64 included).                                                           |
+| `MaxBroadcastBytes`       | 4 KiB   | One broadcast message, under the same bus ceiling.                                                                                                                                                                                                                                    |
+| `MaxPublishItems`         | 32      | Items in one `Publish` request.                                                                                                                                                                                                                                                       |
+| `MaxParticipantsPerRoom`  | 128     | Records a room keeps. Beyond it the room keeps the lowest session ids, reports its snapshot truncated and turns further sessions away — lowest rather than newest so two nodes serving the same over-full room show the same people.                                                  |
 
 Raising `MaxMutationsPerPush` or `MaxValueBytes` means raising
 `MaxRequestBytes` in tandem.
@@ -556,6 +563,85 @@ can invent its own; the engine ships constants for the ones it uses itself:
 `CodeTextFullStateRequired` and `CodeTextStateStale`.
 
 See [Authentication and permissions](../how-to/authentication-and-permissions.md).
+
+## Rooms
+
+The ephemeral plane — presence and broadcast — served by `PresenceService`
+alongside the sync service. It is mounted by `HTTPHandler()` and by
+`Handlers()`, so a deployment that mounts either gets it without asking.
+Nothing it carries is stored: see [Rooms](../explanation/rooms.md).
+
+```go
+path, h := srv.PresenceHandler()   // one service
+for path, h := range srv.Handlers() { mux.Handle(path, h) } // all of them
+```
+
+`Watch` streams a session's rooms; `Publish` writes state, sends broadcasts and
+announces departures. `Publish` is unary, so only receiving needs a stream.
+
+### The join gate
+
+Every topic passes the same admission check at join, again on the stream's
+heartbeat, and on a `Publish` for a topic the caller is not already watching
+here:
+
+1. `CanAccessWorkspace` — the workspace gate, first, so a refused caller
+   performs no storage work.
+2. For an **anchored** topic, the anchor row must exist and pass that entity's
+   `ReadFilter`. Room membership therefore inherits row permissions. An anchor
+   naming an unregistered or server-only entity is refused.
+3. `RoomPermissions.CanJoinRoom`, if the policy implements it.
+4. `RoomPermissions.VisibleParticipants`, resolved once and applied to the
+   snapshot and to every later frame.
+
+A settled denial drops the topic as `REASON_ACCESS_REVOKED`; a hook that could
+not decide drops it as `REASON_ERROR`, so an outage never reads as a
+revocation. Other topics on the stream keep running either way.
+
+The anchor row read is memoized across the streams re-gating on it, so a
+document everyone has open costs one read per heartbeat interval rather than one
+per watcher — at the price of a revocation being noticed within two heartbeats
+rather than one.
+
+```go
+type RoomPermissions interface {
+    CanJoinRoom(ctx context.Context, p Principal, workspaceID string, topic presence.Topic) error
+    VisibleParticipants(ctx context.Context, p Principal, workspaceID string, topic presence.Topic) (ParticipantFilter, error)
+}
+```
+
+Optional, and type-asserted: a `Permissions` that does not implement it admits
+every caller who cleared the gate above and shows them everyone. Embed
+`server.AllowAllRooms` to implement one hook and inherit the other. Return
+`server.DenyRoom(msg)` for a settled refusal.
+
+### Identity
+
+`Participant.Subject` is stamped from the request principal. Nothing in the
+payload names the publisher, so presence cannot be used to impersonate.
+`session_id` is self-asserted like a client id — the server binds it to the
+principal that opened its stream, and refuses a `Publish` naming a session this
+node holds for somebody else.
+
+### The bus
+
+```go
+type Bus interface {
+    Publish(ctx context.Context, ev presence.Event) error
+    Subscribe(topic presence.Topic) (<-chan presence.Event, func())
+}
+```
+
+`WithPresenceBus` installs it; the default is in-process. Delivery is at most
+once, and `Publish` must never block on a watcher that is not reading — see the
+`engine/presence` package doc for the full contract and
+`presencetest.Conformance` for the suite an implementation must pass.
+
+Liveness is the bus's only durability: a node re-announces the records of the
+sessions its streams are responsible for every `WithRoomAnnounce` interval, and
+drops a record nobody re-announced within three of them. `Publish` returns that
+interval, so a publisher holding no stream — which nothing re-announces for —
+can refresh its own records on it.
 
 ## Hosting many apps
 

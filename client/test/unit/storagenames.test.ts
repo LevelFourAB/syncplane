@@ -37,8 +37,19 @@ describe('storageNames', () => {
 			streamLock: 'sync:stream:acct',
 			changeChannel: 'sync:change:acct',
 			reopenChannel: 'sync:reopen:acct',
+			presenceLock: 'sync:presencelock:acct',
+			presenceChannel: 'sync:presence:acct',
 			textPeerLocks: 'sync:textpeer',
 		});
+	});
+
+	// The two planes are elected independently, and a tab holding one must not
+	// be prevented from contending for the other.
+	it('gives the data stream and the room stream different locks', () => {
+		const names = storageNames(DEFAULT_STORAGE_PREFIX, 'acct');
+		expect(names.presenceLock).not.toBe(names.streamLock);
+		expect(names.presenceChannel).not.toBe(names.changeChannel);
+		expect(names.presenceChannel).not.toBe(names.reopenChannel);
 	});
 
 	it('moves every name when the prefix changes', () => {

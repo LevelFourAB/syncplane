@@ -75,6 +75,31 @@ Everything else is allowed. Keys may contain `/`, spaces and any printable
 Unicode, and are compared bytewise — no case folding, no normalization, so `é`
 written as one code point and as `e` plus a combining accent are different rows.
 
+## Room names
+
+A room topic is `(workspace_id, name)` plus an optional row anchor — see
+[rooms](../explanation/rooms.md). Nothing declares a room ahead of time, so the
+`name` half is a **character rule** rather than an identifier rule:
+
+| Rule                                                      |
+| --------------------------------------------------------- |
+| Non-empty                                                 |
+| No ASCII control characters (`\u0000`–`\u001f`, `\u007f`) |
+| Encodable as UTF-8 (no unpaired surrogate)                |
+| At most 128 UTF-8 bytes                                   |
+
+So `cursors`, `doc:42/cursors` and `Board — Sprint 14` all work. Checked when a
+room is opened on the client (`ws.room(name)`) and at the RPC boundary on the
+server, where a violation is `invalid_argument`.
+
+The cap is smaller than a row key's because the whole topic — workspace id,
+name, anchor key, publisher subject — rides in every presence event alongside
+the app's own state, and a bus over Postgres `LISTEN`/`NOTIFY` has to fit all of
+it in one 7900-byte payload with the state base64-expanded. 128 bytes leaves
+that budget to the state, which is the part an app cannot shorten.
+
+Like row keys, names compare bytewise: `Notes` and `notes` are two rooms.
+
 ## Workspace ids
 
 `workspace_id` is a hard partition key everywhere — see

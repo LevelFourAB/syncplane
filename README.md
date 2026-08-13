@@ -25,6 +25,10 @@ It ships as two halves joined by a protobuf wire contract: a Go server
 - ✍️ **Collaborative text** — mark a `bytes` field `text: true` and it holds a
   convergent text document, with Peritext-style marks and anchors that travel
   with the characters they cover.
+- 👥 **Presence and broadcast** — a second, non-durable plane for cursors, "who
+  is here" and typing indicators. A room anchored to a row inherits that row's
+  read permission, so it needs no policy of its own, and nothing it carries
+  touches the mutation log.
 - 🕰️ **Field history** — opt an entity into `history: {}` and the server logs
   what its marked fields held before each editing session, with the actor;
   restoring one is an ordinary `patch`.

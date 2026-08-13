@@ -16,6 +16,7 @@ import { TodoSchema } from '../../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	decodeTextDoc,
+	type Room,
 	SyncClient,
 	type TextHandle,
 	textMarksOf,
@@ -45,6 +46,14 @@ const rejections: string[] = [];
 /** Open text handles, keyed by the number the spec holds (handles are not JSON). */
 const textHandles = new Map<number, TextHandle>();
 let nextTextHandle = 1;
+/**
+ * Open rooms, keyed the same way, each with the broadcasts it has received —
+ * messages are at-most-once and not replayed, so a spec that asked for them
+ * after the fact would have nothing to read unless they are collected as they
+ * arrive.
+ */
+const rooms = new Map<number, { room: Room<string>; received: string[] }>();
+let nextRoom = 1;
 /** Set only for a tab opened with measureWrites; see writeBytes. */
 let meter: WriteMeter | undefined;
 
@@ -57,6 +66,12 @@ function text(handle: number): TextHandle {
 	const h = textHandles.get(handle);
 	if (h === undefined) throw new Error(`harness: no text handle ${handle}`);
 	return h;
+}
+
+function roomOf(handle: number): { room: Room<string>; received: string[] } {
+	const r = rooms.get(handle);
+	if (r === undefined) throw new Error(`harness: no room ${handle}`);
+	return r;
 }
 
 /** Decodes widget `id`'s stored body, read through the client's local store. */
@@ -180,6 +195,10 @@ const harness: HarnessApi = {
 		// before the tab closes is queued before the client goes away.
 		for (const handle of textHandles.values()) await handle.close();
 		textHandles.clear();
+		// Closing a room publishes its departure, so the other tabs see this one
+		// go at once rather than waiting out the expiry window.
+		for (const entry of rooms.values()) await entry.room.close();
+		rooms.clear();
 		await client?.close();
 		client = undefined;
 		workspaceId = undefined;
@@ -266,6 +285,45 @@ const harness: HarnessApi = {
 	async closeText(handle) {
 		await text(handle).close();
 		textHandles.delete(handle);
+	},
+
+	async joinRoom(name) {
+		const room = current().ws(workspaceId!).room<string>(name);
+		const key = nextRoom++;
+		const received: string[] = [];
+		room.onMessage((m) => received.push(m.message));
+		rooms.set(key, { room, received });
+		return key;
+	},
+
+	async sessionId() {
+		return current().sessionId;
+	},
+
+	async setPresence(id, state) {
+		roomOf(id).room.setPresence(state);
+	},
+
+	async sendRoomMessage(id, message) {
+		await roomOf(id).room.send(message);
+	},
+
+	async roomPeers(id) {
+		return roomOf(id).room.peers().map((p) => ({
+			sessionId: p.sessionId,
+			subject: p.subject,
+			state: p.state,
+			self: p.self,
+		}));
+	},
+
+	async roomMessages(id) {
+		return [ ...roomOf(id).received ];
+	},
+
+	async leaveRoom(id) {
+		await roomOf(id).room.close();
+		rooms.delete(id);
 	},
 
 	async storedText(id) {

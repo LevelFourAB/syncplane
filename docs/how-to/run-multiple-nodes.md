@@ -10,11 +10,17 @@ replacing both, because each one is single-node for a different reason.
 - **Pokes** — the default notifier fans out in-process, so a client connected
   to node A never hears about a write that landed on node B. It converges by
   polling, which is correct but not realtime. Replace it with `pgnotify`.
+- **Rooms** — the default presence bus is in-process too, so each node shows a
+  client only the participants that node happens to be serving. Unlike pokes
+  this does not converge later, because nothing on the
+  [ephemeral plane](../explanation/rooms.md) is durable: a roster split across
+  nodes stays split. Replace it with `pgpresence` — and skip it entirely if the
+  app uses no rooms.
 
-The two are independent. A Postgres notifier in front of a SQLite store is a
+The three are independent. A Postgres notifier in front of a SQLite store is a
 sensible single-node deployment that gains nothing, and a Postgres store with
 the default notifier is a correct multi-node deployment whose clients converge
-at poll latency. You need both for multi-node realtime.
+at poll latency. You need all three for multi-node realtime with presence.
 
 ## Both, together
 
@@ -33,12 +39,24 @@ if err != nil {
 }
 defer notifier.Close()
 
+bus, err := pgpresence.Open(ctx, os.Getenv("DATABASE_URL"))
+if err != nil {
+	log.Fatal(err)
+}
+defer bus.Close()
+
 srv, err := server.New(
 	store,
 	server.WithNotifier(notifier),
+	server.WithPresenceBus(bus),
 	server.WithEntities(&todov1.Todo{}),
 )
 ```
+
+Each of the two `LISTEN`/`NOTIFY` transports holds a connection pool for
+publishing plus one dedicated connection parked in `WaitForNotification` —
+neither `pgstore` nor the other exposes a pool to share — so budget four
+connection sets per process rather than two.
 
 `Open` applies any outstanding migrations, under an advisory lock — so every
 node runs the same code at boot and they race safely. There is no separate
@@ -125,6 +143,27 @@ workspace it has a live subscription for, so watching clients are not left
 waiting for a poll — but a workspace nobody was subscribed to is not announced,
 which is why a background consumer keeps its periodic sweep as a backstop.
 
+`pgpresence` has the same three lossy paths and heals differently, because a
+presence event _was_ the state and cannot be re-sent from nothing the way a
+content-free poke can. There is no re-poke on reconnect; instead each node
+re-announces the records it is responsible for every `WithRoomAnnounce`
+interval, so the other nodes' rosters are stale for at most one interval. A
+broadcast sent during the gap is gone, which is the primitive's documented
+contract.
+
+The one failure it does **not** swallow is an oversize payload: a presence
+event carries the app's own state base64-encoded inside an 8000-byte NOTIFY
+payload, so one that will not fit is refused at `Publish` rather than dropped.
+The engine caps state and messages well under that
+(`MaxPresenceStateBytes`, `MaxBroadcastBytes`), so reaching it means those
+limits were raised past what the transport can carry.
+
+Presence updates arrive at a far higher rate than pokes — a cursor moves tens of
+times a second — so the publish queue folds state per `(topic, session)` before
+it reaches the database: a hundred users moving cursors cost a hundred
+`pg_notify` round trips per drain rather than a thousand. Broadcasts are each
+distinct and never folded, only dropped.
+
 ## Isolating deployments that share a database
 
 One channel carries every namespace. Staging and production on the same
@@ -133,7 +172,12 @@ give them separate channels:
 
 ```go
 pgnotify.Open(ctx, dsn, pgnotify.WithChannel("syncplane_poke_staging"))
+pgpresence.Open(ctx, dsn, pgpresence.WithChannel("syncplane_presence_staging"))
 ```
+
+The two default to different channels (`syncplane_poke` and
+`syncplane_presence`) and must stay apart: a node running only the notifier
+would otherwise receive presence payloads it cannot decode.
 
 `pgstore` needs no equivalent: point the two at different databases, or at
 different schemas via the DSN's `search_path`.

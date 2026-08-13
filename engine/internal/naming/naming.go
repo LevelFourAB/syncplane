@@ -56,6 +56,18 @@ const (
 	// bypass gives itself. It is written by the operator's own code and read by
 	// humans and echo-suppression checks, so it is short by design.
 	MaxActorSystemBytes = 64
+	// MaxRoomNameBytes caps the name half of a room topic. The name rides in
+	// every presence event on the bus, alongside the workspace id, the anchor
+	// key, the publisher's subject and the app's own state — and a bus over
+	// Postgres LISTEN/NOTIFY has to fit all of that in one 7900-byte payload,
+	// with the state expanded by base64. 128 leaves that budget to the state,
+	// which is the part an app cannot shorten.
+	MaxRoomNameBytes = 128
+	// MaxSessionIDBytes caps the id a presence session identifies itself by.
+	// The id keys every record on the ephemeral plane, is echoed to every
+	// watcher of a room the session is in, and rides the presence bus with the
+	// room name and the app's state. 128 holds a UUID with room to spare.
+	MaxSessionIDBytes = 128
 )
 
 // ValidateEntityName checks an entity's wire name — (syncplane.v1.entity).name,
@@ -211,7 +223,7 @@ func ValidateRowKey(key string) error {
 // the change feed into logs and rendered history, where a control character
 // turns the output into something that cannot be read back.
 func ValidateActorSubject(subject string) error {
-	return validateActorField("actor subject", subject, MaxActorSubjectBytes)
+	return validatePrintableField("actor subject", subject, MaxActorSubjectBytes)
 }
 
 // ValidateActorSystem checks the label a write made under the engine's trusted
@@ -219,12 +231,55 @@ func ValidateActorSubject(subject string) error {
 // characters, and at most MaxActorSystemBytes long. Empty is valid and means a
 // caller, not the bypass, made the write.
 func ValidateActorSystem(system string) error {
-	return validateActorField("actor system label", system, MaxActorSystemBytes)
+	return validatePrintableField("actor system label", system, MaxActorSystemBytes)
 }
 
-// validateActorField holds the rules both actor fields share; what differs is
-// the cap and the noun in the message.
-func validateActorField(what, s string, maxBytes int) error {
+// ValidateRoomName checks the name half of a room topic. It must be non-empty,
+// valid UTF-8, free of ASCII control characters, and at most MaxRoomNameBytes
+// long.
+//
+// Rooms are addressed by whatever string an app picks, so the rule is a
+// character rule rather than an identifier rule: `doc:42/cursors` and
+// `Board — Sprint 14` are both fine, and no registration declares a room ahead
+// of time. Control characters are refused for the reason row keys refuse them —
+// the name reaches logs, and the client's cross-tab room protocol separates
+// fields with them — and the cap is what keeps one topic from consuming a bus
+// payload the app's own state has to share.
+//
+// Comparison is bytewise, with no case folding and no normalization, so `Notes`
+// and `notes` are two rooms.
+func ValidateRoomName(name string) error {
+	if name == "" {
+		return fmt.Errorf("room name is empty")
+	}
+	return validatePrintableField("room name", name, MaxRoomNameBytes)
+}
+
+// ValidateSessionID checks the id a presence session identifies itself by. It
+// must be non-empty, valid UTF-8, free of ASCII control characters, and at most
+// MaxSessionIDBytes long.
+//
+// It is a character rule rather than an identifier rule because clients mint it
+// however they like — a UUID, a device handle and a slot number, a hash. What
+// it may not do is carry a control character, because the id is echoed to every
+// watcher of every room the session is in and separates fields in the client's
+// cross-tab room protocol.
+//
+// A session id is NOT an identity: it is self-asserted, like a client id, and
+// the subject a participant is shown under is stamped by the server from the
+// request principal instead.
+func ValidateSessionID(id string) error {
+	if id == "" {
+		return fmt.Errorf("session id is empty")
+	}
+	return validatePrintableField("session id", id, MaxSessionIDBytes)
+}
+
+// validatePrintableField holds the rule the free-form names share — valid
+// UTF-8, no ASCII control characters, a byte cap — because each of them ends up
+// in a log line or beside a control character that separates fields. What
+// differs is the cap and the noun in the message.
+func validatePrintableField(what, s string, maxBytes int) error {
 	if len(s) > maxBytes {
 		return fmt.Errorf("%s is %d bytes, the limit is %d", what, len(s), maxBytes)
 	}

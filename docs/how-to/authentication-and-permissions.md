@@ -184,6 +184,40 @@ The change feed and the admin service do not authenticate and do not consult
 `Permissions`; reaching them means you are already inside the process. The admin
 service has its own gate (`RegisterAuthorizer`).
 
+## Rooms inherit row permissions
+
+A [room](../explanation/rooms.md) anchored to a row admits a caller only if that
+entity's `ReadFilter` would let them read it, so presence on a document is
+governed by the document's own rules and there is no second surface to keep in
+step.
+
+An unanchored room is gated on `CanAccessWorkspace` alone. Implement the
+optional `RoomPermissions` when either is not the whole answer — being able to
+read a row is not the same as being allowed to know who else is looking at it:
+
+```go
+type policy struct {
+	server.AllowAll
+	server.AllowAllRooms
+}
+
+func (policy) CanJoinRoom(
+	_ context.Context, p server.Principal, ws string, t presence.Topic,
+) error {
+	if t.Name == "admin" && !directory.IsAdmin(p.Subject, ws) {
+		return server.DenyRoom("not an administrator")
+	}
+	return nil
+}
+```
+
+`DenyRoom` is the settled refusal, as `DenyWorkspace` is for a workspace: it
+drops that one topic permanently and leaves the caller everything else. Any
+other error drops it as retryable, so an outage never reads as a revocation.
+
+Both hooks run at join and `CanJoinRoom` again on the stream's heartbeat, which
+bounds revocation the same way the workspace gate is bounded below.
+
 ## Revocation
 
 A settled denial is permanent and reaches the client as such: it stops syncing

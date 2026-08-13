@@ -31,6 +31,9 @@ standing condition that retrying cannot clear.
 | A workspace's queue was refused for a mutation-id gap      | `status().lastError` + a `resequence` sync event    | `mutation_id_gap`                                                          |
 | A watch could not be registered                            | `status().lastError`                                | `watch_failed`                                                             |
 | A text handle could not merge remote state                 | `TextHandle.status()` + `TextHandle.onError`        | `text_merge_failed`                                                        |
+| The server withdrew a room                                 | `Room.status()` + `Room.onError`                    | `room_dropped`                                                             |
+| A room publish could not be sent                           | `Room.onError`                                      | `room_offline`                                                             |
+| `Room.send` was called on a closed or dropped room         | the `RoomSendError` it rejects with                 | `room_closed`, `room_dropped`                                              |
 | Access to a workspace was withdrawn                        | `status().workspaces[id].access`                    | —                                                                          |
 | Server and client schema revisions differ                  | `status().schemaSkew`                               | —                                                                          |
 
@@ -40,7 +43,14 @@ callback runs), **`lastError` is the sync loop** (transient, cleared by the next
 successful cycle), and the last two are **standing conditions** that survive a
 successful cycle because retrying cannot change them. The text-handle row is
 neither: it belongs to one live handle rather than to the client, which is why
-it has its own channel.
+it has its own channel. The two room rows are the same shape one level over:
+they belong to one open room, and neither touches the client's status.
+
+`room_dropped` is terminal — the server re-checks access on every heartbeat, so
+reopening meets the same answer — while `room_offline` is not: it reports that
+one publish did not reach the server, and the room's state is re-sent when the
+stream reopens. Nothing on the room plane is durable, so neither code ever means
+data was lost; see [Rooms](../explanation/rooms.md).
 
 ## Two codes that deliberately appear nowhere above
 

@@ -181,8 +181,8 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 	it('both tabs pull the union of subscriptions; a full-sync tab widens everyone', async () => {
 		const h = harness();
 		await h.seed();
-		const regA = new IntentRegistry(h.kv, h.kvMutex);
-		const regB = new IntentRegistry(h.kv, h.kvMutex);
+		const regA = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
+		const regB = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
 		const subsA = [ sub('todo') ];
 		const subsB = [ sub('project') ];
 		await regA.seed(scope(subsA), new Map());
@@ -229,7 +229,7 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		const h = harness();
 		await h.seed();
 		const status = new StatusTracker();
-		const regA = new IntentRegistry(h.kv, h.kvMutex);
+		const regA = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
 		const subsA = [ sub('todo') ];
 		await regA.seed(scope(subsA), new Map());
 		const tabA = h.tab(h.transport([]), { intent: regA, scopes: scope(subsA), status });
@@ -240,7 +240,7 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 
 		// A full-sync peer collapses the union to full sync — effective scope is
 		// now broader than this tab asked for.
-		const regB = new IntentRegistry(h.kv, h.kvMutex);
+		const regB = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
 		await regB.seed(scope([]), new Map());
 		await tabA.syncNow();
 		expect(status.current().workspaces[WS]!.scope).toEqual({ own: 1, effective: 0, widened: true });
@@ -253,8 +253,8 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		// Two same-key PATCHes — foldable to one mutation — but tab B's undo
 		// stack references id 2.
 		await h.seed([ patch(1n, 't1', [ 'title' ]), patch(2n, 't1', [ 'completed' ]) ]);
-		const regA = new IntentRegistry(h.kv, h.kvMutex);
-		const regB = new IntentRegistry(h.kv, h.kvMutex);
+		const regA = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
+		const regB = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
 		await regA.seed(scope([]), new Map());
 		await regB.seed(scope([]), new Map([ [ WS, new Set([ 2n ]) ] ]));
 
@@ -278,7 +278,7 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 	it('compaction protects an own ref persisted after its in-memory snapshot', async () => {
 		const h = harness();
 		await h.seed([ patch(1n, 't1', [ 'title' ]), patch(2n, 't1', [ 'completed' ]) ]);
-		const regA = new IntentRegistry(h.kv, h.kvMutex);
+		const regA = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex);
 		await regA.seed(scope([]), new Map());
 
 		// compact() reads this tab's undo refs from memory BEFORE taking the kv
@@ -348,11 +348,11 @@ describe('coordinator multi-tab (shared store, intent union)', () => {
 		const clock = () => now;
 
 		// "Crashed" tab: seeds a record, never stops.
-		const regB = new IntentRegistry(h.kv, h.kvMutex, { now: clock });
+		const regB = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex, { now: clock });
 		await regB.seed(scope([ sub('project') ]), new Map());
 
 		// Clean tab: start() seeds its record, stop() removes it.
-		const regA = new IntentRegistry(h.kv, h.kvMutex, { now: clock });
+		const regA = new IntentRegistry(crypto.randomUUID(), h.kv, h.kvMutex, { now: clock });
 		const subsA = [ sub('todo') ];
 		const pullsA: Subscription[][] = [];
 		const tabA = h.tab(h.transport(pullsA), { intent: regA, scopes: scope(subsA) });

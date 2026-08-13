@@ -6,11 +6,13 @@ import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js
 import { buildDelete, buildPut, entityDefOf } from '../../src/mutations.js';
 import {
 	MAX_ENTITY_NAME_LENGTH,
+	MAX_ROOM_NAME_BYTES,
 	MAX_ROW_KEY_BYTES,
 	MAX_WORKSPACE_ID_BYTES,
 	rowKey,
 	validateEntityName,
 	validateKeyField,
+	validateRoomName,
 	validateRowKey,
 	validateWorkspaceId,
 } from '../../src/naming.js';
@@ -164,6 +166,38 @@ describe('validateRowKey', () => {
 		// Two bytes per character, so half the cap in characters is the limit.
 		expect(() => validateRowKey('todo', 'å'.repeat(MAX_ROW_KEY_BYTES / 2 + 1)))
 			.toThrow(/the limit is/);
+	});
+});
+
+describe('validateRoomName', () => {
+	// A character rule, not an identifier rule: nothing declares a room ahead
+	// of time, so an app names one after whatever it is showing.
+	it('accepts the names apps address rooms by', () => {
+		for (const name of [ 'cursors', 'doc:42/cursors', 'Board — Sprint 14', 'åäö' ]) {
+			expect(() => validateRoomName(name)).not.toThrow();
+		}
+	});
+
+	it('rejects the empty name', () => {
+		expect(() => validateRoomName('')).toThrow(/empty/);
+	});
+
+	it('rejects control characters', () => {
+		expect(() => validateRoomName('a\u0000b')).toThrow(/\\u0000/);
+		// U+001F separates the fields of the cross-tab room protocol.
+		expect(() => validateRoomName('a\u001fb')).toThrow(/\\u001f/);
+		expect(() => validateRoomName('a\u007f')).toThrow(/\\u007f/);
+	});
+
+	it('rejects an unpaired surrogate', () => {
+		expect(() => validateRoomName('a\ud800b')).toThrow(/unpaired surrogate/);
+		expect(() => validateRoomName('a😀')).not.toThrow();
+	});
+
+	it('caps the length in UTF-8 bytes, not characters', () => {
+		expect(() => validateRoomName('a'.repeat(MAX_ROOM_NAME_BYTES))).not.toThrow();
+		expect(() => validateRoomName('a'.repeat(MAX_ROOM_NAME_BYTES + 1))).toThrow(/the limit is/);
+		expect(() => validateRoomName('å'.repeat(MAX_ROOM_NAME_BYTES / 2 + 1))).toThrow(/the limit is/);
 	});
 });
 

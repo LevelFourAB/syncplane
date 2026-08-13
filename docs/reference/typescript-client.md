@@ -1585,8 +1585,85 @@ error boundary.
   `PokeEvent`, `StreamEvent`, `LeadershipEvent`, `ResequenceEvent`, `QueryEvent`),
   plus `SyncEventHandler`, `SyncEventOutcome` and `QueryDeclineReason`, for typing
   an `onSyncEvent` handler. Types only — events are delivered, never constructed.
+- Rooms ([below](#14-rooms--presence-and-broadcast)): `jsonCodec` and
+  `RoomSendError`, plus the `Room`, `Peer`, `RoomCodec`, `RoomError`,
+  `RoomMessage`, `RoomOptions` and `RoomStatus` types.
 - Error codes: `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied`,
-  `CodePoisonDropped`.
+  `CodePoisonDropped`, `CodeRoomDropped`, `CodeRoomOffline`, `CodeRoomClosed`.
+
+---
+
+## 14. Rooms — presence and broadcast
+
+The ephemeral plane: state that only matters while somebody is connected.
+Nothing here is stored, replayed or acknowledged — see
+[Rooms](../explanation/rooms.md) and
+[Add presence to an app](../how-to/add-presence.md).
+
+```ts
+ws.room<S, M>(name, opts?): Room<S, M>              // unanchored
+ws.room<S, M>(schema, key, name, opts?): Room<S, M> // anchored to a row
+```
+
+Mirrored on the client itself for the default workspace. Anchoring makes
+membership inherit that row's read permission.
+
+### `Room<S, M>`
+
+| Member                      | Behaviour                                                                                                                                                                              |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `name`, `sessionId`         | The room's name, and this tab's session — the key its own record lives under.                                                                                                          |
+| `setPresence(state, opts?)` | Replaces this session's state wholly. Throttled; never queued offline but re-sent when the stream reopens. `opts.seq` records the workspace position it was authored against.          |
+| `send(message)`             | Broadcasts to whoever is watching now. At most once. Rejects with a `RoomSendError` when the room is closed or dropped, and with the transport's error when the server is unreachable. |
+| `peers()`                   | The roster including your own record, ordered by session id. Frozen, and reference-stable until something actually changes.                                                            |
+| `subscribe(cb)`             | Roster changes. Returns an unsubscribe function.                                                                                                                                       |
+| `onMessage(cb)`             | Broadcasts, including your own — filter on `RoomMessage.self`.                                                                                                                         |
+| `onError(cb)`               | The room being dropped, and publish failures. Returns an unsubscribe function.                                                                                                         |
+| `status()`                  | `joining` → `open`, or `dropped` (terminal) / `closed`.                                                                                                                                |
+| `close()`                   | Withdraws this session's record and stops delivering. Idempotent.                                                                                                                      |
+
+### `Peer<S>`
+
+`sessionId`, `subject` (server-stamped; empty when unauthenticated), `state`
+(`undefined` when the codec could not decode it), `seq`, and `self`. Peer
+objects are immutable and keep their identity across roster changes, so
+`React.memo` children only re-render for the peer that moved.
+
+### Options
+
+| Option       | Default       | Meaning                                                                                                                     |
+| ------------ | ------------- | --------------------------------------------------------------------------------------------------------------------------- |
+| `codec`      | `jsonCodec()` | How state and messages are encoded. A cursor room passes `encodeAnchor()` bytes through instead of JSON.                    |
+| `throttleMs` | 60            | Smallest gap between published states. The first of a quiet period goes out at once and the last of a burst always follows. |
+
+`SyncClientOptions.presenceEnabled` (default true) turns the `Watch` stream off
+while leaving publishing intact — for a page that writes presence and does not
+render it, and to get a browser connection slot back. A record is normally kept
+alive by whichever node holds its session's stream, so with no stream each open
+room re-publishes its own last state on the interval `Publish` reports: one
+unary call per room per interval in place of the connection.
+
+### React
+
+```ts
+const { peers, room, loading, error } = useRoom<S, M>(name, opts?);
+const peers = usePresence<S>(name, opts?);
+```
+
+Both take the anchored form too (`(schema, key, name, opts?)`), resolve the
+workspace from `useWorkspaceScope`, and close the room on unmount or on an
+identity change. `opts.onMessage` may be an inline closure — it is read through
+a ref and does not reopen the room. Available as bare exports and on the
+`createReactSync(entities)` bundle.
+
+### Multi-tab
+
+One `Watch` stream per account however many tabs and rooms are open, elected on
+its own Web Lock — independently of the data stream's, so rooms work on a
+polling-only client and the two leaders need not be the same tab. Publishing is
+unary and happens directly from every tab. Where Web Locks or BroadcastChannel
+are missing, every tab runs its own stream. See
+[Multi-tab behaviour](../explanation/multi-tab.md).
 
 ---
 

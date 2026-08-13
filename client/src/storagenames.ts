@@ -69,6 +69,19 @@ export interface StorageNames {
 	/** BroadcastChannel carrying stream-reopen pings and tab departures. */
 	readonly reopenChannel: string;
 	/**
+	 * Web Lock whose holder runs the account's room Watch stream.
+	 *
+	 * Separate from `streamLock` because the two planes are elected
+	 * independently: rooms have to work on a client running no data stream at
+	 * all, and the tab holding one need not be the tab holding the other.
+	 */
+	readonly presenceLock: string;
+	/**
+	 * BroadcastChannel carrying room frames from the Watch leader to the other
+	 * tabs, and their room sets back to it.
+	 */
+	readonly presenceChannel: string;
+	/**
 	 * Stem of the per-slot Web Locks that keep text writer identities unique
 	 * (see text/peer.ts). Scoped by clientId rather than by account, since that
 	 * is what a text peer is derived from; the account never enters the name.
@@ -84,6 +97,8 @@ export function storageNames(prefix: string, accountId: string): StorageNames {
 		streamLock: `${prefix}:stream:${accountId}`,
 		changeChannel: `${prefix}:change:${accountId}`,
 		reopenChannel: `${prefix}:reopen:${accountId}`,
+		presenceLock: `${prefix}:presencelock:${accountId}`,
+		presenceChannel: `${prefix}:presence:${accountId}`,
 		textPeerLocks: `${prefix}:textpeer`,
 	};
 }

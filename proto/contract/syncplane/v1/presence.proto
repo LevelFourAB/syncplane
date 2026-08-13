@@ -1,0 +1,267 @@
+syntax = "proto3";
+
+package syncplane.v1;
+
+import "google/protobuf/duration.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
+
+// PresenceService carries the state that only matters while someone is
+// connected: cursors, selections, "who is viewing this", typing indicators, a
+// token stream in flight. None of it is durable, none of it is replayed, and
+// none of it touches the mutation log.
+//
+// Keeping it off the log is the point. A workspace's log is server-linearized,
+// so a cursor routed through it would burn a sequence number, drag every
+// subscriber's cursor forward, be stored until GC collected it, and serialize
+// against real writes in the same partition. The dividing test is "would a
+// reader arriving later want this?" — if yes it is a row, and it belongs in
+// SyncService.
+//
+// The surface is two RPCs rather than one channel because the browser
+// ConnectRPC subset has neither client-streaming nor bidi: Publish is unary and
+// Watch is server-streaming. Watch is also deliberately separate from
+// SyncService.Subscribe. Subscribe's scope set is fixed for the life of the
+// stream, and room membership changes every time a user opens a document —
+// folding rooms into it would force a data-stream reopen, and its catch-up,
+// on every navigation. Reopening Watch costs nothing comparable: there is no
+// cursor, no backlog, and a joiner wants a fresh snapshot anyway.
+service PresenceService {
+	// Watch streams the rooms of one session: a snapshot of each topic on join,
+	// then participant updates, departures and broadcast messages as they
+	// happen. The topic set is fixed for the life of the stream; changing it is
+	// a close and reopen.
+	//
+	// Delivery is at-most-once and unordered across topics. A frame the server
+	// could not hand over — a slow reader, a bus that dropped it — is gone, and
+	// nothing replays it. Presence heals anyway: every record is re-announced
+	// periodically by the node holding its session's stream, so a lost update
+	// is corrected within one announce interval. A broadcast message has no
+	// such backstop; an app that cannot lose one must write a row.
+	rpc Watch(WatchRequest) returns (stream WatchResponse);
+	// Publish writes this session's soft state, sends broadcast messages, and
+	// announces departures. It is unary, so a publisher needs no stream — only
+	// a receiver does.
+	//
+	// The caller's identity is stamped by the server from the request
+	// principal. Nothing in the payload names who is publishing, because a
+	// client-asserted subject would make presence an impersonation channel.
+	rpc Publish(PublishRequest) returns (PublishResponse);
+}
+
+// Topic addresses one room. It is scoped to a workspace — there are no
+// cross-workspace rooms — and is either anchored to a row or not.
+//
+// An ANCHORED topic (entity and key both set) inherits that row's read
+// permission: a caller is admitted only if the app's ReadFilter would let them
+// read the row. That is what keeps room membership from being a second
+// authorization surface an app has to remember to guard, and it is why a
+// cursor room on a document needs no policy of its own.
+//
+// An UNANCHORED topic (entity and key both empty) is gated on workspace access
+// alone, plus the app's own room hook if it installs one.
+message Topic {
+	string workspace_id = 1;
+	// Names the room within the workspace. Free-form, subject to the room-name
+	// rule (see docs/reference/naming.md); two callers naming the same string
+	// are in the same room.
+	string name = 2;
+	// The anchor's entity, or empty for an unanchored topic. Both entity and
+	// key must be set together.
+	string entity = 3;
+	// The anchor's row key. Both entity and key must be set together.
+	string key = 4;
+}
+
+// PresenceUpdate is one session's soft state in one room.
+message PresenceUpdate {
+	// App-defined, opaque to the engine, and capped by MaxPresenceStateBytes.
+	// Empty is valid and means "here, with nothing to say" — the participant
+	// still appears in the room.
+	bytes state = 1;
+	// Orders two deliveries of the same session's state in the same topic.
+	// Minted by the publisher and monotonic per (session, topic); a
+	// re-announcement carries the revision the state was first published with.
+	// A recipient keeps the highest it has seen, so the bus may reorder or
+	// re-deliver without the roster flickering.
+	//
+	// Revisions from different sessions are never compared, and the engine
+	// never mints one.
+	uint64 revision = 2;
+	// The workspace sequence the state was authored against, as the publisher
+	// last saw it.
+	//
+	// Rooms are not synchronized with the data stream: a peer's cursor can name
+	// a row, or a position inside a collaborative-text field, that the
+	// recipient has not pulled yet. Carrying the authoring position is what
+	// lets a recipient tell "I am behind" from "this cursor is nonsense" and
+	// hold the state until it catches up. 0 means the publisher did not say.
+	uint64 seq = 3;
+}
+
+// Participant is one session's record in one room, as a watcher sees it.
+message Participant {
+	// The publishing session. Stable for as long as that session lives, and
+	// distinct from the client id: one device may hold several sessions, and
+	// the client id is an idempotency handle rather than an identity.
+	string session_id = 1;
+	// Who is publishing, taken from the request principal at publish time.
+	// Empty when the publisher was unauthenticated. Never client-supplied.
+	string subject = 2;
+	PresenceUpdate presence = 3;
+}
+
+// RoomSnapshot is the roster of one topic as the serving node knows it, sent
+// once when the topic is joined.
+//
+// It is a node-local view, not global truth: a node knows the sessions whose
+// streams it holds plus whatever the bus has told it about the rest. A record
+// that has not been re-announced within the expiry window is absent from it.
+message RoomSnapshot {
+	// Every participant the node knows of, the joining session included.
+	repeated Participant participants = 1;
+	// True when the roster was cut to MaxParticipantsPerRoom. The kept prefix
+	// is ordered by session id, so every recipient of the same roster keeps the
+	// same participants.
+	bool truncated = 2;
+}
+
+// RoomMessage is one broadcast: an ephemeral payload delivered to whoever is
+// watching the topic at the moment it arrives. It is not stored, not replayed
+// and not acknowledged.
+message RoomMessage {
+	// The session that sent it.
+	string sender_session_id = 1;
+	// Who sent it, stamped from the request principal. Empty when the sender
+	// was unauthenticated.
+	string sender_subject = 2;
+	// App-defined, opaque to the engine, capped by MaxBroadcastBytes.
+	bytes payload = 3;
+}
+
+// TopicDropped ends one topic's participation in a Watch stream. The server
+// sends nothing further for that topic; every other topic keeps streaming.
+//
+// It reports only per-topic outcomes. A request that exceeds a limit — too many
+// topics, too many fronted sessions, an oversize payload — fails the whole RPC
+// with resource_exhausted instead, because the stream never opens.
+message TopicDropped {
+	enum Reason {
+		REASON_UNSPECIFIED = 0;
+		// The join gate refused this caller, permanently: workspace access was
+		// revoked, the anchor row is no longer readable, or the app's room hook
+		// said no. Stop showing the room; retrying will not change the answer.
+		REASON_ACCESS_REVOKED = 1;
+		// A failure scoped to this topic that may not persist (a storage error,
+		// a permission hook that could not decide). Reopen with backoff.
+		REASON_ERROR = 2;
+	}
+	Reason reason = 1;
+	// Human-readable detail for logs. Never parse it; branch on reason.
+	string message = 2;
+}
+
+message WatchRequest {
+	// Identifies the watching session, and is the session a Publish on this
+	// account writes as. Minted by the client, per tab: it is what a departure
+	// and an expiry are keyed on. The server binds it to the caller's principal
+	// for the life of the stream.
+	string session_id = 1;
+	// The rooms to watch. At least one; duplicates are rejected, and the
+	// server caps the count (see Limits.MaxRoomsPerStream). The set is fixed
+	// for the life of the stream.
+	repeated Topic topics = 2;
+	// Caps the participants in each RoomSnapshot. 0 means "server default"; the
+	// server clamps to its own maximum either way.
+	uint32 limit = 3;
+	// Other sessions this stream is responsible for keeping alive.
+	//
+	// A record survives because the node holding its session's stream
+	// re-announces it, so a session with no stream anywhere is forgotten within
+	// the expiry window — which is exactly what should happen to one whose
+	// process died. But a browser shares ONE stream across an account's tabs,
+	// and the tabs that are not holding it still publish their own presence.
+	// Naming them here is what stops a room emptying out to whichever tab
+	// happens to hold the lock.
+	//
+	// Every id must belong to the same principal as session_id; one that does
+	// not fails the stream. The list is fixed for the life of the stream, so a
+	// tab that opens or closes is a reopen — the same reopen a room change
+	// already costs.
+	repeated string fronted_session_ids = 4;
+}
+
+// WatchResponse is one frame of the stream, always naming the topic it
+// concerns — except a heartbeat, which is stream-level.
+message WatchResponse {
+	// The topic this frame is about. Unset only on a heartbeat.
+	Topic topic = 1;
+
+	oneof body {
+		// The roster of this topic at join time. Sent once per topic, before
+		// any other frame for it; a client replaces whatever it held.
+		RoomSnapshot snapshot = 2;
+		// A participant joined, or changed its state. Apply it as
+		// last-writer-wins by PresenceUpdate.revision — a re-announcement of a
+		// record the client already holds arrives as one of these.
+		Participant updated = 3;
+		// The session that left, by session id. Sent when a session published
+		// a departure and when its record expired without being re-announced;
+		// the two are indistinguishable, and deliberately so.
+		string left = 4;
+		// A broadcast from another session, or from this one — the sender is
+		// not excluded, so an app that echoes locally must filter on
+		// sender_session_id.
+		RoomMessage message = 5;
+		// This topic has left the stream; see TopicDropped.
+		TopicDropped dropped = 6;
+		// Liveness keepalive for the whole stream. Carries no topic and no
+		// payload.
+		bool heartbeat = 7;
+	}
+}
+
+// PublishItem is one write to one room.
+message PublishItem {
+	Topic topic = 1;
+
+	oneof body {
+		// Replace this session's state in the topic. Wholly replaces the
+		// previous state — there is no field mask and no merge, because soft
+		// state is re-sent in full on every announce anyway.
+		PresenceUpdate presence = 2;
+		// Broadcast a payload to whoever is watching the topic now. At most
+		// once, to nobody if nobody is there.
+		bytes message = 3;
+		// Withdraw this session from the topic. Watchers see it as `left`
+		// immediately rather than waiting out the expiry window, which is what
+		// makes closing a document feel instant.
+		bool leave = 4;
+	}
+}
+
+message PublishRequest {
+	// The publishing session, as named on this account's Watch stream. A
+	// session bound to a different principal is rejected.
+	string session_id = 1;
+	// The writes, applied in order. At least one, and at most
+	// Limits.MaxPublishItems. Items are independent: there is no atomicity
+	// across them and none is implied.
+	repeated PublishItem items = 2;
+}
+
+message PublishResponse {
+	// How often a publisher holding no Watch stream must re-publish to keep its
+	// records alive, and the interval the serving node re-announces on.
+	//
+	// A record survives because some node re-announces it, and a node does that
+	// only for the sessions whose streams it holds. A publisher with no stream
+	// anywhere is therefore kept alive by its own publishes alone, and lapses
+	// three of these intervals after the last one. Re-publishing the same state
+	// at its existing revision refreshes liveness without costing watchers a
+	// frame.
+	//
+	// A client that holds a Watch stream can ignore this — the node serving the
+	// stream is already doing it.
+	google.protobuf.Duration announce_interval = 1;
+}

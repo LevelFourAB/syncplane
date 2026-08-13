@@ -48,6 +48,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Query data](how-to/query-data.md)
 - [Sync only part of a workspace](how-to/partial-sync.md)
 - [Use collaborative text](how-to/use-collaborative-text.md)
+- [Add presence to an app](how-to/add-presence.md)
 - [Build a UI with React](how-to/react.md)
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
 - [Restore a field to a previous value](how-to/restore-a-field.md)
@@ -89,6 +90,9 @@ Understanding-oriented. Read these when a behaviour surprises you.
 - [Collaborative text](explanation/collaborative-text.md) — Fugue ordering,
   state-based replication, delta sync, marks, undo, compaction.
 - [Multi-tab behaviour](explanation/multi-tab.md) — one store, one stream
-  leader, and what only a real browser can verify.
+  leader per plane, and what only a real browser can verify.
+- [Rooms: the ephemeral plane](explanation/rooms.md) — presence and broadcast,
+  why the mutation log is the wrong home for them, and expiry by
+  re-announcement.
 - [Limits and trade-offs](explanation/limits-and-trade-offs.md) — what the
   engine deliberately does not do, and what to know before adopting.

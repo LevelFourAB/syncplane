@@ -45,7 +45,7 @@ describe('IntentRegistry', () => {
 		let now = startAt;
 		const clock = { now: () => now, advance: (ms: number) => (now += ms) };
 		const registry = (opts: Omit<IntentRegistryOptions, 'now'> = {}) =>
-			new IntentRegistry(kv, mutex, { ...opts, now: clock.now });
+			new IntentRegistry(crypto.randomUUID(), kv, mutex, { ...opts, now: clock.now });
 		const readRecord = async (tabId: string): Promise<IntentRecord | undefined> => {
 			const tx = await kv.read();
 			try {

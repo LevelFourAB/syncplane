@@ -1,7 +1,14 @@
 import type { BrowserContext, Page } from '@playwright/test';
 
 import { SERVER_URL_ENV } from './global-setup.js';
-import type { MarkView, OpenOptions, StatusView, TodoView, WriteBytesView } from './harness-api.js';
+import type {
+	MarkView,
+	OpenOptions,
+	PeerView,
+	StatusView,
+	TodoView,
+	WriteBytesView,
+} from './harness-api.js';
 
 /** Address of the testserver global setup spawned for this run. */
 export function serverUrl(): string {
@@ -153,6 +160,40 @@ export class Tab {
 
 	openText(id: string): Promise<number> {
 		return this.page.evaluate((i) => window.harness.openText(i), id);
+	}
+
+	joinRoom(name: string): Promise<number> {
+		return this.page.evaluate((n) => window.harness.joinRoom(n), name);
+	}
+
+	sessionId(): Promise<string> {
+		return this.page.evaluate(() => window.harness.sessionId());
+	}
+
+	setPresence(room: number, state: string): Promise<void> {
+		return this.page.evaluate(
+			(args) => window.harness.setPresence(args.room, args.state),
+			{ room, state },
+		);
+	}
+
+	sendRoomMessage(room: number, message: string): Promise<void> {
+		return this.page.evaluate(
+			(args) => window.harness.sendRoomMessage(args.room, args.message),
+			{ room, message },
+		);
+	}
+
+	roomPeers(room: number): Promise<PeerView[]> {
+		return this.page.evaluate((r) => window.harness.roomPeers(r), room);
+	}
+
+	roomMessages(room: number): Promise<string[]> {
+		return this.page.evaluate((r) => window.harness.roomMessages(r), room);
+	}
+
+	leaveRoom(room: number): Promise<void> {
+		return this.page.evaluate((r) => window.harness.leaveRoom(r), room);
 	}
 
 	textPeer(handle: number): Promise<string> {

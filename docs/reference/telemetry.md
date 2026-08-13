@@ -128,6 +128,30 @@ just another successful pull. `reset_reason` is one of:
 per host, so how many streams are held open is what says whether clients have
 connection slots left.
 
+### Rooms
+
+The ephemeral plane; see [Rooms](../explanation/rooms.md).
+
+| Instrument                       | Type            | Unit            | Attributes        |
+| -------------------------------- | --------------- | --------------- | ----------------- |
+| `syncplane.rooms.streams`        | up-down counter | `{stream}`      | —                 |
+| `syncplane.rooms.joined`         | up-down counter | `{room}`        | —                 |
+| `syncplane.rooms.participants`   | histogram       | `{participant}` | —                 |
+| `syncplane.rooms.publishes`      | counter         | `{publish}`     | `room_event_kind` |
+| `syncplane.rooms.events.dropped` | counter         | `{event}`       | `drop_reason`     |
+
+`rooms.streams` is a second level alongside `subscribe.streams`: an app using
+rooms holds two long-lived connections per account rather than one, which halves
+how many accounts a page can run against one host over HTTP/1.1.
+
+The ratio `rooms.joined / rooms.streams` is what a re-gate tick costs — every
+live room re-runs its join gate on the stream's heartbeat, and an anchored one
+reads its row (memoized across the streams sharing it).
+
+`rooms.events.dropped` is the at-most-once contract actually biting. Presence
+heals from it within one announce interval; broadcasts do not, so a nonzero rate
+is exactly the messages an app lost.
+
 ### Cursor state
 
 | Instrument                            | Type    | Unit        |
@@ -246,21 +270,23 @@ like an incident in a backend's error rate.
 
 ## Attribute reference
 
-| Attribute                  | Bounded by                        | Metrics?       |
-| -------------------------- | --------------------------------- | -------------- |
-| `syncplane.entity`         | registered entities               | yes            |
-| `syncplane.mutator`        | declared mutators                 | yes            |
-| `syncplane.mutation_kind`  | `crud`/`custom`/`batch`           | yes            |
-| `syncplane.outcome`        | `ok`/`error`/`canceled`/`skipped` | yes            |
-| `syncplane.rejection_code` | codes your app rejects with       | yes            |
-| `syncplane.reset_reason`   | fixed enum                        | yes            |
-| `syncplane.tx_kind`        | `read`/`write`                    | yes            |
-| `syncplane.gc_kind`        | fixed enum                        | yes            |
-| `syncplane.failure_kind`   | fixed enum                        | yes            |
-| `syncplane.consumer`       | registered consumers              | yes            |
-| `syncplane.index`          | derived index names               | yes            |
-| `syncplane.workspace_id`   | **the deployment**                | **spans only** |
-| `syncplane.client_id`      | **installations, forever**        | **spans only** |
+| Attribute                   | Bounded by                        | Metrics?       |
+| --------------------------- | --------------------------------- | -------------- |
+| `syncplane.entity`          | registered entities               | yes            |
+| `syncplane.mutator`         | declared mutators                 | yes            |
+| `syncplane.mutation_kind`   | `crud`/`custom`/`batch`           | yes            |
+| `syncplane.outcome`         | `ok`/`error`/`canceled`/`skipped` | yes            |
+| `syncplane.rejection_code`  | codes your app rejects with       | yes            |
+| `syncplane.reset_reason`    | fixed enum                        | yes            |
+| `syncplane.tx_kind`         | `read`/`write`                    | yes            |
+| `syncplane.gc_kind`         | fixed enum                        | yes            |
+| `syncplane.failure_kind`    | fixed enum                        | yes            |
+| `syncplane.consumer`        | registered consumers              | yes            |
+| `syncplane.index`           | derived index names               | yes            |
+| `syncplane.room_event_kind` | `state`/`leave`/`message`         | yes            |
+| `syncplane.drop_reason`     | fixed enum                        | yes            |
+| `syncplane.workspace_id`    | **the deployment**                | **spans only** |
+| `syncplane.client_id`       | **installations, forever**        | **spans only** |
 
 ## The TypeScript client
 

@@ -8,6 +8,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/presence"
 )
 
 // Rejection is a business-level "no" to a mutation. It becomes a
@@ -252,6 +253,102 @@ var ErrEpochUnavailable = errors.New("server: filter epoch unavailable")
 // reconstruct (e.g. beyond retained history); those clients reset as before.
 type EpochReadFilters interface {
 	ReadFilterAt(ctx context.Context, p Principal, workspaceID, entity string, epoch uint64) (RowFilter, error)
+}
+
+// RoomDenial is a PERMANENT "no" from CanJoinRoom: this caller may not be in
+// this room, and retrying will not change that. It drops the topic from the
+// caller's Watch stream with reason ACCESS_REVOKED, so a client stops showing
+// the room instead of reconnecting forever.
+//
+// It is distinct from WorkspaceDenial because it is narrower: the caller keeps
+// the workspace and everything else in it, and loses one room.
+type RoomDenial struct {
+	// Message explains the denial. It reaches the client, so keep it free of
+	// detail the caller has not earned.
+	Message string
+}
+
+func (d *RoomDenial) Error() string { return "room access denied: " + d.Message }
+
+// DenyRoom builds the permanent denial CanJoinRoom returns when the caller may
+// not be in the room.
+//
+// Return it only when the answer is settled. A lookup that FAILED must return
+// its underlying error instead: that drops the topic as a retryable error,
+// where a denial tells the client to stop asking.
+func DenyRoom(message string) error { return &RoomDenial{Message: message} }
+
+// AsRoomDenial extracts a RoomDenial from an error chain.
+func AsRoomDenial(err error) (*RoomDenial, bool) {
+	var d *RoomDenial
+	if errors.As(err, &d) {
+		return d, true
+	}
+	return nil, false
+}
+
+// ParticipantFilter decides per participant whether a caller may see it. The
+// argument is the server-stamped subject of the publishing session, empty for
+// an unauthenticated one. A nil ParticipantFilter shows every participant.
+//
+// It is resolved once when a topic is joined and applied to that topic's
+// snapshot and to every later frame, so it must be a pure function of the
+// subject — the same reasoning RowFilter is warmed once per stream under.
+type ParticipantFilter func(subject string) bool
+
+// RoomPermissions is an optional Permissions extension covering the ephemeral
+// plane. A Permissions that does not implement it admits every caller who
+// cleared the room's own gate — workspace access, and the anchor row's read
+// filter for an anchored topic — and shows them every participant.
+//
+// Reach for it when those two are not the whole answer. Being able to READ a
+// document is not the same as being allowed to know who else is looking at it:
+// an app where a reviewer browses anonymously, or where an admin's attention is
+// not something the author should see, needs the roster filtered even though
+// every one of those callers may read the row the room is anchored to.
+//
+// Both hooks run on the join gate, and CanJoinRoom runs again on the stream's
+// heartbeat, so a settled denial takes effect within one heartbeat interval
+// rather than whenever the client next reconnects. Neither runs per event.
+//
+// Embed AllowAllRooms to implement one hook and inherit the other.
+type RoomPermissions interface {
+	// CanJoinRoom admits or refuses one topic. Return DenyRoom for a settled
+	// no; any other error drops the topic as retryable, so an outage never
+	// reads as a revocation.
+	CanJoinRoom(ctx context.Context, p Principal, workspaceID string, topic presence.Topic) error
+	// VisibleParticipants returns the filter applied to this caller's view of
+	// the room, or nil to show everyone.
+	VisibleParticipants(ctx context.Context, p Principal, workspaceID string, topic presence.Topic) (ParticipantFilter, error)
+}
+
+// AllowAllRooms is the permissive RoomPermissions: every caller who cleared the
+// room's own gate may join, and sees everyone. Embed it to implement only the
+// hook you need:
+//
+//	type policy struct {
+//		server.AllowAll
+//		server.AllowAllRooms
+//	}
+//
+//	func (policy) VisibleParticipants(
+//		_ context.Context, p server.Principal, _ string, _ presence.Topic,
+//	) (server.ParticipantFilter, error) {
+//		if p.IsAnonymous() {
+//			return func(string) bool { return false }, nil
+//		}
+//		return nil, nil
+//	}
+type AllowAllRooms struct{}
+
+func (AllowAllRooms) CanJoinRoom(context.Context, Principal, string, presence.Topic) error {
+	return nil
+}
+
+func (AllowAllRooms) VisibleParticipants(
+	context.Context, Principal, string, presence.Topic,
+) (ParticipantFilter, error) {
+	return nil, nil
 }
 
 // AllowAll is the default Permissions implementation: every caller may do

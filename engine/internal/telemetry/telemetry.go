@@ -94,6 +94,12 @@ const (
 	// AttrGCKind names what a garbage-collection pass reclaimed. A fixed set
 	// decided by what the pass collects, not by any data it saw.
 	AttrGCKind = attribute.Key("syncplane.gc_kind")
+	// AttrRoomEventKind distinguishes what a room publish carried — state, a
+	// departure, or a broadcast. Bounded by the wire oneof.
+	AttrRoomEventKind = attribute.Key("syncplane.room_event_kind")
+	// AttrDropReason buckets why an event was discarded. A fixed set decided by
+	// what the engine can drop for, not by anything a request said.
+	AttrDropReason = attribute.Key("syncplane.drop_reason")
 	// AttrFailureKind buckets why a connector pass failed — the
 	// connect.FailureKind enum, which separates "wait, it heals" from "ask the
 	// user to reconnect".

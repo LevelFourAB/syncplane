@@ -36,6 +36,8 @@ func main() {
 		gcInterval   = flag.Duration("gc-interval", 0, "tombstone GC interval (0 disables GC)")
 		gcTextDelta  = flag.Duration("gc-text-delta-retention", time.Millisecond,
 			"collaborative-text delta log retention; the default makes a write compactable as soon as a suite asks")
+		roomAnnounce = flag.Duration("room-announce", 500*time.Millisecond,
+			"presence re-announce interval; a record nobody re-announces expires after three of these")
 		gcTextPurge = flag.Int("gc-text-compaction", 1,
 			"items a text field must give up before compaction rewrites its row (0 disables)")
 	)
@@ -61,6 +63,7 @@ func main() {
 	perms := exampleapp.NewPermissions()
 	opts := append(exampleapp.Options(perms),
 		server.WithHeartbeat(*heartbeat),
+		server.WithRoomAnnounce(*roomAnnounce),
 		server.WithNotifyCoalescing(*notifyWindow),
 		server.WithPermissions(perms),
 		server.WithChunkSize(*chunkSize),
@@ -129,10 +132,14 @@ func main() {
 	}
 	defer srv.Close()
 
-	path, handler := srv.Handler()
 	stats := newRPCStats()
 	mux := http.NewServeMux()
-	mux.Handle(path, stats.wrap(handler))
+	// Every service, each behind the stats wrapper: it keys on the last path
+	// segment, so mounting the presence service here is what makes Watch and
+	// Publish visible to /debug/rpc.
+	for path, handler := range srv.Handlers() {
+		mux.Handle(path, stats.wrap(handler))
+	}
 	// Server-side view of what the clients are doing, for the multi-tab e2e
 	// suite; see rpcStats.
 	mux.Handle("/debug/rpc", stats)

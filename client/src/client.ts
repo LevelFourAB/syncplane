@@ -123,6 +123,7 @@ import {
 	resolveReverse,
 } from './refs.js';
 import { reportError, reportMisuse, safeInvoke } from './report.js';
+import { createRoom, type Room, type RoomOptions } from './room.js';
 import {
 	DEFAULT_STORAGE_PREFIX,
 	type StorageNames,
@@ -141,6 +142,7 @@ import {
 import type { SyncEventHandler, UnstampedSyncEvent } from './sync/events.js';
 import { emitSyncEvent, queryEventOf } from './sync/events.js';
 import { IntentRegistry } from './sync/intent.js';
+import { PresenceCoordinator, type PresenceTopic } from './sync/presence.js';
 import {
 	type SchemaSkewAction,
 	StatusTracker,
@@ -504,6 +506,21 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	pushMaxDelayMs?: number;
 	/** Hold the live change stream open. Default true. */
 	streamEnabled?: boolean;
+	/**
+	 * Hold the room `Watch` stream open. Default true.
+	 *
+	 * Independent of `streamEnabled`: the two planes are separate streams with
+	 * separate leadership, so rooms work on a polling-only client. False leaves
+	 * `setPresence` and `send` working — publishing is a unary call — and stops
+	 * this client RECEIVING anything, which is what a page that only writes
+	 * presence wants, and what gets a browser its second connection slot back.
+	 *
+	 * A record is normally kept alive by whichever node holds its session's
+	 * stream, so with no stream each open room re-publishes its own last state
+	 * on the interval the server reports — one unary call per room per interval
+	 * in place of the connection.
+	 */
+	presenceEnabled?: boolean;
 	/** Max row changes per pull page; 0 = server default. Pages loop until drained. */
 	pullLimit?: number;
 	/**
@@ -831,6 +848,25 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	readonly db: EntityApis<E>;
 	/** Opens a live text-field handle in this workspace (see TextHandle). */
 	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle>;
+	/**
+	 * Opens a room in this workspace: presence and broadcast for state that is
+	 * only worth having while someone is connected (see Room). Nothing a room
+	 * carries is stored or replayed.
+	 *
+	 * Anchoring it to a row — `room(Todo, 't1', 'cursors')` — makes membership
+	 * inherit that row's read permission, so a cursor room on a document needs
+	 * no policy of its own. The unanchored form is gated on workspace access.
+	 *
+	 * The account holds ONE `Watch` stream however many rooms are open, shared
+	 * across tabs; opening a room joins it and closing the last one ends it.
+	 */
+	room<S, M = S>(name: string, opts?: RoomOptions<S, M>): Room<S, M>;
+	room<S, M = S, D extends DescMessage = DescMessage>(
+		schema: D,
+		key: string,
+		name: string,
+		opts?: RoomOptions<S, M>,
+	): Room<S, M>;
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
@@ -1056,6 +1092,22 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		return this.textHandle(schema, key, field);
 	}
 
+	room<S, M = S>(name: string, opts?: RoomOptions<S, M>): Room<S, M>;
+	room<S, M = S, D extends DescMessage = DescMessage>(
+		schema: D,
+		key: string,
+		name: string,
+		opts?: RoomOptions<S, M>,
+	): Room<S, M>;
+	room<S, M = S>(
+		a: string | DescMessage,
+		b?: string | RoomOptions<S, M>,
+		c?: string,
+		d?: RoomOptions<S, M>,
+	): Room<S, M> {
+		return this.client.roomIn(this.workspaceId, a, b, c, d);
+	}
+
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined> {
 		return this.client.getIn(this.workspaceId, schema, key);
 	}
@@ -1261,6 +1313,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * SyncClientOptions.storagePrefix.
 	 */
 	readonly storageNames: StorageNames;
+	/**
+	 * This tab's identity for the ephemeral plane: minted per instance, never
+	 * persisted, and the key every presence record this client publishes lives
+	 * under.
+	 *
+	 * Distinct from `clientId()`, which is the per-device idempotency handle
+	 * mutations are keyed by and survives a reload. One device holds one client
+	 * id and as many session ids as it has tabs.
+	 */
+	readonly sessionId: string = crypto.randomUUID();
 	private opts: SyncClientOptions<E>;
 	/** @internal shared with the workspace scopes. */
 	readonly entityRegistry: EntityRegistry;
@@ -1291,6 +1353,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * undo-ref updates into the enqueue transaction.
 	 */
 	private intentReg?: IntentRegistry;
+	/**
+	 * The ephemeral plane's coordinator (sync/presence.ts), created on the first
+	 * room rather than at start(): an app that uses no rooms should hold no
+	 * second stream and claim no second Web Lock.
+	 */
+	private presence?: PresenceCoordinator;
 	/**
 	 * The in-flight (or completed) start, memoized so concurrent callers share
 	 * one. Cleared again when that start REJECTS, which is what makes start()
@@ -1556,6 +1624,68 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** Opens a live text-field handle in the default workspace (see TextHandle). */
 	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle> {
 		return this.textHandleIn(this.defaultScope(), schema, key, field);
+	}
+
+	/** Opens a room in the default workspace (see WorkspaceClient.room). */
+	room<S, M = S>(name: string, opts?: RoomOptions<S, M>): Room<S, M>;
+	room<S, M = S, D extends DescMessage = DescMessage>(
+		schema: D,
+		key: string,
+		name: string,
+		opts?: RoomOptions<S, M>,
+	): Room<S, M>;
+	room<S, M = S>(
+		a: string | DescMessage,
+		b?: string | RoomOptions<S, M>,
+		c?: string,
+		d?: RoomOptions<S, M>,
+	): Room<S, M> {
+		return this.roomIn(this.defaultScope().workspaceId, a, b, c, d);
+	}
+
+	/**
+	 * Opens a room in one workspace, resolving both call shapes: `(name, opts)`
+	 * for an unanchored room, `(schema, key, name, opts)` for one anchored to a
+	 * row.
+	 *
+	 * @internal
+	 */
+	roomIn<S, M = S>(
+		workspaceId: string,
+		a: string | DescMessage,
+		b?: string | RoomOptions<S, M>,
+		c?: string,
+		d?: RoomOptions<S, M>,
+	): Room<S, M> {
+		let topic: PresenceTopic;
+		let opts: RoomOptions<S, M> | undefined;
+		if (typeof a === 'string') {
+			topic = { workspaceId, name: a };
+			opts = b as RoomOptions<S, M> | undefined;
+		} else {
+			const def = this.entityRegistry.bySchema(a);
+			topic = { workspaceId, name: c!, entity: def.name, key: b as string };
+			opts = d;
+		}
+		const presence = this.presenceCoordinator();
+		return createRoom<S, M>(
+			topic.name,
+			this.sessionId,
+			opts,
+			(sink) => presence.attach(topic, sink),
+		);
+	}
+
+	/** The ephemeral plane's coordinator, started with the first room. */
+	private presenceCoordinator(): PresenceCoordinator {
+		this.presence ??= new PresenceCoordinator({
+			transport: () => this.resolveTransport(),
+			sessionId: this.sessionId,
+			presenceLock: this.storageNames.presenceLock,
+			presenceChannel: this.storageNames.presenceChannel,
+			watchEnabled: this.opts.presenceEnabled !== false,
+		});
+		return this.presence;
 	}
 
 	/**
@@ -1915,7 +2045,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// closed store. (If close() instead races the coordinator.start() await
 		// below, it observes the assigned this.coordinator and stops it.)
 		if (this.closed) return;
-		this.intentReg = new IntentRegistry(await this.kv(), this.kvMutex);
+		this.intentReg = new IntentRegistry(this.sessionId, await this.kv(), this.kvMutex);
 		const coordinator = new Coordinator({
 			transport,
 			kv: await this.kv(),
@@ -2484,6 +2614,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (this.closed) return;
 		this.closed = true;
 		await this.coordinator?.stop();
+		await this.presence?.stop();
 		this.changeShare?.stop();
 		this.hubInstance?.close();
 		if (this.kvPromise) {

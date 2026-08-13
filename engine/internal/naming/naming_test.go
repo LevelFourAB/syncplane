@@ -209,6 +209,37 @@ var _ = Describe("ValidateActorSystem", func() {
 	})
 })
 
+var _ = Describe("ValidateRoomName", func() {
+	// A room name is a character rule, not an identifier rule: nothing declares
+	// a room ahead of time, so an app names one after whatever it is showing.
+	It("accepts the names apps address rooms by", func() {
+		for _, s := range []string{"cursors", "doc:42/cursors", "Board — Sprint 14", "åäö"} {
+			Expect(naming.ValidateRoomName(s)).To(Succeed(), s)
+		}
+	})
+
+	It("rejects the empty name", func() {
+		Expect(naming.ValidateRoomName("")).To(MatchError(ContainSubstring("empty")))
+	})
+
+	It("rejects control characters and invalid UTF-8", func() {
+		Expect(naming.ValidateRoomName("a\x00b")).To(MatchError(ContainSubstring(`\u0000`)))
+		// U+001F separates the fields of the client's cross-tab room protocol.
+		Expect(naming.ValidateRoomName("a\x1fb")).To(MatchError(ContainSubstring(`\u001f`)))
+		Expect(naming.ValidateRoomName("a\x7f")).To(MatchError(ContainSubstring(`\u007f`)))
+		Expect(naming.ValidateRoomName(string([]byte{0x61, 0xff}))).
+			To(MatchError(ContainSubstring("valid UTF-8")))
+	})
+
+	It("caps the length in bytes, not characters", func() {
+		Expect(naming.ValidateRoomName(strings.Repeat("a", naming.MaxRoomNameBytes))).To(Succeed())
+		Expect(naming.ValidateRoomName(strings.Repeat("a", naming.MaxRoomNameBytes+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+		Expect(naming.ValidateRoomName(strings.Repeat("å", naming.MaxRoomNameBytes/2+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
 var _ = Describe("ScalarKeyString", func() {
 	It("renders each admitted kind the way the client does", func() {
 		w := &testdatav1.Widget{Id: "w1", Count: -7, Big: 9007199254740993, Flag: true}

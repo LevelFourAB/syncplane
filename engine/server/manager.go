@@ -65,11 +65,15 @@ type Manager struct {
 	closed bool
 }
 
-// hostedApp is one app: its *Server plus the sync handler routed traffic is
-// served by. The handler is built once, when the app is created, rather than
-// per request — it owns Connect's route table and the app's interceptor chain
-// (logging, then authentication), none of which change after New. Runtime
-// schema registration swaps the server's catalog, not its handler.
+// hostedApp is one app: its *Server plus the mux routed traffic is served by.
+// The mux carries every Connect service the server mounts — the sync plane and
+// the ephemeral one — each at its own full method path, which is why routing
+// can strip the "/<appID>" prefix and hand the rest over unexamined.
+//
+// It is built once, when the app is created, rather than per request: it owns
+// Connect's route table and the app's interceptor chain (logging, then
+// authentication), none of which change after New. Runtime schema registration
+// swaps the server's catalog, not its handler.
 type hostedApp struct {
 	srv     *Server
 	handler http.Handler
@@ -190,8 +194,11 @@ func (m *Manager) host(appID string) (*hostedApp, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: app %q: %w", appID, err)
 	}
-	_, h := srv.Handler()
-	app = &hostedApp{srv: srv, handler: h}
+	mux := http.NewServeMux()
+	for path, h := range srv.Handlers() {
+		mux.Handle(path, h)
+	}
+	app = &hostedApp{srv: srv, handler: mux}
 	m.apps[appID] = app
 	return app, nil
 }
@@ -360,11 +367,13 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte) (Manag
 	return ManagerRegisterResult{Revision: r.Revision, Status: status, Entities: r.Entities}, nil
 }
 
-// SyncHandler returns the routed public sync handler. It strips the leading
-// "/<appID>" path segment, looks up that app's *Server, and delegates to the
-// server's own SyncService handler (which expects "/syncplane.v1.SyncService/...").
-// An unknown app is 404. App servers are created on demand by Register / boot
-// reload, so a request for an unregistered app never auto-creates one.
+// SyncHandler returns the routed public handler. It strips the leading
+// "/<appID>" path segment, looks up that app's *Server, and delegates to that
+// server's own mux, which carries every Connect service it mounts at the full
+// method path each expects ("/syncplane.v1.SyncService/..." and
+// "/syncplane.v1.PresenceService/..."). An unknown app is 404. App servers are
+// created on demand by Register / boot reload, so a request for an unregistered
+// app never auto-creates one.
 func (m *Manager) SyncHandler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		appID, rest := splitAppPrefix(r.URL.Path)

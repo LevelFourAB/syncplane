@@ -80,6 +80,17 @@ export interface MarkView {
 	value: string;
 }
 
+/**
+ * One participant of a room, narrowed to what crosses the page boundary. The
+ * app state is a plain string here, which is all the specs publish.
+ */
+export interface PeerView {
+	sessionId: string;
+	subject: string;
+	state: string | undefined;
+	self: boolean;
+}
+
 export interface HarnessApi {
 	/** Creates (and optionally starts) this tab's client. Returns its clientId. */
 	open(opts: OpenOptions): Promise<string>;
@@ -131,6 +142,23 @@ export interface HarnessApi {
 	textMarks(handle: number): Promise<MarkView[]>;
 	/** Closes the handle, returning its slot to the device's pool. */
 	closeText(handle: number): Promise<void>;
+
+	/**
+	 * Rooms — the ephemeral plane. Handles are numbers for the same reason text
+	 * handles are: a Room is not structured-clone safe, so nothing but JSON
+	 * crosses the page boundary.
+	 */
+	joinRoom(name: string): Promise<number>;
+	/** This tab's presence session id, which its own record is keyed on. */
+	sessionId(): Promise<string>;
+	setPresence(room: number, state: string): Promise<void>;
+	sendRoomMessage(room: number, message: string): Promise<void>;
+	/** The room's roster, ordered by session id. */
+	roomPeers(room: number): Promise<PeerView[]>;
+	/** Broadcast messages this room has received, oldest first. */
+	roomMessages(room: number): Promise<string[]>;
+	/** Leaves the room, withdrawing this session's record. */
+	leaveRoom(room: number): Promise<void>;
 	/** The stored document's visible text, read fresh from the local store. */
 	storedText(id: string): Promise<string>;
 	/** The stored document's mark spans, projected without opening a handle. */

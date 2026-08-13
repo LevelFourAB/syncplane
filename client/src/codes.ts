@@ -23,6 +23,9 @@
  * | Watch registration failed            | `status().lastError`           | `watch_failed`             |
  * | Text handle cannot merge remote state | `TextHandle.status()` +       | `text_merge_failed`        |
  * |                                      | `TextHandle.onError`           |                            |
+ * | Room withdrawn by the server         | `Room.status()` + `Room.onError` | `room_dropped`          |
+ * | Room publish could not be sent       | `Room.onError`                 | `room_offline`             |
+ * | Room send on a closed or dropped room | the `RoomSendError` it rejects with | `room_closed`, `room_dropped` |
  * | Access to a workspace withdrawn      | `status().workspaces[id].access` | (no code — `'revoked'`)  |
  * | Server/client schema revisions differ | `status().schemaSkew`         | (no code — see SchemaSkewInfo) |
  *
@@ -177,6 +180,32 @@ export const CodeTextMergeFailed = 'text_merge_failed';
  * carries the exact Connect code when a finer distinction is needed.
  */
 export const CodeUnavailable = 'unavailable';
+
+/**
+ * The server withdrew a room: the caller may no longer be in it, its anchor row
+ * became unreadable or went away, or the app's room hook refused.
+ *
+ * Terminal for that one room — the server re-checks access on every heartbeat
+ * and reopening would meet the same answer — and scoped to it: every other room
+ * and the data plane carry on. Arrives on `Room.status()` and `Room.onError`.
+ */
+export const CodeRoomDropped = 'room_dropped';
+
+/**
+ * A room publish could not reach the server. Not terminal: presence state is
+ * re-announced by the server for as long as the stream lives, and the next
+ * successful publish carries the newest state, so a cursor that missed a beat
+ * catches up rather than sticking. Arrives on `Room.onError` only — it does not
+ * change `Room.status()`.
+ */
+export const CodeRoomOffline = 'room_offline';
+
+/**
+ * `Room.send` was called after `close()`. Carried by the `RoomSendError` it
+ * rejects with; it never reaches `Room.onError`, which reports what happened to
+ * a room the app still holds open.
+ */
+export const CodeRoomClosed = 'room_closed';
 
 /**
  * Codes that can ride on a rejected mutation. Apps may define their own on the

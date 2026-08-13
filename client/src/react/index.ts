@@ -16,6 +16,7 @@ import type { DescMessage } from '@bufbuild/protobuf';
 
 import { buildReactDb } from './build-db.js';
 import { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
+import { usePresenceHook, useRoomHook } from './hooks/use-room.js';
 import { useSyncStatus } from './hooks/use-sync-status.js';
 import { useUndo } from './hooks/use-undo.js';
 import { useWorkspaceStatus } from './hooks/use-workspace-status.js';
@@ -31,6 +32,8 @@ export {
 	useWorkspaceScope,
 } from './context.js';
 export { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
+export { usePresenceHook, useRoomHook } from './hooks/use-room.js';
+export type { UseRoomOptions, UseRoomResult } from './hooks/use-room.js';
 export { useSyncStatus } from './hooks/use-sync-status.js';
 export { useTextHook } from './hooks/use-text.js';
 export type { UseTextResult } from './hooks/use-text.js';
@@ -82,6 +85,10 @@ export interface ReactSync<E extends readonly DescMessage[]> {
 	useUndo: typeof useUndo;
 	useUndoScope: typeof useUndoScope;
 	useOnMutationRejected: typeof useOnMutationRejected;
+	/** The ephemeral plane: one room, with the handle. */
+	useRoom: typeof useRoomHook;
+	/** The ephemeral plane: one room's roster, without the handle. */
+	usePresence: typeof usePresenceHook;
 }
 
 /**
@@ -106,5 +113,7 @@ export function createReactSync<const E extends readonly DescMessage[]>(
 		useUndo,
 		useUndoScope,
 		useOnMutationRejected,
+		useRoom: useRoomHook,
+		usePresence: usePresenceHook,
 	};
 }
