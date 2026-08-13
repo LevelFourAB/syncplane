@@ -408,7 +408,11 @@ func (c *catalog) clone() *catalog {
 // entity catalog, so runtime registration can land under live traffic).
 type Server struct {
 	store storage.Adapter
-	cat   atomic.Pointer[catalog]
+	// replicaReads is the adapter's replica-read capability, nil when the
+	// adapter offers none. readTx/readTxAnchored route through it; every
+	// other read stays on store.
+	replicaReads storage.ReplicaReader
+	cat          atomic.Pointer[catalog]
 	// mutators is fixed once New returns — mutators are declared only through
 	// WithMutator — which is what makes it safe to read from every request
 	// goroutine without a lock.
@@ -770,6 +774,11 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		} else {
 			s.leases = lease.NewLocal()
 		}
+	}
+	// No option gates this: like leases, whether reads may leave the primary
+	// is adapter configuration, and an adapter without a replica returns nil.
+	if p, ok := storage.As[storage.ReplicaProvider](store); ok {
+		s.replicaReads = p.ReplicaReader()
 	}
 	// Telemetry is resolved before anything can record on it: the background
 	// loops below start inside New, and a nil instrument set would be a panic
@@ -1327,7 +1336,10 @@ func fieldIsOpaque(fd protoreflect.FieldDescriptor) bool {
 // WorkspaceIDs lists the workspaces that hold persisted state, delegating to
 // the storage adapter. Used by background consumers (connectors, outbox
 // drainers) to discover work. A workspace only ever named by reads — a pull
-// or a query against an id nobody has written — is not in the list.
+// or a query against an id nobody has written — is not in the list. The list
+// may be boundedly stale (an adapter may answer it from a read replica): a
+// just-written workspace appears on a later call, so poll rather than assume
+// one call is exhaustive.
 func (s *Server) WorkspaceIDs(ctx context.Context) ([]string, error) {
 	return s.store.ListWorkspaceIDs(ctx)
 }

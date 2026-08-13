@@ -100,10 +100,11 @@ message MutationResult {
 	// sequence — its savepoint rolled back — which is what makes rejections
 	// free rather than gap-producing.
 	//
-	// The TypeScript client ignores it (it learns versions from the rows it
-	// applies). It is kept for clients that write without syncing back — a
-	// server-side or batch client — and for asserting the no-sequence-on-
-	// rejection invariant.
+	// The TypeScript client tracks the highest value per workspace and sends
+	// it back as PullRequest.min_seq / WorkspaceScope.min_seq, so a
+	// replica-reading server never serves it a snapshot older than its own
+	// acked writes. Also the only in-band way a client that never syncs back —
+	// a server-side or batch writer — learns the sequence its write took.
 	uint64 seq = 3;
 	// Machine-readable rejection code (e.g. "permission_denied").
 	string error_code = 4;
@@ -174,6 +175,14 @@ message PullRequest {
 	// another build's rows current in a shared local store — names it here, or
 	// discards and re-bootstraps on every page that carries delta state for it.
 	repeated string no_delta_entities = 6;
+	// Lowest workspace sequence this pull may be answered from: the highest
+	// seq the client has seen a push acked at (MutationResult.seq). A freshness
+	// floor for servers reading from a replica — without it, a pull served
+	// from a snapshot older than the client's own acked writes would drop
+	// their optimistic state and briefly revert them. It never widens what the
+	// pull returns; the cursor still decides that. 0 (and clients predating
+	// the field) means no floor beyond the cursor's own position.
+	uint64 min_seq = 7;
 }
 
 message PullResponse {
@@ -361,6 +370,9 @@ message WorkspaceScope {
 	bytes cursor = 2;
 	// Scopes this workspace's stream. Empty = full sync.
 	repeated Subscription subscriptions = 3;
+	// PullRequest.min_seq, applied to every page this scope is served: the
+	// highest seq the client has seen a push acked at for this workspace.
+	uint64 min_seq = 4;
 }
 
 message SubscribeRequest {

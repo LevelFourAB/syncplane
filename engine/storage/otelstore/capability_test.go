@@ -39,6 +39,18 @@ func (a *leaseAdapter) Namespace(string) storage.Adapter { return a }
 
 func (a *leaseAdapter) Leases() lease.Locker { return a.locker }
 
+// replicaAdapter is plainAdapter plus storage.ReplicaProvider.
+type replicaAdapter struct {
+	plainAdapter
+	rr storage.ReplicaReader
+}
+
+func (a *replicaAdapter) Namespace(string) storage.Adapter { return a }
+
+func (a *replicaAdapter) ReplicaReader() storage.ReplicaReader { return a.rr }
+
+type fakeReplicaReader struct{ storage.ReplicaReader }
+
 var _ = Describe("Capability discovery", func() {
 	It("exposes the inner adapter's cursorstate.Provider", func() {
 		inner := &providerAdapter{cs: &fakeCursorStore{}}
@@ -82,11 +94,36 @@ var _ = Describe("Capability discovery", func() {
 		Expect(p.Leases()).To(BeIdenticalTo(inner.locker))
 	})
 
+	It("exposes the inner adapter's storage.ReplicaProvider", func() {
+		inner := &replicaAdapter{rr: &fakeReplicaReader{}}
+		wrapped, err := otelstore.Wrap(inner)
+		Expect(err).NotTo(HaveOccurred())
+
+		p, ok := storage.As[storage.ReplicaProvider](wrapped)
+		Expect(ok).To(BeTrue())
+		Expect(p.ReplicaReader()).To(BeIdenticalTo(inner.rr))
+	})
+
+	It("keeps storage.ReplicaProvider visible on a namespaced view and through a chain", func() {
+		inner := &replicaAdapter{rr: &fakeReplicaReader{}}
+		once, err := otelstore.Wrap(inner)
+		Expect(err).NotTo(HaveOccurred())
+		twice, err := otelstore.Wrap(once)
+		Expect(err).NotTo(HaveOccurred())
+
+		p, ok := storage.As[storage.ReplicaProvider](twice.Namespace("app"))
+		Expect(ok).To(BeTrue())
+		Expect(p.ReplicaReader()).To(BeIdenticalTo(inner.rr))
+	})
+
 	It("does not invent a capability the inner adapter lacks", func() {
 		wrapped, err := otelstore.Wrap(&plainAdapter{})
 		Expect(err).NotTo(HaveOccurred())
 
 		_, ok := storage.As[cursorstate.Provider](wrapped)
+		Expect(ok).To(BeFalse())
+
+		_, ok = storage.As[storage.ReplicaProvider](wrapped)
 		Expect(ok).To(BeFalse())
 	})
 })

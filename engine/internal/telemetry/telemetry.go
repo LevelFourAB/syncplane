@@ -104,6 +104,9 @@ const (
 	// connect.FailureKind enum, which separates "wait, it heals" from "ask the
 	// user to reconnect".
 	AttrFailureKind = attribute.Key("syncplane.failure_kind")
+	// AttrReadRoute is where a replica-capable read was served from — the
+	// storage.ReadRoute values, a fixed set of three.
+	AttrReadRoute = attribute.Key("syncplane.read_route")
 
 	// AttrWorkspace is the workspace partition key. SPAN ONLY — unbounded.
 	AttrWorkspace = attribute.Key("syncplane.workspace_id")

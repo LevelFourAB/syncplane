@@ -8,11 +8,19 @@
 //
 // # Connection model
 //
-// One pgxpool.Pool serves both reads and writes; a transaction holds one
-// connection for its duration. There is no reader/writer split because there
-// is nothing to split around: Postgres readers never block on writers, so the
-// separate pool sqlitestore keeps to escape its single write lock buys nothing
-// here.
+// By default one pgxpool.Pool serves both reads and writes; a transaction
+// holds one connection for its duration. There is no reader/writer split
+// within one database because there is nothing to split around: Postgres
+// readers never block on writers, so the separate pool sqlitestore keeps to
+// escape its single write lock buys nothing here.
+//
+// WithReadReplica adds a second pool, exposed through storage.ReplicaProvider,
+// pointed at a hot standby (or at the primary itself). It carries only
+// read-only snapshot transactions and the two workspace-list queries — no
+// session state, no advisory locks, never migrations — and every floored read
+// validates the replica's freshness against the workspace's last_seq inside
+// the already-open transaction, falling back to the primary when the replica
+// is behind. See replica.go.
 //
 // # Write mutual exclusion
 //
@@ -40,6 +48,12 @@
 // level, is what makes their pre-write reads stable. They still retry on
 // serialization failure (40001) and deadlock (40P01), which cross-table writes
 // inside one workspace can produce; the contract licenses re-running fn.
+//
+// A replica read is a time-shifted read: the same REPEATABLE READ snapshot a
+// primary read would have taken at some earlier moment. Convergence never
+// depends on freshness — the engine's cursors and floors do — which is why
+// the replica path bounds staleness per read by workspace sequence rather
+// than by replication position.
 //
 // # Scans and re-entrant reads
 //
@@ -286,9 +300,13 @@ const maxWriteAttempts = 10
 // Store implements storage.Adapter. Stores derived via Namespace share the
 // pool; only the Store returned by Open owns (and closes) it.
 type Store struct {
-	pool  *pgxpool.Pool
-	ns    string
-	owner bool
+	pool *pgxpool.Pool
+	// replica is the read-replica pool, nil unless Open was given
+	// WithReadReplica. Only replica.go's reads and the workspace-list queries
+	// touch it.
+	replica *pgxpool.Pool
+	ns      string
+	owner   bool
 	// leases backs the lease.Provider implementation (see leases.go), shared
 	// by every derived namespace so they lease out of one space.
 	leases *pgLeases
@@ -298,8 +316,10 @@ type Store struct {
 type Option func(*config)
 
 type config struct {
-	ns       string
-	maxConns int32
+	ns              string
+	maxConns        int32
+	replicaDSN      string
+	replicaMaxConns int32
 }
 
 // WithNamespace scopes the store to an app namespace. Namespaces partition
@@ -316,6 +336,27 @@ func WithNamespace(ns string) Option {
 // the DSN's pool_max_conns says).
 func WithMaxConns(n int32) Option {
 	return func(c *config) { c.maxConns = n }
+}
+
+// WithReadReplica adds a read-replica pool at dsn — a hot standby of the
+// primary, or the primary itself — and makes the store implement
+// storage.ReplicaProvider. The replica serves read-only snapshot transactions
+// through that capability and the workspace-list queries; everything else,
+// including migrations and leases, stays on the primary.
+//
+// Open fails when the schema at dsn is not at this binary's migration version,
+// which is what catches a DSN that is not a standby of the primary's database.
+func WithReadReplica(dsn string) Option {
+	return func(c *config) { c.replicaDSN = dsn }
+}
+
+// WithReplicaMaxConns caps the replica pool. A replica connection is held for
+// the duration of one read transaction, so this bounds concurrent replica
+// reads; callers past the cap queue on the pool exactly as they do on the
+// primary's. Zero leaves pgx's default (or whatever the replica DSN's
+// pool_max_conns says).
+func WithReplicaMaxConns(n int32) Option {
+	return func(c *config) { c.replicaMaxConns = n }
 }
 
 // Open connects to the Postgres database named by dsn (a libpq URI or key/value
@@ -345,9 +386,17 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 		pool.Close()
 		return nil, err
 	}
+	var replica *pgxpool.Pool
+	if cfg.replicaDSN != "" {
+		replica, err = openReplica(ctx, cfg.replicaDSN, cfg.replicaMaxConns)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+	}
 	// The lease session dials lazily, on the first TryAcquire, so a
 	// deployment that never leases never pays the connection.
-	return &Store{pool: pool, ns: cfg.ns, owner: true, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
+	return &Store{pool: pool, replica: replica, ns: cfg.ns, owner: true, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
 }
 
 // migrate brings the database up to len(migrations), under an advisory lock so
@@ -416,7 +465,7 @@ func migrate(ctx context.Context, pool *pgxpool.Pool) error {
 // Open owns the pool and must outlive every derived store. The server-global
 // schema catalog is shared across namespaces.
 func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{pool: s.pool, ns: ns, leases: s.leases}
+	return &Store{pool: s.pool, replica: s.replica, ns: ns, leases: s.leases}
 }
 
 // Close closes the pool if this store owns it (came from Open); on a
@@ -426,6 +475,9 @@ func (s *Store) Close() error {
 		return nil
 	}
 	s.leases.close()
+	if s.replica != nil {
+		s.replica.Close()
+	}
 	s.pool.Close()
 	return nil
 }
@@ -534,7 +586,20 @@ func isRetryable(err error) bool {
 }
 
 func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
-	rows, err := s.pool.Query(ctx,
+	// The replica may answer: every caller is a periodic re-poll, and the
+	// contract licenses a bounded-staleness view. A replica failure retries
+	// on the primary rather than surfacing — the list is how background
+	// passes find work, and a lagging replica must not stall them.
+	if s.replica != nil {
+		if ids, err := s.listWorkspaceIDs(ctx, s.replica); err == nil {
+			return ids, nil
+		}
+	}
+	return s.listWorkspaceIDs(ctx, s.pool)
+}
+
+func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+	rows, err := pool.Query(ctx,
 		`SELECT workspace_id FROM workspaces WHERE namespace = $1 ORDER BY workspace_id`, s.ns)
 	if err != nil {
 		return nil, err
@@ -568,7 +633,18 @@ func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer, after str
 	if limit <= 0 {
 		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
 	}
-	rows, err := s.pool.Query(ctx,
+	// Replica-first with a primary retry, as in ListWorkspaceIDs and for the
+	// same reason: a polling consumer tolerates staleness, not a stall.
+	if s.replica != nil {
+		if ids, err := s.listPendingWorkspaceIDs(ctx, s.replica, consumer, after, limit); err == nil {
+			return ids, nil
+		}
+	}
+	return s.listPendingWorkspaceIDs(ctx, s.pool, consumer, after, limit)
+}
+
+func (s *Store) listPendingWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool, consumer, after string, limit int) ([]string, error) {
+	rows, err := pool.Query(ctx,
 		`SELECT w.workspace_id
 		 FROM workspaces w
 		 LEFT JOIN consumer_positions p

@@ -134,6 +134,15 @@ Four signals cover most of what goes wrong and are invisible without this:
 - **`syncplane.gc.collected{gc_kind=stranded_consumers}`** — an effect consumer
   was collected below the horizon. What it missed cannot be recovered.
 
+With a read replica configured (`pgstore.WithReadReplica`), two more:
+
+- **`syncplane.replica.reads{read_route=fallback_error}`** — the replica is
+  unreachable or broken; every read is quietly served by the primary instead.
+- **sustained `syncplane.replica.reads{read_route=fallback_stale}`** —
+  replication lag exceeds the window between a client's push ack and its next
+  pull, so reads are concentrating back on the primary whose pool was sized
+  assuming they would not. Brief bursts after a write spike are normal.
+
 For tuning rather than alerting, compare `syncplane.notify.requested` against
 `syncplane.notify.published`: the gap is what `WithNotifyCoalescing` absorbed.
 

@@ -235,6 +235,33 @@ dedicated connection, so a node's leases die with its connection rather than
 waiting out a TTL. `storagetest.Leases` and `storagetest.LeasesNamespaced`
 encode the expectations.
 
+## Read replicas (optional)
+
+An adapter may implement `storage.ReplicaProvider` — one method returning a
+`storage.ReplicaReader` — and a server constructed on it routes its heavy read
+paths (bootstrap snapshots, pulls, subscribe catch-ups, change-feed drains,
+query scans) through that reader instead of `WithReadTx`, counting each read on
+`syncplane.replica.reads` by route.
+
+The reader serves _time-shifted reads_: consistent snapshots of the primary as
+of an earlier moment, bounded per read by a workspace-sequence floor.
+`WithReadTxMinSeq` runs its closure over a snapshot whose workspace sequence is
+at least the floor, preferring the replica and falling back to the primary when
+it is behind (`fallback_stale`) or failing before the closure runs
+(`fallback_error`); `WithReadTxAnchored` floors at the primary's current
+sequence, which is read-your-writes for callers holding no sequence of their
+own. Both keep `WithReadTx`'s at-most-once contract for the closure, and the
+routing decision completes before the closure runs — a replica failure
+mid-stream surfaces as an error, exactly as a failover does.
+
+`ReplicaReader` returning nil means the capability is absent: implementing the
+interface is not the promise, configuration is, so callers (and `storage.As`
+probes) must check for nil. `pgstore` implements it when `WithReadReplica`
+names a standby; `sqlitestore` does not — its file admits one process, which
+leaves nothing to offload. `storagetest.Replica` encodes the expectations;
+running `storagetest.Conformance` with a replica configured (pointed at the
+primary itself is enough) must also still pass.
+
 ## Wrapping adapters
 
 A wrapper that delegates to an inner adapter (`otelstore` is the shipped

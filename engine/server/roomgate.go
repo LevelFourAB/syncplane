@@ -165,7 +165,9 @@ func (c *anchorCache) get(ctx context.Context, s *Server, t presence.Topic) (sto
 	c.mu.Unlock()
 
 	var row storage.Row
-	if err := s.store.WithReadTx(ctx, t.WorkspaceID, func(tx storage.ReadTx) error {
+	// Any staleness serves: the entry is about to be cached for a TTL anyway,
+	// so replica lag adds nothing the cache does not already tolerate.
+	if err := s.readTx(ctx, t.WorkspaceID, 0, func(tx storage.ReadTx) error {
 		var err error
 		row, err = tx.GetRow(t.Entity, t.Key)
 		return err

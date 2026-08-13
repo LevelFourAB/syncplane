@@ -68,9 +68,23 @@ Run a primary with automatic failover — Patroni, or whatever your platform
 calls its HA pair. Two properties of the adapter shape what that can do for
 you.
 
-**Standbys are for failover, not for read scaling.** The adapter takes one DSN
-and one pool, and read transactions run `REPEATABLE READ READ ONLY` against the
-primary.
+**Standbys are for failover — and, opted in, for read scaling.** By default the
+adapter takes one DSN and one pool, and every read runs `REPEATABLE READ READ
+ONLY` against the primary. `pgstore.WithReadReplica(dsn)` (`syncplaned
+-db-replica`) adds a second pool pointed at a hot standby and moves the heavy
+read paths — bootstrap snapshots, pulls, subscribe catch-ups, change-feed
+drains, query scans — onto it.
+
+A replica read is a _time-shifted read_: the same consistent snapshot the
+primary would have served a moment ago, so convergence is never at stake —
+only freshness is, and the engine bounds it per read with a workspace-sequence
+floor. Each read names the lowest `last_seq` it may be served from — a pull's
+cursor position, the client's highest acked seq (carried on the wire as
+`min_seq`, so a client is never shown a snapshot older than its own acked
+writes), or the primary's current seq for bootstrap and query. The adapter
+checks the floor inside the already-open replica transaction and falls back to
+the primary when the replica is behind. A lagging replica therefore costs
+primary load, never correctness.
 
 **A failover is an error, not a corruption risk.** `pgstore` retries
 serialization failures and deadlocks, so an in-flight transaction cut short by
@@ -78,16 +92,27 @@ a failover surfaces as an RPC error and the client retries it. Writes are
 already serialized per workspace by an advisory transaction lock, and no node
 holds state that has to be reconciled afterwards.
 
+**Standby query cancellation surfaces the same way.** A long replica read — a
+bootstrap snapshot, a feed drain — conflicts with WAL replay once it holds a
+snapshot the primary has vacuumed past, and the standby cancels it (SQLSTATE
+57014) when `max_standby_streaming_delay` runs out. The error reaches the
+caller mid-stream and the client retries, exactly as it does across a
+failover. `hot_standby_feedback = on` prevents the conflicts by making the
+primary retain the dead rows the standby's snapshots still see — at the price
+of that bloat accumulating on the primary for as long as long replica reads
+run.
+
 ### Connection budget
 
 Each node opens:
 
-| Connections    | What for                                                                    |
-| -------------- | --------------------------------------------------------------------------- |
-| `WithMaxConns` | the `pgstore` pool; a write holds one while waiting on its workspace's lock |
-| 1              | the lease session, dialled on first use and shared by every app namespace   |
-| 1              | `pglisten`'s `LISTEN` connection, parked for the process's lifetime         |
-| 1              | `pglisten`'s publisher, dialled on the first notification                   |
+| Connections           | What for                                                                    |
+| --------------------- | --------------------------------------------------------------------------- |
+| `WithMaxConns`        | the `pgstore` pool; a write holds one while waiting on its workspace's lock |
+| `WithReplicaMaxConns` | the replica pool, against the standby; only with `WithReadReplica`          |
+| 1                     | the lease session, dialled on first use and shared by every app namespace   |
+| 1                     | `pglisten`'s `LISTEN` connection, parked for the process's lifetime         |
+| 1                     | `pglisten`'s publisher, dialled on the first notification                   |
 
 The last two are the whole fan-out budget, not one pair per plane: `pgnotify`
 and `pgpresence` register different channels on the same `pglisten.Conn`, so a
@@ -97,6 +122,18 @@ Neither connection is pooled, so neither needs sizing.
 
 Size `WithMaxConns` against your `max_connections` divided by node count, minus
 the fixed connections above, and leave headroom for the standby's own clients.
+
+With a replica configured the two pools size against different loads. The
+replica pool carries the slowest concurrent reads — a bootstrap snapshot or a
+feed drain holds its connection for the whole streamed read — so size
+`WithReplicaMaxConns` by how many of those run at once, against the standby's
+own `max_connections`. That work leaves the primary pool, which then sizes by
+write rate plus two smaller read shares: the anchor point-reads (one statement
+per bootstrap and query, no held connection) and the fallback share — every
+read a lagging or unreachable replica sends back. The fallback share is
+visible as `syncplane.replica.reads` with `read_route` `fallback_stale` or
+`fallback_error`; a sustained rise means the primary pool is quietly carrying
+read load you budgeted to the replica.
 
 ### Connection poolers
 
@@ -115,6 +152,10 @@ breaks each of them differently:
 
 None of the three fails loudly. Run with no pooler (the engine already pools) or
 with `pool_mode = session`.
+
+The replica DSN is the one place transaction pooling is tolerable: the replica
+pool runs only single-transaction read-only work — no advisory locks, no
+`LISTEN`, never migrations. The primary's rules are unchanged.
 
 Deployments sharing one database server stay out of each other's lease space by
 schema: the lock key hashes `(schema, namespace, role, workspace)`, so separate

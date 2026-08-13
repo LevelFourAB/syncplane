@@ -180,14 +180,23 @@ window is only adding latency; near-total collapse means it is worth widening.
 
 ### Storage
 
-| Instrument                      | Type      | Unit | Attributes           |
-| ------------------------------- | --------- | ---- | -------------------- |
-| `syncplane.storage.tx.duration` | histogram | `s`  | `tx_kind`, `outcome` |
+| Instrument                      | Type      | Unit     | Attributes           |
+| ------------------------------- | --------- | -------- | -------------------- |
+| `syncplane.storage.tx.duration` | histogram | `s`      | `tx_kind`, `outcome` |
+| `syncplane.replica.reads`       | counter   | `{read}` | `read_route`         |
 
-Requires `otelstore.Wrap`. `tx_kind` is `read` or `write`. Timed from the
-caller's point of view — retries of the write closure included — because that
-is what the caller waited for. A write duration that climbs while push volume
-does not is queueing, not work.
+`storage.tx.duration` requires `otelstore.Wrap`. `tx_kind` is `read` or
+`write`. Timed from the caller's point of view — retries of the write closure
+included — because that is what the caller waited for. A write duration that
+climbs while push volume does not is queueing, not work.
+
+`replica.reads` counts every read the server routed through the adapter's
+replica capability (`pgstore.WithReadReplica`); absent a replica nothing is
+recorded. `read_route` is `replica` (served from the replica), `fallback_stale`
+(the replica was behind the read's freshness floor, served from the primary) or
+`fallback_error` (the replica failed before the read began, served from the
+primary). The fallback share is read load landing back on the primary — see
+[What to alert on](../how-to/observe-the-engine.md#what-to-alert-on).
 
 ### Background maintenance
 
@@ -270,23 +279,24 @@ like an incident in a backend's error rate.
 
 ## Attribute reference
 
-| Attribute                   | Bounded by                        | Metrics?       |
-| --------------------------- | --------------------------------- | -------------- |
-| `syncplane.entity`          | registered entities               | yes            |
-| `syncplane.mutator`         | declared mutators                 | yes            |
-| `syncplane.mutation_kind`   | `crud`/`custom`/`batch`           | yes            |
-| `syncplane.outcome`         | `ok`/`error`/`canceled`/`skipped` | yes            |
-| `syncplane.rejection_code`  | codes your app rejects with       | yes            |
-| `syncplane.reset_reason`    | fixed enum                        | yes            |
-| `syncplane.tx_kind`         | `read`/`write`                    | yes            |
-| `syncplane.gc_kind`         | fixed enum                        | yes            |
-| `syncplane.failure_kind`    | fixed enum                        | yes            |
-| `syncplane.consumer`        | registered consumers              | yes            |
-| `syncplane.index`           | derived index names               | yes            |
-| `syncplane.room_event_kind` | `state`/`leave`/`message`         | yes            |
-| `syncplane.drop_reason`     | fixed enum                        | yes            |
-| `syncplane.workspace_id`    | **the deployment**                | **spans only** |
-| `syncplane.client_id`       | **installations, forever**        | **spans only** |
+| Attribute                   | Bounded by                                  | Metrics?       |
+| --------------------------- | ------------------------------------------- | -------------- |
+| `syncplane.entity`          | registered entities                         | yes            |
+| `syncplane.mutator`         | declared mutators                           | yes            |
+| `syncplane.mutation_kind`   | `crud`/`custom`/`batch`                     | yes            |
+| `syncplane.outcome`         | `ok`/`error`/`canceled`/`skipped`           | yes            |
+| `syncplane.rejection_code`  | codes your app rejects with                 | yes            |
+| `syncplane.reset_reason`    | fixed enum                                  | yes            |
+| `syncplane.tx_kind`         | `read`/`write`                              | yes            |
+| `syncplane.read_route`      | `replica`/`fallback_stale`/`fallback_error` | yes            |
+| `syncplane.gc_kind`         | fixed enum                                  | yes            |
+| `syncplane.failure_kind`    | fixed enum                                  | yes            |
+| `syncplane.consumer`        | registered consumers                        | yes            |
+| `syncplane.index`           | derived index names                         | yes            |
+| `syncplane.room_event_kind` | `state`/`leave`/`message`                   | yes            |
+| `syncplane.drop_reason`     | fixed enum                                  | yes            |
+| `syncplane.workspace_id`    | **the deployment**                          | **spans only** |
+| `syncplane.client_id`       | **installations, forever**                  | **spans only** |
 
 ## The TypeScript client
 

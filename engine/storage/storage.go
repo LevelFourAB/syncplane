@@ -90,8 +90,9 @@
 // workspaces committing concurrently).
 //
 // Adapters may additionally implement the optional capability interfaces
-// cursorstate.Provider and lease.Provider — both shipped adapters do — which
-// servers resolve through storage.As, so wrapping adapters stay transparent by
+// cursorstate.Provider and lease.Provider (both shipped adapters do) and
+// ReplicaProvider (pgstore, when a read replica is configured) — all resolved
+// by servers through storage.As, so wrapping adapters stay transparent by
 // implementing Unwrap.
 package storage
 
@@ -295,11 +296,12 @@ type Adapter interface {
 	//
 	// The answer may be OPTIMISTIC — a returned workspace whose pending changes
 	// are all for entities the consumer filters out has nothing for it to do —
-	// but it must never be short: a workspace whose position is behind at call
-	// time has to appear, because for a consumer relying on this to find work,
-	// an omission is an effect that never fires. Adapters are free to answer
-	// from a snapshot; a workspace written during the call may appear in the
-	// next page or the next call.
+	// but never permanently short: for a consumer relying on this to find work,
+	// a workspace that stays omitted is an effect that never fires. Adapters may
+	// answer from a bounded-staleness read view (a snapshot, a read replica), so
+	// one call may miss a workspace that became pending shortly before it; the
+	// workspace must appear once the view reaches that moment — for the polling
+	// consumers this serves, a later call rather than not at all.
 	ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error)
 	Close() error
 }

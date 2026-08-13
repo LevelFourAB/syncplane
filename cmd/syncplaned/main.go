@@ -61,6 +61,7 @@ func isPostgresDSN(db string) bool {
 func main() {
 	var (
 		dbPath       = flag.String("db", "", "SQLite database path, or a postgres:// DSN for multi-node hosting (default: temp file)")
+		dbReplica    = flag.String("db-replica", "", "postgres:// DSN of a read replica of -db; requires a postgres -db")
 		addr         = flag.String("addr", "127.0.0.1:0", "public sync listen address")
 		adminAddr    = flag.String("admin-addr", "127.0.0.1:0", "private admin listen address")
 		token        = flag.String("token", "", "bearer token for AdminService (empty denies all registration)")
@@ -102,9 +103,18 @@ func main() {
 		}()
 	}
 
+	if *dbReplica != "" && !postgres {
+		clilog.Fatal(logger, "configure store",
+			fmt.Errorf("-db-replica requires -db to be a postgres:// DSN"))
+	}
+
 	var store storage.Adapter
 	if postgres {
-		pg, err := pgstore.Open(context.Background(), *dbPath)
+		var pgOpts []pgstore.Option
+		if *dbReplica != "" {
+			pgOpts = append(pgOpts, pgstore.WithReadReplica(*dbReplica))
+		}
+		pg, err := pgstore.Open(context.Background(), *dbPath, pgOpts...)
 		if err != nil {
 			clilog.Fatal(logger, "open store", err)
 		}

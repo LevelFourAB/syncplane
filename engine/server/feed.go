@@ -107,7 +107,10 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 	if limit <= 0 {
 		limit = s.limits.MaxPullChanges
 	}
-	err = s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+	// Floored at the cursor: the "cursor ahead of CurrentSeq" verdict below
+	// means a swapped store, and a replica snapshot from before the cursor was
+	// issued would reach the same verdict about a perfectly healthy consumer.
+	err = s.readTx(ctx, workspaceID, after.Seq, func(tx storage.ReadTx) error {
 		horizon, err := tx.TombstoneHorizon()
 		if err != nil {
 			return err

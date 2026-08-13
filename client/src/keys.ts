@@ -9,8 +9,8 @@
  *                                per local edit; see overlayTextKey)
  *   b/<gen>/<entity>/<ws>/<key>  bootstrap staging (a generation's incoming snapshot)
  *   p/<ws>/<paddedId>            pending mutation queue (binary Mutation envelope)
- *   meta/ws/<ws>/<name>          cursor, lastMutationId, serverSeq, bootstrapGen,
- *                                pushedThrough — all per workspace
+ *   meta/ws/<ws>/<name>          cursor, lastMutationId, serverSeq, ackedSeq,
+ *                                bootstrapGen, pushedThrough — all per workspace
  *   meta/<name>                  clientId, formatVersion, entities — account-wide
  *   intent/<tabId>               per-tab sync intent (subscriptions, undo refs, heartbeat)
  *
@@ -135,6 +135,16 @@ export const metaBootstrapResume = (workspaceId: string): string =>
  */
 export const metaServerSeq = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}serverSeq`;
+/**
+ * Highest workspace seq the server acked one of this store's pushes at
+ * (decimal string; MutationResult.seq over APPLIED results). Sent back as
+ * PullRequest.min_seq / WorkspaceScope.min_seq so a replica-reading server
+ * never serves a snapshot older than the store's own acked writes. Written
+ * monotonic-max — tabs push independently and a lower ack must not regress
+ * it — and discarded with the cursor lineage: a floor carried across a store
+ * swap could sit above the new head forever.
+ */
+export const metaAckedSeq = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}ackedSeq`;
 
 /**
  * Version of this KV layout. On mismatch the client tries to push the

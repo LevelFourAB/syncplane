@@ -169,6 +169,13 @@ type metrics struct {
 	// messages an app lost.
 	roomEventsDropped metric.Int64Counter
 
+	// replicaReads counts reads routed through the adapter's replica
+	// capability, by route (see storage.ReadRoute). The fallback share is
+	// read load quietly concentrating back on the primary: sustained
+	// fallback_stale means replication lag exceeds the clients' ack-to-pull
+	// window, and fallback_error means the replica is unreachable.
+	replicaReads metric.Int64Counter
+
 	// indexBuildDuration times one backfill batch, by outcome.
 	indexBuildDuration metric.Float64Histogram
 	// indexBuildRows counts rows backfilled into a secondary index. Until an
@@ -194,6 +201,7 @@ const (
 	metricGCDuration             = "syncplane.gc.duration"
 	metricGCWorkspaces           = "syncplane.gc.workspaces"
 	metricGCCollected            = "syncplane.gc.collected"
+	metricReplicaReads           = "syncplane.replica.reads"
 	metricIndexBuildDuration     = "syncplane.index.build.duration"
 	metricIndexBuildRows         = "syncplane.index.build.rows"
 	metricRoomStreams            = "syncplane.rooms.streams"
@@ -248,6 +256,9 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 		gcCollected: b.Int64Counter(metricGCCollected,
 			metric.WithDescription("Rows reclaimed by garbage collection, by kind."),
 			metric.WithUnit("{row}")),
+		replicaReads: b.Int64Counter(metricReplicaReads,
+			metric.WithDescription("Reads routed through the read-replica capability, by route."),
+			metric.WithUnit("{read}")),
 		indexBuildDuration: b.Float64Histogram(metricIndexBuildDuration,
 			metric.WithDescription("Duration of one secondary-index backfill batch."),
 			metric.WithUnit("s")),

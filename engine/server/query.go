@@ -100,7 +100,9 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		rows []qrow
 		more bool
 	)
-	err = s.store.WithReadTx(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+	// Anchored: query cursors are value-based and carry no seq to floor on,
+	// and a caller who just wrote expects the query to see it.
+	err = s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
 		var err error
 		rows, more, err = queryRows(tx, info, predicate, order, pg, func(row storage.Row) (bool, error) {
 			class, err := emitter.classify(row)

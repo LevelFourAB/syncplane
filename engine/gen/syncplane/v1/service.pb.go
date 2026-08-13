@@ -252,10 +252,11 @@ type MutationResult struct {
 	// sequence — its savepoint rolled back — which is what makes rejections
 	// free rather than gap-producing.
 	//
-	// The TypeScript client ignores it (it learns versions from the rows it
-	// applies). It is kept for clients that write without syncing back — a
-	// server-side or batch client — and for asserting the no-sequence-on-
-	// rejection invariant.
+	// The TypeScript client tracks the highest value per workspace and sends
+	// it back as PullRequest.min_seq / WorkspaceScope.min_seq, so a
+	// replica-reading server never serves it a snapshot older than its own
+	// acked writes. Also the only in-band way a client that never syncs back —
+	// a server-side or batch writer — learns the sequence its write took.
 	Seq uint64 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
 	// Machine-readable rejection code (e.g. "permission_denied").
 	ErrorCode     string `protobuf:"bytes,4,opt,name=error_code,json=errorCode,proto3" json:"error_code,omitempty"`
@@ -502,8 +503,16 @@ type PullRequest struct {
 	// another build's rows current in a shared local store — names it here, or
 	// discards and re-bootstraps on every page that carries delta state for it.
 	NoDeltaEntities []string `protobuf:"bytes,6,rep,name=no_delta_entities,json=noDeltaEntities,proto3" json:"no_delta_entities,omitempty"`
-	unknownFields   protoimpl.UnknownFields
-	sizeCache       protoimpl.SizeCache
+	// Lowest workspace sequence this pull may be answered from: the highest
+	// seq the client has seen a push acked at (MutationResult.seq). A freshness
+	// floor for servers reading from a replica — without it, a pull served
+	// from a snapshot older than the client's own acked writes would drop
+	// their optimistic state and briefly revert them. It never widens what the
+	// pull returns; the cursor still decides that. 0 (and clients predating
+	// the field) means no floor beyond the cursor's own position.
+	MinSeq        uint64 `protobuf:"varint,7,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *PullRequest) Reset() {
@@ -576,6 +585,13 @@ func (x *PullRequest) GetNoDeltaEntities() []string {
 		return x.NoDeltaEntities
 	}
 	return nil
+}
+
+func (x *PullRequest) GetMinSeq() uint64 {
+	if x != nil {
+		return x.MinSeq
+	}
+	return 0
 }
 
 type PullResponse struct {
@@ -1170,6 +1186,9 @@ type WorkspaceScope struct {
 	Cursor []byte `protobuf:"bytes,2,opt,name=cursor,proto3" json:"cursor,omitempty"`
 	// Scopes this workspace's stream. Empty = full sync.
 	Subscriptions []*Subscription `protobuf:"bytes,3,rep,name=subscriptions,proto3" json:"subscriptions,omitempty"`
+	// PullRequest.min_seq, applied to every page this scope is served: the
+	// highest seq the client has seen a push acked at for this workspace.
+	MinSeq        uint64 `protobuf:"varint,4,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1223,6 +1242,13 @@ func (x *WorkspaceScope) GetSubscriptions() []*Subscription {
 		return x.Subscriptions
 	}
 	return nil
+}
+
+func (x *WorkspaceScope) GetMinSeq() uint64 {
+	if x != nil {
+		return x.MinSeq
+	}
+	return 0
 }
 
 type SubscribeRequest struct {
@@ -1741,14 +1767,15 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"q\n" +
 	"\fPushResponse\x128\n" +
 	"\aresults\x18\x01 \x03(\v2\x1e.syncplane.v1.WorkspaceResultsR\aresults\x12'\n" +
-	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\xe9\x01\n" +
+	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\x82\x02\n" +
 	"\vPullRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x16\n" +
 	"\x06cursor\x18\x03 \x01(\fR\x06cursor\x12@\n" +
 	"\rsubscriptions\x18\x04 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x12\x14\n" +
 	"\x05limit\x18\x05 \x01(\rR\x05limit\x12*\n" +
-	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\"\xfb\x01\n" +
+	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\x12\x17\n" +
+	"\amin_seq\x18\a \x01(\x04R\x06minSeq\"\xfb\x01\n" +
 	"\fPullResponse\x12)\n" +
 	"\x05patch\x18\x01 \x01(\v2\x13.syncplane.v1.PatchR\x05patch\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\fR\n" +
@@ -1798,11 +1825,12 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\fstart_cursor\x18\x03 \x01(\fR\vstartCursor\x12\x1d\n" +
 	"\n" +
 	"end_cursor\x18\x04 \x01(\fR\tendCursor\x12\x19\n" +
-	"\bhas_more\x18\x05 \x01(\bR\ahasMore\"\x8d\x01\n" +
+	"\bhas_more\x18\x05 \x01(\bR\ahasMore\"\xa6\x01\n" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +
-	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\"\xcc\x01\n" +
+	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x12\x17\n" +
+	"\amin_seq\x18\x04 \x01(\x04R\x06minSeq\"\xcc\x01\n" +
 	"\x10SubscribeRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x124\n" +
 	"\x06scopes\x18\x02 \x03(\v2\x1c.syncplane.v1.WorkspaceScopeR\x06scopes\x12\x14\n" +

@@ -95,7 +95,10 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		SchemaRevision: s.catalogPtr().schemaRev,
 		Entities:       order,
 	}
-	if err := s.store.WithReadTx(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+	// Anchored: the Begin cursor's seq becomes the client's resume point, so it
+	// must not sit behind writes the client has already been acked — and the
+	// anchor is at least any resume's own floor.
+	if err := s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
 		current, err := tx.CurrentSeq()
 		if err != nil {
 			return err
@@ -200,7 +203,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			// Short tx per page: collect raw rows only; classification and
 			// stream writes happen outside so the tx stays brief.
 			var page []storage.Row
-			if err := s.store.WithReadTx(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+			// Floored at the Begin seq: pages of one snapshot must not read
+			// from before the position the Begin frame promised.
+			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
 				return tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
 					page = append(page, row)
 					return nil

@@ -52,6 +52,24 @@ var _ = storagetest.ConformanceNamespaced("postgres", func() (storage.Adapter, s
 	}
 })
 
+// The replica pointed at the primary itself: always fresh, so the routing and
+// read contracts are exercised without a second database. The fake-lagging
+// specs in replica_test.go cover the stale side.
+var _ = storagetest.Replica("postgres", func() storage.Adapter {
+	dsn := pgtest.DSN()
+	store, err := pgstore.Open(context.Background(), dsn, pgstore.WithReadReplica(dsn))
+	Expect(err).NotTo(HaveOccurred())
+	return store
+})
+
+// The full adapter contract must hold unchanged with a replica wired in.
+var _ = storagetest.Conformance("postgres (replica configured)", func() storage.Adapter {
+	dsn := pgtest.DSN()
+	store, err := pgstore.Open(context.Background(), dsn, pgstore.WithReadReplica(dsn))
+	Expect(err).NotTo(HaveOccurred())
+	return store
+})
+
 var _ = storagetest.CursorState("postgres", func() storage.Adapter {
 	return open()
 })

@@ -390,7 +390,13 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 
 	var resp *syncplanev1.PullResponse
 	var resetSeen resetReason // logged after the tx commits, never inside it
-	err = s.store.WithReadTx(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+	// The snapshot is floored at BOTH positions the client holds. The cursor's
+	// seq alone is not enough: a push acked at seq S+1 followed by a pull whose
+	// cursor still sits at S may be served a snapshot missing the acked write,
+	// and the client would drop its optimism for a mutation the page lacks.
+	// min_seq is untrusted wire input whose worst effect is forcing the read
+	// onto the primary — the behavior every pull had before replicas.
+	err = s.readTx(ctx, msg.GetWorkspaceId(), max(cur.seq, msg.GetMinSeq()), func(tx storage.ReadTx) error {
 		// A delta resync (or a stale one) takes precedence over the normal
 		// forward page, but still runs the shared reset checks first: a cursor
 		// below the horizon or from a foreign store resets rather than resyncs.

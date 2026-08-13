@@ -20,6 +20,7 @@ import {
 	confirmedKey,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
+	metaAckedSeq,
 	metaCursor,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
@@ -465,6 +466,10 @@ export async function wipeConfirmedState(
 	touched: TouchSet,
 ): Promise<void> {
 	await tx.del(metaCursor(workspaceId));
+	// The acked floor goes with the cursor: it names a seq in the lineage being
+	// discarded, and carried across a swap it could sit above the new lineage's
+	// head and pin every pull to the primary.
+	await tx.del(metaAckedSeq(workspaceId));
 	// The built markers say the index covers the whole entity, which stops being
 	// true the moment the rows are gone, so they leave in the same transaction.
 	// The positions themselves need no sweep: they ride on the rows below.
@@ -868,6 +873,11 @@ export async function finalizeRebase(
 	// older server) writes nothing.
 	if (input.baseline) {
 		await tx.put(metaServerSeq(workspaceId), (input.serverSeq ?? 0n).toString());
+		// A snapshot swap replaces the cursor lineage, and the acked floor names
+		// a seq in the old one; a floor above the new head would pin every pull
+		// to the primary. wipeConfirmedState already dropped it on the direct
+		// path — this covers the staged swap, whose wipe and install commit here.
+		await tx.del(metaAckedSeq(workspaceId));
 	} else if (input.serverSeq) {
 		await tx.put(metaServerSeq(workspaceId), input.serverSeq.toString());
 	}

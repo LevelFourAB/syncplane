@@ -28,6 +28,7 @@ import {
 	WorkspaceDropped_Reason,
 } from '../gen/syncplane/v1/service_pb.js';
 import {
+	metaAckedSeq,
 	metaBootstrapGen,
 	metaBootstrapResume,
 	metaCursor,
@@ -1000,6 +1001,51 @@ export class Coordinator {
 	}
 
 	/**
+	 * One workspace's resume position: the stored cursor and the acked-seq
+	 * freshness floor that rides beside it as PullRequest.min_seq /
+	 * WorkspaceScope.min_seq. Read together so a pull opened between a push's
+	 * ack and its record cannot pair a fresh cursor with a stale floor.
+	 */
+	private async pullPosition(
+		workspaceId: string,
+	): Promise<{ cursor: Uint8Array | undefined; minSeq: bigint }> {
+		return this.opts.kvMutex.runShared(async () => {
+			const tx = await this.opts.kv.read();
+			try {
+				const cursor = (await tx.get(metaCursor(workspaceId))) as Uint8Array | undefined;
+				const acked = (await tx.get(metaAckedSeq(workspaceId))) as string | undefined;
+				return { cursor, minSeq: acked === undefined ? 0n : BigInt(acked) };
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * Records the highest workspace seq the server acked one of this store's
+	 * pushes at (see metaAckedSeq). Monotonic max inside the transaction: tabs
+	 * push independently, and a lower ack landing later must not regress a
+	 * floor another tab already earned.
+	 */
+	private async recordAckedSeq(workspaceId: string, seq: bigint): Promise<void> {
+		await this.opts.kvMutex.run(async () => {
+			const tx = await this.opts.kv.write();
+			try {
+				const stored = (await tx.get(metaAckedSeq(workspaceId))) as string | undefined;
+				if (stored !== undefined && BigInt(stored) >= seq) {
+					tx.release();
+					return;
+				}
+				await tx.put(metaAckedSeq(workspaceId), seq.toString());
+				await tx.commit();
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+	}
+
+	/**
 	 * The entity names to send as no_delta_entities.
 	 *
 	 * Re-read per pull cycle and per stream open rather than cached: the set
@@ -1341,7 +1387,11 @@ export class Coordinator {
 						state.poison = undefined;
 						state.gapped = false;
 					}
+					let ackedSeq = 0n;
 					for (const result of wsResult.results) {
+						if (result.status === MutationStatus.APPLIED && result.seq > ackedSeq) {
+							ackedSeq = result.seq;
+						}
 						if (result.status === MutationStatus.REJECTED) {
 							const m = inFlight.get(`${sent.workspaceId}\u0000${result.mutationId}`);
 							rejections.push({
@@ -1353,6 +1403,8 @@ export class Coordinator {
 							});
 						}
 					}
+					// Rejections carry seq 0, so a rejected-only batch records nothing.
+					if (ackedSeq > 0n) await this.recordAckedSeq(sent.workspaceId, ackedSeq);
 					entry.pending = entry.pending.slice(sent.count);
 					entry.atHead = false;
 					if (entry.pending.length === 0) remaining.delete(sent.workspaceId);
@@ -1950,7 +2002,7 @@ export class Coordinator {
 		let lastAcked = 0n;
 		const noDeltaEntities = await this.noDeltaEntities();
 		for (;;) {
-			const cursor = await this.cursor(workspaceId);
+			const { cursor, minSeq } = await this.pullPosition(workspaceId);
 			// Timed from issuing the request to the page being committed locally,
 			// not just the RPC: what a user waits for is the data being readable,
 			// and the rebase is part of that.
@@ -1965,6 +2017,7 @@ export class Coordinator {
 						limit: this.opts.pullLimit ?? 0,
 						subscriptions: subs,
 						noDeltaEntities,
+						minSeq,
 					},
 					{ signal: this.abort.signal },
 				);
@@ -2913,7 +2966,12 @@ export class Coordinator {
 	 * first N and leaves the rest to the poll loop, which is slower but correct.
 	 */
 	private async planStream(): Promise<{
-		scopes: { workspaceId: string; cursor: Uint8Array; subscriptions: Subscription[] }[];
+		scopes: {
+			workspaceId: string;
+			cursor: Uint8Array;
+			subscriptions: Subscription[];
+			minSeq: bigint;
+		}[];
 		subs: Map<string, Subscription[]>;
 		noDeltaEntities: string[];
 	}> {
@@ -2924,12 +2982,18 @@ export class Coordinator {
 			workspaceId: string;
 			cursor: Uint8Array;
 			subscriptions: Subscription[];
+			minSeq: bigint;
 		}[] = [];
 		for (const [ ws, subs ] of union) {
 			if (this.workspaces.get(ws)?.revoked) continue;
 			if (scopes.length >= this.maxWorkspacesPerRequest) break;
-			const cursor = await this.cursor(ws);
-			scopes.push({ workspaceId: ws, cursor: cursor ?? new Uint8Array(), subscriptions: subs });
+			const { cursor, minSeq } = await this.pullPosition(ws);
+			scopes.push({
+				workspaceId: ws,
+				cursor: cursor ?? new Uint8Array(),
+				subscriptions: subs,
+				minSeq,
+			});
 		}
 		return { scopes, subs: union, noDeltaEntities: await this.noDeltaEntities() };
 	}

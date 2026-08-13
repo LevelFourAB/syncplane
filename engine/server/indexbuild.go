@@ -209,7 +209,9 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		))
 	}()
 
-	if err := s.store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
+	// Any staleness serves: a stale "not ready" only re-runs the write path
+	// below, whose own transactions re-check against the primary.
+	if err := s.readTx(ctx, ws, 0, func(tx storage.ReadTx) error {
 		var err error
 		alreadyReady, err = ci.ready(tx, info.name)
 		return err

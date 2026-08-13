@@ -73,6 +73,18 @@ runs only one of them.
 node runs the same code at boot and they race safely. There is no separate
 migration step to sequence into a deploy.
 
+A fleet whose primary is sized by its reads can move them to a hot standby:
+
+```go
+store, err := pgstore.Open(ctx, os.Getenv("DATABASE_URL"),
+	pgstore.WithReadReplica(os.Getenv("DATABASE_REPLICA_URL")))
+```
+
+Migrations still run on the primary only; the replica is probed for the same
+schema version and `Open` fails when it does not answer with one. What routes
+where, how freshness is bounded, and how to size the second pool is
+[deploy-for-high-availability.md](deploy-for-high-availability.md#postgresql).
+
 ## Hosting several apps
 
 `Manager` shares one set of server options across every app it hosts, but a
@@ -99,6 +111,10 @@ Postgres DSN selects `pgstore` and wires `pgnotify` per app for you:
 ```sh
 syncplaned -db postgres://user:pass@host/syncplane   # Postgres, multi-node ready
 syncplaned -db /var/lib/syncplane/sync.db            # SQLite, unchanged
+
+# Postgres with reads served from a hot standby
+syncplaned -db postgres://user:pass@host/syncplane \
+	-db-replica postgres://user:pass@standby/syncplane
 ```
 
 The notifier is not a separate flag because there is no useful deployment that

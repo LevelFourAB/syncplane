@@ -40,6 +40,11 @@ type subScope struct {
 	// against. Both advance as pages are sent.
 	cur       cursorState
 	rawCursor []byte
+	// minSeq is the scope's freshness floor from the wire
+	// (WorkspaceScope.min_seq): the highest seq the client saw a push acked
+	// at, which its cursor may still sit behind. Fixed for the stream's life;
+	// the advancing cursor overtakes it after the first page.
+	minSeq uint64
 	// sparseCursor is the client's opt-in to page frames that carry no cursor
 	// (SubscribeRequest.sparse_cursor). cursorSent records whether the client
 	// holds one at all — a scope opened without a cursor must be given one
@@ -297,6 +302,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		subs:         want.GetSubscriptions(),
 		cur:          cur,
 		rawCursor:    want.GetCursor(),
+		minSeq:       want.GetMinSeq(),
 		sparseCursor: sparseCursor,
 		cursorSent:   len(want.GetCursor()) > 0,
 		signals:      signals,
@@ -414,7 +420,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		var page *syncplanev1.PullResponse
 		var next cursorState
 		var reason resetReason
-		if err := s.store.WithReadTx(ctx, sc.ws, func(tx storage.ReadTx) error {
+		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
 			page, next, reason, e = s.pullPage(tx, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.clientID, sc.rawCursor, limit)
 			return e
