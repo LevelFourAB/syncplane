@@ -267,6 +267,35 @@ export interface Query<M> {
 }
 
 /**
+ * A cross-workspace query whose predicate is chosen per workspace, for a
+ * condition naming something workspace-scoped — a row id, which is a different
+ * literal in each partition.
+ *
+ * Accepted wherever a `Query` is by the cross-workspace reads, and only there:
+ * it requires the workspace set it is built against (`opts.workspaces`) and
+ * throws without one. `byWorkspace` is called once per named workspace, and a
+ * workspace it returns `undefined` for is left out of the read.
+ *
+ * Order, page and total describe the merged result, so `orderBy`, `limit`,
+ * `offset` and `total` stay shared; only the predicate varies. `after`/`before`
+ * are absent because no position spans workspaces.
+ *
+ * @example
+ * ```ts
+ * const mine = db.task.useQueryAll({
+ * 	orderBy: (t) => [ t.dueAt.asc() ],
+ * 	byWorkspace: (ws) => {
+ * 		const me = memberIdIn(ws);
+ * 		return me && ((t) => t.assignee.eq(me));
+ * 	},
+ * }, { workspaces });
+ * ```
+ */
+export interface WorkspaceQuery<M> extends Omit<Query<M>, 'where' | 'after' | 'before'> {
+	byWorkspace: (workspaceId: string) => ((w: QueryRef<M>) => Cond) | undefined;
+}
+
+/**
  * What a result's `total` is for a given query: `undefined` once the query
  * opts out with `total: false`, `number` otherwise. A flag only known at
  * runtime types as `number`; guard the read where the flag can be false.

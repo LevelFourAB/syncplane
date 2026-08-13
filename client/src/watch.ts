@@ -2,17 +2,24 @@ import { type DescMessage, fromBinary, type MessageShape } from '@bufbuild/proto
 
 import { COMPLETE, type Coverage, type PageInfo, type RowSet, withCoverage } from './coverage.js';
 import { debugVerifyTouchesEnv } from './env.js';
-import { wsSegment } from './keys.js';
+import { compareWorkspaces, wsSegment } from './keys.js';
 import type { KVRead, KVStore } from './kv/store.js';
 import type { EntityRegistry } from './mutations.js';
 import type { Mutex } from './mutex.js';
 import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
-import type { PageWindow } from './query/ast.js';
+import type { Cond, PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
-import { type IndexReport, queryByIndex } from './query/execute.js';
+import { type IndexedRow, type IndexReport, queryByIndex } from './query/execute.js';
 import { compareRows, type CompiledQuery, evalCond, runQuery } from './query/index.js';
-import { readMergedRowsWithVersion, type Row, scanMergedRows, type ScopedRow } from './read.js';
+import {
+	readMergedRowsWithVersion,
+	type ReadScope,
+	type Row,
+	scanMergedRows,
+	type ScopedRow,
+	type WorkspaceScope,
+} from './read.js';
 import { hydrate, type IncludeSpec, type RefClient } from './refs.js';
 import { safeInvoke } from './report.js';
 import type { QueryDeclineReason, UnstampedQueryEvent } from './sync/events.js';
@@ -270,12 +277,24 @@ interface Watcher {
 	entity: string;
 	/**
 	 * Workspace this watcher observes; undefined means every workspace in the
-	 * store (the cross-workspace read the entity-first key layout makes cheap).
+	 * store (the cross-workspace read the entity-first key layout makes cheap),
+	 * unless `workspaces` narrows it to a named set.
 	 */
 	workspaceId?: string;
+	/**
+	 * The workspaces a set-scoped watcher spans, in key-segment order; undefined
+	 * for a watcher over one workspace or over all of them.
+	 *
+	 * A set naming exactly one workspace ALSO sets `workspaceId`, which is what
+	 * puts it on the scoped read, scan-scope and index paths without a case of
+	 * its own.
+	 */
+	workspaces?: readonly string[];
 	cb: WatchCallback<unknown>;
 	/** When set, rows are filtered/ordered/sliced before the callback fires. */
 	query?: CompiledQuery;
+	/** Per-workspace predicate; see NamedWorkspaces.predicates. */
+	predicates?: ReadonlyMap<string, Cond>;
 	/**
 	 * The query's cursor bounds. They bound the MATCH SET — a row outside them
 	 * is not a match — so `total` counts what is inside them and `window` slices
@@ -458,7 +477,7 @@ export interface WatcherHubOptions {
 	 * result can carry it. Absent ⇒ complete, which is what a hub built without
 	 * a subscription set (tests, in-process facades) should say.
 	 */
-	coverageOf?: (entity: string, workspaceId?: string) => Coverage;
+	coverageOf?: (entity: string, scope?: WorkspaceScope) => Coverage;
 	/**
 	 * An entity's compiled secondary indexes, so a query watcher's first read
 	 * can be served from one instead of scanned. Absent ⇒ every read scans,
@@ -534,7 +553,7 @@ export class WatcherHub {
 
 	watch<D extends DescMessage>(
 		schema: D,
-		workspaceId: string | undefined,
+		scope: ReadScope,
 		cb: WatchCallback<MessageShape<D>>,
 		query?: CompiledQuery,
 		include?: IncludeSpec,
@@ -543,21 +562,36 @@ export class WatcherHub {
 		if (this.closed) return INERT;
 		const def = this.registry.bySchema(schema);
 		const reaches = this.reachableEntities(def.name, include);
-		if (workspaceId === undefined && (query?.after !== undefined || query?.before !== undefined)) {
-			throw new Error(
-				"watchQueryAll: after/before name a position in one workspace's ordering, "
-					+ 'which a cross-workspace watch has no counterpart for',
-			);
-		}
-		const cursors = workspaceId === undefined
+		const named = typeof scope === 'object' ? scope : undefined;
+		const workspaces = named === undefined
+			? undefined
+			: [ ...new Set(named.workspaces) ].sort(compareWorkspaces);
+		// A named set of one is read as that workspace: same scan prefix, same
+		// shared rows, same index. What it does NOT inherit is the ordering a
+		// scoped watch can name a position in — see `cursors` below.
+		const workspaceId = workspaces === undefined
+			? (typeof scope === 'string' ? scope : undefined)
+			: (workspaces.length === 1 ? workspaces[0] : undefined);
+		// A set keeps its cursors off even at size one, so that a list shrinking to
+		// a single workspace does not silently change what the watch delivers.
+		const cursors = workspaceId === undefined || named !== undefined
 			? undefined
 			: new OrderCursors(schema, query?.orderBy ?? []);
+		if (cursors === undefined && (query?.after !== undefined || query?.before !== undefined)) {
+			throw new Error(
+				"watchQueryAll: after/before name a position in one workspace's ordering, which "
+					+ 'a cross-workspace watch — over every workspace or over a named set of them '
+					+ '— has no counterpart for',
+			);
+		}
 		const watcher: Watcher = {
 			schema,
 			entity: def.name,
 			workspaceId,
+			workspaces,
 			cb: cb as WatchCallback<unknown>,
 			query,
+			predicates: named?.predicates,
 			bounds: query === undefined ? undefined : pageWindowOf(schema, def.name, query),
 			cursors,
 			include,
@@ -965,7 +999,7 @@ export class WatcherHub {
 
 	/** Rebuilds a scope's shared rows from a full merged-view scan, in scan order. */
 	private async scanScope(tx: KVRead, watcher: Watcher): Promise<ResultRow[]> {
-		const merged = await scanMergedRows(tx, this.registry, watcher.entity, watcher.workspaceId);
+		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
 		const scope = scanScope(watcher);
 		const prev = this.scopes.get(scope)?.rows;
 		const rows = new Map<string, ResultRow>();
@@ -994,6 +1028,12 @@ export class WatcherHub {
 	 * set is what the watcher goes on to maintain — re-deriving a page after each
 	 * commit would put a read back on the commit path, which is the cost this
 	 * class exists to remove.
+	 *
+	 * A watcher over a named set walks one index per workspace and concatenates:
+	 * each leg is a single-workspace query, so none of them meets the decline
+	 * that stops a read spanning every workspace. One leg declining declines the
+	 * whole seed — the scan that then serves it is the definition, and half a
+	 * result from an index is not a result.
 	 */
 	private async seedFromIndex(
 		tx: KVRead,
@@ -1002,26 +1042,44 @@ export class WatcherHub {
 	): Promise<MatchSet | undefined> {
 		const indexes = this.opts.indexes;
 		if (watcher.query === undefined) return declined(report, 'no-query');
-		if (watcher.workspaceId === undefined) return declined(report, 'cross-workspace');
-		// A hub built without the client's index cache has none to consult, and an
-		// entity outside the registry has none either.
-		if (indexes === undefined) return declined(report, 'no-index');
+		const workspaces = watcher.workspaceId !== undefined
+			? [ watcher.workspaceId ]
+			: watcher.workspaces;
+		if (workspaces === undefined) return declined(report, 'cross-workspace');
+		// A hub built without the client's index cache has none to consult, an
+		// entity outside the registry has none either, and a set naming no
+		// workspace has none to consult in.
+		if (indexes === undefined || workspaces.length === 0) return declined(report, 'no-index');
 		const def = this.registry.get(watcher.entity);
 		if (def === undefined) return declined(report, 'no-index');
-		const found = await queryByIndex(
-			tx,
-			this.registry,
-			def,
-			watcher.schema,
-			indexes(watcher.entity),
-			{ where: watcher.query.where, orderBy: watcher.query.orderBy },
-			watcher.workspaceId,
-			watcher.bounds,
-			report,
-		);
-		if (found === undefined) return undefined;
+		const legs: IndexedRow<unknown>[] = [];
+		const names = new Set<string>();
+		for (const ws of workspaces) {
+			const leg: IndexReport = { candidates: 0 };
+			const found = await queryByIndex(
+				tx,
+				this.registry,
+				def,
+				watcher.schema,
+				indexes(watcher.entity),
+				{ where: whereFor(watcher, ws), orderBy: watcher.query.orderBy },
+				ws,
+				watcher.bounds,
+				leg,
+			);
+			report.candidates += leg.candidates;
+			if (found === undefined) {
+				report.declined = leg.declined;
+				return undefined;
+			}
+			if (leg.index !== undefined) names.add(leg.index);
+			legs.push(...found.rows as IndexedRow<unknown>[]);
+		}
+		// One read reports one index. Legs choose independently, so a set whose
+		// per-workspace predicates planned differently reports each name it used.
+		report.index = [ ...names ].join('+');
 		const scoped = this.scopeRows(scanScope(watcher));
-		const ordered = found.rows.map((entry) => {
+		const ordered = legs.map((entry) => {
 			const id = rowId(entry.row.workspaceId, entry.row.key);
 			const prev = scoped.rows.get(id);
 			const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
@@ -1059,7 +1117,7 @@ export class WatcherHub {
 		// Claimed before the callback (and before any hydrate), so a dispatch that
 		// starts while this one is still hydrating knows it is the newer of the two.
 		watcher.emittedAt = at;
-		const coverage = this.opts.coverageOf?.(watcher.entity, watcher.workspaceId) ?? COMPLETE;
+		const coverage = this.opts.coverageOf?.(watcher.entity, readScope(watcher)) ?? COMPLETE;
 		const memoized = !force
 			&& watcher.lastWindow !== undefined
 			&& watcher.lastCoverage !== undefined
@@ -1164,7 +1222,7 @@ export class WatcherHub {
 	 */
 	private async verifyMatches(tx: KVRead, watcher: Watcher): Promise<void> {
 		if (watcher.matches === undefined) return;
-		const merged = await scanMergedRows(tx, this.registry, watcher.entity, watcher.workspaceId);
+		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
 		const bytes = new Map(merged.map((row) => [ rowId(row.workspaceId, row.key), row.v ]));
 		const scanned: Row<unknown>[] = merged.map((row) => ({
 			key: row.key,
@@ -1173,10 +1231,21 @@ export class WatcherHub {
 			version: row.version,
 		}));
 		// The definition, minus the page: a match set is the whole result, and the
-		// offset/limit slice happens on emit.
-		const want = watcher.query === undefined ? scanned : runQuery(
-			scanned,
-			{ where: watcher.query.where, orderBy: watcher.query.orderBy },
+		// offset/limit slice happens on emit. A per-workspace predicate is applied
+		// before the sort rather than inside it, which is the same set — `runQuery`
+		// filters first — and leaves one query for the one order it has to be in.
+		const admitted = watcher.predicates === undefined
+			? scanned
+			: scanned.filter((row) => {
+				const where = whereFor(watcher, row.workspaceId);
+				return where === undefined || evalCond(row.value, where, watcher.schema);
+			});
+		const want = watcher.query === undefined ? admitted : runQuery(
+			admitted,
+			{
+				where: watcher.predicates === undefined ? watcher.query.where : undefined,
+				orderBy: watcher.query.orderBy,
+			},
 			watcher.schema,
 			watcher.bounds,
 		);
@@ -1277,6 +1346,7 @@ interface TouchedPair {
 interface Reach {
 	entity: string;
 	workspaceId?: string;
+	workspaces?: readonly string[];
 	include?: IncludeSpec;
 	reaches: ReadonlySet<string>;
 }
@@ -1301,7 +1371,7 @@ function touchedRefs(watcher: KeyWatcher, pairs: readonly TouchedPair[]): string
 	const out = new Set<string>();
 	for (const pair of pairs) {
 		if (pair.entity !== watcher.entity) continue;
-		if (watcher.workspaceId !== undefined && pair.workspaceId !== watcher.workspaceId) continue;
+		if (!inScope(watcher, pair.workspaceId)) continue;
 		if (pair.keys === undefined) {
 			for (const [ id, ref ] of watcher.refs) {
 				if (ref.workspaceId === pair.workspaceId) out.add(id);
@@ -1414,7 +1484,8 @@ function declined(report: IndexReport, reason: QueryDeclineReason): undefined {
 
 /** Derives a watcher's whole match set from a scope, given in scan order. */
 function buildMatches(watcher: Watcher, rows: readonly ResultRow[]): MatchSet {
-	const ordered = watcher.query?.where === undefined && watcher.bounds === undefined
+	const ordered = watcher.query?.where === undefined && watcher.predicates === undefined
+			&& watcher.bounds === undefined
 		? rows.slice()
 		: rows.filter((r) => admits(watcher, r));
 	if (watcher.query?.orderBy && watcher.query.orderBy.length > 0) {
@@ -1424,12 +1495,13 @@ function buildMatches(watcher: Watcher, rows: readonly ResultRow[]): MatchSet {
 }
 
 /**
- * Whether a watcher's query admits a row. The cursor bounds are part of that
- * and not a slice taken afterwards: a row outside them is not a match, so it
- * never enters the maintained set and never reaches `total`.
+ * Whether a watcher's query admits a row, under the predicate that row's own
+ * workspace is read with. The cursor bounds are part of that and not a slice
+ * taken afterwards: a row outside them is not a match, so it never enters the
+ * maintained set and never reaches `total`.
  */
 function admits(watcher: Watcher, row: ResultRow): boolean {
-	const where = watcher.query?.where;
+	const where = whereFor(watcher, row.row.workspaceId);
 	if (where !== undefined && !evalCond(row.row.value, where, watcher.schema)) return false;
 	return watcher.bounds === undefined || watcher.bounds.within(row.row.value, row.row.key);
 }
@@ -1489,7 +1561,7 @@ function plannedKeys(
 	const keys: { workspaceId: string; key: string }[] = [];
 	for (const pair of pairs) {
 		if (pair.entity !== sample.entity) continue;
-		if (sample.workspaceId !== undefined && sample.workspaceId !== pair.workspaceId) continue;
+		if (!inScope(sample, pair.workspaceId)) continue;
 		if (pair.keys === undefined) return undefined;
 		for (const key of pair.keys) keys.push({ workspaceId: pair.workspaceId, key });
 	}
@@ -1510,7 +1582,7 @@ function touchesInclude(watcher: Reach, pairs: readonly TouchedPair[]): boolean 
 	if (watcher.include === undefined) return false;
 	for (const t of pairs) {
 		if (t.entity === watcher.entity || !watcher.reaches.has(t.entity)) continue;
-		if (watcher.workspaceId === undefined || watcher.workspaceId === t.workspaceId) return true;
+		if (inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
 }
@@ -1615,14 +1687,53 @@ function suffixOf(
 
 /**
  * Identity of the rows a watcher draws on: its entity plus its workspace scope
- * (`*` for the cross-workspace scan). Watchers sharing this share a read and a
- * decode cache — which is why `*` is not a legal workspace id (see naming.ts):
- * a workspace named `*` would collide with the cross-workspace scope of the
- * same entity, and whichever watcher was sampled first would decide the read
- * both are then served from.
+ * as key segments — one, a comma-joined set, or `*` for the cross-workspace
+ * scan. Watchers sharing this share a read and a decode cache.
+ *
+ * The three forms cannot collide. A segment is percent-encoded, so it never
+ * holds the comma that joins a set; and `*` is not a legal workspace id (see
+ * naming.ts) precisely because it would otherwise name the cross-workspace
+ * scope of the same entity, leaving whichever watcher was sampled first to
+ * decide the read both are then served from.
  */
-function scanScope(watcher: { entity: string; workspaceId?: string }): string {
-	return `${watcher.entity}\u001f${watcher.workspaceId ?? '*'}`;
+function scanScope(
+	watcher: { entity: string; workspaceId?: string; workspaces?: readonly string[] },
+): string {
+	const scope = watcher.workspaceId !== undefined
+		? wsSegment(watcher.workspaceId)
+		: watcher.workspaces?.map(wsSegment).join(',') ?? '*';
+	return `${watcher.entity}\u001f${scope}`;
+}
+
+/**
+ * The workspaces a watcher reads and reports coverage over, as a set of one, a
+ * named set, or every workspace in the store. A set of one resolves to its
+ * single-workspace form, so the scoped read path serves it unchanged.
+ */
+function readScope(
+	watcher: { workspaceId?: string; workspaces?: readonly string[] },
+): WorkspaceScope | undefined {
+	return watcher.workspaceId ?? watcher.workspaces;
+}
+
+/**
+ * Whether a workspace falls inside a watcher's scope — its own, one of the set
+ * it named, or any at all for one spanning every workspace.
+ */
+function inScope(
+	watcher: { workspaceId?: string; workspaces?: readonly string[] },
+	workspaceId: string,
+): boolean {
+	if (watcher.workspaceId !== undefined) return watcher.workspaceId === workspaceId;
+	return watcher.workspaces === undefined || watcher.workspaces.includes(workspaceId);
+}
+
+/**
+ * The predicate one workspace's rows are tested against: the watcher's own,
+ * unless it carries one chosen per workspace.
+ */
+function whereFor(watcher: Watcher, workspaceId: string): Cond | undefined {
+	return watcher.predicates?.get(workspaceId) ?? watcher.query?.where;
 }
 
 /** Identity of a row inside one scan scope. */
@@ -1635,8 +1746,8 @@ function reaches(watcher: Reach, touched: readonly TouchedPair[]): boolean {
 		if (!watcher.reaches.has(t.entity)) continue;
 		// A reference followed by `include` may point at a row in the same
 		// workspace only (references never cross the partition), so a scoped
-		// watcher matches only its own workspace.
-		if (watcher.workspaceId === undefined || watcher.workspaceId === t.workspaceId) return true;
+		// watcher matches only the workspaces it named.
+		if (inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
 }

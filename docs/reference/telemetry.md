@@ -384,12 +384,20 @@ the rows says which happened — both return the same answer. When `path` is
 
 | `declined`        | Meaning                                                |
 | ----------------- | ------------------------------------------------------ |
-| `cross-workspace` | `queryAll`/`watchQueryAll`; no index spans workspaces  |
+| `cross-workspace` | `queryAll`/`watchQueryAll` over every workspace        |
 | `no-query`        | a `watch()` with no query, which is the whole entity   |
 | `no-index`        | the entity declares none                               |
 | `not-built`       | declared, still building for this workspace            |
 | `no-plan`         | none matches this filter and ordering                  |
 | `budget`          | the walk read more rows than its ceiling and fell back |
+
+A read bounded to a named set of workspaces (`opts.workspaces`) walks one index
+per workspace rather than declining, so it reports `path: 'index'`. `index` then
+names each index the legs used, joined with `+` — normally one name, since the
+legs plan the same query, and several only where a per-workspace predicate
+planned differently. `workspaceId` is set only where the set named exactly one;
+`candidates` sums the legs. One leg declining declines the whole read, whose
+`declined` is that leg's reason.
 
 `not-built` after a bootstrap or a schema change is expected and ends on its own
 once the background build finishes — the `indexing` event is that moment: it

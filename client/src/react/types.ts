@@ -4,8 +4,10 @@ import type {
 	CasOptions,
 	MaskedPatchOptions,
 	PatchOptions,
+	QueryAcross,
 	UpdateOptions,
 	UpdateRecipe,
+	WorkspacesOption,
 } from '../client.js';
 import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
@@ -62,9 +64,9 @@ export interface UseQueryOptions extends UseWatchOptions {
 
 /**
  * Options for `useQueryAll`. `UseQueryOptions` without the workspace selector or
- * the undo target: the read spans every workspace and the hook does not write.
+ * the undo target: the read spans workspaces and the hook does not write.
  */
-export interface UseQueryAllOptions {
+export interface UseQueryAllOptions extends WorkspacesOption {
 	/** Hydrate result rows against this include tree (folded into the identity). */
 	include?: IncludeSpec;
 	/** Page of the merged result to render; see UseQueryOptions.window. */
@@ -181,12 +183,18 @@ export interface ReactEntityApi<D extends DescMessage> {
 		opts?: UseQueryOptions,
 	): WatchResult<MessageShape<D>, TotalOf<Q>>;
 	/**
-	 * `useQuery` over every workspace the client holds, as one subscription. Each
-	 * row carries the `workspaceId` it came from, which is what groups the result
-	 * and routes a write back; ordering and limits apply to the merged set rather
-	 * than per workspace (see `client.watchQueryAll`).
+	 * `useQuery` across workspaces, as one subscription: every workspace the
+	 * client holds, or the set `opts.workspaces` names. Each row carries the
+	 * `workspaceId` it came from, which is what groups the result and routes a
+	 * write back; ordering and limits apply to the merged set rather than per
+	 * workspace (see `client.watchQueryAll`).
+	 *
+	 * `opts.workspaces` bounds the read to workspaces you name, so the rows and
+	 * the total describe those and no others. A WorkspaceQuery in place of the
+	 * query gives each of them its own predicate under the one subscription; it
+	 * requires `opts.workspaces`.
 	 */
-	useQueryAll<const Q extends Query<MessageShape<D>>>(
+	useQueryAll<const Q extends QueryAcross<MessageShape<D>>>(
 		query: Q,
 		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>, TotalOf<Q>>;

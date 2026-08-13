@@ -1,6 +1,7 @@
 import { type DescMessage, fromBinary, type MessageShape, toBinary } from '@bufbuild/protobuf';
 
 import {
+	compareWorkspaces,
 	confirmedKey,
 	confirmedPrefix,
 	type ConfirmedRecord,
@@ -23,6 +24,7 @@ import {
 	textFieldBytes,
 } from './mutations.js';
 import { sortOrderedFields } from './ordering.js';
+import type { Cond } from './query/ast.js';
 import { reportError } from './report.js';
 import {
 	applyFragment,
@@ -325,21 +327,71 @@ export interface ScopedRow extends MergedRow {
 }
 
 /**
- * Scans live rows of an entity, overlay-first, in key order. With
- * `workspaceId` it scans that workspace's contiguous prefix; without it, every
- * workspace in the store — one prefix scan either way, which is what the
- * entity-first key order buys.
+ * Which workspace prefixes a scan covers: one, a named set, or — when absent —
+ * every workspace in the store.
  *
- * Results are ordered by (workspace, key) for a cross-workspace scan and by key
- * within a single workspace, which is the order the underlying prefix scan
- * yields.
+ * A named set is not a shorthand for "all": an empty array names no workspace
+ * and reads nothing.
+ */
+export type WorkspaceScope = string | readonly string[];
+
+/**
+ * Which workspaces one read spans, as the caller asked for it: one by id, a set
+ * it named, or — when absent — every workspace the client holds.
+ */
+export type ReadScope = string | NamedWorkspaces | undefined;
+
+/**
+ * A read bounded to workspaces the caller named, optionally with a predicate
+ * chosen per workspace.
+ *
+ * The set bounds what is read, so the cost is the named prefixes rather than the
+ * entity across every workspace. A set of exactly one is read on that
+ * workspace's prefix, shared rows and indexes — the paths a single-workspace
+ * read already takes.
+ */
+export interface NamedWorkspaces {
+	/**
+	 * Workspaces the read spans, deduplicated and in key-segment order (see
+	 * compareWorkspaces), which is the order the merged result's final tie-break
+	 * resolves in. An empty set reads nothing.
+	 */
+	workspaces: readonly string[];
+	/**
+	 * The predicate each workspace is read under, replacing the read's own
+	 * `where`. Only the predicate may vary: one result has one order.
+	 *
+	 * Every workspace in `workspaces` has an entry; a workspace to be excluded is
+	 * left out of the set rather than mapped to nothing.
+	 */
+	predicates?: ReadonlyMap<string, Cond>;
+}
+
+/**
+ * Scans live rows of an entity, overlay-first, in key order. One workspace
+ * scans that workspace's contiguous prefix and a named set scans one prefix
+ * each; with no scope it is a single prefix scan of every workspace in the
+ * store, which is what the entity-first key order buys.
+ *
+ * Results are ordered by (workspace, key) wherever the scope spans more than
+ * one workspace and by key within a single one — the order the underlying
+ * prefix scans yield, with a named set's workspaces visited in key-segment
+ * order so the two agree.
  */
 export async function scanMergedRows(
 	tx: KVRead,
 	registry: EntityRegistry,
 	entity: string,
-	workspaceId?: string,
+	scope?: WorkspaceScope,
 ): Promise<ScopedRow[]> {
+	if (typeof scope === 'object') {
+		const out: ScopedRow[] = [];
+		for (const ws of [ ...new Set(scope) ].sort(compareWorkspaces)) {
+			out.push(...await scanMergedRows(tx, registry, entity, ws));
+		}
+		return out;
+	}
+	const workspaceId = scope;
 	const cPrefix = workspaceId === undefined
 		? confirmedPrefix(entity)
 		: confirmedWsPrefix(entity, workspaceId);
@@ -448,9 +500,9 @@ export async function scanDecoded<D extends DescMessage>(
 	registry: EntityRegistry,
 	def: EntityDef,
 	schema: D,
-	workspaceId?: string,
+	scope?: WorkspaceScope,
 ): Promise<Row<MessageShape<D>>[]> {
-	const rows = await scanMergedRows(tx, registry, def.name, workspaceId);
+	const rows = await scanMergedRows(tx, registry, def.name, scope);
 	return rows.map((row) => {
 		const value = fromBinary(schema, row.v);
 		sortOrderedFields(schema, value);

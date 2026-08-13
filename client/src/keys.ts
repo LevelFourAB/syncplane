@@ -48,6 +48,21 @@ export const wsSegment = (workspaceId: string): string => encodeURIComponent(wor
 /** Inverse of wsSegment. */
 export const wsFromSegment = (segment: string): string => decodeURIComponent(segment);
 
+/**
+ * Orders two workspace ids the way the store orders their rows — by the encoded
+ * key segment rather than the raw id, which percent-encoding does not preserve
+ * (`a b` encodes above `a!`, and sorts the other way raw).
+ *
+ * A read spanning several workspaces has to visit them in this order for its
+ * rows to come out in the same order a single scan across all of them would
+ * yield.
+ */
+export const compareWorkspaces = (a: string, b: string): number => {
+	const sa = wsSegment(a);
+	const sb = wsSegment(b);
+	return sa < sb ? -1 : sa > sb ? 1 : 0;
+};
+
 export const META_CLIENT_ID = 'meta/clientId';
 export const META_FORMAT_VERSION = 'meta/formatVersion';
 /**

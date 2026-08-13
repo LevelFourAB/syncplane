@@ -9,6 +9,7 @@
 // which JSON.stringify cannot encode, so a replacer tags bigints.
 
 import type { CompiledQuery } from '../query/index.js';
+import type { ReadScope } from '../read.js';
 import type { IncludeSpec } from '../refs.js';
 import type { WatchWindow } from '../watch.js';
 
@@ -29,20 +30,38 @@ function stableStringify(value: unknown): string {
 
 /**
  * Identity string for a watch subscription. Folds the entity key, the compiled
- * query (omitted for whole-entity watches) and the include spec into one stable
- * string. Equal strings ⇒ the same underlying subscription; a change forces a
- * resubscribe and (for the suspense cache) a distinct cache cell.
+ * query (omitted for whole-entity watches), the include spec and the workspaces
+ * the read spans into one stable string. Equal strings ⇒ the same underlying
+ * subscription; a change forces a resubscribe and (for the suspense cache) a
+ * distinct cache cell.
  */
 export function stableHash(
 	entityKey: string,
 	query?: CompiledQuery,
 	include?: IncludeSpec,
 	window?: WatchWindow,
+	scope?: ReadScope,
 ): string {
 	return stableStringify({
 		e: entityKey,
 		q: query ?? null,
 		i: include ?? null,
 		w: window ? { o: window.offset ?? 0, l: window.limit ?? null } : null,
+		s: scopeKey(scope),
 	});
+}
+
+/**
+ * A read scope as plain data: each workspace the read names paired with the
+ * predicate it is read under. A per-workspace predicate is a `Cond` by the time
+ * it gets here, so the identity turns on what the callback RETURNED rather than
+ * on the callback, which is a new function every render.
+ *
+ * The workspace list arrives canonical (deduplicated and ordered), which is what
+ * lets the array stand for the set it names.
+ */
+function scopeKey(scope: ReadScope): unknown {
+	if (scope === undefined) return null;
+	if (typeof scope === 'string') return scope;
+	return scope.workspaces.map((ws) => [ ws, scope.predicates?.get(ws) ?? null ]);
 }

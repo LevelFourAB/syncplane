@@ -5,6 +5,8 @@ export type {
 	ListHandle,
 	MirrorTx,
 	MutatorMirror,
+	QueryAcross,
+	QueryAllOptions,
 	RejectionInfo,
 	RejectionTarget,
 	RemoveWorkspaceOptions,
@@ -19,8 +21,10 @@ export type {
 	SyncStatus,
 	Transaction,
 	UndoScope,
+	WatchQueryAllOptions,
 	WorkspaceAccess,
 	WorkspaceClient,
+	WorkspacesOption,
 	WorkspaceStatus,
 } from './client.js';
 export {
@@ -80,6 +84,7 @@ export type {
 	QueryRef,
 	Scalar,
 	TotalOf,
+	WorkspaceQuery,
 } from './query/index.js';
 export type { HydratedRow, IncludeSpec } from './refs.js';
 // The ephemeral plane. jsonCodec is the default and is exported so an app can

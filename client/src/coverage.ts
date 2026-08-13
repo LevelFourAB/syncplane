@@ -1,6 +1,6 @@
 import type { Subscription } from './gen/syncplane/v1/patch_pb.js';
 import type { QueryCursor } from './query/cursor.js';
-import type { Row } from './read.js';
+import type { Row, WorkspaceScope } from './read.js';
 
 /**
  * Why a local result may not be the whole answer.
@@ -230,12 +230,17 @@ export class CoverageResolver {
 	) {}
 
 	/**
-	 * Coverage of an entity in one workspace, or — with no workspace — across
-	 * every workspace the client holds, which is complete only if it is complete
-	 * in each of them.
+	 * Coverage of an entity in one workspace, in a named set of them, or — with
+	 * no scope — across every workspace the client holds. Anything spanning more
+	 * than one is complete only if it is complete in each, and a set naming none
+	 * is complete because it admits nothing.
 	 */
-	coverageOf(entity: string, workspaceId?: string): Coverage {
+	coverageOf(entity: string, scope?: WorkspaceScope): Coverage {
 		const scopes = this.scopes();
+		if (typeof scope === 'object') {
+			return mergeCoverage([ ...new Set(scope) ].map((ws) => this.coverageOf(entity, ws)));
+		}
+		const workspaceId = scope;
 		if (workspaceId !== undefined) {
 			const subs = scopes.get(workspaceId);
 			const base = subs === undefined ? COMPLETE : coverageOfEntity(subs, entity);

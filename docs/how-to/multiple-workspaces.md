@@ -44,6 +44,56 @@ const everywhere = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) });
 const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
 ```
 
+### Naming the workspaces to read
+
+A view over _some_ of the workspaces — "the areas I follow", a filtered
+dashboard — takes `workspaces` rather than reading everything and filtering in
+the component:
+
+```tsx
+const followed = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) }, {
+	workspaces: [ 'team', 'personal' ],
+});
+```
+
+The read then scans only the prefixes it names, and `followed.total` counts what
+you asked about — where a component filter leaves a total describing a different
+question. Naming a single workspace is worth it on its own: the read is then a
+one-workspace query by construction, so a
+[secondary index](../reference/proto-options.md#secondary-indexes) can serve it,
+which nothing spanning workspaces can. An empty array reads nothing; it is not
+shorthand for "all".
+
+The same option is on the one-shot: `client.queryAll(TodoSchema, q, {
+workspaces })`.
+
+### A predicate that differs per workspace
+
+A row never crosses a workspace, so anything referenced by id — the member a
+task is assigned to — has a **different id in each one**, and "assigned to me"
+is a different literal per workspace. One `where` cannot say it. `byWorkspace`
+builds one predicate per workspace, still under a single subscription and a
+single merged result:
+
+```tsx
+const mine = db.task.useQueryAll({
+	orderBy: (t) => [ t.dueAt.asc() ],
+	byWorkspace: (workspaceId) => {
+		const me = memberIdIn(workspaceId);
+		// Returning nothing leaves the workspace out of the read entirely.
+		return me && ((t) => t.assignee.eq(me));
+	},
+}, { workspaces: followedIds });
+```
+
+Only the predicate varies: order, page and total belong to the merged result, so
+`orderBy`, `limit`, `offset` and `total` stay at the top level. Each workspace's
+leg is a single-workspace query and can be index-served. `byWorkspace` needs
+`workspaces` — the predicates are built from the set it runs over — and throws
+without it.
+
+### Rows named one by one
+
 When the set is not a predicate but a list of specific rows — a personal task
 list, a pinned set — name them by ref instead. `client.watchRowsAll(schema,
 refs, cb, opts?)` and `db.todo.useRowsAll(refs, opts?)` take

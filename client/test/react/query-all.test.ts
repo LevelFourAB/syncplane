@@ -1,6 +1,6 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { createElement, type ReactNode } from 'react';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
@@ -106,6 +106,101 @@ describe('useQueryAll', () => {
 		);
 		await waitFor(() => expect(result.current.all).toHaveLength(2));
 		expect(result.current.one).toHaveLength(1);
+		await client.close();
+	});
+
+	it('spans the workspaces it is given, and counts only them', async () => {
+		const client = newClient();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'one' });
+		await client.ws('ws2').mutate.put(TodoSchema, { id: 'b', title: 'two' });
+		await client.ws('ws3').mutate.put(TodoSchema, { id: 'c', title: 'three' });
+
+		const { result } = renderHook(
+			() => db.todo.useQueryAll({}, { workspaces: [ 'ws1', 'ws3' ] }),
+			{ wrapper: wrapper(client) },
+		);
+		await waitFor(() => expect(result.current).toHaveLength(2));
+		expect(result.current.map((row) => row.workspaceId).sort()).toEqual([ 'ws1', 'ws3' ]);
+		expect(result.current.total).toBe(2);
+		await client.close();
+	});
+
+	it('resubscribes when the workspace set changes, but not when it is reordered', async () => {
+		const client = newClient();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'one' });
+		await client.ws('ws2').mutate.put(TodoSchema, { id: 'b', title: 'two' });
+		await client.ws('ws3').mutate.put(TodoSchema, { id: 'c', title: 'three' });
+		const subscribed = vi.spyOn(client, 'watchQueryAll');
+
+		const { result, rerender } = renderHook(
+			({ workspaces }: { workspaces: readonly string[] }) => db.todo.useQueryAll({}, { workspaces }),
+			{ wrapper: wrapper(client), initialProps: { workspaces: [ 'ws1', 'ws2' ] } },
+		);
+		await waitFor(() => expect(result.current).toHaveLength(2));
+		expect(subscribed).toHaveBeenCalledTimes(1);
+
+		// A fresh array naming the same workspaces in another order asks the same
+		// question, so the watch stays where it is.
+		rerender({ workspaces: [ 'ws2', 'ws1' ] });
+		expect(subscribed).toHaveBeenCalledTimes(1);
+
+		rerender({ workspaces: [ 'ws1', 'ws3' ] });
+		await waitFor(() =>
+			expect(result.current.map((row) => row.workspaceId).sort()).toEqual([ 'ws1', 'ws3' ])
+		);
+		expect(subscribed).toHaveBeenCalledTimes(2);
+		await client.close();
+	});
+
+	it('keeps a per-workspace predicate on its subscription across renders', async () => {
+		const client = newClient();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'mine-1' });
+		const subscribed = vi.spyOn(client, 'watchQueryAll');
+
+		// The callback is a new function every render; only what it RETURNS can
+		// decide whether this is still the same question.
+		const { result, rerender } = renderHook(
+			({ title }: { title: string }) =>
+				db.todo.useQueryAll({
+					byWorkspace: () => (t) => t.title.eq(title),
+				}, { workspaces: [ 'ws1' ] }),
+			{ wrapper: wrapper(client), initialProps: { title: 'mine-1' } },
+		);
+		await waitFor(() => expect(result.current).toHaveLength(1));
+		expect(subscribed).toHaveBeenCalledTimes(1);
+
+		rerender({ title: 'mine-1' });
+		expect(subscribed).toHaveBeenCalledTimes(1);
+
+		rerender({ title: 'mine-2' });
+		await waitFor(() => expect(result.current).toHaveLength(0));
+		expect(subscribed).toHaveBeenCalledTimes(2);
+		await client.close();
+	});
+
+	it('gives each workspace its own predicate under one subscription', async () => {
+		const client = newClient();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'mine-1' });
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'b', title: 'mine-2' });
+		await client.ws('ws2').mutate.put(TodoSchema, { id: 'c', title: 'mine-2' });
+
+		// "mine" is a different literal in each workspace, which is the whole
+		// reason one `where` cannot say it.
+		const mine: Record<string, string> = { ws1: 'mine-1', ws2: 'mine-2' };
+		const { result } = renderHook(
+			() =>
+				db.todo.useQueryAll({
+					byWorkspace: (workspaceId) => {
+						const title = mine[workspaceId];
+						return title === undefined ? undefined : ((t) => t.title.eq(title));
+					},
+				}, { workspaces: [ 'ws1', 'ws2', 'ws3' ] }),
+			{ wrapper: wrapper(client) },
+		);
+		await waitFor(() => expect(result.current).toHaveLength(2));
+		expect(
+			result.current.map((row) => [ row.workspaceId, row.value.id ]).sort(),
+		).toEqual([ [ 'ws1', 'a' ], [ 'ws2', 'c' ] ]);
 		await client.close();
 	});
 });

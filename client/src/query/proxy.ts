@@ -10,7 +10,7 @@
 // schema that hits one, instead of the field just disappearing from the DSL.
 
 import type { CmpOp, CompiledQuery, Cond, Path, Scalar, StrOp } from './ast.js';
-import type { Query, QueryRef } from './types.js';
+import type { Query, QueryRef, WorkspaceQuery } from './types.js';
 
 type OpBuilder = (path: Path) => unknown;
 
@@ -106,4 +106,34 @@ export function compileQuery<M>(q: Query<M>): CompiledQuery {
 	if (q.before !== undefined) out.before = q.before;
 	if (q.total !== undefined) out.total = q.total;
 	return out;
+}
+
+/** Whether a query chooses its predicate per workspace (see WorkspaceQuery). */
+export function isWorkspaceQuery<M>(q: Query<M> | WorkspaceQuery<M>): q is WorkspaceQuery<M> {
+	return typeof (q as WorkspaceQuery<M>).byWorkspace === 'function';
+}
+
+/**
+ * Invokes a per-workspace query's callback once per workspace, returning the
+ * predicate each of them is read under.
+ *
+ * The returned `workspaces` are those that kept a predicate, in the order given
+ * and deduplicated; a workspace the callback declined is dropped rather than
+ * read with none. The shared half of the query — order, page, total — compiles
+ * through compileQuery like any other, a WorkspaceQuery having no `where`.
+ */
+export function compileByWorkspace<M>(
+	q: WorkspaceQuery<M>,
+	workspaces: readonly string[],
+): { workspaces: string[]; predicates: Map<string, Cond> } {
+	const ref = rootRef<M>();
+	const predicates = new Map<string, Cond>();
+	const kept: string[] = [];
+	for (const workspaceId of new Set(workspaces)) {
+		const where = q.byWorkspace(workspaceId);
+		if (where === undefined) continue;
+		predicates.set(workspaceId, where(ref));
+		kept.push(workspaceId);
+	}
+	return { workspaces: kept, predicates };
 }

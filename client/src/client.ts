@@ -38,6 +38,7 @@ import {
 } from './gen/syncplane/v1/patch_pb.js';
 import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
+	compareWorkspaces,
 	confirmedWsPrefix,
 	FORMAT_VERSION,
 	META_CLIENT_ID,
@@ -55,7 +56,7 @@ import {
 } from './keys.js';
 import { IDBKVStore } from './kv/idb.js';
 import { MemoryKVStore } from './kv/memory.js';
-import type { KVStore } from './kv/store.js';
+import type { KVRead, KVStore } from './kv/store.js';
 import {
 	applyTextStringsToCrud,
 	assertWritePolicy,
@@ -67,6 +68,7 @@ import {
 	buildPut,
 	crudHasPlainString,
 	encodeItemKey,
+	type EntityDef,
 	EntityRegistry,
 	expandCollectionMask,
 	extractTextStrings,
@@ -102,18 +104,30 @@ import {
 } from './query/cursor.js';
 import { assertSameResult, type IndexReport, queryByIndex } from './query/execute.js';
 import {
+	compileByWorkspace,
 	type CompiledQuery,
 	compileQuery,
 	type Cond,
+	evalCond,
+	isWorkspaceQuery,
 	type OrderKey,
+	type PageWindow,
 	type Query,
 	type QueryRef,
 	runQueryPage,
 	type TotalOf,
+	type WorkspaceQuery,
 } from './query/index.js';
 import { condToProto, orderKeyToProto } from './query/proto.js';
 import { prepareQuery, toWirePaths } from './query/wire.js';
-import { readMergedRow, readMergedRowWithVersion, type Row, scanDecoded } from './read.js';
+import {
+	type NamedWorkspaces,
+	readMergedRow,
+	readMergedRowWithVersion,
+	type ReadScope,
+	type Row,
+	scanDecoded,
+} from './read.js';
 import {
 	hydrate,
 	type HydratedRow,
@@ -1292,6 +1306,45 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
 }
 
 /**
+ * What a cross-workspace read may be given: one query for every workspace, or a
+ * WorkspaceQuery choosing its predicate per workspace.
+ */
+export type QueryAcross<M> = Query<M> | WorkspaceQuery<M>;
+
+/** Narrows a cross-workspace read to workspaces the caller names. */
+export interface WorkspacesOption {
+	/**
+	 * Workspaces the read spans, in place of every workspace the client holds.
+	 * Rows, `total` and `coverage` then describe these workspaces and no others.
+	 *
+	 * Order is not significant and duplicates are ignored. An empty array reads
+	 * nothing; it is not shorthand for "all". A workspace the client does not hold
+	 * contributes no rows.
+	 *
+	 * Cost falls to the named workspaces rather than the entity across all of
+	 * them, and a set naming exactly one is served by that workspace's secondary
+	 * indexes, which no read spanning workspaces can use.
+	 */
+	workspaces?: readonly string[];
+}
+
+/** Options for `queryAll`. */
+export interface QueryAllOptions extends WorkspacesOption {
+	/** Hydrate result rows against this include tree. */
+	include?: IncludeSpec;
+}
+
+/** Options for `watchQueryAll`; `WatchOptions` plus the workspace set. */
+export interface WatchQueryAllOptions extends WatchOptions, WorkspacesOption {}
+
+/** A local read's page, before coverage and hydration ride on it. */
+interface QueryPage<T> {
+	rows: Row<T>[];
+	total: number | undefined;
+	hasMore: boolean;
+}
+
+/**
  * Local-read/local-write sync client. Mutations apply optimistically and
  * queue locally (works fully offline); start() begins background sync.
  *
@@ -1299,7 +1352,8 @@ class NestedUndoScope<E extends readonly DescMessage[]> extends WorkspaceScope<E
  * store, a change stream and a push, so nothing about the client grows with
  * workspace count except the data itself. Reads and writes at this level target
  * the default workspace; `client.ws(id)` targets another, and `scanAll`/
- * `queryAll` read across all of them at once.
+ * `queryAll` read across them at once — every workspace by default, or the set
+ * `queryAll`'s `workspaces` option names.
  *
  * Two ACCOUNTS need two clients. A credential is attached per request, so two
  * accounts can never share a stream — federating across them is forced, not
@@ -2704,7 +2758,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * @internal
 	 */
 	registerWatch<D extends DescMessage>(
-		workspaceId: string | undefined,
+		scope: ReadScope,
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		compiled?: CompiledQuery,
@@ -2721,7 +2775,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		let window = initialWindow;
 		void this.hub().then((hub) => {
 			if (cancelled) return;
-			handle = hub.watch(schema, workspaceId, cb, compiled, include, window);
+			handle = hub.watch(schema, scope, cb, compiled, include, window);
 		}).catch((err) => {
 			this.statusTracker.update({
 				lastError: {
@@ -2916,33 +2970,52 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Like query(), but over every workspace at once. Ordering and limits apply
-	 * to the merged result — the evaluation is exact, not a per-workspace
-	 * fan-out-and-merge, because all the rows live in one store under one prefix.
-	 * References still resolve within each row's own workspace.
+	 * Like query(), but across workspaces: every one the client holds, or the set
+	 * `opts.workspaces` names.
+	 *
+	 * Ordering, `offset`/`limit` and `total` apply to the merged result rather
+	 * than per workspace; each row names the workspace it came from, and its
+	 * references resolve within that workspace. The result mints no cursors and
+	 * the query may carry none, at any workspace count.
+	 *
+	 * Throws synchronously for a WorkspaceQuery given no `opts.workspaces`, and
+	 * rejects for a query carrying `after`/`before`.
 	 */
-	queryAll<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
+	queryAll<D extends DescMessage, const Q extends QueryAcross<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: QueryAllOptions,
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
-		return this.queryIn(undefined, schema, q, opts);
+		return this.queryIn(readScopeOf(schema, q, opts?.workspaces), schema, q, opts);
 	}
 
-	/** @internal */
-	async queryIn<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
-		workspaceId: string | undefined,
+	/**
+	 * Backs query(), ws(id).query() and queryAll() — a workspace id, a resolved
+	 * ReadScope, or nothing for every workspace. A per-workspace predicate rides
+	 * on the scope (see readScopeOf), not on `q`, which carries only the half of
+	 * the query the merged result shares.
+	 * @internal
+	 */
+	async queryIn<D extends DescMessage, const Q extends QueryAcross<MessageShape<D>>>(
+		scope: ReadScope,
 		schema: D,
 		q: Q,
 		opts?: { include?: IncludeSpec },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
-		const compiled = prepareQuery(schema, compileQuery(q));
-		// A cursor names a position under ONE workspace's ordering, so a
-		// cross-workspace read neither accepts nor mints one; see the tie-break
-		// note in query/execute.ts for why the two orders differ.
-		const cursors = workspaceId === undefined
+		const named = typeof scope === 'object' ? scope : undefined;
+		const workspaceId = scopedWorkspace(scope);
+		// What the scan covers and coverage is reported over: the named prefixes,
+		// or the one workspace, or every workspace in the store.
+		const scanned = named === undefined ? workspaceId : named.workspaces;
+		const compiled = prepareQuery(schema, compileQuery(q as Query<MessageShape<D>>));
+		// A cursor names a position under ONE workspace's ordering, so a read
+		// spanning workspaces neither accepts nor mints one; see the tie-break note
+		// in query/execute.ts for why the two orders differ. A named set keeps them
+		// off even at size one, so that a list shrinking to a single workspace does
+		// not silently change what the read returns.
+		const cursors = workspaceId === undefined || named !== undefined
 			? undefined
 			: new OrderCursors(schema, compiled.orderBy ?? []);
 		const window = cursors === undefined
@@ -2950,8 +3023,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			: pageWindowOf(schema, def.name, compiled);
 		if (cursors === undefined && (compiled.after !== undefined || compiled.before !== undefined)) {
 			throw new Error(
-				"query: after/before name a position in one workspace's ordering, "
-					+ 'which a cross-workspace query has no counterpart for',
+				"query: after/before name a position in one workspace's ordering, which a "
+					+ 'cross-workspace query — over every workspace or over a named set of them '
+					+ '— has no counterpart for',
 			);
 		}
 		const kv = await this.kv();
@@ -2962,37 +3036,27 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			entered = performance.now();
 			const tx = await kv.read();
 			try {
+				// The definition of the result. A per-workspace predicate is applied
+				// before it rather than inside it — the same set, since runQueryPage
+				// filters first — leaving one query for the one order it has to be in.
+				const scan = async () => {
+					const rows = await scanDecoded(tx, this.entityRegistry, def, schema, scanned);
+					return runQueryPage(admittedIn(named, rows, schema), compiled, schema, window);
+				};
 				// An index narrows which rows are read; it never changes which
 				// match, so a decline here is not a fallback in the apologetic
-				// sense — the scan below IS the definition, and the index has to
+				// sense — the scan above IS the definition, and the index has to
 				// reproduce it exactly or decline.
-				const planned = await queryByIndex(
-					tx,
-					this.entityRegistry,
-					def,
-					schema,
-					this.indexes.for(def.name),
-					compiled,
-					workspaceId,
-					window,
-					report,
-				);
-				const scan = async () =>
-					runQueryPage(
-						await scanDecoded(tx, this.entityRegistry, def, schema, workspaceId),
-						compiled,
-						schema,
-						window,
-					);
-				if (planned === undefined) return await scan();
-				const rows = planned.rows.map((entry) => entry.row);
+				const found = named === undefined
+					? await this.pageByIndex(tx, def, schema, compiled, workspaceId, window, report)
+					: await this.pageByIndexLegs(tx, def, schema, compiled, named, report);
+				if (found === undefined) return await scan();
 				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
 				// This is the same net the watch hub uses for its maintained
 				// results, pointed at the other place a cheap answer stands in
 				// for an expensive one: nothing else would notice an index and a
 				// scan drifting apart, because both look like perfectly ordinary
 				// results.
-				const found = { rows, total: planned.total, hasMore: planned.hasMore };
 				if (this.verifyIndexReads) assertSameResult(found, await scan(), def.name);
 				return found;
 			} finally {
@@ -3012,7 +3076,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		);
 		// Coverage is the BASE entity's: a query answers from what synced, and
 		// hydration only decorates the rows it found.
-		const coverage = this.coverage.coverageOf(def.name, workspaceId);
+		const coverage = this.coverage.coverageOf(def.name, scanned);
 		const info = pageInfoOf(cursors, def.name, page);
 		if (!opts?.include) {
 			return withCoverage(page.rows, coverage, info) as RowSet<MessageShape<D>, TotalOf<Q>>;
@@ -3028,6 +3092,91 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			MessageShape<D>,
 			TotalOf<Q>
 		>;
+	}
+
+	/** One workspace's — or the whole store's — matching page, from an index. */
+	private async pageByIndex<D extends DescMessage>(
+		tx: KVRead,
+		def: EntityDef,
+		schema: D,
+		compiled: CompiledQuery,
+		workspaceId: string | undefined,
+		window: PageWindow | undefined,
+		report: IndexReport,
+	): Promise<QueryPage<MessageShape<D>> | undefined> {
+		const planned = await queryByIndex(
+			tx,
+			this.entityRegistry,
+			def,
+			schema,
+			this.indexes.for(def.name),
+			compiled,
+			workspaceId,
+			window,
+			report,
+		);
+		return planned && {
+			rows: planned.rows.map((entry) => entry.row),
+			total: planned.total,
+			hasMore: planned.hasMore,
+		};
+	}
+
+	/**
+	 * A named set's matching page, from one index walk per workspace.
+	 *
+	 * Each leg is a single-workspace query, so none of them meets the decline
+	 * that stops a read spanning every workspace; the page is cut from the merged
+	 * matches afterwards, which is what makes `limit` the merged result's rather
+	 * than each leg's. One leg declining declines the whole read — the scan that
+	 * then serves it is the definition, and half a result from an index is not a
+	 * result.
+	 */
+	private async pageByIndexLegs<D extends DescMessage>(
+		tx: KVRead,
+		def: EntityDef,
+		schema: D,
+		compiled: CompiledQuery,
+		named: NamedWorkspaces,
+		report: IndexReport,
+	): Promise<QueryPage<MessageShape<D>> | undefined> {
+		// A set naming no workspace has no index to consult in; the scan that then
+		// serves it reads nothing either way.
+		if (named.workspaces.length === 0) {
+			report.declined = 'no-index';
+			return undefined;
+		}
+		const matches: Row<MessageShape<D>>[] = [];
+		const names = new Set<string>();
+		// Walked in key-segment order, so that rows tying on every order key AND
+		// on the row key resolve the way the scan's input order resolves them.
+		for (const workspaceId of [ ...named.workspaces ].sort(compareWorkspaces)) {
+			const leg: IndexReport = { candidates: 0 };
+			const found = await queryByIndex(
+				tx,
+				this.entityRegistry,
+				def,
+				schema,
+				this.indexes.for(def.name),
+				{ where: named.predicates?.get(workspaceId) ?? compiled.where, orderBy: compiled.orderBy },
+				workspaceId,
+				undefined,
+				leg,
+			);
+			report.candidates += leg.candidates;
+			if (found === undefined) {
+				report.declined = leg.declined;
+				return undefined;
+			}
+			if (leg.index !== undefined) names.add(leg.index);
+			for (const entry of found.rows) matches.push(entry.row);
+		}
+		// One read reports one index. Legs choose independently, so a set whose
+		// per-workspace predicates planned differently reports each name it used.
+		report.index = [ ...names ].join('+');
+		// Ordered, counted and cut here; the predicate is spent, each leg having
+		// been walked under its own.
+		return runQueryPage(matches, { ...compiled, where: undefined }, schema);
 	}
 
 	/**
@@ -3208,21 +3357,30 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Like watchQuery(), but live across every workspace. The result set is
-	 * re-emitted after any commit touching the entity in any workspace.
+	 * Like watchQuery(), but live across workspaces: every one the client holds,
+	 * or the set `opts.workspaces` names.
+	 *
+	 * Re-emits after any commit touching the entity in a workspace the watch
+	 * spans, and no others. Ordering, the window and `total` apply to the merged
+	 * set rather than per workspace; each row names the workspace it came from.
+	 * Emitted pages carry no cursors, at any workspace count.
+	 *
+	 * Throws synchronously for a WorkspaceQuery given no `opts.workspaces`. A
+	 * query carrying `after`/`before` is a watch that cannot be established and
+	 * so reaches `opts.onError` instead, like any other.
 	 */
-	watchQueryAll<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
+	watchQueryAll<D extends DescMessage, const Q extends QueryAcross<MessageShape<D>>>(
 		schema: D,
 		q: Q,
 		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
-		opts?: WatchOptions,
+		opts?: WatchQueryAllOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
 		return this.registerWatch(
-			undefined,
+			readScopeOf(schema, q as Query<MessageShape<D>>, opts?.workspaces),
 			schema,
 			cb as WatchCallback<MessageShape<D>>,
-			prepareQuery(schema, compileQuery(q)),
+			prepareQuery(schema, compileQuery(q as Query<MessageShape<D>>)),
 			opts?.include,
 			opts?.onError,
 			opts?.window,
@@ -3934,11 +4092,73 @@ function workspaceOfMutationCounterKey(key: string): string | undefined {
 }
 
 /**
+ * The scope a cross-workspace read runs under. A uniform query keeps its own
+ * predicate and only narrows which workspaces are read; a per-workspace one
+ * compiles here, so the workspaces its callback declined never reach the store.
+ *
+ * The workspace list comes back deduplicated and in key-segment order, so two
+ * callers naming the same set in either order produce equal scopes — which is
+ * what a subscription identity turns on, and what makes the merged result's
+ * tie-break reproducible.
+ *
+ * Throws if a WorkspaceQuery is given no workspaces to apply to.
+ * @internal
+ */
+export function readScopeOf<M>(
+	schema: DescMessage,
+	q: Query<M> | WorkspaceQuery<M>,
+	workspaces: readonly string[] | undefined,
+): ReadScope {
+	if (workspaces === undefined) {
+		if (!isWorkspaceQuery(q)) return undefined;
+		throw new Error(
+			'byWorkspace has no workspaces to apply to: a per-workspace predicate is built '
+				+ 'from the set it runs over, so pass opts.workspaces',
+		);
+	}
+	const named = [ ...new Set(workspaces) ].sort(compareWorkspaces);
+	if (!isWorkspaceQuery(q)) return { workspaces: named };
+	const built = compileByWorkspace(q, named);
+	// Resolved against the schema exactly as the shared query is: a condition
+	// ending at a reference compares by the target's key, and only this step
+	// extends the path to it. Skipping it would leave `assignee.eq(id)` — the
+	// motivating shape — comparing against a message and matching nothing.
+	const predicates = new Map<string, Cond>();
+	for (const [ workspaceId, where ] of built.predicates) {
+		predicates.set(workspaceId, prepareQuery(schema, { where }).where!);
+	}
+	return { workspaces: built.workspaces, predicates };
+}
+
+/** The single workspace a scope names, if it names exactly one. */
+function scopedWorkspace(scope: ReadScope): string | undefined {
+	if (typeof scope !== 'object') return scope;
+	return scope.workspaces.length === 1 ? scope.workspaces[0] : undefined;
+}
+
+/**
+ * Rows a scope's per-workspace predicates admit. A uniform query has none and
+ * keeps its own `where`, which the query path applies.
+ */
+function admittedIn<T>(
+	named: NamedWorkspaces | undefined,
+	rows: Row<T>[],
+	schema: DescMessage,
+): Row<T>[] {
+	const predicates = named?.predicates;
+	if (predicates === undefined) return rows;
+	return rows.filter((row) => {
+		const where = predicates.get(row.workspaceId);
+		return where !== undefined && evalCond(row.value, where, schema);
+	});
+}
+
+/**
  * The page metadata a local read reports: what the evaluator already counted,
  * plus the positions of the first and last row so a caller can page on.
  *
- * `cursors` is absent for a read that cannot mint one — a cross-workspace
- * query, whose positions would not be comparable against one workspace's
+ * `cursors` is absent for a read that cannot mint one — a read spanning
+ * workspaces, whose positions would not be comparable against one workspace's
  * ordering.
  */
 function pageInfoOf<T>(

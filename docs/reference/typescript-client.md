@@ -162,7 +162,25 @@ await client.db.todo.getRow(key)
 await client.db.todo.scan()
 await client.db.todo.query(q, { include? })
 await client.db.todo.queryServer(q)
+
+// across workspaces; each row names the one it came from
+await client.scanAll(Todo):                              Promise<RowSet<MessageShape<D>>>
+await client.queryAll(Todo, q, { include?, workspaces? }): Promise<RowSet<MessageShape<D>>>
 ```
+
+`queryAll` spans every workspace the client holds unless `workspaces` names a
+set, in which case only those prefixes are scanned and `total` counts only them.
+An empty array reads nothing — it is not shorthand for "all" — and a workspace
+the client does not hold contributes no rows. A set naming exactly one workspace
+is read on that workspace's prefix and its indexes, which is what a read spanning
+workspaces cannot use; cursors stay unavailable at every set size (see §4).
+
+In place of `where`, a query may carry `byWorkspace: (workspaceId) => where |
+undefined`, giving each workspace its own predicate under one merged result —
+for a condition naming something workspace-scoped, a row id being the usual case.
+Only the predicate varies (`orderBy`, `limit`, `offset` and `total` describe the
+merged result and stay shared), returning `undefined` leaves that workspace out,
+and it requires `workspaces`.
 
 Every result array is a `RowSet`: an ordinary array carrying non-enumerable
 extras — `coverage` (see §9), `total`, and the three paging fields below. All of
@@ -436,6 +454,9 @@ const prev = await client.db.todo.query({
   Setting it alongside either cursor throws.
 - Cursors are unavailable on `queryAll`/`watchQueryAll`: a position names a place
   in one workspace's ordering, and a cross-workspace result has no single one.
+  This holds however few workspaces the read spans — a set of one still mints
+  none, so a list shrinking to a single workspace cannot silently change what the
+  read returns.
 
 ### Operator surface (by field type)
 
@@ -1427,6 +1448,12 @@ interface ReactEntityApi<D> {
 	useSuspenseQuery(
 		q: Query<MessageShape<D>>,
 		opts?: UseQueryOptions,
+	): WatchResult<MessageShape<D>>;
+	// Across workspaces: every one the client holds, or opts.workspaces.
+	// `q` may carry `byWorkspace` in place of `where` (see §2).
+	useQueryAll(
+		q: Query<MessageShape<D>> | WorkspaceQuery<MessageShape<D>>,
+		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
