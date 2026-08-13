@@ -70,8 +70,12 @@ and opens a transport of its own, which is the shorter wiring when a process
 runs only one of them.
 
 `Open` applies any outstanding migrations, under an advisory lock — so every
-node runs the same code at boot and they race safely. There is no separate
-migration step to sequence into a deploy.
+node runs the same code at boot and they race safely. Nothing has to be
+sequenced into a deploy. A fleet that would rather own its DDL runs
+`pgstore.Migrate` (or applies `pgstore.Statements`) from a deploy step and gives
+every node `pgstore.WithoutMigrations()`, which is
+[a decision about privileges and rollbacks](deploy-for-high-availability.md#owning-the-migrations)
+rather than a default worth changing.
 
 A fleet whose primary is sized by its reads can move them to a hot standby:
 
@@ -207,8 +211,23 @@ The two default to different channels (`syncplane_poke` and
 payload to the decoder that understands it — a poke and a presence event share
 one connection but nothing else.
 
-`pgstore` needs no equivalent: point the two at different databases, or at
-different schemas via the DSN's `search_path`.
+`pgstore` needs no equivalent for its tables: point the two at different
+databases, or at different schemas via the DSN's `search_path`.
+
+Its advisory locks are the exception, because they live in a keyspace that
+belongs to the database rather than to a schema. Leases hash the schema into
+their key and so stay apart, but two deployments sharing a database still
+contend on:
+
+- **the migration lock**, a fixed key, so staging and production take turns
+  migrating at boot;
+- **the per-workspace write lock**, keyed by `(namespace, workspace_id)`, so two
+  deployments serialize their writes wherever both names match — the default
+  namespace and a workspace called `demo` in each, say.
+
+Both cost throughput and never correctness: an advisory lock excludes, and the
+worst case is one deployment's write waiting on the other's. Separate databases
+avoid it outright; a distinct namespace per deployment avoids the write half.
 
 ## Testing against a real Postgres
 

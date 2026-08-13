@@ -162,6 +162,101 @@ schema: the lock key hashes `(schema, namespace, role, workspace)`, so separate
 `search_path`s are enough. Give them separate notify channels too — see
 [Run more than one node](run-multiple-nodes.md#isolating-deployments-that-share-a-database).
 
+### Table layout
+
+Five tables hold every tenant's data — `rows`, `field_deltas`, `idempotency`,
+`index_entries` and `consumer_shadows` — and by default each is one heap shared
+by every workspace in the database. `pgstore.WithPartitions(32)` (`syncplaned
+-db-partitions 32`) hash-partitions them by `(namespace, workspace_id)`
+instead.
+
+**Decide it when you create the database.** The option is honoured only by the
+migration that creates the schema; afterwards `Open` and `Migrate` adopt the
+layout they find, so a deploy step chooses once and every node boots without
+the flag. Converting a database that already holds data is not something the
+option can do.
+
+The modulus must be a power of two, and 32 is a reasonable starting point. The
+power-of-two rule is what keeps a later split available: Postgres requires
+every hash modulus to divide the largest in the set, so one modulus-32
+partition can be detached and two modulus-64 partitions attached in its place —
+a per-partition rewrite instead of a whole-table one.
+
+What it buys is **maintenance granularity**. GC's tombstone churn makes
+autovacuum the operational story on a large deployment; partitioned, it runs as
+N short concurrent jobs instead of one long serial one, dead tuples stay inside
+one tenant's partition rather than interleaved through index pages every tenant
+scans, and an index rebuild runs per partition rather than pinning the
+cluster's xmin horizon for hours while every other table bloats.
+
+What it does not buy: read latency (B-tree depth is logarithmic — 32 partitions
+saves roughly one page fetch per lookup), a bound on the largest partition
+(hash spreads workspaces evenly, not bytes, so one whale tenant still lands
+whole in one partition), or cheap tenant deletion. No query changes either way:
+every statement already binds `namespace` and `workspace_id` to equality, so
+pruning reaches a single partition, and a row never moves between them.
+
+Two operational consequences:
+
+- **Schedule `ANALYZE`.** Autovacuum does not analyze a partitioned parent, so
+  its planner statistics go stale unless something runs `ANALYZE` on a
+  schedule.
+- **Adding an index later is not online.** `CREATE INDEX` on a partitioned
+  parent cannot be `CONCURRENTLY`, so a migration that adds one holds a write
+  lock for the build. Own the migrations (below) if you need to build it per
+  partition instead.
+
+The rest of the tables are left whole on purpose: `workspaces` is scanned
+_across_ workspaces by the passes that look for work and has nothing to prune
+on, and `clients`, `text_floors`, `index_state`, `consumer_positions`,
+`cursor_state` and `schemas` are small enough that the partition count would
+cost more than it buys.
+
+### Owning the migrations
+
+`Open` applies whatever the ledger is missing at boot. For a fleet that would
+rather run its DDL as a deploy step, or read it before it runs, two entry
+points take that over:
+
+- `pgstore.Migrate(ctx, dsn, opts...)` applies the outstanding migrations and
+  returns — the same work `Open` does at boot, on its own.
+- `pgstore.Statements(opts...)` returns them as SQL, one script per ledger
+  step, each ending with its own row in `schema_migrations`. Applying all of
+  them to an empty database leaves one `Open` accepts as fully migrated, with
+  nothing to stamp afterwards.
+
+`Migrate`'s DSN falls under the pooler rule above: it holds a session-scoped
+advisory lock across the transactions it applies, so it must not point at a
+transaction-pooling proxy.
+
+**Give the nodes `WithoutMigrations()`** (`syncplaned -db-migrate=false`), or
+the step is advisory rather than authoritative: a bare `Open` applies whatever
+the ledger is missing, so the first node to boot with a newer binary migrates
+production itself. With the option, `Open` reads the ledger and refuses to serve
+unless the step has already brought it to this binary's version.
+
+It is also what lets the nodes connect as a role that cannot change the schema.
+A node that migrates at boot needs `CREATE` on the schema forever — Postgres
+checks the privilege before it checks existence, so even the ledger's
+`CREATE TABLE IF NOT EXISTS` is refused without it — while a node opening
+without migrations needs nothing beyond `SELECT`, `INSERT`, `UPDATE` and
+`DELETE` on the tables it serves.
+
+So the deploy step runs `pgstore.Migrate` as a role that owns the schema, and
+every node behind it starts as the restricted one:
+
+```sh
+syncplaned -db "$DATABASE_URL" -db-migrate=false
+```
+
+**A migration is a one-way door for the fleet.** `Open` refuses a database
+whose ledger is ahead of the binary, so once the step has run, no older binary
+can boot against that database — including a node that restarts mid-roll and a
+rollback to the previous release. Nodes already serving are unaffected, since
+the check happens at `Open`. Run the step with the roll it belongs to rather
+than long before it, and plan a binary rollback together with a database
+restore.
+
 ## Connectors run alone
 
 A connector keeps its cursors and shadows in connector-owned state, not in the
@@ -214,7 +309,12 @@ makes visible instead of a silent stream of dropped fields.
   the store
 - `WithMaxConns` sized against `max_connections`, plus the fixed connections per
   node
-- No transaction-mode pooler anywhere in front of the engine
+- No transaction-mode pooler anywhere in front of the engine, the deploy step's
+  DSN included
+- Table layout chosen at creation — partitioned deployments also need `ANALYZE`
+  on a schedule
+- A deploy step that owns the DDL paired with `WithoutMigrations()` on the
+  nodes; without it the step is advisory and the nodes still need `CREATE`
 - Connectors in their own deployment at one replica
 - Override `CanAccessWorkspace` — the default `AllowAll` leaves a shared
   deployment with no tenant isolation and nothing says so at compile time

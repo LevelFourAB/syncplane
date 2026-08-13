@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"testing"
 	"time"
 
@@ -155,6 +156,47 @@ var _ = Describe("Postgres leases", func() {
 	})
 })
 
+// grantReadWriteRole creates a login role holding DML on the schema behind dsn
+// and nothing that can change it, and returns dsn pointed at that role. What a
+// node needs from the database is not observable on the superuser connection
+// every other spec runs as.
+func grantReadWriteRole(dsn string) string {
+	GinkgoHelper()
+	ctx := context.Background()
+	exec := func(sql string) {
+		GinkgoHelper()
+		conn, err := pgx.Connect(ctx, dsn)
+		Expect(err).NotTo(HaveOccurred())
+		defer func() { _ = conn.Close(ctx) }()
+		_, err = conn.Exec(ctx, sql)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	conn, err := pgx.Connect(ctx, dsn)
+	Expect(err).NotTo(HaveOccurred())
+	var schema string
+	Expect(conn.QueryRow(ctx, `SELECT current_schema()`).Scan(&schema)).To(Succeed())
+	Expect(conn.Close(ctx)).To(Succeed())
+
+	const password = "restricted"
+	role := pgtest.UniqueName("sp_dml")
+	exec(fmt.Sprintf(`CREATE ROLE %q LOGIN PASSWORD '%s'`, role, password))
+	// A role is cluster-wide, and DROP ROLE refuses while the grants below
+	// still name it. Ginkgo unwinds this before pgtest drops the schema and
+	// after the spec's own store.Close.
+	DeferCleanup(func() {
+		exec(fmt.Sprintf(`DROP OWNED BY %q`, role))
+		exec(fmt.Sprintf(`DROP ROLE %q`, role))
+	})
+	exec(fmt.Sprintf(`GRANT USAGE ON SCHEMA %q TO %q`, schema, role))
+	exec(fmt.Sprintf(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA %q TO %q`, schema, role))
+
+	u, err := url.Parse(dsn)
+	Expect(err).NotTo(HaveOccurred(), "the suite's DSN must be a URI to re-point at a role")
+	u.User = url.UserPassword(role, password)
+	return u.String()
+}
+
 var _ = Describe("Postgres migrations", func() {
 	ctx := context.Background()
 
@@ -194,6 +236,75 @@ var _ = Describe("Postgres migrations", func() {
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
 		Expect(applied).To(Equal([]int{1, 2, 3}), "every migration, each recorded exactly once")
+	})
+
+	Describe("opened without them", func() {
+		It("serves a database a deploy step migrated", func() {
+			dsn := pgtest.DSN()
+			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+
+			store, err := pgstore.Open(ctx, dsn, pgstore.WithoutMigrations())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})
+			})).To(Succeed())
+		})
+
+		It("refuses a database nothing has migrated, and creates nothing", func() {
+			// The failure a deploy step's absence must produce: an empty
+			// database is where migrate would have built the whole schema, so
+			// leaving it untouched is the assertion, not just the error.
+			dsn := pgtest.DSN()
+			_, err := pgstore.Open(ctx, dsn, pgstore.WithoutMigrations())
+			Expect(err).To(MatchError(ContainSubstring("has this database been migrated?")))
+
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+			var tables int
+			Expect(conn.QueryRow(ctx,
+				`SELECT count(*) FROM pg_tables WHERE schemaname = current_schema()`).
+				Scan(&tables)).To(Succeed())
+			Expect(tables).To(BeZero())
+		})
+
+		It("refuses a database the deploy step has not finished migrating", func() {
+			// Half a ledger: the state between two steps of a deploy, and the
+			// one a bare Open would silently complete on the node's behalf.
+			dsn := pgtest.DSN()
+			stmts, err := pgstore.Statements()
+			Expect(err).NotTo(HaveOccurred())
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+			_, err = conn.Exec(ctx, stmts[0].SQL)
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = pgstore.Open(ctx, dsn, pgstore.WithoutMigrations())
+			Expect(err).To(MatchError(ContainSubstring("database schema at version 1")))
+		})
+
+		It("boots as a role that cannot change the schema", func() {
+			// What the option is for. A node that migrates at boot needs CREATE
+			// on the schema forever — Postgres checks the privilege before it
+			// checks existence, so even the ledger's CREATE TABLE IF NOT EXISTS
+			// is refused without it — and a deployment whose DDL is a deploy
+			// step should not have to grant that to every node.
+			dsn := pgtest.DSN()
+			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+
+			restricted := grantReadWriteRole(dsn)
+			store, err := pgstore.Open(ctx, restricted, pgstore.WithoutMigrations())
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+			Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+				return tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})
+			})).To(Succeed())
+
+			_, err = pgstore.Open(ctx, restricted)
+			Expect(err).To(MatchError(ContainSubstring("permission denied")))
+		})
 	})
 
 	It("lets several nodes Open the same database at once", func() {

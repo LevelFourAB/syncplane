@@ -68,6 +68,16 @@
 // whole result instead would work but is unbounded: ScanEntity has no limit and
 // compaction walks whole entities through it.
 //
+// # Schema and physical layout
+//
+// Open applies any outstanding migrations at boot, serialized across nodes by
+// an advisory lock. Migrate and Statements expose the same ledger to a
+// deployment that would rather own its DDL as a deploy step, and
+// WithoutMigrations turns the boot-time application into a check that the step
+// has run. WithPartitions hash-partitions the workspace-scoped tables at
+// creation time, which is the one schema decision this adapter cannot make for
+// a database after it holds data. See schema.go.
+//
 // # Collation and integer width
 //
 // Every text column is declared COLLATE "C". The engine compares keys with
@@ -106,191 +116,6 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
-// migrations[i] takes a database at ledger version i to i+1. Index 0 is the
-// baseline — the current shape stated once, as sqlitestore's schema is. Later
-// structural changes append here, and the ledger is what makes them
-// replayable.
-//
-// Every text column is COLLATE "C" (see the package comment). It is applied
-// even to columns nothing orders by — the actor's subject and system label,
-// consumer names — so the rule is "all of them" rather than a judgement call
-// per column that a later index turns into a bug.
-var migrations = []string{
-	// 1: the baseline schema.
-	`
-	CREATE TABLE workspaces (
-		namespace           TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id        TEXT COLLATE "C" NOT NULL,
-		last_seq            BIGINT NOT NULL DEFAULT 0,
-		tombstone_horizon   BIGINT NOT NULL DEFAULT 0,
-		store_epoch         BIGINT NOT NULL DEFAULT 0,
-		field_delta_horizon BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id)
-	);
-
-	CREATE TABLE rows (
-		namespace     TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id  TEXT COLLATE "C" NOT NULL,
-		entity        TEXT COLLATE "C" NOT NULL,
-		key           TEXT COLLATE "C" NOT NULL,
-		value         BYTEA,
-		version       BIGINT NOT NULL,
-		deleted       BOOLEAN NOT NULL DEFAULT FALSE,
-		updated_at    BIGINT NOT NULL DEFAULT 0,
-		actor_subject TEXT COLLATE "C" NOT NULL DEFAULT '',
-		actor_system  TEXT COLLATE "C" NOT NULL DEFAULT '',
-		PRIMARY KEY (namespace, workspace_id, entity, key)
-	);
-	-- ScanChanges pages by the whole (version, entity, key) tuple, so the index
-	-- carries all three: sqlitestore stops at version and sorts the tie-break,
-	-- which a fresh schema has no reason to inherit.
-	CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version, entity, key);
-	-- Partial, because deleted = true is the only collectable state, which keeps
-	-- the GC index proportional to the dead rows rather than the live ones.
-	CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted;
-	-- Backs ScanEntityByVersionDesc. The key order matches the recency window's
-	-- tie-break (version descending, key ascending) so a page boundary lands
-	-- where the in-memory top-K would have put it.
-	CREATE INDEX rows_by_entity_version
-		ON rows (namespace, workspace_id, entity, version DESC, key) WHERE NOT deleted;
-
-	CREATE TABLE clients (
-		namespace        TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id     TEXT COLLATE "C" NOT NULL,
-		client_id        TEXT COLLATE "C" NOT NULL,
-		last_mutation_id BIGINT NOT NULL DEFAULT 0,
-		updated_at       BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, client_id)
-	);
-	CREATE INDEX clients_gc ON clients (namespace, workspace_id, updated_at);
-
-	-- Server-global: app_id is the partition, because one engine hosts several
-	-- apps and reloads every app's entities on boot before serving.
-	CREATE TABLE schemas (
-		app_id         TEXT COLLATE "C" PRIMARY KEY,
-		descriptor_set BYTEA NOT NULL,
-		revision       TEXT COLLATE "C" NOT NULL,
-		updated_at     BIGINT NOT NULL DEFAULT 0
-	);
-
-	-- One row per (text field, write), holding the fragment that write added so
-	-- a pull can ship a keystroke instead of a document. The primary key is
-	-- ordered so the per-field span read (one row, one field, seq > cursor) is a
-	-- range scan of its tail. frag is empty for a gap marker.
-	CREATE TABLE field_deltas (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		entity       TEXT COLLATE "C" NOT NULL,
-		key          TEXT COLLATE "C" NOT NULL,
-		field        TEXT COLLATE "C" NOT NULL,
-		seq          BIGINT NOT NULL,
-		frag         BYTEA NOT NULL,
-		updated_at   BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, entity, key, field, seq)
-	);
-	CREATE INDEX field_deltas_gc ON field_deltas (namespace, workspace_id, updated_at);
-
-	CREATE TABLE text_floors (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		entity       TEXT COLLATE "C" NOT NULL,
-		key          TEXT COLLATE "C" NOT NULL,
-		field        TEXT COLLATE "C" NOT NULL,
-		vv           BYTEA NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, entity, key, field)
-	);
-
-	CREATE TABLE idempotency (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		key          TEXT COLLATE "C" NOT NULL,
-		seq          BIGINT NOT NULL,
-		result       BYTEA NOT NULL,
-		updated_at   BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, key)
-	);
-	CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
-
-	-- k is BYTEA, which Postgres compares bytewise — the order the engine's key
-	-- encoder is built for, and the reason this must never become a text column
-	-- whatever its collation. The key column sits in the primary key after k for
-	-- uniqueness only: k already ends with the row key.
-	CREATE TABLE index_entries (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		entity       TEXT COLLATE "C" NOT NULL,
-		idx          TEXT COLLATE "C" NOT NULL,
-		k            BYTEA NOT NULL,
-		key          TEXT COLLATE "C" NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, entity, idx, k, key)
-	);
-	-- Entries are replaced and deleted per ROW, and neither caller knows which
-	-- indexes the row occupies; this is what makes that affordable.
-	CREATE INDEX index_entries_by_row
-		ON index_entries (namespace, workspace_id, entity, key);
-
-	CREATE TABLE index_state (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		entity       TEXT COLLATE "C" NOT NULL,
-		idx          TEXT COLLATE "C" NOT NULL,
-		spec_hash    TEXT COLLATE "C" NOT NULL,
-		ready        BOOLEAN NOT NULL DEFAULT FALSE,
-		PRIMARY KEY (namespace, workspace_id, entity, idx)
-	);
-
-	CREATE TABLE consumer_positions (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		consumer     TEXT COLLATE "C" NOT NULL,
-		seq          BIGINT NOT NULL DEFAULT 0,
-		entity       TEXT COLLATE "C" NOT NULL DEFAULT '',
-		key          TEXT COLLATE "C" NOT NULL DEFAULT '',
-		updated_at   BIGINT NOT NULL DEFAULT 0,
-		PRIMARY KEY (namespace, workspace_id, consumer)
-	);
-	CREATE INDEX consumer_positions_gc
-		ON consumer_positions (namespace, workspace_id, updated_at);
-
-	-- No GC index: shadows are deleted per row or wholesale with their
-	-- consumer, and the primary key's (namespace, workspace_id, consumer)
-	-- prefix is the range scan for that.
-	CREATE TABLE consumer_shadows (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		consumer     TEXT COLLATE "C" NOT NULL,
-		entity       TEXT COLLATE "C" NOT NULL,
-		key          TEXT COLLATE "C" NOT NULL,
-		snapshot     BYTEA NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
-	);
-	`,
-	// 2: verdicts on refused mutations, so a retry that follows a lost push
-	// response is answered with the rejection instead of a bare ack. NULL until
-	// a client has had something refused, which is the common case.
-	`ALTER TABLE clients ADD COLUMN rejections BYTEA;`,
-	// Cursor-state entries: the membership sets of issued pull cursors, keyed
-	// by the (id, gen) reference the cursor carries. See cursorstate.go for
-	// the pruning that keeps the table bounded.
-	`
-	CREATE TABLE cursor_state (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		id           BIGINT NOT NULL,
-		gen          BIGINT NOT NULL,
-		state        BYTEA NOT NULL,
-		written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (namespace, workspace_id, id, gen)
-	);
-	`,
-}
-
-// migrationLockKey serializes schema migration across nodes. Several servers
-// booting at once would otherwise race to apply the same migration, and CREATE
-// TABLE is not idempotent. The value is "syncplan" in ASCII, chosen to be
-// recognisable in pg_locks rather than for any property of the number.
-const migrationLockKey int64 = 0x73796E63706C616E
-
 // maxWriteAttempts bounds WithWriteTx's retry loop. Serialization failures and
 // deadlocks are transient by definition, so a closure that cannot get through
 // in this many tries is hitting something structural and should surface as an
@@ -312,7 +137,7 @@ type Store struct {
 	leases *pgLeases
 }
 
-// Option configures Open.
+// Option configures Open, Migrate and Statements.
 type Option func(*config)
 
 type config struct {
@@ -320,6 +145,22 @@ type config struct {
 	maxConns        int32
 	replicaDSN      string
 	replicaMaxConns int32
+	partitions      int
+	skipMigrations  bool
+}
+
+// newConfig applies opts and validates them, so Open, Migrate and Statements
+// reject the same input.
+func newConfig(opts []Option) (config, error) {
+	var cfg config
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	if p := cfg.partitions; p != 0 && (p < 0 || p > maxPartitions || p&(p-1) != 0) {
+		return config{}, fmt.Errorf("pgstore: partitions must be zero or a power of two up to %d, got %d",
+			maxPartitions, p)
+	}
+	return cfg, nil
 }
 
 // WithNamespace scopes the store to an app namespace. Namespaces partition
@@ -359,17 +200,54 @@ func WithReplicaMaxConns(n int32) Option {
 	return func(c *config) { c.replicaMaxConns = n }
 }
 
+// WithPartitions hash-partitions the workspace-scoped tables by (namespace,
+// workspace_id) with the given modulus.
+//
+// The tables are rows, field_deltas, idempotency, index_entries and
+// consumer_shadows. The modulus must be a power of two up to 1024; zero, the
+// default, leaves each table whole, and Open, Migrate and Statements reject
+// any other value.
+//
+// It is honoured only when the database has no migrations recorded yet; both
+// Open and Migrate otherwise adopt the layout they find. A deploy step may
+// therefore choose the layout once and every node boot without the option, and
+// a boot naming a different modulus is ignored rather than obeyed. Nothing
+// here converts a database that already holds data.
+//
+// docs/how-to/deploy-for-high-availability.md carries what the layout buys
+// and what it costs.
+func WithPartitions(n int) Option {
+	return func(c *config) { c.partitions = n }
+}
+
+// WithoutMigrations makes Open verify the schema instead of applying it: it
+// reads the migration ledger and fails unless the database is already at this
+// binary's version, leaving Migrate or Statements to have brought it there.
+//
+// It is what makes a deploy step that owns the DDL authoritative rather than
+// advisory, since otherwise the first node to boot with a newer binary
+// migrates the database itself. A node opening this way issues no DDL and
+// takes no advisory lock, so it may connect as a role with no privilege beyond
+// the rows it serves.
+//
+// Migrate and Statements ignore it, as does WithPartitions alongside it —
+// nothing is created for a modulus to apply to.
+func WithoutMigrations() Option {
+	return func(c *config) { c.skipMigrations = true }
+}
+
 // Open connects to the Postgres database named by dsn (a libpq URI or key/value
-// string) and applies any outstanding migrations.
+// string) and applies any outstanding migrations, or under WithoutMigrations
+// verifies that something else already has.
 //
 // Several processes may Open the same database concurrently: migration is
 // serialized by an advisory lock, which is the difference from sqlitestore's
 // "never open the same file twice". Use Namespace to multiplex apps over one
 // database.
 func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
-	var cfg config
-	for _, opt := range opts {
-		opt(&cfg)
+	cfg, err := newConfig(opts)
+	if err != nil {
+		return nil, err
 	}
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
@@ -382,9 +260,15 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: connect: %w", err)
 	}
-	if err := migrate(ctx, pool); err != nil {
+	var schemaErr error
+	if cfg.skipMigrations {
+		schemaErr = verifySchema(ctx, pool)
+	} else {
+		schemaErr = migrate(ctx, pool, layout{partitions: cfg.partitions})
+	}
+	if schemaErr != nil {
 		pool.Close()
-		return nil, err
+		return nil, schemaErr
 	}
 	var replica *pgxpool.Pool
 	if cfg.replicaDSN != "" {
@@ -397,67 +281,6 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	// The lease session dials lazily, on the first TryAcquire, so a
 	// deployment that never leases never pays the connection.
 	return &Store{pool: pool, replica: replica, ns: cfg.ns, owner: true, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
-}
-
-// migrate brings the database up to len(migrations), under an advisory lock so
-// that concurrently booting nodes apply each step once.
-//
-// The lock is taken FIRST, before even the ledger exists. CREATE TABLE IF NOT
-// EXISTS looks idempotent but is not concurrency-safe: two sessions both find
-// the table missing, both create it, and the loser fails on a unique violation
-// in pg_type rather than shrugging. Nothing here may touch the schema outside
-// the lock.
-func migrate(ctx context.Context, pool *pgxpool.Pool) error {
-	conn, err := pool.Acquire(ctx)
-	if err != nil {
-		return fmt.Errorf("pgstore: acquire connection for migration: %w", err)
-	}
-	defer conn.Release()
-
-	if _, err := conn.Exec(ctx, `SELECT pg_advisory_lock($1)`, migrationLockKey); err != nil {
-		return fmt.Errorf("pgstore: take migration lock: %w", err)
-	}
-	defer func() {
-		// Best effort: the lock is session-scoped, so a failure here is undone
-		// by the connection returning to the pool and eventually closing.
-		_, _ = conn.Exec(ctx, `SELECT pg_advisory_unlock($1)`, migrationLockKey)
-	}()
-
-	if _, err := conn.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    INTEGER PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
-		)`); err != nil {
-		return fmt.Errorf("pgstore: create migration ledger: %w", err)
-	}
-
-	var version int
-	if err := conn.QueryRow(ctx,
-		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
-		return fmt.Errorf("pgstore: read schema version: %w", err)
-	}
-	if version > len(migrations) {
-		return fmt.Errorf("pgstore: database schema version %d is newer than this binary (max %d)", version, len(migrations))
-	}
-	for ; version < len(migrations); version++ {
-		tx, err := conn.Begin(ctx)
-		if err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, migrations[version]); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("pgstore: migration %d: %w", version+1, err)
-		}
-		if _, err := tx.Exec(ctx,
-			`INSERT INTO schema_migrations (version) VALUES ($1)`, version+1); err != nil {
-			_ = tx.Rollback(ctx)
-			return fmt.Errorf("pgstore: migration %d: record version: %w", version+1, err)
-		}
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("pgstore: migration %d: commit: %w", version+1, err)
-		}
-	}
-	return nil
 }
 
 // Namespace returns a view of the store scoped to the given app namespace,

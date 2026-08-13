@@ -32,9 +32,8 @@ func openReplica(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: connect replica: %w", err)
 	}
-	var version int
-	if err := pool.QueryRow(ctx,
-		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations`).Scan(&version); err != nil {
+	version, err := schemaVersion(ctx, pool)
+	if err != nil {
 		pool.Close()
 		return nil, fmt.Errorf("pgstore: probe replica schema (is the replica DSN a standby of this database?): %w", err)
 	}

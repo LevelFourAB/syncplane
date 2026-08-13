@@ -62,6 +62,8 @@ func main() {
 	var (
 		dbPath       = flag.String("db", "", "SQLite database path, or a postgres:// DSN for multi-node hosting (default: temp file)")
 		dbReplica    = flag.String("db-replica", "", "postgres:// DSN of a read replica of -db; requires a postgres -db")
+		dbPartitions = flag.Int("db-partitions", 0, "hash-partition the workspace-scoped tables into this many partitions (a power of two, applied only when creating the schema); requires a postgres -db")
+		dbMigrate    = flag.Bool("db-migrate", true, "apply outstanding migrations at boot; -db-migrate=false verifies the schema instead, for a deployment whose DDL is a deploy step; requires a postgres -db")
 		addr         = flag.String("addr", "127.0.0.1:0", "public sync listen address")
 		adminAddr    = flag.String("admin-addr", "127.0.0.1:0", "private admin listen address")
 		token        = flag.String("token", "", "bearer token for AdminService (empty denies all registration)")
@@ -107,12 +109,26 @@ func main() {
 		clilog.Fatal(logger, "configure store",
 			fmt.Errorf("-db-replica requires -db to be a postgres:// DSN"))
 	}
+	if *dbPartitions != 0 && !postgres {
+		clilog.Fatal(logger, "configure store",
+			fmt.Errorf("-db-partitions requires -db to be a postgres:// DSN"))
+	}
+	if !*dbMigrate && !postgres {
+		clilog.Fatal(logger, "configure store",
+			fmt.Errorf("-db-migrate=false requires -db to be a postgres:// DSN"))
+	}
 
 	var store storage.Adapter
 	if postgres {
 		var pgOpts []pgstore.Option
 		if *dbReplica != "" {
 			pgOpts = append(pgOpts, pgstore.WithReadReplica(*dbReplica))
+		}
+		if *dbPartitions != 0 {
+			pgOpts = append(pgOpts, pgstore.WithPartitions(*dbPartitions))
+		}
+		if !*dbMigrate {
+			pgOpts = append(pgOpts, pgstore.WithoutMigrations())
 		}
 		pg, err := pgstore.Open(context.Background(), *dbPath, pgOpts...)
 		if err != nil {

@@ -314,3 +314,27 @@ failing with `SQLITE_BUSY_SNAPSHOT`, the reader pool is `query_only`, and
 before a power loss or kernel panic (not a process crash) for not paying an
 fsync per transaction. A client whose mutation is acked and then lost that way
 will not resend it, since an ack retires the pending entry.
+
+### Tuning `pgstore`
+
+Each is an `Option`. `Open` takes all of them; `Migrate` and `Statements` accept
+the same values and ignore the ones that cannot apply to them. Zero or empty
+selects the default.
+
+| Option                   | Default             | What it controls                                                                                                                                                                                 |
+| ------------------------ | ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WithNamespace(ns)`      | `""`                | The app namespace this store's rows, workspaces and watermarks live under. Same as `Open(...).Namespace(ns)`.                                                                                    |
+| `WithMaxConns(n)`        | pgx's, or the DSN's | Pool size, which bounds writers in flight — a write holds a connection while it waits for its workspace's advisory lock.                                                                         |
+| `WithReadReplica(dsn)`   | no replica          | A second pool against a hot standby, exposed as `storage.ReplicaProvider`. `Open` fails if the schema there is not at this binary's version.                                                     |
+| `WithReplicaMaxConns(n)` | pgx's, or the DSN's | Replica pool size, which bounds concurrent replica reads.                                                                                                                                        |
+| `WithPartitions(n)`      | unpartitioned       | Hash-partitions `rows`, `field_deltas`, `idempotency`, `index_entries` and `consumer_shadows` by `(namespace, workspace_id)`. A power of two up to 1024, honoured only when creating the schema. |
+| `WithoutMigrations()`    | migrate at boot     | `Open` verifies the ledger is at this binary's version instead of applying it, and fails if it is not. Issues no DDL and takes no advisory lock.                                                 |
+
+`Open` migrates at boot, serialized across nodes by an advisory lock.
+`Migrate(ctx, dsn, opts...)` does the same on its own, and `Statements(opts...)`
+returns the migrations as SQL for a deployment that applies its own DDL. Pair
+either with `WithoutMigrations()` on the nodes, which is what stops a node from
+migrating the database behind the deploy step's back — and lets it connect as a
+role with no privilege to change the schema at all. What the layout and the
+migration ownership cost an operator is in
+[Deploy for high availability](../how-to/deploy-for-high-availability.md#table-layout).
