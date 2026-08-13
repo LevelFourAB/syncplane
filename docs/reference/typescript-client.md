@@ -818,12 +818,16 @@ on read. All resolution is **orphan-tolerant** (missing target → `undefined`/e
 
 ### `include` (hydration)
 
-`query`/`watchQuery` accept `{ include }`, an `IncludeSpec` tree. Each result row
+`query`/`watchQuery` accept `{ include }`, an `Include` tree. Each result row
 gets a parallel `refs` object (`HydratedRow`):
 
 ```ts
-interface IncludeSpec {
-	[relation: string]: true | IncludeSpec;
+interface Include {
+	[relation: string]: true | Include | …options…;
+	$where?: (w) => Cond; // narrow the relation's rows
+	$orderBy?: (w) => OrderKey[]; // order them
+	$limit?: number; // page them — per holder, after $orderBy
+	$offset?: number;
 }
 interface HydratedRow<T> extends Row<T> {
 	refs: Record<string, HydratedRow | HydratedRow[] | undefined>;
@@ -834,7 +838,37 @@ const rows = await client.db.task.query(
 	{ include: { project: true, blockedBy: { project: true } } },
 );
 rows[0].refs.project; // HydratedRow | undefined (to-one)
+
+// "each project with its 5 most recent open tasks"
+const projects = await client.db.project.query({}, {
+	include: {
+		tasks: {
+			$where: (t) => t.done.eq(false),
+			$orderBy: (t) => [ t.createdAt.desc() ],
+			$limit: 5,
+		},
+	},
+});
 ```
+
+`$`-prefixed keys are options, everything else is a relation — no proto field or
+derived relation name can start with `$`. Options are evaluated against the
+relation's **target** entity with query semantics, and they narrow that
+relation's list for each holder independently: `$limit: 5` is five rows per
+holder, not five overall. They need a relation that resolves to a list (a
+reverse relation or a to-many ref); hydration rejects them on a to-one ref, and
+at the tree root. The option callbacks receive an untyped field reference —
+relation names are plain strings, so there is no schema to infer the target's
+fields from. A subscription's `follow` stays an option-free `IncludeSpec`
+(`[relation: string]: true | IncludeSpec`): the follow closure syncs rows, it
+does not shape a result.
+
+Hydration is batched: forward targets resolve as point reads deduplicated
+across the call, a reverse relation costs one query per workspace the result
+spans (never one per row), and rows referencing one target through the same
+relation share the hydrated object — so nested includes resolve once per
+distinct target. Do not mutate delivered rows; a shared target makes the edit
+visible through every holder.
 
 ### Explicit ref accessors
 
@@ -1533,7 +1567,9 @@ interface WatchState {
   separate hook, not an option, because it selects a fixed hook path.
 - `UseWorkspaceOptions`: `{ workspaceId?: string; undo?: 'nearest' | 'workspace' }` —
   every hook accepts it. `UseWatchOptions`/`UseQueryOptions`/`UseRowOptions` add
-  `{ include?: IncludeSpec }`.
+  `{ include?: Include }`. Option lambdas (`$where`/`$orderBy`) fold into the
+  subscription identity by what they return, so a new function per render does
+  not resubscribe — a structurally different condition does.
 
 ### Workspace resolution
 

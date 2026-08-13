@@ -13,7 +13,7 @@ import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
 import type { Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
-import type { IncludeSpec } from '../refs.js';
+import type { Include } from '../refs.js';
 import type { RowRef, WatchWindow } from '../watch.js';
 import type { UseTextResult } from './hooks/use-text.js';
 import type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
@@ -44,7 +44,7 @@ export type UndoTarget = 'nearest' | 'workspace';
 /** Options shared by the watch-backed hooks. */
 export interface UseWatchOptions extends UseWorkspaceOptions {
 	/** Hydrate result rows against this include tree (folded into the identity). */
-	include?: IncludeSpec;
+	include?: Include;
 }
 
 /** Options for `useQuery` and `useSuspenseQuery`. */
@@ -68,7 +68,7 @@ export interface UseQueryOptions extends UseWatchOptions {
  */
 export interface UseQueryAllOptions extends WorkspacesOption {
 	/** Hydrate result rows against this include tree (folded into the identity). */
-	include?: IncludeSpec;
+	include?: Include;
 	/** Page of the merged result to render; see UseQueryOptions.window. */
 	window?: WatchWindow;
 }
@@ -90,7 +90,7 @@ export type UseRowsOptions = UseRowOptions;
  */
 export interface UseRowsAllOptions {
 	/** Hydrate result rows against this include tree (folded into the identity). */
-	include?: IncludeSpec;
+	include?: Include;
 }
 
 /** The stable per-entity mutate facade (identical to `client.db[key].mutate`). */

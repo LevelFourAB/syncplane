@@ -20,7 +20,7 @@ import {
 	type ScopedRow,
 	type WorkspaceScope,
 } from './read.js';
-import { hydrate, type IncludeSpec, type RefClient } from './refs.js';
+import { hydrate, type Include, type RefClient } from './refs.js';
 import { safeInvoke } from './report.js';
 import type { QueryDeclineReason, UnstampedQueryEvent } from './sync/events.js';
 import { queryEventOf } from './sync/events.js';
@@ -202,7 +202,7 @@ const INERT_KEYED: ScopedKeyedWatchHandle = Object.freeze({
 /** Options for `watchRows`. A keyed watch has no result order to page through. */
 export interface KeyedWatchOptions {
 	/** Hydrate delivered rows against this include tree. */
-	include?: IncludeSpec;
+	include?: Include;
 	/** Called if this watch cannot be established at all; see WatchOptions.onError. */
 	onError?: (error: unknown) => void;
 }
@@ -210,7 +210,7 @@ export interface KeyedWatchOptions {
 /** Options shared by `watch` and `watchQuery`. */
 export interface WatchOptions {
 	/** Hydrate result rows against this include tree. */
-	include?: IncludeSpec;
+	include?: Include;
 	/**
 	 * Page to deliver, in place of any `offset`/`limit` the query carries.
 	 *
@@ -306,7 +306,7 @@ interface Watcher {
 	 * position in. */
 	cursors?: OrderCursors;
 	/** When set, result rows are hydrated against this include tree. */
-	include?: IncludeSpec;
+	include?: Include;
 	/**
 	 * Entities this watcher's hydration reaches (own entity ∪ every entity
 	 * reachable through `include`). A commit touching any of them re-fires the
@@ -404,7 +404,7 @@ interface KeyWatcher {
 	 */
 	pending: Map<string, ResultRow | undefined>;
 	cb: ScopedKeyedWatchCallback<unknown>;
-	include?: IncludeSpec;
+	include?: Include;
 	/** Entities this watcher's hydration reaches; see Watcher.reaches. */
 	reaches: ReadonlySet<string>;
 	/** Coverage of the last emit; see Watcher.lastCoverage. */
@@ -556,7 +556,7 @@ export class WatcherHub {
 		scope: ReadScope,
 		cb: WatchCallback<MessageShape<D>>,
 		query?: CompiledQuery,
-		include?: IncludeSpec,
+		include?: Include,
 		window?: WatchWindow,
 	): WatchHandle {
 		if (this.closed) return INERT;
@@ -643,7 +643,7 @@ export class WatcherHub {
 		workspaceId: string | undefined,
 		refs: Iterable<RowRef>,
 		cb: ScopedKeyedWatchCallback<MessageShape<D>>,
-		include?: IncludeSpec,
+		include?: Include,
 	): ScopedKeyedWatchHandle {
 		if (this.closed) return INERT_KEYED;
 		const def = this.registry.bySchema(schema);
@@ -1313,16 +1313,17 @@ export class WatcherHub {
 	 * Entities a watcher reaches: its own, plus every entity reachable by
 	 * walking the include tree (forward target / reverse source) at each level.
 	 */
-	private reachableEntities(entity: string, include?: IncludeSpec): Set<string> {
+	private reachableEntities(entity: string, include?: Include): Set<string> {
 		const out = new Set<string>([ entity ]);
-		const walk = (from: string, spec?: IncludeSpec): void => {
+		const walk = (from: string, spec?: Include): void => {
 			if (!spec) return;
 			for (const [ relation, nested ] of Object.entries(spec)) {
+				if (relation.startsWith('$')) continue;
 				const fwd = this.registry.forwardRef(from, relation);
 				const next = fwd ? fwd.targetEntity : this.registry.reverseRef(from, relation)?.sourceEntity;
 				if (next === undefined) continue;
 				out.add(next);
-				if (nested !== true) walk(next, nested);
+				if (typeof nested === 'object' && nested !== null) walk(next, nested);
 			}
 		};
 		walk(entity, include);
@@ -1347,7 +1348,7 @@ interface Reach {
 	entity: string;
 	workspaceId?: string;
 	workspaces?: readonly string[];
-	include?: IncludeSpec;
+	include?: Include;
 	reaches: ReadonlySet<string>;
 }
 

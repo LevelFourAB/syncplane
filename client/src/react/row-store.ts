@@ -27,7 +27,7 @@ import { useCallback, useRef, useSyncExternalStore } from 'react';
 import type { SyncClient, WorkspaceClient } from '../client.js';
 import type { Coverage } from '../coverage.js';
 import type { Row } from '../read.js';
-import type { IncludeSpec } from '../refs.js';
+import type { Include } from '../refs.js';
 import type { RowRef, ScopedKeyedRow, ScopedKeyedRows } from '../watch.js';
 import { asError, type KeyedRowsResult, withKeyedState } from './result.js';
 import { stableHash } from './stable-hash.js';
@@ -343,7 +343,7 @@ function discard<T>(entry: RowEntry<T>): void {
 export function rowWatchIdentity(
 	workspaceId: string,
 	typeName: string,
-	include?: IncludeSpec,
+	include?: Include,
 ): string {
 	return stableHash(`row/${workspaceId}/${typeName}`, undefined, include);
 }
@@ -354,7 +354,7 @@ export function rowWatchIdentity(
  * namespace keeps it from ever aliasing the per-workspace watch of the same
  * entity, which reads different rows from a different scan scope.
  */
-export function rowWatchAllIdentity(typeName: string, include?: IncludeSpec): string {
+export function rowWatchAllIdentity(typeName: string, include?: Include): string {
 	return stableHash(`rowAll/${typeName}`, undefined, include);
 }
 
@@ -368,7 +368,7 @@ export function rowWatchAllIdentity(typeName: string, include?: IncludeSpec): st
 export function rowWatchOf<D extends DescMessage>(
 	scope: WorkspaceClient,
 	schema: D,
-	include?: IncludeSpec,
+	include?: Include,
 ): RowWatchFactory<MessageShape<D>> {
 	const workspaceId = scope.workspaceId;
 	return (onRows, onError) => {
@@ -388,7 +388,7 @@ export function rowWatchOf<D extends DescMessage>(
 export function rowWatchAllOf<D extends DescMessage>(
 	client: SyncClient,
 	schema: D,
-	include?: IncludeSpec,
+	include?: Include,
 ): RowWatchFactory<MessageShape<D>> {
 	return (onRows, onError) => client.watchRowsAll(schema, [], onRows, { include, onError });
 }

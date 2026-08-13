@@ -131,6 +131,7 @@ import {
 import {
 	hydrate,
 	type HydratedRow,
+	type Include,
 	type IncludeSpec,
 	loadForward,
 	type RefClient,
@@ -268,8 +269,8 @@ export interface SubscriptionSpec<D extends DescMessage = DescMessage> {
 	where?: (w: SpecRef<D>) => Cond;
 	/**
 	 * Reference-following scope: also sync the closure reached by walking these
-	 * relations from the rows this subscription selects. Same ergonomic tree as
-	 * a query `include` (`{ project: true, blockedBy: { project: true } }`);
+	 * relations from the rows this subscription selects. The option-free shape
+	 * of a query `include` (`{ project: true, blockedBy: { project: true } }`);
 	 * forward refs resolve by point-lookup, reverse relations by predicate scan,
 	 * each bounded by the server's follow limits. A followed row is still subject
 	 * to the same read filter as a base row.
@@ -776,14 +777,14 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): WatchHandle;
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
 		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(
 		holderSchema: D,
@@ -887,7 +888,7 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
@@ -1140,7 +1141,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.client.queryIn(this.workspaceId, schema, q, opts);
 	}
@@ -1331,7 +1332,7 @@ export interface WorkspacesOption {
 /** Options for `queryAll`. */
 export interface QueryAllOptions extends WorkspacesOption {
 	/** Hydrate result rows against this include tree. */
-	include?: IncludeSpec;
+	include?: Include;
 }
 
 /** Options for `watchQueryAll`; `WatchOptions` plus the workspace set. */
@@ -2762,7 +2763,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
 		compiled?: CompiledQuery,
-		include?: IncludeSpec,
+		include?: Include,
 		onError?: (error: unknown) => void,
 		initialWindow?: WatchWindow,
 	): WatchHandle {
@@ -2851,7 +2852,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		refs: Iterable<RowRef>,
 		cb: ScopedKeyedWatchCallback<MessageShape<D>>,
-		include?: IncludeSpec,
+		include?: Include,
 		onError?: (error: unknown) => void,
 	): ScopedKeyedWatchHandle {
 		if (this.closed) return INERT_REF_WATCH;
@@ -2895,7 +2896,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		keys: Iterable<string>,
 		cb: KeyedWatchCallback<MessageShape<D>>,
-		include?: IncludeSpec,
+		include?: Include,
 		onError?: (error: unknown) => void,
 	): KeyedWatchHandle {
 		const handle = this.registerRefWatch(
@@ -2964,7 +2965,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.queryIn(this.defaultScope().workspaceId, schema, q, opts);
 	}
@@ -3000,7 +3001,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		scope: ReadScope,
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);

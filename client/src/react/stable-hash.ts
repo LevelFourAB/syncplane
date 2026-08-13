@@ -1,5 +1,5 @@
 // Structural identity for the values that decide whether a watch subscription
-// must be torn down and re-established: a CompiledQuery and/or an IncludeSpec.
+// must be torn down and re-established: a CompiledQuery and/or an Include.
 //
 // compileQuery() runs the DSL lambdas every render and returns a fresh
 // CompiledQuery object, so reference identity is useless. Instead we serialize
@@ -8,9 +8,9 @@
 // identity. `Scalar` includes `bigint` (and limit/offset are plain numbers),
 // which JSON.stringify cannot encode, so a replacer tags bigints.
 
-import type { CompiledQuery } from '../query/index.js';
+import { type CompiledQuery, compileQuery } from '../query/index.js';
 import type { ReadScope } from '../read.js';
-import type { IncludeSpec } from '../refs.js';
+import type { Include, IncludeOrderBy, IncludeWhere } from '../refs.js';
 import type { WatchWindow } from '../watch.js';
 
 /**
@@ -38,17 +38,39 @@ function stableStringify(value: unknown): string {
 export function stableHash(
 	entityKey: string,
 	query?: CompiledQuery,
-	include?: IncludeSpec,
+	include?: Include,
 	window?: WatchWindow,
 	scope?: ReadScope,
 ): string {
 	return stableStringify({
 		e: entityKey,
 		q: query ?? null,
-		i: include ?? null,
+		i: include === undefined ? null : includeIdentity(include),
 		w: window ? { o: window.offset ?? 0, l: window.limit ?? null } : null,
 		s: scopeKey(scope),
 	});
+}
+
+/**
+ * An include tree as plain data. `$where`/`$orderBy` hold lambdas — a new
+ * function every render — so the identity turns on what they RETURN, the same
+ * rule scopeKey applies to per-workspace predicates.
+ */
+function includeIdentity(include: Include): unknown {
+	const out: Record<string, unknown> = {};
+	for (const [ key, value ] of Object.entries(include)) {
+		if (value === undefined) continue;
+		if (key === '$where') {
+			out[key] = compileQuery({ where: value as IncludeWhere }).where;
+		} else if (key === '$orderBy') {
+			out[key] = compileQuery({ orderBy: value as IncludeOrderBy }).orderBy;
+		} else if (typeof value === 'object' && value !== null) {
+			out[key] = includeIdentity(value);
+		} else {
+			out[key] = value;
+		}
+	}
+	return out;
 }
 
 /**

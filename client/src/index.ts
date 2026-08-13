@@ -86,7 +86,13 @@ export type {
 	TotalOf,
 	WorkspaceQuery,
 } from './query/index.js';
-export type { HydratedRow, IncludeSpec } from './refs.js';
+export type {
+	HydratedRow,
+	Include,
+	IncludeOrderBy,
+	IncludeSpec,
+	IncludeWhere,
+} from './refs.js';
 // The ephemeral plane. jsonCodec is the default and is exported so an app can
 // wrap it; a cursor room passes encodeAnchor() bytes through its own instead.
 export { jsonCodec, RoomSendError } from './room.js';

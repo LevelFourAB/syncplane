@@ -14,6 +14,7 @@ import {
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import type { Row } from '../../src/read.js';
+import type { HydratedRow } from '../../src/refs.js';
 import {
 	defineSchema,
 	entity,
@@ -392,6 +393,204 @@ describe('watch include reactivity', () => {
 		await flush();
 		expect(seen.at(-1)).toEqual([ 'B', 'B' ]);
 		handle.close();
+		await client.close();
+	});
+});
+
+describe('batched include hydration', () => {
+	/** A client that counts one-shot local reads via the query sync event. */
+	function countingClient() {
+		let queries = 0;
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ IssueSchema, ProjectSchema, UserSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+			onSyncEvent: (event) => {
+				if (event.type === 'query' && event.origin === 'query') queries++;
+			},
+		});
+		return { client, queries: () => queries };
+	}
+
+	it('resolves a reverse include with one query for the whole page', async () => {
+		const { client, queries } = countingClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.project.mutate.put({ id: 'p2', name: 'B' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'a', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i2', title: 'b', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i3', title: 'c', project: { id: 'p2' } });
+
+		const before = queries();
+		const rows = await client.db.project.query(
+			{ orderBy: (p) => [ p.id.asc() ] },
+			{ include: { issues: true } },
+		) as unknown as HydratedRow[];
+		// One read for the page, ONE for the whole reverse relation — not one
+		// per row.
+		expect(queries() - before).toBe(2);
+		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
+		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+		await client.close();
+	});
+
+	it('batches a reverse relation through a to-many ref into one scan', async () => {
+		const { client, queries } = countingClient();
+		await client.db.issue.mutate.put({ id: 'a', title: 'A' });
+		await client.db.issue.mutate.put({ id: 'b', title: 'B' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'one', blockedBy: [ { id: 'a' } ] });
+		await client.db.issue.mutate.put({
+			id: 'i2',
+			title: 'two',
+			blockedBy: [ { id: 'a' }, { id: 'b' } ],
+		});
+
+		const before = queries();
+		const rows = await client.db.issue.query(
+			{ where: (i) => i.id.in([ 'a', 'b' ]), orderBy: (i) => [ i.id.asc() ] },
+			{ include: { issues: true } },
+		) as unknown as HydratedRow[];
+		expect(queries() - before).toBe(2);
+		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
+		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i2' ]);
+		await client.close();
+	});
+
+	it('hands rows sharing a target the same hydrated object, nested refs included', async () => {
+		const { client, queries } = countingClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'a', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i2', title: 'b', project: { id: 'p1' } });
+
+		const before = queries();
+		const rows = await client.db.issue.query(
+			{ orderBy: (i) => [ i.id.asc() ] },
+			{ include: { project: { issues: true } } },
+		) as unknown as HydratedRow[];
+		// Page read + one reverse read for the DISTINCT projects; the forward
+		// hop is point reads.
+		expect(queries() - before).toBe(2);
+		expect(rows[0]!.refs.project).toBe(rows[1]!.refs.project);
+		const project = rows[0]!.refs.project as HydratedRow;
+		expect((project.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
+		await client.close();
+	});
+});
+
+describe('include relation options', () => {
+	it('narrows, orders and pages a reverse relation', async () => {
+		const client = newClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'x', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i2', title: 'y', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i3', title: 'x', project: { id: 'p1' } });
+
+		const rows = await client.db.project.query({}, {
+			include: {
+				issues: {
+					$where: (i) => i.title.eq('x'),
+					$orderBy: (i) => [ i.id.desc() ],
+					$limit: 1,
+				},
+			},
+		}) as unknown as HydratedRow[];
+		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+
+		const offset = await client.db.project.query({}, {
+			include: {
+				issues: { $orderBy: (i) => [ i.id.desc() ], $limit: 2, $offset: 1 },
+			},
+		}) as unknown as HydratedRow[];
+		expect((offset[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i2', 'i1' ]);
+		await client.close();
+	});
+
+	it('pages each holder independently', async () => {
+		const client = newClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.project.mutate.put({ id: 'p2', name: 'B' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'a', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i2', title: 'b', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i3', title: 'c', project: { id: 'p2' } });
+
+		const rows = await client.db.project.query(
+			{ orderBy: (p) => [ p.id.asc() ] },
+			{ include: { issues: { $orderBy: (i) => [ i.id.asc() ], $limit: 1 } } },
+		) as unknown as HydratedRow[];
+		// The limit cuts EACH project's list, not the batched read behind them.
+		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1' ]);
+		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+		await client.close();
+	});
+
+	it('applies options to a to-many forward ref', async () => {
+		const client = newClient();
+		await client.db.issue.mutate.put({ id: 'a', title: 'keep' });
+		await client.db.issue.mutate.put({ id: 'b', title: 'drop' });
+		await client.db.issue.mutate.put({ id: 'c', title: 'keep' });
+		await client.db.issue.mutate.put({
+			id: 'i1',
+			title: 'holder',
+			blockedBy: [ { id: 'c' }, { id: 'b' }, { id: 'a' } ],
+		});
+
+		const rows = await client.db.issue.query(
+			{ where: (i) => i.id.eq('i1') },
+			{
+				include: {
+					blockedBy: { $where: (i) => i.title.eq('keep'), $orderBy: (i) => [ i.id.asc() ] },
+				},
+			},
+		) as unknown as HydratedRow[];
+		expect((rows[0]!.refs.blockedBy as HydratedRow[]).map((r) => r.key)).toEqual([ 'a', 'c' ]);
+		await client.close();
+	});
+
+	it('rejects options on a to-one ref', async () => {
+		const client = newClient();
+		await client.db.issue.mutate.put({ id: 'i1', title: 'a', project: { id: 'p1' } });
+		await expect(
+			client.db.issue.query({}, { include: { project: { $limit: 1 } } }),
+		).rejects.toThrow(/list relation/);
+		await client.close();
+	});
+
+	it('rejects an option at the tree root and an unknown option', async () => {
+		const client = newClient();
+		await client.db.issue.mutate.put({ id: 'i1', title: 'a' });
+		await expect(
+			client.db.issue.query({}, { include: { $limit: 1 } }),
+		).rejects.toThrow(/tree root/);
+		await expect(
+			client.db.issue.query({}, { include: { blockedBy: { $take: 1 } as never } }),
+		).rejects.toThrow(/unknown option/);
+		await client.close();
+	});
+
+	it('keeps a watched include narrowed on re-hydration', async () => {
+		const client = newClient();
+		await client.db.project.mutate.put({ id: 'p1', name: 'A' });
+		await client.db.issue.mutate.put({ id: 'i1', title: 'x', project: { id: 'p1' } });
+
+		const seen: string[][] = [];
+		const unsub = client.db.project.watchQuery(
+			{},
+			(rows) => {
+				const refs = (rows[0] as unknown as HydratedRow | undefined)?.refs;
+				seen.push(((refs?.issues as HydratedRow[] | undefined) ?? []).map((r) => r.key));
+			},
+			{ include: { issues: { $where: (i) => i.title.eq('x') } } },
+		);
+		await new Promise((r) => setTimeout(r, 0));
+		expect(seen.at(-1)).toEqual([ 'i1' ]);
+
+		// A source change re-hydrates; the filter still applies to the new set.
+		await client.db.issue.mutate.put({ id: 'i2', title: 'y', project: { id: 'p1' } });
+		await client.db.issue.mutate.put({ id: 'i3', title: 'x', project: { id: 'p1' } });
+		await new Promise((r) => setTimeout(r, 0));
+		expect(seen.at(-1)).toEqual([ 'i1', 'i3' ]);
+		unsub.close();
 		await client.close();
 	});
 });

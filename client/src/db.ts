@@ -19,7 +19,7 @@ import { newId } from './id.js';
 import type { EntityDef, EntityRegistry, PatchInit, TextInit } from './mutations.js';
 import type { Query, TotalOf } from './query/index.js';
 import type { Row } from './read.js';
-import type { IncludeSpec } from './refs.js';
+import type { Include } from './refs.js';
 import type { TextHandle } from './text/handle.js';
 import type { WatchCallback, WatchHandle, WatchOptions } from './watch.js';
 
@@ -89,7 +89,7 @@ export interface EntityApi<D extends DescMessage> {
 	scan(): Promise<RowSet<MessageShape<D>>>;
 	query<const Q extends Query<MessageShape<D>>>(
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	/**
 	 * Runs the query AGAINST THE SERVER instead of the local store — the way to
@@ -172,7 +172,7 @@ interface SchemaApi {
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		opts?: { include?: IncludeSpec },
+		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
 	/** Absent on facades with no transport of their own (transactions). */
 	queryServer?<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
