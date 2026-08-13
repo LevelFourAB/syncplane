@@ -335,6 +335,14 @@ selects the default.
 returns the migrations as SQL for a deployment that applies its own DDL. Pair
 either with `WithoutMigrations()` on the nodes, which is what stops a node from
 migrating the database behind the deploy step's back — and lets it connect as a
-role with no privilege to change the schema at all. What the layout and the
-migration ownership cost an operator is in
+role with no privilege to change the schema at all.
+
+A ledger ahead of the binary is not by itself a refusal. Every step records
+whether it was additive, and `Open` serves a database migrated past it as long
+as every step in between only added to the schema. `SchemaVersion()` reports the
+version this binary migrates to, and `CanServe(binaryVersion, schemaVersion)`
+answers the same question ahead of time for a deploy step that does not want to
+strand the fleet it is running in front of.
+
+What the layout and the migration ownership cost an operator is in
 [Deploy for high availability](../how-to/deploy-for-high-availability.md#table-layout).

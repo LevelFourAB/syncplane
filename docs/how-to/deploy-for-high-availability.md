@@ -249,13 +249,30 @@ every node behind it starts as the restricted one:
 syncplaned -db "$DATABASE_URL" -db-migrate=false
 ```
 
-**A migration is a one-way door for the fleet.** `Open` refuses a database
-whose ledger is ahead of the binary, so once the step has run, no older binary
-can boot against that database — including a node that restarts mid-roll and a
-rollback to the previous release. Nodes already serving are unaffected, since
-the check happens at `Open`. Run the step with the roll it belongs to rather
-than long before it, and plan a binary rollback together with a database
-restore.
+**An additive migration is not a one-way door.** Each step records in
+`schema_migrations` whether a binary that does not know it can still serve the
+schema it left behind, and every step so far can be — adding a table or a column
+is invisible to a binary that never names it. So a node older than the ledger
+boots normally, which is what makes a mid-roll restart and a rollback to the
+previous release ordinary events rather than incidents.
+
+A step that **removes or narrows** something is the exception, and it does shut
+the door: from the moment it applies, no binary below it can open the database,
+including one that restarts mid-roll. Nodes already serving are unaffected — the
+check happens at `Open` — so the failure is latent until something restarts.
+Plan such a step as its own release, and plan a rollback across it together with
+a database restore.
+
+Two helpers make the distinction checkable rather than remembered:
+
+- `pgstore.SchemaVersion()` — the ledger version this binary migrates to.
+- `pgstore.CanServe(binaryVersion, schemaVersion)` — whether a binary at
+  `binaryVersion` can serve a database at `schemaVersion`. A deploy step can ask
+  it before migrating, and refuse to run ahead of a fleet it would strand.
+
+The running node asks the same question at `Open`, but out of the ledger rather
+than out of its own migration list — it cannot judge a step it does not carry,
+which is why the answer is recorded in the database by the binary that knew.
 
 ## Connectors run alone
 

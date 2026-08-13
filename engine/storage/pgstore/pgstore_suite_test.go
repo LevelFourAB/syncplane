@@ -235,7 +235,70 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3, 4}), "every migration, each recorded exactly once")
+	})
+
+	Describe("a ledger ahead of this binary", func() {
+		// What a node finds after a deploy step migrated for the next release
+		// and the roll has not reached it — or after a rollback. The step's own
+		// DDL is beside the point here: what decides the boot is what the
+		// ledger records about it, which is the only thing a binary that never
+		// carried the step can read.
+		recordStep := func(dsn string, additive bool) {
+			GinkgoHelper()
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			defer func() { _ = conn.Close(ctx) }()
+			_, err = conn.Exec(ctx,
+				`INSERT INTO schema_migrations (version, additive) VALUES ($1, $2)`,
+				pgstore.SchemaVersion()+1, additive)
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		DescribeTable("serves a database whose later steps only added to it",
+			func(opts ...pgstore.Option) {
+				dsn := pgtest.DSN()
+				Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+				recordStep(dsn, true)
+
+				store, err := pgstore.Open(ctx, dsn, opts...)
+				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+				Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+					return tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})
+				})).To(Succeed())
+			},
+			Entry("migrating at boot"),
+			Entry("verifying at boot", pgstore.WithoutMigrations()),
+		)
+
+		DescribeTable("refuses a database whose later step removed something",
+			func(opts ...pgstore.Option) {
+				dsn := pgtest.DSN()
+				Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+				recordStep(dsn, false)
+
+				_, err := pgstore.Open(ctx, dsn, opts...)
+				Expect(err).To(MatchError(ContainSubstring("needs a binary at version")))
+			},
+			Entry("migrating at boot"),
+			Entry("verifying at boot", pgstore.WithoutMigrations()),
+		)
+
+		It("applies nothing to a database ahead of it", func() {
+			dsn := pgtest.DSN()
+			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+			recordStep(dsn, true)
+
+			Expect(pgstore.Migrate(ctx, dsn)).To(Succeed())
+
+			conn, err := pgx.Connect(ctx, dsn)
+			Expect(err).NotTo(HaveOccurred())
+			DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
+			var highest int
+			Expect(conn.QueryRow(ctx, `SELECT MAX(version) FROM schema_migrations`).Scan(&highest)).To(Succeed())
+			Expect(highest).To(Equal(pgstore.SchemaVersion() + 1))
+		})
 	})
 
 	Describe("opened without them", func() {

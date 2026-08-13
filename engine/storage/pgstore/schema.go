@@ -25,12 +25,12 @@ import (
 // even to columns nothing orders by — the actor's subject and system label,
 // consumer names — so the rule is "all of them" rather than a judgement call
 // per column that a later index turns into a bug.
-var migrations = []func(layout) string{
-	baselineSchema,
+var migrations = []migration{
+	{additive: true, sql: baselineSchema},
 	// 2: verdicts on refused mutations, so a retry that follows a lost push
 	// response is answered with the rejection instead of a bare ack. NULL until
 	// a client has had something refused, which is the common case.
-	fixed(`ALTER TABLE clients ADD COLUMN rejections BYTEA;`),
+	{additive: true, sql: fixed(`ALTER TABLE clients ADD COLUMN rejections BYTEA;`)},
 	// 3: cursor-state entries — the membership sets of issued pull cursors,
 	// keyed by the (id, gen) reference the cursor carries. See cursorstate.go
 	// for the pruning that keeps the table bounded.
@@ -39,7 +39,7 @@ var migrations = []func(layout) string{
 	// pluggable (server.WithCursorStateStore), entries are immutable and any
 	// of them may be evicted at any time, so a deployment large enough for its
 	// churn to matter points it at something else entirely.
-	fixed(`
+	{additive: true, sql: fixed(`
 	CREATE TABLE cursor_state (
 		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 		workspace_id TEXT COLLATE "C" NOT NULL,
@@ -49,7 +49,29 @@ var migrations = []func(layout) string{
 		written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
 		PRIMARY KEY (namespace, workspace_id, id, gen)
 	);
-	`),
+	`)},
+	// 4: the ledger records what each step did to compatibility, so a binary
+	// older than the ledger can tell whether it may still serve. DEFAULT TRUE
+	// backfills the three steps above, all of which are additive.
+	{additive: true, sql: fixed(
+		`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS additive BOOLEAN NOT NULL DEFAULT TRUE;`)},
+}
+
+// migration is one step of the ledger.
+type migration struct {
+	// sql is the step under a given layout.
+	sql func(layout) string
+	// additive reports that a binary which does not know this step can still
+	// serve the schema it leaves behind — true of anything that only adds
+	// tables, columns or indexes, since an older binary serves those by never
+	// naming them.
+	//
+	// It is stated rather than defaulted because the zero value has to be the
+	// safe one: a step that drops or narrows something and forgets to say so
+	// would otherwise let an older binary boot and fail later, deep in a read,
+	// which is the failure this whole mechanism exists to convert into a
+	// refusal at Open.
+	additive bool
 }
 
 // fixed adapts a step whose SQL does not depend on the layout.
@@ -61,10 +83,15 @@ func fixed(sql string) func(layout) string {
 // it: migrate, before it can read a version at all, and the first script
 // Statements returns — which is what spares an externally applied schema a
 // separate bootstrap.
+//
+// additive is here as well as in migration 4 because both orders have to work:
+// a database created by this DDL needs the column before step 1 records
+// itself, and one created before the column existed gets it from the step.
 const ledgerDDL = `
 CREATE TABLE IF NOT EXISTS schema_migrations (
 	version    INTEGER PRIMARY KEY,
-	applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+	applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+	additive   BOOLEAN NOT NULL DEFAULT TRUE
 );
 `
 
@@ -296,6 +323,39 @@ func baselineSchema(l layout) string {
 	return b.String()
 }
 
+// SchemaVersion returns the ledger version this binary migrates a database to,
+// counting from 1. A database Open accepts without complaint is at this version
+// or, when every step between is additive, above it.
+func SchemaVersion() int {
+	return len(migrations)
+}
+
+// CanServe reports whether a binary that knows binaryVersion migrations can
+// serve a database migrated to schemaVersion — true when every step between
+// them only added to the schema.
+//
+// It answers from THIS binary's migration list, so it is for a process that
+// knows schemaVersion: a deploy step asking, before it migrates, whether the
+// fleet it is about to run ahead of will survive until the roll reaches it. A
+// schemaVersion this binary does not know is unanswerable and reports false.
+//
+// The running node's own version of this question is decided at Open, out of
+// the ledger, since a binary cannot judge steps it does not carry.
+func CanServe(binaryVersion, schemaVersion int) bool {
+	if schemaVersion > len(migrations) {
+		return false
+	}
+	if binaryVersion < 0 {
+		binaryVersion = 0
+	}
+	for v := binaryVersion + 1; v <= schemaVersion; v++ {
+		if !migrations[v-1].additive {
+			return false
+		}
+	}
+	return true
+}
+
 // Migration is one step of pgstore's schema ledger.
 type Migration struct {
 	// Version is the ledger version the step brings the database to, counting
@@ -378,8 +438,34 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 	return version, err
 }
 
-// verifySchema checks that the database is already migrated to this binary's
-// version, which is what Open does in place of migrate under WithoutMigrations.
+// serveFloor is the lowest ledger version whose binary can still serve this
+// database: the highest step recorded as non-additive, or zero when every step
+// was additive. A binary at or above it may open a database ahead of itself.
+//
+// The floor is a suffix rather than the exact set of binaries a step broke,
+// which is a deliberate over-approximation. Dropping at step 12 a column added
+// at step 10 really only breaks binaries 10 and 11 — binary 9 never named it —
+// but a rolling deploy moves one version at a time, so the interval that would
+// model it exactly buys nothing and the cost of being conservative is a
+// refused boot rather than a bad read.
+//
+// The additive column arrives in migration 4 and is read only when the ledger
+// is AHEAD of this binary, which puts the database past 4 whenever this code
+// asks. No older shape of the ledger reaches here.
+func serveFloor(ctx context.Context, q querier) (int, error) {
+	var floor int
+	err := q.QueryRow(ctx,
+		`SELECT COALESCE(MAX(version), 0) FROM schema_migrations WHERE NOT additive`).Scan(&floor)
+	if err != nil {
+		return 0, fmt.Errorf("pgstore: read schema compatibility: %w", err)
+	}
+	return floor, nil
+}
+
+// verifySchema checks that this binary can serve the database, which is what
+// Open does in place of migrate under WithoutMigrations. A ledger short of this
+// binary is the deploy step not having run; a ledger ahead of it is judged by
+// serveFloor.
 //
 // It reads the ledger and nothing else — no DDL, no advisory lock — so a node
 // running this way needs no schema privileges beyond the rows it serves. That
@@ -391,34 +477,49 @@ func verifySchema(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		return fmt.Errorf("pgstore: read schema version (has this database been migrated?): %w", err)
 	}
-	switch {
-	case version < len(migrations):
+	if version < len(migrations) {
 		return fmt.Errorf("pgstore: database schema at version %d, want %d: apply the outstanding migrations before opening without them",
 			version, len(migrations))
-	case version > len(migrations):
-		return errSchemaNewer(version)
+	}
+	return checkAhead(ctx, pool, version)
+}
+
+// checkAhead decides whether a ledger past this binary's own version is one it
+// may still serve. Nothing to do when the database is not ahead.
+func checkAhead(ctx context.Context, q querier, version int) error {
+	if version <= len(migrations) {
+		return nil
+	}
+	floor, err := serveFloor(ctx, q)
+	if err != nil {
+		return err
+	}
+	if len(migrations) < floor {
+		return errSchemaNewer(version, floor)
 	}
 	return nil
 }
 
-// errSchemaNewer is the refusal both boot paths share: a ledger past what this
-// binary knows means the database has a shape this code was never written
-// against, and reading it as though it had not would be the worse failure.
-func errSchemaNewer(version int) error {
-	return fmt.Errorf("pgstore: database schema version %d is newer than this binary (max %d)",
-		version, len(migrations))
+// errSchemaNewer is the refusal both boot paths share, and it is now specific
+// about the way out: the database carries a step this binary cannot serve
+// through, so the answer is a newer binary rather than anything done here.
+func errSchemaNewer(version, floor int) error {
+	return fmt.Errorf("pgstore: database schema version %d needs a binary at version %d or later (this one knows %d): migration %d removed or narrowed something older binaries read",
+		version, floor, len(migrations), floor)
 }
 
 // migrationSQL is one ledger step as a script: its DDL followed by the row
 // recording it. Version 1 also creates the ledger, so the scripts bootstrap an
 // empty database on their own.
 func migrationSQL(version int, l layout) string {
+	step := migrations[version-1]
 	var b strings.Builder
 	if version == 1 {
 		b.WriteString(ledgerDDL)
 	}
-	b.WriteString(migrations[version-1](l))
-	fmt.Fprintf(&b, "\nINSERT INTO schema_migrations (version) VALUES (%d);\n", version)
+	b.WriteString(step.sql(l))
+	fmt.Fprintf(&b, "\nINSERT INTO schema_migrations (version, additive) VALUES (%d, %t);\n",
+		version, step.additive)
 	return b.String()
 }
 
@@ -465,7 +566,9 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, want layout) error {
 		return fmt.Errorf("pgstore: read schema version: %w", err)
 	}
 	if version > len(migrations) {
-		return errSchemaNewer(version)
+		// Ahead of this binary: there is nothing to apply, and whether it may
+		// serve at all is the ledger's to say.
+		return checkAhead(ctx, conn, version)
 	}
 	l := want
 	if version > 0 {

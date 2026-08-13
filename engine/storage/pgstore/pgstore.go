@@ -185,7 +185,7 @@ func WithMaxConns(n int32) Option {
 // through that capability and the workspace-list queries; everything else,
 // including migrations and leases, stays on the primary.
 //
-// Open fails when the schema at dsn is not at this binary's migration version,
+// Open fails when the schema at dsn is not at the primary's migration version,
 // which is what catches a DSN that is not a standby of the primary's database.
 func WithReadReplica(dsn string) Option {
 	return func(c *config) { c.replicaDSN = dsn }
@@ -272,7 +272,12 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	var replica *pgxpool.Pool
 	if cfg.replicaDSN != "" {
-		replica, err = openReplica(ctx, cfg.replicaDSN, cfg.replicaMaxConns)
+		primaryVersion, err := schemaVersion(ctx, pool)
+		if err != nil {
+			pool.Close()
+			return nil, fmt.Errorf("pgstore: read schema version: %w", err)
+		}
+		replica, err = openReplica(ctx, cfg.replicaDSN, cfg.replicaMaxConns, primaryVersion)
 		if err != nil {
 			pool.Close()
 			return nil, err

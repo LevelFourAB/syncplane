@@ -20,7 +20,13 @@ import (
 // anything else (an unrelated database, an empty one, a standby still
 // replaying a fresh migration) fails Open rather than serving reads from the
 // wrong schema.
-func openReplica(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool, error) {
+//
+// It is the PRIMARY's version that is compared, not this binary's. The two
+// differ whenever a node serves a database migrated ahead of it, which is a
+// state the ledger licenses (see serveFloor); comparing against the binary
+// instead would refuse the replica in exactly that case, and it would be
+// answering a question about the binary while claiming to be about the standby.
+func openReplica(ctx context.Context, dsn string, maxConns int32, primaryVersion int) (*pgxpool.Pool, error) {
 	poolCfg, err := pgxpool.ParseConfig(dsn)
 	if err != nil {
 		return nil, fmt.Errorf("pgstore: parse replica dsn: %w", err)
@@ -37,10 +43,10 @@ func openReplica(ctx context.Context, dsn string, maxConns int32) (*pgxpool.Pool
 		pool.Close()
 		return nil, fmt.Errorf("pgstore: probe replica schema (is the replica DSN a standby of this database?): %w", err)
 	}
-	if version != len(migrations) {
+	if version != primaryVersion {
 		pool.Close()
-		return nil, fmt.Errorf("pgstore: replica schema at version %d, want %d (is the replica DSN a standby of this database?)",
-			version, len(migrations))
+		return nil, fmt.Errorf("pgstore: replica schema at version %d, primary at %d (is the replica DSN a standby of this database?)",
+			version, primaryVersion)
 	}
 	return pool, nil
 }
