@@ -11,10 +11,26 @@ import { fileURLToPath } from 'node:url';
 import { fromJson, type JsonValue, toJson } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
-import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import type { DescMessage, Message } from '@bufbuild/protobuf';
+import {
+	IssueSchema,
+	PairSchema,
+	ProjectSchema,
+	UserSchema,
+	WidgetSchema,
+} from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
+import type { Cond } from '../../src/query/ast.js';
 import { compareRows, evalCond, runQuery } from '../../src/query/evaluate.js';
 import { condFromProto, condToProto, orderKeyFromProto } from '../../src/query/proto.js';
+import {
+	collectRels,
+	type RelCond,
+	type RelNode,
+	relReplacement,
+	rewriteRels,
+	targetKeyTuple,
+} from '../../src/query/rel.js';
 import { localPathOf, prepareQuery } from '../../src/query/wire.js';
 import { toLocalNames } from '../support/vector-paths.js';
 
@@ -53,6 +69,29 @@ interface CompileErrorCase {
 	orderBy?: JsonValue[];
 }
 
+/**
+ * A rel-condition (`matches`) case: rows evaluated against a lookup context of
+ * target rows. `want` must come out twice — from the scan-level DEFINITION and
+ * from the two-phase rewrite the engines actually run.
+ */
+interface RelatedCase {
+	name: string;
+	type?: string;
+	context: Record<string, JsonValue[]>;
+	rows: { key: string; row: JsonValue }[];
+	cond: JsonValue;
+	want: string[];
+}
+
+/** Context keys are entity wire names. */
+const CONTEXT_SCHEMAS: Record<string, DescMessage> = {
+	user: UserSchema,
+	project: ProjectSchema,
+	issue: IssueSchema,
+	pair: PairSchema,
+	widget: WidgetSchema,
+};
+
 const vectorsPath = join(
 	dirname(fileURLToPath(import.meta.url)),
 	'../../../testdata/queryeval/vectors.json',
@@ -62,6 +101,7 @@ const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as {
 	compareCases: CompareCase[];
 	orderCases: OrderCase[];
 	compileErrorCases: CompileErrorCase[];
+	relatedCases: RelatedCase[];
 };
 
 const sign = (v: number): number => (v < 0 ? -1 : v > 0 ? 1 : 0);
@@ -72,6 +112,79 @@ describe('queryeval conformance vectors', () => {
 		expect(vectors.compareCases.length).toBeGreaterThan(0);
 		expect(vectors.orderCases.length).toBeGreaterThan(0);
 		expect(vectors.compileErrorCases.length).toBeGreaterThan(0);
+		expect(vectors.relatedCases.length).toBeGreaterThan(0);
+	});
+
+	describe('related', () => {
+		for (const tc of vectors.relatedCases) {
+			it(tc.name, () => {
+				const schema = schemaFor(tc.type);
+				const proto = fromJson(ConditionSchema, tc.cond);
+				const where = prepareQuery(schema, {
+					where: toLocalNames(schema, condFromProto(proto)),
+				}).where!;
+				const rows = tc.rows.map((r) => ({
+					key: r.key,
+					value: fromJson(schema, r.row) as Message,
+				}));
+				const context = new Map<string, Message[]>();
+				for (const [ entity, raws ] of Object.entries(tc.context)) {
+					const target = CONTEXT_SCHEMAS[entity]!;
+					context.set(target.typeName, raws.map((raw) => fromJson(target, raw) as Message));
+				}
+				const nodes = collectRels(schema, where);
+				expect(nodes.length).toBeGreaterThan(0);
+
+				// The two-phase rewrite, exactly as the execute pipeline runs it:
+				// pre-pass over the context, membership test on the stubs.
+				const replacements = new Map<RelCond, Cond>();
+				for (const node of nodes) {
+					const targets = (context.get(node.targetSchema.typeName) ?? [])
+						.filter((t) => evalCond(t, node.cond.cond, node.targetSchema))
+						.map((t) => targetKeyTuple(node, t));
+					replacements.set(node.cond, relReplacement(node, targets));
+				}
+				const rewritten = rewriteRels(where, replacements);
+				expect(rows.filter((r) => evalCond(r.value, rewritten, schema)).map((r) => r.key))
+					.toEqual(tc.want);
+
+				// The scan-level definition: per stub, derive the target key, look
+				// the target up in the context, evaluate the inner condition.
+				const byCond = new Map<RelCond, RelNode>(nodes.map((n) => [ n.cond, n ]));
+				const definition = (row: Message, cond: Cond): boolean => {
+					switch (cond.kind) {
+						case 'and':
+							return cond.conds.every((c) => definition(row, c));
+						case 'or':
+							return cond.conds.some((c) => definition(row, c));
+						case 'not':
+							return !definition(row, cond.cond);
+						case 'rel': {
+							const node = byCond.get(cond)!;
+							const rec = row as unknown as Record<string, unknown>;
+							let at: unknown = rec;
+							for (const seg of cond.path) at = (at as Record<string, unknown>)?.[seg];
+							const stubs = at === undefined ? [] : Array.isArray(at) ? at : [ at ];
+							const targets = context.get(node.targetSchema.typeName) ?? [];
+							return stubs.some((stub) => {
+								const target = targets.find((t) =>
+									node.keyFields.every((kf) =>
+										(t as unknown as Record<string, unknown>)[kf.localName]
+											=== (stub as Record<string, unknown>)[kf.localName]
+									)
+								);
+								return target !== undefined
+									&& evalCond(target, node.cond.cond, node.targetSchema);
+							});
+						}
+						default:
+							return evalCond(row, cond, schema);
+					}
+				};
+				expect(rows.filter((r) => definition(r.value, where)).map((r) => r.key))
+					.toEqual(tc.want);
+			});
+		}
 	});
 
 	describe('eval', () => {

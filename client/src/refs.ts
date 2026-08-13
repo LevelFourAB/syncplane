@@ -15,7 +15,7 @@ import type { DescMessage, Message } from '@bufbuild/protobuf';
 
 import { type EntityRegistry, type ForwardRef, keyOf, type ReverseRef } from './mutations.js';
 import type { Cond, OrderKey } from './query/ast.js';
-import { and, compareRows, compileQuery, evalCond, type Query } from './query/index.js';
+import { and, compareRows, compileQuery, evalCond, hasRel, type Query } from './query/index.js';
 import { prepareQuery } from './query/wire.js';
 import type { Row } from './read.js';
 
@@ -490,6 +490,11 @@ function prepareNodeOptions(schema: DescMessage, node: RelationNode): PreparedOp
 		schema,
 		compileQuery({ where: node.where, orderBy: node.orderBy } as Query<Message>),
 	);
+	// Hydration filters resolved rows in memory, with no read of its own for a
+	// semi-join's pre-pass to ride on. Nest the include a level deeper instead.
+	if (hasRel(compiled.where)) {
+		throw new Error('include: $where cannot use matches(); nest the relation instead');
+	}
 	return {
 		where: compiled.where,
 		orderBy: compiled.orderBy,

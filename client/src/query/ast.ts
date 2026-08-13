@@ -29,6 +29,13 @@ export type Cond =
 	// is what lets two conditions describe the same element; see ExistsCond in
 	// the proto for why an implicit quantifier cannot.
 	| { kind: 'exists'; path: Path; cond: Cond }
+	// One-hop semi-join: `path` names a forward reference field (row-local),
+	// and `cond`'s paths are relative to the TARGET entity's row. True when at
+	// least one referenced target exists and satisfies `cond`. Not row-local:
+	// evaluation rewrites it to a membership test on the stored stubs first
+	// (see query/rel.ts), and the wire form (RelCond) carries it to the server
+	// unrewritten.
+	| { kind: 'rel'; path: Path; cond: Cond }
 	| { kind: 'present'; path: Path; op: 'isSet' | 'isNotSet' }
 	| { kind: 'and' | 'or'; conds: Cond[] }
 	| { kind: 'not'; cond: Cond };

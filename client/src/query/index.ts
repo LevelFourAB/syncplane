@@ -40,6 +40,29 @@ export {
 	rootRef,
 } from './proxy.js';
 export type {
+	RelCond,
+	RelKeys,
+	RelKeysDelta,
+	RelNode,
+	RelPassCache,
+	RelWorkspaceKeys,
+	TouchedTarget,
+} from './rel.js';
+export {
+	collectRels,
+	computeRelKeys,
+	diffRelKeys,
+	hasRel,
+	relReplacement,
+	relsArePositive,
+	relTupleKey,
+	rewriteRels,
+	rewriteWithKeys,
+	sameRelKeys,
+	stubKeyTuples,
+	updateRelKeys,
+} from './rel.js';
+export type {
 	BoolOps,
 	FieldOps,
 	MapEntryRef,
@@ -51,6 +74,7 @@ export type {
 	PresenceOps,
 	Query,
 	QueryRef,
+	RelOps,
 	RepeatedMessageOps,
 	RepeatedScalarOps,
 	StringOps,

@@ -1,6 +1,13 @@
 import { type DescMessage, fromBinary, type MessageShape } from '@bufbuild/protobuf';
 
-import { COMPLETE, type Coverage, type PageInfo, type RowSet, withCoverage } from './coverage.js';
+import {
+	COMPLETE,
+	type Coverage,
+	type PageInfo,
+	type RelCoverageRef,
+	type RowSet,
+	withCoverage,
+} from './coverage.js';
 import { debugVerifyTouchesEnv } from './env.js';
 import { compareWorkspaces, wsSegment } from './keys.js';
 import type { KVRead, KVStore } from './kv/store.js';
@@ -11,7 +18,29 @@ import { sortOrderedFields } from './ordering.js';
 import type { Cond, PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
 import { type IndexedRow, type IndexReport, queryByIndex } from './query/execute.js';
-import { compareRows, type CompiledQuery, evalCond, runQuery } from './query/index.js';
+import {
+	collectRels,
+	compareRows,
+	type CompiledQuery,
+	computeRelKeys,
+	diffRelKeys,
+	evalCond,
+	type RelCond,
+	type RelKeys,
+	type RelKeysDelta,
+	type RelNode,
+	type RelPassCache,
+	relReplacement,
+	relsArePositive,
+	relTupleKey,
+	rewriteRels,
+	rewriteWithKeys,
+	runQuery,
+	sameRelKeys,
+	stubKeyTuples,
+	type TouchedTarget,
+	updateRelKeys,
+} from './query/index.js';
 import {
 	readMergedRowsWithVersion,
 	type ReadScope,
@@ -365,6 +394,30 @@ interface Watcher {
 	 * lose a row change rather than merely deliver it late.
 	 */
 	emittedAt: number;
+	/** Set when the query crosses references (`matches`); see RelWatchState. */
+	rel?: RelWatchState;
+}
+
+/**
+ * State of a watcher whose query crosses references. Such a query is not
+ * row-local: a commit to a TARGET entity moves which base rows match without
+ * touching them, so the watcher re-runs the pre-pass on those commits
+ * (refreshRel) and rebuilds its match set when the membership keys moved —
+ * and only then, which is what the sameRelKeys memo buys.
+ */
+interface RelWatchState {
+	/** Every rel node of the query and its per-workspace predicates. */
+	nodes: RelNode[];
+	/** Wire names of the target entities, for reach tests. Includes the
+	 * watcher's own entity for a self-reference. */
+	targets: ReadonlySet<string>;
+	/** The crossed refs in the form the coverage rule consumes. */
+	coverage: readonly RelCoverageRef[];
+	/** Matching target keys from the last pre-pass; unset before the first. */
+	keys?: RelKeys;
+	/** Rewritten per-workspace predicates, memoized against `keys` and cleared
+	 * whenever they move. */
+	whereByWs: Map<string, Cond | undefined>;
 }
 
 /**
@@ -477,7 +530,11 @@ export interface WatcherHubOptions {
 	 * result can carry it. Absent ⇒ complete, which is what a hub built without
 	 * a subscription set (tests, in-process facades) should say.
 	 */
-	coverageOf?: (entity: string, scope?: WorkspaceScope) => Coverage;
+	coverageOf?: (
+		entity: string,
+		scope?: WorkspaceScope,
+		rels?: readonly RelCoverageRef[],
+	) => Coverage;
 	/**
 	 * An entity's compiled secondary indexes, so a query watcher's first read
 	 * can be served from one instead of scanned. Absent ⇒ every read scans,
@@ -561,8 +618,9 @@ export class WatcherHub {
 	): WatchHandle {
 		if (this.closed) return INERT;
 		const def = this.registry.bySchema(schema);
-		const reaches = this.reachableEntities(def.name, include);
 		const named = typeof scope === 'object' ? scope : undefined;
+		const rel = this.relStateOf(schema, query, named?.predicates);
+		const reaches = this.reachableEntities(def.name, include, rel);
 		const workspaces = named === undefined
 			? undefined
 			: [ ...new Set(named.workspaces) ].sort(compareWorkspaces);
@@ -600,6 +658,7 @@ export class WatcherHub {
 			window: window ?? { offset: query?.offset, limit: query?.limit },
 			pending: 'reset',
 			emittedAt: 0,
+			rel,
 		};
 		this.watchers.add(watcher);
 		// Read the initial result asynchronously (also seeds the emit memo).
@@ -887,18 +946,62 @@ export class WatcherHub {
 		// an include watcher, the hydrate it needs — runs outside.
 		const at = await this.mutex.runShared(async () => {
 			const tx = await this.kv.read();
+			// Passes are shared for the whole notify rather than per group: two
+			// watchers crossing one relation ask the same question of the target
+			// entity whatever their own entity or query is, and inside this
+			// transaction they are entitled to one answer.
+			const relPasses: RelPassCache = new Map();
 			try {
 				for (const [ scope, group ] of byScope) {
-					const delta = await this.readDelta(tx, scope, group, pairs);
+					// Rel watchers re-run their pre-pass first: a commit touching a
+					// TARGET entity moves which base rows match without touching
+					// them, which no keyed delta can carry. A pre-pass whose keys
+					// did not move keeps the watcher on the incremental path.
+					const movedRel = new Map<Watcher, RelKeysDelta | 'moved'>();
 					for (const w of group) {
+						if (w.rel === undefined || !touchesRel(w, pairs)) continue;
+						const moved = await this.refreshRel(tx, w, relPasses, pairs);
+						if (moved !== undefined) movedRel.set(w, moved);
+					}
+					const delta = await this.readDelta(tx, scope, group, pairs);
+					let scopeRows = delta.rebuild ? delta.rows : undefined;
+					for (const w of group) {
+						let from: number;
+						const moved = movedRel.get(w);
+						// A membership move reaches rows the commit never named, so
+						// the keyed delta alone cannot carry it. Where the move is
+						// small and the query lets it be read backwards, the rows it
+						// reaches are found and spliced; otherwise the match set is
+						// re-derived from the whole scope.
+						const reached = moved === undefined || delta.rebuild
+							? undefined
+							: await this.relReached(tx, w, moved, scope);
+						if (delta.rebuild) {
+							from = applyDelta(w, delta);
+						} else if (reached !== undefined) {
+							from = applyDelta(w, {
+								rebuild: false,
+								changed: mergeChanged(delta.changed, reached),
+							}, reached);
+						} else if (moved !== undefined) {
+							scopeRows ??= await this.scanScope(tx, group[0]!);
+							w.matches = buildMatches(w, scopeRows);
+							w.pending = 'reset';
+							from = 0;
+						} else {
+							from = applyDelta(w, delta);
+						}
 						pending.push({
 							watcher: w,
-							from: applyDelta(w, delta),
+							from,
 							force: touchesInclude(w, pairs),
 						});
 					}
 					if (this.verifyTouches) {
-						for (const w of group) await this.verifyMatches(tx, w);
+						for (const w of group) {
+							await this.verifyRelKeys(tx, w);
+							await this.verifyMatches(tx, w);
+						}
 					}
 					this.pruneScope(scope);
 				}
@@ -931,6 +1034,8 @@ export class WatcherHub {
 			entered = performance.now();
 			const tx = await this.kv.read();
 			try {
+				// The first pre-pass, before anything evaluates the predicate.
+				if (watcher.rel) await this.refreshRel(tx, watcher);
 				watcher.matches = await this.seedFromIndex(tx, watcher, report)
 					?? buildMatches(watcher, await this.scanScope(tx, watcher));
 				if (this.verifyTouches) await this.verifyMatches(tx, watcher);
@@ -1117,7 +1222,8 @@ export class WatcherHub {
 		// Claimed before the callback (and before any hydrate), so a dispatch that
 		// starts while this one is still hydrating knows it is the newer of the two.
 		watcher.emittedAt = at;
-		const coverage = this.opts.coverageOf?.(watcher.entity, readScope(watcher)) ?? COMPLETE;
+		const coverage = this.opts.coverageOf?.(watcher.entity, readScope(watcher), watcher.rel?.coverage)
+			?? COMPLETE;
 		const memoized = !force
 			&& watcher.lastWindow !== undefined
 			&& watcher.lastCoverage !== undefined
@@ -1234,7 +1340,10 @@ export class WatcherHub {
 		// offset/limit slice happens on emit. A per-workspace predicate is applied
 		// before the sort rather than inside it, which is the same set — `runQuery`
 		// filters first — and leaves one query for the one order it has to be in.
-		const admitted = watcher.predicates === undefined
+		// A rel query takes the same pre-filter path whatever its scope: its
+		// effective predicate is per workspace by construction.
+		const perWorkspace = watcher.predicates !== undefined || watcher.rel !== undefined;
+		const admitted = !perWorkspace
 			? scanned
 			: scanned.filter((row) => {
 				const where = whereFor(watcher, row.workspaceId);
@@ -1243,7 +1352,7 @@ export class WatcherHub {
 		const want = watcher.query === undefined ? admitted : runQuery(
 			admitted,
 			{
-				where: watcher.predicates === undefined ? watcher.query.where : undefined,
+				where: perWorkspace ? undefined : watcher.query.where,
 				orderBy: watcher.query.orderBy,
 			},
 			watcher.schema,
@@ -1311,9 +1420,10 @@ export class WatcherHub {
 
 	/**
 	 * Entities a watcher reaches: its own, plus every entity reachable by
-	 * walking the include tree (forward target / reverse source) at each level.
+	 * walking the include tree (forward target / reverse source) at each level,
+	 * plus the target of every reference its query crosses.
 	 */
-	private reachableEntities(entity: string, include?: Include): Set<string> {
+	private reachableEntities(entity: string, include?: Include, rel?: RelWatchState): Set<string> {
 		const out = new Set<string>([ entity ]);
 		const walk = (from: string, spec?: Include): void => {
 			if (!spec) return;
@@ -1327,7 +1437,228 @@ export class WatcherHub {
 			}
 		};
 		walk(entity, include);
+		for (const target of rel?.targets ?? []) out.add(target);
 		return out;
+	}
+
+	/**
+	 * The rel state of a query watcher, or undefined for a row-local query —
+	 * which is every watcher without a `matches` in its predicate, and keeps
+	 * their paths untouched.
+	 */
+	private relStateOf(
+		schema: DescMessage,
+		query?: CompiledQuery,
+		predicates?: ReadonlyMap<string, Cond>,
+	): RelWatchState | undefined {
+		const nodes = [
+			...collectRels(schema, query?.where),
+			...(predicates ? [ ...predicates.values() ].flatMap((where) => collectRels(schema, where)) : []),
+		];
+		if (nodes.length === 0) return undefined;
+		const targets = new Set<string>();
+		const coverage: RelCoverageRef[] = [];
+		for (const node of nodes) {
+			const target = this.registry.bySchema(node.targetSchema).name;
+			targets.add(target);
+			coverage.push({
+				targetEntity: target,
+				...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+			});
+		}
+		return { nodes, targets, coverage, whereByWs: new Map() };
+	}
+
+	/**
+	 * Brings a rel watcher's membership up to date and reports how it moved: a
+	 * delta the caller can re-examine rows from, `'moved'` when it moved but no
+	 * delta describes it, or undefined when it did not move. Any move drops the
+	 * rewritten predicates, because a moved membership changes which base rows
+	 * match without touching one of them.
+	 *
+	 * `pairs` lets the update be taken from the rows the commit named rather
+	 * than from a fresh pass over the target entity, which is a point read per
+	 * changed row instead of a query per watcher. It declines — and the pass
+	 * serves — for a commit that named no keys, and for a watcher that has no
+	 * membership yet to update.
+	 *
+	 * `shared` collects the passes so watchers crossing the same relation over
+	 * the same scope read the target entity once between them. It must not
+	 * outlive the read `tx` answers from: two watchers sharing a pass are
+	 * claiming to have read the same view, which only one transaction gives.
+	 */
+	private async refreshRel(
+		tx: KVRead,
+		watcher: Watcher,
+		shared?: RelPassCache,
+		pairs?: readonly TouchedPair[],
+	): Promise<RelKeysDelta | undefined | 'moved'> {
+		const rel = watcher.rel!;
+		const scope = readScope(watcher);
+		const prev = rel.keys;
+		const next = (pairs !== undefined && prev !== undefined
+			? await updateRelKeys(
+				tx,
+				this.registry,
+				rel.nodes,
+				scope,
+				prev,
+				(entity) => touchedTargets(watcher, entity, pairs),
+				shared,
+			)
+			: undefined)
+			?? await computeRelKeys(
+				tx,
+				this.registry,
+				rel.nodes,
+				scope,
+				this.opts.indexes,
+				shared,
+			);
+		if (prev !== undefined && sameRelKeys(prev, next)) return undefined;
+		rel.keys = next;
+		rel.whereByWs.clear();
+		if (prev === undefined) return 'moved';
+		return diffRelKeys(prev, next) ?? 'moved';
+	}
+
+	/**
+	 * The rows a membership move reaches — those that may have started or
+	 * stopped matching without the commit naming them — or undefined for "no
+	 * cheaper answer than re-deriving the whole match set".
+	 *
+	 * Both halves rest on the move being MONOTONE, which relsArePositive is the
+	 * check for. A row can then only start matching because a key entered some
+	 * node's set, so the entrants select the candidates; and it can only stop
+	 * because a key left, so the leavers are looked for among the rows already
+	 * held. Under a negation both implications reverse and this would miss rows,
+	 * which is why such a query declines to the re-derivation.
+	 *
+	 * It declines rather than scans. A scan of the base entity is what the
+	 * re-derivation already does, and doing it here would be the same cost with
+	 * a splice script on top.
+	 */
+	private async relReached(
+		tx: KVRead,
+		watcher: Watcher,
+		moved: RelKeysDelta | 'moved',
+		scope: string,
+	): Promise<Map<string, ResultRow | undefined> | undefined> {
+		const rel = watcher.rel;
+		const matches = watcher.matches;
+		const indexes = this.opts.indexes;
+		if (moved === 'moved' || rel?.keys === undefined || matches === undefined) return undefined;
+		if (indexes === undefined) return undefined;
+		const workspaces = watcher.workspaceId !== undefined
+			? [ watcher.workspaceId ]
+			: watcher.workspaces;
+		// A read spanning every workspace has no leg an index walk can serve,
+		// the same decline the seed makes.
+		if (workspaces === undefined || workspaces.length === 0) return undefined;
+		for (const ws of workspaces) {
+			if (!relsArePositive(watcher.predicates?.get(ws) ?? watcher.query?.where)) return undefined;
+		}
+		const def = this.registry.get(watcher.entity);
+		if (def === undefined) return undefined;
+		const out = new Map<string, ResultRow | undefined>();
+		// Rows that may have stopped matching: the ones already held whose stub
+		// names a target that left. Held rows are in memory, so this costs no
+		// read at all.
+		for (const held of matches.ordered) {
+			for (const node of rel.nodes) {
+				const gone = moved.removed.get(node)?.get(held.row.workspaceId);
+				if (gone === undefined || gone.size === 0) continue;
+				const hit = stubKeyTuples(node, held.row.value).some((tuple) => {
+					const key = relTupleKey(tuple);
+					return key !== undefined && gone.has(key);
+				});
+				if (hit) {
+					out.set(held.id, held);
+					break;
+				}
+			}
+		}
+		// Rows that may have started matching: the query the watcher already
+		// runs, with one node narrowed to the keys that just entered. Every
+		// other node keeps its current membership, so what comes back is rows
+		// matching NOW that owe it to this node's move.
+		const scoped = this.scopeRows(scope);
+		for (const node of rel.nodes) {
+			for (const ws of workspaces) {
+				const entered = moved.added.get(node)?.get(ws);
+				if (entered === undefined || entered.length === 0) continue;
+				const base = watcher.predicates?.get(ws) ?? watcher.query?.where;
+				if (base === undefined) return undefined;
+				const replacements = new Map<RelCond, Cond>();
+				for (const other of rel.nodes) {
+					const keys = other === node
+						? entered
+						: [ ...(rel.keys.get(other)?.get(ws)?.values() ?? []) ];
+					replacements.set(other.cond, relReplacement(other, keys));
+				}
+				const found = await queryByIndex(
+					tx,
+					this.registry,
+					def,
+					watcher.schema,
+					indexes(watcher.entity),
+					{ where: rewriteRels(base, replacements), total: false },
+					ws,
+				);
+				if (found === undefined) return undefined;
+				for (const entry of found.rows as IndexedRow<unknown>[]) {
+					const id = rowId(entry.row.workspaceId, entry.row.key);
+					const prev = scoped.rows.get(id);
+					const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
+							&& prev.row.version === entry.row.version
+						? prev
+						: {
+							id,
+							suffix: suffixOf(watcher, entry.row.workspaceId, entry.row.key),
+							bytes: entry.bytes,
+							row: entry.row as Row<unknown>,
+						};
+					scoped.rows.set(id, row);
+					out.set(id, row);
+				}
+			}
+		}
+		return out;
+	}
+
+	/**
+	 * Asserts a maintained membership still equals what a pre-pass would find.
+	 * Only reachable under debugVerifyTouches.
+	 *
+	 * The counterpart of verifyMatches for the half of a rel watcher's state
+	 * that no scan of its own entity can check: a membership updated from the
+	 * rows a commit named is only right if every commit that moved a target row
+	 * named it, and a membership that is quietly wrong still produces an
+	 * ordinary-looking result.
+	 */
+	private async verifyRelKeys(tx: KVRead, watcher: Watcher): Promise<void> {
+		const rel = watcher.rel;
+		if (rel?.keys === undefined) return;
+		const want = await computeRelKeys(
+			tx,
+			this.registry,
+			rel.nodes,
+			readScope(watcher),
+			this.opts.indexes,
+		);
+		if (sameRelKeys(rel.keys, want)) return;
+		const describe = (keys: RelKeys) =>
+			[ ...keys.values() ]
+				.map((perWs) =>
+					[ ...perWs ].map(([ ws, keyed ]) => `${ws}:[${[ ...keyed.keys() ].join(', ')}]`).join(' ')
+				)
+				.join(' | ');
+		throw new Error(
+			`maintained rel membership diverged for ${watcher.entity}: \n`
+				+ `  held: ${describe(rel.keys)}\n`
+				+ `  pass: ${describe(want)}\n`
+				+ 'A commit changed a target row without naming it (see TouchSet).',
+		);
 	}
 }
 
@@ -1402,7 +1733,11 @@ function forcedEntries(watcher: KeyWatcher): [string, ResultRow | undefined][] {
  * name: whether a row matched before is what the match set already holds, and
  * where it sat is a binary search away.
  */
-function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
+function applyDelta(
+	watcher: Watcher,
+	delta: ScopeDelta,
+	recheck?: { has(id: string): boolean },
+): number {
 	if (delta.rebuild) {
 		watcher.matches = buildMatches(watcher, delta.rows);
 		watcher.pending = 'reset';
@@ -1415,8 +1750,10 @@ function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
 	let from = Infinity;
 	for (const [ id, next ] of delta.changed) {
 		const prev = matches.byId.get(id);
-		// The same object means the same bytes, version and position.
-		if (prev !== undefined && prev === next) continue;
+		// The same object means the same bytes, version and position — unless the
+		// caller says this row's verdict may have moved without its bytes, which
+		// is what a membership move does to a row it reaches.
+		if (prev !== undefined && prev === next && recheck?.has(id) !== true) continue;
 		const admitted = next !== undefined && admits(watcher, next);
 		if (prev === undefined && !admitted) continue;
 		let removedAt = -1;
@@ -1450,6 +1787,20 @@ function applyDelta(watcher: Watcher, delta: ScopeDelta): number {
 		if (insertedAt >= 0) record(watcher, { op: 'insert', index: insertedAt, row: next!.row });
 	}
 	return from;
+}
+
+/**
+ * The commit's own changed rows over the ones a membership move reached. The
+ * commit wins where both name a row: both were read in this transaction, and
+ * the one that names it read it because it changed.
+ */
+function mergeChanged(
+	changed: ReadonlyMap<string, ResultRow | undefined>,
+	reached: ReadonlyMap<string, ResultRow | undefined>,
+): Map<string, ResultRow | undefined> {
+	const out = new Map(reached);
+	for (const [ id, row ] of changed) out.set(id, row);
+	return out;
 }
 
 /**
@@ -1583,6 +1934,42 @@ function touchesInclude(watcher: Reach, pairs: readonly TouchedPair[]): boolean 
 	if (watcher.include === undefined) return false;
 	for (const t of pairs) {
 		if (t.entity === watcher.entity || !watcher.reaches.has(t.entity)) continue;
+		if (inScope(watcher, t.workspaceId)) return true;
+	}
+	return false;
+}
+
+/**
+ * The rows of one target entity a commit named, inside the watcher's scope, or
+ * undefined when a pair reached it without naming its rows — which is the
+ * whole set as far as anything downstream can tell, so the caller has to ask
+ * the entity rather than update from a list.
+ */
+function touchedTargets(
+	watcher: Watcher,
+	entity: string,
+	pairs: readonly TouchedPair[],
+): TouchedTarget[] | undefined {
+	const out: TouchedTarget[] = [];
+	for (const pair of pairs) {
+		if (pair.entity !== entity || !inScope(watcher, pair.workspaceId)) continue;
+		if (pair.keys === undefined) return undefined;
+		for (const key of pair.keys) out.push({ workspaceId: pair.workspaceId, key });
+	}
+	return out;
+}
+
+/**
+ * Whether a commit touched a target entity of a reference the watcher's query
+ * crosses. Unlike touchesInclude the watcher's own entity is NOT excluded: a
+ * self-reference makes the base entity its own target, and a commit to it
+ * moves the membership keys exactly like any other target commit.
+ */
+function touchesRel(watcher: Watcher, pairs: readonly TouchedPair[]): boolean {
+	const rel = watcher.rel;
+	if (rel === undefined) return false;
+	for (const t of pairs) {
+		if (!rel.targets.has(t.entity)) continue;
 		if (inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
@@ -1731,10 +2118,18 @@ function inScope(
 
 /**
  * The predicate one workspace's rows are tested against: the watcher's own,
- * unless it carries one chosen per workspace.
+ * unless it carries one chosen per workspace — and, for a query crossing
+ * references, that base predicate rewritten row-local with the workspace's
+ * membership keys from the last pre-pass (memoized until the keys move).
  */
 function whereFor(watcher: Watcher, workspaceId: string): Cond | undefined {
-	return watcher.predicates?.get(workspaceId) ?? watcher.query?.where;
+	const base = watcher.predicates?.get(workspaceId) ?? watcher.query?.where;
+	const rel = watcher.rel;
+	if (rel === undefined || base === undefined) return base;
+	if (!rel.whereByWs.has(workspaceId)) {
+		rel.whereByWs.set(workspaceId, rewriteWithKeys(base, rel.keys ?? new Map(), workspaceId));
+	}
+	return rel.whereByWs.get(workspaceId);
 }
 
 /** Identity of a row inside one scan scope. */

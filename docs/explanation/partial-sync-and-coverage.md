@@ -130,10 +130,15 @@ So every result array carries a `coverage` report:
 
 ```ts
 if (!rows.coverage.complete) {
-	// bounds: ('unsubscribed' | 'predicate' | 'window' | 'hydrating')[],
+	// bounds: ('unsubscribed' | 'predicate' | 'window' | 'hydrating' | 'relation')[],
 	// plus limit for a window
 }
 ```
+
+`relation` is the cross-entity case: a query whose predicate crosses a
+reference (`matches()`) answers from the target rows the store holds, and a
+holder whose target never synced reads as a non-match. See
+[relational queries](relational-queries.md) for the rule that clears it.
 
 `coverage.complete` is true only when the local store **provably** holds every
 row of the entity.

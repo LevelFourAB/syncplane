@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating. A path segment that follows a MAP field is the entry KEY, not a field name — the same convention an lww field-mask path uses, so there is one rule rather than two. Because a map entry has explicit presence, a query that names one variant of an app-defined oneof value simply reads as NOT FOUND for a row whose entry holds a different variant: the condition is false and the ordering ranks it last, and no cross-variant comparison ever has to be defined. That is what lets the value type be app-defined rather than an engine-canonical one.",
+	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating. A path segment that follows a MAP field is the entry KEY, not a field name — the same convention an lww field-mask path uses, so there is one rule rather than two. Because a map entry has explicit presence, a query that names one variant of an app-defined oneof value simply reads as NOT FOUND for a row whose entry holds a different variant: the condition is false and the ordering ranks it last, and no cross-variant comparison ever has to be defined. That is what lets the value type be app-defined rather than an engine-canonical one. The relatedCases pin the rel condition (`matches`, the one-hop semi-join): each carries a `context` of target rows per entity, and both harnesses must produce `want` twice — once by the scan-level DEFINITION (per row, per stub, derive the target key, look it up in the context, evaluate the inner condition), and once by the TWO-PHASE REWRITE each engine actually runs (pre-pass over the context, then the membership test on the ref stubs). A target missing from the context is an orphan, which is also what a tombstoned target looks like to the evaluator.",
 	"evalCases": [
 		{
 			"name": "eq string match",
@@ -5125,6 +5125,714 @@
 					}
 				}
 			}
+		},
+		{
+			"name": "rel over a non-reference field",
+			"cond": {
+				"rel": {
+					"path": [
+						"label"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "x"
+							}
+						}
+					}
+				}
+			}
+		},
+		{
+			"name": "rel nested inside any()",
+			"type": "issue",
+			"cond": {
+				"exists": {
+					"path": [
+						"blocked_by"
+					],
+					"cond": {
+						"rel": {
+							"path": [
+								"assignee"
+							],
+							"cond": {
+								"cmp": {
+									"path": [
+										"name"
+									],
+									"op": "CMP_OP_EQ",
+									"value": {
+										"stringValue": "x"
+									}
+								}
+							}
+						}
+					}
+				}
+			}
+		}
+	],
+	"relatedCases": [
+		{
+			"name": "rel to-one matches when the target satisfies the condition",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"assignee": {
+							"id": "u2"
+						}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"assignee"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Maya"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"i1"
+			]
+		},
+		{
+			"name": "rel unset to-one ref is false however permissive the inner condition",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i3",
+					"row": {
+						"id": "i3"
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"assignee"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"id"
+							],
+							"op": "STR_OP_STARTS_WITH",
+							"value": ""
+						}
+					}
+				}
+			},
+			"want": [
+				"i1"
+			]
+		},
+		{
+			"name": "rel orphaned stub is false; a deleted target is simply absent",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i4",
+					"row": {
+						"id": "i4",
+						"assignee": {
+							"id": "ghost"
+						}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"assignee"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"id"
+							],
+							"op": "STR_OP_STARTS_WITH",
+							"value": ""
+						}
+					}
+				}
+			},
+			"want": []
+		},
+		{
+			"name": "rel repeated ref matches when SOME target satisfies the condition",
+			"type": "issue",
+			"context": {
+				"issue": [
+					{
+						"id": "b1",
+						"state": "open"
+					},
+					{
+						"id": "b2",
+						"state": "done"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i5",
+					"row": {
+						"id": "i5",
+						"blockedBy": [
+							{
+								"id": "b1"
+							},
+							{
+								"id": "b2"
+							}
+						]
+					}
+				},
+				{
+					"key": "i6",
+					"row": {
+						"id": "i6",
+						"blockedBy": [
+							{
+								"id": "b2"
+							}
+						]
+					}
+				},
+				{
+					"key": "i7",
+					"row": {
+						"id": "i7"
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"blocked_by"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"state"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "open"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"i5"
+			]
+		},
+		{
+			"name": "rel repeated ref with duplicate stubs still matches",
+			"type": "issue",
+			"context": {
+				"issue": [
+					{
+						"id": "b1",
+						"state": "open"
+					},
+					{
+						"id": "b2",
+						"state": "done"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i8",
+					"row": {
+						"id": "i8",
+						"blockedBy": [
+							{
+								"id": "b1"
+							},
+							{
+								"id": "b1"
+							}
+						]
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"blocked_by"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"state"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "open"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"i8"
+			]
+		},
+		{
+			"name": "rel composite-key target compares whole tuples, not single fields",
+			"type": "issue",
+			"context": {
+				"pair": [
+					{
+						"ns": "a",
+						"id": "p1",
+						"label": "keep"
+					},
+					{
+						"ns": "b",
+						"id": "p1",
+						"label": "other"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"pair": {
+							"ns": "a",
+							"id": "p1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"pair": {
+							"ns": "b",
+							"id": "p1"
+						}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"pair"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"label"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "keep"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"i1"
+			]
+		},
+		{
+			"name": "rel repeated composite-key ref compares whole tuples per element",
+			"context": {
+				"pair": [
+					{
+						"ns": "a",
+						"id": "p1",
+						"label": "keep"
+					},
+					{
+						"ns": "b",
+						"id": "p1",
+						"label": "other"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "w1",
+					"row": {
+						"id": "w1",
+						"refs": [
+							{
+								"ns": "a",
+								"id": "p1"
+							}
+						]
+					}
+				},
+				{
+					"key": "w2",
+					"row": {
+						"id": "w2",
+						"refs": [
+							{
+								"ns": "b",
+								"id": "p1"
+							}
+						]
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"refs"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"label"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "keep"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"w1"
+			]
+		},
+		{
+			"name": "rel with an empty membership set matches nothing",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"assignee": {
+							"id": "u2"
+						}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"assignee"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Nobody"
+							}
+						}
+					}
+				}
+			},
+			"want": []
+		},
+		{
+			"name": "not(rel) also admits rows with no reference at all",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"assignee": {
+							"id": "u2"
+						}
+					}
+				},
+				{
+					"key": "i3",
+					"row": {
+						"id": "i3"
+					}
+				}
+			],
+			"cond": {
+				"not": {
+					"rel": {
+						"path": [
+							"assignee"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"name"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "Maya"
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"i2",
+				"i3"
+			]
+		},
+		{
+			"name": "rel composes with row-local conditions under and",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"state": "open",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"state": "done",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"state"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "open"
+								}
+							}
+						},
+						{
+							"rel": {
+								"path": [
+									"assignee"
+								],
+								"cond": {
+									"cmp": {
+										"path": [
+											"name"
+										],
+										"op": "CMP_OP_EQ",
+										"value": {
+											"stringValue": "Maya"
+										}
+									}
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": [
+				"i1"
+			]
+		},
+		{
+			"name": "rel inner condition may address the target key itself",
+			"type": "issue",
+			"context": {
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "u2",
+						"name": "Noor"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "i1",
+					"row": {
+						"id": "i1",
+						"assignee": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "i2",
+					"row": {
+						"id": "i2",
+						"assignee": {
+							"id": "u2"
+						}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"assignee"
+					],
+					"cond": {
+						"in": {
+							"path": [
+								"id"
+							],
+							"values": [
+								{
+									"stringValue": "u2"
+								}
+							]
+						}
+					}
+				}
+			},
+			"want": [
+				"i2"
+			]
 		}
 	]
 }

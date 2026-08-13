@@ -73,12 +73,47 @@ export interface RepeatedScalarOps<E extends Scalar> {
 export interface RepeatedMessageOps<E> {
 	any(cond: (element: MsgRef<E>) => Cond): Cond;
 	isEmpty(): Cond;
+	/**
+	 * One-hop semi-join over a to-many reference: true when SOME referenced
+	 * target row exists and satisfies the condition. See {@link RelOps.matches}
+	 * for the contract; on a repeated field that is not a reference it throws
+	 * at query time, like `any()` on a non-list.
+	 */
+	matches(cond: (target: MsgRef<E>) => Cond): Cond;
 }
 
 /** Bytes and singular message fields. */
 export interface PresenceOps {
 	isSet(): Cond;
 	isNotSet(): Cond;
+}
+
+/**
+ * The one-hop semi-join, offered on forward reference fields: true when at
+ * least one referenced target row EXISTS and satisfies the condition. The
+ * callback's reference is rooted at the target entity's row, so every field of
+ * the target is addressable — unlike drilling into the field itself, which
+ * reaches only the key fields a stored stub carries:
+ *
+ * ```ts
+ * // issues assigned to anyone on this team
+ * db.issue.query({ where: (i) => i.assignee.matches((a) => a.teamId.eq(t)) })
+ * ```
+ *
+ * An unset ref and an orphaned stub contribute nothing, so the condition is
+ * false for them — and `not(matches(…))` therefore also admits rows with no
+ * reference at all. One hop only: a `matches` inside a `matches` or inside an
+ * `any()` throws, as does one on a message field that is not a reference —
+ * reference-ness lives in a proto option the TS types cannot see, so the check
+ * is at query time.
+ *
+ * A local query crossing a reference is answered from the target rows the
+ * store holds; when partial sync bounds those, the result reports the
+ * `'relation'` coverage bound. See the coverage rule in
+ * docs/reference/typescript-client.md.
+ */
+export interface RelOps<T> {
+	matches(cond: (target: MsgRef<T>) => Cond): Cond;
 }
 
 /**
@@ -194,8 +229,10 @@ export type FieldOps<V> = [NonNullable<V>] extends [string] ? StringOps
 	// Whatever is left and is an object is a message. Matching on `object`
 	// rather than on `$typeName` is what makes a sub-message declared with the
 	// TS schema builder drillable too: its inferred row shape is a plain object,
-	// with no generated brand to key off.
-	: [NonNullable<V>] extends [object] ? MsgRef<NonNullable<V>> & PresenceOps
+	// with no generated brand to key off. RelOps rides on every message field
+	// because reference-ness lives in a proto option the TS types cannot see;
+	// matches() on a non-reference throws at query time.
+	: [NonNullable<V>] extends [object] ? MsgRef<NonNullable<V>> & PresenceOps & RelOps<NonNullable<V>>
 	: never; // scalars no branch above claimed: unsupported for now
 
 /**

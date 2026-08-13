@@ -2,7 +2,7 @@ import { create } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import { type Widget, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
-import type { Cond, OrderKey } from '../../src/query/ast.js';
+import type { Cond, OrderKey, Scalar } from '../../src/query/ast.js';
 import { compareRows, evalCond, runQuery } from '../../src/query/evaluate.js';
 import type { Row } from '../../src/read.js';
 
@@ -65,6 +65,38 @@ describe('evalCond', () => {
 		expect(evalCond(w, { kind: 'in', path: [ 'count' ], values: [ 1, 10, 100 ] })).toBe(true);
 		expect(evalCond(w, { kind: 'in', path: [ 'count' ], values: [ 1, 2 ] })).toBe(false);
 		expect(evalCond(w, { kind: 'in', path: [ 'label' ], values: [ 'alpha', 'beta' ] })).toBe(true);
+	});
+
+	// A long value list is answered from a hash of canonical keys rather than
+	// by comparing each value, and a `matches` condition collapses to exactly
+	// such a list — one key per matching target row. The two paths must give
+	// the same answer, including for the number/bigint pairs that compare
+	// across types and the values that equal nothing.
+	it('answers a long in the same way as a short one', () => {
+		const pad = Array.from({ length: 32 }, (_, i) => `pad-${i}`);
+		const cases: { path: string[]; values: Scalar[]; expect: boolean }[] = [
+			{ path: [ 'count' ], values: [ 10 ], expect: true },
+			{ path: [ 'count' ], values: [ 10n ], expect: true },
+			{ path: [ 'count' ], values: [ 11, 10.5 ], expect: false },
+			{ path: [ 'label' ], values: [ 'alpha' ], expect: true },
+			{ path: [ 'label' ], values: [ 'Alpha' ], expect: false },
+			{ path: [ 'count' ], values: [ Number.NaN ], expect: false },
+			{ path: [ 'count' ], values: [ Number.POSITIVE_INFINITY ], expect: false },
+		];
+		for (const c of cases) {
+			expect(evalCond(w, { kind: 'in', path: c.path, values: c.values }))
+				.toBe(c.expect);
+			expect(evalCond(w, { kind: 'in', path: c.path, values: [ ...c.values, ...pad ] }))
+				.toBe(c.expect);
+		}
+		// NaN in the ROW equals nothing, including a NaN in the list. The
+		// hashed path only answers when every value has a key, so the two
+		// lists here are the two paths: `pad` alone builds the set, `pad` plus
+		// a NaN declines it.
+		const nan = { value: Number.NaN };
+		expect(evalCond(nan, { kind: 'in', path: [ 'value' ], values: pad })).toBe(false);
+		expect(evalCond(nan, { kind: 'in', path: [ 'value' ], values: [ Number.NaN, ...pad ] }))
+			.toBe(false);
 	});
 
 	it('handles repeated operators', () => {

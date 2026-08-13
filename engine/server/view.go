@@ -132,7 +132,7 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(v.tx, info, spec, v.visible, v.srv.limits)
+	rows, err := runQuerySpec(v.srv, v.tx, info, spec, v.visible)
 	if err != nil {
 		return err
 	}
@@ -152,12 +152,29 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 // visible is nil for a trusted read, in which case everything live matches.
 // Because it is applied inside queryRows, the page counts only rows the caller
 // may actually see — a filtered row consumes no page budget.
-func runQuerySpec(tx storage.ReadTx, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error), limits Limits) ([]qrow, error) {
+func runQuerySpec(srv *Server, tx storage.ReadTx, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error)) ([]qrow, error) {
+	limits := srv.limits
 	desc := info.msgType.Descriptor()
+	where := spec.Where
+	// A rel condition resolves against the target entity's rows before the
+	// predicate compiles: the pre-pass shares this read's snapshot and its
+	// visibility gate, so crossing the reference reads exactly what a direct
+	// read of the target would.
+	rels, err := query.ExtractRels(desc, where)
+	if err != nil {
+		return nil, fmt.Errorf("server: query %s: %w", info.name, err)
+	}
+	if len(rels) > 0 {
+		replacements, err := srv.resolveRels(tx, rels, visible, nil)
+		if err != nil {
+			return nil, fmt.Errorf("server: query %s: %w", info.name, err)
+		}
+		where = query.RewriteRels(where, replacements)
+	}
 	// engine/query writes for the wire, where an unprefixed message is right;
 	// on this path the same error lands in an app developer's Go call, so it
 	// gets the package prefix and the entity it was compiled against.
-	predicate, err := query.Compile(desc, spec.Where)
+	predicate, err := query.Compile(desc, where)
 	if err != nil {
 		return nil, fmt.Errorf("server: query %s: %w", info.name, err)
 	}

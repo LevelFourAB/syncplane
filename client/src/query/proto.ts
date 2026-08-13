@@ -21,6 +21,7 @@ import {
 	PresentOp,
 	type QueryValue,
 	QueryValueSchema,
+	RelCondSchema,
 	RepCondSchema,
 	RepOp,
 	StrCondSchema,
@@ -152,6 +153,13 @@ export function condToProto(cond: Cond): Condition {
 					value: create(ExistsCondSchema, { path: cond.path, cond: condToProto(cond.cond) }),
 				},
 			});
+		case 'rel':
+			return create(ConditionSchema, {
+				kind: {
+					case: 'rel',
+					value: create(RelCondSchema, { path: cond.path, cond: condToProto(cond.cond) }),
+				},
+			});
 		case 'present':
 			return create(ConditionSchema, {
 				kind: {
@@ -213,6 +221,10 @@ export function condFromProto(cond: Condition): Cond {
 		case 'exists': {
 			if (!kind.value.cond) throw new Error('exists condition needs a condition');
 			return { kind: 'exists', path: kind.value.path, cond: condFromProto(kind.value.cond) };
+		}
+		case 'rel': {
+			if (!kind.value.cond) throw new Error('rel condition needs a condition');
+			return { kind: 'rel', path: kind.value.path, cond: condFromProto(kind.value.cond) };
 		}
 		case 'present': {
 			switch (kind.value.op) {

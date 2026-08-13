@@ -15,6 +15,7 @@ import {
 	type Coverage,
 	CoverageResolver,
 	type PageInfo,
+	type RelCoverageRef,
 	type RowSet,
 	withCoverage,
 } from './coverage.js';
@@ -104,16 +105,22 @@ import {
 } from './query/cursor.js';
 import { assertSameResult, type IndexReport, queryByIndex } from './query/execute.js';
 import {
+	collectRels,
 	compileByWorkspace,
 	type CompiledQuery,
 	compileQuery,
+	computeRelKeys,
 	type Cond,
 	evalCond,
+	hasRel,
 	isWorkspaceQuery,
 	type OrderKey,
 	type PageWindow,
 	type Query,
 	type QueryRef,
+	type RelKeys,
+	type RelNode,
+	rewriteWithKeys,
 	runQueryPage,
 	type TotalOf,
 	type WorkspaceQuery,
@@ -2002,7 +2009,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.hubPromise ??= (async () => {
 			const hub = new WatcherHub(await this.kv(), this.entityRegistry, this.kvMutex, {
 				debugVerifyTouches: this.opts.debugVerifyTouches,
-				coverageOf: (entity, workspaceId) => this.coverage.coverageOf(entity, workspaceId),
+				coverageOf: (entity, scope, rels) => this.coverage.coverageOf(entity, scope, rels),
 				indexes: (entity) => this.indexes.for(entity),
 				onRead: (event) => this.emit(event),
 			});
@@ -2358,10 +2365,21 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// The predicate and the window ordering go through the same
 			// compile → prepare → wire-path pipeline a query does, so a
 			// subscription and the equivalent query agree on what they name.
-			const wire = toWirePaths(
+			const prepared = prepareQuery(
 				spec.schema,
-				prepareQuery(spec.schema, compileQuery({ where: spec.where, orderBy: spec.orderBy })),
+				compileQuery({ where: spec.where, orderBy: spec.orderBy }),
 			);
+			// A subscription predicate is evaluated against rows as they change,
+			// where a semi-join's membership set has no single moment to be
+			// computed at; scope the base entity row-locally and use `follow` to
+			// bring the targets along.
+			if (hasRel(prepared.where)) {
+				throw new Error(
+					`subscription predicate for "${def.name}" uses matches(); a subscription scopes `
+						+ 'rows by their own fields — follow the reference instead',
+				);
+			}
+			const wire = toWirePaths(spec.schema, prepared);
 			return create(SubscriptionSchema, {
 				entity: def.name,
 				predicate: wire.where ? condToProto(wire.where) : undefined,
@@ -3029,6 +3047,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					+ '— has no counterpart for',
 			);
 		}
+		// References the query crosses (`matches`), from the shared predicate and
+		// every per-workspace one. Their two-phase rewrite runs inside the read
+		// section below, so the membership sets and the rows they are tested
+		// against are one consistent view.
+		const relNodes = [
+			...collectRels(schema, compiled.where),
+			...(named?.predicates
+				? [ ...named.predicates.values() ].flatMap((where) => collectRels(schema, where))
+				: []),
+		];
 		const kv = await this.kv();
 		const report: IndexReport = { candidates: 0 };
 		const started = performance.now();
@@ -3037,20 +3065,54 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			entered = performance.now();
 			const tx = await kv.read();
 			try {
+				// The effective predicate per workspace: the base one, with each rel
+				// node collapsed to that workspace's membership test. Undefined when
+				// the query is row-local, which keeps the zero-cost path unchanged.
+				const relWhere = relNodes.length === 0 ? undefined : relWhereFor(
+					await computeRelKeys(
+						tx,
+						this.entityRegistry,
+						relNodes,
+						scanned,
+						(entity) => this.indexes.for(entity),
+					),
+					(ws) => named?.predicates?.get(ws) ?? compiled.where,
+				);
+				const effective: CompiledQuery = relWhere === undefined
+					? compiled
+					: workspaceId !== undefined && named === undefined
+					? { ...compiled, where: relWhere(workspaceId) }
+					: { ...compiled, where: undefined };
+				const effNamed = relWhere === undefined || named === undefined ? named : {
+					workspaces: named.workspaces,
+					predicates: new Map(
+						named.workspaces.map((ws): [string, Cond] => [ ws, relWhere(ws)! ]),
+					),
+				};
 				// The definition of the result. A per-workspace predicate is applied
 				// before it rather than inside it — the same set, since runQueryPage
 				// filters first — leaving one query for the one order it has to be in.
 				const scan = async () => {
 					const rows = await scanDecoded(tx, this.entityRegistry, def, schema, scanned);
-					return runQueryPage(admittedIn(named, rows, schema), compiled, schema, window);
+					// A rel query spanning every workspace has a predicate per
+					// workspace the store happens to hold, which no NamedWorkspaces
+					// can carry; each row is tested under its own workspace's.
+					const admitted = relWhere !== undefined && effNamed === undefined
+							&& workspaceId === undefined
+						? rows.filter((r) => {
+							const where = relWhere(r.workspaceId);
+							return where === undefined || evalCond(r.value, where, schema);
+						})
+						: admittedIn(effNamed, rows, schema);
+					return runQueryPage(admitted, effective, schema, window);
 				};
 				// An index narrows which rows are read; it never changes which
 				// match, so a decline here is not a fallback in the apologetic
 				// sense — the scan above IS the definition, and the index has to
 				// reproduce it exactly or decline.
-				const found = named === undefined
-					? await this.pageByIndex(tx, def, schema, compiled, workspaceId, window, report)
-					: await this.pageByIndexLegs(tx, def, schema, compiled, named, report);
+				const found = effNamed === undefined
+					? await this.pageByIndex(tx, def, schema, effective, workspaceId, window, report)
+					: await this.pageByIndexLegs(tx, def, schema, effective, effNamed, report);
 				if (found === undefined) return await scan();
 				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
 				// This is the same net the watch hub uses for its maintained
@@ -3075,9 +3137,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				waitMs: entered - started,
 			}, report),
 		);
-		// Coverage is the BASE entity's: a query answers from what synced, and
-		// hydration only decorates the rows it found.
-		const coverage = this.coverage.coverageOf(def.name, scanned);
+		// Coverage is the BASE entity's — a query answers from what synced, and
+		// hydration only decorates the rows it found — plus the relation rule
+		// for each reference the predicate crossed.
+		const coverage = this.coverage.coverageOf(
+			def.name,
+			scanned,
+			relCoverageRefs(this.entityRegistry, relNodes),
+		);
 		const info = pageInfoOf(cursors, def.name, page);
 		if (!opts?.include) {
 			return withCoverage(page.rows, coverage, info) as RowSet<MessageShape<D>, TotalOf<Q>>;
@@ -4135,6 +4202,42 @@ export function readScopeOf<M>(
 function scopedWorkspace(scope: ReadScope): string | undefined {
 	if (typeof scope !== 'object') return scope;
 	return scope.workspaces.length === 1 ? scope.workspaces[0] : undefined;
+}
+
+/**
+ * The effective-predicate resolver of a read whose query crosses references:
+ * given the pre-pass key sets, returns each workspace's base predicate with
+ * every rel node collapsed to that workspace's membership test, memoized per
+ * workspace.
+ */
+function relWhereFor(
+	keys: RelKeys,
+	baseOf: (workspaceId: string) => Cond | undefined,
+): (workspaceId: string) => Cond | undefined {
+	const memo = new Map<string, Cond | undefined>();
+	return (workspaceId) => {
+		if (memo.has(workspaceId)) return memo.get(workspaceId);
+		const base = baseOf(workspaceId);
+		const where = base === undefined ? undefined : rewriteWithKeys(base, keys, workspaceId);
+		memo.set(workspaceId, where);
+		return where;
+	};
+}
+
+/**
+ * The crossed references of a read, in the form the coverage rule consumes:
+ * target entity names, plus the ref field's localName for a top-level path —
+ * the name a subscription's follow spec would use.
+ */
+function relCoverageRefs(
+	registry: EntityRegistry,
+	nodes: readonly RelNode[],
+): RelCoverageRef[] | undefined {
+	if (nodes.length === 0) return undefined;
+	return nodes.map((node) => ({
+		targetEntity: registry.bySchema(node.targetSchema).name,
+		...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+	}));
 }
 
 /**

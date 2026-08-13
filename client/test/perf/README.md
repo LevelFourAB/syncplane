@@ -31,6 +31,7 @@ mislabelled number is worse than a missing one.
 | `05-incremental`    | Catching up, realtime latency, rebase over pending writes     |
 | `05b-live-queries`  | Catch-up cost at 0/10/50 open watches, watch-observed latency |
 | `05c-writes`        | Per-write local latency: patch, put, patch with watches open  |
+| `05d-rel-watches`   | Watches whose query crosses a reference, over target commits  |
 | `06-resilience`     | Falling behind the GC horizon, and what a second tab costs    |
 | `07-deletion-churn` | Applying 2000 deletions, and the store they leave behind      |
 
@@ -39,7 +40,8 @@ reads the corpus, so it measures it in exactly the state the seeder left it
 (`04b` writes, but offline into a fresh account it then discards — nothing
 reaches the server). `05` and its siblings write, and `06` deletes rows and
 advances the tombstone horizon, which is why `07` churns only rows it inserted
-itself.
+itself. `05d` rewrites issue states, so it works a range in the middle of the id
+space rather than the newest end the other write specs share.
 
 `02-reads` waits for the background index build before measuring — a bootstrap
 installs its snapshot unindexed, and reads taken while the build runs price the

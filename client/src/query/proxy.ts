@@ -41,6 +41,16 @@ OPERATORS.any = (path) => (build: (element: unknown) => Cond): Cond => ({
 	path,
 	cond: build(fieldProxy([])),
 });
+// The one-hop semi-join over a forward reference field. The callback's
+// reference is rooted at the TARGET row — a fresh empty root, exactly as any()
+// scopes an element — so the sub-condition records paths relative to it.
+// Distinct from any() on the same field: any() scopes a STUB, whose key fields
+// are all a stored ref carries, while matches() reaches the live target row.
+OPERATORS.matches = (path) => (build: (target: unknown) => Cond): Cond => ({
+	kind: 'rel',
+	path,
+	cond: build(fieldProxy([])),
+});
 // One entry of a map. It appends the key as an ordinary path segment, which is
 // exactly what the segment after a map field means to both evaluators — an
 // explicit accessor rather than property access so that a key colliding with an

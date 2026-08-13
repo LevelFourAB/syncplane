@@ -128,6 +128,28 @@ message ExistsCond {
 	Condition cond = 2;
 }
 
+// RelCond matches a row when at least one row referenced through the ref
+// field at `path` exists and satisfies `cond` — a one-hop semi-join. `path`
+// names a forward reference field of the row's entity (singular or repeated);
+// `cond`'s paths are relative to the TARGET entity's row, the same scoping
+// precedent ExistsCond set. An unset to-one ref, an orphaned stub and a
+// tombstoned target all contribute nothing, so the condition is false for
+// them.
+//
+// There is no target-entity field: both sides derive the target from their
+// ref graph, so the wire cannot claim a target the schema does not give the
+// field. A `rel` whose path is not a reference field is rejected in
+// validation, like every other malformed path. Nesting a rel inside a rel or
+// inside an exists is rejected too — one hop, scoped to the row.
+//
+// Both evaluators run it as a two-phase rewrite: the inner condition selects
+// the matching target keys, and the node collapses to a membership test on
+// the stored ref stubs. The rewrite never appears on the wire.
+message RelCond {
+	repeated string path = 1;
+	Condition cond = 2;
+}
+
 message ConditionList {
 	repeated Condition conds = 1;
 }
@@ -143,6 +165,7 @@ message Condition {
 		ConditionList or = 7;
 		Condition not = 8;
 		ExistsCond exists = 9;
+		RelCond rel = 10;
 	}
 }
 

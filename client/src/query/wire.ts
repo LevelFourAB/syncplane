@@ -1,6 +1,6 @@
 import { type DescField, type DescMessage, type DescOneof, ScalarType } from '@bufbuild/protobuf';
 
-import { isTextField, refKeyFields } from '../mutations.js';
+import { isTextField, refKeyFields, refTarget } from '../mutations.js';
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
 
 /**
@@ -40,7 +40,7 @@ export function toWirePaths(schema: DescMessage, compiled: CompiledQuery): Compi
  * without sharing an implementation.
  */
 type CondScope =
-	| { kind: 'message'; schema: DescMessage }
+	| { kind: 'message'; schema: DescMessage; nested?: 'element' | 'relation' }
 	| { kind: 'entry'; map: MapField };
 
 /** A map field, narrowed. */
@@ -73,6 +73,18 @@ function translateCond(scope: CondScope, cond: Cond): Cond {
 				);
 			}
 			return { kind: 'exists', path: leaf.path, cond: translateCond(element, cond.cond) };
+		}
+		case 'rel': {
+			// The sub-condition's paths are relative to the TARGET row, so they
+			// translate against the target schema rather than this one.
+			const leaf = translatePathLeaf(scope, cond.path);
+			const target = refTarget(leaf.field);
+			if (!target) {
+				throw new Error(
+					`query path ${cond.path.join('.')}: matches() needs a reference field`,
+				);
+			}
+			return { kind: 'rel', path: leaf.path, cond: translateCond(messageScope(target), cond.cond) };
 		}
 		case 'and':
 		case 'or':
@@ -214,6 +226,34 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 			}
 			return { kind: 'exists', path: leaf.path, cond: prepareCond(element, cond.cond) };
 		}
+		case 'rel': {
+			if (scope.kind === 'entry' || scope.nested === 'element') {
+				throw new Error(
+					`query path ${cond.path.join('.')}: matches() cannot nest inside any(); `
+						+ 'the semi-join is scoped to the row',
+				);
+			}
+			if (scope.nested === 'relation') {
+				throw new Error(
+					`query path ${cond.path.join('.')}: matches() cannot nest inside matches(); `
+						+ 'the semi-join is one hop',
+				);
+			}
+			const leaf = resolveInScope(scope, cond.path, false);
+			const target = leaf.keyed || leaf.entryKey ? undefined : refTarget(leaf.field);
+			if (!target || refKeyFields(leaf.field).length === 0) {
+				throw new Error(
+					`query path ${cond.path.join('.')}: matches() needs a reference field, got ${
+						describeLeaf(leaf)
+					}; a message field is only a reference when its target declares (syncplane.v1.entity)`,
+				);
+			}
+			return {
+				kind: 'rel',
+				path: leaf.path,
+				cond: prepareCond({ kind: 'message', schema: target, nested: 'relation' }, cond.cond),
+			};
+		}
 		case 'present':
 			// Presence works on every leaf, so nothing to check.
 			return { ...cond, path: resolveInScope(scope, cond.path, false).path };
@@ -295,7 +335,10 @@ function resolveInScope(scope: CondScope, path: Path, appendKey: boolean): Resol
  */
 function elementScopeOf(field: DescField, leaf?: LeafRef): CondScope | undefined {
 	if (field.fieldKind === 'list' && field.listKind === 'message') {
-		return messageScope(field.message);
+		// Marked as nested so a rel inside is rejected: a semi-join is scoped
+		// to the row, and an element gives its target derivation nothing to
+		// hang off.
+		return { kind: 'message', schema: field.message, nested: 'element' };
 	}
 	if (field.fieldKind === 'map' && !leaf?.keyed && !leaf?.entryKey) {
 		return { kind: 'entry', map: field };

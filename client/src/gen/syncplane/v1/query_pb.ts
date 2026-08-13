@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/query.proto.
  */
 export const file_syncplane_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iNwoNQ29uZGl0aW9uTGlzdBImCgVjb25kcxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iggMKCUNvbmRpdGlvbhIkCgNjbXAYASABKAsyFS5zeW5jcGxhbmUudjEuQ21wQ29uZEgAEiIKAmluGAIgASgLMhQuc3luY3BsYW5lLnYxLkluQ29uZEgAEiQKA3N0chgDIAEoCzIVLnN5bmNwbGFuZS52MS5TdHJDb25kSAASJAoDcmVwGAQgASgLMhUuc3luY3BsYW5lLnYxLlJlcENvbmRIABIsCgdwcmVzZW50GAUgASgLMhkuc3luY3BsYW5lLnYxLlByZXNlbnRDb25kSAASKgoDYW5kGAYgASgLMhsuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkxpc3RIABIpCgJvchgHIAEoCzIbLnN5bmNwbGFuZS52MS5Db25kaXRpb25MaXN0SAASJgoDbm90GAggASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkgAEioKBmV4aXN0cxgJIAEoCzIYLnN5bmNwbGFuZS52MS5FeGlzdHNDb25kSABCBgoEa2luZCI+CghPcmRlcktleRIMCgRwYXRoGAEgAygJEiQKA2RpchgCIAEoDjIXLnN5bmNwbGFuZS52MS5EaXJlY3Rpb24qfAoFQ21wT3ASFgoSQ01QX09QX1VOU1BFQ0lGSUVEEAASDQoJQ01QX09QX0VREAESDgoKQ01QX09QX05FURACEg0KCUNNUF9PUF9HVBADEg4KCkNNUF9PUF9HVEUQBBINCglDTVBfT1BfTFQQBRIOCgpDTVBfT1BfTFRFEAYqYgoFU3RyT3ASFgoSU1RSX09QX1VOU1BFQ0lGSUVEEAASFgoSU1RSX09QX1NUQVJUU19XSVRIEAESFAoQU1RSX09QX0VORFNfV0lUSBACEhMKD1NUUl9PUF9DT05UQUlOUxADKmwKBVJlcE9wEhYKElJFUF9PUF9VTlNQRUNJRklFRBAAEg4KClJFUF9PUF9IQVMQARISCg5SRVBfT1BfSEFTX0FOWRACEhIKDlJFUF9PUF9IQVNfQUxMEAMSEwoPUkVQX09QX0lTX0VNUFRZEAQqWQoJUHJlc2VudE9wEhoKFlBSRVNFTlRfT1BfVU5TUEVDSUZJRUQQABIVChFQUkVTRU5UX09QX0lTX1NFVBABEhkKFVBSRVNFTlRfT1BfSVNfTk9UX1NFVBACKk0KCURpcmVjdGlvbhIZChVESVJFQ1RJT05fVU5TUEVDSUZJRUQQABIRCg1ESVJFQ1RJT05fQVNDEAESEgoORElSRUNUSU9OX0RFU0MQAkJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z");
+  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIjcKDUNvbmRpdGlvbkxpc3QSJgoFY29uZHMYASADKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIqgDCglDb25kaXRpb24SJAoDY21wGAEgASgLMhUuc3luY3BsYW5lLnYxLkNtcENvbmRIABIiCgJpbhgCIAEoCzIULnN5bmNwbGFuZS52MS5JbkNvbmRIABIkCgNzdHIYAyABKAsyFS5zeW5jcGxhbmUudjEuU3RyQ29uZEgAEiQKA3JlcBgEIAEoCzIVLnN5bmNwbGFuZS52MS5SZXBDb25kSAASLAoHcHJlc2VudBgFIAEoCzIZLnN5bmNwbGFuZS52MS5QcmVzZW50Q29uZEgAEioKA2FuZBgGIAEoCzIbLnN5bmNwbGFuZS52MS5Db25kaXRpb25MaXN0SAASKQoCb3IYByABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEiYKA25vdBgIIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb25IABIqCgZleGlzdHMYCSABKAsyGC5zeW5jcGxhbmUudjEuRXhpc3RzQ29uZEgAEiQKA3JlbBgKIAEoCzIVLnN5bmNwbGFuZS52MS5SZWxDb25kSABCBgoEa2luZCI+CghPcmRlcktleRIMCgRwYXRoGAEgAygJEiQKA2RpchgCIAEoDjIXLnN5bmNwbGFuZS52MS5EaXJlY3Rpb24qfAoFQ21wT3ASFgoSQ01QX09QX1VOU1BFQ0lGSUVEEAASDQoJQ01QX09QX0VREAESDgoKQ01QX09QX05FURACEg0KCUNNUF9PUF9HVBADEg4KCkNNUF9PUF9HVEUQBBINCglDTVBfT1BfTFQQBRIOCgpDTVBfT1BfTFRFEAYqYgoFU3RyT3ASFgoSU1RSX09QX1VOU1BFQ0lGSUVEEAASFgoSU1RSX09QX1NUQVJUU19XSVRIEAESFAoQU1RSX09QX0VORFNfV0lUSBACEhMKD1NUUl9PUF9DT05UQUlOUxADKmwKBVJlcE9wEhYKElJFUF9PUF9VTlNQRUNJRklFRBAAEg4KClJFUF9PUF9IQVMQARISCg5SRVBfT1BfSEFTX0FOWRACEhIKDlJFUF9PUF9IQVNfQUxMEAMSEwoPUkVQX09QX0lTX0VNUFRZEAQqWQoJUHJlc2VudE9wEhoKFlBSRVNFTlRfT1BfVU5TUEVDSUZJRUQQABIVChFQUkVTRU5UX09QX0lTX1NFVBABEhkKFVBSRVNFTlRfT1BfSVNfTk9UX1NFVBACKk0KCURpcmVjdGlvbhIZChVESVJFQ1RJT05fVU5TUEVDSUZJRUQQABIRCg1ESVJFQ1RJT05fQVNDEAESEgoORElSRUNUSU9OX0RFU0MQAkJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z");
 
 /**
  * QueryValue is a scalar literal in a condition. The branch preserves the
@@ -254,6 +254,46 @@ export const ExistsCondSchema: GenMessage<ExistsCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 6);
 
 /**
+ * RelCond matches a row when at least one row referenced through the ref
+ * field at `path` exists and satisfies `cond` — a one-hop semi-join. `path`
+ * names a forward reference field of the row's entity (singular or repeated);
+ * `cond`'s paths are relative to the TARGET entity's row, the same scoping
+ * precedent ExistsCond set. An unset to-one ref, an orphaned stub and a
+ * tombstoned target all contribute nothing, so the condition is false for
+ * them.
+ *
+ * There is no target-entity field: both sides derive the target from their
+ * ref graph, so the wire cannot claim a target the schema does not give the
+ * field. A `rel` whose path is not a reference field is rejected in
+ * validation, like every other malformed path. Nesting a rel inside a rel or
+ * inside an exists is rejected too — one hop, scoped to the row.
+ *
+ * Both evaluators run it as a two-phase rewrite: the inner condition selects
+ * the matching target keys, and the node collapses to a membership test on
+ * the stored ref stubs. The rewrite never appears on the wire.
+ *
+ * @generated from message syncplane.v1.RelCond
+ */
+export type RelCond = Message<"syncplane.v1.RelCond"> & {
+  /**
+   * @generated from field: repeated string path = 1;
+   */
+  path: string[];
+
+  /**
+   * @generated from field: syncplane.v1.Condition cond = 2;
+   */
+  cond?: Condition | undefined;
+};
+
+/**
+ * Describes the message syncplane.v1.RelCond.
+ * Use `create(RelCondSchema)` to create a new message.
+ */
+export const RelCondSchema: GenMessage<RelCond> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_query, 7);
+
+/**
  * @generated from message syncplane.v1.ConditionList
  */
 export type ConditionList = Message<"syncplane.v1.ConditionList"> & {
@@ -268,7 +308,7 @@ export type ConditionList = Message<"syncplane.v1.ConditionList"> & {
  * Use `create(ConditionListSchema)` to create a new message.
  */
 export const ConditionListSchema: GenMessage<ConditionList> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 7);
+  messageDesc(file_syncplane_v1_query, 8);
 
 /**
  * @generated from message syncplane.v1.Condition
@@ -331,6 +371,12 @@ export type Condition = Message<"syncplane.v1.Condition"> & {
      */
     value: ExistsCond;
     case: "exists";
+  } | {
+    /**
+     * @generated from field: syncplane.v1.RelCond rel = 10;
+     */
+    value: RelCond;
+    case: "rel";
   } | { case: undefined; value?: undefined };
 };
 
@@ -339,7 +385,7 @@ export type Condition = Message<"syncplane.v1.Condition"> & {
  * Use `create(ConditionSchema)` to create a new message.
  */
 export const ConditionSchema: GenMessage<Condition> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 8);
+  messageDesc(file_syncplane_v1_query, 9);
 
 /**
  * @generated from message syncplane.v1.OrderKey
@@ -361,7 +407,7 @@ export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
  * Use `create(OrderKeySchema)` to create a new message.
  */
 export const OrderKeySchema: GenMessage<OrderKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 9);
+  messageDesc(file_syncplane_v1_query, 10);
 
 /**
  * @generated from enum syncplane.v1.CmpOp

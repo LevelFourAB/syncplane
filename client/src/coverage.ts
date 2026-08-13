@@ -20,8 +20,29 @@ import type { Row, WorkspaceScope } from './read.js';
  *   anything else changing. This is what tells "no issues" apart from "the
  *   issues have not arrived yet" while a cold client fills up — see
  *   SyncStatus.hydration for the workspace-wide view of the same thing.
+ * - `relation` — the query crosses a reference (`matches`) and the target
+ *   entity's local rows are not provably enough to answer it: a holder row
+ *   whose target never synced evaluates against a missing row and reads as a
+ *   non-match. Absent when the target entity's coverage is complete, or when
+ *   every subscription scoping the queried entity follows the crossed ref
+ *   path — then each locally-held holder's targets are in the follow closure.
  */
-export type CoverageBound = 'unsubscribed' | 'predicate' | 'window' | 'hydrating';
+export type CoverageBound = 'unsubscribed' | 'predicate' | 'window' | 'hydrating' | 'relation';
+
+/**
+ * One reference a query crosses (a `matches` condition), as the coverage rule
+ * needs it: which entity the targets belong to, and — when the ref is a
+ * top-level field — the name a subscription's follow path would call it.
+ */
+export interface RelCoverageRef {
+	targetEntity: string;
+	/**
+	 * The ref field's localName when the rel path is a single segment, the form
+	 * follow-spec segments use. Undefined for a ref nested inside a message,
+	 * which no follow path can name — only complete target coverage covers it.
+	 */
+	refLocalName?: string;
+}
 
 /** What the local store provably holds for one entity. */
 export interface Coverage {
@@ -234,24 +255,61 @@ export class CoverageResolver {
 	 * no scope — across every workspace the client holds. Anything spanning more
 	 * than one is complete only if it is complete in each, and a set naming none
 	 * is complete because it admits nothing.
+	 *
+	 * `rels` names the references the read crosses (a query using `matches`);
+	 * each is checked per workspace and an uncovered one adds the `'relation'`
+	 * bound. Omit for a row-local read.
 	 */
-	coverageOf(entity: string, scope?: WorkspaceScope): Coverage {
+	coverageOf(entity: string, scope?: WorkspaceScope, rels?: readonly RelCoverageRef[]): Coverage {
 		const scopes = this.scopes();
 		if (typeof scope === 'object') {
-			return mergeCoverage([ ...new Set(scope) ].map((ws) => this.coverageOf(entity, ws)));
+			return mergeCoverage([ ...new Set(scope) ].map((ws) => this.coverageOf(entity, ws, rels)));
 		}
 		const workspaceId = scope;
 		if (workspaceId !== undefined) {
 			const subs = scopes.get(workspaceId);
 			const base = subs === undefined ? COMPLETE : coverageOfEntity(subs, entity);
-			return this.hydration?.(workspaceId)?.has(entity) ? hydrating(base) : base;
+			const hydrated = this.hydration?.(workspaceId)?.has(entity) ? hydrating(base) : base;
+			return this.withRelations(hydrated, entity, workspaceId, rels);
 		}
 		return mergeCoverage(
-			[ ...scopes.entries() ].map(([ ws, subs ]) => {
-				const base = coverageOfEntity(subs, entity);
-				return this.hydration?.(ws)?.has(entity) ? hydrating(base) : base;
-			}),
+			[ ...scopes.keys() ].map((ws) => this.coverageOf(entity, ws, rels)),
 		);
+	}
+
+	/**
+	 * Folds the `'relation'` bound into a coverage report when any crossed
+	 * reference is not provably answerable from local target rows in this
+	 * workspace. The limit is dropped with it: a row cap only describes the
+	 * whole answer while a window is the only thing bounding it.
+	 */
+	private withRelations(
+		base: Coverage,
+		entity: string,
+		workspaceId: string,
+		rels: readonly RelCoverageRef[] | undefined,
+	): Coverage {
+		if (rels === undefined || rels.length === 0) return base;
+		if (rels.every((rel) => this.relationCovered(entity, workspaceId, rel))) return base;
+		return { complete: false, bounds: [ ...base.bounds, 'relation' ] };
+	}
+
+	/**
+	 * Whether one crossed reference is provably answerable locally, per the
+	 * rule stated on the `'relation'` bound. An entity the workspace does not
+	 * subscribe to at all passes vacuously — the base result is empty, and its
+	 * own bounds already say why.
+	 */
+	private relationCovered(entity: string, workspaceId: string, rel: RelCoverageRef): boolean {
+		// Targets still downloading answer stubs with rows that are not here
+		// yet, whatever the scope promises.
+		if (this.hydration?.(workspaceId)?.has(rel.targetEntity)) return false;
+		const subs = this.scopes().get(workspaceId);
+		if (subs === undefined) return true;
+		if (coverageOfEntity(subs, rel.targetEntity).complete) return true;
+		if (rel.refLocalName === undefined) return false;
+		const own = subs.filter((s) => s.entity === entity);
+		return own.every((s) => s.follow?.paths.some((p) => p.segments[0] === rel.refLocalName) ?? false);
 	}
 }
 

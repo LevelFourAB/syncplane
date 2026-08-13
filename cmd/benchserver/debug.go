@@ -101,6 +101,12 @@ func tiersHandler() http.Handler {
 //     enter every window that is not already full at a better rank.
 //   - "delete" removes `count` issues from the newest end, which is how a
 //     tombstone reaches a client.
+//   - "flip" rewrites `count` issues' state and priority, alternating by index
+//     between the pair relFlipState/relFlipPriority names and a pair that does
+//     not. A client watching a query whose predicate crosses a reference to
+//     these rows sees its MEMBERSHIP move without any row it holds being
+//     touched — the case "patch" cannot produce, since a title moves no
+//     predicate.
 //
 // Writes go through Mutate as one transaction per batch, so a benchmark that
 // asks for 10,000 changes gets a workspace history it can be behind by.
@@ -165,8 +171,8 @@ func writeHandler(srv *server.Server) http.Handler {
 			// inserted rows past the seeded range, so no tier bound applies.
 			// Not offered for "insert" — inserted keys are allocated here, and a
 			// caller-chosen one could collide with a later allocation.
-			if req.Op != "patch" && req.Op != "delete" {
-				http.Error(w, fmt.Sprintf("first is only valid for patch and delete, not %q", req.Op),
+			if req.Op != "patch" && req.Op != "delete" && req.Op != "flip" {
+				http.Error(w, fmt.Sprintf("first is only valid for patch, delete and flip, not %q", req.Op),
 					http.StatusBadRequest)
 				return
 			}
@@ -175,7 +181,7 @@ func writeHandler(srv *server.Server) http.Handler {
 				return
 			}
 			first = *req.First
-		case req.Op == "patch" || req.Op == "delete":
+		case req.Op == "patch" || req.Op == "delete" || req.Op == "flip":
 			first = tier.Issues - req.Count
 			if first < 0 {
 				http.Error(w, fmt.Sprintf("tier %s holds %d issues, cannot touch %d",
@@ -208,6 +214,15 @@ func writeHandler(srv *server.Server) http.Handler {
 // workspace sequence. Smaller than the seeder's batch: a benchmark measuring
 // catch-up wants a history with many versions in it, not one enormous one.
 const writeBatch = 200
+
+// The state/priority pair "flip" moves issues onto. A benchmark watching a
+// query whose semi-join names this pair is what turns a flip into a membership
+// move; client/test/perf/fixtures.ts spells the same values, and the two must
+// agree or the flip moves nothing the watch can see.
+const (
+	relFlipState    = "review"
+	relFlipPriority = int32(4)
+)
 
 // applyWrites writes `count` issues starting at index `first`; the caller has
 // already decided what that index means for the op it asked for.
@@ -242,6 +257,23 @@ func applyWrites(
 						UpdatedAtMs: touchedAtMs(i),
 						CreatedAtMs: touchedAtMs(i),
 					}); err != nil {
+						return err
+					}
+				case "flip":
+					// Alternating by index so one call moves membership in both
+					// directions: a benchmark that only ever added keys would
+					// never price what a removal costs.
+					state, priority := relFlipState, relFlipPriority
+					if i%2 != 0 {
+						state, priority = "open", int32(1)
+					}
+					msg := &benchv1.Issue{
+						Id:          key,
+						State:       state,
+						Priority:    priority,
+						UpdatedAtMs: touchedAtMs(i),
+					}
+					if err := tx.Patch(msg, []string{"state", "priority", "updated_at_ms"}, nil); err != nil {
 						return err
 					}
 				case "delete":

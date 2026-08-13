@@ -36,7 +36,26 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown entity %q", msg.GetEntity()))
 	}
 	desc := info.msgType.Descriptor()
-	predicate, err := query.Compile(desc, msg.GetPredicate())
+	// A rel condition crosses into another entity, so the predicate resolves in
+	// two phases: validation here at the boundary — the rel nodes themselves via
+	// ExtractRels, everything else by compiling with each rel stubbed out to the
+	// empty membership test it collapses to when nothing matches — and the real
+	// rewrite inside the snapshot below, where the target rows are.
+	rels, err := query.ExtractRels(desc, msg.GetPredicate())
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
+	if err := s.checkRelLimit(rels); err != nil {
+		return nil, err
+	}
+	stubbed := make(map[*syncplanev1.RelCond]*syncplanev1.Condition, len(rels))
+	for _, node := range rels {
+		if _, err := s.relTargetInfo(node); err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+		stubbed[node.Cond] = query.RelReplacement(node, nil)
+	}
+	predicate, err := query.Compile(desc, query.RewriteRels(msg.GetPredicate(), stubbed))
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
@@ -86,6 +105,17 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if _, err := emitter.filterOf(info.name); err != nil {
 		return nil, err
 	}
+	// A rel pre-pass reads the TARGET entities too, under the same rule, so
+	// their filters resolve up front as well.
+	for _, node := range rels {
+		target, err := s.relTargetInfo(node)
+		if err != nil {
+			return nil, connect.NewError(connect.CodeInvalidArgument, err)
+		}
+		if _, err := emitter.filterOf(target.name); err != nil {
+			return nil, err
+		}
+	}
 	// Except for field history, whose records describe OTHER entities' rows and
 	// are governed by those entities' filters rather than their own (see
 	// Server.historyReadable). Warm every one they could name.
@@ -103,8 +133,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
 	err = s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
-		var err error
-		rows, more, err = queryRows(tx, info, predicate, order, pg, func(row storage.Row) (bool, error) {
+		visible := func(row storage.Row) (bool, error) {
 			class, err := emitter.classify(row)
 			if err != nil {
 				return false, err
@@ -116,7 +145,23 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 				return true, nil
 			}
 			return s.historyReadable(tx, emitter, info, row)
-		}, emitter, s.limits)
+		}
+		pred := predicate
+		if len(rels) > 0 {
+			// The pre-pass runs inside the same snapshot as the base scan, so
+			// the membership sets and the rows they are tested against are one
+			// consistent view.
+			replacements, err := s.resolveRels(tx, rels, visible, emitter)
+			if err != nil {
+				return err
+			}
+			pred, err = query.Compile(desc, query.RewriteRels(msg.GetPredicate(), replacements))
+			if err != nil {
+				return err
+			}
+		}
+		var err error
+		rows, more, err = queryRows(tx, info, pred, order, pg, visible, emitter, s.limits)
 		return err
 	})
 	if err != nil {

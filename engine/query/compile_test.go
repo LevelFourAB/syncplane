@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/encoding/protojson"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -73,11 +74,28 @@ type compileErrorCase struct {
 	OrderBy []json.RawMessage `json:"orderBy"`
 }
 
+// relatedCase pins the rel condition (`matches`) against a lookup context of
+// target rows. Both harnesses must produce `want` twice: by the scan-level
+// DEFINITION (per stub, derive the target key, look it up, evaluate the inner
+// condition) and by the TWO-PHASE REWRITE the engines actually run.
+type relatedCase struct {
+	Name    string                       `json:"name"`
+	Type    string                       `json:"type"`
+	Context map[string][]json.RawMessage `json:"context"`
+	Rows    []struct {
+		Key string          `json:"key"`
+		Row json.RawMessage `json:"row"`
+	} `json:"rows"`
+	Cond json.RawMessage `json:"cond"`
+	Want []string        `json:"want"`
+}
+
 type vectorFile struct {
 	EvalCases         []evalCase         `json:"evalCases"`
 	CompareCases      []compareCase      `json:"compareCases"`
 	OrderCases        []orderCase        `json:"orderCases"`
 	CompileErrorCases []compileErrorCase `json:"compileErrorCases"`
+	RelatedCases      []relatedCase      `json:"relatedCases"`
 }
 
 func loadVectors() vectorFile {
@@ -89,7 +107,25 @@ func loadVectors() vectorFile {
 	Expect(v.CompareCases).NotTo(BeEmpty())
 	Expect(v.OrderCases).NotTo(BeEmpty())
 	Expect(v.CompileErrorCases).NotTo(BeEmpty())
+	Expect(v.RelatedCases).NotTo(BeEmpty())
 	return v
+}
+
+// ctxPrototype maps a relatedCase context key (the entity's wire name) to a
+// fresh message of that entity.
+func ctxPrototype(entity string) proto.Message {
+	switch entity {
+	case "user":
+		return &testdatav1.User{}
+	case "project":
+		return &testdatav1.Project{}
+	case "issue":
+		return &testdatav1.Issue{}
+	case "pair":
+		return &testdatav1.Pair{}
+	default:
+		return &testdatav1.Widget{}
+	}
 }
 
 func widgetOf(raw json.RawMessage) *testdatav1.Widget {
@@ -162,6 +198,68 @@ var _ = Describe("Conformance vectors", func() {
 				Expect(sign(got)).To(Equal(tc.Want))
 				// Antisymmetry: swapping the arguments flips the sign.
 				Expect(sign(order.Compare(b.ProtoReflect(), a.ProtoReflect(), tc.KeyB, tc.KeyA))).To(Equal(-tc.Want))
+			})
+		}
+	})
+
+	Describe("Related", func() {
+		for _, tc := range vectors.RelatedCases {
+			It(tc.Name, func() {
+				cond := &syncplanev1.Condition{}
+				Expect(protojson.Unmarshal(tc.Cond, cond)).To(Succeed())
+				rowProto := msgForType(tc.Type)
+				desc := rowProto.ProtoReflect().Descriptor()
+				context := make(map[protoreflect.FullName][]proto.Message)
+				for entity, raws := range tc.Context {
+					for _, raw := range raws {
+						msg := proto.Clone(ctxPrototype(entity))
+						Expect(protojson.Unmarshal(raw, msg)).To(Succeed())
+						name := msg.ProtoReflect().Descriptor().FullName()
+						context[name] = append(context[name], msg)
+					}
+				}
+				rows := make([]proto.Message, len(tc.Rows))
+				for i, r := range tc.Rows {
+					rows[i] = proto.Clone(rowProto)
+					Expect(protojson.Unmarshal(r.Row, rows[i])).To(Succeed())
+				}
+
+				// The two-phase rewrite, exactly as the server runs it: pre-pass
+				// over the context, membership test on the stubs.
+				rels, err := query.ExtractRels(desc, cond)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(rels).NotTo(BeEmpty())
+				replacements := make(map[*syncplanev1.RelCond]*syncplanev1.Condition, len(rels))
+				for _, node := range rels {
+					inner, err := query.Compile(node.Target, node.Cond.GetCond())
+					Expect(err).NotTo(HaveOccurred())
+					var matched [][]*syncplanev1.QueryValue
+					for _, target := range context[node.Target.FullName()] {
+						if inner.Eval(target.ProtoReflect()) {
+							matched = append(matched, query.TargetKeyValues(node, target.ProtoReflect()))
+						}
+					}
+					replacements[node.Cond] = query.RelReplacement(node, matched)
+				}
+				rewritten, err := query.Compile(desc, query.RewriteRels(cond, replacements))
+				Expect(err).NotTo(HaveOccurred())
+				var gotRewrite []string
+				for i, row := range rows {
+					if rewritten.Eval(row.ProtoReflect()) {
+						gotRewrite = append(gotRewrite, tc.Rows[i].Key)
+					}
+				}
+				Expect(gotRewrite).To(Equal(sliceOrNil(tc.Want)), "rewrite")
+
+				// The scan-level definition: per stub, derive the target key,
+				// look the target up, evaluate the inner condition against it.
+				var gotDef []string
+				for i, row := range rows {
+					if evalRelDefinition(desc, cond, row.ProtoReflect(), context) {
+						gotDef = append(gotDef, tc.Rows[i].Key)
+					}
+				}
+				Expect(gotDef).To(Equal(sliceOrNil(tc.Want)), "definition")
 			})
 		}
 	})
@@ -501,6 +599,114 @@ var _ = Describe("CompareStringsUTF16", func() {
 		Expect(query.CompareStringsUTF16("\U0001D11E", "�")).To(Equal(-1))
 	})
 })
+
+// sliceOrNil is the empty-want normalization: an empty JSON array decodes to
+// an empty slice while an accumulating harness leaves nil, and gomega's Equal
+// tells the two apart.
+func sliceOrNil(want []string) []string {
+	if len(want) == 0 {
+		return nil
+	}
+	return want
+}
+
+// evalRelDefinition evaluates a condition holding rel nodes by the scan-level
+// DEFINITION: a rel is answered per stub via a key lookup in the context, and
+// everything row-local compiles and evaluates as usual. Rel nodes only ever sit
+// under and/or/not — validation rejects them anywhere deeper — so the walk
+// mirrors exactly that.
+func evalRelDefinition(
+	desc protoreflect.MessageDescriptor,
+	cond *syncplanev1.Condition,
+	row protoreflect.Message,
+	context map[protoreflect.FullName][]proto.Message,
+) bool {
+	switch kind := cond.GetKind().(type) {
+	case *syncplanev1.Condition_And:
+		for _, sub := range kind.And.GetConds() {
+			if !evalRelDefinition(desc, sub, row, context) {
+				return false
+			}
+		}
+		return true
+	case *syncplanev1.Condition_Or:
+		for _, sub := range kind.Or.GetConds() {
+			if evalRelDefinition(desc, sub, row, context) {
+				return true
+			}
+		}
+		return false
+	case *syncplanev1.Condition_Not:
+		return !evalRelDefinition(desc, kind.Not, row, context)
+	case *syncplanev1.Condition_Rel:
+		nodes, err := query.ExtractRels(desc, cond)
+		Expect(err).NotTo(HaveOccurred())
+		node := nodes[0]
+		inner, err := query.Compile(node.Target, node.Cond.GetCond())
+		Expect(err).NotTo(HaveOccurred())
+		for _, stub := range stubsAt(row, kind.Rel.GetPath()) {
+			target := lookupByKey(context[node.Target.FullName()], node.KeyFields, stub)
+			if target != nil && inner.Eval(target.ProtoReflect()) {
+				return true
+			}
+		}
+		return false
+	default:
+		compiled, err := query.Compile(desc, cond)
+		Expect(err).NotTo(HaveOccurred())
+		return compiled.Eval(row)
+	}
+}
+
+// stubsAt resolves the ref stubs a rel path names on one row: the stored stub
+// of a set to-one ref, every element of a repeated one, nothing when unset.
+func stubsAt(row protoreflect.Message, path []string) []protoreflect.Message {
+	cur := row
+	for i, seg := range path {
+		fd := cur.Descriptor().Fields().ByName(protoreflect.Name(seg))
+		Expect(fd).NotTo(BeNil())
+		if i < len(path)-1 {
+			if !cur.Has(fd) {
+				return nil
+			}
+			cur = cur.Get(fd).Message()
+			continue
+		}
+		if fd.IsList() {
+			list := cur.Get(fd).List()
+			out := make([]protoreflect.Message, 0, list.Len())
+			for j := 0; j < list.Len(); j++ {
+				out = append(out, list.Get(j).Message())
+			}
+			return out
+		}
+		if !cur.Has(fd) {
+			return nil
+		}
+		return []protoreflect.Message{cur.Get(fd).Message()}
+	}
+	return nil
+}
+
+// lookupByKey finds the context row whose key fields all equal the stub's —
+// the whole tuple, which is what makes a matching id under the wrong ns a
+// different row.
+func lookupByKey(
+	rows []proto.Message,
+	keyFields []protoreflect.FieldDescriptor,
+	stub protoreflect.Message,
+) proto.Message {
+rows:
+	for _, candidate := range rows {
+		for _, kf := range keyFields {
+			if candidate.ProtoReflect().Get(kf).Interface() != stub.Get(kf).Interface() {
+				continue rows
+			}
+		}
+		return candidate
+	}
+	return nil
+}
 
 func cmpCond(path []string) *syncplanev1.Condition {
 	return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{

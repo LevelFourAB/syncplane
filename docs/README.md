@@ -87,6 +87,9 @@ Understanding-oriented. Read these when a behaviour surprises you.
   per-field last-writer-wins, rebase, tombstones, compare-and-swap.
 - [Partial sync and coverage](explanation/partial-sync-and-coverage.md) — why
   windows exist and why every result carries a coverage report.
+- [Relational queries](explanation/relational-queries.md) — the one-hop
+  semi-join (`matches`), its two-phase rewrite, and how `follow` makes it
+  answerable locally.
 - [Collaborative text](explanation/collaborative-text.md) — Fugue ordering,
   state-based replication, delta sync, marks, undo, compaction.
 - [Multi-tab behaviour](explanation/multi-tab.md) — one store, one stream

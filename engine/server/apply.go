@@ -390,7 +390,7 @@ func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pr
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(a.tx, info, spec, a.visible, a.srv.limits)
+	rows, err := runQuerySpec(a.srv, a.tx, info, spec, a.visible)
 	if err != nil {
 		return err
 	}

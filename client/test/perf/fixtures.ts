@@ -148,6 +148,13 @@ export async function withWire<T>(fn: () => Promise<T>): Promise<{ result: T; wi
 }
 
 /**
+ * The issue state and priority the `flip` write moves rows onto, and therefore
+ * the pair a semi-join has to name for a flip to move its membership. Mirrors
+ * relFlipState/relFlipPriority in cmd/benchserver/debug.go.
+ */
+export const REL_FLIP = { state: 'review', priority: 4 } as const;
+
+/**
  * Server-side writes against a seeded corpus; see benchserver's writeHandler.
  * Returns the index of the first issue touched, so a later call can target the
  * same rows — deleting exactly what an earlier insert created, rather than the
@@ -155,7 +162,7 @@ export async function withWire<T>(fn: () => Promise<T>): Promise<{ result: T; wi
  */
 export async function serverWrite(
 	tierName: string,
-	op: 'patch' | 'insert' | 'delete',
+	op: 'patch' | 'insert' | 'delete' | 'flip',
 	count: number,
 	/** Title prefix for a patch, so a waiter can distinguish this write. */
 	marker?: string,

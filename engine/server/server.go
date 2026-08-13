@@ -271,6 +271,20 @@ type Limits struct {
 	// however the workspace is driven, and any divergence is a bug in the
 	// maintenance rules rather than a tuning question.
 	DisableMembershipMaintenance bool
+	// Maximum matches() conditions one query predicate may carry. Each crosses
+	// into another entity and is answered by its own pass over that entity's
+	// rows before the query itself runs, so the count multiplies the price of
+	// the request while the predicate's own size says nothing about it.
+	//
+	// Conditions selecting the same target rows share one pass, so the limit
+	// counts what a predicate WRITES rather than what it costs. Default 8.
+	MaxRelConditions int
+	// Maximum target rows one matches() condition may select. It is the size of
+	// the membership test the condition collapses to, which the server builds
+	// and holds for the request, so an unbounded one turns a small request into
+	// a large read. Exceeding it fails the query rather than truncating: a
+	// truncated key set would silently drop rows that match. Default 50000.
+	MaxRelKeys int
 }
 
 // maxIndexEntriesPerRow and maxIndexScanCandidates read the defaults through
@@ -288,6 +302,20 @@ func (l Limits) maxIndexScanCandidates() int {
 		return 10000
 	}
 	return l.MaxIndexScanCandidates
+}
+
+func (l Limits) maxRelConditions() int {
+	if l.MaxRelConditions <= 0 {
+		return 8
+	}
+	return l.MaxRelConditions
+}
+
+func (l Limits) maxRelKeys() int {
+	if l.MaxRelKeys <= 0 {
+		return 50000
+	}
+	return l.MaxRelKeys
 }
 
 func (l Limits) withDefaults() Limits {

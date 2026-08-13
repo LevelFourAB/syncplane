@@ -466,17 +466,17 @@ cannot be filtered or ordered on; registering such a schema logs a warning
 naming the field. **Enums arrive as numbers**, so it is `t.status.eq(2)`, not
 `t.status.eq(Status.DONE)`.
 
-| Field type                                      | Operators                                                                    |
-| ----------------------------------------------- | ---------------------------------------------------------------------------- |
-| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains` + order              |
-| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte` + order                          |
-| `boolean` (`BoolOps`)                           | `eq`, `neq` + order                                                          |
-| `Uint8Array` & singular message (`PresenceOps`) | `isSet`, `isNotSet`                                                          |
-| repeated scalar (`RepeatedScalarOps`)           | `has`, `hasAny`, `hasAll`, `isEmpty`                                         |
-| repeated message (`RepeatedMessageOps`)         | `any(cb)`, `isEmpty`                                                         |
-| singular message                                | drillable (`t.settings.color.eq(...)`) + `isSet`/`isNotSet`                  |
-| oneof group (`OneofRef`)                        | one entry per case: the member's operators + `isSet`/`isNotSet`              |
-| map (`MapOps`)                                  | `at(key)` → the value's operators + `isSet`/`isNotSet`; `any(cb)`; `isEmpty` |
+| Field type                                      | Operators                                                                                      |
+| ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains` + order                                |
+| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte` + order                                            |
+| `boolean` (`BoolOps`)                           | `eq`, `neq` + order                                                                            |
+| `Uint8Array` & singular message (`PresenceOps`) | `isSet`, `isNotSet`                                                                            |
+| repeated scalar (`RepeatedScalarOps`)           | `has`, `hasAny`, `hasAll`, `isEmpty`                                                           |
+| repeated message (`RepeatedMessageOps`)         | `any(cb)`, `isEmpty`; on a reference also `matches(cb)`                                        |
+| singular message                                | drillable (`t.settings.color.eq(...)`) + `isSet`/`isNotSet`; on a reference also `matches(cb)` |
+| oneof group (`OneofRef`)                        | one entry per case: the member's operators + `isSet`/`isNotSet`                                |
+| map (`MapOps`)                                  | `at(key)` → the value's operators + `isSet`/`isNotSet`; `any(cb)`; `isEmpty`                   |
 
 Order: every orderable field exposes `.asc()` / `.desc()` → `OrderKey`.
 
@@ -592,6 +592,70 @@ because a stored stub holds nothing else.
 `any()` nests — `w.members.any((m) => m.tags.has('urgent'))` — each level rooted
 at its own element. An empty or unset list matches nothing, so `not(...any())`
 reads as "no element matches".
+
+#### Crossing a reference — `matches()`
+
+`matches(cb)` on a forward reference field — to-one or repeated — is the
+one-hop semi-join: true when at least one referenced target row **exists** and
+satisfies the condition. The callback's reference is rooted at the **target
+entity's row**, so every field of the target is addressable:
+
+```ts
+// issues assigned to anyone on this team
+await client.db.issue.query({
+	where: (i) => i.assignee.matches((a) => a.teamId.eq(teamId)),
+});
+// tasks blocked by an unresolved task (repeated ref: SOME target matches)
+await client.db.task.query({
+	where: (t) => t.blockedBy.matches((b) => b.done.eq(false)),
+});
+```
+
+Distinct from `any()` on the same field: `any()` scopes a **stub**, which
+carries only the target's key fields, while `matches()` reaches the live target
+row. `i.blockedBy.any((b) => b.id.eq(x))` asks about the stored reference
+itself and stays row-local; `i.blockedBy.matches((b) => b.done.eq(false))`
+crosses into the target entity. Both stay available.
+
+Semantics worth pinning:
+
+- An unset to-one ref, an orphaned stub and a deleted target all contribute
+  nothing, so the condition is **false** for them — and `not(matches(…))`
+  therefore also admits rows with no reference at all.
+- The membership is decided per row **within the row's workspace**; references
+  never cross the partition.
+- Evaluation is a two-phase rewrite: the inner condition runs as an ordinary
+  query over the target entity, and the node collapses to a membership test on
+  the stored ref stubs — the same shape the reverse-relation push-down
+  produces, so the derived per-ref-field index serves it.
+- Cost: one pre-pass per distinct `matches` — two conditions crossing into the
+  same entity with the same inner condition share one. It is an ordinary query,
+  so an index declared on the target entity covering the inner condition makes
+  it proportional to the matches rather than to the entity; a query over every
+  workspace at once reads the entity instead, since an index walk covers one
+  workspace.
+- A **local** query crossing a reference is only as good as the target rows the
+  store holds; when partial sync bounds them the result reports the
+  `'relation'` coverage bound (see §9), and `queryServer` accepts the same
+  condition as the escape hatch.
+- Under `watchQuery`, a commit to the target entity re-evaluates the result even
+  though it named no row the watch holds. Declaring an index on the watched
+  entity whose first component is the reference field
+  (`{ name: 'by_issue', key: [{ path: 'issue' }] }`) keeps that proportional to
+  the rows the commit moved; without one, and for a `matches` under `not`, it is
+  proportional to the watched entity. See
+  [what a live `matches` costs](../explanation/relational-queries.md#what-a-live-matches-costs).
+
+Rejected with named errors, all additive later: `matches` on a message field
+that is **not** a reference (reference-ness lives in a proto option the TS types
+cannot see, so this throws at query time, not compile time), `matches` inside
+`matches` (the semi-join is one hop), `matches` inside `any()`, `matches` in a
+subscription predicate (scope the base entity and `follow` the reference
+instead), and `matches` in a forward relation's include `$where` (no query
+backs it there; a reverse relation's `$where` takes it, since that rides a real
+query). There is no `matches` **through a reverse relation** — "projects with
+an open issue" is phrased from the source side or waits — and no ordering by a
+related field.
 
 ### Rejected and surprising cases
 
@@ -1104,7 +1168,12 @@ maintained: [Partial sync and coverage](../explanation/partial-sync-and-coverage
 ### Coverage
 
 ```ts
-type CoverageBound = 'unsubscribed' | 'predicate' | 'window' | 'hydrating';
+type CoverageBound =
+	| 'unsubscribed'
+	| 'predicate'
+	| 'window'
+	| 'hydrating'
+	| 'relation';
 interface Coverage {
 	complete: boolean;
 	bounds: CoverageBound[];
@@ -1117,6 +1186,15 @@ Every result array carries one as a non-enumerable `coverage`, beside `total`
 transient bound: a cold client's first snapshot lands entity by entity, so an
 entity that has not arrived reads as `[]` exactly like an empty one until this
 says otherwise. It clears on its own and the readers re-fire.
+
+`relation` appears only on queries that cross a reference (`matches()`): a
+holder row whose target never synced evaluates against a missing row and reads
+as a non-match. The bound is absent when the crossed reference is provably
+answerable — the target entity's coverage is complete in the workspace, **or**
+every subscription scoping the queried entity `follow`s the crossed ref field,
+which puts each locally-held holder's targets in the follow closure. A
+`matches` through a ref nested inside a message can only be covered the first
+way, since a follow path names top-level relations.
 
 ### Delivery order
 

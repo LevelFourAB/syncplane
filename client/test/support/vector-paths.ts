@@ -43,6 +43,21 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 			}
 			return { kind: 'exists', path, cond: toLocalNames(field.message, cond.cond) };
 		}
+		case 'rel': {
+			// The sub-condition is scoped to the TARGET row, so it translates
+			// against the target schema — the same rule prepareQuery applies.
+			const path = localPathOf(schema, cond.path);
+			const { field } = resolveLeafRef(schema, path, false);
+			const target = field.fieldKind === 'message'
+				? field.message
+				: field.fieldKind === 'list' && field.listKind === 'message'
+				? field.message
+				: undefined;
+			if (!target) {
+				throw new Error(`vector path ${cond.path.join('.')} is not a reference field`);
+			}
+			return { kind: 'rel', path, cond: toLocalNames(target, cond.cond) };
+		}
 		case 'and':
 		case 'or':
 			return { ...cond, conds: cond.conds.map((c) => toLocalNames(schema, c)) };
@@ -66,9 +81,11 @@ function entryLocalNames(map: Extract<DescField, { fieldKind: 'map' }>, cond: Co
 		case 'present':
 			return { ...cond, path: translate(cond.path) };
 		case 'exists':
+		case 'rel':
 			// A nested any() inside an entry: its own path translates here, its
 			// sub-condition against whatever that path resolves to. No vector needs
-			// it yet, so it is left to the resolver to reject if one ever does.
+			// it yet — nor a rel, which prepare rejects inside an entry scope — so
+			// it is left to the resolver to reject if one ever does.
 			return { ...cond, path: translate(cond.path) };
 		case 'and':
 		case 'or':

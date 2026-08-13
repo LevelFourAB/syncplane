@@ -3,7 +3,13 @@ import { describe, expect, it } from 'vitest';
 import type { MessageShape } from '@bufbuild/protobuf';
 import { subscription } from '../../src/client.js';
 import type { EntityApi } from '../../src/db.js';
-import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import {
+	IssueSchema,
+	PairSchema,
+	ProjectSchema,
+	UserSchema,
+	WidgetSchema,
+} from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { and, not, type Query } from '../../src/query/index.js';
 import { freshWorkspace, newClient } from './helpers.js';
 
@@ -357,5 +363,57 @@ describe('queryServer (push-down)', () => {
 			await writer.close();
 			await reader.close();
 		});
+	});
+
+	it('answers a matches() semi-join the same way both sides do', async () => {
+		// The rel condition travels as RelCond and each side runs its own
+		// two-phase rewrite — the client over its local rows, the server inside
+		// its snapshot — so the SAME predicate producing the same rows is the
+		// wire behavior only this tier can observe.
+		const ws = freshWorkspace();
+		const entities = [ IssueSchema, UserSchema, ProjectSchema, PairSchema ];
+		const writer = newClient(ws, { entities });
+		await writer.start();
+		await writer.mutate.put(UserSchema, { id: 'u1', name: 'Maya' });
+		await writer.mutate.put(UserSchema, { id: 'u2', name: 'Noor' });
+		await writer.mutate.put(IssueSchema, { id: 'i1', state: 'open', assignee: { id: 'u1' } });
+		await writer.mutate.put(IssueSchema, { id: 'i2', state: 'open', assignee: { id: 'u2' } });
+		await writer.mutate.put(IssueSchema, { id: 'i3', state: 'done' });
+		await writer.mutate.put(IssueSchema, {
+			id: 'i4',
+			state: 'done',
+			blockedBy: [ { id: 'i1' }, { id: 'ghost' } ],
+		});
+		await writer.syncNow();
+
+		type IssueQuery = Query<MessageShape<typeof IssueSchema>>;
+		const cold = newClient(ws, { entities });
+		const cases: IssueQuery[] = [
+			{ where: (i) => i.assignee.matches((a) => a.name.eq('Maya')) },
+			{ where: (i) => i.blockedBy.matches((b) => b.state.eq('open')) },
+			{ where: (i) => not(i.assignee.matches((a) => a.name.eq('Maya'))) },
+			{
+				where: (i) => and(i.state.eq('open'), i.assignee.matches((a) => a.id.startsWith('u'))),
+			},
+		];
+		for (const q of cases) {
+			const remote = await cold.queryServer(IssueSchema, q);
+			const local = await writer.query(IssueSchema, q);
+			expect(remote.map((r) => r.key)).toEqual(local.map((r) => r.key));
+		}
+		// Not merely equal to each other — equal to what the semantics say.
+		expect(
+			(await cold.queryServer(IssueSchema, {
+				where: (i) => i.assignee.matches((a) => a.name.eq('Maya')),
+			})).map((r) => r.key),
+		).toEqual([ 'i1' ]);
+		expect(
+			(await cold.queryServer(IssueSchema, {
+				where: (i) => i.blockedBy.matches((b) => b.state.eq('open')),
+			})).map((r) => r.key),
+		).toEqual([ 'i4' ]);
+
+		await writer.close();
+		await cold.close();
 	});
 });

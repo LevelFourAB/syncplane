@@ -259,6 +259,76 @@ export function equalsScalar(a: unknown, b: Scalar): boolean {
 }
 
 /**
+ * Where hashing a membership test starts paying for itself. Below it the set's
+ * construction and the per-row hash cost more than the comparisons they
+ * replace; above it the linear scan is what the row count multiplies.
+ *
+ * It matters most for a list nobody wrote by hand: a `matches` condition
+ * collapses to a membership test holding a key per matching target row, and a
+ * query no index serves tests every candidate row against all of them.
+ */
+const IN_SET_THRESHOLD = 16;
+
+/**
+ * Canonical membership keys per `in` condition, built on the first row and
+ * dropped with the condition itself. Queries build a fresh AST per run, so
+ * nothing here outlives the query that needed it.
+ *
+ * `null` marks a list that must be scanned rather than hashed.
+ */
+const membershipSets = new WeakMap<readonly Scalar[], Set<string> | null>();
+
+function membershipSet(values: readonly Scalar[]): Set<string> | undefined {
+	if (values.length < IN_SET_THRESHOLD) return undefined;
+	const cached = membershipSets.get(values);
+	if (cached !== undefined) return cached ?? undefined;
+	const set = new Set<string>();
+	for (const v of values) {
+		const key = scalarKey(v);
+		if (key === undefined) {
+			// A value equalsScalar decides by something other than its
+			// canonical key. Rare enough that declining the whole set is
+			// cheaper than reasoning about a mixed lookup.
+			membershipSets.set(values, null);
+			return undefined;
+		}
+		set.add(key);
+	}
+	membershipSets.set(values, set);
+	return set;
+}
+
+/**
+ * The canonical membership key of a scalar: two values share one exactly when
+ * equalsScalar calls them equal. Undefined for a value whose equality no key
+ * can decide — a NaN, which equals nothing including itself, an infinity,
+ * which a bigint out of Number range would also have to match, and anything
+ * that is not a scalar.
+ *
+ * The number/bigint pair is what the normalization is for: they compare across
+ * types after an integer check, so an integral number and a bigint of the same
+ * magnitude have to land on the same key.
+ */
+export function scalarKey(v: unknown): string | undefined {
+	switch (typeof v) {
+		case 'string':
+			return 's' + v;
+		case 'boolean':
+			return v ? 'b1' : 'b0';
+		case 'bigint':
+			return 'i' + v.toString();
+		case 'number':
+			if (Number.isInteger(v)) return 'i' + BigInt(v).toString();
+			if (!Number.isFinite(v)) return undefined;
+			// Number -> string is the shortest round-tripping form, so two
+			// keys are equal exactly when the doubles are.
+			return 'f' + String(v);
+		default:
+			return undefined;
+	}
+}
+
+/**
  * Compares two values of the same logical kind. Returns undefined when the
  * values are incomparable (type mismatch, or NaN on either side); callers
  * treat that as condition-false (filtering) or a rank (ordering, see
@@ -365,6 +435,14 @@ export function evalCond(
 		case 'in': {
 			const { found, value } = resolveIn(row, cond.path, schema, entry);
 			if (!found) return false;
+			const set = membershipSet(cond.values);
+			if (set) {
+				// A row value with no canonical key equals none of the values
+				// in the set, which all have one — the same answer the scan
+				// below gives.
+				const key = scalarKey(value);
+				return key !== undefined && set.has(key);
+			}
 			return cond.values.some((v) => equalsScalar(value, v));
 		}
 		case 'str': {
@@ -402,6 +480,14 @@ export function evalCond(
 			}
 			return false;
 		}
+		case 'rel':
+			// A rel condition is not row-local: the execute pipeline rewrites it
+			// to a membership test on the stored stubs before anything evaluates
+			// (query/rel.ts), so one reaching this evaluator is a missed rewrite,
+			// not a query that can be answered.
+			throw new Error(
+				`query path ${cond.path.join('.')}: matches() must be resolved before evaluation`,
+			);
 		case 'exists': {
 			const { found, value, field } = resolveIn(row, cond.path, schema, entry);
 			// An unset or empty collection matches nothing, like every other

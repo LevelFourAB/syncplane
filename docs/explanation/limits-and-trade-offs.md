@@ -14,6 +14,35 @@ So: a selective predicate beats deep pagination, and a large entity behind a hot
 endpoint will be felt. There is no full-text search; `contains` is a substring
 test per row and is never index-servable.
 
+## A filter can cross a reference, a sort cannot
+
+`matches()` is the one condition that leaves the row: a single hop through a
+forward reference. It stays cheap because nothing downstream ever sees it — a
+pre-pass runs the inner condition over the target entity, the node collapses to a
+membership test on the stored stub, and the planner, the index walk and the
+cursors are handed an ordinary row-local query. The full model is in
+[relational queries](relational-queries.md).
+
+`orderBy` has no counterpart, because a sort key cannot be folded away like
+that. The value it sorts on lives in another row, and no index key reaches into
+one, so the only way to answer is to sort the entire match set: scan and decode
+the outer entity, look up every distinct target, again on the next page, and
+once more for `total`.
+
+Partial sync sharpens the difference. When a predicate cannot see its target the
+row drops out and coverage reports the `relation` bound — a failure the reader
+can act on. When a sort key cannot see one there is nothing to sort by, so the
+row sinks to the end of the result, and under a `limit` the end of the result is
+off the page. What comes back is a short answer with nothing to mark it as
+short.
+
+So sorting across a reference stays with the two places it already works. For an
+ordered slice per holder — the five newest comments on each issue — `include`
+takes `$where`, `$orderBy` and `$limit`, applied to each holder inside the pass
+that hydrates it. For a table sorted by a related column, hydrate and sort in the
+app: those rows are on screen already, and sorting them again is not work the
+engine could have taken off you.
+
 ## Cursors page, offset jumps to a rank
 
 `after`/`before` are the default way to page: a cursor names a POSITION in the

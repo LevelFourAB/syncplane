@@ -178,6 +178,19 @@ export type WatchSpec =
 	/** Entity watch over every issue — fires on ANY issue change, which is what
 	 * makes it the waiter for change latency without knowing the row. */
 	| { kind: 'issues' }
+	/**
+	 * Comments whose issue matches a predicate over the ISSUE — a one-hop
+	 * semi-join, so this watch is maintained against two entities at once. A
+	 * commit to the target entity moves which comments match without touching
+	 * any of them, which is the case no keyed delta can carry.
+	 */
+	| { kind: 'relComments'; state: string; priority: number; limit: number }
+	/**
+	 * The same comments, ordered and paged the same way, with the semi-join
+	 * replaced by a row-local predicate. The control that separates what a
+	 * commit costs a comment watch from what crossing a reference adds.
+	 */
+	| { kind: 'comments'; limit: number }
 	| { kind: 'flat' };
 
 /**
@@ -190,6 +203,14 @@ export interface WatchView {
 	callbacks: number;
 	/** Rows the latest delivery carried. */
 	rows: number;
+	/**
+	 * Deliveries of those that carried a `reset` delta rather than a splice.
+	 * A reset says the result was re-derived rather than maintained, so a
+	 * consumer holding rendered rows rebuilds all of them; the split is what
+	 * separates maintenance that stayed incremental from maintenance that gave
+	 * up.
+	 */
+	resets: number;
 }
 
 /**

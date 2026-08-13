@@ -793,6 +793,75 @@ func (x *ExistsCond) GetCond() *Condition {
 	return nil
 }
 
+// RelCond matches a row when at least one row referenced through the ref
+// field at `path` exists and satisfies `cond` — a one-hop semi-join. `path`
+// names a forward reference field of the row's entity (singular or repeated);
+// `cond`'s paths are relative to the TARGET entity's row, the same scoping
+// precedent ExistsCond set. An unset to-one ref, an orphaned stub and a
+// tombstoned target all contribute nothing, so the condition is false for
+// them.
+//
+// There is no target-entity field: both sides derive the target from their
+// ref graph, so the wire cannot claim a target the schema does not give the
+// field. A `rel` whose path is not a reference field is rejected in
+// validation, like every other malformed path. Nesting a rel inside a rel or
+// inside an exists is rejected too — one hop, scoped to the row.
+//
+// Both evaluators run it as a two-phase rewrite: the inner condition selects
+// the matching target keys, and the node collapses to a membership test on
+// the stored ref stubs. The rewrite never appears on the wire.
+type RelCond struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Path          []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
+	Cond          *Condition             `protobuf:"bytes,2,opt,name=cond,proto3" json:"cond,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RelCond) Reset() {
+	*x = RelCond{}
+	mi := &file_syncplane_v1_query_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RelCond) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RelCond) ProtoMessage() {}
+
+func (x *RelCond) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_query_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RelCond.ProtoReflect.Descriptor instead.
+func (*RelCond) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *RelCond) GetPath() []string {
+	if x != nil {
+		return x.Path
+	}
+	return nil
+}
+
+func (x *RelCond) GetCond() *Condition {
+	if x != nil {
+		return x.Cond
+	}
+	return nil
+}
+
 type ConditionList struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Conds         []*Condition           `protobuf:"bytes,1,rep,name=conds,proto3" json:"conds,omitempty"`
@@ -802,7 +871,7 @@ type ConditionList struct {
 
 func (x *ConditionList) Reset() {
 	*x = ConditionList{}
-	mi := &file_syncplane_v1_query_proto_msgTypes[7]
+	mi := &file_syncplane_v1_query_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -814,7 +883,7 @@ func (x *ConditionList) String() string {
 func (*ConditionList) ProtoMessage() {}
 
 func (x *ConditionList) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_query_proto_msgTypes[7]
+	mi := &file_syncplane_v1_query_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -827,7 +896,7 @@ func (x *ConditionList) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConditionList.ProtoReflect.Descriptor instead.
 func (*ConditionList) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ConditionList) GetConds() []*Condition {
@@ -850,6 +919,7 @@ type Condition struct {
 	//	*Condition_Or
 	//	*Condition_Not
 	//	*Condition_Exists
+	//	*Condition_Rel
 	Kind          isCondition_Kind `protobuf_oneof:"kind"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -857,7 +927,7 @@ type Condition struct {
 
 func (x *Condition) Reset() {
 	*x = Condition{}
-	mi := &file_syncplane_v1_query_proto_msgTypes[8]
+	mi := &file_syncplane_v1_query_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -869,7 +939,7 @@ func (x *Condition) String() string {
 func (*Condition) ProtoMessage() {}
 
 func (x *Condition) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_query_proto_msgTypes[8]
+	mi := &file_syncplane_v1_query_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -882,7 +952,7 @@ func (x *Condition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Condition.ProtoReflect.Descriptor instead.
 func (*Condition) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Condition) GetKind() isCondition_Kind {
@@ -973,6 +1043,15 @@ func (x *Condition) GetExists() *ExistsCond {
 	return nil
 }
 
+func (x *Condition) GetRel() *RelCond {
+	if x != nil {
+		if x, ok := x.Kind.(*Condition_Rel); ok {
+			return x.Rel
+		}
+	}
+	return nil
+}
+
 type isCondition_Kind interface {
 	isCondition_Kind()
 }
@@ -1013,6 +1092,10 @@ type Condition_Exists struct {
 	Exists *ExistsCond `protobuf:"bytes,9,opt,name=exists,proto3,oneof"`
 }
 
+type Condition_Rel struct {
+	Rel *RelCond `protobuf:"bytes,10,opt,name=rel,proto3,oneof"`
+}
+
 func (*Condition_Cmp) isCondition_Kind() {}
 
 func (*Condition_In) isCondition_Kind() {}
@@ -1031,6 +1114,8 @@ func (*Condition_Not) isCondition_Kind() {}
 
 func (*Condition_Exists) isCondition_Kind() {}
 
+func (*Condition_Rel) isCondition_Kind() {}
+
 type OrderKey struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
@@ -1041,7 +1126,7 @@ type OrderKey struct {
 
 func (x *OrderKey) Reset() {
 	*x = OrderKey{}
-	mi := &file_syncplane_v1_query_proto_msgTypes[9]
+	mi := &file_syncplane_v1_query_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1053,7 +1138,7 @@ func (x *OrderKey) String() string {
 func (*OrderKey) ProtoMessage() {}
 
 func (x *OrderKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_query_proto_msgTypes[9]
+	mi := &file_syncplane_v1_query_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1066,7 +1151,7 @@ func (x *OrderKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OrderKey.ProtoReflect.Descriptor instead.
 func (*OrderKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *OrderKey) GetPath() []string {
@@ -1119,9 +1204,12 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\n" +
 	"ExistsCond\x12\x12\n" +
 	"\x04path\x18\x01 \x03(\tR\x04path\x12+\n" +
+	"\x04cond\x18\x02 \x01(\v2\x17.syncplane.v1.ConditionR\x04cond\"J\n" +
+	"\aRelCond\x12\x12\n" +
+	"\x04path\x18\x01 \x03(\tR\x04path\x12+\n" +
 	"\x04cond\x18\x02 \x01(\v2\x17.syncplane.v1.ConditionR\x04cond\">\n" +
 	"\rConditionList\x12-\n" +
-	"\x05conds\x18\x01 \x03(\v2\x17.syncplane.v1.ConditionR\x05conds\"\xb4\x03\n" +
+	"\x05conds\x18\x01 \x03(\v2\x17.syncplane.v1.ConditionR\x05conds\"\xdf\x03\n" +
 	"\tCondition\x12)\n" +
 	"\x03cmp\x18\x01 \x01(\v2\x15.syncplane.v1.CmpCondH\x00R\x03cmp\x12&\n" +
 	"\x02in\x18\x02 \x01(\v2\x14.syncplane.v1.InCondH\x00R\x02in\x12)\n" +
@@ -1131,7 +1219,9 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\x03and\x18\x06 \x01(\v2\x1b.syncplane.v1.ConditionListH\x00R\x03and\x12-\n" +
 	"\x02or\x18\a \x01(\v2\x1b.syncplane.v1.ConditionListH\x00R\x02or\x12+\n" +
 	"\x03not\x18\b \x01(\v2\x17.syncplane.v1.ConditionH\x00R\x03not\x122\n" +
-	"\x06exists\x18\t \x01(\v2\x18.syncplane.v1.ExistsCondH\x00R\x06existsB\x06\n" +
+	"\x06exists\x18\t \x01(\v2\x18.syncplane.v1.ExistsCondH\x00R\x06exists\x12)\n" +
+	"\x03rel\x18\n" +
+	" \x01(\v2\x15.syncplane.v1.RelCondH\x00R\x03relB\x06\n" +
 	"\x04kind\"I\n" +
 	"\bOrderKey\x12\x12\n" +
 	"\x04path\x18\x01 \x03(\tR\x04path\x12)\n" +
@@ -1181,7 +1271,7 @@ func file_syncplane_v1_query_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_query_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_syncplane_v1_query_proto_goTypes = []any{
 	(CmpOp)(0),            // 0: syncplane.v1.CmpOp
 	(StrOp)(0),            // 1: syncplane.v1.StrOp
@@ -1195,9 +1285,10 @@ var file_syncplane_v1_query_proto_goTypes = []any{
 	(*RepCond)(nil),       // 9: syncplane.v1.RepCond
 	(*PresentCond)(nil),   // 10: syncplane.v1.PresentCond
 	(*ExistsCond)(nil),    // 11: syncplane.v1.ExistsCond
-	(*ConditionList)(nil), // 12: syncplane.v1.ConditionList
-	(*Condition)(nil),     // 13: syncplane.v1.Condition
-	(*OrderKey)(nil),      // 14: syncplane.v1.OrderKey
+	(*RelCond)(nil),       // 12: syncplane.v1.RelCond
+	(*ConditionList)(nil), // 13: syncplane.v1.ConditionList
+	(*Condition)(nil),     // 14: syncplane.v1.Condition
+	(*OrderKey)(nil),      // 15: syncplane.v1.OrderKey
 }
 var file_syncplane_v1_query_proto_depIdxs = []int32{
 	0,  // 0: syncplane.v1.CmpCond.op:type_name -> syncplane.v1.CmpOp
@@ -1207,23 +1298,25 @@ var file_syncplane_v1_query_proto_depIdxs = []int32{
 	2,  // 4: syncplane.v1.RepCond.op:type_name -> syncplane.v1.RepOp
 	5,  // 5: syncplane.v1.RepCond.values:type_name -> syncplane.v1.QueryValue
 	3,  // 6: syncplane.v1.PresentCond.op:type_name -> syncplane.v1.PresentOp
-	13, // 7: syncplane.v1.ExistsCond.cond:type_name -> syncplane.v1.Condition
-	13, // 8: syncplane.v1.ConditionList.conds:type_name -> syncplane.v1.Condition
-	6,  // 9: syncplane.v1.Condition.cmp:type_name -> syncplane.v1.CmpCond
-	7,  // 10: syncplane.v1.Condition.in:type_name -> syncplane.v1.InCond
-	8,  // 11: syncplane.v1.Condition.str:type_name -> syncplane.v1.StrCond
-	9,  // 12: syncplane.v1.Condition.rep:type_name -> syncplane.v1.RepCond
-	10, // 13: syncplane.v1.Condition.present:type_name -> syncplane.v1.PresentCond
-	12, // 14: syncplane.v1.Condition.and:type_name -> syncplane.v1.ConditionList
-	12, // 15: syncplane.v1.Condition.or:type_name -> syncplane.v1.ConditionList
-	13, // 16: syncplane.v1.Condition.not:type_name -> syncplane.v1.Condition
-	11, // 17: syncplane.v1.Condition.exists:type_name -> syncplane.v1.ExistsCond
-	4,  // 18: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	19, // [19:19] is the sub-list for extension type_name
-	19, // [19:19] is the sub-list for extension extendee
-	0,  // [0:19] is the sub-list for field type_name
+	14, // 7: syncplane.v1.ExistsCond.cond:type_name -> syncplane.v1.Condition
+	14, // 8: syncplane.v1.RelCond.cond:type_name -> syncplane.v1.Condition
+	14, // 9: syncplane.v1.ConditionList.conds:type_name -> syncplane.v1.Condition
+	6,  // 10: syncplane.v1.Condition.cmp:type_name -> syncplane.v1.CmpCond
+	7,  // 11: syncplane.v1.Condition.in:type_name -> syncplane.v1.InCond
+	8,  // 12: syncplane.v1.Condition.str:type_name -> syncplane.v1.StrCond
+	9,  // 13: syncplane.v1.Condition.rep:type_name -> syncplane.v1.RepCond
+	10, // 14: syncplane.v1.Condition.present:type_name -> syncplane.v1.PresentCond
+	13, // 15: syncplane.v1.Condition.and:type_name -> syncplane.v1.ConditionList
+	13, // 16: syncplane.v1.Condition.or:type_name -> syncplane.v1.ConditionList
+	14, // 17: syncplane.v1.Condition.not:type_name -> syncplane.v1.Condition
+	11, // 18: syncplane.v1.Condition.exists:type_name -> syncplane.v1.ExistsCond
+	12, // 19: syncplane.v1.Condition.rel:type_name -> syncplane.v1.RelCond
+	4,  // 20: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
+	21, // [21:21] is the sub-list for method output_type
+	21, // [21:21] is the sub-list for method input_type
+	21, // [21:21] is the sub-list for extension type_name
+	21, // [21:21] is the sub-list for extension extendee
+	0,  // [0:21] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_query_proto_init() }
@@ -1238,7 +1331,7 @@ func file_syncplane_v1_query_proto_init() {
 		(*QueryValue_UintValue)(nil),
 		(*QueryValue_BoolValue)(nil),
 	}
-	file_syncplane_v1_query_proto_msgTypes[8].OneofWrappers = []any{
+	file_syncplane_v1_query_proto_msgTypes[9].OneofWrappers = []any{
 		(*Condition_Cmp)(nil),
 		(*Condition_In)(nil),
 		(*Condition_Str)(nil),
@@ -1248,6 +1341,7 @@ func file_syncplane_v1_query_proto_init() {
 		(*Condition_Or)(nil),
 		(*Condition_Not)(nil),
 		(*Condition_Exists)(nil),
+		(*Condition_Rel)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -1255,7 +1349,7 @@ func file_syncplane_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_query_proto_rawDesc), len(file_syncplane_v1_query_proto_rawDesc)),
 			NumEnums:      5,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -564,7 +564,7 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(e.tx, info, spec, nil, e.srv.limits)
+	rows, err := runQuerySpec(e.srv, e.tx, info, spec, nil)
 	if err != nil {
 		return err
 	}

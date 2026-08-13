@@ -72,6 +72,7 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strconv"
 	"strings"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -181,7 +182,7 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		if err != nil {
 			return nil, err
 		}
-		return &inNode{fields: fields, values: values}, nil
+		return newInNode(fields, values), nil
 	case *syncplanev1.Condition_Str:
 		c := kind.Str
 		fields, err := resolveFields(desc, c.GetPath())
@@ -271,6 +272,14 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 			return nil, err
 		}
 		return &notNode{cond: inner}, nil
+	case *syncplanev1.Condition_Rel:
+		// A rel condition needs the target entity's rows, which only the
+		// query-execution paths hold: they resolve it with ExtractRels and
+		// rewrite it row-local (RewriteRels) before compiling. Reaching Compile
+		// unresolved means the surface does not support it — a subscription
+		// predicate, an ordering, an exists sub-condition.
+		return nil, fmt.Errorf("path %v: matches is not supported here; a relation condition needs the target entity's rows",
+			kind.Rel.GetPath())
 	default:
 		return nil, fmt.Errorf("condition has no kind")
 	}
@@ -404,6 +413,9 @@ func walkSubPaths(cond *syncplanev1.Condition, check func([]string) error) error
 		return nil
 	case *syncplanev1.Condition_Not:
 		return walkSubPaths(kind.Not, check)
+	case *syncplanev1.Condition_Rel:
+		return fmt.Errorf("path %v: matches cannot nest inside any(); the semi-join is scoped to the row",
+			kind.Rel.GetPath())
 	default:
 		return fmt.Errorf("condition has no kind")
 	}
@@ -426,7 +438,7 @@ func refMembershipNode(
 			fields: key, op: syncplanev1.CmpOp_CMP_OP_EQ, value: values[0],
 		}}, nil
 	case syncplanev1.RepOp_REP_OP_HAS_ANY:
-		return &existsNode{fields: fields, cond: &inNode{fields: key, values: values}}, nil
+		return &existsNode{fields: fields, cond: newInNode(key, values)}, nil
 	case syncplanev1.RepOp_REP_OP_HAS_ALL:
 		conds := make([]node, 0, len(values))
 		for _, v := range values {
@@ -877,6 +889,40 @@ func (n *cmpNode) eval(s scope) bool {
 type inNode struct {
 	fields []pathStep
 	values []condValue
+	// set holds every value under its canonical key, or is nil when the list
+	// is short enough that scanning it beats hashing, or when some value has
+	// no canonical key (see scalarKey).
+	set map[string]struct{}
+}
+
+// inSetThreshold is where hashing starts paying for itself. Below it the map's
+// construction and the per-row hash cost more than the comparisons they
+// replace; above it the linear scan is what the row count multiplies.
+//
+// It matters most for a membership test nobody wrote by hand: a rel condition
+// collapses to one holding a key per matching target row, and a query the
+// planner cannot serve from an index tests every candidate row against all of
+// them.
+const inSetThreshold = 16
+
+func newInNode(fields []pathStep, values []condValue) *inNode {
+	n := &inNode{fields: fields, values: values}
+	if len(values) < inSetThreshold {
+		return n
+	}
+	set := make(map[string]struct{}, len(values))
+	for _, cv := range values {
+		key, ok := scalarKey(cv)
+		if !ok {
+			// A value equalsScalar decides by something other than its
+			// canonical key. Rare enough that declining the whole set is
+			// cheaper than reasoning about a mixed lookup.
+			return n
+		}
+		set[key] = struct{}{}
+	}
+	n.set = set
+	return n
 }
 
 func (n *inNode) eval(s scope) bool {
@@ -884,12 +930,57 @@ func (n *inNode) eval(s scope) bool {
 	if !found {
 		return false
 	}
+	if n.set != nil {
+		// A row value with no canonical key equals none of the values in the
+		// set, which all have one — the same answer the scan below gives.
+		key, ok := scalarKey(v)
+		if !ok {
+			return false
+		}
+		_, hit := n.set[key]
+		return hit
+	}
 	for _, cv := range n.values {
 		if equalsScalar(v, cv) {
 			return true
 		}
 	}
 	return false
+}
+
+// scalarKey is the canonical membership key of a scalar: two values share one
+// exactly when equalsScalar calls them equal. ok is false for a value whose
+// equality no key can decide — a NaN, which equals nothing including itself,
+// an infinity, which a bigint out of float64 range would also have to match,
+// and any non-scalar.
+//
+// The number/bigint pair is what the normalization is for: they compare across
+// kinds after an integral check, so an integral number and a bigint of the
+// same magnitude have to land on the same key.
+func scalarKey(v rowValue) (string, bool) {
+	switch v.kind {
+	case rvString:
+		return "s" + v.str, true
+	case rvBool:
+		if v.b {
+			return "b1", true
+		}
+		return "b0", true
+	case rvNumber:
+		if isIntegralFloat(v.num) {
+			return "i" + bigFromFloat(v.num).String(), true
+		}
+		if math.IsNaN(v.num) || math.IsInf(v.num, 0) {
+			return "", false
+		}
+		// 'b' is the exact binary form, so two keys are equal exactly when the
+		// float64s are — no rounding to decide.
+		return "f" + strconv.FormatFloat(v.num, 'b', -1, 64), true
+	case rvBigint:
+		return "i" + v.big.String(), true
+	default:
+		return "", false
+	}
 }
 
 type strNode struct {

@@ -23,6 +23,7 @@ import {
 	UserSchema,
 } from '../../../src/gen/syncplane/bench/v1/bench_pb.js';
 import {
+	and,
 	type Query,
 	type QueryCursor,
 	subscription,
@@ -77,7 +78,13 @@ let recorded: EventRecord[] = [];
 /** Serial number for locally queued writes, so each one is a distinct value. */
 let writeSeq = 0;
 /** Watches openWatches holds, in spec order; WatchView indexes match. */
-let watches: { handle: WatchHandle; callbacks: number; rows: number }[] = [];
+let watches: {
+	handle: WatchHandle;
+	callbacks: number;
+	rows: number;
+	resets: number;
+	seeded: boolean;
+}[] = [];
 
 /**
  * Body a `put` write carries. Sized to the corpus's issue bodies rather than
@@ -572,16 +579,29 @@ const harness: BenchHarnessApi = {
 		const c = current();
 		const firsts: Promise<void>[] = [];
 		for (const spec of specs) {
-			const view = { handle: undefined as unknown as WatchHandle, callbacks: 0, rows: 0 };
+			const view = {
+				handle: undefined as unknown as WatchHandle,
+				callbacks: 0,
+				rows: 0,
+				resets: 0,
+				// Not reset by resetWatchStats: it is what tells the seeding
+				// delivery from a round's own.
+				seeded: false,
+			};
 			let first!: () => void;
 			firsts.push(
 				new Promise<void>((resolve) => {
 					first = resolve;
 				}),
 			);
-			const cb = (rows: { length: number }) => {
+			const cb = (rows: { length: number }, delta?: { kind: string }) => {
 				view.callbacks++;
 				view.rows = rows.length;
+				// The watch's own first delivery is a reset by construction;
+				// counting it would put a constant in a column whose point is the
+				// writes that follow.
+				if (delta?.kind === 'reset' && view.seeded) view.resets++;
+				view.seeded = true;
 				first();
 			};
 			switch (spec.kind) {
@@ -609,6 +629,20 @@ const harness: BenchHarnessApi = {
 				case 'issues':
 					view.handle = c.watch(IssueSchema, cb);
 					break;
+				case 'relComments':
+					view.handle = c.watchQuery(CommentSchema, {
+						where: (m) =>
+							m.issue.matches((i) => and(i.state.eq(spec.state), i.priority.eq(spec.priority))),
+						orderBy: (m) => [ m.createdAtMs.desc() ],
+						limit: spec.limit,
+					}, cb);
+					break;
+				case 'comments':
+					view.handle = c.watchQuery(CommentSchema, {
+						orderBy: (m) => [ m.createdAtMs.desc() ],
+						limit: spec.limit,
+					}, cb);
+					break;
 				case 'flat':
 					view.handle = c.watch(FlatSchema, cb);
 					break;
@@ -619,11 +653,14 @@ const harness: BenchHarnessApi = {
 	},
 
 	async watchStats(): Promise<WatchView[]> {
-		return watches.map((w) => ({ callbacks: w.callbacks, rows: w.rows }));
+		return watches.map((w) => ({ callbacks: w.callbacks, rows: w.rows, resets: w.resets }));
 	},
 
 	async resetWatchStats(): Promise<void> {
-		for (const w of watches) w.callbacks = 0;
+		for (const w of watches) {
+			w.callbacks = 0;
+			w.resets = 0;
+		}
 	},
 
 	async waitForWatch(index: number, minCallbacks: number, timeoutMs: number): Promise<number> {
