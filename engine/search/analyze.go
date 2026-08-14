@@ -35,7 +35,9 @@ package search
 
 import (
 	"strings"
+	"sync"
 	"unicode"
+	"unicode/utf8"
 
 	"golang.org/x/text/cases"
 	"golang.org/x/text/language"
@@ -66,14 +68,17 @@ type QueryTerm struct {
 
 // Analyze returns the terms of text in document order. It returns nil for
 // text that yields no terms, including the empty string.
+//
+// Every returned term is a slice of one string — text itself when it needed
+// no normalization — so retaining a single term retains the whole of it.
 func Analyze(text string, opts Options) []string {
-	tokens := tokenize(normalize(text, opts))
-	if len(tokens) == 0 {
+	s := normalize(text, opts)
+	terms := make([]string, 0, estimateTerms(s))
+	tokenize(s, func(term string, _ bool) {
+		terms = append(terms, term)
+	})
+	if len(terms) == 0 {
 		return nil
-	}
-	terms := make([]string, len(tokens))
-	for i, t := range tokens {
-		terms[i] = t.term
 	}
 	return terms
 }
@@ -82,28 +87,85 @@ func Analyze(text string, opts Options) []string {
 // term marked as a prefix when the query ends inside it. It returns nil for
 // a query that yields no terms.
 func AnalyzeQuery(query string, opts Options) []QueryTerm {
-	tokens := tokenize(normalize(query, opts))
-	if len(tokens) == 0 {
+	s := normalize(query, opts)
+	terms := make([]QueryTerm, 0, estimateTerms(s))
+	tokenize(s, func(term string, atEnd bool) {
+		terms = append(terms, QueryTerm{Term: term, Prefix: atEnd})
+	})
+	if len(terms) == 0 {
 		return nil
-	}
-	terms := make([]QueryTerm, len(tokens))
-	for i, t := range tokens {
-		terms[i] = QueryTerm{Term: t.term}
-	}
-	if last := tokens[len(tokens)-1]; last.atEnd {
-		terms[len(terms)-1].Prefix = true
 	}
 	return terms
 }
 
+// estimateTerms sizes the term slice from the document's length. Five bytes
+// per term is roughly a western word; CJK text runs about twice that density
+// and pays one growth for it.
+func estimateTerms(s string) int {
+	return 1 + len(s)/5
+}
+
 func normalize(s string, opts Options) string {
+	// All-ASCII text is its own NFKC and NFD form and carries no combining
+	// mark, so every stage but the case mapping is provably identity on it —
+	// and over ASCII the Unicode default case conversion is A-Z to a-z and
+	// nothing else. Text that is already lowercase comes back unchanged, which
+	// is what lets a term alias the field it was read from.
+	if ascii, lower := scanASCII(s); ascii {
+		if lower {
+			return s
+		}
+		return lowerASCII(s)
+	}
 	s = norm.NFKC.String(s)
-	// A cases.Caser is stateful, so one is built per call rather than shared.
-	s = cases.Lower(language.Und).String(s)
+	s = lowerFull(s)
 	if !opts.KeepDiacritics {
 		s = foldDiacritics(s)
 	}
 	return s
+}
+
+// scanASCII reports whether s is all ASCII, and whether it holds no A-Z.
+func scanASCII(s string) (ascii, lower bool) {
+	lower = true
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= utf8.RuneSelf {
+			return false, false
+		}
+		if c >= 'A' && c <= 'Z' {
+			lower = false
+		}
+	}
+	return true, lower
+}
+
+func lowerASCII(s string) string {
+	b := make([]byte, len(s))
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if c >= 'A' && c <= 'Z' {
+			c += 'a' - 'A'
+		}
+		b[i] = c
+	}
+	return string(b)
+}
+
+// lowerCasers pools the Unicode case mappers. A cases.Caser carries mapping
+// state across its input and so cannot be shared between goroutines, but it is
+// also expensive enough to build that constructing one per document showed up
+// in search profiles.
+var lowerCasers = sync.Pool{New: func() any {
+	c := cases.Lower(language.Und)
+	return &c
+}}
+
+func lowerFull(s string) string {
+	c := lowerCasers.Get().(*cases.Caser)
+	out := c.String(s)
+	lowerCasers.Put(c)
+	return out
 }
 
 func foldDiacritics(s string) string {
@@ -119,13 +181,6 @@ func foldDiacritics(s string) string {
 	return norm.NFC.String(b.String())
 }
 
-type token struct {
-	term string
-	// atEnd marks a token whose final code point is the final code point of
-	// the input, which is what lets AnalyzeQuery treat it as a prefix.
-	atEnd bool
-}
-
 const (
 	classSkip = iota
 	classWord
@@ -133,6 +188,15 @@ const (
 )
 
 func classify(r rune) int {
+	if r < utf8.RuneSelf {
+		// No ASCII code point is CJK or a combining mark, so the class is
+		// decided by letter-or-digit alone — and answering that from the byte
+		// avoids a range-table search per character of every document.
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' {
+			return classWord
+		}
+		return classSkip
+	}
 	if isCJK(r) {
 		return classCJK
 	}
@@ -161,44 +225,80 @@ func isCJK(r rune) bool {
 	return false
 }
 
-func tokenize(s string) []token {
-	var tokens []token
-	var run []rune
+// tokenize calls emit once per term of the normalized string s, in document
+// order. atEnd marks a term whose final code point is the final code point of
+// s, which is what lets AnalyzeQuery treat it as a prefix.
+//
+// Every term is a SUBSTRING of s rather than a copy of one: a run of the same
+// class is contiguous by construction, and neither the length cap nor the
+// bigram split does anything but cut one. That is what keeps analysis of a
+// document allocation-free beyond the term slice itself.
+func tokenize(s string, emit func(term string, atEnd bool)) {
+	runStart, runRunes := -1, 0
 	runClass := classSkip
 
-	flush := func(atEnd bool) {
+	flush := func(end int) {
+		run := s[runStart:end]
+		atEnd := end == len(s)
 		switch runClass {
 		case classWord:
-			term := run
-			if len(term) > maxTermLength {
-				term = term[:maxTermLength]
+			if runRunes > maxTermLength {
+				run = run[:runeOffset(run, maxTermLength)]
 			}
-			tokens = append(tokens, token{term: string(term), atEnd: atEnd})
+			emit(run, atEnd)
 		case classCJK:
-			if len(run) == 1 {
-				tokens = append(tokens, token{term: string(run), atEnd: atEnd})
-				break
-			}
-			for i := 0; i+2 <= len(run); i++ {
-				tokens = append(tokens, token{
-					term:  string(run[i : i+2]),
-					atEnd: atEnd && i+2 == len(run),
-				})
-			}
+			emitBigrams(run, runRunes, atEnd, emit)
 		}
-		run = run[:0]
+		runStart, runRunes = -1, 0
 	}
 
-	for _, r := range s {
+	for i := 0; i < len(s); {
+		r, size := utf8.DecodeRuneInString(s[i:])
 		c := classify(r)
 		if c != runClass {
-			flush(false)
-			runClass = c
+			if runStart >= 0 {
+				flush(i)
+			}
+			runClass, runStart, runRunes = c, -1, 0
+			if c != classSkip {
+				runStart = i
+			}
 		}
 		if c != classSkip {
-			run = append(run, r)
+			runRunes++
 		}
+		i += size
 	}
-	flush(true)
-	return tokens
+	if runStart >= 0 {
+		flush(len(s))
+	}
+}
+
+// emitBigrams splits an unsegmented run into overlapping character pairs. A
+// one-character run is emitted as itself, so a single CJK character is
+// findable rather than lost.
+func emitBigrams(run string, runes int, atEnd bool, emit func(string, bool)) {
+	if runes == 1 {
+		emit(run, atEnd)
+		return
+	}
+	lo := 0
+	_, n := utf8.DecodeRuneInString(run)
+	for mid := n; mid < len(run); {
+		_, n := utf8.DecodeRuneInString(run[mid:])
+		hi := mid + n
+		emit(run[lo:hi], atEnd && hi == len(run))
+		lo, mid = mid, hi
+	}
+}
+
+// runeOffset is the byte offset of the n-th code point of s, which must hold
+// at least n of them.
+func runeOffset(s string, n int) int {
+	off := 0
+	for i := 0; i < n; i++ {
+		_, size := utf8.DecodeRuneInString(s[off:])
+		off += size
+	}
+	return off
 }

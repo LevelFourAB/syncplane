@@ -14,6 +14,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
+	"github.com/levelfourab/syncplane/engine/search"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -431,7 +432,7 @@ func queryByIndex(
 		return decline()
 	}
 	// A required match narrows candidates harder than any value range, so the
-	// postings intersection goes first. Its declines never offered a row (the
+	// postings walk goes first. Its declines never offered a row (the
 	// budget is spent before any candidate is resolved), so falling through to
 	// the planner — and from there to the scan — needs nothing undone.
 	if served, err := queryBySearch(tx, info, predicate, limits, consider); err != nil || served {
@@ -549,17 +550,23 @@ func queryByIndex(
 
 // queryBySearch answers a query from the entity's term-postings index when a
 // REQUIRED match condition narrows it, reporting whether it did. Candidates
-// are the intersection of every query term's postings — a prefix range for a
-// prefix term — unioned with the overflow rows, whose term sets outgrew their
-// postings; every candidate is then re-read and re-checked against the FULL
-// predicate, so the index changes which rows are considered, never which
-// match. A relevance ordering needs nothing from the walk: the caller's heap
-// and sort rank whatever is offered, exactly as they rank a scan's rows.
+// come from the most selective query term's postings, narrowed by the other
+// terms where that is cheaper than re-reading rows, and unioned with the
+// overflow rows, whose term sets outgrew their postings; every candidate is
+// then re-read and re-checked against the FULL predicate, so the index changes
+// which rows are considered, never which match. A relevance ordering needs
+// nothing from the walk: the caller's heap and sort rank whatever is offered,
+// exactly as they rank a scan's rows.
+//
+// Because the candidates are only ever narrowed and never completed, dropping
+// a narrowing pass is always safe: it leaves more rows to re-check, not fewer
+// rows in the answer. That is what lets both passes below bound their reads
+// and give up on a term whose postings are not worth what they would save.
 //
 // Declines — no declaration, no required match, a term-less match (which
 // matches every row, so the postings narrow nothing), an unbuilt index, or a
-// term whose postings blow the candidate budget — all happen before any row
-// is offered, so the caller falls through with nothing to discard.
+// query whose every term blows the candidate budget — all happen before any
+// row is offered, so the caller falls through with nothing to discard.
 func queryBySearch(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -581,11 +588,15 @@ func queryBySearch(
 	}
 
 	budget := limits.maxIndexScanCandidates()
-	scanKeys := func(lo, hi []byte, keep func(rowKey string)) (bool, error) {
+	// postings reads the row keys a range names, giving up once it has seen
+	// more than cap of them. The cap rides the storage limit rather than a
+	// counter in the callback so that a range the walk is not going to use
+	// costs one bounded read instead of a full one.
+	postings := func(lo, hi []byte, max int, keep func(rowKey string)) (bool, error) {
 		seen := 0
-		err := tx.ScanIndex(info.name, si.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+		err := tx.ScanIndex(info.name, si.name, lo, hi, max+1, storage.ScanAsc, func(_ []byte, rowKey string) error {
 			seen++
-			if seen > budget {
+			if seen > max {
 				return errIndexBudget
 			}
 			keep(rowKey)
@@ -597,29 +608,37 @@ func queryBySearch(
 		return err == nil, err
 	}
 
-	// Intersect term by term. The first term seeds the set; each later term
-	// keeps only the rows it also has. An empty intersection still reads the
-	// overflow rows — they carry no postings to intersect on.
-	var candidates map[string]struct{}
-	for _, t := range m.Terms() {
+	candidates, seeded, err := searchSeed(m.Terms(), budget, postings)
+	if err != nil || candidates == nil {
+		return false, err
+	}
+
+	// Narrow with the remaining terms. A row that matches carries every term,
+	// so intersecting can only remove candidates — but reading a term's
+	// postings to find that out is only worth it while the list is small
+	// against the rows it could save re-reading, which is what the cap
+	// expresses. A term that blows it is skipped rather than declined.
+	for i, t := range m.Terms() {
+		if i == seeded || len(candidates) == 0 {
+			continue
+		}
 		lo, hi := query.SearchTermRange(t)
-		next := make(map[string]struct{})
-		ok, err := scanKeys(lo, hi, func(rowKey string) {
-			if candidates == nil {
-				next[rowKey] = struct{}{}
-				return
-			}
+		next := make(map[string]struct{}, len(candidates))
+		ok, err := postings(lo, hi, min(len(candidates)*searchNarrowRatio, budget), func(rowKey string) {
 			if _, in := candidates[rowKey]; in {
 				next[rowKey] = struct{}{}
 			}
 		})
-		if !ok || err != nil {
+		if err != nil {
 			return false, err
 		}
-		candidates = next
+		if ok {
+			candidates = next
+		}
 	}
+
 	lo, hi := query.SearchOverflowRange()
-	ok, err := scanKeys(lo, hi, func(rowKey string) {
+	ok, err := postings(lo, hi, budget, func(rowKey string) {
 		candidates[rowKey] = struct{}{}
 	})
 	if !ok || err != nil {
@@ -650,6 +669,69 @@ func queryBySearch(
 		return false, err
 	}
 	return true, nil
+}
+
+// searchSeedCaps are the candidate counts the seed pass offers a term, in
+// order. They grow geometrically so that the total read stays within a
+// constant factor of the winning term's posting list, and they start small
+// because the term a search is worth serving from usually has a short one.
+var searchSeedCaps = []int{64, 512, 4096}
+
+// searchNarrowRatio is how many index entries a narrowing pass will read per
+// candidate it could remove. A candidate costs a row read, a decode and a
+// rank; an index entry costs a step of a range already positioned. The ratio
+// is the conservative end of that difference, so a term wide enough to be
+// skipped was never going to pay for itself.
+const searchNarrowRatio = 32
+
+// searchSeed picks the term whose postings bound the walk most tightly and
+// returns the rows they name, along with the position of the term it used. A
+// nil map means no term is selective enough to be worth a candidate walk at
+// all and the caller must scan.
+//
+// Terms are offered a growing candidate cap rather than read whole, one round
+// per cap: the first term to fit under a cap has the shortest list of them
+// all, to within the ratio between two caps, and every other term is abandoned
+// as soon as it is known not to fit. A query of common words therefore costs a
+// bounded read per term before it declines, instead of reading every list to
+// the budget to discover the same thing.
+func searchSeed(
+	terms []search.QueryTerm,
+	budget int,
+	postings func(lo, hi []byte, max int, keep func(rowKey string)) (bool, error),
+) (map[string]struct{}, int, error) {
+	caps := searchSeedCaps
+	if len(terms) == 1 {
+		// One term is its own most selective: there is nothing to compare it
+		// against, so the rounds would only read the same list twice.
+		caps = nil
+	}
+	// One round per cap, then a final one at the budget — which is the cap that
+	// decides whether the walk happens at all, so it runs however small the
+	// budget is configured to be.
+	for round := 0; round <= len(caps); round++ {
+		max := budget
+		if round < len(caps) {
+			if caps[round] >= budget {
+				continue
+			}
+			max = caps[round]
+		}
+		for i, t := range terms {
+			lo, hi := query.SearchTermRange(t)
+			found := make(map[string]struct{})
+			ok, err := postings(lo, hi, max, func(rowKey string) {
+				found[rowKey] = struct{}{}
+			})
+			if err != nil {
+				return nil, 0, err
+			}
+			if ok {
+				return found, i, nil
+			}
+		}
+	}
+	return nil, 0, nil
 }
 
 // seekRange narrows one range of an ordered plan to the part of it the page's

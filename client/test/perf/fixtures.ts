@@ -97,6 +97,26 @@ export function issueKey(index: number): string {
 	return `issue-${String(index).padStart(8, '0')}`;
 }
 
+/**
+ * The terms the corpus plants in its issue bodies, mirroring
+ * benchapp.SearchRareTerm and its siblings. What a search costs is set by how
+ * many rows carry its terms, so these — and the counts below — are the axis
+ * every search benchmark varies.
+ */
+export const searchTerms = {
+	rare: 'zygote',
+	mid: 'quasar',
+	common: 'telemetry',
+} as const;
+
+/** Issues carrying `searchTerms.rare`; fixed across tiers (benchapp.RareTermRows). */
+export const rareTermRows = 10;
+
+/** Issues carrying `searchTerms.mid` (benchapp.MidTermPer). */
+export function midTermRows(t: Tier): number {
+	return Math.ceil(t.issues / 100);
+}
+
 export interface WireStats {
 	total: Record<string, number>;
 	bytesIn: Record<string, number>;
@@ -315,9 +335,18 @@ export class BenchTab {
 		return this.page.evaluate(() => window.benchHarness.heapBytes());
 	}
 
-	/** Closes the client, then the tab — how a user closes a tab, in order. */
+	/**
+	 * Closes the client, then the tab — how a user closes a tab, in order.
+	 *
+	 * A page that has gone away takes the client with it, so a missing harness
+	 * is nothing left to close rather than a failure. Throwing here would run
+	 * inside the caller's `finally` and replace whatever error sent it there,
+	 * which is how a crashed tab comes back reported as a missing property.
+	 */
 	async closeTab(): Promise<void> {
-		await this.page.evaluate(() => window.benchHarness.close());
+		await this.page.evaluate(async () => {
+			await window.benchHarness?.close();
+		}).catch(() => {});
 		await this.page.close();
 	}
 }

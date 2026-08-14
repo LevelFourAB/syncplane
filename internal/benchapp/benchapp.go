@@ -23,7 +23,7 @@ import (
 
 // GeneratorVersion changes whenever the generated corpus does. It is the cache
 // key for a seeded database: bump it and every cached corpus is regenerated.
-const GeneratorVersion = 1
+const GeneratorVersion = 2
 
 // Options returns the entity registrations for the bench corpus.
 func Options() []server.Option {

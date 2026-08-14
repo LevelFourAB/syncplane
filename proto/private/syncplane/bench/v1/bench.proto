@@ -101,10 +101,15 @@ message Issue {
 			name: "by_label_updated"
 			key: [ { path: "labels" }, { path: "updated_at_ms" desc: true } ]
 		}
+		// Search over the bulk entity, so a search benchmark is measured
+		// against half the corpus rather than a side entity. `title` carries
+		// the mark instead of appearing here, which puts it ahead of `body` in
+		// the ranking — the order a tracker's own search would want.
+		search: { field: [ { path: "body" } ] }
 	};
 
 	string id = 1;
-	string title = 2;
+	string title = 2 [(syncplane.v1.field_behavior) = { searchable: true }];
 	// Plain string, not collaborative text: this is the payload-weight dial for
 	// the bulk entity, and giving it CRDT semantics would put text merge cost
 	// into every issue benchmark. Notes are where text is measured.

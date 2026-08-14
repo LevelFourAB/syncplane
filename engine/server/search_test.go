@@ -184,6 +184,42 @@ var _ = Describe("Search", func() {
 			Expect(keysOf(prefix)).To(Equal([]string{"a1"}))
 		})
 
+		It("answers a mix of common and rare terms from the rare one", func() {
+			// The walk is bounded by its most selective term and skips reading
+			// a posting list too wide to be worth narrowing with, so the terms
+			// here differ by two orders of magnitude in how many rows carry
+			// them — and the common one comes FIRST, where a walk that simply
+			// seeded from the leading term would pick it.
+			var muts []*syncplanev1.Mutation
+			for i := 0; i < 100; i++ {
+				// Ids continue the fixture's, without a gap: the watermark
+				// rejects a client that skips one.
+				muts = append(muts, putArticle(uint64(5+i), &testdatav1.Article{
+					Id:      fmt.Sprintf("bulk%03d", i),
+					Summary: "common filler",
+				}))
+			}
+			muts = append(muts, putArticle(105, &testdatav1.Article{
+				Id: "hit", Summary: "common needle",
+			}))
+			resp, err := client.Push(ctx, connect.NewRequest(pushOf(ws, muts)))
+			Expect(err).NotTo(HaveOccurred())
+			for _, r := range pushResults(resp.Msg) {
+				Expect(r.GetErrorCode()).To(BeEmpty(), r.GetErrorMessage())
+			}
+
+			ask := func() []string {
+				return keysOf(runQuery(&syncplanev1.QueryRequest{
+					Entity:    "article",
+					Predicate: match("common needle "),
+				}))
+			}
+			scan := ask()
+			Expect(scan).To(Equal([]string{"hit"}))
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			Expect(ask()).To(Equal(scan))
+		})
+
 		It("stores the overflow marker for an oversized document and still matches it", func() {
 			var b strings.Builder
 			for i := 0; i < query.SearchTermsPerRow+40; i++ {

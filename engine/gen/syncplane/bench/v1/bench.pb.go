@@ -805,10 +805,10 @@ const file_syncplane_bench_v1_bench_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name\x12\x14\n" +
 	"\x05color\x18\x03 \x01(\tR\x05color:\x0f\xa2\xbb\x18\v\n" +
-	"\x05label\x12\x02id\"\xcb\x05\n" +
+	"\x05label\x12\x02id\"\xdd\x05\n" +
 	"\x05Issue\x12\x0e\n" +
-	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
-	"\x05title\x18\x02 \x01(\tR\x05title\x12\x12\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\x05title\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x028\x01R\x05title\x12\x12\n" +
 	"\x04body\x18\x03 \x01(\tR\x04body\x125\n" +
 	"\aproject\x18\x04 \x01(\v2\x1b.syncplane.bench.v1.ProjectR\aproject\x124\n" +
 	"\bassignee\x18\x05 \x01(\v2\x18.syncplane.bench.v1.UserR\bassignee\x124\n" +
@@ -822,7 +822,7 @@ const file_syncplane_bench_v1_bench_proto_rawDesc = "" +
 	"\rupdated_at_ms\x18\v \x01(\x03R\vupdatedAtMs\x12\"\n" +
 	"\rcreated_at_ms\x18\f \x01(\x03R\vcreatedAtMs\x12\x1e\n" +
 	"\x06labels\x18\r \x03(\tB\x06\xaa\xbb\x18\x02(\x01R\x06labels\x12I\n" +
-	"\tchecklist\x18\x0e \x03(\v2!.syncplane.bench.v1.ChecklistItemB\b\xaa\xbb\x18\x04\x12\x02idR\tchecklist:\xa1\x01\xa2\xbb\x18\x9c\x01\n" +
+	"\tchecklist\x18\x0e \x03(\v2!.syncplane.bench.v1.ChecklistItemB\b\xaa\xbb\x18\x04\x12\x02idR\tchecklist:\xab\x01\xa2\xbb\x18\xa6\x01\n" +
 	"\x05issue\x12\x02id\x1a2\n" +
 	"\x12by_project_updated\x12\t\n" +
 	"\aproject\x12\x11\n" +
@@ -832,7 +832,9 @@ const file_syncplane_bench_v1_bench_proto_rawDesc = "" +
 	"\bpriority\x10\x01\x1a/\n" +
 	"\x10by_label_updated\x12\b\n" +
 	"\x06labels\x12\x11\n" +
-	"\rupdated_at_ms\x10\x01\"G\n" +
+	"\rupdated_at_ms\x10\x01J\b\n" +
+	"\x06\n" +
+	"\x04body\"G\n" +
 	"\rChecklistItem\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x12\n" +

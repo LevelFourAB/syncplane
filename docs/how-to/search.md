@@ -138,7 +138,10 @@ Costs to know:
   never the results.
 - **Common-word queries narrow little.** A term that appears in most rows
   yields most rows as candidates; the query is still correct, just closer to a
-  scan. Ranking, not the index, is what puts the good hits first.
+  scan. Ranking, not the index, is what puts the good hits first. A query of
+  several words costs what its most selective word costs, so adding a word to
+  a search never makes it slower — but a single common word has nothing to be
+  narrowed by.
 
 Why matching and ranking behave as they do — and what search deliberately does
 not attempt — is covered in [the search model](../explanation/search.md).

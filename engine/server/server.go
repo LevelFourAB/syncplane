@@ -98,8 +98,8 @@ type compiledIndex struct {
 // declaration. It shares the derived/disposable/pure-optimization contract of
 // compiledIndex and the same storage, state and build machinery; what differs
 // is the entry shape (terms, not field values — see
-// engine/query/searchindex.go) and that reads probe it by term intersection
-// rather than through the planner.
+// engine/query/searchindex.go) and that reads probe it by term rather than
+// through the planner.
 type searchIndex struct {
 	name     string
 	specHash string

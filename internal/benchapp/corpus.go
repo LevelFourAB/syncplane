@@ -250,6 +250,7 @@ func (g *generator) issue(i int) proto.Message {
 			Done: g.rng.IntN(3) == 0,
 		})
 	}
+	issue.Body += g.searchMarkers(i)
 	// Dependencies point BACKWARDS only. A chain that can only run toward lower
 	// indices cannot contain a cycle, so following blocked_by transitively
 	// terminates however deep a benchmark sets followDepth.
@@ -291,6 +292,36 @@ func (g *generator) flat(i int) proto.Message {
 			"region": pick(g.rng, regions),
 		},
 	}
+}
+
+// searchMarkers is the text an issue body carries for the search benchmarks:
+// terms whose SELECTIVITY is a property of the corpus rather than of the
+// filler, which is what makes a search number interpretable. The filler words
+// are drawn from a small vocabulary and so occur in nearly every row — the
+// only selectivity they can express is "matches everything".
+//
+// Placement is by row index and consumes no randomness, so the markers land on
+// the same rows for every seed, spread across the key space rather than
+// clustered at one end.
+//
+//   - SearchRareTerm — RareTermRows rows, whatever the tier's size. The
+//     selective search: what an index has to keep flat as a corpus grows.
+//   - SearchMidTerm — one row in MidTermPer. Selective enough to be worth an
+//     index, wide enough that the candidates dominate the walk.
+//   - SearchCommonTerm — every row. The case no index can help with, and the
+//     ceiling the other two are read against. Planted rather than taken from
+//     the filler because a filler word occurs in MOST bodies, not all, and a
+//     result set that drifts with the seed cannot be asserted on.
+func (g *generator) searchMarkers(i int) string {
+	var b strings.Builder
+	b.WriteString(" " + SearchCommonTerm)
+	if step := max(g.tier.Issues/RareTermRows, 1); i%step == 0 {
+		b.WriteString(" " + SearchRareTerm)
+	}
+	if i%MidTermPer == 0 {
+		b.WriteString(" " + SearchMidTerm)
+	}
+	return b.String()
 }
 
 // hotIssue picks the issue a comment hangs off, skewed so most comments land on
@@ -383,6 +414,19 @@ func dedupe(in []string) []string {
 	}
 	return out
 }
+
+// The search markers, and how many rows carry them. Exported because the
+// benchmark specs search for them by name and assert the row counts they get
+// back: a search whose result set moved is measuring a different query.
+const (
+	SearchRareTerm   = "zygote"
+	SearchMidTerm    = "quasar"
+	SearchCommonTerm = "telemetry"
+	// RareTermRows is fixed across tiers, so the rare search returns the same
+	// rows from a thousand-row corpus and from a half-million-row one.
+	RareTermRows = 10
+	MidTermPer   = 100
+)
 
 var (
 	issueStates   = []string{"open", "open", "open", "in_progress", "review", "done", "closed"}

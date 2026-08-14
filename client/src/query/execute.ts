@@ -80,6 +80,29 @@ const MAX_INDEX_CANDIDATES = 10000;
 const READ_BATCH = 64;
 
 /**
+ * The candidate counts a search's seed pass offers a term, in order. They grow
+ * geometrically so the total read stays within a constant factor of the
+ * winning term's posting list, and they start small because the term a search
+ * is worth serving from usually has a short one. The server's mirror is
+ * searchSeedCaps.
+ */
+const SEARCH_SEED_CAPS = [ 64, 512, 4096 ];
+
+/**
+ * How many index positions a narrowing pass will read per candidate it could
+ * remove — the point where the reads it costs stop being cheaper than the
+ * candidate re-checks it saves.
+ *
+ * That is a property of the STORE, not of the query, which is why this number
+ * is smaller than the server's searchNarrowRatio: stepping an IndexedDB cursor
+ * and reading a row out of it are within a small factor of each other, where
+ * on the server a point read costs many index steps. The two sides are free to
+ * disagree — a candidate set is a superset that every side re-checks in full,
+ * so a walk that narrowed less still answers identically.
+ */
+const SEARCH_NARROW_RATIO = 4;
+
+/**
  * Cap on the shadowed rows whose confirmed records a query reads so the count
  * shortcut can subtract their positions (see countAssist below). Past it a
  * point read per pending row rivals the range walk the shortcut avoids, and
@@ -161,7 +184,7 @@ export async function queryByIndex<D extends DescMessage>(
 	if (built.length === 0) return decline(report, 'not-built');
 
 	// A required match narrows candidates harder than any value range, so the
-	// term-postings intersection goes first. A term-less match (which matches
+	// term-postings walk goes first. A term-less match (which matches
 	// every row) narrows nothing, and an unbuilt search index simply falls
 	// through to the planner — which cannot serve a match and declines to the
 	// scan.
@@ -437,13 +460,18 @@ export async function queryByIndex<D extends DescMessage>(
  * term-postings index — the mirror of the server's queryBySearch, plus the
  * overlay merge every local read owes.
  *
- * Candidates are the intersection of every query term's postings (a prefix
- * range for a prefix term) unioned with the overflow rows, minus rows the
+ * Candidates come from the most selective term's postings (a prefix range for
+ * a prefix term), narrowed by the other terms where that is cheaper than
+ * re-reading rows, unioned with the overflow rows, and minus the rows the
  * overlay shadows; every candidate is re-read and re-checked against the FULL
  * predicate, and overlay rows are evaluated whole — so the result is exactly
- * the scan's. No early settling: a relevance ordering is computed per row, so
- * the walk cannot know which candidates the page will keep, and the candidate
- * set is already bounded by the budget it declines over.
+ * the scan's. Because candidates are only ever narrowed and never completed,
+ * dropping a narrowing pass leaves more rows to re-check rather than fewer
+ * rows in the answer, which is what lets both passes bound their reads.
+ *
+ * No early settling: a relevance ordering is computed per row, so the walk
+ * cannot know which candidates the page will keep, and the candidate set is
+ * already bounded by the budget it declines over.
  */
 async function querySearchIndex<D extends DescMessage>(
 	tx: KVRead,
@@ -487,37 +515,91 @@ async function querySearchIndex<D extends DescMessage>(
 	const prefix = indexPositionPrefix(def.name, idx.name, idx.specHash, workspaceId);
 	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
 	let walked = 0;
+	/**
+	 * Reads the rows a posting range names, giving up once it has seen more
+	 * than `max` of them — 'wide' — or once the whole walk has outrun its
+	 * budget — 'budget'. Only 'ok' means the range was read completely, and
+	 * only a completely read range may narrow anything.
+	 */
 	const scanKeys = async (
 		lo: string,
 		hi: string | undefined,
+		max: number,
 		keep: (key: string) => void,
-	): Promise<boolean> => {
+	): Promise<'ok' | 'wide' | 'budget'> => {
 		const scanLo = prefix + lo;
 		const scanHi = hi === undefined ? successorOf(prefix) : prefix + hi;
+		let seen = 0;
 		for await (const cKey of tx.indexScan(scanLo, scanHi)) {
-			if (++walked > MAX_INDEX_CANDIDATES) return false;
+			if (++walked > MAX_INDEX_CANDIDATES) return 'budget';
+			if (++seen > max) return 'wide';
 			if (!cKey.startsWith(rowPrefix)) continue;
 			keep(cKey.slice(rowPrefix.length));
 		}
-		return true;
+		return 'ok';
 	};
 
-	// Intersect term by term. The first term seeds the set; each later term
-	// keeps only the rows it also has. An empty intersection still reads the
-	// overflow rows — they carry no postings to intersect on.
-	let candidates: Set<string> | undefined;
-	for (const t of matcher.terms) {
-		const { lo, hi } = searchTermRange(t);
+	/**
+	 * Picks the term whose postings bound the walk most tightly, offering each
+	 * a growing cap rather than reading any of them whole: the first term to
+	 * fit under a cap has the shortest list of them all, to within the ratio
+	 * between two caps, and every other term is abandoned as soon as it is
+	 * known not to fit. A query of common words therefore costs a bounded read
+	 * per term before it declines, instead of reading every list to the budget
+	 * to discover the same thing.
+	 */
+	const seed = async (): Promise<{ keys: Set<string>; at: number } | undefined> => {
+		// One term is its own most selective: there is nothing to compare it
+		// against, so the rounds would only read the same list twice.
+		// The final round is at the budget — the cap that decides whether the
+		// walk happens at all — so a cap that reaches it adds nothing.
+		const caps = matcher.terms.length === 1
+			? [ MAX_INDEX_CANDIDATES ]
+			: [ ...SEARCH_SEED_CAPS.filter((c) => c < MAX_INDEX_CANDIDATES), MAX_INDEX_CANDIDATES ];
+		for (const max of caps) {
+			for (let at = 0; at < matcher.terms.length; at++) {
+				const { lo, hi } = searchTermRange(matcher.terms[at]!);
+				const keys = new Set<string>();
+				const outcome = await scanKeys(lo, hi, max, (key) => keys.add(key));
+				if (outcome === 'budget') return undefined;
+				if (outcome === 'ok') return { keys, at };
+			}
+		}
+		return undefined;
+	};
+
+	const seeded = await seed();
+	if (seeded === undefined) return decline(report, 'budget', walked);
+
+	// Narrow with the remaining terms. A row that matches carries every term,
+	// so intersecting can only remove candidates — but reading a term's
+	// postings to find that out is only worth it while the list is small
+	// against the rows it could save re-reading, which is what the cap
+	// expresses. A term that blows it is skipped rather than declined.
+	let all = seeded.keys;
+	for (let at = 0; at < matcher.terms.length; at++) {
+		if (at === seeded.at || all.size === 0) continue;
+		const { lo, hi } = searchTermRange(matcher.terms[at]!);
 		const next = new Set<string>();
-		const ok = await scanKeys(lo, hi, (key) => {
-			if (candidates === undefined || candidates.has(key)) next.add(key);
-		});
-		if (!ok) return decline(report, 'budget', walked);
-		candidates = next;
+		const kept = all;
+		const outcome = await scanKeys(
+			lo,
+			hi,
+			Math.min(kept.size * SEARCH_NARROW_RATIO, MAX_INDEX_CANDIDATES),
+			(key) => {
+				if (kept.has(key)) next.add(key);
+			},
+		);
+		if (outcome === 'budget') return decline(report, 'budget', walked);
+		if (outcome === 'ok') all = next;
 	}
-	const all = candidates ?? new Set<string>();
+
+	// The overflow rows carry no postings to narrow on, so they join whatever
+	// the terms left — including an empty intersection.
 	const overflow = searchOverflowRange();
-	if (!await scanKeys(overflow.lo, overflow.hi, (key) => all.add(key))) {
+	if (
+		await scanKeys(overflow.lo, overflow.hi, MAX_INDEX_CANDIDATES, (key) => all.add(key)) !== 'ok'
+	) {
 		return decline(report, 'budget', walked);
 	}
 

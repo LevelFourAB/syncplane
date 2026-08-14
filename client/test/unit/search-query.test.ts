@@ -64,6 +64,16 @@ const SEED: Article[] = [
 		summary: Array.from({ length: SEARCH_TERMS_PER_ROW + 20 }, (_, i) => `unique${i}`).join(' ')
 			+ ' needle',
 	}),
+	// A term wide enough that no candidate walk should read its postings, and
+	// one row that also carries a rare one. What a query naming both costs is
+	// set by the rare term alone, and the two arms have to agree on the answer
+	// whichever way the walk decides to get there.
+	...Array.from(
+		{ length: 100 },
+		(_, i) =>
+			row({ id: `bulk${String(i).padStart(3, '0')}`, summary: 'common filler', state: 'live' }),
+	),
+	row({ id: 'hit', summary: 'common zygote', state: 'live' }),
 ];
 
 /** Plants rows as CONFIRMED state — the only state an index covers. */
@@ -173,6 +183,12 @@ describe('search-index-served match queries', () => {
 	same('finds an oversized row through the overflow union', {
 		where: (a) => a.match('needle'),
 	}, [ 'big' ]);
+
+	// The common term comes FIRST, which is where a walk that seeded from the
+	// leading term rather than the most selective one would pick it.
+	same('answers a mix of common and rare terms from the rare one', {
+		where: (a) => a.match('common zygote '),
+	}, [ 'hit' ]);
 
 	same('slices a relevance page and reports the total', {
 		where: (a) => a.match('milk'),

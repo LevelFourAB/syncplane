@@ -102,9 +102,20 @@ Without an index, a match query scans the entity and evaluates every row —
 correct, and O(entity). The search index exists to narrow that, and it narrows
 _only_: it maps each term a row's searchable fields analyze to into one
 posting (`term → row key`), stored in the same secondary-index storage as
-every other index, on both sides. A query intersects its terms' posting
-ranges — a prefix range for the typeahead term — and then re-reads, re-checks
-and re-ranks the candidates from the rows themselves.
+every other index, on both sides. A query takes its candidates from the
+posting range of its most selective term — a prefix range for the typeahead
+term — and then re-reads, re-checks and re-ranks them from the rows
+themselves.
+
+Which term that is, is discovered rather than guessed: each term is offered a
+growing candidate cap and the first one to fit under a cap has the shortest
+posting list. The remaining terms then narrow the set, but only while reading
+their postings costs less than re-checking the rows they would remove — a term
+so common that reading it would cost more than it saves is skipped. Skipping
+is safe because candidates are only ever narrowed and never completed: fewer
+narrowing passes mean more rows re-checked, never different rows returned. The
+practical consequence is that typing a second word into a search box cannot
+make the query slower than the first word alone.
 
 Keeping the index down to postings is what preserves the query contract: an
 index-served match returns exactly what the scan returns, because the rows

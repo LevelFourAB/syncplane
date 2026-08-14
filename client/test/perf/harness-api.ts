@@ -163,6 +163,18 @@ export type ReadOp =
 	| { kind: 'thread'; issueId: string }
 	/** A predicate no index serves, so the evaluator walks the entity. */
 	| { kind: 'unindexed'; limit: number }
+	/**
+	 * Full-text search over the issue bodies, served by the term-postings
+	 * index. `terms` is the query as a user typed it, so a trailing space is
+	 * what separates an exact final term from a prefix one, and `ranked` adds
+	 * the relevance ordering — which ranks every matching row, whatever the
+	 * limit.
+	 *
+	 * The corpus plants terms of known selectivity (benchapp.SearchRareTerm and
+	 * its siblings), and that is the axis these reads vary: what a search costs
+	 * is set by how many rows carry its terms, not by how many words it has.
+	 */
+	| { kind: 'search'; terms: string; limit: number; ranked?: true }
 	| { kind: 'get'; issueId: string };
 
 /**

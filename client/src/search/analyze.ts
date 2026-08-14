@@ -69,7 +69,9 @@ export interface QueryTerm {
  * no terms, including the empty string.
  */
 export function analyze(text: string, options?: AnalyzeOptions): string[] {
-	return tokenize(normalize(text, options)).map(t => t.term);
+	const terms: string[] = [];
+	tokenize(normalize(text, options), (term) => terms.push(term));
+	return terms;
 }
 
 /**
@@ -81,14 +83,21 @@ export function analyzeQuery(
 	query: string,
 	options?: AnalyzeOptions,
 ): QueryTerm[] {
-	const tokens = tokenize(normalize(query, options));
-	return tokens.map((t, i) => ({
-		term: t.term,
-		prefix: i === tokens.length - 1 && t.atEnd,
-	}));
+	const terms: QueryTerm[] = [];
+	tokenize(normalize(query, options), (term, atEnd) => terms.push({ term, prefix: atEnd }));
+	return terms;
 }
 
+const nonAscii = /[^\x00-\x7f]/;
+
 function normalize(s: string, options?: AnalyzeOptions): string {
+	// All-ASCII text is its own NFKC and NFD form and carries no combining
+	// mark, so every stage but the case mapping is provably identity on it \u2014
+	// and over ASCII the Unicode default case conversion is A-Z to a-z and
+	// nothing else. Skipping the three normalization passes there is what
+	// keeps analysis of ordinary prose off the slow path, since every
+	// searchable field of every candidate row is analyzed on every ranked read.
+	if (!nonAscii.test(s)) return s.toLowerCase();
 	s = s.normalize('NFKC').toLowerCase();
 	if (!options?.keepDiacritics) {
 		s = s
@@ -97,15 +106,6 @@ function normalize(s: string, options?: AnalyzeOptions): string {
 			.normalize('NFC');
 	}
 	return s;
-}
-
-interface Token {
-	term: string;
-	/**
-	 * Marks a token whose final code point is the final code point of the
-	 * input, which is what lets analyzeQuery treat it as a prefix.
-	 */
-	atEnd: boolean;
 }
 
 const enum CharClass {
@@ -117,7 +117,16 @@ const enum CharClass {
 const wordChar = /[\p{L}\p{M}\p{N}]/u;
 
 function classify(ch: string): CharClass {
-	if (isCjk(ch.codePointAt(0)!)) {
+	const cp = ch.codePointAt(0)!;
+	if (cp < 0x80) {
+		// No ASCII code point is CJK or a combining mark, so the class is
+		// decided by letter-or-digit alone — and answering that from the code
+		// point avoids a property-class regex per character of every document.
+		const word = (cp >= 0x61 && cp <= 0x7a) || (cp >= 0x41 && cp <= 0x5a)
+			|| (cp >= 0x30 && cp <= 0x39);
+		return word ? CharClass.Word : CharClass.Skip;
+	}
+	if (isCjk(cp)) {
 		return CharClass.Cjk;
 	}
 	if (wordChar.test(ch)) {
@@ -142,47 +151,85 @@ function isCjk(cp: number): boolean {
 	);
 }
 
-function tokenize(s: string): Token[] {
-	const tokens: Token[] = [];
-	let run: string[] = [];
+/**
+ * Calls `emit` once per term of the normalized string, in document order.
+ * `atEnd` marks a term whose final code point is the final code point of the
+ * input, which is what lets analyzeQuery treat it as a prefix.
+ *
+ * Every term is a SLICE of the normalized string rather than characters
+ * reassembled from it: a run of one class is contiguous by construction, and
+ * neither the length cap nor the bigram split does anything but cut one.
+ */
+function tokenize(s: string, emit: (term: string, atEnd: boolean) => void): void {
+	let runStart = -1;
+	let runPoints = 0;
 	let runClass = CharClass.Skip;
 
-	const flush = (atEnd: boolean): void => {
+	const flush = (end: number): void => {
+		const run = s.slice(runStart, end);
+		const atEnd = end === s.length;
 		switch (runClass) {
-			case CharClass.Word: {
-				const term = run.length > MAX_TERM_LENGTH
-					? run.slice(0, MAX_TERM_LENGTH)
-					: run;
-				tokens.push({ term: term.join(''), atEnd });
+			case CharClass.Word:
+				emit(runPoints > MAX_TERM_LENGTH ? cutPoints(run, MAX_TERM_LENGTH) : run, atEnd);
 				break;
-			}
-			case CharClass.Cjk: {
-				if (run.length === 1) {
-					tokens.push({ term: run[0]!, atEnd });
-					break;
-				}
-				for (let i = 0; i + 2 <= run.length; i++) {
-					tokens.push({
-						term: run[i]! + run[i + 1]!,
-						atEnd: atEnd && i + 2 === run.length,
-					});
-				}
+			case CharClass.Cjk:
+				emitBigrams(run, runPoints, atEnd, emit);
 				break;
-			}
 		}
-		run = [];
+		runStart = -1;
+		runPoints = 0;
 	};
 
+	let at = 0;
 	for (const ch of s) {
 		const c = classify(ch);
 		if (c !== runClass) {
-			flush(false);
+			if (runStart >= 0) flush(at);
 			runClass = c;
+			runStart = c === CharClass.Skip ? -1 : at;
+			runPoints = 0;
 		}
-		if (c !== CharClass.Skip) {
-			run.push(ch);
-		}
+		if (c !== CharClass.Skip) runPoints++;
+		at += ch.length;
 	}
-	flush(true);
-	return tokens;
+	if (runStart >= 0) flush(s.length);
+}
+
+/**
+ * Splits an unsegmented run into overlapping character pairs. A one-character
+ * run is emitted as itself, so a single CJK character is findable rather than
+ * lost.
+ */
+function emitBigrams(
+	run: string,
+	points: number,
+	atEnd: boolean,
+	emit: (term: string, atEnd: boolean) => void,
+): void {
+	if (points === 1) {
+		emit(run, atEnd);
+		return;
+	}
+	let lo = 0;
+	let mid = 0;
+	for (const ch of run) {
+		if (mid > 0) {
+			const hi = mid + ch.length;
+			emit(run.slice(lo, hi), atEnd && hi === run.length);
+			lo = mid;
+		}
+		mid += ch.length;
+	}
+}
+
+/** The first `points` code points of `s`, which must hold at least that many. */
+function cutPoints(s: string, points: number): string {
+	let at = 0;
+	let seen = 0;
+	for (const ch of s) {
+		if (seen === points) break;
+		at += ch.length;
+		seen++;
+	}
+	return s.slice(0, at);
 }

@@ -325,6 +325,13 @@ async function runRead(op: ReadOp): Promise<ReadResult> {
 				limit: op.limit,
 			}) as typeof rows;
 			break;
+		case 'search':
+			rows = await c.query(IssueSchema, {
+				where: (i) => i.match(op.terms),
+				orderBy: op.ranked === true ? (i) => [ i.relevance() ] : undefined,
+				limit: op.limit,
+			}) as typeof rows;
+			break;
 		case 'get': {
 			const row = await c.get(IssueSchema, op.issueId);
 			return {
