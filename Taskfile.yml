@@ -1,6 +1,24 @@
 version: '3'
 
 tasks:
+  build:
+    desc: Build all targets
+    cmds:
+      - task: build:go
+      - task: build:ts
+
+  build:go:
+    desc: Build the Go binary
+    cmds:
+      - go build ./...
+      - go build -o dist/syncplaned ./cmd/syncplaned
+
+  build:ts:
+    desc: Build the TypeScript client
+    dir: client
+    cmds:
+      - pnpm build
+
   generate:templ:
     # Runs from the repo root so the paths templ bakes into its runtime errors
     # are repo-rooted (internal/admin/ui/views.templ) rather than relative to
