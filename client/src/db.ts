@@ -17,7 +17,15 @@ import type {
 import type { RowSet } from './coverage.js';
 import { newId } from './id.js';
 import type { EntityDef, EntityRegistry, PatchInit, TextInit } from './mutations.js';
-import type { Group, GroupQuery, Query, Scalar, TotalOf } from './query/index.js';
+import type {
+	Group,
+	GroupQuery,
+	GroupRowsQuery,
+	Query,
+	RowGroup,
+	Scalar,
+	TotalOf,
+} from './query/index.js';
 import type { Row } from './read.js';
 import type { Include } from './refs.js';
 import type { TextHandle } from './text/handle.js';
@@ -126,6 +134,25 @@ export interface EntityApi<D extends DescMessage> {
 	groupCountServer(q: GroupQuery<MessageShape<D>>): Promise<Group[]>;
 	/** {@link EntityApi.distinct} against the server. */
 	distinctServer(q: GroupQuery<MessageShape<D>>): Promise<(Scalar | undefined)[]>;
+	/**
+	 * The first rows of each group — a board column's preview, the top item of
+	 * every project.
+	 *
+	 * The groups are {@link EntityApi.groupCount}'s; `q.orderBy` decides which
+	 * rows come first inside one and `q.perGroup` how many. See
+	 * {@link GroupRowsQuery} for what an index makes of the read.
+	 */
+	groupRows(q: GroupRowsQuery<MessageShape<D>>): Promise<RowGroup<MessageShape<D>>[]>;
+	/** {@link EntityApi.groupRows} against the server, for rows partial sync did
+	 * not bring down. */
+	groupRowsServer(q: GroupRowsQuery<MessageShape<D>>): Promise<RowGroup<MessageShape<D>>[]>;
+	/** {@link EntityApi.groupRows}, live: emits after every commit that moves a
+	 * group's head. */
+	watchGroupRows(
+		q: GroupRowsQuery<MessageShape<D>>,
+		cb: (groups: RowGroup<MessageShape<D>>[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
 	/** {@link EntityApi.groupCount}, live: emits after every commit that changes
 	 * the groups. */
 	watchGroupCount(
@@ -231,6 +258,22 @@ interface SchemaApi {
 		schema: D,
 		q: GroupQuery<MessageShape<D>>,
 	): Promise<(Scalar | undefined)[]>;
+	groupRows<D extends DescMessage>(
+		schema: D,
+		q: GroupRowsQuery<MessageShape<D>>,
+	): Promise<RowGroup<MessageShape<D>>[]>;
+	/** Absent on facades with no transport of their own (transactions). */
+	groupRowsServer?<D extends DescMessage>(
+		schema: D,
+		q: GroupRowsQuery<MessageShape<D>>,
+	): Promise<RowGroup<MessageShape<D>>[]>;
+	/** Absent on facades that cannot host a live read (transactions). */
+	watchGroupRows?<D extends DescMessage>(
+		schema: D,
+		q: GroupRowsQuery<MessageShape<D>>,
+		cb: (groups: RowGroup<MessageShape<D>>[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
 	/** Absent on facades that cannot host a live read (transactions). */
 	watchGroupCount?<D extends DescMessage>(
 		schema: D,
@@ -348,6 +391,15 @@ export function buildEntityApis<E extends readonly DescMessage[]>(
 			},
 			groupCount: (q) => client.groupCount(schema, q),
 			distinct: (q) => client.distinct(schema, q),
+			groupRows: (q) => client.groupRows(schema, q),
+			groupRowsServer: (q) => {
+				if (!client.groupRowsServer) throw unavailable(key, 'groupRowsServer', 'server reads');
+				return client.groupRowsServer(schema, q);
+			},
+			watchGroupRows: (q, cb, opts) => {
+				if (!client.watchGroupRows) throw unavailable(key, 'watchGroupRows', 'live reads');
+				return client.watchGroupRows(schema, q, cb, opts);
+			},
 			groupCountServer: (q) => {
 				if (!client.groupCountServer) throw unavailable(key, 'groupCountServer', 'server reads');
 				return client.groupCountServer(schema, q);

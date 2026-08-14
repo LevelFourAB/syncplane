@@ -92,7 +92,8 @@ Understanding-oriented. Read these when a behaviour surprises you.
   semi-join (`matches`), its two-phase rewrite, and how `follow` makes it
   answerable locally.
 - [Grouped reads](explanation/grouped-reads.md) — counts and distinct values
-  without reading rows, the skip-scan that serves them, and what a group is.
+  without reading rows, the head of each group without reading the rest, the
+  skip-scan that serves them all, and what a group is.
 - [Full-text search](explanation/search.md) — why the analyzer is specified
   twice, ranking without corpus statistics, and an index that only narrows.
 - [Collaborative text](explanation/collaborative-text.md) — Fugue ordering,

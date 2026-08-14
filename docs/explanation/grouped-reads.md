@@ -1,4 +1,4 @@
-# Grouped reads: counts without reading rows
+# Grouped reads: counts, and the head of each group
 
 A list UI asks two kinds of question. "Which rows" is a query, and everything
 about it — the predicate, the ordering, the page — is built for that. "How many,
@@ -12,6 +12,13 @@ walks the same match set again for a number. Six columns is six walks; a facet
 sidebar is one per value it already knows about, and it cannot discover a value
 it does not. A grouped read (`groupCount`, `distinct`) answers all of them in one
 walk, and with the right index in one walk that never reads a row.
+
+The same board asks a third question the query surface answers just as badly:
+"the first twenty cards of each column". One query per column again, or one query
+that reads every card of every column to keep twenty of each — the read is
+unbounded in the wrong dimension, scaling with the size of the groups where the
+answer wanted is `groups × N`. `groupRows` is that read: the same partition, with
+each group's head instead of its number.
 
 ## What a group is
 
@@ -93,6 +100,36 @@ Declining is always correct, exactly as it is for a row query: with no such inde
 the caller buckets a scan, per the standing rule that an index is an optimization
 and the scan is the definition.
 
+## The head of a group
+
+Rows per group ride the same walk. Inside one group's sub-range the entries are
+already in the index's own order, so a walk that stops after `perGroup + 1` rows
+has the column's page and knows whether there are more — `groups × perGroup` rows
+read, whatever the groups hold.
+
+That only works when the index's order IS the requested one, so `PlanGroupRows`
+requires two things the counted read does not:
+
+- **The components past the partition supply `orderBy`**, direction included. An
+  index storing `[status, rank desc]` serves "highest rank first" and declines
+  "lowest rank first" — walking a group backward would have to start at the far
+  end of a range whose end is the next group's start. With no `orderBy` at all the
+  rows come back in row-key order, which every entry ends with, so the partition
+  has to be the LAST component for the walk to be that order.
+- **Each entry of a group is a distinct row.** A component past the partition that
+  fans out puts one row at several positions of one group, and the page would
+  carry duplicates ordered by a value nobody asked about.
+
+Both declines land on the definition — bucket the match set, sort each bucket, cut
+it — which reads every matching row. That is the difference declaring
+`[status, rank]` makes, and it is why the read is worth a declared index in a way
+a one-off count is not.
+
+`total` per group is the one part that is not bounded by `perGroup`: counting a
+group means visiting all of it. It is opt-out (`total: false`) for exactly that
+reason, and a column that shows a badge is paying for the badge, not for the
+preview.
+
 ## What a count off entries gives up
 
 Reading a count off index entries means not looking at the rows, and two things
@@ -119,7 +156,8 @@ drop the shadowed rows, add the pending ones back.
 A grouped read cannot merge that cheaply. A shadowed row's confirmed positions
 are still in the store's index, so honouring the overlay would mean subtracting
 each one from whichever group it falls in and adding the pending rows' own groups
-back. So the client's index walk **declines outright while anything is in the
+back — and for `groupRows`, splicing them into the right place in each group's
+page. So the client's index walk **declines outright while anything is in the
 overlay** and buckets the merged view instead. In the steady state — nothing
 pending, which is where a board spends its time — the skip-scan runs; with a
 write in flight the read costs a scan of what the client holds, which is bounded

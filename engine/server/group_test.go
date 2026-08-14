@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -208,6 +209,214 @@ var _ = Describe("Grouped queries", func() {
 		})
 	})
 
+	Describe("rows per group, against the scan", func() {
+		// The same rows the counted specs use, on the same two servers: one that
+		// can only bucket a scan and sort each bucket, one whose skip-scan reads
+		// each group's head straight off `by_state_rank`. Every spec below runs
+		// the request against both.
+		rnd := rand.New(rand.NewSource(20260815))
+		states := []string{"open", "doing", "done"}
+		var rows []*testdatav1.Issue
+		for i := 0; i < 90; i++ {
+			row := &testdatav1.Issue{
+				Id:    fmt.Sprintf("i%03d", i),
+				Title: fmt.Sprintf("t%d", i),
+				Rank:  int32(rnd.Intn(20)),
+			}
+			if i%5 != 0 {
+				row.State = states[rnd.Intn(len(states))]
+			}
+			for _, l := range []string{"ui", "bug"} {
+				if rnd.Intn(2) == 0 {
+					row.Labels = append(row.Labels, l)
+				}
+			}
+			rows = append(rows, row)
+		}
+
+		var scanning, indexed syncplanev1connect.SyncServiceClient
+
+		BeforeEach(func() {
+			load := func(srv *server.Server) {
+				GinkgoHelper()
+				Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+					for _, r := range rows {
+						if err := tx.Put(proto.Clone(r).(*testdatav1.Issue)); err != nil {
+							return err
+						}
+					}
+					return nil
+				})).To(Succeed())
+			}
+			scanSrv, _ := newTestServerStore(server.WithLimits(server.Limits{DisableIndexes: true}))
+			load(scanSrv)
+			scanning = clientFor(scanSrv)
+
+			indexSrv, _ := newTestServerStore()
+			load(indexSrv)
+			Expect(indexSrv.BuildIndexes(ctx, ws)).To(Succeed())
+			indexed = clientFor(indexSrv)
+		})
+
+		// render describes a row-grouped response as strings, so a divergence
+		// names the group, its rows and what it said about the rest of them.
+		render := func(resp *syncplanev1.QueryResponse) []string {
+			out := make([]string, 0, len(resp.GetRowGroups()))
+			for _, g := range resp.GetRowGroups() {
+				v := "(none)"
+				if g.GetValue() != nil {
+					v = g.GetValue().String()
+				}
+				keys := make([]string, 0, len(g.GetRows()))
+				for _, r := range g.GetRows() {
+					keys = append(keys, r.GetKey())
+				}
+				out = append(out, fmt.Sprintf("%s=[%s] total=%d more=%t",
+					v, strings.Join(keys, " "), g.GetTotal(), g.GetHasMore()))
+			}
+			return out
+		}
+
+		run := func(c syncplanev1connect.SyncServiceClient, req *syncplanev1.QueryRequest) []string {
+			GinkgoHelper()
+			req.WorkspaceId = ws
+			req.Entity = "issue"
+			req.Aggregate = syncplanev1.AggregateOp_AGGREGATE_OP_ROWS
+			resp, err := c.Query(ctx, connect.NewRequest(req))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetRows()).To(BeEmpty(), "a grouped read answers with groups, not rows")
+			Expect(resp.Msg.GetGroups()).To(BeEmpty(), "rows come back as row_groups")
+			return render(resp.Msg)
+		}
+
+		agree := func(req *syncplanev1.QueryRequest) []string {
+			GinkgoHelper()
+			want := run(scanning, proto.Clone(req).(*syncplanev1.QueryRequest))
+			Expect(run(indexed, proto.Clone(req).(*syncplanev1.QueryRequest))).To(Equal(want),
+				"the skip-scan and the bucketed scan must agree")
+			return want
+		}
+
+		It("returns each group's head in the requested order", func() {
+			got := agree(&syncplanev1.QueryRequest{
+				GroupBy:  []string{"state"},
+				OrderBy:  []*syncplanev1.OrderKey{query.Desc("rank")},
+				PerGroup: 3,
+			})
+			Expect(got).To(HaveLen(4), "three states plus the rows that hold none")
+			for _, g := range got {
+				Expect(g).To(ContainSubstring("more=true"))
+				Expect(g).To(ContainSubstring("total=0"), "a total costs the whole group, so it is opt-in")
+			}
+		})
+
+		It("counts the whole group when asked to", func() {
+			counted := agree(&syncplanev1.QueryRequest{
+				GroupBy:       []string{"state"},
+				OrderBy:       []*syncplanev1.OrderKey{query.Desc("rank")},
+				PerGroup:      3,
+				PerGroupTotal: true,
+			})
+			total := 0
+			for _, g := range counted {
+				Expect(g).NotTo(ContainSubstring("total=0"))
+				var n int
+				_, err := fmt.Sscanf(g[strings.Index(g, "total="):], "total=%d", &n)
+				Expect(err).NotTo(HaveOccurred())
+				total += n
+			}
+			Expect(total).To(Equal(len(rows)), "every row is in exactly one group of a singular path")
+		})
+
+		It("orders by the row key when nothing else is asked for", func() {
+			agree(&syncplanev1.QueryRequest{GroupBy: []string{"state"}, PerGroup: 2})
+		})
+
+		It("takes the head under a residual the range cannot express", func() {
+			agree(&syncplanev1.QueryRequest{
+				GroupBy:       []string{"state"},
+				OrderBy:       []*syncplanev1.OrderKey{query.Desc("rank")},
+				Predicate:     query.Contains("title", "1"),
+				PerGroup:      2,
+				PerGroupTotal: true,
+			})
+		})
+
+		It("takes the head of an ordering no index serves", func() {
+			// The index orders by rank; this asks for the title, so the skip-scan
+			// declines and the scan answers. The two still agree, which is the
+			// property that makes declining free.
+			agree(&syncplanev1.QueryRequest{
+				GroupBy:  []string{"state"},
+				OrderBy:  []*syncplanev1.OrderKey{query.Asc("title")},
+				PerGroup: 2,
+			})
+		})
+
+		It("puts a row in one group per label", func() {
+			got := agree(&syncplanev1.QueryRequest{
+				GroupBy:       []string{"labels"},
+				OrderBy:       []*syncplanev1.OrderKey{query.Desc("rank")},
+				PerGroup:      2,
+				PerGroupTotal: true,
+			})
+			Expect(got).To(HaveLen(3), "ui, bug, and the rows carrying neither")
+		})
+
+		It("caps the groups returned and reports the rest", func() {
+			full := agree(&syncplanev1.QueryRequest{
+				GroupBy:  []string{"state"},
+				OrderBy:  []*syncplanev1.OrderKey{query.Desc("rank")},
+				PerGroup: 2,
+			})
+			capped := agree(&syncplanev1.QueryRequest{
+				GroupBy:  []string{"state"},
+				OrderBy:  []*syncplanev1.OrderKey{query.Desc("rank")},
+				PerGroup: 2,
+				Limit:    2,
+			})
+			Expect(capped).To(Equal(full[:2]))
+			for _, c := range []syncplanev1connect.SyncServiceClient{scanning, indexed} {
+				resp, err := c.Query(ctx, connect.NewRequest(&syncplanev1.QueryRequest{
+					WorkspaceId: ws,
+					Entity:      "issue",
+					GroupBy:     []string{"state"},
+					Aggregate:   syncplanev1.AggregateOp_AGGREGATE_OP_ROWS,
+					PerGroup:    2,
+					Limit:       2,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Msg.GetHasMore()).To(BeTrue())
+			}
+		})
+
+		It("caps the groups so the response stays inside the row budget", func() {
+			// per_group × limit is what the response carries, so a server holding
+			// 10 rows to a page answers 5 groups of 2 and says there are more.
+			srv, _ := newTestServerStore(server.WithLimits(server.Limits{MaxQueryRows: 10}))
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				for i := 0; i < 12; i++ {
+					if err := tx.Put(&testdatav1.Issue{
+						Id: fmt.Sprintf("i%02d", i), State: fmt.Sprintf("s%02d", i),
+					}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})).To(Succeed())
+			resp, err := clientFor(srv).Query(ctx, connect.NewRequest(&syncplanev1.QueryRequest{
+				WorkspaceId: ws,
+				Entity:      "issue",
+				GroupBy:     []string{"state"},
+				Aggregate:   syncplanev1.AggregateOp_AGGREGATE_OP_ROWS,
+				PerGroup:    2,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(resp.Msg.GetRowGroups()).To(HaveLen(5))
+			Expect(resp.Msg.GetHasMore()).To(BeTrue())
+		})
+	})
+
 	Describe("ordering and shape", func() {
 		var client syncplanev1connect.SyncServiceClient
 
@@ -283,7 +492,19 @@ var _ = Describe("Grouped queries", func() {
 		}
 
 		It("rejects a group_by with no aggregate", func() {
-			reject(&syncplanev1.QueryRequest{GroupBy: []string{"label"}}, "COUNT or DISTINCT")
+			reject(&syncplanev1.QueryRequest{GroupBy: []string{"label"}}, "COUNT, DISTINCT or ROWS")
+		})
+
+		It("rejects rows per group without a count of them, and a count without rows", func() {
+			reject(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"label"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_ROWS,
+			}, "needs per_group")
+			reject(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"label"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+				PerGroup:  5,
+			}, "per_group needs aggregate ROWS")
 		})
 
 		It("rejects an aggregate with no group_by", func() {
@@ -308,6 +529,24 @@ var _ = Describe("Grouped queries", func() {
 				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
 				After:     []byte{1, 2, 3},
 			}, "after/before")
+		})
+
+		It("takes an order_by only where there are rows to order", func() {
+			reject(&syncplanev1.QueryRequest{
+				GroupBy:   []string{"label"},
+				Aggregate: syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
+				OrderBy:   []*syncplanev1.OrderKey{query.Asc("label")},
+			}, "order_by")
+			req := &syncplanev1.QueryRequest{
+				WorkspaceId: ws,
+				Entity:      "widget",
+				GroupBy:     []string{"label"},
+				Aggregate:   syncplanev1.AggregateOp_AGGREGATE_OP_ROWS,
+				PerGroup:    2,
+				OrderBy:     []*syncplanev1.OrderKey{query.Asc("label")},
+			}
+			_, err := client.Query(ctx, connect.NewRequest(req))
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("rejects a path nothing can be grouped by", func() {

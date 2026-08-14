@@ -11,11 +11,11 @@ import type {
 } from '../client.js';
 import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
-import type { GroupQuery, Query, TotalOf } from '../query/index.js';
+import type { GroupQuery, GroupRowsQuery, Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { Include } from '../refs.js';
 import type { RowRef, WatchWindow } from '../watch.js';
-import type { DistinctResult, GroupResult } from './hooks/use-groups.js';
+import type { DistinctResult, GroupResult, RowGroupResult } from './hooks/use-groups.js';
 import type { UseTextResult } from './hooks/use-text.js';
 import type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
 
@@ -209,6 +209,15 @@ export interface ReactEntityApi<D extends DescMessage> {
 	 * offers. `undefined` is among them when some matching row holds no value at
 	 * the path. */
 	useDistinct(query: GroupQuery<MessageShape<D>>, opts?: UseWorkspaceOptions): DistinctResult;
+	/**
+	 * Live head of each group — a board's columns, each with its first rows. The
+	 * groups are `useGroupCount`'s; see {@link GroupRowsQuery} for what decides
+	 * the rows inside one.
+	 */
+	useGroupRows(
+		query: GroupRowsQuery<MessageShape<D>>,
+		opts?: UseWorkspaceOptions,
+	): RowGroupResult<MessageShape<D>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	/** `useRow` that suspends until this key's first callback (see useSuspenseQuery). */
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;

@@ -371,6 +371,51 @@ export interface GroupQuery<M> {
 }
 
 /**
+ * A read that answers with the first ROWS of each group — a board column's
+ * preview, the top item of every project, the newest few of each label.
+ *
+ * The groups are a {@link GroupQuery}'s: ascending value order with the
+ * no-value group last, `limit` caps how many, a repeated `by` path puts a row in
+ * one group per element, and a value no row holds is absent rather than empty.
+ * What is new is `orderBy`, which decides what "first" means INSIDE a group, and
+ * `perGroup`, which is how many of them come back.
+ *
+ * The read costs `groups × perGroup` rows against an index whose components past
+ * the grouping path are that ordering — declaring
+ * `index: [{ path: "status" }, { path: "rank" }]` is what makes a board column
+ * affordable — and falls back to reading the whole match set otherwise.
+ *
+ * @example
+ * ```ts
+ * const columns = await db.issue.groupRows({
+ * 	by: (i) => i.status,
+ * 	orderBy: (i) => [ i.rank.asc() ],
+ * 	perGroup: 20,
+ * 	where: (i) => i.projectId.eq(projectId),
+ * });
+ * ```
+ */
+export interface GroupRowsQuery<M> {
+	/** The field the match set is partitioned by, named without an operator. */
+	by: (w: QueryRef<M>) => GroupKeyRef;
+	where?: (w: QueryRef<M>) => Cond;
+	/** What "first" means inside a group. Rows come back in key order without
+	 * one. */
+	orderBy?: (w: QueryRef<M>) => OrderKey[];
+	/** Rows to return per group, counted from the first in `orderBy` order. */
+	perGroup: number;
+	/** Maximum groups to return, counted from the first in value order. */
+	limit?: number;
+	/**
+	 * Whether each group reports `total`. `false` makes it undefined and drops
+	 * the walk of every matching row a count needs, where the rows themselves
+	 * cost `perGroup` of them.
+	 * @defaultValue true
+	 */
+	total?: boolean;
+}
+
+/**
  * A cross-workspace query whose predicate is chosen per workspace, for a
  * condition naming something workspace-scoped — a row id, which is a different
  * literal in each partition.

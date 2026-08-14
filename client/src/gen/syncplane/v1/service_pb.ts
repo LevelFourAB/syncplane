@@ -8,7 +8,7 @@ import type { Mutation } from "./mutation_pb.js";
 import { file_syncplane_v1_mutation } from "./mutation_pb.js";
 import type { Patch, RowChange, Subscription } from "./patch_pb.js";
 import { file_syncplane_v1_patch } from "./patch_pb.js";
-import type { AggregateOp, Condition, OrderKey, QueryGroup } from "./query_pb.js";
+import type { AggregateOp, Condition, OrderKey, QueryGroup, QueryValue } from "./query_pb.js";
 import { file_syncplane_v1_query } from "./query_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
@@ -16,7 +16,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/service.proto.
  */
 export const file_syncplane_v1_service: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIrQBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgGIAMoCRIPCgdtaW5fc2VxGAcgASgEIq4BCgxQdWxsUmVzcG9uc2USIgoFcGF0Y2gYASABKAsyEy5zeW5jcGxhbmUudjEuUGF0Y2gSEwoLbmV4dF9jdXJzb3IYAiABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgDIAEoBBINCgVyZXNldBgEIAEoCBIQCghoYXNfbW9yZRgFIAEoCBILCgNzZXEYBiABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAcgASgJIrgBChBCb290c3RyYXBSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIRCgljbGllbnRfaWQYAiABKAkSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SGQoRcHJpb3JpdHlfZW50aXRpZXMYBCADKAkSLQoGcmVzdW1lGAUgASgLMh0uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3VtZSIwCg9Cb290c3RyYXBSZXN1bWUSDgoGY3Vyc29yGAEgASgMEg0KBXRva2VuGAIgASgMIo8DChFCb290c3RyYXBSZXNwb25zZRI2CgViZWdpbhgBIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5CZWdpbkgAEjYKBWNodW5rGAIgASgLMiUuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkNodW5rSAASMgoDZW5kGAMgASgLMiMuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkVuZEgAGoABCgVCZWdpbhIOCgZjdXJzb3IYASABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgCIAEoBBILCgNzZXEYAyABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAQgASgJEhAKCGVudGl0aWVzGAUgAygJEg8KB3Jlc3VtZWQYBiABKAgaRAoFQ2h1bmsSJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFAoMcmVzdW1lX3Rva2VuGAIgASgMGgUKA0VuZEIGCgRib2R5IpkCCgxRdWVyeVJlcXVlc3QSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmVudGl0eRgDIAEoCRIqCglwcmVkaWNhdGUYBCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEigKCG9yZGVyX2J5GAUgAygLMhYuc3luY3BsYW5lLnYxLk9yZGVyS2V5Eg0KBWxpbWl0GAYgASgNEg4KBm9mZnNldBgHIAEoDRINCgVhZnRlchgIIAEoDBIOCgZiZWZvcmUYCSABKAwSEAoIZ3JvdXBfYnkYCiADKAkSLAoJYWdncmVnYXRlGAsgASgOMhkuc3luY3BsYW5lLnYxLkFnZ3JlZ2F0ZU9wSgQIAhADUgljbGllbnRfaWQitQEKDVF1ZXJ5UmVzcG9uc2USJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJEhQKDHN0YXJ0X2N1cnNvchgDIAEoDBISCgplbmRfY3Vyc29yGAQgASgMEhAKCGhhc19tb3JlGAUgASgIEigKBmdyb3VwcxgGIAMoCzIYLnN5bmNwbGFuZS52MS5RdWVyeUdyb3VwInoKDldvcmtzcGFjZVNjb3BlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIOCgZjdXJzb3IYAiABKAwSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SDwoHbWluX3NlcRgEIAEoBCKUAQoQU3Vic2NyaWJlUmVxdWVzdBIRCgljbGllbnRfaWQYASABKAkSLAoGc2NvcGVzGAIgAygLMhwuc3luY3BsYW5lLnYxLldvcmtzcGFjZVNjb3BlEg0KBWxpbWl0GAMgASgNEhkKEW5vX2RlbHRhX2VudGl0aWVzGAQgAygJEhUKDXNwYXJzZV9jdXJzb3IYBSABKAgiuwEKEFdvcmtzcGFjZURyb3BwZWQSNQoGcmVhc29uGAEgASgOMiUuc3luY3BsYW5lLnYxLldvcmtzcGFjZURyb3BwZWQuUmVhc29uEg8KB21lc3NhZ2UYAiABKAkiXwoGUmVhc29uEhYKElJFQVNPTl9VTlNQRUNJRklFRBAAEhAKDFJFQVNPTl9SRVNFVBABEhkKFVJFQVNPTl9BQ0NFU1NfUkVWT0tFRBACEhAKDFJFQVNPTl9FUlJPUhADItMBChFTdWJzY3JpYmVSZXNwb25zZRIUCgx3b3Jrc3BhY2VfaWQYASABKAkSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJEioKBHBhZ2UYAyABKAsyGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlSAASEwoJY2F1Z2h0X3VwGAQgASgISAASMQoHZHJvcHBlZBgFIAEoCzIeLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VEcm9wcGVkSAASEwoJaGVhcnRiZWF0GAYgASgISABCBgoEYm9keSqRAQoOTXV0YXRpb25TdGF0dXMSHwobTVVUQVRJT05fU1RBVFVTX1VOU1BFQ0lGSUVEEAASGwoXTVVUQVRJT05fU1RBVFVTX0FQUExJRUQQARIjCh9NVVRBVElPTl9TVEFUVVNfQUxSRUFEWV9BUFBMSUVEEAISHAoYTVVUQVRJT05fU1RBVFVTX1JFSkVDVEVEEAMy7QIKC1N5bmNTZXJ2aWNlEj0KBFB1c2gSGS5zeW5jcGxhbmUudjEuUHVzaFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVzaFJlc3BvbnNlEj0KBFB1bGwSGS5zeW5jcGxhbmUudjEuUHVsbFJlcXVlc3QaGi5zeW5jcGxhbmUudjEuUHVsbFJlc3BvbnNlEk4KCUJvb3RzdHJhcBIeLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlMAESTgoJU3Vic2NyaWJlEh4uc3luY3BsYW5lLnYxLlN1YnNjcmliZVJlcXVlc3QaHy5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVzcG9uc2UwARJACgVRdWVyeRIaLnN5bmNwbGFuZS52MS5RdWVyeVJlcXVlc3QaGy5zeW5jcGxhbmUudjEuUXVlcnlSZXNwb25zZUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvc2VydmljZS5wcm90bxIMc3luY3BsYW5lLnYxIlEKDldvcmtzcGFjZUJhdGNoEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIpCgltdXRhdGlvbnMYAiADKAsyFi5zeW5jcGxhbmUudjEuTXV0YXRpb24iPAoLUHVzaFJlcXVlc3QSLQoHYmF0Y2hlcxgBIAMoCzIcLnN5bmNwbGFuZS52MS5Xb3Jrc3BhY2VCYXRjaCKLAQoOTXV0YXRpb25SZXN1bHQSEwoLbXV0YXRpb25faWQYASABKAQSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLk11dGF0aW9uU3RhdHVzEgsKA3NlcRgDIAEoBBISCgplcnJvcl9jb2RlGAQgASgJEhUKDWVycm9yX21lc3NhZ2UYBSABKAkiggEKEFdvcmtzcGFjZVJlc3VsdHMSFAoMd29ya3NwYWNlX2lkGAEgASgJEi0KB3Jlc3VsdHMYAiADKAsyHC5zeW5jcGxhbmUudjEuTXV0YXRpb25SZXN1bHQSEgoKZXJyb3JfY29kZRgDIAEoCRIVCg1lcnJvcl9tZXNzYWdlGAQgASgJIlgKDFB1c2hSZXNwb25zZRIvCgdyZXN1bHRzGAEgAygLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZVJlc3VsdHMSFwoPc2NoZW1hX3JldmlzaW9uGAIgASgJIrQBCgtQdWxsUmVxdWVzdBIUCgx3b3Jrc3BhY2VfaWQYASABKAkSEQoJY2xpZW50X2lkGAIgASgJEg4KBmN1cnNvchgDIAEoDBIxCg1zdWJzY3JpcHRpb25zGAQgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhINCgVsaW1pdBgFIAEoDRIZChFub19kZWx0YV9lbnRpdGllcxgGIAMoCRIPCgdtaW5fc2VxGAcgASgEIq4BCgxQdWxsUmVzcG9uc2USIgoFcGF0Y2gYASABKAsyEy5zeW5jcGxhbmUudjEuUGF0Y2gSEwoLbmV4dF9jdXJzb3IYAiABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgDIAEoBBINCgVyZXNldBgEIAEoCBIQCghoYXNfbW9yZRgFIAEoCBILCgNzZXEYBiABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAcgASgJIrgBChBCb290c3RyYXBSZXF1ZXN0EhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIRCgljbGllbnRfaWQYAiABKAkSMQoNc3Vic2NyaXB0aW9ucxgDIAMoCzIaLnN5bmNwbGFuZS52MS5TdWJzY3JpcHRpb24SGQoRcHJpb3JpdHlfZW50aXRpZXMYBCADKAkSLQoGcmVzdW1lGAUgASgLMh0uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3VtZSIwCg9Cb290c3RyYXBSZXN1bWUSDgoGY3Vyc29yGAEgASgMEg0KBXRva2VuGAIgASgMIo8DChFCb290c3RyYXBSZXNwb25zZRI2CgViZWdpbhgBIAEoCzIlLnN5bmNwbGFuZS52MS5Cb290c3RyYXBSZXNwb25zZS5CZWdpbkgAEjYKBWNodW5rGAIgASgLMiUuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkNodW5rSAASMgoDZW5kGAMgASgLMiMuc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlc3BvbnNlLkVuZEgAGoABCgVCZWdpbhIOCgZjdXJzb3IYASABKAwSHgoWbGFzdF9hY2tlZF9tdXRhdGlvbl9pZBgCIAEoBBILCgNzZXEYAyABKAQSFwoPc2NoZW1hX3JldmlzaW9uGAQgASgJEhAKCGVudGl0aWVzGAUgAygJEg8KB3Jlc3VtZWQYBiABKAgaRAoFQ2h1bmsSJQoEcm93cxgBIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USFAoMcmVzdW1lX3Rva2VuGAIgASgMGgUKA0VuZEIGCgRib2R5IsUCCgxRdWVyeVJlcXVlc3QSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmVudGl0eRgDIAEoCRIqCglwcmVkaWNhdGUYBCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uEigKCG9yZGVyX2J5GAUgAygLMhYuc3luY3BsYW5lLnYxLk9yZGVyS2V5Eg0KBWxpbWl0GAYgASgNEg4KBm9mZnNldBgHIAEoDRINCgVhZnRlchgIIAEoDBIOCgZiZWZvcmUYCSABKAwSEAoIZ3JvdXBfYnkYCiADKAkSLAoJYWdncmVnYXRlGAsgASgOMhkuc3luY3BsYW5lLnYxLkFnZ3JlZ2F0ZU9wEhEKCXBlcl9ncm91cBgMIAEoDRIXCg9wZXJfZ3JvdXBfdG90YWwYDSABKAhKBAgCEANSCWNsaWVudF9pZCLmAQoNUXVlcnlSZXNwb25zZRIlCgRyb3dzGAEgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSFAoMc3RhcnRfY3Vyc29yGAMgASgMEhIKCmVuZF9jdXJzb3IYBCABKAwSEAoIaGFzX21vcmUYBSABKAgSKAoGZ3JvdXBzGAYgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5R3JvdXASLwoKcm93X2dyb3VwcxgHIAMoCzIbLnN5bmNwbGFuZS52MS5RdWVyeVJvd0dyb3VwIoABCg1RdWVyeVJvd0dyb3VwEicKBXZhbHVlGAEgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUSJQoEcm93cxgCIAMoCzIXLnN5bmNwbGFuZS52MS5Sb3dDaGFuZ2USDQoFdG90YWwYAyABKAQSEAoIaGFzX21vcmUYBCABKAgiegoOV29ya3NwYWNlU2NvcGUSFAoMd29ya3NwYWNlX2lkGAEgASgJEg4KBmN1cnNvchgCIAEoDBIxCg1zdWJzY3JpcHRpb25zGAMgAygLMhouc3luY3BsYW5lLnYxLlN1YnNjcmlwdGlvbhIPCgdtaW5fc2VxGAQgASgEIpQBChBTdWJzY3JpYmVSZXF1ZXN0EhEKCWNsaWVudF9pZBgBIAEoCRIsCgZzY29wZXMYAiADKAsyHC5zeW5jcGxhbmUudjEuV29ya3NwYWNlU2NvcGUSDQoFbGltaXQYAyABKA0SGQoRbm9fZGVsdGFfZW50aXRpZXMYBCADKAkSFQoNc3BhcnNlX2N1cnNvchgFIAEoCCK7AQoQV29ya3NwYWNlRHJvcHBlZBI1CgZyZWFzb24YASABKA4yJS5zeW5jcGxhbmUudjEuV29ya3NwYWNlRHJvcHBlZC5SZWFzb24SDwoHbWVzc2FnZRgCIAEoCSJfCgZSZWFzb24SFgoSUkVBU09OX1VOU1BFQ0lGSUVEEAASEAoMUkVBU09OX1JFU0VUEAESGQoVUkVBU09OX0FDQ0VTU19SRVZPS0VEEAISEAoMUkVBU09OX0VSUk9SEAMi0wEKEVN1YnNjcmliZVJlc3BvbnNlEhQKDHdvcmtzcGFjZV9pZBgBIAEoCRIXCg9zY2hlbWFfcmV2aXNpb24YAiABKAkSKgoEcGFnZRgDIAEoCzIaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2VIABITCgljYXVnaHRfdXAYBCABKAhIABIxCgdkcm9wcGVkGAUgASgLMh4uc3luY3BsYW5lLnYxLldvcmtzcGFjZURyb3BwZWRIABITCgloZWFydGJlYXQYBiABKAhIAEIGCgRib2R5KpEBCg5NdXRhdGlvblN0YXR1cxIfChtNVVRBVElPTl9TVEFUVVNfVU5TUEVDSUZJRUQQABIbChdNVVRBVElPTl9TVEFUVVNfQVBQTElFRBABEiMKH01VVEFUSU9OX1NUQVRVU19BTFJFQURZX0FQUExJRUQQAhIcChhNVVRBVElPTl9TVEFUVVNfUkVKRUNURUQQAzLtAgoLU3luY1NlcnZpY2USPQoEUHVzaBIZLnN5bmNwbGFuZS52MS5QdXNoUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdXNoUmVzcG9uc2USPQoEUHVsbBIZLnN5bmNwbGFuZS52MS5QdWxsUmVxdWVzdBoaLnN5bmNwbGFuZS52MS5QdWxsUmVzcG9uc2USTgoJQm9vdHN0cmFwEh4uc3luY3BsYW5lLnYxLkJvb3RzdHJhcFJlcXVlc3QaHy5zeW5jcGxhbmUudjEuQm9vdHN0cmFwUmVzcG9uc2UwARJOCglTdWJzY3JpYmUSHi5zeW5jcGxhbmUudjEuU3Vic2NyaWJlUmVxdWVzdBofLnN5bmNwbGFuZS52MS5TdWJzY3JpYmVSZXNwb25zZTABEkAKBVF1ZXJ5Ehouc3luY3BsYW5lLnYxLlF1ZXJ5UmVxdWVzdBobLnN5bmNwbGFuZS52MS5RdWVyeVJlc3BvbnNlQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_mutation, file_syncplane_v1_patch, file_syncplane_v1_query]);
 
 /**
  * WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
@@ -666,8 +666,9 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
    * Groups come back in ascending value order with the no-value group last —
    * the order an ascending `order_by` on the same path puts rows in — and
    * `limit` caps how many are returned. The other paging fields describe a
-   * page of rows and have no counterpart here, so `order_by`, `offset`,
-   * `after` and `before` are all rejected alongside it.
+   * page of rows and have no counterpart here, so `offset`, `after` and
+   * `before` are rejected alongside it, as is `order_by` under an aggregate
+   * that answers with numbers: only AGGREGATE_OP_ROWS has rows to order.
    *
    * A path through a REPEATED field groups per ELEMENT: a row holding three
    * labels joins three groups, so the counts do not sum to the number of
@@ -688,6 +689,26 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
    * @generated from field: syncplane.v1.AggregateOp aggregate = 11;
    */
   aggregate: AggregateOp;
+
+  /**
+   * Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
+   * in `order_by` order. Required there and rejected under every other
+   * aggregate; clamped to the server's own row maximum, which `limit` groups
+   * of it multiply against.
+   *
+   * @generated from field: uint32 per_group = 12;
+   */
+  perGroup: number;
+
+  /**
+   * Whether each row group reports how many rows it holds in all. It costs a
+   * walk of every matching row of every returned group, where the rows
+   * themselves cost `per_group` of them — so a caller that shows no count
+   * leaves it false. Ignored without AGGREGATE_OP_ROWS.
+   *
+   * @generated from field: bool per_group_total = 13;
+   */
+  perGroupTotal: boolean;
 };
 
 /**
@@ -745,13 +766,22 @@ export type QueryResponse = Message<"syncplane.v1.QueryResponse"> & {
   hasMore: boolean;
 
   /**
-   * The groups of a request carrying `group_by`, in ascending value order with
-   * the no-value group last; empty for an ordinary row query. `rows`,
-   * `start_cursor` and `end_cursor` are all empty whenever a request grouped.
+   * The groups of a request carrying `group_by` with a counting aggregate, in
+   * ascending value order with the no-value group last; empty otherwise.
+   * `rows`, `start_cursor` and `end_cursor` are all empty whenever a request
+   * grouped.
    *
    * @generated from field: repeated syncplane.v1.QueryGroup groups = 6;
    */
   groups: QueryGroup[];
+
+  /**
+   * The groups of a request carrying `group_by` with AGGREGATE_OP_ROWS, in
+   * the same order; empty otherwise.
+   *
+   * @generated from field: repeated syncplane.v1.QueryRowGroup row_groups = 7;
+   */
+  rowGroups: QueryRowGroup[];
 };
 
 /**
@@ -760,6 +790,54 @@ export type QueryResponse = Message<"syncplane.v1.QueryResponse"> & {
  */
 export const QueryResponseSchema: GenMessage<QueryResponse> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_service, 11);
+
+/**
+ * QueryRowGroup is one group of a read that answers with rows: the value its
+ * rows share at the grouping path, and the first of them in order_by order.
+ *
+ * @generated from message syncplane.v1.QueryRowGroup
+ */
+export type QueryRowGroup = Message<"syncplane.v1.QueryRowGroup"> & {
+  /**
+   * The shared value, absent for the group of rows that hold no value at the
+   * path — a group of its own, ordered last.
+   *
+   * @generated from field: syncplane.v1.QueryValue value = 1;
+   */
+  value?: QueryValue | undefined;
+
+  /**
+   * The group's first rows, at most QueryRequest.per_group of them, ordered
+   * by order_by with ties broken by row key ascending. Value changes only,
+   * never tombstones.
+   *
+   * @generated from field: repeated syncplane.v1.RowChange rows = 2;
+   */
+  rows: RowChange[];
+
+  /**
+   * Matching rows in the group in all, or 0 when the request did not ask for
+   * it — a group that holds no matching row does not come back at all, so 0
+   * never means "empty".
+   *
+   * @generated from field: uint64 total = 3;
+   */
+  total: bigint;
+
+  /**
+   * Whether the group holds rows past the ones returned.
+   *
+   * @generated from field: bool has_more = 4;
+   */
+  hasMore: boolean;
+};
+
+/**
+ * Describes the message syncplane.v1.QueryRowGroup.
+ * Use `create(QueryRowGroupSchema)` to create a new message.
+ */
+export const QueryRowGroupSchema: GenMessage<QueryRowGroup> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_service, 12);
 
 /**
  * WorkspaceScope is one workspace's slice of a Subscribe stream: where to
@@ -805,7 +883,7 @@ export type WorkspaceScope = Message<"syncplane.v1.WorkspaceScope"> & {
  * Use `create(WorkspaceScopeSchema)` to create a new message.
  */
 export const WorkspaceScopeSchema: GenMessage<WorkspaceScope> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 12);
+  messageDesc(file_syncplane_v1_service, 13);
 
 /**
  * @generated from message syncplane.v1.SubscribeRequest
@@ -867,7 +945,7 @@ export type SubscribeRequest = Message<"syncplane.v1.SubscribeRequest"> & {
  * Use `create(SubscribeRequestSchema)` to create a new message.
  */
 export const SubscribeRequestSchema: GenMessage<SubscribeRequest> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 13);
+  messageDesc(file_syncplane_v1_service, 14);
 
 /**
  * WorkspaceDropped ends one workspace's participation in a stream. The server
@@ -896,7 +974,7 @@ export type WorkspaceDropped = Message<"syncplane.v1.WorkspaceDropped"> & {
  * Use `create(WorkspaceDroppedSchema)` to create a new message.
  */
 export const WorkspaceDroppedSchema: GenMessage<WorkspaceDropped> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 14);
+  messageDesc(file_syncplane_v1_service, 15);
 
 /**
  * @generated from enum syncplane.v1.WorkspaceDropped.Reason
@@ -938,7 +1016,7 @@ export enum WorkspaceDropped_Reason {
  * Describes the enum syncplane.v1.WorkspaceDropped.Reason.
  */
 export const WorkspaceDropped_ReasonSchema: GenEnum<WorkspaceDropped_Reason> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_service, 14, 0);
+  enumDesc(file_syncplane_v1_service, 15, 0);
 
 /**
  * SubscribeResponse is one frame of the stream, always naming the workspace it
@@ -1013,7 +1091,7 @@ export type SubscribeResponse = Message<"syncplane.v1.SubscribeResponse"> & {
  * Use `create(SubscribeResponseSchema)` to create a new message.
  */
 export const SubscribeResponseSchema: GenMessage<SubscribeResponse> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_service, 15);
+  messageDesc(file_syncplane_v1_service, 16);
 
 /**
  * @generated from enum syncplane.v1.MutationStatus

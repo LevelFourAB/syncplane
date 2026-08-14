@@ -293,6 +293,63 @@ correct and never faster. See
 over rows partial sync did not bring down. They are server snapshots under the
 same rules as `queryServer`, and unavailable inside `transact`.
 
+### Grouped reads — the first rows of each group
+
+`groupRows` partitions the match set the same way and answers with each group's
+head: a board column's preview, the top item of every project.
+
+```ts
+await client.groupRows(Issue, q):       Promise<RowGroup<Issue>[]>
+await client.groupRowsServer(Issue, q): Promise<RowGroup<Issue>[]>  // server push-down
+
+// db facade (identical semantics)
+await client.db.issue.groupRows(q)
+await client.db.issue.groupRowsServer(q)
+
+interface GroupRowsQuery<M> {
+	by: (i: QueryRef<M>) => GroupKeyRef; // as in GroupQuery
+	where?: (i: QueryRef<M>) => Cond;
+	orderBy?: (i: QueryRef<M>) => OrderKey[]; // what "first" means inside a group
+	perGroup: number; // rows per group
+	limit?: number; // maximum groups, counted from the first in value order
+	total?: boolean; // default true; see below
+}
+
+interface RowGroup<T> {
+	value: Scalar | undefined; // undefined = the group of rows holding no value there
+	rows: Row<T>[]; // at most `perGroup`, in `orderBy` order
+	total: number | undefined; // matching rows in the group; undefined under `total: false`
+	hasMore: boolean; // whether the group holds rows past the ones returned
+}
+```
+
+```ts
+const columns = await client.db.issue.groupRows({
+	by: (i) => i.status,
+	orderBy: (i) => [ i.rank.asc() ],
+	perGroup: 20,
+	where: (i) => i.projectId.eq(projectId),
+});
+```
+
+The groups obey `GroupQuery`'s rules exactly — value order, the no-value group,
+one group per element of a repeated path, and only the groups the rows produce.
+Inside a group, rows come back in `orderBy` order with ties broken by row key
+ascending, as they do in a `query`; without an `orderBy` they come back in row-key
+order.
+
+`total: false` drops the count and the walk of every matching row it needs, where
+the rows themselves cost `perGroup` of them. Pass it on a column that shows no
+badge.
+
+An index whose components past the grouping path ARE the requested ordering —
+`[eq-filter fields…, groupPath, order keys…]` — makes the read cost
+`groups × perGroup` rows. An ordering it stores in the other direction, or one it
+does not hold at all, falls back to reading the whole match set and sorting each
+group. `groupRowsServer` pushes the read to the server under `queryServer`'s
+rules; the server clamps `limit × perGroup` to its own row maximum and reports
+`hasMore`.
+
 ### `Row<T>`
 
 ```ts
@@ -871,6 +928,21 @@ const view = client.db.issue.watchDistinct(q, (values) => { ... });
   index that costs O(groups); over a scan it costs the entity, which is the same
   bill `groupCount` pays and the reason a grouped surface is worth an index.
 - No window and no coverage. `setWindow` is a no-op on the handle it returns.
+
+#### Watching group heads — `watchGroupRows`
+
+```ts
+const view = client.watchGroupRows(Issue, q, (groups) => { ... }, { onError? });
+
+// db facade
+const view = client.db.issue.watchGroupRows(q, (groups) => { ... });
+```
+
+- Same `GroupRowsQuery` and the same answer as `groupRows` (§2), under
+  `watchGroupCount`'s rhythm: re-read per commit, suppressed when the groups,
+  their rows, their totals and their `hasMore` are all unchanged.
+- Rows are decoded per read rather than shared with the entity's row watchers, so
+  a callback may keep what it receives.
 
 #### Watching rows by key — `watchRows`
 
@@ -1753,6 +1825,11 @@ interface ReactEntityApi<D> {
 		q: GroupQuery<MessageShape<D>>,
 		opts?: UseWorkspaceOptions,
 	): DistinctResult;
+	// The head of each group — a board's columns, each with its first rows (§2).
+	useGroupRows(
+		q: GroupRowsQuery<MessageShape<D>>,
+		opts?: UseWorkspaceOptions,
+	): RowGroupResult<MessageShape<D>>;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
@@ -1781,6 +1858,7 @@ type GroupResult = readonly Group[] & Omit<WatchState, 'hydrating'>;
 type DistinctResult =
 	& readonly (Scalar | undefined)[]
 	& Omit<WatchState, 'hydrating'>;
+type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
 // The array client.query returns, plus how the watch behind it is doing.
 type WatchResult<T> = ReadonlyRowSet<T> & WatchState;

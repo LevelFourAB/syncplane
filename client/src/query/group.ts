@@ -22,10 +22,21 @@
 // come back as zero: a read over rows has no way to learn the value set, and
 // that domain belongs to the app (an enum, a status entity) to join against
 // these counts.
+//
+// # Rows per group
+//
+// The same partition answers the HEAD of each group — a board column's preview,
+// the top item of every project. Within one group the index positions are
+// already in the index's own order, so a walk that stops after N of them costs
+// groups × N rows instead of every row of every group. That needs an index whose
+// components past the grouping path are the requested ordering, which is what
+// planGroupRows requires; the scan — bucket, sort each bucket, cut — is the
+// definition either way.
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import type { Cond, Path, Scalar } from './ast.js';
+import type { Row } from '../read.js';
+import type { Cond, OrderKey, Path, Scalar } from './ast.js';
 import { compareValues, resolvePath, scalarKey } from './evaluate.js';
 
 /** One group of a grouped read. */
@@ -48,6 +59,38 @@ export interface CompiledGroupQuery {
 	where?: Cond;
 	/** Maximum groups to return, counted from the first in value order. */
 	limit?: number;
+}
+
+/** A fully-materialized grouped ROW query, independent of the typed DSL. */
+export interface CompiledGroupRowsQuery {
+	/** Path the match set is partitioned by. */
+	by: Path;
+	where?: Cond;
+	/** What "first" means inside a group; row key order when absent. */
+	orderBy?: OrderKey[];
+	/** Rows to return per group. */
+	perGroup: number;
+	/** Maximum groups to return, counted from the first in value order. */
+	limit?: number;
+	/** Whether each group reports how many rows it holds in all. */
+	total?: boolean;
+}
+
+/** One group of a grouped row read: the value its rows share, and the first of
+ * them in the query's order. */
+export interface RowGroup<T> {
+	/**
+	 * The value its rows share at the grouping path, `undefined` for the group
+	 * of rows that hold none.
+	 */
+	value: Scalar | undefined;
+	/** The group's first rows, at most `perGroup` of them. */
+	rows: Row<T>[];
+	/** Matching rows in the group in all; `undefined` when the query opted out
+	 * of counting them. */
+	total: number | undefined;
+	/** Whether the group holds rows past the ones returned. */
+	hasMore: boolean;
 }
 
 /**

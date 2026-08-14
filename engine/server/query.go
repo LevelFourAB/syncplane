@@ -72,6 +72,16 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if req := int(msg.GetLimit()); req > 0 && req < limit {
 		limit = req
 	}
+	perGroup := 0
+	if msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
+		// At least one: compileGrouping has already refused a request that asked
+		// for no rows per group, and a zero here would divide by it below.
+		perGroup = max(1, min(int(msg.GetPerGroup()), s.limits.MaxQueryRows))
+		// The response carries limit × perGroup rows, so capping the groups is
+		// what keeps a grouped read inside the row budget an ordinary page has.
+		// One group always fits: it is the read the caller asked for, cut short.
+		limit = min(limit, max(1, s.limits.MaxQueryRows/perGroup))
+	}
 	offset := int(msg.GetOffset())
 	if offset > s.limits.MaxQueryOffset {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(limitExceeded(
@@ -138,9 +148,10 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	filtered := filter != nil || history
 
 	var (
-		rows   []qrow
-		groups []query.GroupCount
-		more   bool
+		rows      []qrow
+		groups    []query.GroupCount
+		rowGroups []*rowGroup
+		more      bool
 	)
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
@@ -174,7 +185,12 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 		var err error
 		if group != nil {
-			groups, more, err = groupRows(tx, info, pred, group,
+			if msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
+				rowGroups, more, err = groupRows(tx, info, pred, group, order,
+					perGroup, limit, msg.GetPerGroupTotal(), visible, emitter, s.limits)
+				return err
+			}
+			groups, more, err = groupCounts(tx, info, pred, group,
 				msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
 				limit, filtered, visible, emitter, s.limits)
 			return err
@@ -192,6 +208,22 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		// moved on is otherwise indistinguishable from one that has not.
 		SchemaRevision: s.catalogPtr().schemaRev,
 		HasMore:        more,
+	}
+	if group != nil && msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
+		resp.RowGroups = make([]*syncplanev1.QueryRowGroup, 0, len(rowGroups))
+		for _, g := range rowGroups {
+			out := &syncplanev1.QueryRowGroup{
+				Value:   g.value.Proto(),
+				Rows:    make([]*syncplanev1.RowChange, 0, len(g.rows)),
+				Total:   g.total,
+				HasMore: g.hasMore,
+			}
+			for _, r := range g.rows {
+				out.Rows = append(out.Rows, rowChange(r.row))
+			}
+			resp.RowGroups = append(resp.RowGroups, out)
+		}
+		return connect.NewResponse(resp), nil
 	}
 	if group != nil {
 		resp.Groups = make([]*syncplanev1.QueryGroup, 0, len(groups))
@@ -218,15 +250,19 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 // ordinary row query.
 //
 // The paging fields describe a page of ROWS and have no counterpart over a set
-// of groups — a group has no cursor, and an ordering is fixed by the grouping
-// path — so a request combining them is refused rather than resolved. Saying
-// which field to drop is the whole value of failing here.
+// of groups — a group has no cursor, and the groups themselves are ordered by
+// the grouping path — so a request combining them is refused rather than
+// resolved. Saying which field to drop is the whole value of failing here.
+//
+// order_by is the exception, and only under AGGREGATE_OP_ROWS: there it orders
+// the rows INSIDE each group, which is what makes "the first N" mean anything.
 func compileGrouping(
 	desc protoreflect.MessageDescriptor,
 	msg *syncplanev1.QueryRequest,
 ) (*query.Group, error) {
 	path := msg.GetGroupBy()
 	op := msg.GetAggregate()
+	rows := op == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS
 	if len(path) == 0 {
 		if op != syncplanev1.AggregateOp_AGGREGATE_OP_UNSPECIFIED {
 			return nil, fmt.Errorf("aggregate %s needs a group_by path", op)
@@ -234,12 +270,18 @@ func compileGrouping(
 		return nil, nil
 	}
 	switch op {
-	case syncplanev1.AggregateOp_AGGREGATE_OP_COUNT, syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT:
+	case syncplanev1.AggregateOp_AGGREGATE_OP_COUNT,
+		syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
+		syncplanev1.AggregateOp_AGGREGATE_OP_ROWS:
 	default:
-		return nil, errors.New("group_by needs an aggregate of COUNT or DISTINCT")
+		return nil, errors.New("group_by needs an aggregate of COUNT, DISTINCT or ROWS")
 	}
 	switch {
-	case len(msg.GetOrderBy()) > 0:
+	case rows && msg.GetPerGroup() == 0:
+		return nil, errors.New("aggregate ROWS needs per_group; it is how many rows each group returns")
+	case !rows && msg.GetPerGroup() > 0:
+		return nil, fmt.Errorf("per_group needs aggregate ROWS; %s answers with no rows to cap", op)
+	case !rows && len(msg.GetOrderBy()) > 0:
 		return nil, errors.New("group_by cannot be combined with order_by; groups come back in ascending value order")
 	case msg.GetOffset() > 0:
 		return nil, errors.New("group_by cannot be combined with offset; limit caps the groups returned")

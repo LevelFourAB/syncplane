@@ -336,8 +336,9 @@ message QueryRequest {
 	// Groups come back in ascending value order with the no-value group last —
 	// the order an ascending `order_by` on the same path puts rows in — and
 	// `limit` caps how many are returned. The other paging fields describe a
-	// page of rows and have no counterpart here, so `order_by`, `offset`,
-	// `after` and `before` are all rejected alongside it.
+	// page of rows and have no counterpart here, so `offset`, `after` and
+	// `before` are rejected alongside it, as is `order_by` under an aggregate
+	// that answers with numbers: only AGGREGATE_OP_ROWS has rows to order.
 	//
 	// A path through a REPEATED field groups per ELEMENT: a row holding three
 	// labels joins three groups, so the counts do not sum to the number of
@@ -350,6 +351,20 @@ message QueryRequest {
 	repeated string group_by = 10;
 	// What to compute per group. Required with `group_by`, rejected without it.
 	AggregateOp aggregate = 11;
+	// Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
+	// in `order_by` order. Required there and rejected under every other
+	// aggregate.
+	//
+	// The response carries `limit` × `per_group` rows, so both are clamped
+	// against the row maximum an ungrouped page is clamped to: a request asking
+	// for more groups than that leaves room for gets the first of them, with
+	// has_more set.
+	uint32 per_group = 12;
+	// Whether each row group reports how many rows it holds in all. It costs a
+	// walk of every matching row of every returned group, where the rows
+	// themselves cost `per_group` of them — so a caller that shows no count
+	// leaves it false. Ignored without AGGREGATE_OP_ROWS.
+	bool per_group_total = 13;
 
 	// Was client_id. Query is a read: it carries no idempotency and no
 	// watermark, and read filters key on workspace and entity, so the server
@@ -378,10 +393,32 @@ message QueryResponse {
 	// unlimited query, which returns everything that matched. Under `group_by`
 	// it reports whether groups remain past `limit` instead.
 	bool has_more = 5;
-	// The groups of a request carrying `group_by`, in ascending value order
-	// with the no-value group last; empty for an ordinary row query. `rows`,
-	// `start_cursor` and `end_cursor` are all empty whenever a request grouped.
+	// The groups of a request carrying `group_by` with a counting aggregate, in
+	// ascending value order with the no-value group last; empty otherwise.
+	// `rows`, `start_cursor` and `end_cursor` are all empty whenever a request
+	// grouped.
 	repeated QueryGroup groups = 6;
+	// The groups of a request carrying `group_by` with AGGREGATE_OP_ROWS, in
+	// the same order; empty otherwise.
+	repeated QueryRowGroup row_groups = 7;
+}
+
+// QueryRowGroup is one group of a read that answers with rows: the value its
+// rows share at the grouping path, and the first of them in order_by order.
+message QueryRowGroup {
+	// The shared value, absent for the group of rows that hold no value at the
+	// path — a group of its own, ordered last.
+	QueryValue value = 1;
+	// The group's first rows, at most QueryRequest.per_group of them, ordered
+	// by order_by with ties broken by row key ascending. Value changes only,
+	// never tombstones.
+	repeated RowChange rows = 2;
+	// Matching rows in the group in all, or 0 when the request did not ask for
+	// it — a group that holds no matching row does not come back at all, so 0
+	// never means "empty".
+	uint64 total = 3;
+	// Whether the group holds rows past the ones returned.
+	bool has_more = 4;
 }
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to

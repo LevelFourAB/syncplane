@@ -198,4 +198,49 @@ var _ = Describe("PlanGroup", func() {
 		Expect(p).NotTo(BeNil())
 		Expect(p.Index).To(Equal("by_count_label"))
 	})
+
+	Describe("with rows per group", func() {
+		order := func(keys ...*syncplanev1.OrderKey) *query.Order {
+			GinkgoHelper()
+			o, err := query.CompileOrder(widget, keys)
+			Expect(o).NotTo(BeNil())
+			Expect(err).NotTo(HaveOccurred())
+			return o
+		}
+
+		It("serves the head of each group from the components after the partition", func() {
+			p := query.PlanGroupRows([]query.Index{byLabelCount}, nil, group("label"),
+				order(query.Asc("count")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ordered).To(BeTrue())
+			Expect(p.Index).To(Equal("by_label_count"))
+		})
+
+		It("declines an ordering the components past the partition do not supply", func() {
+			// The index stores `count` ascending, so walking a group forward
+			// yields the LAST rows of this ordering first.
+			Expect(query.PlanGroupRows([]query.Index{byLabelCount}, nil, group("label"),
+				order(query.Desc("count")))).To(BeNil())
+			// And an order key no component holds at all.
+			Expect(query.PlanGroupRows([]query.Index{byLabel}, nil, group("label"),
+				order(query.Asc("count")))).To(BeNil())
+		})
+
+		It("serves an unordered read only where the partition is the last component", func() {
+			// With nothing between the partition and the row key every entry ends
+			// with, walking a group forward IS row-key order.
+			p := query.PlanGroupRows([]query.Index{byLabel}, nil, group("label"), order())
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ordered).To(BeTrue())
+			Expect(query.PlanGroupRows([]query.Index{byLabelCount}, nil, group("label"),
+				order())).To(BeNil())
+		})
+
+		It("declines an index that puts one row at several entries of a group", func() {
+			// The rows of a group would come back with duplicates, in an order
+			// decided by a value the query never asked about.
+			Expect(query.PlanGroupRows([]query.Index{index("by_label_tags", "label", "tags")},
+				nil, group("label"), order())).To(BeNil())
+		})
+	})
 })

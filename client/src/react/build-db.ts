@@ -1,6 +1,6 @@
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import { useDistinctHook, useGroupCountHook } from './hooks/use-groups.js';
+import { useDistinctHook, useGroupCountHook, useGroupRowsHook } from './hooks/use-groups.js';
 import { useMutateHook } from './hooks/use-mutate.js';
 import { useQueryAllHook } from './hooks/use-query-all.js';
 import { useQueryHook } from './hooks/use-query.js';
@@ -37,6 +37,7 @@ export function buildReactDb<E extends readonly DescMessage[]>(entities: E): Rea
 			useQueryAll: (query, opts) => useQueryAllHook(schema, query, opts),
 			useGroupCount: (query, opts) => useGroupCountHook(schema, query, opts),
 			useDistinct: (query, opts) => useDistinctHook(schema, query, opts),
+			useGroupRows: (query, opts) => useGroupRowsHook(schema, query, opts),
 			useRow: (rowKey, opts) => useRowHook(schema, rowKey, opts),
 			useSuspenseRow: (rowKey, opts) => useRowHook(schema, rowKey, opts, true),
 			useRows: (rowKeys, opts) => useRowsHook(schema, rowKeys, opts),

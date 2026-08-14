@@ -5008,6 +5008,350 @@
 				"number"
 			],
 			"want": "scan"
+		},
+		{
+			"name": "rows per group: the components past the partition supply the order",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"perGroup": 5,
+			"want": {
+				"index": "by_label_count",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "rows per group: a descending component serves a descending order key",
+			"indexes": [
+				{
+					"name": "by_label_count_desc",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"perGroup": 5,
+			"want": {
+				"index": "by_label_count_desc",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "rows per group: declines an order the stored direction reverses",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_DESC"
+				}
+			],
+			"perGroup": 5,
+			"want": "scan"
+		},
+		{
+			"name": "rows per group: declines an order key no component holds",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"perGroup": 5,
+			"want": "scan"
+		},
+		{
+			"name": "rows per group: partitions after the equality prefix and orders past it",
+			"indexes": [
+				{
+					"name": "by_count_label_ratio",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"settings",
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"count"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"doubleValue": 3
+					}
+				}
+			},
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"settings",
+						"ratio"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"perGroup": 3,
+			"want": {
+				"index": "by_count_label_ratio",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "rows per group: an unordered read needs the partition to be the last component",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"perGroup": 2,
+			"want": {
+				"index": "by_label",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "rows per group: declines an unordered read with a component past the partition",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"perGroup": 2,
+			"want": "scan"
+		},
+		{
+			"name": "rows per group: declines an index that puts one row at several entries of a group",
+			"indexes": [
+				{
+					"name": "by_label_count_tags",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"label"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"perGroup": 2,
+			"want": "scan"
+		},
+		{
+			"name": "rows per group: a repeated grouping path orders inside one element's group",
+			"indexes": [
+				{
+					"name": "by_tags_count",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"groupBy": [
+				"tags"
+			],
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"perGroup": 2,
+			"want": {
+				"index": "by_tags_count",
+				"residual": false,
+				"desc": false,
+				"entriesAreRows": true
+			}
 		}
 	]
 }

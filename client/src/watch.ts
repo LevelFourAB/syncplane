@@ -17,8 +17,13 @@ import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
 import type { Cond, PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
-import { type IndexedRow, type IndexReport, queryByIndex } from './query/execute.js';
-import { readGroups, sameGroups } from './query/group-read.js';
+import {
+	type IndexedRow,
+	type IndexReport,
+	queryByIndex,
+	type RowGroupPage,
+} from './query/execute.js';
+import { readGroups, readRowGroups, sameGroups, sameRowGroups } from './query/group-read.js';
 import {
 	collectRels,
 	compareRows,
@@ -37,13 +42,14 @@ import {
 	relTupleKey,
 	rewriteRels,
 	rewriteWithKeys,
+	type RowGroup,
 	runQuery,
 	sameRelKeys,
 	stubKeyTuples,
 	type TouchedTarget,
 	updateRelKeys,
 } from './query/index.js';
-import type { PreparedGroupQuery } from './query/wire.js';
+import type { PreparedGroupQuery, PreparedGroupRowsQuery } from './query/wire.js';
 import {
 	readMergedRowsWithVersion,
 	type ReadScope,
@@ -690,20 +696,6 @@ export class WatcherHub {
 	}
 
 	/**
-	 * Watches an explicit set of rows of one entity, named by ref.
-	 *
-	 * With a `workspaceId` every ref must name that workspace and the watcher
-	 * shares its scan scope (and so its decode cache) with the other watchers of
-	 * it; with none, the refs may span workspaces and the watcher draws on the
-	 * cross-workspace scope instead.
-	 *
-	 * Nothing is scanned either way: the refs are read as point lookups in one
-	 * batch, and a commit re-reads only the watched refs it named. Registration
-	 * is cheap enough to start empty and grow through
-	 * ScopedKeyedWatchHandle.setRefs, which is what a screen of row-by-key views
-	 * does as its components mount.
-	 */
-	/**
 	 * Live grouped read: emits the groups after every commit that touches the
 	 * entity in this workspace, suppressing callbacks whose answer is unchanged.
 	 *
@@ -720,25 +712,74 @@ export class WatcherHub {
 		cb: (groups: Group[]) => void,
 		onError?: (error: unknown) => void,
 	): WatchHandle {
-		if (this.closed) return INERT;
 		const def = this.registry.bySchema(schema);
-		const watcher: GroupWatcher = {
-			schema,
+		return this.addGroupWatcher<Group[]>({
 			entity: def.name,
 			workspaceId,
-			compiled,
+			read: (tx) =>
+				readGroups(
+					tx,
+					this.registry,
+					def,
+					schema,
+					this.opts.indexes?.(def.name) ?? [],
+					compiled,
+					workspaceId,
+				),
+			same: sameGroups,
 			cb,
 			onError,
 			reaches: new Set([ def.name ]),
-			last: undefined,
-		};
-		this.groupWatchers.add(watcher);
+		});
+	}
+
+	/**
+	 * Live grouped ROW read: emits the head of each group after every commit
+	 * that moves one. See watchGroups for what a grouped watcher does and does
+	 * not maintain.
+	 *
+	 * Rows are decoded per read rather than shared with the row watchers of the
+	 * same scope, so a callback may keep what it receives.
+	 */
+	watchRowGroups<D extends DescMessage>(
+		schema: D,
+		workspaceId: string,
+		compiled: PreparedGroupRowsQuery,
+		cb: (groups: RowGroup<MessageShape<D>>[]) => void,
+		onError?: (error: unknown) => void,
+	): WatchHandle {
+		const def = this.registry.bySchema(schema);
+		return this.addGroupWatcher<RowGroupPage<MessageShape<D>>[]>({
+			entity: def.name,
+			workspaceId,
+			read: (tx) =>
+				readRowGroups(
+					tx,
+					this.registry,
+					def,
+					schema,
+					this.opts.indexes?.(def.name) ?? [],
+					compiled,
+					workspaceId,
+				),
+			same: sameRowGroups,
+			cb: (groups) => cb(groups.map((g) => ({ ...g, rows: g.rows.map((entry) => entry.row) }))),
+			onError,
+			reaches: new Set([ def.name ]),
+		});
+	}
+
+	/** Registers one grouped watcher and gives it its first read. */
+	private addGroupWatcher<R>(watcher: Omit<GroupWatcher<R>, 'last'>): WatchHandle {
+		if (this.closed) return INERT;
+		const held = watcher as GroupWatcher<unknown>;
+		this.groupWatchers.add(held);
 		// The first read is its own dispatch rather than part of a notify, so a
 		// mounting consumer does not wait for the next commit to see anything.
-		void this.dispatchGroups([ watcher ]);
+		void this.dispatchGroups([ held ]);
 		return {
 			close: () => {
-				this.groupWatchers.delete(watcher);
+				this.groupWatchers.delete(held);
 			},
 			setWindow: () => {},
 		};
@@ -747,25 +788,13 @@ export class WatcherHub {
 	/** Re-reads a set of grouped watchers and delivers whatever changed. */
 	private async dispatchGroups(watchers: readonly GroupWatcher[]): Promise<void> {
 		if (watchers.length === 0) return;
-		let results: (Group[] | undefined)[];
+		let results: unknown[];
 		try {
 			results = await this.mutex.runShared(async () => {
 				const tx = await this.kv.read();
 				try {
-					const out: (Group[] | undefined)[] = [];
-					for (const w of watchers) {
-						out.push(
-							await readGroups(
-								tx,
-								this.registry,
-								this.registry.bySchema(w.schema),
-								w.schema,
-								this.opts.indexes?.(w.entity) ?? [],
-								w.compiled,
-								w.workspaceId,
-							),
-						);
-					}
+					const out: unknown[] = [];
+					for (const w of watchers) out.push(await w.read(tx));
 					return out;
 				} finally {
 					tx.release();
@@ -780,15 +809,29 @@ export class WatcherHub {
 		}
 		for (let i = 0; i < watchers.length; i++) {
 			const w = watchers[i]!;
-			const groups = results[i];
+			const answer = results[i];
 			// A watcher closed while the read was in flight has nothing to hear it.
-			if (groups === undefined || !this.groupWatchers.has(w)) continue;
-			if (w.last !== undefined && sameGroups(w.last, groups)) continue;
-			w.last = groups;
-			safeInvoke(w.cb, groups, 'group watch callback');
+			if (answer === undefined || !this.groupWatchers.has(w)) continue;
+			if (w.last !== undefined && w.same(w.last, answer)) continue;
+			w.last = answer;
+			safeInvoke(w.cb, answer, 'group watch callback');
 		}
 	}
 
+	/**
+	 * Watches an explicit set of rows of one entity, named by ref.
+	 *
+	 * With a `workspaceId` every ref must name that workspace and the watcher
+	 * shares its scan scope (and so its decode cache) with the other watchers of
+	 * it; with none, the refs may span workspaces and the watcher draws on the
+	 * cross-workspace scope instead.
+	 *
+	 * Nothing is scanned either way: the refs are read as point lookups in one
+	 * batch, and a commit re-reads only the watched refs it named. Registration
+	 * is cheap enough to start empty and grow through
+	 * ScopedKeyedWatchHandle.setRefs, which is what a screen of row-by-key views
+	 * does as its components mount.
+	 */
 	watchRefs<D extends DescMessage>(
 		schema: D,
 		workspaceId: string | undefined,
@@ -2236,18 +2279,31 @@ function whereFor(watcher: Watcher, workspaceId: string): Cond | undefined {
  * entity re-runs the read, and `last` is what suppresses a callback that would
  * deliver the same answer again.
  */
-interface GroupWatcher {
-	schema: DescMessage;
+/**
+ * A watcher over a GROUPED read — counts, distinct values, or the head of each
+ * group.
+ *
+ * It holds no match set and maintains nothing: a commit re-runs the read, and a
+ * read whose answer is unchanged delivers nothing. The read itself is a closure
+ * rather than a query on the watcher, because the shapes a grouped read answers
+ * with have nothing in common past that rhythm — which is also why `same` comes
+ * with it.
+ */
+interface GroupWatcher<R = unknown> {
 	entity: string;
 	workspaceId: string;
-	compiled: PreparedGroupQuery;
-	cb: (groups: Group[]) => void;
+	/** Re-reads the answer inside the hub's shared read section. */
+	read: (tx: KVRead) => Promise<R>;
+	/** Whether two answers say the same thing, so an unchanged read is not
+	 * delivered. */
+	same: (a: R, b: R) => boolean;
+	cb: (result: R) => void;
 	onError?: (error: unknown) => void;
 	/** The entities a commit must touch to reach this watcher — its own, since a
 	 * grouped read crosses nothing. */
 	reaches: Set<string>;
 	/** The last delivered answer, or undefined before the first callback. */
-	last?: Group[];
+	last?: R;
 }
 
 /** Identity of a row inside one scan scope. */

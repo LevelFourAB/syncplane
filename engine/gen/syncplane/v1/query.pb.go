@@ -296,6 +296,11 @@ const (
 	AggregateOp_AGGREGATE_OP_COUNT AggregateOp = 1
 	// The group values alone. No row is read, so no count is reported.
 	AggregateOp_AGGREGATE_OP_DISTINCT AggregateOp = 2
+	// The first rows of each group, in order_by order — a board column's
+	// preview, the top item of every project. Answered in
+	// QueryResponse.row_groups rather than in `groups`, since a group of rows
+	// is a different shape from a group of numbers.
+	AggregateOp_AGGREGATE_OP_ROWS AggregateOp = 3
 )
 
 // Enum value maps for AggregateOp.
@@ -304,11 +309,13 @@ var (
 		0: "AGGREGATE_OP_UNSPECIFIED",
 		1: "AGGREGATE_OP_COUNT",
 		2: "AGGREGATE_OP_DISTINCT",
+		3: "AGGREGATE_OP_ROWS",
 	}
 	AggregateOp_value = map[string]int32{
 		"AGGREGATE_OP_UNSPECIFIED": 0,
 		"AGGREGATE_OP_COUNT":       1,
 		"AGGREGATE_OP_DISTINCT":    2,
+		"AGGREGATE_OP_ROWS":        3,
 	}
 )
 
@@ -1463,11 +1470,12 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\tDirection\x12\x19\n" +
 	"\x15DIRECTION_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rDIRECTION_ASC\x10\x01\x12\x12\n" +
-	"\x0eDIRECTION_DESC\x10\x02*^\n" +
+	"\x0eDIRECTION_DESC\x10\x02*u\n" +
 	"\vAggregateOp\x12\x1c\n" +
 	"\x18AGGREGATE_OP_UNSPECIFIED\x10\x00\x12\x16\n" +
 	"\x12AGGREGATE_OP_COUNT\x10\x01\x12\x19\n" +
-	"\x15AGGREGATE_OP_DISTINCT\x10\x02BFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
+	"\x15AGGREGATE_OP_DISTINCT\x10\x02\x12\x15\n" +
+	"\x11AGGREGATE_OP_ROWS\x10\x03BFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
 var (
 	file_syncplane_v1_query_proto_rawDescOnce sync.Once

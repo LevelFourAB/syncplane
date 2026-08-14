@@ -49,13 +49,19 @@ import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import { foldTextLog, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
-import type { CompiledQuery, Cond, PageWindow } from './ast.js';
+import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
-import type { CompiledGroupQuery, Group, GroupValue } from './group.js';
+import type {
+	CompiledGroupQuery,
+	CompiledGroupRowsQuery,
+	Group,
+	GroupValue,
+	RowGroup,
+} from './group.js';
 import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
-import { planGroup, planQuery } from './plan.js';
+import { planGroup, planGroupRows, planQuery } from './plan.js';
 import { requiredMatchCond, searchOverflowRange, searchTermRange } from './searchindex.js';
 
 /**
@@ -141,6 +147,15 @@ export interface IndexReport {
 	declined?: QueryDeclineReason;
 	/** Index positions walked; 0 unless an index was actually consulted. */
 	candidates: number;
+}
+
+/**
+ * One group of an index-served grouped row read: the public shape with each row
+ * against the bytes it was decoded from, so a caller holding rows across reads
+ * can tell whether one moved (see IndexedRow).
+ */
+export interface RowGroupPage<T> extends Omit<RowGroup<T>, 'rows'> {
+	rows: IndexedRow<T>[];
 }
 
 /** An index-served page, with the matches it was cut from. */
@@ -537,10 +552,20 @@ export async function groupByIndex<D extends DescMessage>(
 		const above = upperBound(group);
 		const from = maxKey(prefix + group, lo);
 		const until = above === undefined ? hi : minKey(prefix + above, hi);
-		const args = { tx, registry, def, schema, compiled, encoder, plan, workspaceId, rowPrefix };
+		const args = {
+			tx,
+			registry,
+			def,
+			schema,
+			by: compiled.by,
+			encoder,
+			plan,
+			workspaceId,
+			rowPrefix,
+		};
 		const got = countable
 			? await countGroup(args, group, from, until, at.key)
-			: await walkGroup(args, group, from, until);
+			: await walkGroup(args, group, from, until, compiled.distinct);
 		if (got === undefined) return decline(report, 'budget', walked);
 		walked += got.walked;
 		if (walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
@@ -598,6 +623,7 @@ async function walkGroup<D extends DescMessage>(
 	group: string,
 	lo: string,
 	hi: string | undefined,
+	distinct: boolean,
 ): Promise<GroupContribution | undefined> {
 	const keys: string[] = [];
 	const seen = new Set<string>();
@@ -631,12 +657,195 @@ async function walkGroup<D extends DescMessage>(
 			value ??= groupValueAt(entry.row.value, at, group);
 			count++;
 		}
-		if (value !== undefined && at.compiled.distinct) break;
+		if (value !== undefined && distinct) break;
 	}
 	if (count === 0) return { count: 0, walked };
 	// A group with matching rows that none of them describes means the positions
 	// no longer match the rows; only the scan can settle that.
 	return value === undefined ? undefined : { value, count, walked };
+}
+
+/**
+ * Answers a grouped ROW read from an index, or returns undefined to mean
+ * "bucket a scan instead" — the mirror of the server's groupRows index half.
+ *
+ * The skip-scan is groupByIndex's, with each group's work changed: inside one
+ * group's sub-range the positions are already in the requested order — that is
+ * what planGroupRows declines an index for not supplying — so the walk reads
+ * `perGroup + 1` rows and moves on. A group that reports its total pays for the
+ * rest of its positions; one that does not stops at the row that answers
+ * `hasMore`.
+ *
+ * An entity with ANYTHING in the overlay declines outright, for groupByIndex's
+ * reason: merging pending writes into a per-group page means finding which
+ * groups they moved between, over a set the pending queue already bounds.
+ */
+export async function groupRowsByIndex<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	indexes: CompiledIndex[],
+	compiled: CompiledGroupRowsQuery,
+	multi: boolean,
+	workspaceId: string | undefined,
+	report?: IndexReport,
+): Promise<{ groups: RowGroupPage<MessageShape<D>>[]; hasMore: boolean } | undefined> {
+	if (workspaceId === undefined) return decline(report, 'cross-workspace');
+	if (indexes.length === 0) return decline(report, 'no-index');
+	const built = (await Promise.all(
+		indexes.map(async (idx) =>
+			(await tx.has(metaIndexBuilt(workspaceId, def.name, idx.name, idx.specHash)))
+				? idx
+				: undefined
+		),
+	)).filter((idx): idx is CompiledIndex => idx !== undefined);
+	if (built.length === 0) return decline(report, 'not-built');
+	for await (const _ of tx.scan(overlayWsPrefix(def.name, workspaceId))) {
+		return decline(report, 'no-plan');
+	}
+	const plan = planGroupRows(
+		built.filter((idx) => idx.encoder !== undefined)
+			.map((idx) => ({ name: idx.name, encoder: idx.encoder! })),
+		compiled.where,
+		compiled.by,
+		multi,
+		compiled.orderBy,
+	);
+	if (plan === undefined) return decline(report, 'no-plan');
+	const chosen = built.find((idx) => idx.name === plan.index)!;
+	const encoder = chosen.encoder!;
+
+	const prefix = indexPositionPrefix(def.name, chosen.name, chosen.specHash, workspaceId);
+	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
+	const groups: RowGroupPage<MessageShape<D>>[] = [];
+	// One past the limit: the extra group is what reports that more exist.
+	const want = compiled.limit === undefined ? undefined : compiled.limit + 1;
+	let walked = 0;
+	let lo = prefix + (plan.range.lo ?? '');
+	let hi = plan.range.hi === undefined ? successorOf(prefix) : prefix + plan.range.hi;
+	while (want === undefined || groups.length < want) {
+		const at = await tx.indexSeek(lo, hi, plan.desc ? 'desc' : 'asc');
+		if (at === undefined) break;
+		let group: string;
+		try {
+			group = encoder.prefixOf(at.position.slice(prefix.length), plan.partition);
+		} catch {
+			// Positions that are not entries of this index: the store disagrees
+			// with the declaration, and only the scan can say what the groups are.
+			return decline(report, 'no-plan', walked);
+		}
+		const above = upperBound(group);
+		const from = maxKey(prefix + group, lo);
+		const until = above === undefined ? hi : minKey(prefix + above, hi);
+		const args = {
+			tx,
+			registry,
+			def,
+			schema,
+			by: compiled.by,
+			encoder,
+			plan,
+			workspaceId,
+			rowPrefix,
+		};
+		const got = await walkGroupRows(args, compiled, group, from, until);
+		if (got === undefined) return decline(report, 'budget', walked);
+		walked += got.walked;
+		if (walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+		if (got.group !== undefined) groups.push(got.group);
+		if (plan.desc) {
+			hi = prefix + group;
+		} else {
+			if (above === undefined) break;
+			lo = prefix + above;
+		}
+	}
+	if (report) {
+		report.index = chosen.name;
+		report.candidates = walked;
+	}
+	return compiled.limit !== undefined && groups.length > compiled.limit
+		? { groups: groups.slice(0, compiled.limit), hasMore: true }
+		: { groups, hasMore: false };
+}
+
+/**
+ * One group's head: the rows its positions name, in position order, which the
+ * plan promised is the requested order.
+ *
+ * Undefined means the walk outran its budget, or that a group holding rows is
+ * described by none of them — both of which only the scan can resolve. A group
+ * with no matching row comes back without one, which is how a residual that
+ * rejects everything in a sub-range makes a group simply not exist.
+ */
+async function walkGroupRows<D extends DescMessage>(
+	at: GroupWalk<D>,
+	compiled: CompiledGroupRowsQuery,
+	group: string,
+	lo: string,
+	hi: string | undefined,
+): Promise<{ group?: RowGroupPage<MessageShape<D>>; walked: number } | undefined> {
+	const wantTotal = compiled.total !== false;
+	// How many matching rows settle the answer: the page plus the row that
+	// reports there are more. A group that owes a total has no such bound.
+	const need = wantTotal ? undefined : compiled.perGroup + 1;
+	const rows: IndexedRow<MessageShape<D>>[] = [];
+	let value: GroupValue | undefined;
+	let total = 0;
+	let walked = 0;
+	let batch: string[] = [];
+	const flush = async (): Promise<void> => {
+		if (batch.length === 0) return;
+		const keys = batch;
+		batch = [];
+		for (
+			const entry of await readConfirmedMany(
+				at.tx,
+				at.registry,
+				at.def,
+				at.schema,
+				at.workspaceId,
+				keys,
+			)
+		) {
+			if (entry === undefined) continue;
+			if (!matches(entry.row.value, at.plan.residual, at.schema)) continue;
+			value ??= groupValueAt(entry.row.value, at, group);
+			total++;
+			if (rows.length < compiled.perGroup) rows.push(entry);
+		}
+	};
+	for await (const cKey of at.tx.indexScan(lo, hi)) {
+		walked++;
+		if (walked > MAX_INDEX_CANDIDATES) return undefined;
+		if (!cKey.startsWith(at.rowPrefix)) continue;
+		batch.push(cKey.slice(at.rowPrefix.length));
+		// The walk reads ahead by a batch, and `total` only moves during a flush,
+		// so sizing the batch to what the group still needs is what keeps it from
+		// reading rows nothing will look at. Each position is a distinct row —
+		// planGroupRows declines an index where a component past the partition
+		// fans out — so nothing here has to dedupe.
+		const room = need === undefined ? READ_BATCH : Math.min(READ_BATCH, need - total);
+		if (batch.length >= room) {
+			await flush();
+			if (need !== undefined && total >= need) break;
+		}
+	}
+	await flush();
+	if (total === 0) return { walked };
+	// A group with matching rows that none of them describes means the positions
+	// no longer match the rows; only the scan can settle that.
+	if (value === undefined) return undefined;
+	return {
+		group: {
+			value: value.found ? value.value : undefined,
+			rows,
+			total: wantTotal ? total : undefined,
+			hasMore: total > compiled.perGroup,
+		},
+		walked,
+	};
 }
 
 /** What one group contributed, and how much of the walk's budget it cost. */
@@ -653,7 +862,8 @@ interface GroupWalk<D extends DescMessage> {
 	registry: EntityRegistry;
 	def: EntityDef;
 	schema: D;
-	compiled: CompiledGroupQuery;
+	/** The path the read partitions on; see groupValueAt. */
+	by: Path;
 	encoder: IndexEncoder;
 	plan: GroupPlan;
 	workspaceId: string;
@@ -675,7 +885,7 @@ function groupValueAt<D extends DescMessage>(
 	at: GroupWalk<D>,
 	group: string,
 ): GroupValue | undefined {
-	const values = groupValuesOf(row, at.compiled.by, at.schema);
+	const values = groupValuesOf(row, at.by, at.schema);
 	if (values.length === 1) return values[0];
 	const component = at.encoder.components[at.plan.partition - 1]!;
 	for (const v of values) {

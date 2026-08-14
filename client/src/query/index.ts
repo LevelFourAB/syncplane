@@ -26,16 +26,23 @@ export {
 	runQuery,
 	runQueryPage,
 } from './evaluate.js';
-export type { CompiledGroupQuery, Group, GroupValue } from './group.js';
+export type {
+	CompiledGroupQuery,
+	CompiledGroupRowsQuery,
+	Group,
+	GroupValue,
+	RowGroup,
+} from './group.js';
 export { compareGroupValues, GroupBuckets, groupValuesOf } from './group.js';
 export type { IndexComponent, IndexKind } from './indexkey.js';
 export { compileIndexComponent, IndexEncoder, specHash, upperBound } from './indexkey.js';
 export type { GroupPlan, IndexRange, PlannableIndex, QueryPlan } from './plan.js';
-export { planGroup, planQuery } from './plan.js';
+export { planGroup, planGroupRows, planQuery } from './plan.js';
 export {
 	and,
 	compileByWorkspace,
 	compileGroupQuery,
+	compileGroupRowsQuery,
 	compileQuery,
 	isWorkspaceQuery,
 	not,
@@ -70,6 +77,7 @@ export type {
 	FieldOps,
 	GroupKeyRef,
 	GroupQuery,
+	GroupRowsQuery,
 	MapEntryRef,
 	MapKeyOps,
 	MapOps,

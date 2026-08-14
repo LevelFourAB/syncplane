@@ -10,10 +10,13 @@
 
 import {
 	type CompiledGroupQuery,
+	type CompiledGroupRowsQuery,
 	type CompiledQuery,
 	compileGroupQuery,
+	compileGroupRowsQuery,
 	compileQuery,
 	type GroupQuery,
+	type GroupRowsQuery,
 } from '../query/index.js';
 import type { ReadScope } from '../read.js';
 import type { Include, IncludeOrderBy, IncludeWhere } from '../refs.js';
@@ -107,6 +110,18 @@ export function groupHash(entityKey: string, query: GroupQuery<unknown>): string
 		// A malformed query has no identity to speak of; the read itself is where
 		// it is reported, and hashing the entity alone keeps that one call site
 		// from sharing a cell with any other.
+		return stableStringify({ e: entityKey, q: null });
+	}
+	return stableStringify({ e: entityKey, q: compiled });
+}
+
+/** Identity string for a grouped ROW watch subscription; see groupHash, whose
+ * rule it follows with the ordering and the per-group page added. */
+export function groupRowsHash(entityKey: string, query: GroupRowsQuery<unknown>): string {
+	let compiled: CompiledGroupRowsQuery;
+	try {
+		compiled = compileGroupRowsQuery(query);
+	} catch {
 		return stableStringify({ e: entityKey, q: null });
 	}
 	return stableStringify({ e: entityKey, q: compiled });

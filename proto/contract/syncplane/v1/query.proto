@@ -196,6 +196,11 @@ enum AggregateOp {
 	AGGREGATE_OP_COUNT = 1;
 	// The group values alone. No row is read, so no count is reported.
 	AGGREGATE_OP_DISTINCT = 2;
+	// The first rows of each group, in order_by order — a board column's
+	// preview, the top item of every project. Answered in
+	// QueryResponse.row_groups rather than in `groups`, since a group of rows
+	// is a different shape from a group of numbers.
+	AGGREGATE_OP_ROWS = 3;
 }
 
 // QueryGroup is one group of a grouped read: the value its rows share at the

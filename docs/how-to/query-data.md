@@ -323,6 +323,48 @@ Declare the index the grouping wants and the read never touches a row: component
 next. Without one it buckets a scan, which is correct and costs the entity. See
 [Grouped reads](../explanation/grouped-reads.md).
 
+## The first rows of each group — column previews, top-N
+
+A board column shows a badge and the first twenty cards; a project list shows
+each project's newest issue. Read with the query surface that is one query per
+column, or one query that reads every row of every column to keep twenty of each.
+`groupRows` is the same partition as `groupCount` with rows instead of numbers:
+
+```ts
+const columns = await client.db.issue.groupRows({
+	by: (i) => i.status,
+	orderBy: (i) => [ i.rank.asc() ],
+	perGroup: 20,
+	where: (i) => i.projectId.eq(projectId),
+});
+// [ { value: 'done', rows: [ …20 issues… ], total: 41, hasMore: true }, … ]
+```
+
+`orderBy` decides what "first" means inside a group; `perGroup` how many come
+back; `limit` still caps the groups themselves. Each group carries `total` — the
+matching rows in it, the badge — and `hasMore`, which is what a column's "load
+more" hangs off. The live version is `useGroupRows`, and `groupRowsServer`
+pushes the read down for rows partial sync did not bring.
+
+The read costs `groups × perGroup` rows against an index whose components past
+the grouping path ARE that ordering:
+
+```proto
+index: {
+  name: "by_status_rank"
+  key: [ { path: "status" }, { path: "rank" } ]
+}
+```
+
+Anything else — an ordering the index stores backwards, a field no component
+holds — falls back to reading the whole match set and sorting each bucket, which
+is correct and costs the entity. Two shapes to keep in mind:
+
+- **`total: false`** drops the per-group count, and with it the walk of every
+  matching row a count needs. A column showing rows but no badge should pass it.
+- **A repeated `by` path** puts a row in one group per element, as it does for a
+  count — so an issue with three labels appears in three columns.
+
 ## Semantics to know
 
 Ordering is identical in both directions, down to UTF-16 collation, pinned by

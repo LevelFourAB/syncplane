@@ -20,7 +20,7 @@ import type { OrderKey, Path } from '../../src/query/ast.js';
 import { cursorToBytes, OrderCursors } from '../../src/query/cursor.js';
 import { compareRows } from '../../src/query/evaluate.js';
 import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
-import { planGroup, planQuery } from '../../src/query/plan.js';
+import { planGroup, planGroupRows, planQuery } from '../../src/query/plan.js';
 import { condFromProto, orderKeyFromProto } from '../../src/query/proto.js';
 import { localPathOf, prepareGroupQuery } from '../../src/query/wire.js';
 import { toLocalNames } from '../support/vector-paths.js';
@@ -258,12 +258,17 @@ describe('planner conformance vectors', () => {
 	}
 });
 
+// A case carrying `perGroup` is a grouped ROW read and runs the rows planner,
+// whose extra requirement is that the components past the partition supply
+// `orderBy`; one without it is a counted read, where an ordering has no meaning.
 interface GroupCase {
 	name: string;
 	type?: string;
 	indexes: SpecVector[];
 	cond?: JsonValue;
 	groupBy: string[];
+	orderBy?: JsonValue[];
+	perGroup?: number;
 	want: 'scan' | { index: string; residual: boolean; desc: boolean; entriesAreRows: boolean };
 }
 
@@ -295,7 +300,13 @@ describe('group planner conformance vectors', () => {
 				...(where === undefined ? {} : { where }),
 			});
 
-			const plan = planGroup(candidates, compiled.where, compiled.by, compiled.multi);
+			const orderBy = tc.orderBy?.map((k) => {
+				const key = orderKeyFromProto(fromJson(OrderKeySchema, k));
+				return { ...key, path: localPathOf(schema, key.path) };
+			});
+			const plan = tc.perGroup === undefined
+				? planGroup(candidates, compiled.where, compiled.by, compiled.multi)
+				: planGroupRows(candidates, compiled.where, compiled.by, compiled.multi, orderBy ?? []);
 			if (tc.want === 'scan') {
 				expect(plan).toBeUndefined();
 				return;

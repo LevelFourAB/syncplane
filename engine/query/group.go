@@ -186,6 +186,19 @@ func CompareGroupValues(a, b GroupValue) int {
 	return c
 }
 
+// # Rows per group
+//
+// The same partition serves the head of each group: the entries inside one
+// group's sub-range are already in the index's own order, so a walk that stops
+// after N of them reads `groups × N` rows rather than every row of every group.
+// That only holds when the components PAST the partition are the ordering the
+// caller asked for, which is what GroupPlan.Ordered reports and what
+// PlanGroupRows requires — with no such index the caller buckets a scan and
+// sorts each bucket, at the usual cost of the definition.
+//
+// The index that serves it is `[eq-filter fields…, groupPath, order keys…]` —
+// again the one a board ordering by `[status, rank]` already wants declared.
+
 // GroupPlan is a chosen index access path for a grouped read: one range whose
 // entries the walk partitions on a component the prefix left free.
 type GroupPlan struct {
@@ -208,6 +221,12 @@ type GroupPlan struct {
 	// PAST the partition fans out, which puts one row at several positions of
 	// the same group.
 	EntriesAreRows bool
+	// Ordered reports that reading one group's sub-range forward yields its rows
+	// in the requested order, so a walk after the head of a group can stop. It
+	// is false whenever the caller asked for no order and the partition is not
+	// the last component: the entries then sort by whatever follows it, where an
+	// unordered read sorts by row key.
+	Ordered bool
 
 	// comps are the index's components up to and including the partition one —
 	// what GroupPrefix walks to find where a group's shared prefix ends.
@@ -237,6 +256,22 @@ func (p *GroupPlan) GroupPrefix(entry []byte) ([]byte, error) {
 // considered in order and the one that narrows most wins; an exact plan, whose
 // counts need no row reads, beats a residual-bearing one that pins as much.
 func PlanGroup(candidates []Index, pred *Compiled, group *Group) *GroupPlan {
+	return planGroup(candidates, pred, group, nil, false)
+}
+
+// PlanGroupRows picks an index that can answer the head of each group in
+// `order`, or returns nil to mean "bucket a scan and sort each bucket".
+//
+// It is PlanGroup under one more requirement: the components past the partition
+// must BE the requested order, and each entry of a group must name a distinct
+// row. Without both, walking a group in index order says nothing about which of
+// its rows come first, and the head of the group could only be found by reading
+// all of them — which is what the scan already does.
+func PlanGroupRows(candidates []Index, pred *Compiled, group *Group, order *Order) *GroupPlan {
+	return planGroup(candidates, pred, group, order, true)
+}
+
+func planGroup(candidates []Index, pred *Compiled, group *Group, order *Order, rows bool) *GroupPlan {
 	if len(candidates) == 0 || group == nil {
 		return nil
 	}
@@ -244,8 +279,11 @@ func PlanGroup(candidates []Index, pred *Compiled, group *Group) *GroupPlan {
 	var best *GroupPlan
 	bestScore := -1
 	for _, c := range candidates {
-		p, score := planGroupAgainst(c, terms, group)
+		p, score := planGroupAgainst(c, terms, group, order)
 		if p == nil {
+			continue
+		}
+		if rows && (!p.Ordered || !p.EntriesAreRows) {
 			continue
 		}
 		if score > bestScore {
@@ -258,7 +296,7 @@ func PlanGroup(candidates []Index, pred *Compiled, group *Group) *GroupPlan {
 // planGroupAgainst tries one index. The score ranks by how much the range
 // narrows first and by what the walk then costs — an exact range needs no row
 // read per entry, and entries that are rows need none per group either.
-func planGroupAgainst(idx Index, terms []node, group *Group) (*GroupPlan, int) {
+func planGroupAgainst(idx Index, terms []node, group *Group, order *Order) (*GroupPlan, int) {
 	comps := idx.Encoder.Components()
 	if len(comps) == 0 {
 		return nil, 0
@@ -323,6 +361,7 @@ func planGroupAgainst(idx Index, terms []node, group *Group) (*GroupPlan, int) {
 		Residual:       residual,
 		Desc:           part.desc,
 		EntriesAreRows: entriesAreRows,
+		Ordered:        groupOrderServedBy(comps, w.pinned+1, order, w.pinnedKeys),
 		comps:          comps[:w.pinned+1],
 	}
 	score := w.pinned * 4
@@ -333,6 +372,21 @@ func planGroupAgainst(idx Index, terms []node, group *Group) (*GroupPlan, int) {
 		score++
 	}
 	return plan, score
+}
+
+// groupOrderServedBy reports whether walking one group's sub-range forward
+// yields its rows in the requested order. `after` is where the group's shared
+// prefix ends — the equality-pinned components plus the partition.
+//
+// An empty order is the case orderServedBy deliberately answers false to, and
+// here it has a real answer: rows with no order key of their own come back in
+// row-key order, which every entry ends with, so the walk is that order exactly
+// when nothing sits between the partition and it.
+func groupOrderServedBy(comps []IndexComponent, after int, order *Order, pinnedKeys map[int]condValue) bool {
+	if order == nil || len(order.keys) == 0 {
+		return after == len(comps)
+	}
+	return orderServedBy(comps, after, order, pinnedKeys)
 }
 
 // ValueOf names the group a prefix from GroupPrefix stands for, by matching the

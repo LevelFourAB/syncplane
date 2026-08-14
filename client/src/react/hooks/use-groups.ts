@@ -1,11 +1,17 @@
 import type { DescMessage, MessageShape } from '@bufbuild/protobuf';
 import { useCallback, useMemo, useRef, useSyncExternalStore } from 'react';
 
-import type { Group, GroupQuery, Scalar } from '../../query/index.js';
+import type {
+	Group,
+	GroupQuery,
+	GroupRowsQuery,
+	RowGroup,
+	Scalar,
+} from '../../query/index.js';
 import type { WatchHandle } from '../../watch.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
 import { asError, type WatchState } from '../result.js';
-import { groupHash } from '../stable-hash.js';
+import { groupHash, groupRowsHash } from '../stable-hash.js';
 import type { UseWorkspaceOptions } from '../types.js';
 
 /** Groups plus `loading`/`error`; `[]` until the first callback. */
@@ -49,6 +55,72 @@ export function useDistinctHook<D extends DescMessage>(
 	// Derived per render rather than cached: the array is as long as the group
 	// count, and mapping it is cheaper than the cell a cache would need.
 	return withState(groups.map((g) => g.value), groups.loading, groups.error) as DistinctResult;
+}
+
+/** Row groups plus `loading`/`error`; `[]` until the first callback. */
+export type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
+
+/**
+ * Live head of each group in the resolved workspace — a board's columns, each
+ * with its first rows.
+ *
+ * Subscribes the way {@link useGroupCountHook} does: the query is compiled every
+ * render and structurally hashed, every commit touching the entity re-runs the
+ * read, and a callback whose groups are unchanged is suppressed. There is no
+ * `hydrating` here either — read a `useQuery` beside it when a UI has to tell an
+ * empty result from one that has not arrived.
+ */
+export function useGroupRowsHook<D extends DescMessage>(
+	schema: D,
+	query: GroupRowsQuery<MessageShape<D>>,
+	opts?: UseWorkspaceOptions,
+): RowGroupResult<MessageShape<D>> {
+	const client = useSyncClient();
+	const scope = useWorkspaceScope(opts?.workspaceId);
+	// The workspace belongs in the identity for useGroups' reason: one client
+	// holds every workspace, and two of them running the same read must not
+	// share a cell.
+	const identity = groupRowsHash(
+		`gr\u0000${scope.workspaceId}\u0000${schema.typeName}`,
+		query as GroupRowsQuery<unknown>,
+	);
+	const cell = useRef<{ identity?: string; value: RowGroupResult<MessageShape<D>> }>({
+		value: EMPTY as RowGroupResult<MessageShape<D>>,
+	});
+	if (cell.current.identity !== identity) {
+		cell.current = { identity, value: EMPTY as RowGroupResult<MessageShape<D>> };
+	}
+	const subscribe = useCallback((onChange: () => void): () => void => {
+		const handle: WatchHandle = client.watchGroupRows(
+			schema,
+			query as GroupRowsQuery<MessageShape<DescMessage>>,
+			(groups) => {
+				cell.current.value = withState(groups, false, undefined) as RowGroupResult<
+					MessageShape<D>
+				>;
+				onChange();
+			},
+			{
+				onError: (err) => {
+					// Groups already delivered are kept: what is on screen stops
+					// tracking the store rather than vanishing.
+					cell.current.value = withState(
+						[ ...cell.current.value ],
+						false,
+						asError(err),
+					) as RowGroupResult<MessageShape<D>>;
+					onChange();
+				},
+			},
+		);
+		return () => handle.close();
+		// The identity is the resubscribe key; the query and workspace it was
+		// derived from move together with it.
+		// eslint-disable-next-line react-hooks/exhaustive-deps
+	}, [ client, schema, identity ]);
+	const getSnapshot = useCallback(() => cell.current.value, []);
+	const server = useMemo(() => EMPTY as RowGroupResult<MessageShape<D>>, []);
+	return useSyncExternalStore(subscribe, getSnapshot, () => server);
 }
 
 const EMPTY = withState([], true, undefined);

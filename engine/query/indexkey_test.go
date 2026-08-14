@@ -670,13 +670,19 @@ type probeWant struct {
 	Residual bool   `json:"residual"`
 }
 
+// groupCase pins one group-planner decision. A case carrying `perGroup` is a
+// grouped ROW read and runs the rows planner, whose extra requirement is that
+// the components past the partition supply `orderBy`; one without it is a
+// counted read, where an ordering has no meaning.
 type groupCase struct {
-	Name    string            `json:"name"`
-	Type    string            `json:"type"`
-	Indexes []indexSpecVector `json:"indexes"`
-	Cond    json.RawMessage   `json:"cond"`
-	GroupBy []string          `json:"groupBy"`
-	Want    json.RawMessage   `json:"want"`
+	Name     string            `json:"name"`
+	Type     string            `json:"type"`
+	Indexes  []indexSpecVector `json:"indexes"`
+	Cond     json.RawMessage   `json:"cond"`
+	GroupBy  []string          `json:"groupBy"`
+	OrderBy  []json.RawMessage `json:"orderBy"`
+	PerGroup int               `json:"perGroup"`
+	Want     json.RawMessage   `json:"want"`
 }
 
 // groupWant is the non-"scan" form of a groupCase's expectation.
@@ -790,6 +796,17 @@ var _ = Describe("Group planner conformance vectors", func() {
 			Expect(err).NotTo(HaveOccurred())
 
 			plan := query.PlanGroup(candidates, pred, group)
+			if tc.PerGroup > 0 {
+				keys := make([]*syncplanev1.OrderKey, 0, len(tc.OrderBy))
+				for _, k := range tc.OrderBy {
+					ok := &syncplanev1.OrderKey{}
+					Expect(protojson.Unmarshal(k, ok)).To(Succeed())
+					keys = append(keys, ok)
+				}
+				order, err := query.CompileOrder(desc, keys)
+				Expect(err).NotTo(HaveOccurred())
+				plan = query.PlanGroupRows(candidates, pred, group, order)
+			}
 
 			var scan string
 			if json.Unmarshal(tc.Want, &scan) == nil {

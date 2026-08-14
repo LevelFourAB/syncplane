@@ -171,6 +171,98 @@ describe('grouped reads over the wire', () => {
 		await cold.close();
 	});
 
+	it('takes the same head of each group the local read does', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		for (
+			const [ id, label, count ] of [
+				[ 'w1', 'x', 30 ],
+				[ 'w2', 'x', 10 ],
+				[ 'w3', 'x', 20 ],
+				[ 'w4', 'y', 5 ],
+			] as const
+		) {
+			await writer.mutate.put(WidgetSchema, { id, label, count });
+		}
+		await writer.syncNow();
+
+		const q = {
+			by: (w: { label: unknown }) => w.label,
+			orderBy: (w: { count: { desc(): unknown } }) => [ w.count.desc() ],
+			perGroup: 2,
+		} as never;
+		const remote = await writer.groupRowsServer(WidgetSchema, q);
+		expect(remote.map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ])).toEqual([
+			[ 'x', [ 'w1', 'w3' ], 3, true ],
+			[ 'y', [ 'w4' ], 1, false ],
+		]);
+		const local = await writer.groupRows(WidgetSchema, q);
+		expect(local.map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ]))
+			.toEqual(remote.map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ]));
+
+		await writer.close();
+	});
+
+	it('reaches group heads outside the synced subset', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', count: 30, label: 'x' });
+		await writer.mutate.put(WidgetSchema, { id: 'w2', count: 5, label: 'y' });
+		await writer.mutate.put(WidgetSchema, { id: 'w3', count: 4, label: 'y' });
+		await writer.syncNow();
+
+		const reader = newClient(ws, {
+			subscriptions: [ subscription(WidgetSchema, (w) => w.count.gte(25)) ],
+		});
+		await reader.start();
+		await reader.syncNow();
+
+		const q = {
+			by: (w: { label: unknown }) => w.label,
+			orderBy: (w: { count: { desc(): unknown } }) => [ w.count.desc() ],
+			perGroup: 1,
+		} as never;
+		expect((await reader.groupRows(WidgetSchema, q)).map((g) => g.value)).toEqual([ 'x' ]);
+		expect(
+			(await reader.groupRowsServer(WidgetSchema, q)).map((g) => [
+				g.value,
+				g.rows.map((r) => r.key),
+			]),
+		).toEqual([ [ 'x', [ 'w1' ] ], [ 'y', [ 'w2' ] ] ]);
+
+		await writer.close();
+		await reader.close();
+	});
+
+	it('drops the per-group total on both sides when the query opts out', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', label: 'x', count: 2 });
+		await writer.mutate.put(WidgetSchema, { id: 'w2', label: 'x', count: 1 });
+		await writer.syncNow();
+
+		const q = {
+			by: (w: { label: unknown }) => w.label,
+			orderBy: (w: { count: { desc(): unknown } }) => [ w.count.desc() ],
+			perGroup: 1,
+			total: false,
+		} as never;
+		for (
+			const groups of [
+				await writer.groupRowsServer(WidgetSchema, q),
+				await writer.groupRows(WidgetSchema, q),
+			]
+		) {
+			expect(groups.map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ]))
+				.toEqual([ [ 'x', [ 'w1' ], undefined, true ] ]);
+		}
+
+		await writer.close();
+	});
+
 	it('rejects a path nothing can be grouped by, before it reaches the wire', async () => {
 		const ws = freshWorkspace();
 		const client = newClient(ws);

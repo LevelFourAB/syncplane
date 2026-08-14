@@ -10,8 +10,8 @@
 // schema that hits one, instead of the field just disappearing from the DSL.
 
 import type { CmpOp, CompiledQuery, Cond, Path, Scalar, StrOp } from './ast.js';
-import type { CompiledGroupQuery } from './group.js';
-import type { GroupQuery, Query, QueryRef, WorkspaceQuery } from './types.js';
+import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
+import type { GroupQuery, GroupRowsQuery, Query, QueryRef, WorkspaceQuery } from './types.js';
 
 type OpBuilder = (path: Path) => unknown;
 
@@ -153,6 +153,17 @@ export function compileGroupQuery<M>(q: GroupQuery<M>, distinct: boolean): Compi
 	const out: CompiledGroupQuery = { by: pathOf(q.by(ref)), distinct };
 	if (q.where) out.where = q.where(ref);
 	if (q.limit !== undefined) out.limit = q.limit;
+	return out;
+}
+
+/** Invokes a grouped ROW query's lambdas once and returns the plain-data query. */
+export function compileGroupRowsQuery<M>(q: GroupRowsQuery<M>): CompiledGroupRowsQuery {
+	const ref = rootRef<M>();
+	const out: CompiledGroupRowsQuery = { by: pathOf(q.by(ref)), perGroup: q.perGroup };
+	if (q.where) out.where = q.where(ref);
+	if (q.orderBy) out.orderBy = q.orderBy(ref);
+	if (q.limit !== undefined) out.limit = q.limit;
+	if (q.total !== undefined) out.total = q.total;
 	return out;
 }
 

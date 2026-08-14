@@ -2,7 +2,7 @@ import { type DescField, type DescMessage, type DescOneof, ScalarType } from '@b
 
 import { isTextField, refKeyFields, refTarget } from '../mutations.js';
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
-import type { CompiledGroupQuery } from './group.js';
+import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
 import { searchDeclOf } from './match.js';
 
 /**
@@ -214,6 +214,48 @@ export function prepareGroupQuery(
 		by: leaf.path,
 		protoBy: leaf.protoPath,
 		multi,
+	};
+}
+
+/**
+ * A grouped ROW query with its paths resolved: the grouping path checked the
+ * way prepareGroupQuery checks it, and the ordering the way prepareQuery
+ * prepares one — so "first inside a group" means exactly what it means in a row
+ * query.
+ */
+export interface PreparedGroupRowsQuery extends CompiledGroupRowsQuery {
+	/** Whether the grouping path ends at a repeated field, so one row belongs to
+	 * one group per element. */
+	multi: boolean;
+	/** The grouping path as PROTO field names, for the server push-down. */
+	protoBy: Path;
+}
+
+/** Resolves a grouped row query against the schema; see prepareGroupQuery and
+ * prepareQuery, whose rules it applies to the two halves. */
+export function prepareGroupRowsQuery(
+	schema: DescMessage,
+	compiled: CompiledGroupRowsQuery,
+): PreparedGroupRowsQuery {
+	const group = prepareGroupQuery(schema, {
+		by: compiled.by,
+		distinct: false,
+		...(compiled.where ? { where: compiled.where } : {}),
+	});
+	// The predicate goes in as well, and not only to be prepared twice: an
+	// ordering by relevance binds to the match condition inside it, and ranking
+	// the rows of a group is the same ranking as ranking a page of them.
+	const order = prepareQuery(schema, {
+		...(compiled.where ? { where: compiled.where } : {}),
+		...(compiled.orderBy ? { orderBy: compiled.orderBy } : {}),
+	});
+	return {
+		...compiled,
+		...(group.where ? { where: group.where } : {}),
+		...(order.orderBy ? { orderBy: order.orderBy } : {}),
+		by: group.by,
+		protoBy: group.protoBy,
+		multi: group.multi,
 	};
 }
 

@@ -101,6 +101,61 @@ describe('useGroupCount', () => {
 	});
 });
 
+describe('useGroupRows', () => {
+	it('reports loading before the first callback, then each group head', async () => {
+		const client = newClient();
+		await client.mutate.put(TodoSchema, { id: 't1', title: 'a', completed: false });
+		await client.mutate.put(TodoSchema, { id: 't2', title: 'b', completed: false });
+		await client.mutate.put(TodoSchema, { id: 't3', title: 'c', completed: true });
+		const { result } = renderHook(
+			() =>
+				db.todo.useGroupRows({
+					by: (t) => t.completed,
+					orderBy: (t) => [ t.title.desc() ],
+					perGroup: 1,
+				}),
+			{ wrapper: providerWrapper(client) },
+		);
+		expect(result.current).toEqual([]);
+		expect(result.current.loading).toBe(true);
+		await flush();
+		expect(
+			[ ...result.current ].map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ]),
+		)
+			.toEqual([
+				[ false, [ 't2' ], 2, true ],
+				[ true, [ 't3' ], 1, false ],
+			]);
+		expect(result.current.loading).toBe(false);
+		await client.close();
+	});
+
+	it('re-emits when a write moves the head of a group', async () => {
+		const client = newClient();
+		await client.mutate.put(TodoSchema, { id: 't1', title: 'a', completed: false });
+		const { result } = renderHook(
+			() =>
+				db.todo.useGroupRows({
+					by: (t) => t.completed,
+					orderBy: (t) => [ t.title.desc() ],
+					perGroup: 1,
+				}),
+			{ wrapper: providerWrapper(client) },
+		);
+		await flush();
+		const first = result.current;
+		await act(async () => {
+			// The row stays in its group and stays the head of it, but its value
+			// moved — a preview shows the row, so this is a change.
+			await client.mutate.patch(TodoSchema, 't1', { title: 'renamed' });
+		});
+		await flush();
+		expect(result.current).not.toBe(first);
+		expect(result.current[0]?.rows[0]?.value.title).toBe('renamed');
+		await client.close();
+	});
+});
+
 describe('useDistinct', () => {
 	it('reports the values alone, in ascending order', async () => {
 		const client = newClient();

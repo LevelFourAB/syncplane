@@ -11,15 +11,30 @@
 // the fallback.
 
 import type { DescMessage, MessageShape } from '@bufbuild/protobuf';
+import { fromBinary } from '@bufbuild/protobuf';
 
 import type { KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
-import { scanDecoded } from '../read.js';
-import { evalCond } from './evaluate.js';
-import { groupByIndex, type IndexReport } from './execute.js';
-import { type Group, GroupBuckets, groupValuesOf } from './group.js';
-import type { PreparedGroupQuery } from './wire.js';
+import { sortOrderedFields } from '../ordering.js';
+import { scanDecoded, scanMergedRows } from '../read.js';
+import { compareRows, evalCond } from './evaluate.js';
+import {
+	groupByIndex,
+	groupRowsByIndex,
+	type IndexedRow,
+	type IndexReport,
+	type RowGroupPage,
+} from './execute.js';
+import {
+	compareGroupValues,
+	type Group,
+	GroupBuckets,
+	groupKeyOf,
+	type GroupValue,
+	groupValuesOf,
+} from './group.js';
+import type { PreparedGroupQuery, PreparedGroupRowsQuery } from './wire.js';
 
 /**
  * The groups of one workspace's matching rows, in ascending value order.
@@ -58,6 +73,78 @@ export async function readGroups<D extends DescMessage>(
 	return buckets.result(compiled.limit).groups;
 }
 
+/**
+ * The head of each of one workspace's groups: `perGroup` rows in the query's
+ * order, the groups themselves in ascending value order.
+ *
+ * `report` records which index served the read, or why none did, for a caller
+ * that surfaces it.
+ */
+export async function readRowGroups<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	indexes: CompiledIndex[],
+	compiled: PreparedGroupRowsQuery,
+	workspaceId: string,
+	report?: IndexReport,
+): Promise<RowGroupPage<MessageShape<D>>[]> {
+	const indexed = await groupRowsByIndex(
+		tx,
+		registry,
+		def,
+		schema,
+		indexes,
+		compiled,
+		compiled.multi,
+		workspaceId,
+		report,
+	);
+	if (indexed !== undefined) return indexed.groups;
+
+	// The definition: bucket every matching row of the merged view, sort each
+	// bucket, and cut it. It holds the whole match set rather than groups ×
+	// perGroup rows, which is the cost an index walk exists to avoid and the
+	// reason it is worth declaring one.
+	const buckets = new Map<string, { value: GroupValue; rows: IndexedRow<MessageShape<D>>[] }>();
+	const rows = await scanMergedRows(tx, registry, def.name, workspaceId);
+	for (const merged of rows) {
+		const value = fromBinary(schema, merged.v);
+		sortOrderedFields(schema, value);
+		if (compiled.where && !evalCond(value, compiled.where, schema)) continue;
+		const row: IndexedRow<MessageShape<D>> = {
+			row: { key: merged.key, value, workspaceId: merged.workspaceId, version: merged.version },
+			bytes: merged.v,
+		};
+		for (const group of groupValuesOf(value, compiled.by, schema)) {
+			const key = groupKeyOf(group);
+			const held = buckets.get(key);
+			if (held === undefined) buckets.set(key, { value: group, rows: [ row ] });
+			else held.rows.push(row);
+		}
+	}
+	const ordered = [ ...buckets.values() ]
+		.sort((a, b) => compareGroupValues(a.value, b.value));
+	const kept = compiled.limit === undefined ? ordered : ordered.slice(0, compiled.limit);
+	return kept.map(({ value, rows: matched }) => {
+		if (compiled.orderBy && compiled.orderBy.length > 0) {
+			const orderBy = compiled.orderBy;
+			matched.sort((a, b) => compareRows(a.row, b.row, orderBy, schema));
+		} else {
+			// No ordering: the rows come back the way a scan returns them, in key
+			// order.
+			matched.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
+		}
+		return {
+			value: value.found ? value.value : undefined,
+			rows: matched.slice(0, compiled.perGroup),
+			total: compiled.total === false ? undefined : matched.length,
+			hasMore: matched.length > compiled.perGroup,
+		};
+	});
+}
+
 /** Whether two grouped results are the same answer, so a watch can suppress a
  * callback that would deliver nothing new. */
 export function sameGroups(a: readonly Group[], b: readonly Group[]): boolean {
@@ -68,3 +155,32 @@ export function sameGroups(a: readonly Group[], b: readonly Group[]): boolean {
 			return Object.is(g.value, other.value) && g.count === other.count;
 		});
 }
+
+/**
+ * Whether two grouped ROW results are the same answer.
+ *
+ * Rows are compared by the bytes they were decoded from rather than by version:
+ * an optimistic edit moves the bytes and leaves the confirmed version alone, so
+ * a version comparison would suppress the callback that carries the user's own
+ * keystroke.
+ */
+export function sameRowGroups(
+	a: readonly RowGroupPage<unknown>[],
+	b: readonly RowGroupPage<unknown>[],
+): boolean {
+	return a.length === b.length
+		&& a.every((g, i) => {
+			const other = b[i]!;
+			return Object.is(g.value, other.value)
+				&& g.total === other.total
+				&& g.hasMore === other.hasMore
+				&& g.rows.length === other.rows.length
+				&& g.rows.every((entry, j) => {
+					const was = other.rows[j]!;
+					return entry.row.key === was.row.key && bytesEqual(entry.bytes, was.bytes);
+				});
+		});
+}
+
+const bytesEqual = (a: Uint8Array, b: Uint8Array): boolean =>
+	a.length === b.length && a.every((byte, i) => byte === b[i]);

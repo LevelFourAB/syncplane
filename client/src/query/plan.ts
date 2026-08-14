@@ -450,6 +450,14 @@ export interface GroupPlan {
 	 * same group.
 	 */
 	positionsAreRows: boolean;
+	/**
+	 * Whether reading one group's sub-range forward yields its rows in the
+	 * requested order, so a walk can stop after the head of a group. False
+	 * whenever no order was asked for and the partition is not the last
+	 * component: the positions then sort by whatever follows it, where an
+	 * unordered read sorts by row key.
+	 */
+	ordered: boolean;
 	/** How many components a group's shared position prefix spans: the pinned
 	 * ones plus the partition. */
 	partition: number;
@@ -472,12 +480,45 @@ export function planGroup(
 	by: Path,
 	multi: boolean,
 ): GroupPlan | undefined {
+	return pickGroupPlan(candidates, where, by, multi, undefined, false);
+}
+
+/**
+ * Picks an index that can answer the head of each group in `orderBy`, or
+ * returns undefined to mean "bucket a scan and sort each bucket".
+ *
+ * It is planGroup under one more requirement: the components past the partition
+ * must BE the requested order, and each position of a group must belong to a
+ * distinct row. Without both, walking a group in index order says nothing about
+ * which of its rows come first, and the head could only be found by reading all
+ * of them — which is what the scan already does.
+ */
+export function planGroupRows(
+	candidates: PlannableIndex[],
+	where: Cond | undefined,
+	by: Path,
+	multi: boolean,
+	orderBy: OrderKey[] | undefined,
+): GroupPlan | undefined {
+	return pickGroupPlan(candidates, where, by, multi, orderBy, true);
+}
+
+function pickGroupPlan(
+	candidates: PlannableIndex[],
+	where: Cond | undefined,
+	by: Path,
+	multi: boolean,
+	orderBy: OrderKey[] | undefined,
+	rows: boolean,
+): GroupPlan | undefined {
 	const terms = flattenAnd(where);
 	let best: GroupPlan | undefined;
 	let bestScore = -1;
 	for (const c of candidates) {
-		const got = planGroupAgainst(c, terms, by, multi);
-		if (got !== undefined && got.score > bestScore) {
+		const got = planGroupAgainst(c, terms, by, multi, orderBy);
+		if (got === undefined) continue;
+		if (rows && (!got.plan.ordered || !got.plan.positionsAreRows)) continue;
+		if (got.score > bestScore) {
 			best = got.plan;
 			bestScore = got.score;
 		}
@@ -495,6 +536,7 @@ function planGroupAgainst(
 	terms: Cond[],
 	by: Path,
 	multi: boolean,
+	orderBy: OrderKey[] | undefined,
 ): { plan: GroupPlan; score: number } | undefined {
 	const comps = idx.encoder.components;
 	if (comps.length === 0) return undefined;
@@ -549,6 +591,13 @@ function planGroupAgainst(
 			...(residual === undefined ? {} : { residual }),
 			desc: part.desc,
 			positionsAreRows,
+			// An empty ordering is the case orderServedBy answers false to, and
+			// here it has a real answer: rows with no order key of their own come
+			// back in row-key order, which every position ends with, so the walk is
+			// that order exactly when nothing sits between the partition and it.
+			ordered: orderBy === undefined || orderBy.length === 0
+				? w.pinned + 1 === comps.length
+				: orderServedBy(comps, w.pinned + 1, orderBy, w.pinnedKeys),
 			partition: w.pinned + 1,
 		},
 		score: w.pinned * 4 + (residual === undefined ? 2 : 0) + (positionsAreRows ? 1 : 0),
