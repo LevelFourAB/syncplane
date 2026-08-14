@@ -1469,6 +1469,33 @@ await client.mutate.put(CommentSchema, { id, body }, { expectedVersion: 0n });
 
 See [Write policies](proto-options.md#delete-policy) for the full semantics.
 
+### Protected fields
+
+`.protected()` puts one field of an otherwise writable row out of a client's
+reach — a status a server-side workflow advances, an owner stamped at creation:
+
+```ts
+const task = schema.entity('task', {
+	id: schema.text().key(),
+	title: schema.text(),
+	status: schema.text().protected(),
+});
+```
+
+A `patch` whose mask reaches the field **throws** at the call site, like a
+forbidden write policy. A `put` does not: it names no field, so the field keeps
+the value the local row holds (its zero value when there is none) and the rest of
+the write lands — which is what the server does with the row it has. `update`
+follows `patch`, so a recipe that assigns to a protected field throws.
+
+Valid on any field but a key. A oneof is protected as a group, and a mask is
+matched by its first segment, so protecting a message field also refuses masks
+reaching into it.
+
+The server can protect further fields per caller, and those are invisible here: a
+write naming one enqueues and comes back as a `permission_denied` rejection ack.
+See [Protected fields](proto-options.md#protected-fields).
+
 > **Field order is significant** — fields get proto numbers 1..N in declaration order.
 > Evolution is append-only; reordering/removing breaks wire compatibility.
 

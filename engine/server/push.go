@@ -127,10 +127,14 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// A non-rejection (infra) error fails this workspace before any lock is
 	// taken; a rejection is stored and replayed inside the tx to produce the
 	// REJECTED ack and watermark bump.
+	// The gate resolves FieldPermissions once per entity and is read again by
+	// the apply below, so the hook runs out here with the rest of authorization
+	// rather than inside the transaction where a PUT needs its answer.
+	fields := s.newFieldGate(ctx, principal, ws, true)
 	muts := batch.GetMutations()
 	authz := make([]error, len(muts))
 	for i, m := range muts {
-		if err := s.authorize(ctx, principal, ws, m); err != nil {
+		if err := s.authorize(ctx, principal, ws, fields, m); err != nil {
 			if _, isRejection := AsRejection(err); !isRejection {
 				return failInternal(fmt.Sprintf("authorizing mutation %d", m.GetMutationId()), err)
 			}
@@ -246,7 +250,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			var seq uint64
 			applyErr := tx.InSavepoint(func() error {
 				var err error
-				seq, err = s.applyMutation(ctx, ws, tx, m, authz[i])
+				seq, err = s.applyMutation(ctx, ws, tx, fields, m, authz[i])
 				return err
 			})
 
@@ -578,7 +582,19 @@ func (s *Server) checkCrudLimits(crud *syncplanev1.CrudMutation) error {
 // Push): the hook already ran outside the tx, so a non-nil authErr is replayed
 // here — a Rejection rolls the savepoint back and acks, a non-rejection aborts
 // the batch. checkLimits (cheap, deterministic) still runs first.
-func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteTx, m *syncplanev1.Mutation, authErr error) (uint64, error) {
+//
+// g is the same gate authorization warmed, carried in for the CRUD writes. It
+// does NOT reach a custom mutation: a mutator body writes under the verdict on
+// its invocation, which is the escape hatch a protected field is designed
+// around.
+func (s *Server) applyMutation(
+	ctx context.Context,
+	ws string,
+	tx storage.WriteTx,
+	g *fieldGate,
+	m *syncplanev1.Mutation,
+	authErr error,
+) (uint64, error) {
 	if err := s.checkLimits(m); err != nil {
 		return 0, err
 	}
@@ -601,7 +617,7 @@ func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteT
 
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
-		if err := s.applyCrud(ctx, ws, tx, payload.Crud, seq, actor); err != nil {
+		if err := s.applyCrud(ctx, ws, tx, g, payload.Crud, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
@@ -616,7 +632,7 @@ func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteT
 		// row a preceding PUT created). An empty batch is rejected in
 		// checkLimits, above.
 		for _, crud := range payload.Batch.GetMutations() {
-			if err := s.applyCrud(ctx, ws, tx, crud, seq, actor); err != nil {
+			if err := s.applyCrud(ctx, ws, tx, g, crud, seq, actor); err != nil {
 				return 0, err
 			}
 		}
@@ -631,19 +647,25 @@ func (s *Server) applyMutation(ctx context.Context, ws string, tx storage.WriteT
 // themselves. It runs before NextSeq and apply, so rejecting any Write leaves
 // the whole envelope unapplied (and a batch rolls back atomically). A
 // payload-less mutation authorizes vacuously; applyMutation rejects it below.
-func (s *Server) authorize(ctx context.Context, p Principal, workspaceID string, m *syncplanev1.Mutation) error {
+func (s *Server) authorize(
+	ctx context.Context,
+	p Principal,
+	workspaceID string,
+	g *fieldGate,
+	m *syncplanev1.Mutation,
+) error {
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
-		return s.authorizeWrite(ctx, p, workspaceID, Write{
+		return s.authorizeWrite(ctx, p, workspaceID, g, Write{
 			ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: payload.Crud,
 		})
 	case *syncplanev1.Mutation_Custom:
-		return s.authorizeWrite(ctx, p, workspaceID, Write{
+		return s.authorizeWrite(ctx, p, workspaceID, g, Write{
 			ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Custom: payload.Custom,
 		})
 	case *syncplanev1.Mutation_Batch:
 		for _, crud := range payload.Batch.GetMutations() {
-			if err := s.authorizeWrite(ctx, p, workspaceID, Write{
+			if err := s.authorizeWrite(ctx, p, workspaceID, g, Write{
 				ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: crud,
 			}); err != nil {
 				return err
@@ -654,7 +676,15 @@ func (s *Server) authorize(ctx context.Context, p Principal, workspaceID string,
 	return nil
 }
 
-func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, crud *syncplanev1.CrudMutation, seq uint64, actor storage.Actor) error {
+func (s *Server) applyCrud(
+	ctx context.Context,
+	ws string,
+	tx storage.WriteTx,
+	g *fieldGate,
+	crud *syncplanev1.CrudMutation,
+	seq uint64,
+	actor storage.Actor,
+) error {
 	info, ok := s.catalogPtr().entities[crud.GetEntity()]
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown entity %q", crud.GetEntity()))
@@ -701,6 +731,35 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 		}
 		return cachedRow, cachedLive, nil
 	}
+	// The stored row decoded, memoized on top of that one fetch. A PUT has two
+	// callers for it — the protected-field carry-over and the text union — and
+	// both read "no base" the same way: an absent row, a tombstone, and a row
+	// that will not decode (poison, reported once here) are alike, because a PUT
+	// replaces whole rows and so is itself the repair that clears a quarantine.
+	var (
+		cachedBase proto.Message
+		decodedRow bool
+	)
+	currentBase := func() (proto.Message, error) {
+		if decodedRow {
+			return cachedBase, nil
+		}
+		decodedRow = true
+		row, live, err := currentRow()
+		if err != nil {
+			return nil, err
+		}
+		if !live {
+			return nil, nil
+		}
+		base, decErr := info.decode(row.Value)
+		if decErr != nil {
+			s.reportPoison(ctx, ws, row, decErr)
+			return nil, nil
+		}
+		cachedBase = base
+		return base, nil
+	}
 
 	// Optional compare-and-swap: apply only if the row is still at the version
 	// the client read. An absent or deleted row reads as version 0 (so
@@ -734,6 +793,23 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 			return Reject(CodeInvalidArgument,
 				fmt.Sprintf("entity %q: key %q does not match key fields (%q)", info.name, crud.GetKey(), derived))
 		}
+		// A PUT names no field, so a protected one is not refused: it keeps what
+		// the row already holds, and the rest of the write lands. Done here,
+		// before the text guard, so bytes a client sent in a protected
+		// collaborative-text field are gone before anything decodes them.
+		protected, err := g.protected(info)
+		if err != nil {
+			return err
+		}
+		if len(protected) > 0 {
+			base, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
+			}
+			if err := carryProtectedFields(info, protected, base, msg); err != nil {
+				return err
+			}
+		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
 			// Ingress guard: text bytes a client sends must decode as full
@@ -749,27 +825,18 @@ func (s *Server) applyCrud(ctx context.Context, ws string, tx storage.WriteTx, c
 			// from any client state must not reset the document: a concurrent
 			// PATCH would union the old document right back in, duplicating
 			// the text instead of honoring the PUT.
-			row, live, rowErr := currentRow()
-			if rowErr != nil {
-				return rowErr
+			base, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
 			}
-			if live {
-				base, baseErr := info.decode(row.Value)
-				if baseErr != nil {
-					// The stored row is poison (see poison.go). There is nothing
-					// to union with, and no reason to fail: a PUT replaces whole
-					// rows, so this write IS the repair that clears the
-					// quarantine — refusing it would leave the row unfixable.
-					s.reportPoison(ctx, ws, row, baseErr)
-				} else {
-					tw, err := info.textWriteFor(s, ws, tx, crud.GetKey())
-					if err != nil {
-						return err
-					}
-					prevText = info.textSnapshot(base)
-					if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
-						return rejectTextWrite(err)
-					}
+			if base != nil {
+				tw, err := info.textWriteFor(s, ws, tx, crud.GetKey())
+				if err != nil {
+					return err
+				}
+				prevText = info.textSnapshot(base)
+				if err := info.mergeTextFields(base.ProtoReflect(), msg.ProtoReflect(), tw); err != nil {
+					return rejectTextWrite(err)
 				}
 			}
 		}

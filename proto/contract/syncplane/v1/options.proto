@@ -164,6 +164,42 @@ enum UpdatePolicy {
 	UPDATE_POLICY_TRUSTED_ONLY = 2;
 }
 
+// FieldWritePolicy says which callers may write ONE field of an entity, where
+// CreatePolicy, UpdatePolicy and DeletePolicy speak for the whole row. Reach
+// for it when a field is the server's to own — a status a workflow advances, a
+// counter an effect maintains, an owner stamped at creation — while the rest of
+// the row stays client-writable.
+//
+// The two write primitives are governed differently, because they say different
+// things. A PATCH names its fields, so a mask reaching a protected field is a
+// request to do the forbidden thing and is REFUSED. A PUT names none: it
+// carries the whole row because that is the only shape it has, so a protected
+// field silently keeps the value the server already stored (the zero value when
+// the row is new) and the rest of the write lands. Refusing the PUT instead
+// would reject an honest read-modify-write whenever the client's copy of a
+// field it never meant to touch had gone stale.
+//
+// Like the entity policies, it governs the PUT and PATCH primitives rather than
+// modification as an outcome: a custom mutator's rows are covered by the
+// verdict on its invocation, so an app that wants a client-initiated change to
+// a protected field writes a mutator, checks what it needs in the body, and
+// authorizes the invocation by name.
+//
+// Per-caller rules are what a schema enum cannot express — "the owner may
+// reassign, a viewer may not" belongs in the server's FieldPermissions hook,
+// which adds fields to this set for one caller and can never take one away.
+enum FieldWritePolicy {
+	// Any caller the permission policy admits may write the field.
+	FIELD_WRITE_POLICY_UNSPECIFIED = 0;
+	// Same as unset, for schemas that prefer to say so.
+	FIELD_WRITE_POLICY_ALLOW = 1;
+	// Only writes made under the engine's Trusted bypass may change the field —
+	// a connector, a migration, an effect, a cron job. Everything holding a
+	// caller to authorize is refused or carried over, including the in-process
+	// API, which is deliberately held to the same policy as a sync client.
+	FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
+}
+
 // SearchField is one field full-text search reads.
 message SearchField {
 	// Dotted proto field path (e.g. "title", "details.summary") to a singular
@@ -280,6 +316,19 @@ message FieldBehavior {
 	// important, in field order). Requires a singular string or
 	// collaborative-text field. See SearchSpec for what search means.
 	bool searchable = 7;
+	// Who may write this field. Unset allows anyone the app's permission policy
+	// admits, which is the behaviour of every other field. See FieldWritePolicy
+	// for what a restricted field does to a PUT and to a PATCH.
+	//
+	// Declared on top-level fields only: a mask path is matched by its first
+	// segment, so protecting `settings` protects everything under it, and one
+	// leaf of a message a client may otherwise replace cannot be singled out.
+	//
+	// A oneof is protected as a GROUP, the only unit a mask may name it in, so
+	// marking any member marks the whole oneof. A key field may not be marked —
+	// a PATCH can never move one and a PUT that changed one would address a
+	// different row — and is rejected at registration.
+	FieldWritePolicy write_policy = 8;
 }
 
 extend google.protobuf.MessageOptions {

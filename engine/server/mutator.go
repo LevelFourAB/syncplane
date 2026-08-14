@@ -112,6 +112,12 @@ type EntityTx struct {
 	// consults a permission hook under a lock — see Server.Mutate for why that
 	// is confined to this path.
 	authz func(Write) error
+	// fields, when non-nil, is the request's protected-field resolution: Put
+	// takes the stored value for every field it names rather than the one the
+	// caller submitted. It is nil wherever authz is, and additionally nil for a
+	// mutator body — whose rows the Write{Custom} verdict covers — while Apply
+	// sets it with no authz, having authorized its intents in an earlier pass.
+	fields *fieldGate
 }
 
 // authorizeCrud runs the per-write hook for one CRUD write, building the same
@@ -243,6 +249,22 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, msg, nil, o.expected); err != nil {
 		return err
 	}
+	// Fields this caller may not write keep what the row already holds; the
+	// carry-over below is what makes that true without refusing the rest of the
+	// write. A WithTextString naming one is refused instead: unlike a value in a
+	// submitted row, the option names the field outright, which is the same
+	// thing a PATCH mask does.
+	protected, err := e.fields.protected(info)
+	if err != nil {
+		return err
+	}
+	for path := range o.texts {
+		if protectedPath(path, protected) {
+			return Reject(CodePermissionDenied, fmt.Sprintf(
+				"entity %q: field %q may not be written by this caller, so WithTextString(%q) is refused",
+				info.name, protectedHead(path), path))
+		}
+	}
 	var (
 		prevText map[string][]byte
 		// The stored row before this write, hoisted out of the text branch
@@ -251,7 +273,8 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		row  storage.Row
 		live bool
 	)
-	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil {
+	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
+		len(protected) > 0 {
 		var rowErr error
 		row, rowErr = e.tx.GetRow(info.name, key)
 		if rowErr != nil && rowErr != storage.ErrNotFound {
@@ -285,6 +308,12 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		}
 		// Clone so the caller's message is not mutated by the merges.
 		msg = proto.Clone(msg)
+		// Before the text handling, so a plain-string value in a protected text
+		// field is replaced by the stored document rather than resolved into an
+		// edit against it.
+		if err := carryProtectedFields(info, protected, base, msg); err != nil {
+			return err
+		}
 		texts, err := takePlainStrings(info, msg, nil, o)
 		if err != nil {
 			return err

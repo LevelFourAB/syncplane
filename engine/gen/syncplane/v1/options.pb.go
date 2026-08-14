@@ -214,6 +214,85 @@ func (UpdatePolicy) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
 }
 
+// FieldWritePolicy says which callers may write ONE field of an entity, where
+// CreatePolicy, UpdatePolicy and DeletePolicy speak for the whole row. Reach
+// for it when a field is the server's to own — a status a workflow advances, a
+// counter an effect maintains, an owner stamped at creation — while the rest of
+// the row stays client-writable.
+//
+// The two write primitives are governed differently, because they say different
+// things. A PATCH names its fields, so a mask reaching a protected field is a
+// request to do the forbidden thing and is REFUSED. A PUT names none: it
+// carries the whole row because that is the only shape it has, so a protected
+// field silently keeps the value the server already stored (the zero value when
+// the row is new) and the rest of the write lands. Refusing the PUT instead
+// would reject an honest read-modify-write whenever the client's copy of a
+// field it never meant to touch had gone stale.
+//
+// Like the entity policies, it governs the PUT and PATCH primitives rather than
+// modification as an outcome: a custom mutator's rows are covered by the
+// verdict on its invocation, so an app that wants a client-initiated change to
+// a protected field writes a mutator, checks what it needs in the body, and
+// authorizes the invocation by name.
+//
+// Per-caller rules are what a schema enum cannot express — "the owner may
+// reassign, a viewer may not" belongs in the server's FieldPermissions hook,
+// which adds fields to this set for one caller and can never take one away.
+type FieldWritePolicy int32
+
+const (
+	// Any caller the permission policy admits may write the field.
+	FieldWritePolicy_FIELD_WRITE_POLICY_UNSPECIFIED FieldWritePolicy = 0
+	// Same as unset, for schemas that prefer to say so.
+	FieldWritePolicy_FIELD_WRITE_POLICY_ALLOW FieldWritePolicy = 1
+	// Only writes made under the engine's Trusted bypass may change the field —
+	// a connector, a migration, an effect, a cron job. Everything holding a
+	// caller to authorize is refused or carried over, including the in-process
+	// API, which is deliberately held to the same policy as a sync client.
+	FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY FieldWritePolicy = 2
+)
+
+// Enum value maps for FieldWritePolicy.
+var (
+	FieldWritePolicy_name = map[int32]string{
+		0: "FIELD_WRITE_POLICY_UNSPECIFIED",
+		1: "FIELD_WRITE_POLICY_ALLOW",
+		2: "FIELD_WRITE_POLICY_TRUSTED_ONLY",
+	}
+	FieldWritePolicy_value = map[string]int32{
+		"FIELD_WRITE_POLICY_UNSPECIFIED":  0,
+		"FIELD_WRITE_POLICY_ALLOW":        1,
+		"FIELD_WRITE_POLICY_TRUSTED_ONLY": 2,
+	}
+)
+
+func (x FieldWritePolicy) Enum() *FieldWritePolicy {
+	p := new(FieldWritePolicy)
+	*p = x
+	return p
+}
+
+func (x FieldWritePolicy) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (FieldWritePolicy) Descriptor() protoreflect.EnumDescriptor {
+	return file_syncplane_v1_options_proto_enumTypes[3].Descriptor()
+}
+
+func (FieldWritePolicy) Type() protoreflect.EnumType {
+	return &file_syncplane_v1_options_proto_enumTypes[3]
+}
+
+func (x FieldWritePolicy) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use FieldWritePolicy.Descriptor instead.
+func (FieldWritePolicy) EnumDescriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+}
+
 // EntityOptions declares a message as a syncable entity.
 type EntityOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -736,7 +815,20 @@ type FieldBehavior struct {
 	// fields the entity's SearchSpec declares (marked fields count as most
 	// important, in field order). Requires a singular string or
 	// collaborative-text field. See SearchSpec for what search means.
-	Searchable    bool `protobuf:"varint,7,opt,name=searchable,proto3" json:"searchable,omitempty"`
+	Searchable bool `protobuf:"varint,7,opt,name=searchable,proto3" json:"searchable,omitempty"`
+	// Who may write this field. Unset allows anyone the app's permission policy
+	// admits, which is the behaviour of every other field. See FieldWritePolicy
+	// for what a restricted field does to a PUT and to a PATCH.
+	//
+	// Declared on top-level fields only: a mask path is matched by its first
+	// segment, so protecting `settings` protects everything under it, and one
+	// leaf of a message a client may otherwise replace cannot be singled out.
+	//
+	// A oneof is protected as a GROUP, the only unit a mask may name it in, so
+	// marking any member marks the whole oneof. A key field may not be marked —
+	// a PATCH can never move one and a PUT that changed one would address a
+	// different row — and is rejected at registration.
+	WritePolicy   FieldWritePolicy `protobuf:"varint,8,opt,name=write_policy,json=writePolicy,proto3,enum=syncplane.v1.FieldWritePolicy" json:"write_policy,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -820,6 +912,13 @@ func (x *FieldBehavior) GetSearchable() bool {
 	return false
 }
 
+func (x *FieldBehavior) GetWritePolicy() FieldWritePolicy {
+	if x != nil {
+		return x.WritePolicy
+	}
+	return FieldWritePolicy_FIELD_WRITE_POLICY_UNSPECIFIED
+}
+
 var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	{
 		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
@@ -882,7 +981,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xcd\x01\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\x90\x02\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -893,7 +992,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\ahistory\x18\x06 \x01(\bR\ahistory\x12\x1e\n" +
 	"\n" +
 	"searchable\x18\a \x01(\bR\n" +
-	"searchable*f\n" +
+	"searchable\x12A\n" +
+	"\fwrite_policy\x18\b \x01(\x0e2\x1e.syncplane.v1.FieldWritePolicyR\vwritePolicy*f\n" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
@@ -905,7 +1005,11 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\fUpdatePolicy\x12\x1d\n" +
 	"\x19UPDATE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13UPDATE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
-	"\x1aUPDATE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
+	"\x1aUPDATE_POLICY_TRUSTED_ONLY\x10\x02*y\n" +
+	"\x10FieldWritePolicy\x12\"\n" +
+	"\x1eFIELD_WRITE_POLICY_UNSPECIFIED\x10\x00\x12\x1c\n" +
+	"\x18FIELD_WRITE_POLICY_ALLOW\x10\x01\x12#\n" +
+	"\x1fFIELD_WRITE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
 	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
@@ -921,40 +1025,42 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_options_proto_rawDescData
 }
 
-var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
+var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
 var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
 	(CreatePolicy)(0),                   // 1: syncplane.v1.CreatePolicy
 	(UpdatePolicy)(0),                   // 2: syncplane.v1.UpdatePolicy
-	(*EntityOptions)(nil),               // 3: syncplane.v1.EntityOptions
-	(*HistoryOptions)(nil),              // 4: syncplane.v1.HistoryOptions
-	(*SearchField)(nil),                 // 5: syncplane.v1.SearchField
-	(*SearchSpec)(nil),                  // 6: syncplane.v1.SearchSpec
-	(*IndexKey)(nil),                    // 7: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 8: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 9: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 10: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 11: google.protobuf.FieldOptions
+	(FieldWritePolicy)(0),               // 3: syncplane.v1.FieldWritePolicy
+	(*EntityOptions)(nil),               // 4: syncplane.v1.EntityOptions
+	(*HistoryOptions)(nil),              // 5: syncplane.v1.HistoryOptions
+	(*SearchField)(nil),                 // 6: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 7: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 8: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 9: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 10: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 11: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 12: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	8,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	9,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
 	0,  // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
-	4,  // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	5,  // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
 	1,  // 3: syncplane.v1.EntityOptions.create_policy:type_name -> syncplane.v1.CreatePolicy
 	2,  // 4: syncplane.v1.EntityOptions.update_policy:type_name -> syncplane.v1.UpdatePolicy
-	6,  // 5: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
-	5,  // 6: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	7,  // 7: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	10, // 8: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	11, // 9: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	3,  // 10: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	9,  // 11: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	12, // [12:12] is the sub-list for method output_type
-	12, // [12:12] is the sub-list for method input_type
-	10, // [10:12] is the sub-list for extension type_name
-	8,  // [8:10] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	7,  // 5: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	6,  // 6: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	8,  // 7: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	3,  // 8: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
+	11, // 9: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	12, // 10: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	4,  // 11: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	10, // 12: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	13, // [13:13] is the sub-list for method output_type
+	13, // [13:13] is the sub-list for method input_type
+	11, // [11:13] is the sub-list for extension type_name
+	9,  // [9:11] is the sub-list for extension extendee
+	0,  // [0:9] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -967,7 +1073,7 @@ func file_syncplane_v1_options_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
-			NumEnums:      3,
+			NumEnums:      4,
 			NumMessages:   7,
 			NumExtensions: 2,
 			NumServices:   0,

@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXkiiwEKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXkiwQEKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5KmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -405,6 +405,24 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * @generated from field: bool searchable = 7;
    */
   searchable: boolean;
+
+  /**
+   * Who may write this field. Unset allows anyone the app's permission policy
+   * admits, which is the behaviour of every other field. See FieldWritePolicy
+   * for what a restricted field does to a PUT and to a PATCH.
+   *
+   * Declared on top-level fields only: a mask path is matched by its first
+   * segment, so protecting `settings` protects everything under it, and one
+   * leaf of a message a client may otherwise replace cannot be singled out.
+   *
+   * A oneof is protected as a GROUP, the only unit a mask may name it in, so
+   * marking any member marks the whole oneof. A key field may not be marked —
+   * a PATCH can never move one and a PUT that changed one would address a
+   * different row — and is rejected at registration.
+   *
+   * @generated from field: syncplane.v1.FieldWritePolicy write_policy = 8;
+   */
+  writePolicy: FieldWritePolicy;
 };
 
 /**
@@ -548,6 +566,66 @@ export enum UpdatePolicy {
  */
 export const UpdatePolicySchema: GenEnum<UpdatePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 2);
+
+/**
+ * FieldWritePolicy says which callers may write ONE field of an entity, where
+ * CreatePolicy, UpdatePolicy and DeletePolicy speak for the whole row. Reach
+ * for it when a field is the server's to own — a status a workflow advances, a
+ * counter an effect maintains, an owner stamped at creation — while the rest of
+ * the row stays client-writable.
+ *
+ * The two write primitives are governed differently, because they say different
+ * things. A PATCH names its fields, so a mask reaching a protected field is a
+ * request to do the forbidden thing and is REFUSED. A PUT names none: it
+ * carries the whole row because that is the only shape it has, so a protected
+ * field silently keeps the value the server already stored (the zero value when
+ * the row is new) and the rest of the write lands. Refusing the PUT instead
+ * would reject an honest read-modify-write whenever the client's copy of a
+ * field it never meant to touch had gone stale.
+ *
+ * Like the entity policies, it governs the PUT and PATCH primitives rather than
+ * modification as an outcome: a custom mutator's rows are covered by the
+ * verdict on its invocation, so an app that wants a client-initiated change to
+ * a protected field writes a mutator, checks what it needs in the body, and
+ * authorizes the invocation by name.
+ *
+ * Per-caller rules are what a schema enum cannot express — "the owner may
+ * reassign, a viewer may not" belongs in the server's FieldPermissions hook,
+ * which adds fields to this set for one caller and can never take one away.
+ *
+ * @generated from enum syncplane.v1.FieldWritePolicy
+ */
+export enum FieldWritePolicy {
+  /**
+   * Any caller the permission policy admits may write the field.
+   *
+   * @generated from enum value: FIELD_WRITE_POLICY_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * Same as unset, for schemas that prefer to say so.
+   *
+   * @generated from enum value: FIELD_WRITE_POLICY_ALLOW = 1;
+   */
+  ALLOW = 1,
+
+  /**
+   * Only writes made under the engine's Trusted bypass may change the field —
+   * a connector, a migration, an effect, a cron job. Everything holding a
+   * caller to authorize is refused or carried over, including the in-process
+   * API, which is deliberately held to the same policy as a sync client.
+   *
+   * @generated from enum value: FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
+   */
+  TRUSTED_ONLY = 2,
+}
+
+/**
+ * Describes the enum syncplane.v1.FieldWritePolicy.
+ */
+export const FieldWritePolicySchema: GenEnum<FieldWritePolicy> = /*@__PURE__*/
+  enumDesc(file_syncplane_v1_options, 3);
 
 /**
  * Field numbers 50100/50101 are unregistered; fine for internal use.

@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for entity write-policy classification: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts (assertWritePolicy) must reach the same verdict on every case. The decision is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none; null is what makes the unguarded-PUT rule observable, and it is the case the two implementations are most likely to disagree on. `policies` gives the entity's create/update/delete policies; each is \"allow\" or \"trustedOnly\". `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely, which is what \"trustedOnly\" is defined against.",
+	"comment": "Shared conformance vectors for entity write-policy classification: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts (assertWritePolicy) must reach the same verdict on every case. The decision is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none; null is what makes the unguarded-PUT rule observable, and it is the case the two implementations are most likely to disagree on. `policies` gives the entity's create/update/delete policies; each is \"allow\" or \"trustedOnly\". `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely, which is what \"trustedOnly\" is defined against. `protected` gives the entity's protected fields — the ones marked (syncplane.v1.field_behavior).write_policy TRUSTED_ONLY, a oneof named by its group — and `mask` the paths a PATCH names; both default to empty. Only PATCH is refused over them: a PUT names no field, so the write path substitutes the stored value instead, which needs the row and so is not classified here. Fields the server's FieldPermissions hook adds per caller are outside these vectors: the client cannot know them, and the two sides are not meant to agree on them.",
 	"cases": [
 		{
 			"name": "unrestricted entity allows every op",
@@ -146,6 +146,67 @@
 			"op": "UNSPECIFIED",
 			"expectedVersion": null,
 			"policies": { "create": "trustedOnly", "update": "trustedOnly", "delete": "trustedOnly" },
+			"want": "allow"
+		},
+		{
+			"name": "a mask naming a protected field is refused",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
+			"mask": ["owner"],
+			"want": "refuse"
+		},
+		{
+			"name": "a mask reaching into a protected field is refused",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["audit"],
+			"mask": ["audit.size"],
+			"want": "refuse"
+		},
+		{
+			"name": "one protected path refuses the whole mask",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
+			"mask": ["label", "owner"],
+			"want": "refuse"
+		},
+		{
+			"name": "a mask naming only writable fields passes",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
+			"mask": ["label", "settings.color"],
+			"want": "allow"
+		},
+		{
+			"name": "a protected field is matched whole, not by prefix",
+			"op": "PATCH",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
+			"mask": ["owner_label"],
+			"want": "allow"
+		},
+		{
+			"name": "a PUT is not refused by a protected field: the write path carries the stored value over",
+			"op": "PUT",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
+			"want": "allow"
+		},
+		{
+			"name": "a DELETE is not refused by a protected field, which guards a value and not the row",
+			"op": "DELETE",
+			"expectedVersion": null,
+			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
+			"protected": ["owner"],
 			"want": "allow"
 		}
 	]

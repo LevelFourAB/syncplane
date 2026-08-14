@@ -7,6 +7,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 )
@@ -26,7 +27,9 @@ type writePolicyCase struct {
 		Update string `json:"update"`
 		Delete string `json:"delete"`
 	} `json:"policies"`
-	Want string `json:"want"`
+	Protected []string `json:"protected"`
+	Mask      []string `json:"mask"`
+	Want      string   `json:"want"`
 }
 
 var _ = Describe("write policy conformance vectors", func() {
@@ -47,14 +50,18 @@ var _ = Describe("write policy conformance vectors", func() {
 		for _, tc := range cases {
 			srv := &Server{}
 			info := &entityInfo{
-				name:         "vector",
-				createPolicy: createPolicyFromVector(tc.Policies.Create),
-				updatePolicy: updatePolicyFromVector(tc.Policies.Update),
-				deletePolicy: deletePolicyFromVector(tc.Policies.Delete),
+				name:            "vector",
+				createPolicy:    createPolicyFromVector(tc.Policies.Create),
+				updatePolicy:    updatePolicyFromVector(tc.Policies.Update),
+				deletePolicy:    deletePolicyFromVector(tc.Policies.Delete),
+				protectedFields: tc.Protected,
 			}
 			srv.cat.Store(&catalog{entities: map[string]*entityInfo{info.name: info}})
 
 			crud := &syncplanev1.CrudMutation{Entity: info.name, Key: "k", Op: opFromVector(tc.Op)}
+			if len(tc.Mask) > 0 {
+				crud.FieldMask = &fieldmaskpb.FieldMask{Paths: tc.Mask}
+			}
 			if tc.ExpectedVersion != nil {
 				v, err := strconv.ParseUint(*tc.ExpectedVersion, 10, 64)
 				Expect(err).NotTo(HaveOccurred(), tc.Name)

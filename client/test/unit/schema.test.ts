@@ -6,6 +6,7 @@ import {
 	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
+	FieldWritePolicy,
 	UpdatePolicy,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import {
@@ -114,6 +115,36 @@ describe('schema builder', () => {
 		expect(def.policies).toEqual({ create: 'allow', update: 'trustedOnly', delete: 'allow' });
 		expect(entityDefOf(bundle.descMessage('todo')).policies)
 			.toEqual({ create: 'allow', update: 'allow', delete: 'allow' });
+	});
+
+	it('lowers .protected() onto every field kind that can carry it', () => {
+		const person = entity('person', { id: text().key() });
+		const task = entity('task', {
+			id: text().key(),
+			title: text(),
+			status: text().protected(),
+			audit: message({ at: text() }).protected(),
+			labels: map('string', text()).protected(),
+			owner: ref(() => person).protected(),
+		});
+		const desc = defineSchema(person, task).descMessage('task');
+		const policyOf = (name: string) => {
+			const field = desc.fields.find((f) => f.name === name)!;
+			return hasOption(field, fieldBehaviorExt)
+				? getOption(field, fieldBehaviorExt).writePolicy
+				: FieldWritePolicy.UNSPECIFIED;
+		};
+
+		for (const name of [ 'status', 'audit', 'labels', 'owner' ]) {
+			expect(policyOf(name), name).toBe(FieldWritePolicy.TRUSTED_ONLY);
+		}
+		expect(policyOf('title')).toBe(FieldWritePolicy.UNSPECIFIED);
+		expect(entityDefOf(desc).protectedFields).toEqual([ 'status', 'audit', 'labels', 'owner' ]);
+	});
+
+	it('refuses a protected key field, whichever order it is declared in', () => {
+		expect(() => text().key().protected()).toThrow(/not valid on a key field/);
+		expect(() => text().protected().key()).toThrow(/key field cannot be protected/);
 	});
 
 	it('round-trips a value through the runtime descriptor', () => {

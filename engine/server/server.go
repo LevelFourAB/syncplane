@@ -78,6 +78,11 @@ type entityInfo struct {
 	// separately on the recorded prior value — see the field option's doc for
 	// why a mask must never name one.
 	historyFields []string
+	// protectedFields are the top-level units no authorized caller may write:
+	// the fields marked (field_behavior).write_policy TRUSTED_ONLY, with a
+	// oneof contributing its group name. Empty for almost every entity, which
+	// is what keeps the check off the hot path — see fieldGate.
+	protectedFields []string
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -1179,6 +1184,11 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			info.mergers[tf.path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
 		}
 	}
+	protected, err := protectedFieldsOf(desc, info.keyFields)
+	if err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	info.protectedFields = protected
 	if info.history != nil {
 		info.historyFields = historyFieldsOf(desc, info.keyFields)
 		if len(info.historyFields) == 0 {
@@ -1245,6 +1255,54 @@ func historyFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protorefle
 		marked = append(marked, name)
 	}
 	return marked
+}
+
+// protectedFieldsOf resolves an entity's protected set: the top-level units a
+// client-authorized write may not change, which are exactly the fields marked
+// (field_behavior).write_policy TRUSTED_ONLY.
+//
+// A oneof contributes its GROUP name, once, however many members are marked.
+// That is the only form a mask may name it in (see engine/internal/lww), and a
+// group is replaced whole, so protecting one member and not its siblings would
+// be a rule no write could observe. Marking any member therefore marks the
+// group.
+//
+// A marked key field is refused rather than dropped. History drops one because
+// a capture set that cannot be masked is still a coherent thing to ask for; here
+// the mark states a restriction, and one that can never take effect — a PATCH
+// may not move a key field, and a PUT that changed one would address a different
+// row — is a schema mistake worth naming.
+func protectedFieldsOf(
+	desc protoreflect.MessageDescriptor,
+	keyFields []protoreflect.FieldDescriptor,
+) ([]string, error) {
+	isKey := make(map[protoreflect.Name]bool, len(keyFields))
+	for _, fd := range keyFields {
+		isKey[fd.Name()] = true
+	}
+	fields := desc.Fields()
+	var marked []string
+	seen := make(map[string]bool, fields.Len())
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if fieldBehaviorOf(fd).GetWritePolicy() != syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY {
+			continue
+		}
+		if isKey[fd.Name()] {
+			return nil, fmt.Errorf("key field %q is marked (syncplane.v1.field_behavior).write_policy "+
+				"TRUSTED_ONLY; a key field can never be modified in place, so the mark cannot take effect", fd.Name())
+		}
+		name := string(fd.Name())
+		if od := lww.OneofOf(fd); od != nil {
+			name = string(od.Name())
+		}
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		marked = append(marked, name)
+	}
+	return marked, nil
 }
 
 // collectTextFields walks a message's fields (descending through singular,

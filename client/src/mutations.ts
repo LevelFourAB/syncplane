@@ -31,6 +31,7 @@ import {
 	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
+	FieldWritePolicy,
 	UpdatePolicy,
 } from './gen/syncplane/v1/options_pb.js';
 import {
@@ -81,6 +82,17 @@ export interface EntityDef {
 	 * overlay and rolling it back on the rejection ack (see assertWritePolicy).
 	 */
 	policies: WritePolicies;
+	/**
+	 * Top-level field names no client write may change, from
+	 * `(syncplane.v1.field_behavior).write_policy` — a oneof named by its group.
+	 *
+	 * A `patch()` masking one is refused at the call site; a `put()` carries the
+	 * stored value over instead, which is what the server does with the row it
+	 * has. The server may protect further fields per caller (its
+	 * `FieldPermissions` hook), and those are unknowable here: such a write
+	 * enqueues and comes back as a rejection ack.
+	 */
+	protectedFields: string[];
 }
 
 /** Who may perform each class of write on an entity, mirroring the
@@ -132,12 +144,52 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		keyFields,
 		indexes: indexesOf(schema, opts),
 		serverOnly: opts.serverOnly,
+		protectedFields: protectedFieldsOf(schema, keyFields),
 		policies: {
 			create: opts.createPolicy === CreatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
 			update: opts.updatePolicy === UpdatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
 			delete: opts.deletePolicy === DeletePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
 		},
 	};
+}
+
+/**
+ * The units a client write may not change, matching the engine's
+ * protectedFieldsOf: a oneof contributes its group name, because that is the
+ * only form a mask names it in, and a marked key field is a schema mistake
+ * rather than a rule — a patch can never move one, and a put that changed one
+ * would address a different row.
+ */
+function protectedFieldsOf(schema: DescMessage, keyFields: DescField[]): string[] {
+	const keys = new Set(keyFields.map((f) => f.name));
+	const out: string[] = [];
+	const seen = new Set<string>();
+	for (const field of schema.fields) {
+		if (!hasOption(field, fieldBehaviorExt)) continue;
+		if (getOption(field, fieldBehaviorExt).writePolicy !== FieldWritePolicy.TRUSTED_ONLY) continue;
+		if (keys.has(field.name)) {
+			throw new Error(
+				`${schema.typeName}: key field "${field.name}" is marked write_policy TRUSTED_ONLY; `
+					+ `a key field can never be modified in place, so the mark cannot take effect`,
+			);
+		}
+		const name = field.oneof?.name ?? field.name;
+		if (seen.has(name)) continue;
+		seen.add(name);
+		out.push(name);
+	}
+	return out;
+}
+
+/**
+ * The protected field one path writes into, or `undefined` when it writes into
+ * none. A path is matched by its first segment: naming the field replaces it,
+ * and naming something below it writes into it.
+ */
+export function protectedFieldOf(def: EntityDef, path: string): string | undefined {
+	if (def.protectedFields.length === 0) return undefined;
+	const head = path.split('.', 1)[0]!;
+	return def.protectedFields.includes(head) ? head : undefined;
 }
 
 /**
@@ -153,15 +205,32 @@ export function entityDefOf(schema: DescMessage): EntityDef {
  * asserting nothing could land either way and so needs both policies to admit
  * it. Calling an unguarded PUT a create or an update instead would let it
  * through where the opposite policy forbids it.
+ *
+ * `paths` is the effective mask of a patch, including any path a text-string
+ * value contributed — the same mask the server authorizes. A path reaching a
+ * protected field is refused; the field it reaches is its first segment, so
+ * masking `audit.size` is refused wherever masking `audit` is.
  */
 export function assertWritePolicy(
 	def: EntityDef,
 	op: CrudOp,
 	expectedVersion: bigint | undefined,
+	paths?: readonly string[],
 ): void {
 	const refuse = (why: string): never => {
 		throw new Error(`entity "${def.name}": ${why}`);
 	};
+	if (paths !== undefined) {
+		for (const path of paths) {
+			const head = protectedFieldOf(def, path);
+			if (head !== undefined) {
+				refuse(
+					`field "${head}" may not be written by a client, so a patch masking "${path}" is refused. `
+						+ `Drop the path from the mask, or make the change through a custom mutation.`,
+				);
+			}
+		}
+	}
 	const creates = def.policies.create === 'trustedOnly';
 	const updates = def.policies.update === 'trustedOnly';
 	switch (op) {
@@ -1872,6 +1941,40 @@ function scalarEquals(a: unknown, b: unknown): boolean {
 	// Object.is over === so NaN equals itself: a double field holding NaN must
 	// not report as changed on every pass.
 	return Object.is(a, b) || a === b;
+}
+
+/**
+ * Substitutes what the row currently holds for every protected field of
+ * `value`, which is what the server does with a put it authorizes — a put names
+ * no field, so a protected one keeps its stored value rather than refusing the
+ * write. `base` is the row as this client sees it, `undefined` for one it has
+ * none of, where the fields reset to their zero value.
+ *
+ * Mutates and returns `value`, which is the freshly built message a put is
+ * about to encode. Values taken from `base` are copies, so the caller's row
+ * cannot be reached through the mutation.
+ *
+ * The local row may be behind the server's, and then so is the substituted
+ * value: the server's own carry-over decides, and the next rebase corrects the
+ * overlay. Doing it here is what keeps the optimistic view from showing a change
+ * that was never going to land.
+ */
+export function carryProtectedFields<D extends DescMessage>(
+	def: EntityDef,
+	schema: D,
+	value: MessageShape<D>,
+	base: MessageShape<D> | undefined,
+): MessageShape<D> {
+	if (def.protectedFields.length === 0) return value;
+	const src = (base === undefined ? create(schema) : clone(schema, base)) as unknown as Rec;
+	const out = value as unknown as Rec;
+	for (const name of def.protectedFields) {
+		const localName = schema.oneofs.find((o) => o.name === name)?.localName
+			?? schema.fields.find((f) => f.name === name)?.localName;
+		if (localName === undefined) continue;
+		out[localName] = src[localName];
+	}
+	return value;
 }
 
 export function buildPut<D extends DescMessage>(

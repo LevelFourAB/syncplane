@@ -18,6 +18,8 @@ interface PolicyCase {
 	op: 'PUT' | 'PATCH' | 'DELETE' | 'UNSPECIFIED';
 	expectedVersion: string | null;
 	policies: WritePolicies;
+	protected?: string[];
+	mask?: string[];
 	want: 'allow' | 'refuse';
 }
 
@@ -36,10 +38,10 @@ const opOf = (op: PolicyCase['op']): CrudOp =>
 		? CrudOp.DELETE
 		: CrudOp.UNSPECIFIED;
 
-/** Only `name` and `policies` are read by the classifier, so the rest of the
- * EntityDef stays unbuilt rather than stubbed. */
-const defWith = (policies: WritePolicies): EntityDef =>
-	({ name: 'vector', policies }) as unknown as EntityDef;
+/** Only `name`, `policies` and `protectedFields` are read by the classifier, so
+ * the rest of the EntityDef stays unbuilt rather than stubbed. */
+const defWith = (policies: WritePolicies, protectedFields: string[]): EntityDef =>
+	({ name: 'vector', policies, protectedFields }) as unknown as EntityDef;
 
 describe('write policy conformance vectors', () => {
 	it('has cases', () => {
@@ -49,7 +51,13 @@ describe('write policy conformance vectors', () => {
 	for (const tc of vectors.cases) {
 		it(tc.name, () => {
 			const expectedVersion = tc.expectedVersion === null ? undefined : BigInt(tc.expectedVersion);
-			const call = () => assertWritePolicy(defWith(tc.policies), opOf(tc.op), expectedVersion);
+			const call = () =>
+				assertWritePolicy(
+					defWith(tc.policies, tc.protected ?? []),
+					opOf(tc.op),
+					expectedVersion,
+					tc.mask,
+				);
 			if (tc.want === 'allow') {
 				expect(call).not.toThrow();
 			} else {

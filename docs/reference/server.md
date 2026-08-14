@@ -554,8 +554,24 @@ type Authenticator interface {
 - `server.WithPrincipal(ctx, p)` — inject an identity from your own middleware.
 
 Permission hooks: `CanAccessWorkspace`, `CanMutate`, `ReadFilter`,
-`FilterEpoch` (plus `EpochReadFilters` for delta resync on permission changes).
-Embed `server.AllowAll` to implement a subset.
+`FilterEpoch` (plus `EpochReadFilters` for delta resync on permission changes,
+and `FieldPermissions` for per-caller field protection). Embed
+`server.AllowAll` to implement a subset.
+
+```go
+type FieldPermissions interface {
+    ProtectedFields(ctx context.Context, p Principal, workspaceID, entity string) ([]string, error)
+}
+```
+
+Optional and type-asserted. It returns the top-level field names this caller may
+not write, on top of the ones the entity's schema marks
+`(syncplane.v1.field_behavior).write_policy` — it widens that set and can never
+narrow it. A PATCH whose mask reaches a protected field is rejected with
+`CodePermissionDenied`; a PUT keeps the field's stored value and applies the
+rest. Resolved at most once per entity per request, before the write transaction
+opens. A returned name matching no field, or matching a key field, fails the
+request.
 
 Error constructors: `server.DenyWorkspace(msg)` (a settled denial) and
 `server.Reject(code, msg)`. Rejection codes stay free-form on the wire so an app

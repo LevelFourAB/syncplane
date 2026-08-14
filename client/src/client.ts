@@ -67,6 +67,7 @@ import {
 	buildDelete,
 	buildPatch,
 	buildPut,
+	carryProtectedFields,
 	crudHasPlainString,
 	encodeItemKey,
 	type EntityDef,
@@ -75,11 +76,13 @@ import {
 	extractTextStrings,
 	isTextField,
 	keyFieldsFor,
+	keyOf,
 	maskFromDiff,
 	maskFromInit,
 	maskNeedsExpansion,
 	type MergerSpec,
 	type PatchInit,
+	protectedFieldOf,
 	takeTextStrings,
 	type TextInit,
 	type TextStringEdits,
@@ -1773,11 +1776,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			opts?: PatchOptions,
 		): Promise<void> => {
 			const def = this.entityRegistry.bySchema(schema);
-			assertWritePolicy(def, CrudOp.PATCH, opts?.expectedVersion);
 			const { init: cleaned, texts } = extractTextStrings(schema, init);
 			// The mask derives from the ORIGINAL init so extracted text
 			// fields keep their entry (explicit paths pass through).
 			const paths = opts?.paths ?? maskFromInit(schema, init as object);
+			// Authorized on the effective mask, which is what the server sees.
+			assertWritePolicy(def, CrudOp.PATCH, opts?.expectedVersion, paths);
 			const crud = buildPatch(
 				def,
 				schema,
@@ -1796,12 +1800,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// String-valued text fields ride a side map to enqueue, where
 				// they diff against the merged row under a leased peer.
 				const { init, texts } = extractTextStrings(schema, value);
-				const crud = buildPut(
-					def,
-					schema,
-					create(schema, init as MessageInitShape<typeof schema>),
-					opts?.expectedVersion,
-				);
+				// A text string names its field outright, the way a patch mask
+				// does, so a protected one is refused rather than carried over.
+				for (const path of texts?.keys() ?? []) {
+					const head = protectedFieldOf(def, path);
+					if (head !== undefined) {
+						throw new Error(
+							`entity "${def.name}": field "${head}" may not be written by a client, so the text `
+								+ `value for "${path}" is refused.`,
+						);
+					}
+				}
+				let msg = create(schema, init as MessageInitShape<typeof schema>);
+				if (def.protectedFields.length > 0) {
+					msg = carryProtectedFields(def, schema, msg, await read(schema, keyOf(def, msg)));
+				}
+				const crud = buildPut(def, schema, msg, opts?.expectedVersion);
 				attachTextStrings(crud, texts);
 				await sink(crud);
 			},

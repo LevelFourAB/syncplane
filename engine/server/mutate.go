@@ -78,7 +78,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 	if err != nil {
 		return err
 	}
-	authz := s.writeAuthorizer(ctx, p, workspaceID, enforced)
+	authz, fields := s.writeAuthorizer(ctx, p, workspaceID, enforced)
 	wrote := false
 	err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		actor, err := actorOf(ctx)
@@ -88,7 +88,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		// A fresh EntityTx per attempt keeps the closure re-runnable: a
 		// retried attempt re-allocates its sequence instead of stamping rows
 		// with one a rolled-back attempt consumed.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, actor: actor}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, fields: fields, actor: actor}
 		if err := fn(etx); err != nil {
 			return err
 		}
@@ -161,7 +161,9 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 		}
 		custom.Args = packed
 	}
-	return s.authorizeWrite(ctx, p, workspaceID, Write{Custom: custom})
+	// No field gate: a custom mutation has no fields of its own to protect, and
+	// the rows its body writes are covered by this one verdict.
+	return s.authorizeWrite(ctx, p, workspaceID, nil, Write{Custom: custom})
 }
 
 // mutatorFor resolves a registered mutator and returns the args its body is to

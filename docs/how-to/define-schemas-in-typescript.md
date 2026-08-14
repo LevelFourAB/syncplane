@@ -127,6 +127,22 @@ takes `{ expectedVersion: 0n }` on the `put()`: an unguarded put could replace a
 existing row, which the entity forbids. See
 [Write policies](../reference/proto-options.md#delete-policy).
 
+To keep one field of an otherwise writable row out of a client's reach, mark the
+field instead:
+
+```ts
+const task = schema.entity('task', {
+	id: schema.text().key(),
+	title: schema.text(),
+	// Advanced by a server-side workflow; clients read it, never write it.
+	status: schema.text().protected(),
+});
+```
+
+A `patch` masking `status` throws; a `put` lands and leaves `status` as the row
+already had it. See
+[Protected fields](../reference/proto-options.md#protected-fields).
+
 ## The same power from Go
 
 `server.DynamicField` (`Message`, `Ref`, `KeyField`/`OrderField`,

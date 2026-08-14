@@ -109,6 +109,10 @@ over rows. "Only edit your own comment" is not expressible here; it belongs in
 `CanMutate` when ownership is derivable from the key, or in a mutator body when
 it needs the stored row.
 
+They also range over whole rows, not fields. To keep one field of an otherwise
+writable row out of a client's reach, mark the field instead — see
+[Protected fields](#protected-fields).
+
 They govern the write _primitives_, not the outcome. A custom mutator's rows are
 covered by the verdict on its invocation rather than authorized one by one, so
 an app that wants a client-initiated delete or edit of a protected entity writes
@@ -257,14 +261,75 @@ repeated Member members = 4 [(syncplane.v1.field_behavior) = { key_field: [ "uid
 repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] order_field: "pos" }];
 ```
 
-| Field         | Type       | Meaning                                                                                                                                                                                                                                                                                                                       |
-| ------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `opaque`      | `bool`     | Replaced whole, never merged structurally. The escape hatch for CRDT blobs and for any list you want treated as one atomic value (order-sensitive, duplicate-bearing).                                                                                                                                                        |
-| `key_field`   | `repeated` | List-of-message identity field(s); composite allowed. Empty, with an element that is a registered entity, reuses that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                                                                                           |
-| `order_field` | `string`   | Names the position field on the element that orders this keyed list — a **movable list**, whose position the framework manages as a fractional index. Requires a keyed message list.                                                                                                                                          |
-| `text`        | `bool`     | **Collaborative text.** The field holds an encoded convergent text document with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`; the engine auto-installs the text merger. Incompatible with `key_field` / `order_field`.                                                              |
-| `indexed`     | `bool`     | Maintain a single-component secondary index over this field; on a repeated scalar the row takes one entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                           |
-| `history`     | `bool`     | Record this field in the entity's history. Capture is **explicit** — only marked fields are recorded, and an entity that opts in and marks none is rejected at registration. A oneof is captured as a group, so marking any member marks it. Ignored on an entity that has not opted in. See [Field history](#field-history). |
+| Field          | Type       | Meaning                                                                                                                                                                                                                                                                                                                       |
+| -------------- | ---------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `opaque`       | `bool`     | Replaced whole, never merged structurally. The escape hatch for CRDT blobs and for any list you want treated as one atomic value (order-sensitive, duplicate-bearing).                                                                                                                                                        |
+| `key_field`    | `repeated` | List-of-message identity field(s); composite allowed. Empty, with an element that is a registered entity, reuses that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                                                                                           |
+| `order_field`  | `string`   | Names the position field on the element that orders this keyed list — a **movable list**, whose position the framework manages as a fractional index. Requires a keyed message list.                                                                                                                                          |
+| `text`         | `bool`     | **Collaborative text.** The field holds an encoded convergent text document with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`; the engine auto-installs the text merger. Incompatible with `key_field` / `order_field`.                                                              |
+| `indexed`      | `bool`     | Maintain a single-component secondary index over this field; on a repeated scalar the row takes one entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                           |
+| `history`      | `bool`     | Record this field in the entity's history. Capture is **explicit** — only marked fields are recorded, and an entity that opts in and marks none is rejected at registration. A oneof is captured as a group, so marking any member marks it. Ignored on an entity that has not opted in. See [Field history](#field-history). |
+| `write_policy` | `enum`     | `FIELD_WRITE_POLICY_TRUSTED_ONLY` puts the field out of a client's reach while the rest of the row stays writable. Top-level fields only; a oneof is protected as a group; a key field may not be marked. See [Protected fields](#protected-fields).                                                                          |
+
+## Protected fields
+
+`create_policy`, `update_policy` and `delete_policy` speak for a whole row.
+`write_policy` speaks for one field, which is what a status a workflow advances,
+a counter an effect maintains or an owner stamped at creation needs:
+
+```proto
+message Task {
+	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
+
+	string id = 1;
+	string title = 2;
+	// Advanced by a server-side workflow; a client may read it, never write it.
+	string status = 3
+		[(syncplane.v1.field_behavior) = { write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY }];
+}
+```
+
+The two write primitives are governed differently, because they say different
+things:
+
+| Write                                | Outcome                                                                   |
+| ------------------------------------ | ------------------------------------------------------------------------- |
+| `PATCH` whose mask reaches the field | Rejected with `permission_denied`                                         |
+| `PUT`                                | Applied; the field keeps its stored value, or its zero value on a new row |
+| `DELETE`                             | Unaffected — a protected field guards a value, not the row                |
+
+A PATCH names its fields, so a mask reaching a protected one asks outright to do
+the forbidden thing. A PUT names none: it carries the whole row because that is
+the only shape it has, so refusing it would reject an honest read-modify-write
+whenever the client's copy of a field it never meant to touch had gone stale.
+Substituting the stored value lets the rest of the write land.
+
+A mask is matched by its **first segment**, so protecting `audit` also refuses
+`audit.size`, and one leaf of a message a client may otherwise replace cannot be
+singled out. A oneof is protected as a group — the only unit a mask names it in
+— so marking any member marks all of them. A key field may not be marked and is
+rejected at registration: a PATCH can never move one, and a PUT that changed one
+would address a different row.
+
+A protected collaborative-text field is not editable by clients at all: edits
+ship as PATCHes, and a PUT takes the stored document verbatim rather than
+unioning the client's into it.
+
+The TypeScript client reads the same marks and throws at the call site, so a
+`patch()` naming a protected field never enters the pending queue and a `put()`
+substitutes the local row's value into the optimistic overlay.
+
+For a rule that depends on **who** is writing — "the owner may reassign, a viewer
+may not" — a schema enum is the wrong surface; implement the server's
+`FieldPermissions` hook, which adds fields to this set for one caller and can
+never take one away. See
+[Authentication and permissions](../how-to/authentication-and-permissions.md#protect-a-field-per-caller).
+
+Like the entity policies, this governs the write primitives rather than
+modification as an outcome. A custom mutator's rows are covered by the verdict on
+its invocation, so an app that wants a client-initiated change to a protected
+field writes a mutator, checks what it needs in the body, and authorizes the
+invocation by name.
 
 ## Secondary indexes
 

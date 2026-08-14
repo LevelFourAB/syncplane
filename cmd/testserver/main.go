@@ -91,6 +91,11 @@ func main() {
 			// that the client's local refusal and the server's rejection
 			// classify the same write the same way.
 			&testdatav1.Comment{},
+			// Guarded marks fields TRUSTED_ONLY, and exampleapp's policy
+			// protects one more for the subject "viewer": integration tests
+			// verify that a PUT keeps the stored value of a protected field and
+			// that the half only the server knows arrives as a rejection ack.
+			&testdatav1.Guarded{},
 			// Article declares full-text search (a searchable mark plus an
 			// EntityOptions.search spec): integration tests verify a match
 			// predicate and a relevance ordering return the same rows in the

@@ -181,9 +181,12 @@ func (s *Server) apply(
 
 	// Phase 2: authorize every recorded write, outside any transaction. A
 	// rejection here means nothing is applied — the writes were never opened.
+	// The gate outlives this pass: phase 3 reads the protected fields it
+	// resolved here rather than calling the hook under the write lock.
+	fields := s.newFieldGate(ctx, p, workspaceID, enforced)
 	if enforced {
 		for _, in := range atx.intents {
-			if err := s.authorizeWrite(ctx, p, workspaceID, Write{Crud: in.crud()}); err != nil {
+			if err := s.authorizeWrite(ctx, p, workspaceID, fields, Write{Crud: in.crud()}); err != nil {
 				return WriteOutcome{}, err
 			}
 		}
@@ -218,8 +221,10 @@ func (s *Server) apply(
 			return err
 		}
 		// authz stays nil: phase 2 already authorized every intent, and
-		// re-running the hook here would put it back under the write lock.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, actor: actor}
+		// re-running the hook here would put it back under the write lock. The
+		// field gate does travel, warm: a PUT needs the protected set at the
+		// moment it has the stored row, which is here.
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, fields: fields, actor: actor}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err

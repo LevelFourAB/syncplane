@@ -178,6 +178,51 @@ class, not over rows. "Only edit your own comment" stays in `CanMutate` when
 ownership is derivable from the key, or in a mutator body when it needs the
 stored row. See [Write policies](../reference/proto-options.md#delete-policy).
 
+`(syncplane.v1.field_behavior).write_policy` does the same for a single field of
+an otherwise writable row — a status a workflow owns, a counter an effect
+maintains. A PATCH whose mask reaches such a field is rejected; a PUT keeps the
+stored value and lands the rest. See
+[Protected fields](../reference/proto-options.md#protected-fields).
+
+## Protect a field per caller
+
+A schema mark says a field is nobody's to write. When the answer depends on who
+is asking, implement `FieldPermissions` — an optional extension the engine
+type-asserts on your `Permissions`:
+
+```go
+func (p *policy) ProtectedFields(
+	ctx context.Context, caller server.Principal, workspaceID, entity string,
+) ([]string, error) {
+	if entity != "task" || p.roleOf(ctx, workspaceID, caller) == roleOwner {
+		return nil, nil
+	}
+	return []string{"assignee", "due_date"}, nil
+}
+```
+
+The effective set is the schema's marks plus whatever this returns, so the hook
+**widens and never narrows**: it cannot hand a caller a field the schema reserved
+for trusted writes. Both halves are enforced identically once resolved — a PATCH
+reaching a protected field is rejected, a PUT keeps the stored value.
+
+Return names of top-level fields, a oneof named by its group. A name matching no
+field, or matching a key field, fails the request rather than protecting nothing:
+a typo in a permission control must not read as "allow".
+
+Like the rest of `Permissions`, it must be fast and free of side effects. The
+engine resolves it at most once per entity per request, before the write
+transaction opens, and reads the memoized answer again while applying — so a
+membership lookup belongs in middleware that stashes its result on `ctx`, not
+here.
+
+What the two halves differ in is what a client can predict. The TypeScript client
+mirrors the schema's marks and refuses such a write at the call site; a field
+this hook adds is knowable only to the server, so the write enqueues and comes
+back as a rejection ack. Both converge — but the second costs a round trip and
+shows the user an edit that then reverts, so prefer a schema mark for anything
+that holds for every caller.
+
 ## What is not gated
 
 The change feed and the admin service do not authenticate and do not consult

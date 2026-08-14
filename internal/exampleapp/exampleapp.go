@@ -13,6 +13,7 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 )
@@ -20,11 +21,14 @@ import (
 // Permissions rejects todo writes whose title contains "forbidden" and hides
 // todos whose title contains "secret" from reads. The filter epoch is a
 // process-local counter per workspace that the bump_epoch mutator advances,
-// standing in for out-of-band visibility changes (e.g. a membership edit).
+// standing in for out-of-band visibility changes (e.g. a membership edit). It
+// also protects one field per caller (see ProtectedFields), which is the one
+// hook here that does read the principal.
 //
 // It embeds server.AllowAll purely to show the partial-implementation pattern;
-// every hook below is overridden. It authorizes on the write's content rather
-// than on the caller, so it ignores the principal — a real policy would not.
+// every hook below is overridden. CanMutate authorizes on the write's content
+// rather than on the caller, so it ignores the principal — a real policy would
+// not.
 //
 // Safe for concurrent use.
 type Permissions struct {
@@ -77,6 +81,23 @@ func (*Permissions) ReadFilter(_ context.Context, _ server.Principal, _ string, 
 
 func (p *Permissions) FilterEpoch(_ context.Context, _ server.Principal, workspaceID string) (uint64, error) {
 	return p.epochOf(workspaceID).Load(), nil
+}
+
+// ProtectedFields puts the "guarded" entity's `label` out of reach of the
+// subject "viewer", on top of the fields that entity's schema already marks.
+//
+// It is the per-caller half of field protection, and the only half a client
+// cannot predict: the suites assert that such a write enqueues and comes back as
+// a rejection ack, where a schema-marked field is refused at the call site. The
+// subject comes from the bearer token testserver takes at face value, so a spec
+// chooses which side of the rule it is on by who it authenticates as.
+func (*Permissions) ProtectedFields(
+	_ context.Context, p server.Principal, _, entity string,
+) ([]string, error) {
+	if entity != "guarded" || p.Subject != "viewer" {
+		return nil, nil
+	}
+	return []string{"label"}, nil
 }
 
 // BumpEpoch invalidates every outstanding cursor for one workspace, leaving
@@ -147,6 +168,16 @@ func MutatorOptions(perms *Permissions) []server.Option {
 		server.WithMutator("fail_internal", nil,
 			func(context.Context, *server.EntityTx, proto.Message) error {
 				return errors.New("fail_internal always fails")
+			}),
+		// set_owner is the escape hatch a protected field is designed around: a
+		// mutator's rows are covered by the verdict on its invocation, so this
+		// writes "guarded".owner on behalf of a caller no ordinary write would
+		// let near it. Integration tests use it to give a protected field a
+		// value, which is the only way one acquires one.
+		server.WithMutator("set_owner", &testdatav1.Guarded{},
+			func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
+				g := args.(*testdatav1.Guarded)
+				return tx.Patch(g, []string{"owner"}, nil)
 			}),
 		// bump_epoch lets integration tests exercise filter-epoch revocation
 		// end to end: push bump_epoch, the notifier fires, the next pull resets.

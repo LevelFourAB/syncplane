@@ -255,6 +255,44 @@ type EpochReadFilters interface {
 	ReadFilterAt(ctx context.Context, p Principal, workspaceID, entity string, epoch uint64) (RowFilter, error)
 }
 
+// FieldPermissions is an optional Permissions extension covering per-caller
+// field protection. A schema says which fields NO authorized caller may write
+// (see the FieldWritePolicy proto option); this says which further fields THIS
+// caller may not, so the two together answer "the owner may reassign a task, a
+// viewer may not" — a rule a schema enum cannot state.
+//
+// It widens, never narrows. The effective set for a write is the schema's marks
+// plus whatever this returns, so a policy cannot hand a caller a field the
+// schema reserved for trusted writes.
+//
+// Both halves are enforced identically once resolved: a PATCH whose mask reaches
+// a protected field is rejected, and a PUT keeps the stored value for one. What
+// differs is what a client can predict — the TypeScript client mirrors the
+// schema's marks and refuses such a PATCH at the call site, while a field this
+// hook adds is only known to the server, so the client learns of it as a
+// REJECTED ack.
+//
+// A Permissions that does not implement it protects exactly what the schemas
+// mark, which for almost every entity is nothing.
+type FieldPermissions interface {
+	// ProtectedFields returns the top-level field names this caller may not
+	// write in the named entity, beyond the ones its schema marks. Return nil
+	// for "nothing further", which is the answer for most entities.
+	//
+	// Names are proto field names, and a oneof is named by its GROUP — the only
+	// unit a mask may name it in — though naming a member resolves to the same
+	// thing. A name that matches no field, or matches a key field, aborts the
+	// RPC: the hook states a restriction, and one that silently protects nothing
+	// is the wrong way for a permission control to fail.
+	//
+	// The engine resolves it at most once per entity per request, before the
+	// write transaction opens, and reads the memoized answer again while
+	// applying — so it carries the same cost contract as the rest of Permissions
+	// (see the interface doc on execution context) and the same purity
+	// requirement as CanMutate.
+	ProtectedFields(ctx context.Context, p Principal, workspaceID, entity string) ([]string, error)
+}
+
 // RoomDenial is a PERMANENT "no" from CanJoinRoom: this caller may not be in
 // this room, and retrying will not change that. It drops the topic from the
 // caller's Watch stream with reason ACCESS_REVOKED, so a client stops showing
@@ -406,15 +444,63 @@ func (AllowAll) FilterEpoch(context.Context, Principal, string) (uint64, error) 
 // Trusted callers never reach it — every call site sits behind the same
 // `enforced` check that skips CanMutate — which is what lets the TRUSTED_ONLY
 // policies be defined in terms of that bypass.
-func (s *Server) authorizeWrite(ctx context.Context, p Principal, workspaceID string, w Write) error {
+//
+// g is the request's field gate, non-nil for every enforced write. Resolving it
+// here rather than at apply time is what keeps FieldPermissions off the write
+// lock: the answer this call memoizes is the one the PUT carry-away reads inside
+// the transaction.
+func (s *Server) authorizeWrite(
+	ctx context.Context,
+	p Principal,
+	workspaceID string,
+	g *fieldGate,
+	w Write,
+) error {
 	if err := s.checkWritePolicy(w); err != nil {
+		return err
+	}
+	if err := s.checkFieldPolicy(g, w); err != nil {
 		return err
 	}
 	return s.perms.CanMutate(ctx, p, workspaceID, w)
 }
 
-// checkWritePolicy enforces the (syncplane.v1.entity) create_policy,
-// update_policy and delete_policy on a CRUD write.
+// checkFieldPolicy enforces the per-caller half of field protection — the
+// fields FieldPermissions adds to the ones the schema marks — and warms the
+// gate's memo for the entity so the write path can carry protected fields over
+// without consulting the hook under the write lock.
+//
+// The schema's own marks are already refused by checkWritePolicy, which needs no
+// hook and no principal; this re-checks them only because the gate answers with
+// the union, and reaching the same verdict twice costs one scan of a slice that
+// is empty for almost every entity.
+//
+// A custom mutation has no fields to protect: its rows are covered by the
+// verdict on the invocation, exactly as the entity policies are.
+func (s *Server) checkFieldPolicy(g *fieldGate, w Write) error {
+	if g == nil || w.Crud == nil {
+		return nil
+	}
+	info, ok := s.catalogPtr().entities[w.Crud.GetEntity()]
+	if !ok {
+		return nil
+	}
+	protected, err := g.protected(info)
+	if err != nil {
+		return err
+	}
+	return refuseProtectedMask(info, w.Crud, protected)
+}
+
+// checkWritePolicy enforces the schema's own write rules on a CRUD write: the
+// (syncplane.v1.entity) create_policy, update_policy and delete_policy, and the
+// (syncplane.v1.field_behavior) write_policy marks that put a field out of a
+// client's reach.
+//
+// The field rule refuses PATCH and nothing else. A mask naming a protected field
+// asks outright to change it; a PUT names no field, so it is not refused — the
+// write path substitutes the stored value instead (see carryProtectedFields),
+// which is a decision that needs the row and so cannot be made here.
 //
 // It runs BEFORE the app's policy so a schema-level "no" does not depend on
 // that policy having an opinion, and it refuses with a Rejection because the
@@ -450,6 +536,9 @@ func (s *Server) checkWritePolicy(w Write) error {
 	info, ok := s.catalogPtr().entities[crud.GetEntity()]
 	if !ok {
 		return nil
+	}
+	if err := refuseProtectedMask(info, crud, info.protectedFields); err != nil {
+		return err
 	}
 	creates := info.createPolicy == syncplanev1.CreatePolicy_CREATE_POLICY_TRUSTED_ONLY
 	updates := info.updatePolicy == syncplanev1.UpdatePolicy_UPDATE_POLICY_TRUSTED_ONLY

@@ -72,16 +72,27 @@ func (s *Server) gate(ctx context.Context, workspaceID string) (p Principal, enf
 	return p, true, nil
 }
 
-// writeAuthorizer returns the per-write hook an EntityTx runs, or nil when the
-// call is trusted. Shared by Mutate and MutateIdempotent, whose closures
-// discover their writes inside the transaction and so authorize as they go.
-func (s *Server) writeAuthorizer(ctx context.Context, p Principal, workspaceID string, enforced bool) func(Write) error {
+// writeAuthorizer returns the per-write hook an EntityTx runs and the field gate
+// its writes resolve protected fields through, both nil when the call is
+// trusted. Shared by Mutate and MutateIdempotent, whose closures discover their
+// writes inside the transaction and so authorize as they go.
+//
+// The two travel together because they describe one request's enforcement, but
+// they are handed to EntityTx separately: Apply's apply pass carries the gate
+// with no authorizer, having authorized its intents in an earlier pass.
+func (s *Server) writeAuthorizer(
+	ctx context.Context,
+	p Principal,
+	workspaceID string,
+	enforced bool,
+) (func(Write) error, *fieldGate) {
 	if !enforced {
-		return nil
+		return nil, nil
 	}
+	g := s.newFieldGate(ctx, p, workspaceID, enforced)
 	return func(w Write) error {
-		return s.authorizeWrite(ctx, p, workspaceID, w)
-	}
+		return s.authorizeWrite(ctx, p, workspaceID, g, w)
+	}, g
 }
 
 // readGate resolves the read filters for an in-process read and returns the

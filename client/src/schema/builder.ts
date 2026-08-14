@@ -61,6 +61,7 @@ import {
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
 	FieldBehaviorSchema,
+	FieldWritePolicy,
 	file_syncplane_v1_options,
 	IndexKeySchema,
 	IndexSpecSchema,
@@ -156,6 +157,8 @@ interface FieldSpec {
 	indexed?: boolean;
 	/** Include this field in the entity's full-text search. */
 	searchable?: boolean;
+	/** Put this field out of a client's reach; see Field.protected. */
+	protectedField?: boolean;
 }
 
 /**
@@ -185,6 +188,12 @@ export class Field<T> {
 			throw new Error('key() is only valid on a singular scalar field');
 		}
 		if (this.spec.repeated) throw new Error('a key field cannot be repeated');
+		if (this.spec.protectedField) {
+			throw new Error(
+				'a key field cannot be protected(): a patch can never move a key field, and a put that '
+					+ 'changed one would address a different row',
+			);
+		}
 		if (!SCALAR_CAN_KEY[this.spec.scalar!]) {
 			throw new Error(
 				`key() is not valid on a ${this.spec.scalar}() field: a row key must be a string, `
@@ -284,6 +293,30 @@ export class Field<T> {
 			);
 		}
 		return new Field<T>({ ...this.spec, searchable: true });
+	}
+
+	/**
+	 * Puts this field out of a client's reach while the rest of the row stays
+	 * writable — a status a server-side workflow advances, a counter an effect
+	 * maintains, an owner stamped at creation.
+	 *
+	 * A `patch()` whose mask reaches the field throws at the call site and is
+	 * rejected by the server; a `put()` is not refused, and the field keeps the
+	 * value the row already holds (its zero value on a new row). Only writes
+	 * under the server's `Trusted` bypass, and the rows a custom mutator writes,
+	 * can change it.
+	 *
+	 * A key field cannot be protected. To protect a field for some callers only,
+	 * leave it unmarked here and implement the server's `FieldPermissions` hook.
+	 */
+	protected(): Field<T> {
+		if (this.spec.key) {
+			throw new Error(
+				'protected() is not valid on a key field: a patch can never move a key field, and a put '
+					+ 'that changed one would address a different row',
+			);
+		}
+		return new Field<T>({ ...this.spec, protectedField: true });
 	}
 }
 
@@ -893,8 +926,8 @@ function fieldProtoOf(
 	switch (spec.kind) {
 		case 'scalar': {
 			field.type = SCALAR_TO_TYPE[spec.scalar!];
-			if (spec.opaque) setOpaque(field, spec.indexed ?? false);
-			else if (spec.indexed || spec.searchable) setScalarMarks(field, spec);
+			if (spec.opaque) setOpaque(field, spec.indexed ?? false, spec.protectedField);
+			else if (spec.indexed || spec.searchable || spec.protectedField) setScalarMarks(field, spec);
 			break;
 		}
 		case 'message': {
@@ -910,7 +943,9 @@ function fieldProtoOf(
 			const target = spec.ref!();
 			field.type = FieldDescriptorProto_Type.MESSAGE;
 			field.typeName = `.${target.typeName}`;
-			// No field_behavior: reference detection is annotation-free.
+			// Reference detection is annotation-free, so the only mark a ref
+			// carries is one that says who may write it.
+			setWritePolicy(field, spec);
 			break;
 		}
 		case 'map': {
@@ -930,6 +965,7 @@ function fieldProtoOf(
 			field.label = FieldDescriptorProto_Label.REPEATED;
 			field.type = FieldDescriptorProto_Type.MESSAGE;
 			field.typeName = `.${entryFull}`;
+			setWritePolicy(field, spec);
 			break;
 		}
 	}
@@ -974,12 +1010,12 @@ function mapEntryOf(
 }
 
 /** Sets (syncplane.v1.field_behavior).opaque on a field. */
-function setOpaque(field: FieldDescriptorProto, indexed = false): void {
+function setOpaque(field: FieldDescriptorProto, indexed = false, isProtected = false): void {
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { opaque: true, indexed }),
+		create(FieldBehaviorSchema, { opaque: true, indexed, writePolicy: writePolicyOf(isProtected) }),
 	);
 	field.options = fieldOptions;
 }
@@ -993,7 +1029,29 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 		create(FieldBehaviorSchema, {
 			indexed: spec.indexed ?? false,
 			searchable: spec.searchable ?? false,
+			writePolicy: writePolicyOf(spec.protectedField),
 		}),
+	);
+	field.options = fieldOptions;
+}
+
+function writePolicyOf(isProtected: boolean | undefined): FieldWritePolicy {
+	return isProtected ? FieldWritePolicy.TRUSTED_ONLY : FieldWritePolicy.UNSPECIFIED;
+}
+
+/**
+ * Sets (syncplane.v1.field_behavior).write_policy alone, for the kinds that
+ * carry no other mark. No-op on an unprotected field, which must keep its
+ * options unset — a map or reference the builder annotated would be reporting a
+ * behaviour it does not have.
+ */
+function setWritePolicy(field: FieldDescriptorProto, spec: FieldSpec): void {
+	if (!spec.protectedField) return;
+	const fieldOptions = create(FieldOptionsSchema);
+	setExtension(
+		fieldOptions,
+		fieldBehaviorExt,
+		create(FieldBehaviorSchema, { writePolicy: FieldWritePolicy.TRUSTED_ONLY }),
 	);
 	field.options = fieldOptions;
 }
@@ -1007,12 +1065,19 @@ function setBehavior(field: FieldDescriptorProto, spec: FieldSpec): void {
 	const keyField = spec.keyField ?? [];
 	const orderField = spec.orderField ?? '';
 	const indexed = spec.indexed ?? false;
-	if (!spec.opaque && !indexed && keyField.length === 0 && orderField === '') return;
+	const isProtected = spec.protectedField ?? false;
+	if (!spec.opaque && !indexed && !isProtected && keyField.length === 0 && orderField === '') return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { opaque: spec.opaque, keyField, orderField, indexed }),
+		create(FieldBehaviorSchema, {
+			opaque: spec.opaque,
+			keyField,
+			orderField,
+			indexed,
+			writePolicy: writePolicyOf(isProtected),
+		}),
 	);
 	field.options = fieldOptions;
 }
