@@ -20,9 +20,9 @@ import type { OrderKey, Path } from '../../src/query/ast.js';
 import { cursorToBytes, OrderCursors } from '../../src/query/cursor.js';
 import { compareRows } from '../../src/query/evaluate.js';
 import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
-import { planQuery } from '../../src/query/plan.js';
+import { planGroup, planQuery } from '../../src/query/plan.js';
 import { condFromProto, orderKeyFromProto } from '../../src/query/proto.js';
-import { localPathOf } from '../../src/query/wire.js';
+import { localPathOf, prepareGroupQuery } from '../../src/query/wire.js';
 import { toLocalNames } from '../support/vector-paths.js';
 
 interface SpecVector {
@@ -254,6 +254,57 @@ describe('planner conformance vectors', () => {
 			expect(plan!.ranges).toHaveLength(tc.want.ranges);
 			expect(plan!.ordered).toBe(tc.want.ordered);
 			expect(plan!.residual !== undefined).toBe(tc.want.residual);
+		});
+	}
+});
+
+interface GroupCase {
+	name: string;
+	type?: string;
+	indexes: SpecVector[];
+	cond?: JsonValue;
+	groupBy: string[];
+	want: 'scan' | { index: string; residual: boolean; desc: boolean; entriesAreRows: boolean };
+}
+
+const groupVectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { groupCases: GroupCase[] };
+
+// The group planner's decisions are shared for the same reason the row
+// planner's are: one that chose differently would still produce the right
+// groups, just at a different cost.
+describe('group planner conformance vectors', () => {
+	it('has cases', () => {
+		expect(groupVectors.groupCases.length).toBeGreaterThan(0);
+	});
+
+	for (const tc of groupVectors.groupCases) {
+		it(tc.name, () => {
+			const schema = schemaFor(tc.type);
+			const candidates = tc.indexes.map((spec) => ({
+				name: spec.name,
+				encoder: encoderFor(spec, schema),
+			}));
+			const where = tc.cond
+				? toLocalNames(schema, condFromProto(fromJson(ConditionSchema, tc.cond)))
+				: undefined;
+			// groupBy is a ROW path, so it resolves the way an order key does —
+			// including the reference rule, which is what prepareGroupQuery applies.
+			const compiled = prepareGroupQuery(schema, {
+				by: localPathOf(schema, tc.groupBy),
+				distinct: false,
+				...(where === undefined ? {} : { where }),
+			});
+
+			const plan = planGroup(candidates, compiled.where, compiled.by, compiled.multi);
+			if (tc.want === 'scan') {
+				expect(plan).toBeUndefined();
+				return;
+			}
+			expect(plan).toBeDefined();
+			expect(plan!.index).toBe(tc.want.index);
+			expect(plan!.residual !== undefined).toBe(tc.want.residual);
+			expect(plan!.desc).toBe(tc.want.desc);
+			expect(plan!.positionsAreRows).toBe(tc.want.entriesAreRows);
 		});
 	}
 });

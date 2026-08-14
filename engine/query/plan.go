@@ -71,6 +71,12 @@ import (
 // clusters one value, so it serves "which field holds X" — cross-key or, with
 // the key pinned second, one named field — but equality only.
 //
+// A GROUPED read (PlanGroup, group.go) reads the same components under one
+// extra shape: the component right after the equality prefix may be a PARTITION
+// — neither pinned nor bounded to one value — which a walk seeks past one
+// distinct value at a time. It shares walkEqualityPrefix with the row planner
+// so that "what an equality prefix is" is decided in one place.
+//
 // A single-component index still serves an ordering plus a limit: walk it in
 // order, re-check the residual per candidate, stop once the limit is filled.
 // That is bounded by how many candidates the residual rejects, not by the
@@ -152,54 +158,76 @@ func PlanQuery(candidates []Index, pred *Compiled, order *Order) *Plan {
 	return best
 }
 
-// planAgainst tries one index. score is how much the plan narrows — the number
-// of components the range pins — and is only meaningful when the plan is
-// non-nil.
-func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
-	comps := idx.Encoder.Components()
-	if len(comps) == 0 {
-		return nil, 0
-	}
-
-	// Walk the components left to right, consuming equality terms while they
-	// keep pinning.
-	//
-	// Two bookkeeping arrays, because "the walk has consumed this term" and "the
-	// range answers this term" are no longer the same thing. `taken` stops a term
-	// being reused by a later component; `answered` is what drops it from the
-	// residual, and for a term that named a map entry key it cannot be decided
-	// until the whole prefix is known.
-	taken := make([]bool, len(terms))
-	exact := make([]bool, len(terms))
+// prefixWalk is what the leading component walk consumed: the encoded equality
+// prefixes it built, how many components they pin, and the bookkeeping the
+// exactness verdict is computed from once the whole prefix is known.
+//
+// It is shared by the row planner and the group planner, which agree exactly on
+// what an equality prefix is and diverge only in what they do with the
+// component that follows it.
+type prefixWalk struct {
+	// prefixes are the equality prefixes built so far — more than one when an
+	// `in` fanned the walk out.
+	prefixes [][]byte
+	// pinned is how many leading components the prefixes fix.
+	pinned int
+	// taken marks a term the walk consumed, so a later component cannot reuse it.
+	taken []bool
+	// exact marks a term the range answers on its own, before the map-key rule
+	// below is applied.
+	exact []bool
 	// needKeys[ti] are the entry keys an exact reduction of term ti depends on
 	// the prefix pinning. Nil for a key-agnostic term, which is answered outright.
-	needKeys := make([][]condValue, len(terms))
-	// covered[ti] are the conjuncts of term ti's any() the range has consumed, and
-	// conjuncts[ti] how many there are. Zero means the term is not a conjunction
-	// and `exact` decides on its own.
-	covered := make([]map[int]bool, len(terms))
-	conjuncts := make([]int, len(terms))
-	prefixes := [][]byte{nil} // the equality prefixes built so far (>1 for `in`)
-	pinned := 0
-	// The term the components of THIS index's map fan are restricted to. The
-	// first such component to pin fixes it; every later one must reduce the same
-	// term, so `custom.a.number` and `custom.b.text` can never be read as one
-	// pinned pair. It is deliberately coarse — one map fan per index — which can
-	// decline a plan a finer rule would allow (two value components of the same
-	// entry, pinned by two terms naming the same key) but can never accept a
-	// wrong one. pinnedKeys records what each key component chose, which is what
-	// lets an ordering trust a value component of the same fan.
-	mapFanTerm := -1
-	pinnedKeys := map[int]condValue{}
+	needKeys [][]condValue
+	// covered[ti] are the conjuncts of term ti's any() the range has consumed,
+	// and conjuncts[ti] how many there are. Zero means the term is not a
+	// conjunction and `exact` decides on its own.
+	covered   []map[int]bool
+	conjuncts []int
+	// pinnedKeys records what each entry-key component chose, which is what lets
+	// an ordering — or a partition — trust a value component of the same fan.
+	pinnedKeys map[int]condValue
+	// mapFanTerm is the term the components of this index's map fan are
+	// restricted to, or -1 while none has pinned.
+	mapFanTerm int
+	// overflow reports that an `in` fanned the prefix set past maxIndexProbes,
+	// which declines the whole plan rather than issuing the probes.
+	overflow bool
+}
 
+// walkEqualityPrefix walks the components left to right, consuming equality
+// terms while they keep pinning.
+//
+// Two bookkeeping arrays, because "the walk has consumed this term" and "the
+// range answers this term" are no longer the same thing. `taken` stops a term
+// being reused by a later component; `exact` feeds what drops it from the
+// residual, and for a term that named a map entry key it cannot be decided
+// until the whole prefix is known.
+func walkEqualityPrefix(comps []IndexComponent, terms []node) prefixWalk {
+	w := prefixWalk{
+		prefixes:   [][]byte{nil},
+		taken:      make([]bool, len(terms)),
+		exact:      make([]bool, len(terms)),
+		needKeys:   make([][]condValue, len(terms)),
+		covered:    make([]map[int]bool, len(terms)),
+		conjuncts:  make([]int, len(terms)),
+		pinnedKeys: map[int]condValue{},
+		// The first component of this index's map fan to pin fixes the term every
+		// later one must reduce, so `custom.a.number` and `custom.b.text` can
+		// never be read as one pinned pair. It is deliberately coarse — one map
+		// fan per index — which can decline a plan a finer rule would allow (two
+		// value components of the same entry, pinned by two terms naming the same
+		// key) but can never accept a wrong one.
+		mapFanTerm: -1,
+	}
 	for ci, c := range comps {
-		red, found := equalityValuesFor(c, terms, taken, onlyFor(c, mapFanTerm))
+		red, found := equalityValuesFor(c, terms, w.taken, onlyFor(c, w.mapFanTerm))
 		if !found {
 			break
 		}
-		next := make([][]byte, 0, len(prefixes)*len(red.values))
+		next := make([][]byte, 0, len(w.prefixes)*len(red.values))
 		ok := true
-		for _, p := range prefixes {
+		for _, p := range w.prefixes {
 			for _, v := range red.values {
 				buf, appended := appendLiteral(append([]byte(nil), p...), c, v)
 				if !appended {
@@ -215,55 +243,89 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		if !ok {
 			break
 		}
-		if hasMapFan(c) && mapFanTerm < 0 {
-			mapFanTerm = red.term
+		if hasMapFan(c) && w.mapFanTerm < 0 {
+			w.mapFanTerm = red.term
 		}
 		if c.isEntryKey() {
-			pinnedKeys[ci] = red.values[0]
+			w.pinnedKeys[ci] = red.values[0]
 		}
 		// A term that only PARTLY reduces to this component (an any() with more
 		// than one condition inside, a hasAll) still bounds the range, but the
 		// range does not answer it — so it bounds and stays in the residual. A
 		// term that named an entry key is left available too, because the key
 		// component of the same fan still has to consume it.
-		taken[red.term] = red.exact && len(red.keys) == 0
+		w.taken[red.term] = red.exact && len(red.keys) == 0
 		switch {
 		case red.conjuncts > 0:
-			if covered[red.term] == nil {
-				covered[red.term] = make(map[int]bool, red.conjuncts)
+			if w.covered[red.term] == nil {
+				w.covered[red.term] = make(map[int]bool, red.conjuncts)
 			}
-			covered[red.term][red.conjunct] = true
-			conjuncts[red.term] = red.conjuncts
+			w.covered[red.term][red.conjunct] = true
+			w.conjuncts[red.term] = red.conjuncts
 			if len(red.keys) > 0 {
-				needKeys[red.term] = red.keys
+				w.needKeys[red.term] = red.keys
 			}
 		case red.exact:
-			exact[red.term] = true
-			needKeys[red.term] = red.keys
+			w.exact[red.term] = true
+			w.needKeys[red.term] = red.keys
 		}
-		prefixes = next
-		pinned++
+		w.prefixes = next
+		w.pinned++
 		// An `in` fans the prefix set out multiplicatively; stop pinning before
 		// that becomes a fan of probes larger than the scan it replaces.
-		if len(prefixes) > maxIndexProbes {
-			return nil, 0
+		if len(w.prefixes) > maxIndexProbes {
+			w.overflow = true
+			return w
 		}
+	}
+	return w
+}
+
+// usedTerms is which terms the range answers outright, now that the prefix is
+// known: a reduction onto a map-fan value component only answers its term if
+// the keys that term named are pinned too.
+func (w *prefixWalk) usedTerms() []bool {
+	used := make([]bool, len(w.taken))
+	for ti := range used {
+		answered := w.exact[ti]
+		if w.conjuncts[ti] > 0 {
+			// A conjunction is answered only when every conjunct is: the rest
+			// would otherwise have to be re-checked against the same element, and
+			// the range cannot say which element it matched.
+			answered = len(w.covered[ti]) == w.conjuncts[ti]
+		}
+		used[ti] = answered && mapKeysPinned(w.needKeys[ti], w.pinnedKeys)
+	}
+	return used
+}
+
+// planAgainst tries one index. score is how much the plan narrows — the number
+// of components the range pins — and is only meaningful when the plan is
+// non-nil.
+func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
+	comps := idx.Encoder.Components()
+	if len(comps) == 0 {
+		return nil, 0
+	}
+	w := walkEqualityPrefix(comps, terms)
+	if w.overflow {
+		return nil, 0
 	}
 
 	// The component after the equality prefix may take a range from an
 	// inequality. Only one can: past it the entries are no longer contiguous.
 	var ranges []Range
 	rangedComp := -1
-	if pinned < len(comps) {
-		c := comps[pinned]
-		lo, hi, ti, keys, found := inequalityBoundsFor(c, terms, taken, onlyFor(c, mapFanTerm))
+	if w.pinned < len(comps) {
+		c := comps[w.pinned]
+		lo, hi, ti, keys, found := inequalityBoundsFor(c, terms, w.taken, onlyFor(c, w.mapFanTerm))
 		if found {
-			taken[ti] = true
-			exact[ti] = true
-			needKeys[ti] = keys
-			rangedComp = pinned
-			ranges = make([]Range, 0, len(prefixes))
-			for _, p := range prefixes {
+			w.taken[ti] = true
+			w.exact[ti] = true
+			w.needKeys[ti] = keys
+			rangedComp = w.pinned
+			ranges = make([]Range, 0, len(w.prefixes))
+			for _, p := range w.prefixes {
 				ranges = append(ranges, Range{
 					Lo: concatBound(p, lo, true),
 					Hi: concatBound(p, hi, false),
@@ -272,22 +334,10 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		}
 	}
 
-	// Exactness, now that the prefix is known: a reduction onto a map-fan value
-	// component only answers its term if the keys that term named are pinned too.
-	used := make([]bool, len(terms))
-	for ti := range terms {
-		answered := exact[ti]
-		if conjuncts[ti] > 0 {
-			// A conjunction is answered only when every conjunct is: the rest
-			// would otherwise have to be re-checked against the same element, and
-			// the range cannot say which element it matched.
-			answered = len(covered[ti]) == conjuncts[ti]
-		}
-		used[ti] = answered && mapKeysPinned(needKeys[ti], pinnedKeys)
-	}
+	used := w.usedTerms()
 	if ranges == nil {
-		ranges = make([]Range, 0, len(prefixes))
-		for _, p := range prefixes {
+		ranges = make([]Range, 0, len(w.prefixes))
+		for _, p := range w.prefixes {
 			ranges = append(ranges, Range{Lo: p, Hi: UpperBound(p)})
 		}
 	}
@@ -295,8 +345,8 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	ordered := orderServedBy(comps, pinned, order, pinnedKeys)
-	if pinned == 0 && rangedComp < 0 && !ordered {
+	ordered := orderServedBy(comps, w.pinned, order, w.pinnedKeys)
+	if w.pinned == 0 && rangedComp < 0 && !ordered {
 		return nil, 0
 	}
 
@@ -308,10 +358,10 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 		ordered = false
 	}
 	var prefix []byte
-	if len(prefixes) == 1 {
-		prefix = prefixes[0]
+	if len(w.prefixes) == 1 {
+		prefix = w.prefixes[0]
 	}
-	return &Plan{Index: idx.Name, Ranges: ranges, Residual: residual, Ordered: ordered, Prefix: prefix}, pinned
+	return &Plan{Index: idx.Name, Ranges: ranges, Residual: residual, Ordered: ordered, Prefix: prefix}, w.pinned
 }
 
 // maxIndexProbes bounds the fan-out of an `in` over a leading component. Past

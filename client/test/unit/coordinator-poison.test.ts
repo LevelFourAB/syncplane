@@ -107,6 +107,14 @@ class HookedWrite implements KVWrite {
 		return this.inner.indexCount(lo, hi);
 	}
 
+	indexSeek(
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<{ position: string; key: string } | undefined> {
+		return this.inner.indexSeek(lo, hi, direction);
+	}
+
 	put(key: string, value: unknown): Promise<void> {
 		return this.inner.put(key, value);
 	}

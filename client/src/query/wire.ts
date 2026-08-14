@@ -2,6 +2,7 @@ import { type DescField, type DescMessage, type DescOneof, ScalarType } from '@b
 
 import { isTextField, refKeyFields, refTarget } from '../mutations.js';
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
+import type { CompiledGroupQuery } from './group.js';
 import { searchDeclOf } from './match.js';
 
 /**
@@ -175,6 +176,45 @@ export function prepareQuery(
 		);
 	}
 	return out;
+}
+
+/**
+ * A grouped query with its paths resolved against the schema: predicate
+ * prepared like any other, grouping path checked and canonicalized, and the
+ * facts the walk needs about the leaf recorded.
+ */
+export interface PreparedGroupQuery extends CompiledGroupQuery {
+	/** Whether the grouping path ends at a repeated field, so one row belongs to
+	 * one group per element. */
+	multi: boolean;
+	/** The grouping path as PROTO field names, for the server push-down. */
+	protoBy: Path;
+}
+
+/**
+ * Resolves a grouped query against the schema, the way prepareQuery resolves a
+ * row query: a path ending at a single-key reference is extended with that key
+ * field, and a leaf no comparison reaches is rejected — grouping by one would
+ * put every row in a single bucket with nothing to say why.
+ *
+ * A repeated scalar is the one leaf accepted that an order key is not: it
+ * groups per element, which is exactly what a label facet asks for.
+ */
+export function prepareGroupQuery(
+	schema: DescMessage,
+	compiled: CompiledGroupQuery,
+): PreparedGroupQuery {
+	const leaf = resolveLeafRef(schema, compiled.by, true);
+	const multi = leafKind(leaf) === 'list';
+	if (multi) requireComparableElement(compiled.by, leaf.field);
+	else requireComparable(compiled.by, leaf);
+	return {
+		...compiled,
+		...(compiled.where ? { where: prepareCond(messageScope(schema), compiled.where) } : {}),
+		by: leaf.path,
+		protoBy: leaf.protoPath,
+		multi,
+	};
 }
 
 /**

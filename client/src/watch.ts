@@ -18,6 +18,7 @@ import { sortOrderedFields } from './ordering.js';
 import type { Cond, PageWindow } from './query/ast.js';
 import { OrderCursors, pageWindowOf } from './query/cursor.js';
 import { type IndexedRow, type IndexReport, queryByIndex } from './query/execute.js';
+import { readGroups, sameGroups } from './query/group-read.js';
 import {
 	collectRels,
 	compareRows,
@@ -25,6 +26,7 @@ import {
 	computeRelKeys,
 	diffRelKeys,
 	evalCond,
+	type Group,
 	type RelCond,
 	type RelKeys,
 	type RelKeysDelta,
@@ -41,6 +43,7 @@ import {
 	type TouchedTarget,
 	updateRelKeys,
 } from './query/index.js';
+import type { PreparedGroupQuery } from './query/wire.js';
 import {
 	readMergedRowsWithVersion,
 	type ReadScope,
@@ -50,7 +53,7 @@ import {
 	type WorkspaceScope,
 } from './read.js';
 import { hydrate, type Include, type RefClient } from './refs.js';
-import { safeInvoke } from './report.js';
+import { reportError, safeInvoke } from './report.js';
 import type { QueryDeclineReason, UnstampedQueryEvent } from './sync/events.js';
 import { queryEventOf } from './sync/events.js';
 import type { TouchSet } from './touch.js';
@@ -574,6 +577,8 @@ export class WatcherHub {
 	private watchers = new Set<Watcher>();
 	/** Keyed watchers, kept apart because nothing about a result applies to them. */
 	private keyWatchers = new Set<KeyWatcher>();
+	/** Grouped watchers, which hold no rows and re-read on every commit. */
+	private groupWatchers = new Set<GroupWatcher>();
 	private closed = false;
 	/** Set by the client so include watchers can hydrate; absent ⇒ no hydration. */
 	private refClient?: RefClient;
@@ -605,6 +610,7 @@ export class WatcherHub {
 		this.closed = true;
 		this.watchers.clear();
 		this.keyWatchers.clear();
+		this.groupWatchers.clear();
 		this.scopes.clear();
 	}
 
@@ -697,6 +703,92 @@ export class WatcherHub {
 	 * ScopedKeyedWatchHandle.setRefs, which is what a screen of row-by-key views
 	 * does as its components mount.
 	 */
+	/**
+	 * Live grouped read: emits the groups after every commit that touches the
+	 * entity in this workspace, suppressing callbacks whose answer is unchanged.
+	 *
+	 * Unlike a row watcher this holds no match set and maintains nothing — a
+	 * commit re-runs the read. A grouped read over an index costs O(groups)
+	 * whatever the entity holds, and a count has no per-row identity for an
+	 * incremental update to key on: a row moving between two groups changes both
+	 * numbers, and nothing in a delivered group says which rows it was made of.
+	 */
+	watchGroups<D extends DescMessage>(
+		schema: D,
+		workspaceId: string,
+		compiled: PreparedGroupQuery,
+		cb: (groups: Group[]) => void,
+		onError?: (error: unknown) => void,
+	): WatchHandle {
+		if (this.closed) return INERT;
+		const def = this.registry.bySchema(schema);
+		const watcher: GroupWatcher = {
+			schema,
+			entity: def.name,
+			workspaceId,
+			compiled,
+			cb,
+			onError,
+			reaches: new Set([ def.name ]),
+			last: undefined,
+		};
+		this.groupWatchers.add(watcher);
+		// The first read is its own dispatch rather than part of a notify, so a
+		// mounting consumer does not wait for the next commit to see anything.
+		void this.dispatchGroups([ watcher ]);
+		return {
+			close: () => {
+				this.groupWatchers.delete(watcher);
+			},
+			setWindow: () => {},
+		};
+	}
+
+	/** Re-reads a set of grouped watchers and delivers whatever changed. */
+	private async dispatchGroups(watchers: readonly GroupWatcher[]): Promise<void> {
+		if (watchers.length === 0) return;
+		let results: (Group[] | undefined)[];
+		try {
+			results = await this.mutex.runShared(async () => {
+				const tx = await this.kv.read();
+				try {
+					const out: (Group[] | undefined)[] = [];
+					for (const w of watchers) {
+						out.push(
+							await readGroups(
+								tx,
+								this.registry,
+								this.registry.bySchema(w.schema),
+								w.schema,
+								this.opts.indexes?.(w.entity) ?? [],
+								w.compiled,
+								w.workspaceId,
+							),
+						);
+					}
+					return out;
+				} finally {
+					tx.release();
+				}
+			});
+		} catch (err) {
+			for (const w of watchers) {
+				if (w.onError) safeInvoke(w.onError, err, 'group watch error handler');
+				else reportError('group watch', err);
+			}
+			return;
+		}
+		for (let i = 0; i < watchers.length; i++) {
+			const w = watchers[i]!;
+			const groups = results[i];
+			// A watcher closed while the read was in flight has nothing to hear it.
+			if (groups === undefined || !this.groupWatchers.has(w)) continue;
+			if (w.last !== undefined && sameGroups(w.last, groups)) continue;
+			w.last = groups;
+			safeInvoke(w.cb, groups, 'group watch callback');
+		}
+	}
+
 	watchRefs<D extends DescMessage>(
 		schema: D,
 		workspaceId: string | undefined,
@@ -935,6 +1027,13 @@ export class WatcherHub {
 		for (const w of this.keyWatchers) {
 			if (reaches(w, pairs)) keyed.push(w);
 		}
+		// Grouped watchers hold nothing to update in the read section below, so
+		// they re-read on their own rather than joining it.
+		const grouped: GroupWatcher[] = [];
+		for (const w of this.groupWatchers) {
+			if (reaches(w, pairs)) grouped.push(w);
+		}
+		void this.dispatchGroups(grouped);
 		if (byScope.size === 0 && keyed.length === 0) return;
 		const pending: { watcher: Watcher; from: number; force: boolean }[] = [];
 		const keyedPending: { watcher: KeyWatcher; force: boolean }[] = [];
@@ -2130,6 +2229,25 @@ function whereFor(watcher: Watcher, workspaceId: string): Cond | undefined {
 		rel.whereByWs.set(workspaceId, rewriteWithKeys(base, rel.keys ?? new Map(), workspaceId));
 	}
 	return rel.whereByWs.get(workspaceId);
+}
+
+/**
+ * A live grouped read. It holds no rows and no match set: a commit touching the
+ * entity re-runs the read, and `last` is what suppresses a callback that would
+ * deliver the same answer again.
+ */
+interface GroupWatcher {
+	schema: DescMessage;
+	entity: string;
+	workspaceId: string;
+	compiled: PreparedGroupQuery;
+	cb: (groups: Group[]) => void;
+	onError?: (error: unknown) => void;
+	/** The entities a commit must touch to reach this watcher — its own, since a
+	 * grouped read crosses nothing. */
+	reaches: Set<string>;
+	/** The last delivered answer, or undefined before the first callback. */
+	last?: Group[];
 }
 
 /** Identity of a row inside one scan scope. */

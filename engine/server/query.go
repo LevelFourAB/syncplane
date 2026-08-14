@@ -11,6 +11,7 @@ import (
 
 	"connectrpc.com/connect"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
@@ -59,6 +60,10 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	group, err := compileGrouping(desc, msg)
+	if err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 	order, err := query.CompileOrderWith(desc, msg.GetOrderBy(), predicate)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -102,7 +107,8 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// must not run while the read tx is pinned); classify() inside the scan
 	// then hits the memoized filter. Query scans a single entity, so this is
 	// the only filter to warm.
-	if _, err := emitter.filterOf(info.name); err != nil {
+	filter, err := emitter.filterOf(info.name)
+	if err != nil {
 		return nil, err
 	}
 	// A rel pre-pass reads the TARGET entities too, under the same rule, so
@@ -126,9 +132,15 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 	}
 
+	// A row a filter or the history rule can hide is a row an index entry may
+	// not stand in for; the grouped walk needs that stated, because otherwise it
+	// counts entries without reading them.
+	filtered := filter != nil || history
+
 	var (
-		rows []qrow
-		more bool
+		rows   []qrow
+		groups []query.GroupCount
+		more   bool
 	)
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
@@ -161,6 +173,12 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 			}
 		}
 		var err error
+		if group != nil {
+			groups, more, err = groupRows(tx, info, pred, group,
+				msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
+				limit, filtered, visible, emitter, s.limits)
+			return err
+		}
 		rows, more, err = queryRows(tx, info, pred, order, pg, visible, emitter, s.limits)
 		return err
 	})
@@ -175,6 +193,16 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		SchemaRevision: s.catalogPtr().schemaRev,
 		HasMore:        more,
 	}
+	if group != nil {
+		resp.Groups = make([]*syncplanev1.QueryGroup, 0, len(groups))
+		for _, g := range groups {
+			resp.Groups = append(resp.Groups, &syncplanev1.QueryGroup{
+				Value: g.Value.Proto(),
+				Count: g.Count,
+			})
+		}
+		return connect.NewResponse(resp), nil
+	}
 	for _, r := range rows {
 		resp.Rows = append(resp.Rows, rowChange(r.row))
 	}
@@ -184,6 +212,41 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		resp.EndCursor = order.EncodeCursor(msg.GetEntity(), last.msg.ProtoReflect(), last.row.Key)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// compileGrouping resolves a request's grouping key, or returns nil for an
+// ordinary row query.
+//
+// The paging fields describe a page of ROWS and have no counterpart over a set
+// of groups — a group has no cursor, and an ordering is fixed by the grouping
+// path — so a request combining them is refused rather than resolved. Saying
+// which field to drop is the whole value of failing here.
+func compileGrouping(
+	desc protoreflect.MessageDescriptor,
+	msg *syncplanev1.QueryRequest,
+) (*query.Group, error) {
+	path := msg.GetGroupBy()
+	op := msg.GetAggregate()
+	if len(path) == 0 {
+		if op != syncplanev1.AggregateOp_AGGREGATE_OP_UNSPECIFIED {
+			return nil, fmt.Errorf("aggregate %s needs a group_by path", op)
+		}
+		return nil, nil
+	}
+	switch op {
+	case syncplanev1.AggregateOp_AGGREGATE_OP_COUNT, syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT:
+	default:
+		return nil, errors.New("group_by needs an aggregate of COUNT or DISTINCT")
+	}
+	switch {
+	case len(msg.GetOrderBy()) > 0:
+		return nil, errors.New("group_by cannot be combined with order_by; groups come back in ascending value order")
+	case msg.GetOffset() > 0:
+		return nil, errors.New("group_by cannot be combined with offset; limit caps the groups returned")
+	case len(msg.GetAfter()) > 0 || len(msg.GetBefore()) > 0:
+		return nil, errors.New("group_by cannot be combined with after/before; a cursor names a row position, which a group has none of")
+	}
+	return query.CompileGroup(desc, path)
 }
 
 // queryCursor caps and decodes one of a request's cursors. The cap comes first:

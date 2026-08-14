@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/query.proto.
  */
 export const file_syncplane_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhoKCU1hdGNoQ29uZBINCgVxdWVyeRgBIAEoCSI3Cg1Db25kaXRpb25MaXN0EiYKBWNvbmRzGAEgAygLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiLSAwoJQ29uZGl0aW9uEiQKA2NtcBgBIAEoCzIVLnN5bmNwbGFuZS52MS5DbXBDb25kSAASIgoCaW4YAiABKAsyFC5zeW5jcGxhbmUudjEuSW5Db25kSAASJAoDc3RyGAMgASgLMhUuc3luY3BsYW5lLnYxLlN0ckNvbmRIABIkCgNyZXAYBCABKAsyFS5zeW5jcGxhbmUudjEuUmVwQ29uZEgAEiwKB3ByZXNlbnQYBSABKAsyGS5zeW5jcGxhbmUudjEuUHJlc2VudENvbmRIABIqCgNhbmQYBiABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEikKAm9yGAcgASgLMhsuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkxpc3RIABImCgNub3QYCCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uSAASKgoGZXhpc3RzGAkgASgLMhguc3luY3BsYW5lLnYxLkV4aXN0c0NvbmRIABIkCgNyZWwYCiABKAsyFS5zeW5jcGxhbmUudjEuUmVsQ29uZEgAEigKBW1hdGNoGAsgASgLMhcuc3luY3BsYW5lLnYxLk1hdGNoQ29uZEgAQgYKBGtpbmQiUQoIT3JkZXJLZXkSDAoEcGF0aBgBIAMoCRIkCgNkaXIYAiABKA4yFy5zeW5jcGxhbmUudjEuRGlyZWN0aW9uEhEKCXJlbGV2YW5jZRgDIAEoCCp8CgVDbXBPcBIWChJDTVBfT1BfVU5TUEVDSUZJRUQQABINCglDTVBfT1BfRVEQARIOCgpDTVBfT1BfTkVREAISDQoJQ01QX09QX0dUEAMSDgoKQ01QX09QX0dURRAEEg0KCUNNUF9PUF9MVBAFEg4KCkNNUF9PUF9MVEUQBipiCgVTdHJPcBIWChJTVFJfT1BfVU5TUEVDSUZJRUQQABIWChJTVFJfT1BfU1RBUlRTX1dJVEgQARIUChBTVFJfT1BfRU5EU19XSVRIEAISEwoPU1RSX09QX0NPTlRBSU5TEAMqbAoFUmVwT3ASFgoSUkVQX09QX1VOU1BFQ0lGSUVEEAASDgoKUkVQX09QX0hBUxABEhIKDlJFUF9PUF9IQVNfQU5ZEAISEgoOUkVQX09QX0hBU19BTEwQAxITCg9SRVBfT1BfSVNfRU1QVFkQBCpZCglQcmVzZW50T3ASGgoWUFJFU0VOVF9PUF9VTlNQRUNJRklFRBAAEhUKEVBSRVNFTlRfT1BfSVNfU0VUEAESGQoVUFJFU0VOVF9PUF9JU19OT1RfU0VUEAIqTQoJRGlyZWN0aW9uEhkKFURJUkVDVElPTl9VTlNQRUNJRklFRBAAEhEKDURJUkVDVElPTl9BU0MQARISCg5ESVJFQ1RJT05fREVTQxACQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM");
+  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhoKCU1hdGNoQ29uZBINCgVxdWVyeRgBIAEoCSI3Cg1Db25kaXRpb25MaXN0EiYKBWNvbmRzGAEgAygLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiLSAwoJQ29uZGl0aW9uEiQKA2NtcBgBIAEoCzIVLnN5bmNwbGFuZS52MS5DbXBDb25kSAASIgoCaW4YAiABKAsyFC5zeW5jcGxhbmUudjEuSW5Db25kSAASJAoDc3RyGAMgASgLMhUuc3luY3BsYW5lLnYxLlN0ckNvbmRIABIkCgNyZXAYBCABKAsyFS5zeW5jcGxhbmUudjEuUmVwQ29uZEgAEiwKB3ByZXNlbnQYBSABKAsyGS5zeW5jcGxhbmUudjEuUHJlc2VudENvbmRIABIqCgNhbmQYBiABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEikKAm9yGAcgASgLMhsuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkxpc3RIABImCgNub3QYCCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uSAASKgoGZXhpc3RzGAkgASgLMhguc3luY3BsYW5lLnYxLkV4aXN0c0NvbmRIABIkCgNyZWwYCiABKAsyFS5zeW5jcGxhbmUudjEuUmVsQ29uZEgAEigKBW1hdGNoGAsgASgLMhcuc3luY3BsYW5lLnYxLk1hdGNoQ29uZEgAQgYKBGtpbmQiRAoKUXVlcnlHcm91cBInCgV2YWx1ZRgBIAEoCzIYLnN5bmNwbGFuZS52MS5RdWVyeVZhbHVlEg0KBWNvdW50GAIgASgEIlEKCE9yZGVyS2V5EgwKBHBhdGgYASADKAkSJAoDZGlyGAIgASgOMhcuc3luY3BsYW5lLnYxLkRpcmVjdGlvbhIRCglyZWxldmFuY2UYAyABKAgqfAoFQ21wT3ASFgoSQ01QX09QX1VOU1BFQ0lGSUVEEAASDQoJQ01QX09QX0VREAESDgoKQ01QX09QX05FURACEg0KCUNNUF9PUF9HVBADEg4KCkNNUF9PUF9HVEUQBBINCglDTVBfT1BfTFQQBRIOCgpDTVBfT1BfTFRFEAYqYgoFU3RyT3ASFgoSU1RSX09QX1VOU1BFQ0lGSUVEEAASFgoSU1RSX09QX1NUQVJUU19XSVRIEAESFAoQU1RSX09QX0VORFNfV0lUSBACEhMKD1NUUl9PUF9DT05UQUlOUxADKmwKBVJlcE9wEhYKElJFUF9PUF9VTlNQRUNJRklFRBAAEg4KClJFUF9PUF9IQVMQARISCg5SRVBfT1BfSEFTX0FOWRACEhIKDlJFUF9PUF9IQVNfQUxMEAMSEwoPUkVQX09QX0lTX0VNUFRZEAQqWQoJUHJlc2VudE9wEhoKFlBSRVNFTlRfT1BfVU5TUEVDSUZJRUQQABIVChFQUkVTRU5UX09QX0lTX1NFVBABEhkKFVBSRVNFTlRfT1BfSVNfTk9UX1NFVBACKk0KCURpcmVjdGlvbhIZChVESVJFQ1RJT05fVU5TUEVDSUZJRUQQABIRCg1ESVJFQ1RJT05fQVNDEAESEgoORElSRUNUSU9OX0RFU0MQAipeCgtBZ2dyZWdhdGVPcBIcChhBR0dSRUdBVEVfT1BfVU5TUEVDSUZJRUQQABIWChJBR0dSRUdBVEVfT1BfQ09VTlQQARIZChVBR0dSRUdBVEVfT1BfRElTVElOQ1QQAkJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z");
 
 /**
  * QueryValue is a scalar literal in a condition. The branch preserves the
@@ -427,6 +427,36 @@ export const ConditionSchema: GenMessage<Condition> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 10);
 
 /**
+ * QueryGroup is one group of a grouped read: the value its rows share at the
+ * grouping path, and what the aggregate computed over them.
+ *
+ * @generated from message syncplane.v1.QueryGroup
+ */
+export type QueryGroup = Message<"syncplane.v1.QueryGroup"> & {
+  /**
+   * The shared value, absent for the group of rows that hold no value at the
+   * path — a group of its own, ordered last.
+   *
+   * @generated from field: syncplane.v1.QueryValue value = 1;
+   */
+  value?: QueryValue | undefined;
+
+  /**
+   * Matching rows in the group; 0 under AGGREGATE_OP_DISTINCT.
+   *
+   * @generated from field: uint64 count = 2;
+   */
+  count: bigint;
+};
+
+/**
+ * Describes the message syncplane.v1.QueryGroup.
+ * Use `create(QueryGroupSchema)` to create a new message.
+ */
+export const QueryGroupSchema: GenMessage<QueryGroup> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_query, 11);
+
+/**
  * @generated from message syncplane.v1.OrderKey
  */
 export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
@@ -459,7 +489,7 @@ export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
  * Use `create(OrderKeySchema)` to create a new message.
  */
 export const OrderKeySchema: GenMessage<OrderKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 11);
+  messageDesc(file_syncplane_v1_query, 12);
 
 /**
  * @generated from enum syncplane.v1.CmpOp
@@ -625,4 +655,36 @@ export enum Direction {
  */
 export const DirectionSchema: GenEnum<Direction> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_query, 4);
+
+/**
+ * AggregateOp is what a grouped read computes for each group it finds.
+ *
+ * @generated from enum syncplane.v1.AggregateOp
+ */
+export enum AggregateOp {
+  /**
+   * @generated from enum value: AGGREGATE_OP_UNSPECIFIED = 0;
+   */
+  UNSPECIFIED = 0,
+
+  /**
+   * The number of matching rows in each group.
+   *
+   * @generated from enum value: AGGREGATE_OP_COUNT = 1;
+   */
+  COUNT = 1,
+
+  /**
+   * The group values alone. No row is read, so no count is reported.
+   *
+   * @generated from enum value: AGGREGATE_OP_DISTINCT = 2;
+   */
+  DISTINCT = 2,
+}
+
+/**
+ * Describes the enum syncplane.v1.AggregateOp.
+ */
+export const AggregateOpSchema: GenEnum<AggregateOp> = /*@__PURE__*/
+  enumDesc(file_syncplane_v1_query, 5);
 

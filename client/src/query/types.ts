@@ -328,6 +328,49 @@ export interface Query<M> {
 }
 
 /**
+ * The field surfaces a grouping key may name: anything comparable, and a
+ * repeated scalar, which groups per element.
+ *
+ * Stated as the operator surfaces rather than as a value type because that is
+ * what the proxy hands back — and it is what rejects the rest. A message, a
+ * map, bytes and a repeated message have no group: nothing identifies one of
+ * their values, so a facet over them would be a single bucket.
+ */
+export type GroupKeyRef = OrderOps | RepeatedScalarOps<Scalar>;
+
+/**
+ * A read that answers with the GROUPS of a match set instead of its rows —
+ * a board column's badge, a facet sidebar, the values a filter dropdown offers.
+ *
+ * Groups come back in ascending value order with the no-value group last, and
+ * `limit` caps how many. There is no ordering or cursor of its own: a group has
+ * no position, and the value order is what makes a limited read meaningful.
+ *
+ * A `by` path through a REPEATED field groups per ELEMENT — a row holding three
+ * labels joins three groups — so the counts do not sum to the number of
+ * matching rows. That is what a label facet wants.
+ *
+ * Only groups the rows produce exist. A status no row currently holds is absent
+ * rather than zero: the set of possible values is the app's (an enum, a status
+ * entity) to join these counts against.
+ *
+ * @example
+ * ```ts
+ * const byStatus = await db.issue.groupCount({
+ * 	by: (i) => i.status,
+ * 	where: (i) => i.projectId.eq(projectId),
+ * });
+ * ```
+ */
+export interface GroupQuery<M> {
+	/** The field the match set is partitioned by, named without an operator. */
+	by: (w: QueryRef<M>) => GroupKeyRef;
+	where?: (w: QueryRef<M>) => Cond;
+	/** Maximum groups to return, counted from the first in value order. */
+	limit?: number;
+}
+
+/**
  * A cross-workspace query whose predicate is chosen per workspace, for a
  * condition naming something workspace-scoped — a row id, which is a different
  * literal in each partition.

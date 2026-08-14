@@ -8,7 +8,13 @@
 // identity. `Scalar` includes `bigint` (and limit/offset are plain numbers),
 // which JSON.stringify cannot encode, so a replacer tags bigints.
 
-import { type CompiledQuery, compileQuery } from '../query/index.js';
+import {
+	type CompiledGroupQuery,
+	type CompiledQuery,
+	compileGroupQuery,
+	compileQuery,
+	type GroupQuery,
+} from '../query/index.js';
 import type { ReadScope } from '../read.js';
 import type { Include, IncludeOrderBy, IncludeWhere } from '../refs.js';
 import type { WatchWindow } from '../watch.js';
@@ -86,4 +92,22 @@ function scopeKey(scope: ReadScope): unknown {
 	if (scope === undefined) return null;
 	if (typeof scope === 'string') return scope;
 	return scope.workspaces.map((ws) => [ ws, scope.predicates?.get(ws) ?? null ]);
+}
+
+/**
+ * Identity string for a GROUPED watch subscription. The lambdas run every
+ * render, so the identity turns on the plain data they produce — the grouping
+ * path, the predicate and the limit — exactly as it does for a row query.
+ */
+export function groupHash(entityKey: string, query: GroupQuery<unknown>): string {
+	let compiled: CompiledGroupQuery;
+	try {
+		compiled = compileGroupQuery(query, false);
+	} catch {
+		// A malformed query has no identity to speak of; the read itself is where
+		// it is reported, and hashing the entity alone keeps that one call site
+		// from sharing a cell with any other.
+		return stableStringify({ e: entityKey, q: null });
+	}
+	return stableStringify({ e: entityKey, q: compiled });
 }

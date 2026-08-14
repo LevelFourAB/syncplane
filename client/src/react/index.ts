@@ -31,6 +31,8 @@ export {
 	useWorkspaceId,
 	useWorkspaceScope,
 } from './context.js';
+export { useDistinctHook, useGroupCountHook } from './hooks/use-groups.js';
+export type { DistinctResult, GroupResult } from './hooks/use-groups.js';
 export { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
 export { usePresenceHook, useRoomHook } from './hooks/use-room.js';
 export type { UseRoomOptions, UseRoomResult } from './hooks/use-room.js';

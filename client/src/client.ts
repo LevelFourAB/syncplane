@@ -37,6 +37,7 @@ import {
 	type Window,
 	WindowSchema,
 } from './gen/syncplane/v1/patch_pb.js';
+import { AggregateOp } from './gen/syncplane/v1/query_pb.js';
 import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
 	compareWorkspaces,
@@ -107,14 +108,18 @@ import {
 	type QueryCursor,
 } from './query/cursor.js';
 import { assertSameResult, type IndexReport, queryByIndex } from './query/execute.js';
+import { readGroups } from './query/group-read.js';
 import {
 	collectRels,
 	compileByWorkspace,
 	type CompiledQuery,
+	compileGroupQuery,
 	compileQuery,
 	computeRelKeys,
 	type Cond,
 	evalCond,
+	type Group,
+	type GroupQuery,
 	hasRel,
 	isWorkspaceQuery,
 	type OrderKey,
@@ -125,11 +130,17 @@ import {
 	type RelNode,
 	rewriteWithKeys,
 	runQueryPage,
+	type Scalar,
 	type TotalOf,
 	type WorkspaceQuery,
 } from './query/index.js';
-import { condToProto, orderKeyToProto } from './query/proto.js';
-import { prepareQuery, toWirePaths } from './query/wire.js';
+import { condToProto, orderKeyToProto, scalarFromProto } from './query/proto.js';
+import {
+	type PreparedGroupQuery,
+	prepareGroupQuery,
+	prepareQuery,
+	toWirePaths,
+} from './query/wire.js';
 import {
 	type NamedWorkspaces,
 	readMergedRow,
@@ -789,6 +800,14 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 		q: Q,
 		opts?: { include?: Include },
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	groupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]>;
+	distinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]>;
 	watch<D extends DescMessage>(schema: D, cb: WatchCallback<MessageShape<D>>): WatchHandle;
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
@@ -1161,6 +1180,66 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		q: Q,
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
 		return this.client.queryServerIn(this.workspaceId, schema, q);
+	}
+
+	groupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]> {
+		return this.client.groupIn(this.workspaceId, schema, q, false);
+	}
+
+	async distinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]> {
+		return (await this.client.groupIn(this.workspaceId, schema, q, true)).map((g) => g.value);
+	}
+
+	groupCountServer<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]> {
+		return this.client.groupServerIn(this.workspaceId, schema, q, false);
+	}
+
+	async distinctServer<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]> {
+		return (await this.client.groupServerIn(this.workspaceId, schema, q, true)).map((g) => g.value);
+	}
+
+	watchGroupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (groups: Group[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle {
+		return this.client.registerGroupWatch(
+			this.workspaceId,
+			schema,
+			q,
+			false,
+			cb,
+			opts?.onError,
+		);
+	}
+
+	watchDistinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (values: (Scalar | undefined)[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle {
+		return this.client.registerGroupWatch(
+			this.workspaceId,
+			schema,
+			q,
+			true,
+			(groups) => cb(groups.map((g) => g.value)),
+			opts?.onError,
+		);
 	}
 
 	watch<D extends DescMessage>(
@@ -2832,6 +2911,88 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		};
 	}
 
+	/**
+	 * Live grouped read: emits the groups after every commit touching the entity,
+	 * suppressing callbacks whose answer is unchanged. The first callback comes
+	 * as soon as the store can be read.
+	 *
+	 * See {@link SyncClient.groupCount} for what a group is.
+	 */
+	watchGroupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (groups: Group[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle {
+		return this.registerGroupWatch(
+			this.defaultScope().workspaceId,
+			schema,
+			q,
+			false,
+			cb,
+			opts?.onError,
+		);
+	}
+
+	/** {@link SyncClient.distinct}, live. Emits the values after every commit
+	 * that changes them. */
+	watchDistinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (values: (Scalar | undefined)[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle {
+		return this.registerGroupWatch(
+			this.defaultScope().workspaceId,
+			schema,
+			q,
+			true,
+			(groups) => cb(groups.map((g) => g.value)),
+			opts?.onError,
+		);
+	}
+
+	/**
+	 * Shared registration for watchGroupCount()/watchDistinct(), under the same
+	 * deferred-registration rule as registerWatch: the query is compiled and the
+	 * schema validated synchronously, so a bad one throws to the caller rather
+	 * than escaping as an unhandled rejection once the hub resolves.
+	 * @internal
+	 */
+	registerGroupWatch<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		distinct: boolean,
+		cb: (groups: Group[]) => void,
+		onError?: (error: unknown) => void,
+	): WatchHandle {
+		if (this.closed) return INERT_WATCH;
+		this.entityRegistry.bySchema(schema);
+		const compiled = prepareGroupQuery(schema, compileGroupQuery(q, distinct));
+		let handle: WatchHandle | undefined;
+		let cancelled = false;
+		void this.hub().then((hub) => {
+			if (cancelled) return;
+			handle = hub.watchGroups(schema, workspaceId, compiled, cb, onError);
+		}).catch((err) => {
+			this.statusTracker.update({
+				lastError: {
+					code: CodeWatchFailed,
+					message: err instanceof Error ? err.message : String(err),
+				},
+			});
+			if (!cancelled && onError) safeInvoke(onError, err, 'watch onError callback');
+		});
+		return {
+			close: () => {
+				cancelled = true;
+				handle?.close();
+			},
+			setWindow: () => {},
+		};
+	}
+
 	watchRows<D extends DescMessage>(
 		schema: D,
 		keys: Iterable<string>,
@@ -3178,6 +3339,117 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			MessageShape<D>,
 			TotalOf<Q>
 		>;
+	}
+
+	/**
+	 * Groups an entity's matching rows by one path and counts each group —
+	 * a board column's badge, a facet sidebar's numbers.
+	 *
+	 * Groups come back in ascending value order with the no-value group last;
+	 * `q.limit` caps how many. A `by` path through a repeated field groups per
+	 * ELEMENT, so the counts do not sum to the number of matching rows. See
+	 * {@link GroupQuery}.
+	 */
+	groupCount<D extends DescMessage>(schema: D, q: GroupQuery<MessageShape<D>>): Promise<Group[]> {
+		return this.groupIn(this.defaultScope().workspaceId, schema, q, false);
+	}
+
+	/**
+	 * The distinct values an entity's matching rows hold at one path, in
+	 * ascending order — what a filter dropdown offers, and what a facet sidebar
+	 * needs before it can count anything.
+	 *
+	 * `undefined` is in the result when some matching row holds no value there;
+	 * it is a value of the result, not an absence of one.
+	 */
+	async distinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]> {
+		return (await this.groupIn(this.defaultScope().workspaceId, schema, q, true))
+			.map((g) => g.value);
+	}
+
+	/** @internal */
+	async groupIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		distinct: boolean,
+	): Promise<Group[]> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const compiled = prepareGroupQuery(schema, compileGroupQuery(q, distinct));
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				return await readGroups(
+					tx,
+					this.entityRegistry,
+					def,
+					schema,
+					this.indexes.for(def.name),
+					compiled,
+					workspaceId,
+				);
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * Runs a grouped read AGAINST THE SERVER instead of the local store — the
+	 * push-down path for counts over rows partial sync did not bring down.
+	 *
+	 * The answer is a server-state snapshot: it is not merged with the optimistic
+	 * overlay and never feeds watchers. Requires connectivity.
+	 */
+	groupCountServer<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]> {
+		return this.groupServerIn(this.defaultScope().workspaceId, schema, q, false);
+	}
+
+	/** {@link SyncClient.distinct} against the server; see
+	 * {@link SyncClient.groupCountServer}. */
+	async distinctServer<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]> {
+		return (await this.groupServerIn(this.defaultScope().workspaceId, schema, q, true))
+			.map((g) => g.value);
+	}
+
+	/** @internal */
+	async groupServerIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		distinct: boolean,
+	): Promise<Group[]> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const compiled = prepareGroupQuery(schema, compileGroupQuery(q, distinct));
+		const wire = toWirePaths(schema, { ...(compiled.where ? { where: compiled.where } : {}) });
+		const rpc = createClient(SyncService, await this.resolveTransport());
+		const resp = await rpc.query({
+			workspaceId,
+			entity: def.name,
+			predicate: wire.where ? condToProto(wire.where) : undefined,
+			groupBy: compiled.protoBy,
+			aggregate: distinct ? AggregateOp.DISTINCT : AggregateOp.COUNT,
+			limit: compiled.limit ?? 0,
+		});
+		// The read rode its own RPC, outside the sync cycle, so this is the only
+		// place its revision reaches the skew handshake.
+		this.coordinator?.observeServerRevision(resp.schemaRevision);
+		return resp.groups.map((g) => ({
+			value: g.value === undefined ? undefined : scalarFromProto(g.value),
+			count: Number(g.count),
+		}));
 	}
 
 	/** One workspace's — or the whole store's — matching page, from an index. */
@@ -3881,6 +4153,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			getRow: (schema, key) => scope.getRow(schema, key),
 			scan: (schema) => scope.scan(schema),
 			query: (schema, q, opts) => scope.query(schema, q, opts),
+			groupCount: (schema, q) => scope.groupCount(schema, q),
+			distinct: (schema, q) => scope.distinct(schema, q),
 			watch: (schema, cb) => scope.watch(schema, cb),
 			watchQuery: (schema, q, cb, opts) => scope.watchQuery(schema, q, cb, opts),
 			resolveRef: (schema, field, holder) => scope.resolveRef(schema, field, holder),

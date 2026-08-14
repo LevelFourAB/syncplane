@@ -51,9 +51,11 @@ import { foldTextLog, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
-import { upperBound } from './indexkey.js';
-import type { IndexRange, QueryPlan } from './plan.js';
-import { planQuery } from './plan.js';
+import type { CompiledGroupQuery, Group, GroupValue } from './group.js';
+import { GroupBuckets, groupValuesOf } from './group.js';
+import { IndexEncoder, upperBound } from './indexkey.js';
+import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
+import { planGroup, planQuery } from './plan.js';
 import { requiredMatchCond, searchOverflowRange, searchTermRange } from './searchindex.js';
 
 /**
@@ -454,6 +456,242 @@ export async function queryByIndex<D extends DescMessage>(
 		hasMore: end !== undefined && matched > end,
 	};
 }
+
+/**
+ * Answers a GROUPED read from an index, or returns undefined to mean "bucket a
+ * scan instead" — the mirror of the server's groupRows index half.
+ *
+ * The walk seeks to the first position of the range, cuts it at the end of the
+ * partition component (the prefix every position of that group shares), does
+ * the group's work inside [prefix, prefix⁺), and seeks to prefix⁺ — the next
+ * distinct value. Groups therefore come out in value order, so a limited read
+ * stops after limit+1 of them rather than bucketing the whole entity.
+ *
+ * An entity with ANYTHING in the overlay declines outright. Every local read
+ * owes the overlay merge, and here that would mean subtracting each shadowed
+ * row's confirmed positions from whichever group they fall in and adding the
+ * pending rows' own groups back — for a set the pending queue already bounds,
+ * which is what makes the scan the honest answer while a write is in flight.
+ */
+export async function groupByIndex<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	indexes: CompiledIndex[],
+	compiled: CompiledGroupQuery,
+	multi: boolean,
+	workspaceId: string | undefined,
+	report?: IndexReport,
+): Promise<{ groups: Group[]; hasMore: boolean } | undefined> {
+	// Positions are keyed per workspace, so a cross-workspace read would have to
+	// merge one walk per workspace; the scan does that for free.
+	if (workspaceId === undefined) return decline(report, 'cross-workspace');
+	if (indexes.length === 0) return decline(report, 'no-index');
+	const built = (await Promise.all(
+		indexes.map(async (idx) =>
+			(await tx.has(metaIndexBuilt(workspaceId, def.name, idx.name, idx.specHash)))
+				? idx
+				: undefined
+		),
+	)).filter((idx): idx is CompiledIndex => idx !== undefined);
+	if (built.length === 0) return decline(report, 'not-built');
+	for await (const _ of tx.scan(overlayWsPrefix(def.name, workspaceId))) {
+		return decline(report, 'no-plan');
+	}
+	const plan = planGroup(
+		built.filter((idx) => idx.encoder !== undefined)
+			.map((idx) => ({ name: idx.name, encoder: idx.encoder! })),
+		compiled.where,
+		compiled.by,
+		multi,
+	);
+	if (plan === undefined) return decline(report, 'no-plan');
+	const chosen = built.find((idx) => idx.name === plan.index)!;
+	const encoder = chosen.encoder!;
+
+	const prefix = indexPositionPrefix(def.name, chosen.name, chosen.specHash, workspaceId);
+	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
+	// A position may stand in for a row only when nothing left can reject it: the
+	// range answers the predicate whole, and each position inside a group belongs
+	// to a distinct row.
+	const countable = plan.residual === undefined && plan.positionsAreRows;
+	const buckets = new GroupBuckets(compiled.distinct);
+	// One past the limit: the extra group is what reports that more exist,
+	// exactly as the extra row does for a page.
+	const want = compiled.limit === undefined ? undefined : compiled.limit + 1;
+	let walked = 0;
+	let lo = prefix + (plan.range.lo ?? '');
+	let hi = plan.range.hi === undefined ? successorOf(prefix) : prefix + plan.range.hi;
+	while (want === undefined || buckets.size < want) {
+		const at = await tx.indexSeek(lo, hi, plan.desc ? 'desc' : 'asc');
+		if (at === undefined) break;
+		let group: string;
+		try {
+			group = encoder.prefixOf(at.position.slice(prefix.length), plan.partition);
+		} catch {
+			// Positions that are not entries of this index: the store disagrees
+			// with the declaration, and only the scan can say what the groups are.
+			return decline(report, 'no-plan', walked);
+		}
+		const above = upperBound(group);
+		const from = maxKey(prefix + group, lo);
+		const until = above === undefined ? hi : minKey(prefix + above, hi);
+		const args = { tx, registry, def, schema, compiled, encoder, plan, workspaceId, rowPrefix };
+		const got = countable
+			? await countGroup(args, group, from, until, at.key)
+			: await walkGroup(args, group, from, until);
+		if (got === undefined) return decline(report, 'budget', walked);
+		walked += got.walked;
+		if (walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+		if (got.value !== undefined) buckets.add(got.value, got.count);
+		if (plan.desc) {
+			hi = prefix + group;
+		} else {
+			if (above === undefined) break;
+			lo = prefix + above;
+		}
+	}
+	if (report) {
+		report.index = chosen.name;
+		report.candidates = walked;
+	}
+	return buckets.result(compiled.limit);
+}
+
+/**
+ * One group whose positions ARE its matching rows: the number comes from the
+ * store's count of the range, and the only row read is the one that names the
+ * group.
+ *
+ * Undefined means the position no longer describes the row it points at, which
+ * a rebuilt index makes possible and which the scan is the only thing that can
+ * resolve.
+ */
+async function countGroup<D extends DescMessage>(
+	at: GroupWalk<D>,
+	group: string,
+	lo: string,
+	hi: string | undefined,
+	nameKey: string,
+): Promise<GroupContribution | undefined> {
+	const count = await at.tx.indexCount(lo, hi);
+	if (count === 0) return { count: 0, walked: 1 };
+	const [ row ] = await readConfirmedMany(at.tx, at.registry, at.def, at.schema, at.workspaceId, [
+		nameKey.slice(at.rowPrefix.length),
+	]);
+	if (row === undefined) return undefined;
+	const value = groupValueAt(row.row.value, at, group);
+	return value === undefined ? undefined : { value, count, walked: 2 };
+}
+
+/**
+ * One group whose rows still have to be read — because a residual can reject
+ * them, or because a component past the partition puts one row at several of
+ * its positions.
+ *
+ * A distinct read stops at the first row that survives: it owes a value and no
+ * number, so the rest of the group is work nothing would look at.
+ */
+async function walkGroup<D extends DescMessage>(
+	at: GroupWalk<D>,
+	group: string,
+	lo: string,
+	hi: string | undefined,
+): Promise<GroupContribution | undefined> {
+	const keys: string[] = [];
+	const seen = new Set<string>();
+	let walked = 0;
+	for await (const cKey of at.tx.indexScan(lo, hi)) {
+		walked++;
+		if (walked > MAX_INDEX_CANDIDATES) return undefined;
+		if (!cKey.startsWith(at.rowPrefix)) continue;
+		const key = cKey.slice(at.rowPrefix.length);
+		// One row can hold several positions of a group when a component past the
+		// partition fans out; a scan visits each row once and the two must agree.
+		if (seen.has(key)) continue;
+		seen.add(key);
+		keys.push(key);
+	}
+	let value: GroupValue | undefined;
+	let count = 0;
+	for (let i = 0; i < keys.length; i += READ_BATCH) {
+		const batch = keys.slice(i, i + READ_BATCH);
+		const rows = await readConfirmedMany(
+			at.tx,
+			at.registry,
+			at.def,
+			at.schema,
+			at.workspaceId,
+			batch,
+		);
+		for (const entry of rows) {
+			if (entry === undefined) continue;
+			if (!matches(entry.row.value, at.plan.residual, at.schema)) continue;
+			value ??= groupValueAt(entry.row.value, at, group);
+			count++;
+		}
+		if (value !== undefined && at.compiled.distinct) break;
+	}
+	if (count === 0) return { count: 0, walked };
+	// A group with matching rows that none of them describes means the positions
+	// no longer match the rows; only the scan can settle that.
+	return value === undefined ? undefined : { value, count, walked };
+}
+
+/** What one group contributed, and how much of the walk's budget it cost. */
+interface GroupContribution {
+	value?: GroupValue;
+	count: number;
+	walked: number;
+}
+
+/** Everything one group's work needs, gathered once so the two shapes of it
+ * take one argument rather than eleven. */
+interface GroupWalk<D extends DescMessage> {
+	tx: KVRead;
+	registry: EntityRegistry;
+	def: EntityDef;
+	schema: D;
+	compiled: CompiledGroupQuery;
+	encoder: IndexEncoder;
+	plan: GroupPlan;
+	workspaceId: string;
+	/** KV-key prefix every confirmed row of this entity and workspace carries,
+	 * which is what a position's record key is stripped of. */
+	rowPrefix: string;
+}
+
+/**
+ * Which of a row's group values the walk is standing in: the one whose encoding
+ * is what the position prefix ends with.
+ *
+ * A singular path has exactly one, so the comparison never runs. A repeated one
+ * has several, and only the encoding says WHICH element put this row in this
+ * group — the position carries the value and the row carries the list.
+ */
+function groupValueAt<D extends DescMessage>(
+	row: unknown,
+	at: GroupWalk<D>,
+	group: string,
+): GroupValue | undefined {
+	const values = groupValuesOf(row, at.compiled.by, at.schema);
+	if (values.length === 1) return values[0];
+	const component = at.encoder.components[at.plan.partition - 1]!;
+	for (const v of values) {
+		if (!v.found) continue;
+		try {
+			if (group.endsWith(new IndexEncoder([ component ]).encodePrefix([ v.value! ]))) return v;
+		} catch {
+			// A value this column cannot encode was never written as a position.
+		}
+	}
+	return undefined;
+}
+
+const maxKey = (a: string, b: string): string => (a < b ? b : a);
+const minKey = (a: string, b: string | undefined): string | undefined =>
+	b === undefined ? a : (a < b ? a : b);
 
 /**
  * Answers a query whose predicate carries a required match from the entity's

@@ -17,7 +17,7 @@ import type {
 import type { RowSet } from './coverage.js';
 import { newId } from './id.js';
 import type { EntityDef, EntityRegistry, PatchInit, TextInit } from './mutations.js';
-import type { Query, TotalOf } from './query/index.js';
+import type { Group, GroupQuery, Query, Scalar, TotalOf } from './query/index.js';
 import type { Row } from './read.js';
 import type { Include } from './refs.js';
 import type { TextHandle } from './text/handle.js';
@@ -105,6 +105,40 @@ export interface EntityApi<D extends DescMessage> {
 	queryServer<const Q extends Query<MessageShape<D>>>(
 		q: Q,
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	/**
+	 * Groups the matching rows by one path and counts each group — a board
+	 * column's badge, a facet sidebar's numbers.
+	 *
+	 * Groups come back in ascending value order with the no-value group last.
+	 * See {@link GroupQuery} for what a group is, and what a repeated `by` path
+	 * does to the counts.
+	 */
+	groupCount(q: GroupQuery<MessageShape<D>>): Promise<Group[]>;
+	/**
+	 * The distinct values the matching rows hold at one path, in ascending order
+	 * — what a filter dropdown offers. `undefined` is among them when some
+	 * matching row holds no value there.
+	 */
+	distinct(q: GroupQuery<MessageShape<D>>): Promise<(Scalar | undefined)[]>;
+	/** {@link EntityApi.groupCount} against the server, for rows partial sync did
+	 * not bring down. See {@link EntityApi.queryServer} for what a server read
+	 * does and does not do. */
+	groupCountServer(q: GroupQuery<MessageShape<D>>): Promise<Group[]>;
+	/** {@link EntityApi.distinct} against the server. */
+	distinctServer(q: GroupQuery<MessageShape<D>>): Promise<(Scalar | undefined)[]>;
+	/** {@link EntityApi.groupCount}, live: emits after every commit that changes
+	 * the groups. */
+	watchGroupCount(
+		q: GroupQuery<MessageShape<D>>,
+		cb: (groups: Group[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
+	/** {@link EntityApi.distinct}, live. */
+	watchDistinct(
+		q: GroupQuery<MessageShape<D>>,
+		cb: (values: (Scalar | undefined)[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
 	watch(cb: WatchCallback<MessageShape<D>>, opts?: WatchOptions): WatchHandle;
 	watchQuery<const Q extends Query<MessageShape<D>>>(
 		q: Q,
@@ -179,6 +213,38 @@ interface SchemaApi {
 		schema: D,
 		q: Q,
 	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	groupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]>;
+	distinct<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]>;
+	/** Absent on facades with no transport of their own (transactions). */
+	groupCountServer?<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<Group[]>;
+	/** Absent on facades with no transport of their own (transactions). */
+	distinctServer?<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+	): Promise<(Scalar | undefined)[]>;
+	/** Absent on facades that cannot host a live read (transactions). */
+	watchGroupCount?<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (groups: Group[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
+	/** Absent on facades that cannot host a live read (transactions). */
+	watchDistinct?<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (values: (Scalar | undefined)[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
 	watch<D extends DescMessage>(
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
@@ -225,6 +291,11 @@ interface SchemaApi {
 		): Promise<void>;
 		del(schema: DescMessage, key: string, opts?: CasOptions): Promise<void>;
 	};
+}
+
+/** The error a read the transaction facade cannot host raises. */
+function unavailable(entity: string, method: string, what: string): Error {
+	return new Error(`client.db.${entity}.${method}: ${what} are not available in transactions`);
 }
 
 function uncapitalize(name: string): string {
@@ -274,6 +345,24 @@ export function buildEntityApis<E extends readonly DescMessage[]>(
 					);
 				}
 				return client.queryServer(schema, q);
+			},
+			groupCount: (q) => client.groupCount(schema, q),
+			distinct: (q) => client.distinct(schema, q),
+			groupCountServer: (q) => {
+				if (!client.groupCountServer) throw unavailable(key, 'groupCountServer', 'server reads');
+				return client.groupCountServer(schema, q);
+			},
+			distinctServer: (q) => {
+				if (!client.distinctServer) throw unavailable(key, 'distinctServer', 'server reads');
+				return client.distinctServer(schema, q);
+			},
+			watchGroupCount: (q, cb, opts) => {
+				if (!client.watchGroupCount) throw unavailable(key, 'watchGroupCount', 'live reads');
+				return client.watchGroupCount(schema, q, cb, opts);
+			},
+			watchDistinct: (q, cb, opts) => {
+				if (!client.watchDistinct) throw unavailable(key, 'watchDistinct', 'live reads');
+				return client.watchDistinct(schema, q, cb, opts);
 			},
 			watch: (cb, opts) => client.watch(schema, cb, opts),
 			watchQuery: (q, cb, opts) => client.watchQuery(schema, q, cb, opts),

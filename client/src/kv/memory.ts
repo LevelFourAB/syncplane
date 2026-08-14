@@ -77,6 +77,22 @@ class MemoryRead implements KVRead {
 	 * the asymptotics of the two paths still match.
 	 */
 	async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
+		for (const [ , k ] of this.indexPairs(lo, hi)) yield k;
+	}
+
+	async indexSeek(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): Promise<{ position: string; key: string } | undefined> {
+		const pairs = this.indexPairs(lo, hi);
+		const at = direction === 'desc' ? pairs[pairs.length - 1] : pairs[0];
+		return at === undefined ? undefined : { position: at[0], key: at[1] };
+	}
+
+	/** The (position, record key) pairs of a range, in the order an IDB index
+	 * over the same records yields them. */
+	private indexPairs(lo?: string, hi?: string): [string, string][] {
 		const pairs: [string, string][] = [];
 		for (const [ k, v ] of this.snapshot) {
 			for (const position of positionsOf(v)) {
@@ -90,7 +106,7 @@ class MemoryRead implements KVRead {
 		pairs.sort((a, b) =>
 			a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : a[1] !== b[1] ? (a[1] < b[1] ? -1 : 1) : 0
 		);
-		for (const [ , k ] of pairs) yield k;
+		return pairs;
 	}
 
 	async indexCount(lo?: string, hi?: string): Promise<number> {

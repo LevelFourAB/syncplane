@@ -77,6 +77,9 @@ export { and, CursorShapeError, not, or } from './query/index.js';
 export type {
 	CompiledQuery,
 	Cond,
+	Group,
+	GroupKeyRef,
+	GroupQuery,
 	OrderKey,
 	Path,
 	Query,

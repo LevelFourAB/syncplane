@@ -512,6 +512,25 @@ export class IndexEncoder {
 		}
 		return { components: entry.slice(0, at), rowKey: entry.slice(at) };
 	}
+
+	/**
+	 * The leading part of an entry that its first `n` components occupy.
+	 *
+	 * It is what a grouped walk cuts an entry at: every entry sharing this prefix
+	 * belongs to one group, so seeking past its upper bound skips the rest of
+	 * that group. Throws on characters that are not an entry of this index.
+	 */
+	prefixOf(entry: string, n: number): string {
+		let at = 0;
+		for (let i = 0; i < n; i++) {
+			try {
+				at += componentLength(this.components[i]!, entry, at);
+			} catch (err) {
+				throw new Error(`index entry: component ${i}: ${(err as Error).message}`);
+			}
+		}
+		return entry.slice(0, at);
+	}
 }
 
 /**

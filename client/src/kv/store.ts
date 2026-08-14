@@ -125,6 +125,22 @@ export interface KVRead {
 	 * where walking the range materializes every key in it.
 	 */
 	indexCount(lo?: string, hi?: string): Promise<number>;
+	/**
+	 * The first index position in [lo, hi) — the last one under `'desc'` —
+	 * together with the key of the record holding it, or undefined when the range
+	 * holds none. An undefined bound is open on that end.
+	 *
+	 * It is the primitive a SKIP-SCAN is built from: read one position, derive
+	 * the prefix every position of its group shares, and resume past that
+	 * prefix's upper bound. Answering it costs one step of the index rather than
+	 * a walk, which is what makes a read over groups cost O(groups) instead of
+	 * O(positions).
+	 */
+	indexSeek(
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<{ position: string; key: string } | undefined>;
 	release(): void;
 }
 
@@ -175,6 +191,14 @@ export class CountingWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexSeek(
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<{ position: string; key: string } | undefined> {
+		return this.inner.indexSeek(lo, hi, direction);
 	}
 
 	indexCount(lo?: string, hi?: string): Promise<number> {

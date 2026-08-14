@@ -230,53 +230,81 @@ export function planQuery(
 	return best;
 }
 
-/** Tries one index. `score` is how many components the range pins. */
-function planAgainst(
-	idx: PlannableIndex,
-	terms: Cond[],
-	orderBy: OrderKey[] | undefined,
-): { plan: QueryPlan; score: number } | undefined {
+/**
+ * What the leading component walk consumed: the encoded equality prefixes it
+ * built, how many components they pin, and the bookkeeping the exactness
+ * verdict is computed from once the whole prefix is known.
+ *
+ * Shared by the row planner and the group planner, which agree exactly on what
+ * an equality prefix is and diverge only in what they do with the component
+ * that follows it.
+ */
+interface PrefixWalk {
+	/** The equality prefixes built so far — more than one when an `in` fanned
+	 * the walk out. */
+	prefixes: string[];
+	/** How many leading components the prefixes fix. */
+	pinned: number;
+	/** Marks a term the walk consumed, so a later component cannot reuse it. */
+	taken: boolean[];
+	/** Marks a term the range answers on its own, before the map-key rule. */
+	exact: boolean[];
+	/** The entry keys an exact reduction depends on the prefix pinning. Absent
+	 * for a key-agnostic term, which the range answers outright. */
+	needKeys: Map<number, Scalar[]>;
+	/** The conjuncts of a term's any() the range has consumed, and how many there
+	 * are. Absent means the term is not a conjunction and `exact` decides alone. */
+	covered: Map<number, Set<number>>;
+	conjuncts: Map<number, number>;
+	/** What each entry-key component chose, which is what lets an ordering — or a
+	 * partition — trust a value component of the same fan. */
+	pinnedKeys: Map<number, Scalar>;
+	/** The term the components of this index's map fan are restricted to, or -1
+	 * while none has pinned. */
+	mapFanTerm: number;
+	/** Whether an `in` fanned the prefix set past MAX_INDEX_PROBES, which
+	 * declines the whole plan rather than issuing the probes. */
+	overflow: boolean;
+}
+
+/**
+ * Walks the components left to right, consuming equality terms while they keep
+ * pinning.
+ *
+ * Two bookkeeping arrays, because "the walk has consumed this term" and "the
+ * range answers this term" are no longer the same thing. `taken` stops a term
+ * being reused by a later component; `exact` feeds what drops it from the
+ * residual, and for a term that named a map entry key it cannot be decided until
+ * the whole prefix is known.
+ */
+function walkEqualityPrefix(idx: PlannableIndex, terms: Cond[]): PrefixWalk {
 	const comps = idx.encoder.components;
-	if (comps.length === 0) return undefined;
-
-	// Walk the components left to right, consuming equality terms while they
-	// keep pinning.
-	//
-	// Two bookkeeping arrays, because "the walk has consumed this term" and "the
-	// range answers this term" are no longer the same thing. `taken` stops a term
-	// being reused by a later component; `used` is what drops it from the
-	// residual, and for a term that named a map entry key it cannot be decided
-	// until the whole prefix is known.
-	const taken = new Array<boolean>(terms.length).fill(false);
-	const exact = new Array<boolean>(terms.length).fill(false);
-	// The entry keys an exact reduction depends on the prefix pinning. Absent for
-	// a key-agnostic term, which the range answers outright.
-	const needKeys = new Map<number, Scalar[]>();
-	// The conjuncts of a term's any() the range has consumed, and how many there
-	// are. Absent means the term is not a conjunction and `exact` decides alone.
-	const covered = new Map<number, Set<number>>();
-	const conjuncts = new Map<number, number>();
-	let prefixes: string[] = [ '' ];
-	let pinned = 0;
-	// The term the components of this index's map fan are restricted to. The
-	// first such component to pin fixes it; every later one must reduce the same
-	// term, so `custom.a.number` and `custom.b.text` can never be read as one
-	// pinned pair. Deliberately coarse — one map fan per index — which can
-	// decline a plan a finer rule would allow but can never accept a wrong one.
-	// pinnedKeys records what each key component chose, which is what lets an
-	// ordering trust a value component of the same fan.
-	let mapFanTerm = -1;
-	const pinnedKeys = new Map<number, Scalar>();
-
+	const w: PrefixWalk = {
+		prefixes: [ '' ],
+		pinned: 0,
+		taken: new Array<boolean>(terms.length).fill(false),
+		exact: new Array<boolean>(terms.length).fill(false),
+		needKeys: new Map(),
+		covered: new Map(),
+		conjuncts: new Map(),
+		pinnedKeys: new Map(),
+		// The first component of this index's map fan to pin fixes the term every
+		// later one must reduce, so `custom.a.number` and `custom.b.text` can never
+		// be read as one pinned pair. Deliberately coarse — one map fan per index —
+		// which can decline a plan a finer rule would allow but can never accept a
+		// wrong one.
+		mapFanTerm: -1,
+		overflow: false,
+	};
 	for (let ci = 0; ci < comps.length; ci++) {
 		const c = comps[ci]!;
-		const found = equalityValuesFor(c, terms, taken, onlyFor(c, mapFanTerm));
+		const found = equalityValuesFor(c, terms, w.taken, onlyFor(c, w.mapFanTerm));
 		if (!found) break;
 		const next: string[] = [];
 		let ok = true;
-		for (const p of prefixes) {
+		for (const p of w.prefixes) {
 			for (const v of found.values) {
-				const encoded = encodeLiteral(idx, pinned, v);
+				const encoded = encodeLiteral(idx, w.pinned, v);
 				if (encoded === undefined) {
 					ok = false;
 					break;
@@ -286,74 +314,97 @@ function planAgainst(
 			if (!ok) break;
 		}
 		if (!ok) break;
-		if (hasMapFan(c) && mapFanTerm < 0) mapFanTerm = found.index;
-		if (c.keyComponent) pinnedKeys.set(ci, found.values[0]!);
+		if (hasMapFan(c) && w.mapFanTerm < 0) w.mapFanTerm = found.index;
+		if (c.keyComponent) w.pinnedKeys.set(ci, found.values[0]!);
 		// A term that only PARTLY reduces to this component (an any() with more
 		// than one condition inside, a hasAll) still bounds the range, but the
 		// range does not answer it — so it bounds and stays in the residual. A
 		// term that named an entry key is left available too, because the key
 		// component of the same fan still has to consume it.
-		taken[found.index] = found.exact && found.keys.length === 0;
+		w.taken[found.index] = found.exact && found.keys.length === 0;
 		if (found.conjuncts !== undefined) {
-			const seen = covered.get(found.index) ?? new Set<number>();
+			const seen = w.covered.get(found.index) ?? new Set<number>();
 			seen.add(found.conjunct!);
-			covered.set(found.index, seen);
-			conjuncts.set(found.index, found.conjuncts);
-			if (found.keys.length > 0) needKeys.set(found.index, found.keys);
+			w.covered.set(found.index, seen);
+			w.conjuncts.set(found.index, found.conjuncts);
+			if (found.keys.length > 0) w.needKeys.set(found.index, found.keys);
 		} else if (found.exact) {
-			exact[found.index] = true;
-			needKeys.set(found.index, found.keys);
+			w.exact[found.index] = true;
+			w.needKeys.set(found.index, found.keys);
 		}
-		prefixes = next;
-		pinned++;
+		w.prefixes = next;
+		w.pinned++;
 		// An `in` fans the prefix set out multiplicatively; stop pinning before
 		// that becomes a fan of probes larger than the scan it replaces.
-		if (prefixes.length > MAX_INDEX_PROBES) return undefined;
+		if (w.prefixes.length > MAX_INDEX_PROBES) {
+			w.overflow = true;
+			return w;
+		}
 	}
+	return w;
+}
+
+/**
+ * Which terms the range answers outright, now that the prefix is known: a
+ * reduction onto a map-fan value component only answers its term if the keys
+ * that term named are pinned too.
+ */
+function usedTerms(w: PrefixWalk): boolean[] {
+	return w.exact.map((e, ti) => {
+		// A conjunction is answered only when every conjunct is: the rest would
+		// otherwise have to be re-checked against the same element, and the range
+		// cannot say which element it matched.
+		const total = w.conjuncts.get(ti);
+		const answered = total === undefined ? e : (w.covered.get(ti)?.size ?? 0) === total;
+		return answered && mapKeysPinned(w.needKeys.get(ti) ?? [], w.pinnedKeys);
+	});
+}
+
+/** Tries one index. `score` is how many components the range pins. */
+function planAgainst(
+	idx: PlannableIndex,
+	terms: Cond[],
+	orderBy: OrderKey[] | undefined,
+): { plan: QueryPlan; score: number } | undefined {
+	const comps = idx.encoder.components;
+	if (comps.length === 0) return undefined;
+	const w = walkEqualityPrefix(idx, terms);
+	if (w.overflow) return undefined;
 
 	// The component after the equality prefix may take a range from an
 	// inequality. Only one can: past it the entries are no longer contiguous.
 	let ranges: IndexRange[] | undefined;
 	let ranged = false;
-	if (pinned < comps.length) {
+	if (w.pinned < comps.length) {
 		const bounds = inequalityBoundsFor(
 			idx,
-			pinned,
+			w.pinned,
 			terms,
-			taken,
-			onlyFor(comps[pinned]!, mapFanTerm),
+			w.taken,
+			onlyFor(comps[w.pinned]!, w.mapFanTerm),
 		);
 		if (bounds) {
-			taken[bounds.index] = true;
-			exact[bounds.index] = true;
-			needKeys.set(bounds.index, bounds.keys);
+			w.taken[bounds.index] = true;
+			w.exact[bounds.index] = true;
+			w.needKeys.set(bounds.index, bounds.keys);
 			ranged = true;
-			ranges = prefixes.map((p) => ({
+			ranges = w.prefixes.map((p) => ({
 				lo: bounds.lo === undefined ? p : p + bounds.lo,
 				hi: bounds.hi === undefined ? upperBound(p) : p + bounds.hi,
 			}));
 		}
 	}
 	if (!ranges) {
-		ranges = prefixes.map((p) => ({ lo: p, hi: upperBound(p) }));
+		ranges = w.prefixes.map((p) => ({ lo: p, hi: upperBound(p) }));
 	}
 
-	// Exactness, now that the prefix is known: a reduction onto a map-fan value
-	// component only answers its term if the keys that term named are pinned too.
-	const used = exact.map((e, ti) => {
-		// A conjunction is answered only when every conjunct is: the rest would
-		// otherwise have to be re-checked against the same element, and the range
-		// cannot say which element it matched.
-		const total = conjuncts.get(ti);
-		const answered = total === undefined ? e : (covered.get(ti)?.size ?? 0) === total;
-		return answered && mapKeysPinned(needKeys.get(ti) ?? [], pinnedKeys);
-	});
+	const used = usedTerms(w);
 
 	// An index that pins nothing and bounds nothing reads the whole thing, in a
 	// different order than the rows are stored — strictly worse than a scan
 	// unless it supplies the ordering.
-	let ordered = orderServedBy(comps, pinned, orderBy, pinnedKeys);
-	if (pinned === 0 && !ranged && !ordered) return undefined;
+	let ordered = orderServedBy(comps, w.pinned, orderBy, w.pinnedKeys);
+	if (w.pinned === 0 && !ranged && !ordered) return undefined;
 
 	// Several ranges cannot be read in order without a merge, so a caller that
 	// needs the ordering has to be told the plan does not supply it.
@@ -365,10 +416,142 @@ function planAgainst(
 			ranges,
 			residual: residualOf(terms, used),
 			ordered,
-			...(prefixes.length === 1 ? { prefix: prefixes[0]! } : {}),
-			distinctPerRange: comps.every((c, ci) => c.fans.length === 0 || ci < pinned),
+			...(w.prefixes.length === 1 ? { prefix: w.prefixes[0]! } : {}),
+			distinctPerRange: comps.every((c, ci) => c.fans.length === 0 || ci < w.pinned),
 		},
-		score: pinned,
+		score: w.pinned,
+	};
+}
+
+/**
+ * A chosen index access path for a grouped read: one range whose entries the
+ * walk partitions on a component the equality prefix left free.
+ */
+export interface GroupPlan {
+	/** The index to read, by name. */
+	index: string;
+	/**
+	 * The range holding every entry that can contribute a group. A grouped plan
+	 * has exactly ONE: several would have to be merged group by group, and a row
+	 * an `in` puts in two of them would be counted twice.
+	 */
+	range: IndexRange;
+	/** The part of the predicate the range does not guarantee, re-checked against
+	 * each fetched row. Undefined means the range is exact, which is what lets a
+	 * count be read off positions with no row read. */
+	residual?: Cond;
+	/** Whether the partition component stores its values descending, so the walk
+	 * must read the range BACKWARD to yield groups in ascending value order. */
+	desc: boolean;
+	/**
+	 * Whether, inside one group's sub-range, every position belongs to a
+	 * different row — so counting positions counts rows. False when a component
+	 * PAST the partition fans out, which puts one row at several positions of the
+	 * same group.
+	 */
+	positionsAreRows: boolean;
+	/** How many components a group's shared position prefix spans: the pinned
+	 * ones plus the partition. */
+	partition: number;
+}
+
+/**
+ * Picks an index that can partition a predicate's match set by `by`, or returns
+ * undefined to mean "bucket a scan instead". Candidates are considered in order
+ * and the one that narrows most wins; an exact plan, whose counts need no row
+ * reads, beats a residual-bearing one that pins as much.
+ *
+ * The shared vectors in testdata/indexkey (`groupCases`) pin the decisions
+ * against the Go planner, because a planner that chose differently would still
+ * return the right groups — just at a different cost — and nothing else would
+ * notice the divergence.
+ */
+export function planGroup(
+	candidates: PlannableIndex[],
+	where: Cond | undefined,
+	by: Path,
+	multi: boolean,
+): GroupPlan | undefined {
+	const terms = flattenAnd(where);
+	let best: GroupPlan | undefined;
+	let bestScore = -1;
+	for (const c of candidates) {
+		const got = planGroupAgainst(c, terms, by, multi);
+		if (got !== undefined && got.score > bestScore) {
+			best = got.plan;
+			bestScore = got.score;
+		}
+	}
+	return best;
+}
+
+/**
+ * Tries one index. The score ranks by how much the range narrows first and by
+ * what the walk then costs — an exact range needs no row read per position, and
+ * positions that are rows need none per group either.
+ */
+function planGroupAgainst(
+	idx: PlannableIndex,
+	terms: Cond[],
+	by: Path,
+	multi: boolean,
+): { plan: GroupPlan; score: number } | undefined {
+	const comps = idx.encoder.components;
+	if (comps.length === 0) return undefined;
+	const w = walkEqualityPrefix(idx, terms);
+	// Several prefixes are several ranges, and a row an `in` puts in two of them
+	// would be counted once per range. A row query dedupes by row key; a count
+	// has no row in hand to dedupe by.
+	if (w.overflow || w.prefixes.length !== 1) return undefined;
+	// Nothing left to partition on: every component is pinned to one value, so
+	// the range holds one group and the index says nothing the predicate did not.
+	if (w.pinned >= comps.length) return undefined;
+
+	const part = comps[w.pinned]!;
+	const keys = matchFanPath(part, by);
+	if (keys === undefined) return undefined;
+	// A map-fan value component holds one value per ENTRY, so partitioning on it
+	// without its key pinned would group `custom.priority` and `custom.severity`
+	// together under whatever value each happened to hold.
+	if (keys.length > 0 && !mapLeafPinned(comps, w.pinned, w.pinned, keys, w.pinnedKeys)) {
+		return undefined;
+	}
+	// A row occupies one position of the partition component per group it belongs
+	// to. A LIST fan gives it one per element, which is exactly what a repeated
+	// grouping path asks for; a map fan whose key the prefix has pinned gives it
+	// one, like an ordinary field. Anything else and the positions are not the
+	// groups the definition assigns, so the two would disagree row for row.
+	if ((keys.length === 0 && part.fans.length > 0) !== multi) return undefined;
+
+	// The partition component may still take a range from an inequality, which
+	// bounds WHICH groups the walk visits. Every position of one group shares
+	// that component's payload, so a group falls wholly inside such a range or
+	// wholly outside it, and clamping never splits one.
+	const prefix = w.prefixes[0]!;
+	let range: IndexRange = { lo: prefix, hi: upperBound(prefix) };
+	const bounds = inequalityBoundsFor(idx, w.pinned, terms, w.taken, onlyFor(part, w.mapFanTerm));
+	if (bounds) {
+		w.taken[bounds.index] = true;
+		w.exact[bounds.index] = true;
+		w.needKeys.set(bounds.index, bounds.keys);
+		range = {
+			lo: bounds.lo === undefined ? prefix : prefix + bounds.lo,
+			hi: bounds.hi === undefined ? upperBound(prefix) : prefix + bounds.hi,
+		};
+	}
+
+	const residual = residualOf(terms, usedTerms(w));
+	const positionsAreRows = comps.every((c, ci) => c.fans.length === 0 || ci <= w.pinned);
+	return {
+		plan: {
+			index: idx.name,
+			range,
+			...(residual === undefined ? {} : { residual }),
+			desc: part.desc,
+			positionsAreRows,
+			partition: w.pinned + 1,
+		},
+		score: w.pinned * 4 + (residual === undefined ? 2 : 0) + (positionsAreRows ? 1 : 0),
 	};
 }
 

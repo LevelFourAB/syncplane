@@ -189,6 +189,25 @@ message Condition {
 	}
 }
 
+// AggregateOp is what a grouped read computes for each group it finds.
+enum AggregateOp {
+	AGGREGATE_OP_UNSPECIFIED = 0;
+	// The number of matching rows in each group.
+	AGGREGATE_OP_COUNT = 1;
+	// The group values alone. No row is read, so no count is reported.
+	AGGREGATE_OP_DISTINCT = 2;
+}
+
+// QueryGroup is one group of a grouped read: the value its rows share at the
+// grouping path, and what the aggregate computed over them.
+message QueryGroup {
+	// The shared value, absent for the group of rows that hold no value at the
+	// path — a group of its own, ordered last.
+	QueryValue value = 1;
+	// Matching rows in the group; 0 under AGGREGATE_OP_DISTINCT.
+	uint64 count = 2;
+}
+
 message OrderKey {
 	repeated string path = 1;
 	Direction dir = 2;

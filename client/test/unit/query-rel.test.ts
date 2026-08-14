@@ -659,6 +659,7 @@ function countingReads(inner: KVStore, prefix: string): KVStore & { reads: numbe
 				scanRange: (lo, hi) => read.scanRange(lo, hi),
 				indexScan: (lo, hi) => read.indexScan(lo, hi),
 				indexCount: (lo, hi) => read.indexCount(lo, hi),
+				indexSeek: (lo, hi, dir) => read.indexSeek(lo, hi, dir),
 				release: () => read.release(),
 			};
 		},
@@ -693,6 +694,7 @@ function countingStore(inner: KVStore, entityName: string): KVStore & { scanned:
 				scanRange: (lo, hi) => read.scanRange(lo, hi),
 				indexScan: (lo, hi) => read.indexScan(lo, hi),
 				indexCount: (lo, hi) => read.indexCount(lo, hi),
+				indexSeek: (lo, hi, dir) => read.indexSeek(lo, hi, dir),
 				release: () => read.release(),
 			};
 		},

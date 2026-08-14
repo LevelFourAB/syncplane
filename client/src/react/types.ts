@@ -11,10 +11,11 @@ import type {
 } from '../client.js';
 import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
-import type { Query, TotalOf } from '../query/index.js';
+import type { GroupQuery, Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { Include } from '../refs.js';
 import type { RowRef, WatchWindow } from '../watch.js';
+import type { DistinctResult, GroupResult } from './hooks/use-groups.js';
 import type { UseTextResult } from './hooks/use-text.js';
 import type { KeyedRowsResult, WatchResult, WatchState } from './result.js';
 
@@ -198,6 +199,16 @@ export interface ReactEntityApi<D extends DescMessage> {
 		query: Q,
 		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>, TotalOf<Q>>;
+	/**
+	 * Live counted groups of the entity — a board column's badge, a facet
+	 * sidebar's numbers. Groups come back in ascending value order with the
+	 * no-value group last; see {@link GroupQuery} for what a group is.
+	 */
+	useGroupCount(query: GroupQuery<MessageShape<D>>, opts?: UseWorkspaceOptions): GroupResult;
+	/** The distinct values behind those groups, live — what a filter dropdown
+	 * offers. `undefined` is among them when some matching row holds no value at
+	 * the path. */
+	useDistinct(query: GroupQuery<MessageShape<D>>, opts?: UseWorkspaceOptions): DistinctResult;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	/** `useRow` that suspends until this key's first callback (see useSuspenseQuery). */
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;

@@ -220,6 +220,79 @@ they survive `JSON.stringify` and drop into a URL. Pass `endCursor` back as
 §4. A cross-workspace read (`queryAll`, `scanAll`) mints none — a position names
 a place in one workspace's ordering.
 
+### Grouped reads — counts and distinct values
+
+A grouped read answers with the GROUPS of a match set instead of its rows: the
+numbers behind a board column's badge, a facet sidebar, or the values a filter
+dropdown offers.
+
+```ts
+await client.groupCount(Issue, q):  Promise<Group[]>
+await client.distinct(Issue, q):    Promise<(Scalar | undefined)[]>
+await client.groupCountServer(Issue, q): Promise<Group[]>   // server push-down
+await client.distinctServer(Issue, q):   Promise<(Scalar | undefined)[]>
+
+// db facade (identical semantics)
+await client.db.issue.groupCount(q)
+await client.db.issue.distinct(q)
+await client.db.issue.groupCountServer(q)
+await client.db.issue.distinctServer(q)
+
+interface GroupQuery<M> {
+	by: (i: QueryRef<M>) => GroupKeyRef; // the field to partition by, named without an operator
+	where?: (i: QueryRef<M>) => Cond;
+	limit?: number; // maximum groups, counted from the first in value order
+}
+
+interface Group {
+	value: Scalar | undefined; // undefined = the group of rows holding no value there
+	count: number; // 0 from `distinct`, which counts nothing
+}
+```
+
+```ts
+const byStatus = await client.db.issue.groupCount({
+	by: (i) => i.status,
+	where: (i) => i.projectId.eq(projectId),
+});
+// [ { value: 'done', count: 12 }, { value: 'open', count: 4 } ]
+
+const assignees = await client.db.issue.distinct({ by: (i) => i.assignee.id });
+```
+
+`by` names a field with no operator on the end — a group has none of its own, and
+claiming one would make yet another field name unreachable through the DSL. It
+accepts any comparable leaf and a repeated scalar; a message, a map, bytes and a
+repeated message throw, because nothing identifies one of their values.
+
+What a grouped read promises:
+
+- **One group per distinct value**, plus one for the rows the path resolves to
+  nothing on — `value: undefined`, and never conflated with an empty string or a
+  zero.
+- **Ascending value order**, with NaN and then the no-value group last: the same
+  order an ascending `orderBy` on that path puts rows in. `limit` cuts from the
+  front of it.
+- **A repeated `by` path groups per ELEMENT.** A row holding three labels joins
+  three groups, so the counts do not sum to the number of matching rows. That is
+  what a label facet wants; a row count is a different question. A row whose list
+  is empty joins the no-value group, so every matching row is somewhere.
+- **Only groups the rows produce.** A status no row currently holds is absent
+  rather than zero — the set of possible values is your schema's (an enum, a
+  status entity), and the read joins against it rather than inventing it.
+
+A [declared index](proto-options.md#secondary-indexes) whose components are
+`[eq-filter fields…, groupPath, …]` — the same index a board ordering by
+`[status, rank]` already wants — turns the read into a skip-scan: it seeks from
+one distinct value to the next instead of walking rows, so a limited read costs
+O(groups) rather than O(entity). Without one it buckets a scan, which is always
+correct and never faster. See
+[explanation/grouped-reads.md](../explanation/grouped-reads.md).
+
+`groupCountServer`/`distinctServer` push the same read to the server, for counts
+over rows partial sync did not bring down. They are server snapshots under the
+same rules as `queryServer`, and unavailable inside `transact`.
+
 ### `Row<T>`
 
 ```ts
@@ -779,6 +852,25 @@ view.close();
   overlay clear) rescans it.
 - Callbacks must **not mutate** received rows (shared between same-entity watchers).
 - Cross-tab: a commit in another tab re-fires this tab's watchers (via BroadcastChannel).
+
+#### Watching groups — `watchGroupCount` / `watchDistinct`
+
+```ts
+const view = client.watchGroupCount(Issue, q, (groups) => { ... }, { onError? });
+const view = client.watchDistinct(Issue, q, (values) => { ... }, { onError? });
+
+// db facade
+const view = client.db.issue.watchGroupCount(q, (groups) => { ... });
+const view = client.db.issue.watchDistinct(q, (values) => { ... });
+```
+
+- Same `GroupQuery` and the same answer as `groupCount`/`distinct` (§2), emitted
+  after every commit touching the entity and suppressed when the answer is
+  unchanged — so a facet re-renders only when its numbers move.
+- Unlike a row watcher this maintains nothing: a commit re-runs the read. Over an
+  index that costs O(groups); over a scan it costs the entity, which is the same
+  bill `groupCount` pays and the reason a grouped surface is worth an index.
+- No window and no coverage. `setWindow` is a no-op on the handle it returns.
 
 #### Watching rows by key — `watchRows`
 
@@ -1651,6 +1743,16 @@ interface ReactEntityApi<D> {
 		q: Query<MessageShape<D>> | WorkspaceQuery<MessageShape<D>>,
 		opts?: UseQueryAllOptions,
 	): WatchResult<MessageShape<D>>;
+	// Counted groups of the match set — a column badge, a facet sidebar (see §2).
+	useGroupCount(
+		q: GroupQuery<MessageShape<D>>,
+		opts?: UseWorkspaceOptions,
+	): GroupResult;
+	// The distinct values behind those groups — what a filter dropdown offers.
+	useDistinct(
+		q: GroupQuery<MessageShape<D>>,
+		opts?: UseWorkspaceOptions,
+	): DistinctResult;
 	useRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useSuspenseRow(key: string, opts?: UseRowOptions): UseRowResultFor<D>;
 	useRows(keys: readonly string[], opts?: UseRowsOptions): UseRowsResultFor<D>;
@@ -1670,6 +1772,15 @@ interface ReactEntityApi<D> {
 type UseRowsResultFor<D> =
 	& readonly (Row<MessageShape<D>> | undefined)[]
 	& WatchState;
+
+// The groups client.groupCount returns, plus how the watch behind them is
+// doing. There is no `hydrating`: a grouped read reports no coverage, so read a
+// useQuery beside it when a UI has to tell a downloading entity from an empty
+// one.
+type GroupResult = readonly Group[] & Omit<WatchState, 'hydrating'>;
+type DistinctResult =
+	& readonly (Scalar | undefined)[]
+	& Omit<WatchState, 'hydrating'>;
 
 // The array client.query returns, plus how the watch behind it is doing.
 type WatchResult<T> = ReadonlyRowSet<T> & WatchState;

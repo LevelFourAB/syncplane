@@ -287,6 +287,58 @@ func (Direction) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{4}
 }
 
+// AggregateOp is what a grouped read computes for each group it finds.
+type AggregateOp int32
+
+const (
+	AggregateOp_AGGREGATE_OP_UNSPECIFIED AggregateOp = 0
+	// The number of matching rows in each group.
+	AggregateOp_AGGREGATE_OP_COUNT AggregateOp = 1
+	// The group values alone. No row is read, so no count is reported.
+	AggregateOp_AGGREGATE_OP_DISTINCT AggregateOp = 2
+)
+
+// Enum value maps for AggregateOp.
+var (
+	AggregateOp_name = map[int32]string{
+		0: "AGGREGATE_OP_UNSPECIFIED",
+		1: "AGGREGATE_OP_COUNT",
+		2: "AGGREGATE_OP_DISTINCT",
+	}
+	AggregateOp_value = map[string]int32{
+		"AGGREGATE_OP_UNSPECIFIED": 0,
+		"AGGREGATE_OP_COUNT":       1,
+		"AGGREGATE_OP_DISTINCT":    2,
+	}
+)
+
+func (x AggregateOp) Enum() *AggregateOp {
+	p := new(AggregateOp)
+	*p = x
+	return p
+}
+
+func (x AggregateOp) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (AggregateOp) Descriptor() protoreflect.EnumDescriptor {
+	return file_syncplane_v1_query_proto_enumTypes[5].Descriptor()
+}
+
+func (AggregateOp) Type() protoreflect.EnumType {
+	return &file_syncplane_v1_query_proto_enumTypes[5]
+}
+
+func (x AggregateOp) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use AggregateOp.Descriptor instead.
+func (AggregateOp) EnumDescriptor() ([]byte, []int) {
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{5}
+}
+
 // QueryValue is a scalar literal in a condition. The branch preserves the
 // client-side kind: JS numbers travel as doubles, JS bigints as
 // sint64/uint64, so evaluation coercion rules match on both sides.
@@ -1191,6 +1243,63 @@ func (*Condition_Rel) isCondition_Kind() {}
 
 func (*Condition_Match) isCondition_Kind() {}
 
+// QueryGroup is one group of a grouped read: the value its rows share at the
+// grouping path, and what the aggregate computed over them.
+type QueryGroup struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The shared value, absent for the group of rows that hold no value at the
+	// path — a group of its own, ordered last.
+	Value *QueryValue `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
+	// Matching rows in the group; 0 under AGGREGATE_OP_DISTINCT.
+	Count         uint64 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryGroup) Reset() {
+	*x = QueryGroup{}
+	mi := &file_syncplane_v1_query_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryGroup) ProtoMessage() {}
+
+func (x *QueryGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_query_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryGroup.ProtoReflect.Descriptor instead.
+func (*QueryGroup) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *QueryGroup) GetValue() *QueryValue {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *QueryGroup) GetCount() uint64 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
 type OrderKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Path  []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
@@ -1209,7 +1318,7 @@ type OrderKey struct {
 
 func (x *OrderKey) Reset() {
 	*x = OrderKey{}
-	mi := &file_syncplane_v1_query_proto_msgTypes[11]
+	mi := &file_syncplane_v1_query_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1221,7 +1330,7 @@ func (x *OrderKey) String() string {
 func (*OrderKey) ProtoMessage() {}
 
 func (x *OrderKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_query_proto_msgTypes[11]
+	mi := &file_syncplane_v1_query_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1234,7 +1343,7 @@ func (x *OrderKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OrderKey.ProtoReflect.Descriptor instead.
 func (*OrderKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *OrderKey) GetPath() []string {
@@ -1315,7 +1424,11 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\x03rel\x18\n" +
 	" \x01(\v2\x15.syncplane.v1.RelCondH\x00R\x03rel\x12/\n" +
 	"\x05match\x18\v \x01(\v2\x17.syncplane.v1.MatchCondH\x00R\x05matchB\x06\n" +
-	"\x04kind\"g\n" +
+	"\x04kind\"R\n" +
+	"\n" +
+	"QueryGroup\x12.\n" +
+	"\x05value\x18\x01 \x01(\v2\x18.syncplane.v1.QueryValueR\x05value\x12\x14\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\"g\n" +
 	"\bOrderKey\x12\x12\n" +
 	"\x04path\x18\x01 \x03(\tR\x04path\x12)\n" +
 	"\x03dir\x18\x02 \x01(\x0e2\x17.syncplane.v1.DirectionR\x03dir\x12\x1c\n" +
@@ -1350,7 +1463,11 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\tDirection\x12\x19\n" +
 	"\x15DIRECTION_UNSPECIFIED\x10\x00\x12\x11\n" +
 	"\rDIRECTION_ASC\x10\x01\x12\x12\n" +
-	"\x0eDIRECTION_DESC\x10\x02BFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
+	"\x0eDIRECTION_DESC\x10\x02*^\n" +
+	"\vAggregateOp\x12\x1c\n" +
+	"\x18AGGREGATE_OP_UNSPECIFIED\x10\x00\x12\x16\n" +
+	"\x12AGGREGATE_OP_COUNT\x10\x01\x12\x19\n" +
+	"\x15AGGREGATE_OP_DISTINCT\x10\x02BFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
 var (
 	file_syncplane_v1_query_proto_rawDescOnce sync.Once
@@ -1364,55 +1481,58 @@ func file_syncplane_v1_query_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_query_proto_rawDescData
 }
 
-var file_syncplane_v1_query_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
-var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 12)
+var file_syncplane_v1_query_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
+var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_syncplane_v1_query_proto_goTypes = []any{
 	(CmpOp)(0),            // 0: syncplane.v1.CmpOp
 	(StrOp)(0),            // 1: syncplane.v1.StrOp
 	(RepOp)(0),            // 2: syncplane.v1.RepOp
 	(PresentOp)(0),        // 3: syncplane.v1.PresentOp
 	(Direction)(0),        // 4: syncplane.v1.Direction
-	(*QueryValue)(nil),    // 5: syncplane.v1.QueryValue
-	(*CmpCond)(nil),       // 6: syncplane.v1.CmpCond
-	(*InCond)(nil),        // 7: syncplane.v1.InCond
-	(*StrCond)(nil),       // 8: syncplane.v1.StrCond
-	(*RepCond)(nil),       // 9: syncplane.v1.RepCond
-	(*PresentCond)(nil),   // 10: syncplane.v1.PresentCond
-	(*ExistsCond)(nil),    // 11: syncplane.v1.ExistsCond
-	(*RelCond)(nil),       // 12: syncplane.v1.RelCond
-	(*MatchCond)(nil),     // 13: syncplane.v1.MatchCond
-	(*ConditionList)(nil), // 14: syncplane.v1.ConditionList
-	(*Condition)(nil),     // 15: syncplane.v1.Condition
-	(*OrderKey)(nil),      // 16: syncplane.v1.OrderKey
+	(AggregateOp)(0),      // 5: syncplane.v1.AggregateOp
+	(*QueryValue)(nil),    // 6: syncplane.v1.QueryValue
+	(*CmpCond)(nil),       // 7: syncplane.v1.CmpCond
+	(*InCond)(nil),        // 8: syncplane.v1.InCond
+	(*StrCond)(nil),       // 9: syncplane.v1.StrCond
+	(*RepCond)(nil),       // 10: syncplane.v1.RepCond
+	(*PresentCond)(nil),   // 11: syncplane.v1.PresentCond
+	(*ExistsCond)(nil),    // 12: syncplane.v1.ExistsCond
+	(*RelCond)(nil),       // 13: syncplane.v1.RelCond
+	(*MatchCond)(nil),     // 14: syncplane.v1.MatchCond
+	(*ConditionList)(nil), // 15: syncplane.v1.ConditionList
+	(*Condition)(nil),     // 16: syncplane.v1.Condition
+	(*QueryGroup)(nil),    // 17: syncplane.v1.QueryGroup
+	(*OrderKey)(nil),      // 18: syncplane.v1.OrderKey
 }
 var file_syncplane_v1_query_proto_depIdxs = []int32{
 	0,  // 0: syncplane.v1.CmpCond.op:type_name -> syncplane.v1.CmpOp
-	5,  // 1: syncplane.v1.CmpCond.value:type_name -> syncplane.v1.QueryValue
-	5,  // 2: syncplane.v1.InCond.values:type_name -> syncplane.v1.QueryValue
+	6,  // 1: syncplane.v1.CmpCond.value:type_name -> syncplane.v1.QueryValue
+	6,  // 2: syncplane.v1.InCond.values:type_name -> syncplane.v1.QueryValue
 	1,  // 3: syncplane.v1.StrCond.op:type_name -> syncplane.v1.StrOp
 	2,  // 4: syncplane.v1.RepCond.op:type_name -> syncplane.v1.RepOp
-	5,  // 5: syncplane.v1.RepCond.values:type_name -> syncplane.v1.QueryValue
+	6,  // 5: syncplane.v1.RepCond.values:type_name -> syncplane.v1.QueryValue
 	3,  // 6: syncplane.v1.PresentCond.op:type_name -> syncplane.v1.PresentOp
-	15, // 7: syncplane.v1.ExistsCond.cond:type_name -> syncplane.v1.Condition
-	15, // 8: syncplane.v1.RelCond.cond:type_name -> syncplane.v1.Condition
-	15, // 9: syncplane.v1.ConditionList.conds:type_name -> syncplane.v1.Condition
-	6,  // 10: syncplane.v1.Condition.cmp:type_name -> syncplane.v1.CmpCond
-	7,  // 11: syncplane.v1.Condition.in:type_name -> syncplane.v1.InCond
-	8,  // 12: syncplane.v1.Condition.str:type_name -> syncplane.v1.StrCond
-	9,  // 13: syncplane.v1.Condition.rep:type_name -> syncplane.v1.RepCond
-	10, // 14: syncplane.v1.Condition.present:type_name -> syncplane.v1.PresentCond
-	14, // 15: syncplane.v1.Condition.and:type_name -> syncplane.v1.ConditionList
-	14, // 16: syncplane.v1.Condition.or:type_name -> syncplane.v1.ConditionList
-	15, // 17: syncplane.v1.Condition.not:type_name -> syncplane.v1.Condition
-	11, // 18: syncplane.v1.Condition.exists:type_name -> syncplane.v1.ExistsCond
-	12, // 19: syncplane.v1.Condition.rel:type_name -> syncplane.v1.RelCond
-	13, // 20: syncplane.v1.Condition.match:type_name -> syncplane.v1.MatchCond
-	4,  // 21: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
-	22, // [22:22] is the sub-list for method output_type
-	22, // [22:22] is the sub-list for method input_type
-	22, // [22:22] is the sub-list for extension type_name
-	22, // [22:22] is the sub-list for extension extendee
-	0,  // [0:22] is the sub-list for field type_name
+	16, // 7: syncplane.v1.ExistsCond.cond:type_name -> syncplane.v1.Condition
+	16, // 8: syncplane.v1.RelCond.cond:type_name -> syncplane.v1.Condition
+	16, // 9: syncplane.v1.ConditionList.conds:type_name -> syncplane.v1.Condition
+	7,  // 10: syncplane.v1.Condition.cmp:type_name -> syncplane.v1.CmpCond
+	8,  // 11: syncplane.v1.Condition.in:type_name -> syncplane.v1.InCond
+	9,  // 12: syncplane.v1.Condition.str:type_name -> syncplane.v1.StrCond
+	10, // 13: syncplane.v1.Condition.rep:type_name -> syncplane.v1.RepCond
+	11, // 14: syncplane.v1.Condition.present:type_name -> syncplane.v1.PresentCond
+	15, // 15: syncplane.v1.Condition.and:type_name -> syncplane.v1.ConditionList
+	15, // 16: syncplane.v1.Condition.or:type_name -> syncplane.v1.ConditionList
+	16, // 17: syncplane.v1.Condition.not:type_name -> syncplane.v1.Condition
+	12, // 18: syncplane.v1.Condition.exists:type_name -> syncplane.v1.ExistsCond
+	13, // 19: syncplane.v1.Condition.rel:type_name -> syncplane.v1.RelCond
+	14, // 20: syncplane.v1.Condition.match:type_name -> syncplane.v1.MatchCond
+	6,  // 21: syncplane.v1.QueryGroup.value:type_name -> syncplane.v1.QueryValue
+	4,  // 22: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
+	23, // [23:23] is the sub-list for method output_type
+	23, // [23:23] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_query_proto_init() }
@@ -1445,8 +1565,8 @@ func file_syncplane_v1_query_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_query_proto_rawDesc), len(file_syncplane_v1_query_proto_rawDesc)),
-			NumEnums:      5,
-			NumMessages:   12,
+			NumEnums:      6,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

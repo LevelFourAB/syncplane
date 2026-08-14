@@ -10,7 +10,8 @@
 // schema that hits one, instead of the field just disappearing from the DSL.
 
 import type { CmpOp, CompiledQuery, Cond, Path, Scalar, StrOp } from './ast.js';
-import type { Query, QueryRef, WorkspaceQuery } from './types.js';
+import type { CompiledGroupQuery } from './group.js';
+import type { GroupQuery, Query, QueryRef, WorkspaceQuery } from './types.js';
 
 type OpBuilder = (path: Path) => unknown;
 
@@ -74,9 +75,32 @@ OPERATORS.relevance = (path) => () => ({ path, dir: 'asc' as const, relevance: t
  */
 export const RESERVED_QUERY_NAMES: ReadonlySet<string> = new Set(Object.keys(OPERATORS));
 
+/**
+ * Reads the path a field reference recorded, without calling an operator on it.
+ * A symbol rather than a name so it can never shadow a proto field, which is
+ * what every entry in OPERATORS above does.
+ */
+const PATH = Symbol('syncplane.query.path');
+
+/**
+ * The path a field reference names — what `(t) => t.status` records.
+ *
+ * It is how a grouping key is spelled: a group has no operator of its own, and
+ * claiming one (`groupBy()`, `key()`) would make yet another field name
+ * unreachable through the DSL.
+ */
+export function pathOf(ref: unknown): Path {
+	const path = (ref as Record<symbol, unknown> | null | undefined)?.[PATH];
+	if (!Array.isArray(path)) {
+		throw new Error('query: expected a field reference, e.g. (t) => t.status');
+	}
+	return path as Path;
+}
+
 function fieldProxy(path: Path): unknown {
 	return new Proxy(Object.create(null) as object, {
 		get(_target, prop) {
+			if (prop === PATH) return path;
 			if (typeof prop !== 'string') return undefined;
 			const op = OPERATORS[prop];
 			if (op !== undefined) return op(path);
@@ -120,6 +144,15 @@ export function compileQuery<M>(q: Query<M>): CompiledQuery {
 	if (q.after !== undefined) out.after = q.after;
 	if (q.before !== undefined) out.before = q.before;
 	if (q.total !== undefined) out.total = q.total;
+	return out;
+}
+
+/** Invokes a grouped query's lambdas once and returns the plain-data query. */
+export function compileGroupQuery<M>(q: GroupQuery<M>, distinct: boolean): CompiledGroupQuery {
+	const ref = rootRef<M>();
+	const out: CompiledGroupQuery = { by: pathOf(q.by(ref)), distinct };
+	if (q.where) out.where = q.where(ref);
+	if (q.limit !== undefined) out.limit = q.limit;
 	return out;
 }
 

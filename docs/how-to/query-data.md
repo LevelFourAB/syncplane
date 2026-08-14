@@ -266,6 +266,63 @@ still supplies the ordering that follows it once an equality has pinned it, so
 X, newest first" at O(limit). One list per index: components over two different
 lists would pair values from different elements.
 
+## Counting per value — badges, facets, dropdowns
+
+The counted surfaces of a list UI are not queries. A board's `In Progress · 12`
+badge, a facet sidebar's numbers, and the values a filter dropdown offers are all
+one question: partition the match set by a field, and report the partitions.
+
+```ts
+// One badge per status, under the filter the board is showing.
+const byStatus = await client.db.issue.groupCount({
+	by: (i) => i.status,
+	where: (i) => i.projectId.eq(projectId),
+});
+// [ { value: 'done', count: 12 }, { value: 'open', count: 4 } ]
+
+// The assignees this project actually has — before any of them is counted.
+const assignees = await client.db.issue.distinct({
+	by: (i) => i.assignee.id,
+	where: (i) => i.projectId.eq(projectId),
+});
+```
+
+`by` names the field with no operator on the end. Live versions read the same:
+
+```tsx
+function StatusBadges({ projectId }: { projectId: string }) {
+	const counts = sync.db.issue.useGroupCount({
+		by: (i) => i.status,
+		where: (i) => i.projectId.eq(projectId),
+	});
+	// Zero-count columns come from YOUR domain, not from the read: a status no
+	// row holds is absent rather than 0.
+	return STATUSES.map((s) => (
+		<Badge
+			key={ s }
+			label={ s }
+			count={ counts.find((g) => g.value === s)?.count ?? 0 }
+		/>
+	));
+}
+```
+
+Three things to know before wiring a facet up:
+
+- **A repeated `by` path counts memberships, not rows.** `by: (i) => i.labels`
+  counts an issue once per label it holds, so the counts do not sum to the number
+  of matching issues. That is what a label facet wants.
+- **Groups come back in ascending value order**, with the group of rows holding
+  no value (`value: undefined`) last. `limit` cuts from the front of that order.
+- **A `groupCountServer` / `distinctServer` pair** pushes the same read to the
+  server, for counts over rows partial sync did not bring down.
+
+Declare the index the grouping wants and the read never touches a row: components
+`[eq-filter fields…, groupPath, …]` — the same shape a board ordering by
+`[status, rank]` already needs — let the walk skip from one distinct value to the
+next. Without one it buckets a scan, which is correct and costs the entity. See
+[Grouped reads](../explanation/grouped-reads.md).
+
 ## Semantics to know
 
 Ordering is identical in both directions, down to UTF-16 collation, pinned by
@@ -289,4 +346,6 @@ Collaborative text fields query as their visible string:
 
 - [TypeScript client API](../reference/typescript-client.md#4-queries--the-dsl)
   — the full operator surface per field type.
+- [Grouped reads](../explanation/grouped-reads.md) — what a group is, and the
+  skip-scan behind a counted surface.
 - [Query from server-side code](server-side-queries.md) — the Go equivalents.

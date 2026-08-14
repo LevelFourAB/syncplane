@@ -178,6 +178,14 @@ class MeteredWrite implements KVWrite {
 		return this.inner.indexCount(lo, hi);
 	}
 
+	indexSeek(
+		lo?: string,
+		hi?: string,
+		direction?: 'asc' | 'desc',
+	): Promise<{ position: string; key: string } | undefined> {
+		return this.inner.indexSeek(lo, hi, direction);
+	}
+
 	async put(key: string, value: unknown): Promise<void> {
 		this.deletes.delete(key);
 		this.puts.set(key, value);

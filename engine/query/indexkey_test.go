@@ -670,6 +670,23 @@ type probeWant struct {
 	Residual bool   `json:"residual"`
 }
 
+type groupCase struct {
+	Name    string            `json:"name"`
+	Type    string            `json:"type"`
+	Indexes []indexSpecVector `json:"indexes"`
+	Cond    json.RawMessage   `json:"cond"`
+	GroupBy []string          `json:"groupBy"`
+	Want    json.RawMessage   `json:"want"`
+}
+
+// groupWant is the non-"scan" form of a groupCase's expectation.
+type groupWant struct {
+	Index          string `json:"index"`
+	Residual       bool   `json:"residual"`
+	Desc           bool   `json:"desc"`
+	EntriesAreRows bool   `json:"entriesAreRows"`
+}
+
 var _ = Describe("Planner conformance vectors", func() {
 	raw, err := os.ReadFile(indexVectorsPath)
 	Expect(err).NotTo(HaveOccurred())
@@ -729,6 +746,64 @@ var _ = Describe("Planner conformance vectors", func() {
 			Expect(plan.Ranges).To(HaveLen(want.Ranges))
 			Expect(plan.Ordered).To(Equal(want.Ordered))
 			Expect(plan.Residual != nil).To(Equal(want.Residual))
+		})
+	}
+})
+
+// The group planner's decisions are shared for the same reason the row
+// planner's are: one that chose differently would still produce the right
+// groups, just at a different cost, so nothing else in either suite would
+// notice the divergence.
+var _ = Describe("Group planner conformance vectors", func() {
+	raw, err := os.ReadFile(indexVectorsPath)
+	Expect(err).NotTo(HaveOccurred())
+	var file struct {
+		GroupCases []groupCase `json:"groupCases"`
+	}
+	Expect(json.Unmarshal(raw, &file)).To(Succeed())
+
+	It("has cases", func() {
+		Expect(file.GroupCases).NotTo(BeEmpty())
+	})
+
+	for _, tc := range file.GroupCases {
+		It(tc.Name, func() {
+			desc := msgForType(tc.Type).ProtoReflect().Descriptor()
+
+			candidates := make([]query.Index, 0, len(tc.Indexes))
+			for _, spec := range tc.Indexes {
+				candidates = append(candidates, query.Index{
+					Name:    spec.Name,
+					Encoder: encoderFor(spec, tc.Type),
+				})
+			}
+
+			var cond *syncplanev1.Condition
+			if len(tc.Cond) > 0 {
+				cond = &syncplanev1.Condition{}
+				Expect(protojson.Unmarshal(tc.Cond, cond)).To(Succeed())
+			}
+			pred, err := query.Compile(desc, cond)
+			Expect(err).NotTo(HaveOccurred())
+
+			group, err := query.CompileGroup(desc, tc.GroupBy)
+			Expect(err).NotTo(HaveOccurred())
+
+			plan := query.PlanGroup(candidates, pred, group)
+
+			var scan string
+			if json.Unmarshal(tc.Want, &scan) == nil {
+				Expect(scan).To(Equal("scan"))
+				Expect(plan).To(BeNil())
+				return
+			}
+			var want groupWant
+			Expect(json.Unmarshal(tc.Want, &want)).To(Succeed())
+			Expect(plan).NotTo(BeNil())
+			Expect(plan.Index).To(Equal(want.Index))
+			Expect(plan.Residual != nil).To(Equal(want.Residual))
+			Expect(plan.Desc).To(Equal(want.Desc))
+			Expect(plan.EntriesAreRows).To(Equal(want.EntriesAreRows))
 		})
 	}
 })

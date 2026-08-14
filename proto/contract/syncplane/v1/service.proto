@@ -329,6 +329,27 @@ message QueryRequest {
 	// `after`. Rows always come back in order_by order whichever bounds are
 	// set.
 	bytes before = 9;
+	// Answer with GROUPS of the match set rather than with its rows: the rows
+	// are partitioned by the value at this path, and `aggregate` says what to
+	// compute for each partition. Absent = an ordinary row query.
+	//
+	// Groups come back in ascending value order with the no-value group last —
+	// the order an ascending `order_by` on the same path puts rows in — and
+	// `limit` caps how many are returned. The other paging fields describe a
+	// page of rows and have no counterpart here, so `order_by`, `offset`,
+	// `after` and `before` are all rejected alongside it.
+	//
+	// A path through a REPEATED field groups per ELEMENT: a row holding three
+	// labels joins three groups, so the counts do not sum to the number of
+	// matching rows. That is what a label facet wants and what a row count is
+	// not.
+	//
+	// Only groups the match set produces exist. A status no row currently holds
+	// is absent rather than zero — the set of possible values is the caller's
+	// schema, not something a read over rows can recover.
+	repeated string group_by = 10;
+	// What to compute per group. Required with `group_by`, rejected without it.
+	AggregateOp aggregate = 11;
 
 	// Was client_id. Query is a read: it carries no idempotency and no
 	// watermark, and read filters key on workspace and entity, so the server
@@ -354,8 +375,13 @@ message QueryResponse {
 	bytes end_cursor = 4;
 	// Whether rows remain past the end `limit` counted from — after end_cursor
 	// for a forward page, before start_cursor for a backward one. False for an
-	// unlimited query, which returns everything that matched.
+	// unlimited query, which returns everything that matched. Under `group_by`
+	// it reports whether groups remain past `limit` instead.
 	bool has_more = 5;
+	// The groups of a request carrying `group_by`, in ascending value order
+	// with the no-value group last; empty for an ordinary row query. `rows`,
+	// `start_cursor` and `end_cursor` are all empty whenever a request grouped.
+	repeated QueryGroup groups = 6;
 }
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to

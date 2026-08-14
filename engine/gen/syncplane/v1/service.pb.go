@@ -993,7 +993,28 @@ type QueryRequest struct {
 	// the request reads a bounded range and `limit` counts forward from
 	// `after`. Rows always come back in order_by order whichever bounds are
 	// set.
-	Before        []byte `protobuf:"bytes,9,opt,name=before,proto3" json:"before,omitempty"`
+	Before []byte `protobuf:"bytes,9,opt,name=before,proto3" json:"before,omitempty"`
+	// Answer with GROUPS of the match set rather than with its rows: the rows
+	// are partitioned by the value at this path, and `aggregate` says what to
+	// compute for each partition. Absent = an ordinary row query.
+	//
+	// Groups come back in ascending value order with the no-value group last —
+	// the order an ascending `order_by` on the same path puts rows in — and
+	// `limit` caps how many are returned. The other paging fields describe a
+	// page of rows and have no counterpart here, so `order_by`, `offset`,
+	// `after` and `before` are all rejected alongside it.
+	//
+	// A path through a REPEATED field groups per ELEMENT: a row holding three
+	// labels joins three groups, so the counts do not sum to the number of
+	// matching rows. That is what a label facet wants and what a row count is
+	// not.
+	//
+	// Only groups the match set produces exist. A status no row currently holds
+	// is absent rather than zero — the set of possible values is the caller's
+	// schema, not something a read over rows can recover.
+	GroupBy []string `protobuf:"bytes,10,rep,name=group_by,json=groupBy,proto3" json:"group_by,omitempty"`
+	// What to compute per group. Required with `group_by`, rejected without it.
+	Aggregate     AggregateOp `protobuf:"varint,11,opt,name=aggregate,proto3,enum=syncplane.v1.AggregateOp" json:"aggregate,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1084,6 +1105,20 @@ func (x *QueryRequest) GetBefore() []byte {
 	return nil
 }
 
+func (x *QueryRequest) GetGroupBy() []string {
+	if x != nil {
+		return x.GroupBy
+	}
+	return nil
+}
+
+func (x *QueryRequest) GetAggregate() AggregateOp {
+	if x != nil {
+		return x.Aggregate
+	}
+	return AggregateOp_AGGREGATE_OP_UNSPECIFIED
+}
+
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Value changes only (never tombstones), ordered by order_by with ties
@@ -1102,8 +1137,13 @@ type QueryResponse struct {
 	EndCursor   []byte `protobuf:"bytes,4,opt,name=end_cursor,json=endCursor,proto3" json:"end_cursor,omitempty"`
 	// Whether rows remain past the end `limit` counted from — after end_cursor
 	// for a forward page, before start_cursor for a backward one. False for an
-	// unlimited query, which returns everything that matched.
-	HasMore       bool `protobuf:"varint,5,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	// unlimited query, which returns everything that matched. Under `group_by`
+	// it reports whether groups remain past `limit` instead.
+	HasMore bool `protobuf:"varint,5,opt,name=has_more,json=hasMore,proto3" json:"has_more,omitempty"`
+	// The groups of a request carrying `group_by`, in ascending value order with
+	// the no-value group last; empty for an ordinary row query. `rows`,
+	// `start_cursor` and `end_cursor` are all empty whenever a request grouped.
+	Groups        []*QueryGroup `protobuf:"bytes,6,rep,name=groups,proto3" json:"groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1171,6 +1211,13 @@ func (x *QueryResponse) GetHasMore() bool {
 		return x.HasMore
 	}
 	return false
+}
+
+func (x *QueryResponse) GetGroups() []*QueryGroup {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
 }
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to
@@ -1809,7 +1856,7 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12!\n" +
 	"\fresume_token\x18\x02 \x01(\fR\vresumeToken\x1a\x05\n" +
 	"\x03EndB\x06\n" +
-	"\x04body\"\xa0\x02\n" +
+	"\x04body\"\xf4\x02\n" +
 	"\fQueryRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06entity\x18\x03 \x01(\tR\x06entity\x125\n" +
@@ -1818,14 +1865,18 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x05limit\x18\x06 \x01(\rR\x05limit\x12\x16\n" +
 	"\x06offset\x18\a \x01(\rR\x06offset\x12\x14\n" +
 	"\x05after\x18\b \x01(\fR\x05after\x12\x16\n" +
-	"\x06before\x18\t \x01(\fR\x06beforeJ\x04\b\x02\x10\x03R\tclient_id\"\xc2\x01\n" +
+	"\x06before\x18\t \x01(\fR\x06before\x12\x19\n" +
+	"\bgroup_by\x18\n" +
+	" \x03(\tR\agroupBy\x127\n" +
+	"\taggregate\x18\v \x01(\x0e2\x19.syncplane.v1.AggregateOpR\taggregateJ\x04\b\x02\x10\x03R\tclient_id\"\xf4\x01\n" +
 	"\rQueryResponse\x12+\n" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12'\n" +
 	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\x12!\n" +
 	"\fstart_cursor\x18\x03 \x01(\fR\vstartCursor\x12\x1d\n" +
 	"\n" +
 	"end_cursor\x18\x04 \x01(\fR\tendCursor\x12\x19\n" +
-	"\bhas_more\x18\x05 \x01(\bR\ahasMore\"\xa6\x01\n" +
+	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x120\n" +
+	"\x06groups\x18\x06 \x03(\v2\x18.syncplane.v1.QueryGroupR\x06groups\"\xa6\x01\n" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +
@@ -1906,7 +1957,9 @@ var file_syncplane_v1_service_proto_goTypes = []any{
 	(*Patch)(nil),                   // 23: syncplane.v1.Patch
 	(*Condition)(nil),               // 24: syncplane.v1.Condition
 	(*OrderKey)(nil),                // 25: syncplane.v1.OrderKey
-	(*RowChange)(nil),               // 26: syncplane.v1.RowChange
+	(AggregateOp)(0),                // 26: syncplane.v1.AggregateOp
+	(*RowChange)(nil),               // 27: syncplane.v1.RowChange
+	(*QueryGroup)(nil),              // 28: syncplane.v1.QueryGroup
 }
 var file_syncplane_v1_service_proto_depIdxs = []int32{
 	21, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
@@ -1923,28 +1976,30 @@ var file_syncplane_v1_service_proto_depIdxs = []int32{
 	20, // 11: syncplane.v1.BootstrapResponse.end:type_name -> syncplane.v1.BootstrapResponse.End
 	24, // 12: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
 	25, // 13: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
-	26, // 14: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
-	22, // 15: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
-	14, // 16: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
-	1,  // 17: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
-	8,  // 18: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
-	16, // 19: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
-	26, // 20: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
-	3,  // 21: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
-	7,  // 22: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
-	9,  // 23: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
-	15, // 24: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
-	12, // 25: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
-	6,  // 26: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
-	8,  // 27: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
-	11, // 28: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
-	17, // 29: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
-	13, // 30: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
-	26, // [26:31] is the sub-list for method output_type
-	21, // [21:26] is the sub-list for method input_type
-	21, // [21:21] is the sub-list for extension type_name
-	21, // [21:21] is the sub-list for extension extendee
-	0,  // [0:21] is the sub-list for field type_name
+	26, // 14: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
+	27, // 15: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
+	28, // 16: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
+	22, // 17: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
+	14, // 18: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
+	1,  // 19: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
+	8,  // 20: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
+	16, // 21: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
+	27, // 22: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
+	3,  // 23: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
+	7,  // 24: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
+	9,  // 25: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
+	15, // 26: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
+	12, // 27: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
+	6,  // 28: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
+	8,  // 29: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
+	11, // 30: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
+	17, // 31: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
+	13, // 32: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
+	28, // [28:33] is the sub-list for method output_type
+	23, // [23:28] is the sub-list for method input_type
+	23, // [23:23] is the sub-list for extension type_name
+	23, // [23:23] is the sub-list for extension extendee
+	0,  // [0:23] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_service_proto_init() }

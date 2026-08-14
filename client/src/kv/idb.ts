@@ -325,6 +325,26 @@ class IDBRead implements KVRead {
 		}
 	}
 
+	async indexSeek(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): Promise<{ position: string; key: string } | undefined> {
+		if (emptyRange(lo, hi)) return undefined;
+		// A key cursor rather than getAllKeys: the POSITION is what a skip-scan
+		// resumes from, and getAllKeys on an index returns only the primary keys.
+		// One step is all that is read, so the cursor never has to survive an
+		// await the way a streaming scan's would.
+		const cursor = await requestDone(
+			this.store().index(INDEX_FIELD).openKeyCursor(
+				boundRange(lo, hi),
+				direction === 'desc' ? 'prev' : 'next',
+			),
+		);
+		if (cursor === null) return undefined;
+		return { position: cursor.key as string, key: cursor.primaryKey as string };
+	}
+
 	async indexCount(lo?: string, hi?: string): Promise<number> {
 		if (emptyRange(lo, hi)) return 0;
 		const range = boundRange(lo, hi);
@@ -397,7 +417,33 @@ class IDBWrite extends IDBRead implements KVWrite {
 	 * semantics are worth more here than the request-shaped ones above.
 	 */
 	override async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		if (emptyRange(lo, hi)) return;
+		for (const [ , k ] of await this.indexPairs(lo, hi)) yield k;
+	}
+
+	/**
+	 * Counted through this class's own pairs rather than the store's index, for
+	 * the same reason indexScan above folds the buffer in: the count must agree
+	 * with what the scan would yield. Same cost note applies — nothing on a hot
+	 * path counts an index inside a write transaction.
+	 */
+	override async indexCount(lo?: string, hi?: string): Promise<number> {
+		return (await this.indexPairs(lo, hi)).length;
+	}
+
+	override async indexSeek(
+		lo?: string,
+		hi?: string,
+		direction: 'asc' | 'desc' = 'asc',
+	): Promise<{ position: string; key: string } | undefined> {
+		const pairs = await this.indexPairs(lo, hi);
+		const at = direction === 'desc' ? pairs[pairs.length - 1] : pairs[0];
+		return at === undefined ? undefined : { position: at[0], key: at[1] };
+	}
+
+	/** The (position, record key) pairs of a range, in position order, with this
+	 * transaction's uncommitted writes folded in. */
+	private async indexPairs(lo?: string, hi?: string): Promise<[string, string][]> {
+		if (emptyRange(lo, hi)) return [];
 		const range = boundRange(lo, hi);
 		const index = this.store().index(INDEX_FIELD);
 		const [ keys, values ] = await Promise.all([
@@ -421,19 +467,7 @@ class IDBWrite extends IDBRead implements KVWrite {
 			}
 		}
 		pairs.sort(comparePositions);
-		for (const [ , k ] of pairs) yield k;
-	}
-
-	/**
-	 * Counted through this class's own indexScan rather than the store's index,
-	 * for the same reason indexScan above folds the buffer in: the count must
-	 * agree with what the scan would yield. Same cost note applies — nothing on
-	 * a hot path counts an index inside a write transaction.
-	 */
-	override async indexCount(lo?: string, hi?: string): Promise<number> {
-		let n = 0;
-		for await (const _ of this.indexScan(lo, hi)) n++;
-		return n;
+		return pairs;
 	}
 
 	/**
