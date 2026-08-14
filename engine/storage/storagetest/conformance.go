@@ -1377,6 +1377,209 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			Expect(ids).To(ConsistOf("ghost"))
 		})
 
+		// The collectable query is how a maintenance pass finds its work without
+		// opening a write transaction against every workspace that exists. An
+		// omission here is state that is never reclaimed, so these specs are
+		// about completeness first: one per kind the pass collects.
+		Describe("collectable workspaces", func() {
+			// Everything a pass collects is selected by age, so a cutoff in the
+			// future selects whatever was just written and one in the past
+			// selects nothing.
+			future := func() time.Time { return time.Now().Add(time.Hour) }
+			past := func() time.Time { return time.Now().Add(-time.Hour) }
+			collectable := func(c storage.GCCutoffs, after string, limit int) []string {
+				GinkgoHelper()
+				ids, err := store.ListCollectableWorkspaceIDs(ctx, c, after, limit)
+				Expect(err).NotTo(HaveOccurred())
+				return ids
+			}
+			// all is a pass that would collect every kind, which is what the
+			// engine's default configuration amounts to.
+			all := func() storage.GCCutoffs {
+				return storage.GCCutoffs{
+					Tombstones:      future(),
+					IdempotencyKeys: future(),
+					FieldDeltas:     future(),
+					Entities:        []storage.EntityCutoff{{Entity: "audit", Before: future()}},
+				}
+			}
+
+			DescribeTable("reports a workspace holding one collectable thing",
+				func(plant func(tx storage.WriteTx)) {
+					write("ws1", func(tx storage.WriteTx) { plant(tx) })
+					Expect(collectable(all(), "", 10)).To(Equal([]string{"ws1"}))
+				},
+				Entry("a tombstone", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.DeleteRow("widget", "k", 2, storage.Actor{})).To(Succeed())
+				}),
+				Entry("a client watermark", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
+				}),
+				Entry("an effect consumer position", func(tx storage.WriteTx) {
+					Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: 1})).To(Succeed())
+				}),
+				Entry("an idempotency key", func(tx storage.WriteTx) {
+					Expect(tx.PutIdempotencyRecord("k1", storage.IdempotencyRecord{Seq: 1})).To(Succeed())
+				}),
+				Entry("a text field delta", func(tx storage.WriteTx) {
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("frag"))).To(Succeed())
+				}),
+				Entry("a live row of an aging entity", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("audit", "a1", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				}),
+			)
+
+			It("reports nothing for a store with no workspaces", func() {
+				Expect(collectable(all(), "", 10)).To(BeEmpty())
+			})
+
+			It("leaves out a workspace holding only live rows", func() {
+				// The case the whole query exists for: an idle workspace must
+				// cost the pass nothing at all.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				Expect(collectable(all(), "", 10)).To(BeEmpty())
+			})
+
+			It("leaves out a workspace whose candidates are all younger than the cutoffs", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.DeleteRow("widget", "k", 2, storage.Actor{})).To(Succeed())
+					Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
+					Expect(tx.PutIdempotencyRecord("k1", storage.IdempotencyRecord{Seq: 1})).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("frag"))).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{
+					Tombstones:      past(),
+					IdempotencyKeys: past(),
+					FieldDeltas:     past(),
+				}, "", 10)).To(BeEmpty())
+			})
+
+			It("treats a zero cutoff as keeping that kind forever", func() {
+				// Which is not what its UnixMilli() says: the distinction is how
+				// unbounded retention reaches an adapter, and reading it as an
+				// epoch timestamp would collect everything instead.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{}, "", 10)).To(BeEmpty(),
+					"a pass with no cutoffs at all collects nothing and has nowhere to go")
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(Equal([]string{"ws1"}))
+			})
+
+			It("names an entity cutoff's own entity", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{
+					Entities: []storage.EntityCutoff{{Entity: "audit", Before: future()}},
+				}, "", 10)).To(BeEmpty(), "a live row of another entity is not the purge's to take")
+			})
+
+			It("pages in id order from an exclusive cursor", func() {
+				for _, id := range []string{"ws3", "ws1", "ws2"} {
+					write(id, func(tx storage.WriteTx) {
+						Expect(tx.SetClientLastMutationID("c1", 1)).To(Succeed())
+					})
+				}
+				Expect(collectable(all(), "", 2)).To(Equal([]string{"ws1", "ws2"}))
+				Expect(collectable(all(), "ws2", 2)).To(Equal([]string{"ws3"}))
+				Expect(collectable(all(), "ws3", 2)).To(BeEmpty(),
+					"paging terminates rather than wrapping")
+			})
+
+			It("rejects a non-positive limit", func() {
+				_, err := store.ListCollectableWorkspaceIDs(ctx, all(), "", 0)
+				Expect(err).To(HaveOccurred())
+				_, err = store.ListCollectableWorkspaceIDs(ctx, all(), "", -1)
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
+		// The build mark is one opaque string per workspace, compared for
+		// equality and nothing else. It is what lets the index pass skip a
+		// workspace without reading the state of each of its indexes.
+		Describe("index build mark", func() {
+			stale := func(mark, after string, limit int) []string {
+				GinkgoHelper()
+				ids, err := store.ListStaleIndexWorkspaceIDs(ctx, mark, after, limit)
+				Expect(err).NotTo(HaveOccurred())
+				return ids
+			}
+			seed := func(ws string) {
+				GinkgoHelper()
+				write(ws, func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+			}
+
+			It("reports a workspace that has never been marked", func() {
+				seed("ws1")
+				Expect(stale("m1", "", 10)).To(Equal([]string{"ws1"}))
+			})
+
+			It("drops a workspace once marked, and reports it again under a new mark", func() {
+				seed("ws1")
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
+				})
+				Expect(stale("m1", "", 10)).To(BeEmpty())
+				Expect(stale("m2", "", 10)).To(Equal([]string{"ws1"}),
+					"a changed declaration re-selects every workspace exactly once")
+			})
+
+			It("overwrites the mark rather than failing on the one already there", func() {
+				seed("ws1")
+				for _, m := range []string{"m1", "m2"} {
+					write("ws1", func(tx storage.WriteTx) {
+						Expect(tx.SetIndexBuildMark(m)).To(Succeed())
+					})
+				}
+				Expect(stale("m2", "", 10)).To(BeEmpty())
+			})
+
+			It("does not register a workspace it marks", func() {
+				// A workspace holding nothing has no rows to index, so marking
+				// one is vacuous — and registering it here would let a build on
+				// an arbitrary id mint a workspace every later pass iterates.
+				write("ghost", func(tx storage.WriteTx) {
+					Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
+				})
+				Expect(store.ListWorkspaceIDs(ctx)).To(BeEmpty())
+			})
+
+			It("keeps the mark across an unrelated write", func() {
+				seed("ws1")
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k2", []byte("v"), 2, storage.Actor{})).To(Succeed())
+				})
+				Expect(stale("m1", "", 10)).To(BeEmpty(),
+					"a row written after the build is indexed by the write path, not by a rebuild")
+			})
+
+			It("pages in id order from an exclusive cursor", func() {
+				for _, id := range []string{"ws3", "ws1", "ws2"} {
+					seed(id)
+				}
+				Expect(stale("m1", "", 2)).To(Equal([]string{"ws1", "ws2"}))
+				Expect(stale("m1", "ws2", 2)).To(Equal([]string{"ws3"}))
+				Expect(stale("m1", "ws3", 2)).To(BeEmpty())
+			})
+
+			It("rejects a non-positive limit", func() {
+				_, err := store.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 0)
+				Expect(err).To(HaveOccurred())
+				_, err = store.ListStaleIndexWorkspaceIDs(ctx, "m1", "", -1)
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
 		It("tracks client watermarks", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
@@ -3028,6 +3231,31 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 			Expect(a.ListPendingWorkspaceIDs(ctx, "indexer", "", 10)).To(BeEmpty())
 			Expect(b.ListPendingWorkspaceIDs(ctx, "indexer", "", 10)).To(ConsistOf("ws1"),
 				"catching up in one namespace must not catch up in the other")
+		})
+
+		It("scopes ListCollectableWorkspaceIDs to the namespace", func() {
+			cutoffs := storage.GCCutoffs{Tombstones: time.Now().Add(time.Hour)}
+			writeTo(a, "ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetClientLastMutationID("c1", 1)).To(Succeed())
+			})
+			Expect(a.ListCollectableWorkspaceIDs(ctx, cutoffs, "", 10)).To(ConsistOf("ws1"))
+			Expect(b.ListCollectableWorkspaceIDs(ctx, cutoffs, "", 10)).To(BeEmpty(),
+				"one namespace's garbage is not the other's to collect")
+		})
+
+		It("scopes the index build mark to the namespace", func() {
+			// Two apps in one database declare different indexes, so a mark
+			// carried across would let one app's build satisfy the other's.
+			for _, s := range []storage.Adapter{a, b} {
+				writeTo(s, "ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+			}
+			writeTo(a, "ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
+			})
+			Expect(a.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(BeEmpty())
+			Expect(b.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(ConsistOf("ws1"))
 		})
 
 		It("scopes tombstone GC to the namespace", func() {

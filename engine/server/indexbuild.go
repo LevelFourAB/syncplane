@@ -36,8 +36,9 @@ import (
 
 // indexBuildLoop periodically brings every workspace's indexes up to date. It
 // reuses the shape of the GC loop — a ticker goroutine, cancelled by Close,
-// iterating ListWorkspaceIDs — because it has the same requirements: never
-// take the server down, never starve a workspace behind a failing one.
+// paging a work query — because it has the same requirements: never take the
+// server down, never starve a workspace behind a failing one, and cost nothing
+// per interval on a deployment with nothing to do.
 type indexBuildLoop struct {
 	interval time.Duration
 	// batch bounds the rows one write transaction indexes. A build holds the
@@ -112,36 +113,59 @@ func (l *indexBuildLoop) close() {
 	l.done.Wait()
 }
 
-// buildAllIndexes runs one pass over every workspace. Like the GC pass, a
+// buildAllIndexes runs one pass over every workspace whose recorded build mark
+// does not match the current catalog's, a page at a time. Like the GC pass, a
 // per-workspace failure is collected and the pass moves on; only cancellation
 // aborts it.
+//
+// In the steady state the work query matches nothing and the pass is one round
+// trip. A workspace it does return is leased before anything reads its index
+// state, so a node that loses the lease pays neither the state reads nor the
+// build.
 func (s *Server) buildAllIndexes(ctx context.Context) error {
-	ids, err := s.store.ListWorkspaceIDs(ctx)
-	if err != nil {
-		return err
-	}
+	mark := s.catalogPtr().indexBuildMark()
 	var errs []error
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
-		}
-		release, run := s.tryLease(ctx, leaseRoleIndexes, id)
-		if !run {
-			continue
-		}
-		err := s.BuildIndexes(ctx, id)
-		release()
+	for after := ""; ; {
+		ids, err := s.store.ListStaleIndexWorkspaceIDs(ctx, mark, after, maintenancePage)
 		if err != nil {
-			errs = append(errs, fmt.Errorf("workspace %s: %w", id, err))
+			return errors.Join(append(errs, err)...)
 		}
+		for _, id := range ids {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			release, run := s.tryLease(ctx, leaseRoleIndexes, id)
+			if !run {
+				continue
+			}
+			err := s.BuildIndexes(ctx, id)
+			release()
+			if err != nil {
+				errs = append(errs, fmt.Errorf("workspace %s: %w", id, err))
+			}
+		}
+		// Paged by workspace id, not by the predicate: a workspace this page
+		// built no longer matches, and paging by the answer would step over the
+		// one that took its place.
+		if len(ids) < maintenancePage {
+			return errors.Join(errs...)
+		}
+		after = ids[len(ids)-1]
 	}
-	return errors.Join(errs...)
 }
 
 // BuildIndexes brings every index of every registered entity up to date for
 // one workspace, and marks each ready. Indexes already ready under their
 // current spec are skipped, so a repeat pass over an unchanged workspace costs
 // one state read per index.
+//
+// A pass that leaves every index ready records the catalog's build mark on the
+// workspace, which is what lets the next background pass skip it without
+// reading any of that state (see
+// storage.Adapter.ListStaleIndexWorkspaceIDs). Nothing is recorded when an
+// index ends the pass unready — a concurrent re-registration is the way that
+// happens — so the workspace stays selected until a pass finishes under one
+// catalog.
 //
 // It is safe to call at any time: the build is idempotent, and readiness is
 // only claimed once the whole entity has been walked. Callers do not normally
@@ -155,21 +179,35 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 		return fmt.Errorf("server: BuildIndexes called re-entrantly inside a write transaction (workspace %q): it opens write transactions that would deadlock against the running one", workspaceID)
 	}
 	cat := s.catalogPtr()
+	allReady := true
 	for _, info := range cat.entities {
 		for i := range info.indexes {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			if err := s.buildIndex(ctx, workspaceID, info, &info.indexes[i]); err != nil {
+			ready, err := s.buildIndex(ctx, workspaceID, info, &info.indexes[i])
+			if err != nil {
 				return fmt.Errorf("entity %q index %q: %w", info.name, info.indexes[i].name, err)
 			}
+			allReady = allReady && ready
 		}
 	}
-	return nil
+	if !allReady {
+		return nil
+	}
+	// The mark of the catalog this pass ran under, not of whatever
+	// re-registration may have swapped in since: a node holding the newer
+	// catalog sees a mark that does not match it and redoes the workspace.
+	return s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		return tx.SetIndexBuildMark(cat.indexBuildMark())
+	})
 }
 
 // buildIndex walks one entity and writes one index's entries for every live
-// row, in batched write transactions, then marks the index ready.
+// row, in batched write transactions, then marks the index ready. It reports
+// whether the index ends the call ready under the caller's spec — false when a
+// concurrent re-registration moved the fingerprint out from under the walk, the
+// one case where a successful call leaves the index unusable.
 //
 // Two things make the batching sound despite concurrent writers:
 //
@@ -181,7 +219,7 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 //     leaves entries in place and the index unready, so reads keep scanning
 //     and the next pass redoes the walk over rows that mostly already have
 //     their entries.
-func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci *compiledIndex) (err error) {
+func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci *compiledIndex) (ready bool, err error) {
 	// Until an index is ready, every read that would have used it scans
 	// instead — so how long a build takes and how far it has got are the
 	// explanation for a query latency regression that no query-side metric can
@@ -216,10 +254,10 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		alreadyReady, err = ci.ready(tx, info.name)
 		return err
 	}); err != nil {
-		return err
+		return false, err
 	}
 	if alreadyReady {
-		return nil
+		return true, nil
 	}
 	// Stamp the spec BEFORE the walk. If the declaration changed, this is what
 	// stops a reader from trusting entries written under the old one: the
@@ -227,14 +265,14 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 		return tx.SetIndexState(info.name, ci.name, ci.specHash, false)
 	}); err != nil {
-		return err
+		return false, err
 	}
 
 	batch := s.indexBuild.batchSize()
 	afterKey := ""
 	for {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return false, ctx.Err()
 		}
 		var (
 			lastKey string
@@ -257,7 +295,7 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 				return info.updateRowIndexes(tx, s.limits, row.Key, msg)
 			})
 		}); err != nil {
-			return err
+			return false, err
 		}
 		// After the commit, never inside the closure: WithWriteTx may re-run
 		// it, and a counter incremented from a rolled-back attempt would report
@@ -269,11 +307,16 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		afterKey = lastKey
 	}
 
-	return s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 		// Re-check the fingerprint at the end: if the schema was re-registered
 		// mid-build, the catalog this goroutine holds is stale and marking
 		// ready would advertise entries built for a spec nobody uses. The
 		// next pass, holding the new catalog, redoes the walk.
+		//
+		// Reset per attempt, as the counters above are: WithWriteTx may re-run
+		// the closure, and a ready carried over from a rolled-back attempt would
+		// let the caller record a build mark for an index that has none.
+		ready = false
 		hash, _, err := tx.IndexState(info.name, ci.name)
 		if err != nil {
 			return err
@@ -281,8 +324,12 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		if hash != ci.specHash {
 			return nil
 		}
+		ready = true
 		return tx.SetIndexState(info.name, ci.name, ci.specHash, true)
-	})
+	}); err != nil {
+		return false, err
+	}
+	return ready, nil
 }
 
 func (l *indexBuildLoop) batchSize() int {

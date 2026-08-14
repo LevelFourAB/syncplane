@@ -4,6 +4,8 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -403,6 +405,37 @@ type catalog struct {
 	refGraphOnce sync.Once
 	refGraph     *refGraph
 	refGraphErr  error
+	// indexMark caches the fingerprint of every declared index, computed on
+	// first use by indexBuildMark and scoped to this catalog for refGraph's
+	// reason: a re-registration builds a fresh catalog, and the mark has to
+	// move with it.
+	indexMarkOnce sync.Once
+	indexMark     string
+}
+
+// indexBuildMark fingerprints every index of every registered entity, so that
+// one equality answers "are this workspace's indexes built under the current
+// declarations" for the whole catalog (see
+// storage.Adapter.ListStaleIndexWorkspaceIDs). Comparing it is what spares the
+// background pass a state read per (workspace × entity × index).
+//
+// Sorted by (entity, index) so the mark depends on the declarations and not on
+// map iteration order, and hashed rather than concatenated because a spec
+// fingerprint is a readable string of unbounded length (query.SpecHash) and
+// this one is stored per workspace.
+func (c *catalog) indexBuildMark() string {
+	c.indexMarkOnce.Do(func() {
+		specs := make([]string, 0, len(c.entities))
+		for _, info := range c.entities {
+			for i := range info.indexes {
+				specs = append(specs, info.name+"\x00"+info.indexes[i].name+"\x00"+info.indexes[i].specHash)
+			}
+		}
+		sort.Strings(specs)
+		sum := sha256.Sum256([]byte(strings.Join(specs, "\n")))
+		c.indexMark = hex.EncodeToString(sum[:16])
+	})
+	return c.indexMark
 }
 
 // clone returns a shallow copy of the catalog with fresh entity maps (the

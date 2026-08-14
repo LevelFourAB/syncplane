@@ -212,6 +212,13 @@ A GC pass collects per-workspace failures and carries on, so `gc.workspaces`
 with `outcome=error` is where one persistently broken workspace shows up —
 invisible in `gc.duration` alone.
 
+`gc.workspaces` counts workspaces the pass **visited**, which is those holding
+something collectable rather than all that exist; a healthy deployment's passes
+are mostly empty. `outcome=skipped` is a workspace another node held the lease
+for. A rate that tracks the total workspace count instead means every pass is
+finding work everywhere, which is the shape of a retention set shorter than the
+write rate.
+
 `gc_kind` is `idle_clients`, `idempotency_keys`, `text_rows`, `history_records`
 or `stranded_consumers`. **Alert on `stranded_consumers`**: an effect consumer
 collected below the horizon stopped reacting to writes long enough to be given

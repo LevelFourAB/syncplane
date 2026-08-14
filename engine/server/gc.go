@@ -73,9 +73,10 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // is only safe while no pruned client can still be retrying mutations the
 // server already applied. Weeks is a sane order of magnitude; minutes is not.
 //
-// interval > 0 runs a background pass over every workspace each interval;
-// interval <= 0 configures retention for manual CollectGarbage calls only.
-// Call Close to stop the background goroutine.
+// interval > 0 runs a background pass each interval over the workspaces holding
+// something these retentions make collectable, which on an idle deployment is
+// none of them; interval <= 0 configures retention for manual CollectGarbage
+// calls only. Call Close to stop the background goroutine.
 //
 // Multi-node note: every node may run the pass — it is idempotent — and each
 // workspace's collection runs under a per-workspace lease (see WithLeases), so
@@ -224,6 +225,28 @@ func (g *gcLoop) textDeltaCutoff(now time.Time) time.Time {
 	return now.Add(-d)
 }
 
+// cutoffs is every age threshold a pass at now applies, in the form the work
+// query takes them. CollectGarbage derives its own thresholds from the same
+// value, so what selects a workspace and what the pass then collects cannot
+// drift apart.
+//
+// One collector is missing from it, deliberately. Text compaction (compactText)
+// has no cutoff of its own: it rewrites rows the delta prune has already
+// quietened, so it rides whichever pass the FieldDeltas threshold brings about
+// rather than selecting a workspace itself. A probe for it would match every
+// workspace holding a row below its delta horizon, which is nearly all of them.
+func (g *gcLoop) cutoffs(now time.Time) storage.GCCutoffs {
+	c := storage.GCCutoffs{
+		Tombstones:      now.Add(-g.retention),
+		IdempotencyKeys: g.idempotencyCutoff(now),
+		FieldDeltas:     g.textDeltaCutoff(now),
+	}
+	if at, expires := g.historyCutoff(now); expires {
+		c.Entities = []storage.EntityCutoff{{Entity: historyEntityName, Before: at}}
+	}
+	return c
+}
+
 // start launches the ticker goroutine; called from New once options applied.
 func (g *gcLoop) start(s *Server) {
 	if g.interval <= 0 {
@@ -283,10 +306,14 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	if inWriteTx(ctx) {
 		return fmt.Errorf("server: CollectGarbage called re-entrantly inside a write transaction (workspace %q): it opens a write transaction that would deadlock against the running one", workspaceID)
 	}
+	// Through cutoffs rather than the retentions directly, so that what a work
+	// query selects a workspace for and what this pass then collects are read
+	// off one value (see gcLoop.cutoffs).
 	now := time.Now()
-	cutoff := now.Add(-s.gc.retention)
-	textCutoff := s.gc.textDeltaCutoff(now)
-	keyCutoff := s.gc.idempotencyCutoff(now)
+	cutoffs := s.gc.cutoffs(now)
+	cutoff := cutoffs.Tombstones
+	textCutoff := cutoffs.FieldDeltas
+	keyCutoff := cutoffs.IdempotencyKeys
 	// HistoryForever is the only reason to skip the sweep: it leaves expiry to
 	// the row's own deletion. Notably NOT gated on the history entity being in
 	// the catalog, even though sweeping a name nothing writes costs a statement
@@ -441,11 +468,23 @@ func (s *Server) drainExpiredHistory(ctx context.Context, workspaceID string, cu
 	return total, nil
 }
 
-// collectAllGarbage runs one pass over every workspace. A per-workspace
-// failure (corrupt row, adapter bug) is collected and the pass moves on, so
-// one bad workspace cannot starve every workspace after it in listing order;
-// the joined errors are returned for logging. Only context cancellation
-// (server shutdown) aborts the pass early.
+// maintenancePage is how many workspace ids one page of a background pass's
+// work query carries. It bounds the pass's memory and nothing else: a pass
+// keeps fetching pages until one comes back short, so a page size does not cap
+// what an interval covers.
+const maintenancePage = 256
+
+// collectAllGarbage runs one pass over every workspace holding something this
+// pass's cutoffs would reclaim, a page at a time. A per-workspace failure
+// (corrupt row, adapter bug) is collected and the pass moves on, so one bad
+// workspace cannot starve every workspace after it in listing order; the joined
+// errors are returned for logging. Only context cancellation (server shutdown)
+// aborts the pass early.
+//
+// The work query is what keeps an idle deployment idle: a workspace with
+// nothing collectable is never returned, so it costs neither the lease probe
+// nor the write transaction that finds nothing. Workspaces counts what the pass
+// visited, which on a healthy deployment is a small fraction of what exists.
 func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 	start := time.Now()
 	// Recorded from a defer so every exit records exactly once: the pass that
@@ -455,38 +494,50 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 		s.tel().gcDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 			telemetry.AttrOutcome.String(telemetry.Classify(err))))
 	}()
-	ids, err := s.store.ListWorkspaceIDs(ctx)
-	if err != nil {
-		return err
-	}
+	cutoffs := s.gc.cutoffs(time.Now())
 	var errs []error
-	for _, id := range ids {
-		if ctx.Err() != nil {
-			return ctx.Err()
+	visited := 0
+	for after := ""; ; {
+		ids, lerr := s.store.ListCollectableWorkspaceIDs(ctx, cutoffs, after, maintenancePage)
+		if lerr != nil {
+			return errors.Join(append(errs, lerr)...)
 		}
-		release, run := s.tryLease(ctx, leaseRoleGC, id)
-		if !run {
-			// Another node holds the lease and is collecting this workspace;
-			// counted so an operator can see the fleet dividing the sweep.
+		for _, id := range ids {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			visited++
+			release, run := s.tryLease(ctx, leaseRoleGC, id)
+			if !run {
+				// Another node holds the lease and is collecting this workspace;
+				// counted so an operator can see the fleet dividing the sweep.
+				s.tel().gcWorkspaces.Add(ctx, 1, metric.WithAttributes(
+					telemetry.AttrOutcome.String(telemetry.OutcomeSkipped)))
+				continue
+			}
+			cerr := s.CollectGarbage(ctx, id)
+			release()
+			// Per-workspace, because the pass swallows individual failures and
+			// carries on: without this, one workspace that fails every pass
+			// forever is indistinguishable from a clean sweep in everything except
+			// the joined error the caller logs.
 			s.tel().gcWorkspaces.Add(ctx, 1, metric.WithAttributes(
-				telemetry.AttrOutcome.String(telemetry.OutcomeSkipped)))
-			continue
+				telemetry.AttrOutcome.String(telemetry.Classify(cerr))))
+			if cerr != nil {
+				errs = append(errs, fmt.Errorf("workspace %s: %w", id, cerr))
+			}
 		}
-		cerr := s.CollectGarbage(ctx, id)
-		release()
-		// Per-workspace, because the pass swallows individual failures and
-		// carries on: without this, one workspace that fails every pass
-		// forever is indistinguishable from a clean sweep in everything except
-		// the joined error the caller logs.
-		s.tel().gcWorkspaces.Add(ctx, 1, metric.WithAttributes(
-			telemetry.AttrOutcome.String(telemetry.Classify(cerr))))
-		if cerr != nil {
-			errs = append(errs, fmt.Errorf("workspace %s: %w", id, cerr))
+		// Paged by workspace id, not by the predicate: a workspace this page
+		// collected no longer matches it, and paging by the answer would step
+		// over the one that took its place.
+		if len(ids) < maintenancePage {
+			break
 		}
+		after = ids[len(ids)-1]
 	}
 	s.log().LogAttrs(ctx, slog.LevelInfo, "garbage collection pass complete",
 		slog.String("component", "gc"),
-		slog.Int("workspaces", len(ids)),
+		slog.Int("workspaces", visited),
 		slog.Int("failed", len(errs)),
 		slog.Duration("elapsed", time.Since(start)))
 	return errors.Join(errs...)

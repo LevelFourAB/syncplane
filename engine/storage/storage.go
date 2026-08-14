@@ -80,6 +80,13 @@
 //     redelivered one. ListPendingWorkspaceIDs reads the same state from
 //     outside a workspace transaction, so that finding the workspaces a
 //     consumer owes work costs one query rather than one transaction each.
+//   - Work queries (ListPendingWorkspaceIDs, ListCollectableWorkspaceIDs,
+//     ListStaleIndexWorkspaceIDs) answer "which workspaces owe this background
+//     pass work" from outside any workspace transaction, paged by id. They are
+//     what keeps a deployment's maintenance floor proportional to the work
+//     waiting rather than to the number of workspaces that exist, so an adapter
+//     answering one by iterating workspaces itself has implemented the signature
+//     and not the point. Each may be optimistic and none may be short.
 //
 // The conformance suite in storagetest encodes this contract; run it (and
 // storagetest.ConformanceNamespaced for multi-tenant adapters) against any
@@ -272,8 +279,11 @@ type Adapter interface {
 	// background pass then iterates forever.
 	WithWriteTx(ctx context.Context, workspaceID string, fn func(WriteTx) error) error
 	// ListWorkspaceIDs returns the ids of all workspaces that hold persisted
-	// state, i.e. those some write transaction has actually written to. Used by
-	// background maintenance (tombstone GC).
+	// state, i.e. those some write transaction has actually written to.
+	//
+	// Unpaged, and therefore for enumeration rather than for finding work: a
+	// background pass asks one of the work queries below instead, so that its
+	// cost tracks what is waiting rather than what exists.
 	ListWorkspaceIDs(ctx context.Context) ([]string, error)
 	// ListPendingWorkspaceIDs returns up to limit ids of workspaces where the
 	// named consumer has changes it has not acted on, ordered by id and starting
@@ -303,7 +313,69 @@ type Adapter interface {
 	// workspace must appear once the view reaches that moment — for the polling
 	// consumers this serves, a later call rather than not at all.
 	ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error)
+	// ListCollectableWorkspaceIDs returns up to limit ids of workspaces holding
+	// something a garbage-collection pass at these cutoffs would reclaim,
+	// ordered by id and starting strictly after `after` ("" from the start). A
+	// limit of zero or less is an error, as it is for ListPendingWorkspaceIDs
+	// and for the same reason.
+	//
+	// It exists so that a maintenance pass costs one query rather than a write
+	// transaction against every workspace that exists — on an adapter that takes
+	// a per-workspace lock, an idle workspace otherwise pays a lock acquisition
+	// and a transaction that finds nothing, once per interval, on every node.
+	//
+	// The answer may be OPTIMISTIC — a returned workspace whose only candidate
+	// is collected by a concurrent pass leaves this one nothing to do — but
+	// never short: a workspace that holds a candidate and stays omitted is state
+	// that is never reclaimed. Adapters may answer from a bounded-staleness read
+	// view on the same terms as ListPendingWorkspaceIDs, since a workspace that
+	// only just became collectable is due on the next pass, not this one.
+	ListCollectableWorkspaceIDs(ctx context.Context, cutoffs GCCutoffs, after string, limit int) ([]string, error)
+	// ListStaleIndexWorkspaceIDs returns up to limit ids of workspaces whose
+	// recorded index-build mark differs from mark, ordered by id and starting
+	// strictly after `after` ("" from the start). A limit of zero or less is an
+	// error.
+	//
+	// A workspace that has never been marked differs from every mark, so a fresh
+	// one is always returned. The engine derives the mark from the fingerprints
+	// of every declared index, which is what makes a schema change re-select
+	// every workspace exactly once.
+	//
+	// It replaces reading each index's state per workspace: at a few thousand
+	// workspaces and a handful of indexes apiece that is six figures of point
+	// reads per interval per node to establish that nothing has changed, against
+	// one indexed query that usually returns nothing.
+	ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error)
 	Close() error
+}
+
+// GCCutoffs are the age thresholds one garbage-collection pass applies, as
+// absolute timestamps rather than the retentions they were derived from. A
+// zero timestamp selects nothing of its kind — the pass keeps that state
+// whatever its age — which is how "unbounded retention" reaches an adapter.
+//
+// It exists for ListCollectableWorkspaceIDs. The collectors themselves take
+// their cutoff one at a time, on a transaction the caller has already opened;
+// this is the same set of thresholds asked across workspaces instead.
+type GCCutoffs struct {
+	// Tombstones bounds deleted rows, idle client watermarks and idle effect
+	// consumers, which share one retention.
+	Tombstones time.Time
+	// IdempotencyKeys bounds claimed trusted-write keys.
+	IdempotencyKeys time.Time
+	// FieldDeltas bounds the collaborative-text delta log.
+	FieldDeltas time.Time
+	// Entities bounds LIVE rows of entities that expire by age rather than by
+	// deletion (PurgeEntityRows), naming each one's own cutoff. Empty for a pass
+	// that purges no entity wholesale.
+	Entities []EntityCutoff
+}
+
+// EntityCutoff is one entity's age threshold for the wholesale purge of its
+// live rows. Entity is a wire entity name as PurgeEntityRows takes it.
+type EntityCutoff struct {
+	Entity string
+	Before time.Time
 }
 
 // As returns the first adapter in a's wrapper chain that implements T. It
@@ -715,6 +787,16 @@ type WriteTx interface {
 	// ReadTx.IndexState). An unconditional upsert: a rebuild re-stamps the row
 	// rather than failing on the state its own earlier attempt wrote.
 	SetIndexState(entity, index, specHash string, ready bool) error
+	// SetIndexBuildMark records the opaque mark under which every index of
+	// every entity in this workspace is built and ready (see
+	// Adapter.ListStaleIndexWorkspaceIDs). The mark is compared for equality
+	// and nothing else; adapters must store and return it verbatim.
+	//
+	// It UPDATES an existing workspace and creates nothing: a workspace with no
+	// persisted state has no rows to index, so marking one is a no-op rather
+	// than the registration WithWriteTx is forbidden to perform. It gains its
+	// mark from the first pass after its first real write.
+	SetIndexBuildMark(mark string) error
 }
 
 // IndexEntry is one position a row occupies in one secondary index.

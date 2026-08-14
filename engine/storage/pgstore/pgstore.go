@@ -107,6 +107,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -429,6 +430,126 @@ func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
 func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
 	rows, err := pool.Query(ctx,
 		`SELECT workspace_id FROM workspaces WHERE namespace = $1 ORDER BY workspace_id`, s.ns)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListCollectableWorkspaceIDs answers "which workspaces hold something this
+// pass would reclaim" as a single query: the workspace scan is in primary-key
+// order, and every candidate table is reached through its _gc index on
+// (namespace, workspace_id, updated_at) — correlated per workspace or hashed
+// once, whichever the planner costs lower. Either way a workspace with nothing
+// collectable costs index reads and no transaction, where a pass without this
+// took the workspace's advisory lock and ran six DELETEs to learn the same
+// thing.
+//
+// The entity purges are the exception. Live rows of an aging entity are found
+// on rows_by_entity_version's (namespace, workspace_id, entity) prefix with
+// updated_at left as a filter, so a workspace whose entity has no expired row
+// reads that entity's entries to say so — the same range PurgeEntityRows walks
+// to delete them, read instead of written.
+//
+// On the primary rather than the replica, unlike the other two workspace-list
+// queries: a lagging replica would keep returning workspaces a pass has just
+// collected, and each of those costs the write transaction this query exists to
+// avoid. Its cost is one query a minute, so there is nothing to offload.
+func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
+	}
+	where, args := collectableWhere(s.ns, after, cutoffs)
+	args = append(args, int64(limit))
+	rows, err := s.pool.Query(ctx,
+		fmt.Sprintf(`SELECT w.workspace_id FROM workspaces w WHERE %s
+		 ORDER BY w.workspace_id LIMIT $%d`, where, len(args)), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// collectableWhere builds ListCollectableWorkspaceIDs' predicate, numbering
+// placeholders from $1 (namespace) and $2 (after).
+//
+// A zero cutoff drops its probe rather than comparing against what UnixMilli()
+// makes of it — the same distinction purgeWhere draws, and here it is the
+// difference between "keep this kind forever" and "collect all of it".
+func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []any) {
+	args := []any{ns, after}
+	next := func(v any) string {
+		args = append(args, v)
+		return fmt.Sprintf("$%d", len(args))
+	}
+	var probes []string
+	exists := func(body string) { probes = append(probes, "EXISTS (SELECT 1 FROM "+body+")") }
+	scoped := func(table string) string {
+		return table + " t WHERE t.namespace = w.namespace AND t.workspace_id = w.workspace_id"
+	}
+	if !cutoffs.Tombstones.IsZero() {
+		at := cutoffs.Tombstones.UnixMilli()
+		exists(scoped("rows") + " AND t.deleted AND t.updated_at < " + next(at))
+		exists(scoped("clients") + " AND t.updated_at < " + next(at))
+		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+	}
+	if !cutoffs.IdempotencyKeys.IsZero() {
+		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
+	}
+	if !cutoffs.FieldDeltas.IsZero() {
+		exists(scoped("field_deltas") + " AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
+	}
+	for _, e := range cutoffs.Entities {
+		if e.Before.IsZero() {
+			continue
+		}
+		exists(scoped("rows") + " AND NOT t.deleted AND t.entity = " + next(e.Entity) +
+			" AND t.updated_at < " + next(e.Before.UnixMilli()))
+	}
+	where := "w.namespace = $1 AND w.workspace_id > $2"
+	if len(probes) == 0 {
+		// A pass that would collect nothing has no workspaces to visit. Said
+		// here rather than left to an empty OR, which reads as TRUE and would
+		// return every workspace to a pass with nothing to do.
+		return where + " AND FALSE", args
+	}
+	return where + " AND (" + strings.Join(probes, " OR ") + ")", args
+}
+
+// ListStaleIndexWorkspaceIDs scans the workspaces table and compares one
+// column. There is no index for it — a btree cannot serve `<>` — and none is
+// wanted: the scan is one row per workspace, which is what replaces the point
+// read per (workspace × entity × index) the pass did to learn the same thing.
+//
+// On the primary, for ListCollectableWorkspaceIDs' reason: a lagging replica
+// would re-select workspaces whose mark is already written, and each of those
+// costs a lease and a write transaction.
+func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT workspace_id FROM workspaces
+		 WHERE namespace = $1 AND workspace_id > $2 AND index_build_mark <> $3
+		 ORDER BY workspace_id LIMIT $4`, s.ns, after, mark, int64(limit))
 	if err != nil {
 		return nil, err
 	}

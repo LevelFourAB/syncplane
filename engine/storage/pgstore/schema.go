@@ -55,6 +55,13 @@ var migrations = []migration{
 	// backfills the three steps above, all of which are additive.
 	{additive: true, sql: fixed(
 		`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS additive BOOLEAN NOT NULL DEFAULT TRUE;`)},
+	// 5: the index-build mark — the opaque fingerprint of the index
+	// declarations a workspace's entries are fully built under (see
+	// ListStaleIndexWorkspaceIDs). The empty default is "never built", which is
+	// what makes every workspace in an upgraded database stale to the first
+	// pass and marked by it.
+	{additive: true, sql: fixed(
+		`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT COLLATE "C" NOT NULL DEFAULT '';`)},
 }
 
 // migration is one step of the ledger.

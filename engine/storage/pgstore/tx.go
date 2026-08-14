@@ -687,6 +687,19 @@ func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
 	return specHash, ready, err
 }
 
+// SetIndexBuildMark updates the workspace row and never calls register: the
+// mark says "this workspace's indexes are built", which is vacuously true of a
+// workspace that holds nothing, and registering one here would let a
+// BuildIndexes call on an arbitrary id mint a workspace every later pass
+// iterates.
+func (t *pgTx) SetIndexBuildMark(mark string) error {
+	_, err := t.tx.Exec(t.ctx,
+		`UPDATE workspaces SET index_build_mark = $3 WHERE namespace = $1 AND workspace_id = $2`,
+		t.ns, t.ws, mark,
+	)
+	return err
+}
+
 func (t *pgTx) SetIndexState(entity, index, specHash string, ready bool) error {
 	if err := t.register(); err != nil {
 		return err

@@ -156,11 +156,14 @@ this is the part an implementer must not get wrong.
   window takes the first `limit` rows, so two rows sharing a version must order
   here exactly as the engine's own comparator orders them, or the window's
   contents depend on where a page happened to end.
+- **`SetIndexBuildMark`** records an opaque string on the workspace saying which
+  index declarations its entries are fully built under. Compare it for equality
+  and store it verbatim; the engine derives it from every declared index's
+  fingerprint. It **updates and never inserts** — a workspace with no persisted
+  state has nothing to index, and creating one here would break lazy
+  registration.
 - **`ListPendingWorkspaceIDs`** answers "which workspaces owe this consumer
-  work", paged by workspace id from an exclusive cursor. It is the one
-  cross-workspace read in the interface, and it exists so that a background
-  consumer's idle cost is one query rather than a read transaction per
-  workspace. Three rules:
+  work", paged by workspace id from an exclusive cursor. Three rules:
 
   - **It may be optimistic, never short.** Listing a workspace whose pending
     changes the consumer filters out costs a wasted pass; omitting one whose
@@ -175,6 +178,24 @@ this is the part an implementer must not get wrong.
 
   An adapter with a cheaper answer (a dirty set maintained on write) may
   substitute one, as long as it stays complete.
+
+- **`ListCollectableWorkspaceIDs`** answers "which workspaces hold something a
+  GC pass at these cutoffs would reclaim", paged the same way. The cutoffs
+  arrive as absolute timestamps, one per kind the pass collects, plus the
+  entities it purges wholesale by age. **A zero timestamp selects nothing of
+  its kind** — that is how unbounded retention reaches an adapter, and reading
+  it as an epoch timestamp would collect everything instead.
+
+- **`ListStaleIndexWorkspaceIDs`** answers "which workspaces are not built under
+  this mark". A workspace that has never been marked differs from every mark, so
+  a fresh one is always returned.
+
+These three are the interface's **work queries**, and they follow the same rules:
+paged by workspace id from an exclusive cursor, a non-positive limit is an error
+rather than "unlimited", and the answer may be optimistic but never short. They
+exist so a deployment's maintenance floor scales with the work waiting rather
+than with the number of workspaces that exist — an adapter answering one by
+iterating workspaces itself has implemented the signature and not the point.
 
 ## Conformance
 

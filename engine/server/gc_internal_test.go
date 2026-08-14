@@ -27,6 +27,34 @@ type fakeGCStore struct {
 func (f *fakeGCStore) ListWorkspaceIDs(context.Context) ([]string, error) { return f.ids, nil }
 func (f *fakeGCStore) Close() error                                       { return nil }
 
+// The background passes reach every workspace this fake holds, so both work
+// queries answer the whole list. Paging it for real is what lets a test assert
+// that a pass covers more workspaces than one page carries.
+func (f *fakeGCStore) ListCollectableWorkspaceIDs(_ context.Context, _ storage.GCCutoffs, after string, limit int) ([]string, error) {
+	return pageIDs(f.ids, after, limit), nil
+}
+
+func (f *fakeGCStore) ListStaleIndexWorkspaceIDs(_ context.Context, _, after string, limit int) ([]string, error) {
+	return pageIDs(f.ids, after, limit), nil
+}
+
+// pageIDs is the paging every work query owes its caller: ids strictly after
+// `after`, in order, at most limit of them. ids is assumed sorted, as an
+// adapter's ORDER BY makes it.
+func pageIDs(ids []string, after string, limit int) []string {
+	var out []string
+	for _, id := range ids {
+		if id <= after {
+			continue
+		}
+		if len(out) == limit {
+			break
+		}
+		out = append(out, id)
+	}
+	return out
+}
+
 // GC sweeps every workspace, not a consumer's pending ones, so this fake never
 // answers it.
 func (f *fakeGCStore) ListPendingWorkspaceIDs(context.Context, string, string, int) ([]string, error) {
@@ -204,6 +232,83 @@ func TestCollectGarbageKeepsOneTransactionWithoutABacklog(t *testing.T) {
 	}
 	if store.writes != 1 {
 		t.Fatalf("write transactions = %d, want 1", store.writes)
+	}
+}
+
+// The whole point of the work query: a workspace with nothing collectable must
+// cost the pass nothing — not the write transaction that would find nothing,
+// and not even the lease probe that precedes it. Multiplied by workspace count
+// and node count, that difference is the maintenance floor of an idle
+// deployment.
+func TestCollectAllGarbageVisitsOnlyCollectableWorkspaces(t *testing.T) {
+	ctx := context.Background()
+	base, err := sqlitestore.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer func() { _ = base.Close() }()
+	store := &countingStore{Adapter: base}
+	locker := &fakeLocker{}
+	s, err := New(store, WithGC(time.Hour, 0), WithLeases(locker))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	// idle holds one live row and nothing else; collectable also holds a
+	// tombstone old enough for this pass's retention.
+	if err := store.WithWriteTx(ctx, "idle", func(tx storage.WriteTx) error {
+		return tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})
+	}); err != nil {
+		t.Fatalf("seeding idle: %v", err)
+	}
+	if err := store.WithWriteTx(ctx, "collectable", func(tx storage.WriteTx) error {
+		if err := tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{}); err != nil {
+			return err
+		}
+		return tx.DeleteRow("widget", "k", 2, storage.Actor{})
+	}); err != nil {
+		t.Fatalf("seeding collectable: %v", err)
+	}
+
+	store.writes, locker.tried = 0, nil
+	// A retention of an hour keeps the tombstone just written, so the first
+	// pass has nothing to do in either workspace.
+	if err := s.collectAllGarbage(ctx); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if store.writes != 0 || len(locker.tried) != 0 {
+		t.Fatalf("a pass with nothing due must not touch a workspace: writes = %d, leases = %v",
+			store.writes, locker.tried)
+	}
+
+	// Widen the retention past the tombstone and only that workspace is due.
+	s.gc.retention = 0
+	store.writes, locker.tried = 0, nil
+	if err := s.collectAllGarbage(ctx); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if want := []string{lockerKey(leaseRoleGC, "collectable")}; !equal(locker.tried, want) {
+		t.Fatalf("leases probed = %v, want %v", locker.tried, want)
+	}
+	if store.writes != 1 {
+		t.Fatalf("write transactions = %d, want 1 — only the collectable workspace", store.writes)
+	}
+}
+
+// A deployment larger than one page must still be covered in full, which is
+// what makes the page a memory bound rather than a cap on the pass.
+func TestCollectAllGarbagePagesPastOnePage(t *testing.T) {
+	ids := make([]string, maintenancePage+3)
+	for i := range ids {
+		ids[i] = fmt.Sprintf("ws%04d", i)
+	}
+	store := &fakeGCStore{ids: ids}
+	s := &Server{store: store, leases: lease.NewLocal(), gc: &gcLoop{retention: time.Hour, configured: true}}
+
+	if err := s.collectAllGarbage(context.Background()); err != nil {
+		t.Fatalf("collect: %v", err)
+	}
+	if !equal(store.collected, ids) {
+		t.Fatalf("collected %d workspaces, want all %d", len(store.collected), len(ids))
 	}
 }
 

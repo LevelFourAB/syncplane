@@ -293,6 +293,12 @@ var migrations = []string{
 		written_at   INTEGER NOT NULL,
 		PRIMARY KEY (namespace, workspace_id, id, gen)
 	);`,
+	// The index-build mark: the opaque fingerprint of the index declarations a
+	// workspace's entries are fully built under (see
+	// ListStaleIndexWorkspaceIDs). Empty is "never built", which is what the
+	// backfill leaves behind and what makes every existing workspace stale to
+	// the first pass after the upgrade.
+	`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT NOT NULL DEFAULT '';`,
 }
 
 // Store implements storage.Adapter. Stores derived via Namespace share the
@@ -759,6 +765,119 @@ func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
 		ids = append(ids, id)
 	}
 	return ids, rows.Err()
+}
+
+// ListCollectableWorkspaceIDs answers "which workspaces hold something this
+// pass would reclaim" as a single query: the workspace scan is in primary-key
+// order, and each row probes the _gc indexes of the four collectable tables on
+// their own (namespace, workspace_id, updated_at) prefix. Each probe stops at
+// the first match, so a workspace with nothing collectable costs four index
+// descents and no transaction at all.
+//
+// The entity purges are the exception. Live rows of an aging entity are found
+// on rows_by_entity_version's (namespace, workspace_id, entity) prefix with
+// updated_at left as a filter, so a workspace whose entity has no expired row
+// reads that entity's entries to say so — the same range PurgeEntityRows walks
+// to delete them, read instead of written.
+func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
+	}
+	where, args := collectableWhere(s.ns, after, cutoffs)
+	args = append(args, limit)
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT w.workspace_id FROM workspaces w WHERE `+where+
+			` ORDER BY w.workspace_id LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListStaleIndexWorkspaceIDs scans the workspaces table and compares one
+// column. There is no index for it — a btree cannot serve `<>` — and none is
+// wanted: the scan is one row per workspace, which is what replaces the point
+// read per (workspace × entity × index) the pass did to learn the same thing.
+func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
+	}
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT workspace_id FROM workspaces
+		 WHERE namespace = ? AND workspace_id > ? AND index_build_mark <> ?
+		 ORDER BY workspace_id LIMIT ?`, s.ns, after, mark, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// collectableWhere builds ListCollectableWorkspaceIDs' predicate.
+//
+// The boolean columns are written `= 1` and `= 0` rather than as truth values
+// because SQLite matches a partial index by a syntactic implication check: only
+// the literal form the index was declared with (rows_gc's `WHERE deleted = 1`)
+// makes the probe an index descent instead of a scan of the workspace's rows.
+//
+// A zero cutoff drops its probe rather than comparing against what UnixMilli()
+// makes of it — the same distinction purgeWhere draws, and here it is the
+// difference between "keep this kind forever" and "collect all of it".
+func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []any) {
+	args := []any{ns, after}
+	next := func(v any) string {
+		args = append(args, v)
+		return "?"
+	}
+	var probes []string
+	exists := func(body string) { probes = append(probes, "EXISTS (SELECT 1 FROM "+body+")") }
+	scoped := func(table string) string {
+		return table + " t WHERE t.namespace = w.namespace AND t.workspace_id = w.workspace_id"
+	}
+	if !cutoffs.Tombstones.IsZero() {
+		at := cutoffs.Tombstones.UnixMilli()
+		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
+		exists(scoped("clients") + " AND t.updated_at < " + next(at))
+		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+	}
+	if !cutoffs.IdempotencyKeys.IsZero() {
+		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
+	}
+	if !cutoffs.FieldDeltas.IsZero() {
+		exists(scoped("field_deltas") + " AND t.updated_at < " + next(cutoffs.FieldDeltas.UnixMilli()))
+	}
+	for _, e := range cutoffs.Entities {
+		if e.Before.IsZero() {
+			continue
+		}
+		exists(scoped("rows") + " AND t.deleted = 0 AND t.entity = " + next(e.Entity) +
+			" AND t.updated_at < " + next(e.Before.UnixMilli()))
+	}
+	where := "w.namespace = ? AND w.workspace_id > ?"
+	if len(probes) == 0 {
+		// A pass that would collect nothing has no workspaces to visit. Said
+		// here rather than left to an empty OR, which reads as TRUE and would
+		// return every workspace to a pass with nothing to do.
+		return where + " AND 1 = 0", args
+	}
+	return where + " AND (" + strings.Join(probes, " OR ") + ")", args
 }
 
 // ListPendingWorkspaceIDs answers "which workspaces owe this consumer work" as
@@ -1457,6 +1576,19 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 		 ON CONFLICT (namespace, workspace_id, entity, idx)
 		 DO UPDATE SET spec_hash = excluded.spec_hash, ready = excluded.ready`,
 		t.ns, t.ws, entity, index, specHash, boolToInt(ready),
+	)
+	return err
+}
+
+// SetIndexBuildMark updates the workspace row and never calls register: the
+// mark says "this workspace's indexes are built", which is vacuously true of a
+// workspace that holds nothing, and registering one here would let a
+// BuildIndexes call on an arbitrary id mint a workspace every later pass
+// iterates.
+func (t *sqliteTx) SetIndexBuildMark(mark string) error {
+	_, err := t.tx.Exec(
+		`UPDATE workspaces SET index_build_mark = ? WHERE namespace = ? AND workspace_id = ?`,
+		mark, t.ns, t.ws,
 	)
 	return err
 }
