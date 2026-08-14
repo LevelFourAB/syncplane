@@ -62,6 +62,18 @@ var migrations = []migration{
 	// pass and marked by it.
 	{additive: true, sql: fixed(
 		`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT COLLATE "C" NOT NULL DEFAULT '';`)},
+	// 6: the text-compaction mark — how far the sweep has considered rows in
+	// ScanChanges order, and the minPurged threshold it did so under (see
+	// ListCompactableWorkspaceIDs). The zero default is "never swept", so the
+	// first pass after the upgrade starts every workspace from the beginning,
+	// which is where compaction started on every pass before the sweep existed.
+	{additive: true, sql: fixed(`
+	ALTER TABLE workspaces
+		ADD COLUMN text_compact_seq         BIGINT NOT NULL DEFAULT 0,
+		ADD COLUMN text_compact_entity      TEXT COLLATE "C" NOT NULL DEFAULT '',
+		ADD COLUMN text_compact_key         TEXT COLLATE "C" NOT NULL DEFAULT '',
+		ADD COLUMN text_compact_min_purged  INTEGER NOT NULL DEFAULT 0;
+	`)},
 }
 
 // migration is one step of the ledger.

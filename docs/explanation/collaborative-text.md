@@ -304,8 +304,8 @@ policy is not recorded, so restored marks come back `ExpandNone`.
 
 A document otherwise keeps one item per character ever typed, and one mark
 operation per formatting action ever taken. `server.WithTextCompaction(minPurged)`
-makes the GC pass purge what the document can no longer need and record the
-document's version vector as that field's **compaction floor**.
+runs a background sweep that purges what the document can no longer need and
+records the document's version vector as that field's **compaction floor**.
 
 Two kinds of state go. **Tombstones** that are deleted, childless and not
 anchored by a surviving mark: a run that was typed and then deleted collapses
@@ -335,6 +335,15 @@ sequence the delta log has been pruned through
 able to send such a reader a cheap delta. The rewrite lands at a fresh sequence,
 so every client re-fetches the field once, and the delta log is gap-marked there
 so nobody folds across a purge.
+
+That horizon is also what the sweep is paced by. Each pass takes the window
+between where the last one stopped and where the prune has since reached, which
+is exactly the set of rows that became quiet in between — so the sweep costs
+what has been edited rather than what is stored, and a workspace whose documents
+have gone quiet stops being visited. It runs apart from garbage collection for
+the same reason it is bounded at all: GC's collectors are deletes over indexed
+ranges, while this scans, decodes and rewrites rows, and one transaction holding
+both would make every writer wait on the expensive half.
 
 The floor is what makes the purge safe. An incoming write carrying an id the row
 lacks, at an id the floor covers, can only be state from before the purge —

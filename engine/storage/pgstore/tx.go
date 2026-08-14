@@ -487,13 +487,24 @@ func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, err
 	return int(tag.RowsAffected()), nil
 }
 
-func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
+func (t *pgTx) FieldDeltaHorizon() (uint64, error) {
 	var horizon int64
 	err := t.tx.QueryRow(t.ctx,
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws,
 	).Scan(&horizon)
-	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+	if errors.Is(err, pgx.ErrNoRows) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	return uint64(horizon), nil
+}
+
+func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
+	horizon, err := t.FieldDeltaHorizon()
+	if err != nil {
 		return nil, false, err
 	}
 	// The span starts where the caller's knowledge ends; anything pruned at or
@@ -698,6 +709,39 @@ func (t *pgTx) SetIndexBuildMark(mark string) error {
 		t.ns, t.ws, mark,
 	)
 	return err
+}
+
+// SetTextCompactMark updates the workspace row and never calls register, for
+// SetIndexBuildMark's reason: a workspace holding no rows has no text to
+// compact, and a sweep must not mint one.
+func (t *pgTx) SetTextCompactMark(mark storage.TextCompactMark) error {
+	_, err := t.tx.Exec(t.ctx,
+		`UPDATE workspaces
+		    SET text_compact_seq = $3, text_compact_entity = $4, text_compact_key = $5,
+		        text_compact_min_purged = $6
+		  WHERE namespace = $1 AND workspace_id = $2`,
+		t.ns, t.ws, int64(mark.Seq), mark.Entity, mark.Key, int32(mark.MinPurged),
+	)
+	return err
+}
+
+func (t *pgTx) TextCompactMark() (storage.TextCompactMark, error) {
+	var m storage.TextCompactMark
+	var seq int64
+	var minPurged int32
+	err := t.tx.QueryRow(t.ctx,
+		`SELECT text_compact_seq, text_compact_entity, text_compact_key, text_compact_min_purged
+		   FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
+		t.ns, t.ws,
+	).Scan(&seq, &m.Entity, &m.Key, &minPurged)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return storage.TextCompactMark{}, nil
+	}
+	if err != nil {
+		return storage.TextCompactMark{}, err
+	}
+	m.Seq, m.MinPurged = uint64(seq), int(minPurged)
+	return m, nil
 }
 
 func (t *pgTx) SetIndexState(entity, index, specHash string, ready bool) error {

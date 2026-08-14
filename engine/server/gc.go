@@ -20,10 +20,6 @@ type gcLoop struct {
 	// textRetention bounds the collaborative-text delta log; see
 	// WithTextDeltaRetention. Always clamped to retention.
 	textRetention time.Duration
-	// textCompaction is the minimum number of items a text field must give up
-	// before the pass rewrites its row; <= 0 disables compaction. See
-	// WithTextCompaction.
-	textCompaction int
 	// keyRetention is how long claimed idempotency keys are kept; see
 	// WithIdempotencyRetention. Independent of retention — it is measured
 	// against callers' retry windows, not clients' offline windows.
@@ -229,12 +225,6 @@ func (g *gcLoop) textDeltaCutoff(now time.Time) time.Time {
 // query takes them. CollectGarbage derives its own thresholds from the same
 // value, so what selects a workspace and what the pass then collects cannot
 // drift apart.
-//
-// One collector is missing from it, deliberately. Text compaction (compactText)
-// has no cutoff of its own: it rewrites rows the delta prune has already
-// quietened, so it rides whichever pass the FieldDeltas threshold brings about
-// rather than selecting a workspace itself. A probe for it would match every
-// workspace holding a row below its delta horizon, which is nearly all of them.
 func (g *gcLoop) cutoffs(now time.Time) storage.GCCutoffs {
 	c := storage.GCCutoffs{
 		Tombstones:      now.Add(-g.retention),
@@ -324,12 +314,12 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	// the catalog would make them immortal.
 	historyCutoff, historyExpires := s.gc.historyCutoff(now)
 	var horizon, deltaHorizon uint64
-	var idleRemoved, keysRemoved, compacted, consumersRemoved, historyRemoved int
+	var idleRemoved, keysRemoved, consumersRemoved, historyRemoved int
 	var historyMore bool
 	if err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		// Re-zero on retry: the closure may run more than once (see the
 		// storage.Adapter write-closure contract).
-		horizon, deltaHorizon, idleRemoved, keysRemoved, compacted, consumersRemoved = 0, 0, 0, 0, 0, 0
+		horizon, deltaHorizon, idleRemoved, keysRemoved, consumersRemoved = 0, 0, 0, 0, 0
 		historyRemoved, historyMore = 0, false
 		h, err := tx.CollectTombstones(cutoff)
 		if err != nil {
@@ -367,10 +357,7 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 				return err
 			}
 		}
-		// Compaction runs last, on rows the prune just declared quiet (see
-		// compact.go); it allocates a sequence only if it rewrites something.
-		compacted, err = s.compactText(tx, deltaHorizon)
-		return err
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -394,7 +381,6 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	}{
 		{"idle_clients", idleRemoved},
 		{"idempotency_keys", keysRemoved},
-		{"text_rows", compacted},
 		{"history_records", historyRemoved},
 		{"stranded_consumers", consumersRemoved},
 	} {
@@ -420,7 +406,6 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		slog.Uint64("text_delta_horizon", deltaHorizon),
 		slog.Int("idle_clients_removed", idleRemoved),
 		slog.Int("idempotency_keys_removed", keysRemoved),
-		slog.Int("text_rows_compacted", compacted),
 		slog.Int("history_records_removed", historyRemoved),
 		slog.Int("consumers_removed", consumersRemoved),
 	)

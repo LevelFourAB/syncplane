@@ -170,10 +170,11 @@ and `points()`, the zero-width marks with their current positions.
 ## Bounding growth on the server
 
 A document otherwise keeps one item per character ever typed and one mark
-operation per formatting action. `server.WithTextCompaction(minPurged)` makes
-the GC pass purge the tombstones and mark operations a document can no longer
-need — including a pending format and the unmark that cancelled it, which
-reclaim as a pair.
+operation per formatting action. `server.WithTextCompaction(minPurged)` runs a
+background sweep that purges the tombstones and mark operations a document can
+no longer need — including a pending format and the unmark that cancelled it,
+which reclaim as a pair. It needs `WithGC` alongside it: the sweep only touches
+rows the delta prune has already quietened.
 
 It is **off by default because it is the one place the engine can drop a user's
 work**: a client editing on top of state the purge dropped is asked to redo its

@@ -317,7 +317,8 @@ share the file. The storage interface has always permitted the concurrency, and
 nodes share the database.
 
 **Background work dedups by lease, and only by lease.** Each GC pass, index
-build and effects drain takes an advisory per-workspace lease (`pgstore` backs
+build, text-compaction sweep and effects drain takes an advisory per-workspace
+lease (`pgstore` backs
 it with advisory locks, so it comes free with the store), which makes nodes
 divide the sweeps and makes single-fire the common case for effects. It is
 deliberately not fencing: a lease can vanish with a dropped connection and its

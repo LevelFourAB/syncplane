@@ -11,6 +11,7 @@ import (
 const (
 	leaseRoleGC      = "gc"
 	leaseRoleIndexes = "indexes"
+	leaseRoleCompact = "compact"
 )
 
 // tryLease takes role's lease on a workspace for one background pass,

@@ -200,13 +200,16 @@ primary). The fallback share is read load landing back on the primary — see
 
 ### Background maintenance
 
-| Instrument                       | Type      | Unit          | Attributes                   |
-| -------------------------------- | --------- | ------------- | ---------------------------- |
-| `syncplane.gc.duration`          | histogram | `s`           | `outcome`                    |
-| `syncplane.gc.workspaces`        | counter   | `{workspace}` | `outcome`                    |
-| `syncplane.gc.collected`         | counter   | `{row}`       | `gc_kind`                    |
-| `syncplane.index.build.duration` | histogram | `s`           | `entity`, `index`, `outcome` |
-| `syncplane.index.build.rows`     | counter   | `{row}`       | `entity`, `index`            |
+| Instrument                          | Type      | Unit          | Attributes                   |
+| ----------------------------------- | --------- | ------------- | ---------------------------- |
+| `syncplane.gc.duration`             | histogram | `s`           | `outcome`                    |
+| `syncplane.gc.workspaces`           | counter   | `{workspace}` | `outcome`                    |
+| `syncplane.gc.collected`            | counter   | `{row}`       | `gc_kind`                    |
+| `syncplane.index.build.duration`    | histogram | `s`           | `entity`, `index`, `outcome` |
+| `syncplane.index.build.rows`        | counter   | `{row}`       | `entity`, `index`            |
+| `syncplane.text.compact.duration`   | histogram | `s`           | `outcome`                    |
+| `syncplane.text.compact.workspaces` | counter   | `{workspace}` | `outcome`                    |
+| `syncplane.text.compact.rows`       | counter   | `{row}`       | —                            |
 
 A GC pass collects per-workspace failures and carries on, so `gc.workspaces`
 with `outcome=error` is where one persistently broken workspace shows up —
@@ -219,14 +222,22 @@ for. A rate that tracks the total workspace count instead means every pass is
 finding work everywhere, which is the shape of a retention set shorter than the
 write rate.
 
-`gc_kind` is `idle_clients`, `idempotency_keys`, `text_rows`, `history_records`
-or `stranded_consumers`. **Alert on `stranded_consumers`**: an effect consumer
+`gc_kind` is `idle_clients`, `idempotency_keys`, `history_records` or
+`stranded_consumers`. **Alert on `stranded_consumers`**: an effect consumer
 collected below the horizon stopped reacting to writes long enough to be given
 up on, and what it missed cannot be recovered.
 
 Until an index is built, reads that would use it scan instead — so
 `index.build.*` is the explanation for a query latency regression no query-side
 metric can give. `outcome=skipped` means the index was already ready.
+
+`text.compact.*` covers the collaborative-text sweep, which is emitted only
+where `WithTextCompaction` is on. It reads like the GC pass: `workspaces`
+counts those the sweep **visited**, which is those whose delta horizon has moved
+since the last pass, and `outcome=skipped` is one another node held the lease
+for. `text.compact.rows` is worth watching alongside pull volume rather than on
+its own — every compacted row lands at a fresh sequence, so each one is a field
+every client re-fetches once.
 
 ### Effects
 

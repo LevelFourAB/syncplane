@@ -190,7 +190,14 @@ this is the part an implementer must not get wrong.
   this mark". A workspace that has never been marked differs from every mark, so
   a fresh one is always returned.
 
-These three are the interface's **work queries**, and they follow the same rules:
+- **`ListCompactableWorkspaceIDs`** answers "which workspaces have text the
+  compaction sweep has not considered". A workspace qualifies while its recorded
+  `TextCompactMark` sits below the field-delta horizon — including a mark AT the
+  horizon that still names an entity, since that is a sub-position inside a group
+  with rows after it — or when the mark was recorded under a **higher**
+  `minPurged` than the one asked for, which is the threshold being lowered.
+
+These four are the interface's **work queries**, and they follow the same rules:
 paged by workspace id from an exclusive cursor, a non-positive limit is an error
 rather than "unlimited", and the answer may be optimistic but never short. They
 exist so a deployment's maintenance floor scales with the work waiting rather

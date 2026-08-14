@@ -49,8 +49,9 @@
 //     expired context fails without committing — the engine never observes a
 //     partial commit from a cancelled write.
 //   - The collaborative-text delta log (PutFieldDelta, FieldDeltas,
-//     PruneFieldDeltas) is an append-only side table the pull path reads over a
-//     sequence span. It exists only to make pulls smaller, so an adapter may
+//     PruneFieldDeltas, FieldDeltaHorizon) is an append-only side table the
+//     pull path reads over a sequence span. It exists only to make pulls
+//     smaller, so an adapter may
 //     always report a span incomplete and lose nothing but wire size; reporting
 //     an under-covered span as COMPLETE is the one failure that corrupts
 //     documents.
@@ -81,12 +82,13 @@
 //     outside a workspace transaction, so that finding the workspaces a
 //     consumer owes work costs one query rather than one transaction each.
 //   - Work queries (ListPendingWorkspaceIDs, ListCollectableWorkspaceIDs,
-//     ListStaleIndexWorkspaceIDs) answer "which workspaces owe this background
-//     pass work" from outside any workspace transaction, paged by id. They are
-//     what keeps a deployment's maintenance floor proportional to the work
-//     waiting rather than to the number of workspaces that exist, so an adapter
-//     answering one by iterating workspaces itself has implemented the signature
-//     and not the point. Each may be optimistic and none may be short.
+//     ListStaleIndexWorkspaceIDs, ListCompactableWorkspaceIDs) answer "which
+//     workspaces owe this background pass work" from outside any workspace
+//     transaction, paged by id. They are what keeps a deployment's maintenance
+//     floor proportional to the work waiting rather than to the number of
+//     workspaces that exist, so an adapter answering one by iterating
+//     workspaces itself has implemented the signature and not the point. Each
+//     may be optimistic and none may be short.
 //
 // The conformance suite in storagetest encodes this contract; run it (and
 // storagetest.ConformanceNamespaced for multi-tenant adapters) against any
@@ -346,7 +348,59 @@ type Adapter interface {
 	// reads per interval per node to establish that nothing has changed, against
 	// one indexed query that usually returns nothing.
 	ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error)
+	// ListCompactableWorkspaceIDs returns up to limit ids of workspaces whose
+	// text-compaction sweep has rows left to consider at this minPurged
+	// threshold, ordered by id and starting strictly after `after` ("" from the
+	// start). A limit of zero or less is an error.
+	//
+	// A workspace qualifies when its recorded mark sits below the field-delta
+	// horizon — the sweep has not yet considered every row the delta prune has
+	// quietened, which includes a mark AT the horizon that still names an
+	// entity, since that is a sub-position inside a group with rows after it —
+	// or when the mark was recorded under a HIGHER minPurged than
+	// this one, which is the threshold being lowered: rows the earlier sweep
+	// skipped may clear the new bar, so the workspace is swept again from the
+	// beginning. Raising the threshold selects nothing, because a row skipped
+	// under the old one is skipped under the new one too.
+	//
+	// The horizon only advances while text is being written and pruned, so a
+	// workspace whose documents have gone quiet stops being returned — which is
+	// what keeps this proportional to text still being edited rather than to
+	// text that exists.
+	//
+	// The answer may be OPTIMISTIC — a returned workspace whose remaining rows
+	// all fail the threshold costs one sweep that rewrites nothing — but never
+	// short, on the same terms as the two work queries above.
+	ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error)
 	Close() error
+}
+
+// TextCompactMark is how far a workspace's text-compaction sweep has got: the
+// (Seq, Entity, Key) position in ScanChanges order it has considered rows
+// through, and the minPurged threshold it did so under.
+//
+// The position is a full sub-position rather than a bare sequence because the
+// sweep pages by it. A mutation writing more rows than one batch holds puts
+// several rows at one sequence, and a bare sequence cannot say where the batch
+// split that group: naming the group's own sequence resumes past it and leaves
+// the rest of its rows unconsidered, naming the one below resumes before the
+// rows already swept and never gets past the group. Neither shows up as a
+// failure — the sweep reports success either way.
+//
+// MinPurged is recorded so that lowering the server's threshold re-sweeps
+// workspaces an earlier pass swept under a stricter one. The zero mark is a
+// workspace no sweep has reached.
+type TextCompactMark struct {
+	// Seq, Entity and Key are an exclusive position in the (Version, Entity,
+	// Key) order ScanChanges yields, and resume through it unchanged: an empty
+	// Entity is a clean version boundary, a non-empty one resumes inside a
+	// same-sequence group.
+	Seq    uint64
+	Entity string
+	Key    string
+	// MinPurged is the WithTextCompaction threshold the sweep that recorded this
+	// mark ran under.
+	MinPurged int
 }
 
 // GCCutoffs are the age thresholds one garbage-collection pass applies, as
@@ -550,6 +604,15 @@ type ReadTx interface {
 	// A row with no writes in the span yields (nil, true, nil) — "unchanged",
 	// which is a meaningful answer, not an absence.
 	FieldDeltas(entity, key, field string, afterSeq uint64) (frags [][]byte, complete bool, err error)
+	// FieldDeltaHorizon returns the sequence the delta log has been pruned
+	// through — the value the last PruneFieldDeltas advanced it to, 0 for a
+	// workspace whose log has never been pruned. It never regresses.
+	//
+	// Text compaction reads it to bound what it may rewrite: a row last written
+	// at or below the horizon is one the server has already stopped being able
+	// to send as a cheap delta, which is what makes it safe to compact (see
+	// engine/server's compact.go).
+	FieldDeltaHorizon() (uint64, error)
 	// TextFloor returns the compaction floor recorded for one collaborative-text
 	// field of one row: the encoded version vector the field's document held
 	// when its tombstones were last purged (see engine/text.Compact). Nil for a
@@ -559,6 +622,12 @@ type ReadTx interface {
 	// replica holding pre-compaction state put purged tombstones back. An
 	// adapter must store it as durably as the row itself.
 	TextFloor(entity, key, field string) ([]byte, error)
+	// TextCompactMark returns how far the workspace's text-compaction sweep has
+	// got (see Adapter.ListCompactableWorkspaceIDs). The zero mark means it has
+	// never run, which is both "compaction is off here" and "it has not reached
+	// this workspace yet"; the sweep treats them the same and starts from the
+	// beginning.
+	TextCompactMark() (TextCompactMark, error)
 	// ScanIndex yields the entries one ENTITY holds in one secondary index whose
 	// key falls in [lo, hi), at most limit entries (limit <= 0 means
 	// unlimited). A nil lo starts at the beginning; a nil hi runs to the end.
@@ -797,6 +866,16 @@ type WriteTx interface {
 	// than the registration WithWriteTx is forbidden to perform. It gains its
 	// mark from the first pass after its first real write.
 	SetIndexBuildMark(mark string) error
+	// SetTextCompactMark records how far the text-compaction sweep has got in
+	// this workspace (see Adapter.ListCompactableWorkspaceIDs). The sweep writes
+	// one per batch it commits, so the mark and the rows that batch rewrote
+	// become visible together and an interrupted sweep resumes where it stopped
+	// rather than redoing the workspace.
+	//
+	// It UPDATES an existing workspace and creates nothing, exactly as
+	// SetIndexBuildMark does and for the same reason: a workspace with no
+	// persisted state has no text to compact.
+	SetTextCompactMark(mark TextCompactMark) error
 }
 
 // IndexEntry is one position a row occupies in one secondary index.

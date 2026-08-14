@@ -548,7 +548,11 @@ type Server struct {
 	// index. Always present: index maintenance is not optional, and an index
 	// that is never built is one that never gets used.
 	indexBuild *indexBuildLoop
-	logger     *slog.Logger
+	// compact reclaims collaborative-text tombstones. Always present, and inert
+	// until WithTextCompaction sets a threshold: the sweep is opt-in, but the
+	// loop has to exist for the option to configure.
+	compact *compactLoop
+	logger  *slog.Logger
 	// providers holds the OpenTelemetry providers the options installed (zero
 	// value = the globals, which are no-op until an SDK is installed);
 	// telemetry the instruments and tracer built from them, reached through
@@ -846,6 +850,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		logger:         slog.Default(),
 		textCacheBytes: DefaultTextCacheBytes,
 		indexBuild:     &indexBuildLoop{interval: defaultIndexBuildInterval, batch: defaultIndexBuildBatch},
+		compact:        &compactLoop{interval: defaultTextCompactionInterval, batch: defaultTextCompactionBatch},
 	}
 	for _, opt := range opts {
 		if err := opt(s); err != nil {
@@ -906,6 +911,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		s.gc.start(s)
 	}
 	s.indexBuild.start(s)
+	s.compact.start(s)
 	s.roomSweep = startRoomSweeper(s)
 	return s, nil
 }

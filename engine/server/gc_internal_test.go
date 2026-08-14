@@ -38,6 +38,10 @@ func (f *fakeGCStore) ListStaleIndexWorkspaceIDs(_ context.Context, _, after str
 	return pageIDs(f.ids, after, limit), nil
 }
 
+func (f *fakeGCStore) ListCompactableWorkspaceIDs(_ context.Context, _ int, after string, limit int) ([]string, error) {
+	return pageIDs(f.ids, after, limit), nil
+}
+
 // pageIDs is the paging every work query owes its caller: ids strictly after
 // `after`, in order, at most limit of them. ids is assumed sorted, as an
 // adapter's ORDER BY makes it.

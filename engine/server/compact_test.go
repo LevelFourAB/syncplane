@@ -110,10 +110,15 @@ var _ = Describe("Collaborative-text compaction", func() {
 		return items
 	}
 
+	// GC prunes the delta log and advances the horizon; the compaction sweep
+	// then reclaims below it. Two passes because they are two passes — see
+	// WithTextCompaction.
 	collect := func() {
 		GinkgoHelper()
 		time.Sleep(5 * time.Millisecond)
 		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+		_, err := srv.CompactText(ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
 	}
 
 	// seedTypedKey creates a row holding "hello world" and then deletes
@@ -183,6 +188,8 @@ var _ = Describe("Collaborative-text compaction", func() {
 		fresh := seedTypedKey("w2", 3)
 
 		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+		_, err := srv.CompactText(ctx, ws)
+		Expect(err).NotTo(HaveOccurred())
 
 		Expect(storedBody("w2")).To(Equal(fresh), "w2 is newer than the delta log's prune cutoff")
 		Expect(tombstones(storedBody("w1"))).To(BeZero(),

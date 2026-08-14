@@ -176,6 +176,17 @@ type metrics struct {
 	// window, and fallback_error means the replica is unreachable.
 	replicaReads metric.Int64Counter
 
+	// compactDuration times a whole text-compaction pass over every workspace
+	// the sweep selected, by outcome; compactWorkspaces counts per-workspace
+	// results as gcWorkspaces does, including the skipped ones another node
+	// holds the lease for.
+	compactDuration   metric.Float64Histogram
+	compactWorkspaces metric.Int64Counter
+	// compactRows counts rows whose text the sweep rewrote. A rewrite lands at a
+	// fresh sequence and every client re-fetches the field once, so this is also
+	// the pull traffic compaction costs.
+	compactRows metric.Int64Counter
+
 	// indexBuildDuration times one backfill batch, by outcome.
 	indexBuildDuration metric.Float64Histogram
 	// indexBuildRows counts rows backfilled into a secondary index. Until an
@@ -201,6 +212,9 @@ const (
 	metricGCDuration             = "syncplane.gc.duration"
 	metricGCWorkspaces           = "syncplane.gc.workspaces"
 	metricGCCollected            = "syncplane.gc.collected"
+	metricCompactDuration        = "syncplane.text.compact.duration"
+	metricCompactWorkspaces      = "syncplane.text.compact.workspaces"
+	metricCompactRows            = "syncplane.text.compact.rows"
 	metricReplicaReads           = "syncplane.replica.reads"
 	metricIndexBuildDuration     = "syncplane.index.build.duration"
 	metricIndexBuildRows         = "syncplane.index.build.rows"
@@ -255,6 +269,15 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 			metric.WithUnit("{workspace}")),
 		gcCollected: b.Int64Counter(metricGCCollected,
 			metric.WithDescription("Rows reclaimed by garbage collection, by kind."),
+			metric.WithUnit("{row}")),
+		compactDuration: b.Float64Histogram(metricCompactDuration,
+			metric.WithDescription("Duration of a collaborative-text compaction pass over every selected workspace."),
+			metric.WithUnit("s")),
+		compactWorkspaces: b.Int64Counter(metricCompactWorkspaces,
+			metric.WithDescription("Per-workspace text-compaction results."),
+			metric.WithUnit("{workspace}")),
+		compactRows: b.Int64Counter(metricCompactRows,
+			metric.WithDescription("Rows whose collaborative text was compacted."),
 			metric.WithUnit("{row}")),
 		replicaReads: b.Int64Counter(metricReplicaReads,
 			metric.WithDescription("Reads routed through the read-replica capability, by route."),

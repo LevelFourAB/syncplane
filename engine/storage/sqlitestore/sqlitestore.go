@@ -299,6 +299,15 @@ var migrations = []string{
 	// backfill leaves behind and what makes every existing workspace stale to
 	// the first pass after the upgrade.
 	`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT NOT NULL DEFAULT '';`,
+	// The text-compaction mark: how far the sweep has considered rows in
+	// ScanChanges order, and the minPurged threshold it did so under (see
+	// ListCompactableWorkspaceIDs). Zero is "never swept", so the first pass
+	// after the upgrade starts every workspace from the beginning — which is
+	// what compaction did on every pass before the sweep existed.
+	`ALTER TABLE workspaces ADD COLUMN text_compact_seq INTEGER NOT NULL DEFAULT 0;
+	 ALTER TABLE workspaces ADD COLUMN text_compact_entity TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE workspaces ADD COLUMN text_compact_key TEXT NOT NULL DEFAULT '';
+	 ALTER TABLE workspaces ADD COLUMN text_compact_min_purged INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Store implements storage.Adapter. Stores derived via Namespace share the
@@ -815,6 +824,42 @@ func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after stri
 		`SELECT workspace_id FROM workspaces
 		 WHERE namespace = ? AND workspace_id > ? AND index_build_mark <> ?
 		 ORDER BY workspace_id LIMIT ?`, s.ns, after, mark, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
+// ListCompactableWorkspaceIDs compares two columns of the workspace row and
+// reads nothing else. Whether a row is worth compacting is a question only
+// decoding its text can answer, so the query does not ask it: it asks the
+// cheaper question of whether the sweep has fallen behind the delta prune,
+// which is the one the mark already records.
+//
+// Like ListStaleIndexWorkspaceIDs this scans the workspaces table rather than
+// an index, for the same reason — the predicate compares two columns to each
+// other, which no btree serves — and against the same alternative, which was
+// scanning every text-bearing entity of every workspace to find out.
+func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
+	}
+	rows, err := s.read.QueryContext(ctx,
+		`SELECT workspace_id FROM workspaces
+		 WHERE namespace = ? AND workspace_id > ?
+		   AND (text_compact_seq < field_delta_horizon
+		        OR (text_compact_seq = field_delta_horizon AND text_compact_entity <> '')
+		        OR text_compact_min_purged > ?)
+		 ORDER BY workspace_id LIMIT ?`, s.ns, after, minPurged, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1419,12 +1464,20 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	return int(n), err
 }
 
-func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
+func (t *sqliteTx) FieldDeltaHorizon() (uint64, error) {
 	var horizon uint64
 	err := t.tx.QueryRow(
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&horizon)
-	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return horizon, err
+}
+
+func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte, bool, error) {
+	horizon, err := t.FieldDeltaHorizon()
+	if err != nil {
 		return nil, false, err
 	}
 	// The span starts where the caller's knowledge ends; anything pruned at or
@@ -1591,6 +1644,38 @@ func (t *sqliteTx) SetIndexBuildMark(mark string) error {
 		mark, t.ns, t.ws,
 	)
 	return err
+}
+
+// SetTextCompactMark updates the workspace row and never calls register, for
+// SetIndexBuildMark's reason: a workspace holding no rows has no text to
+// compact, and a sweep must not mint one.
+func (t *sqliteTx) SetTextCompactMark(mark storage.TextCompactMark) error {
+	_, err := t.tx.Exec(
+		`UPDATE workspaces
+		    SET text_compact_seq = ?, text_compact_entity = ?, text_compact_key = ?,
+		        text_compact_min_purged = ?
+		  WHERE namespace = ? AND workspace_id = ?`,
+		int64(mark.Seq), mark.Entity, mark.Key, mark.MinPurged, t.ns, t.ws,
+	)
+	return err
+}
+
+func (t *sqliteTx) TextCompactMark() (storage.TextCompactMark, error) {
+	var m storage.TextCompactMark
+	var seq int64
+	err := t.tx.QueryRow(
+		`SELECT text_compact_seq, text_compact_entity, text_compact_key, text_compact_min_purged
+		   FROM workspaces WHERE namespace = ? AND workspace_id = ?`,
+		t.ns, t.ws,
+	).Scan(&seq, &m.Entity, &m.Key, &m.MinPurged)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storage.TextCompactMark{}, nil
+	}
+	if err != nil {
+		return storage.TextCompactMark{}, err
+	}
+	m.Seq = uint64(seq)
+	return m, nil
 }
 
 func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry) error {

@@ -565,6 +565,43 @@ func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after stri
 	return ids, rows.Err()
 }
 
+// ListCompactableWorkspaceIDs compares two columns of the workspace row and
+// reads nothing else. Whether a row is worth compacting is a question only
+// decoding its text can answer, so the query does not ask it: it asks the
+// cheaper question of whether the sweep has fallen behind the delta prune,
+// which is the one the mark already records.
+//
+// Scanned rather than indexed, like ListStaleIndexWorkspaceIDs: the predicate
+// compares two columns to each other, which no btree serves. On the primary,
+// for the same reason that query is — a lagging replica re-selects workspaces
+// whose mark is already written, and each costs a lease and a write
+// transaction.
+func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
+	}
+	rows, err := s.pool.Query(ctx,
+		`SELECT workspace_id FROM workspaces
+		 WHERE namespace = $1 AND workspace_id > $2
+		   AND (text_compact_seq < field_delta_horizon
+		        OR (text_compact_seq = field_delta_horizon AND text_compact_entity <> '')
+		        OR text_compact_min_purged > $3)
+		 ORDER BY workspace_id LIMIT $4`, s.ns, after, int32(minPurged), int64(limit))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
+}
+
 // ListPendingWorkspaceIDs answers "which workspaces owe this consumer work" as
 // a single indexed query: the workspace scan is in primary-key order, and each
 // row probes consumer_positions on its own primary key prefix (namespace,

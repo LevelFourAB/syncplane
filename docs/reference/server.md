@@ -39,8 +39,8 @@ in dependency order rather than in the order written, so a `WithMerger` may
 name an entity a later `WithEntities` declares.
 
 **Store ownership stays with the caller.** `srv.Close()` stops the engine's
-background work — the GC pass, the index backfill, and the notify-coalescing
-timers, so a shared notifier receives no trailing publish after shutdown. It
+background work — the GC pass, the index backfill, the text-compaction sweep and
+the notify-coalescing timers, so a shared notifier receives no trailing publish after shutdown. It
 does not close what the caller owns: neither the adapter, which may outlive the
 server (and one adapter backs every app a
 [Manager](../how-to/host-multiple-apps.md) hosts), nor a notifier installed
@@ -53,34 +53,35 @@ arbitrary root.
 
 ## Options
 
-| Option                          | Default    | Effect                                                                                                                                                                                                                                                                                                                       |
-| ------------------------------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WithAuthenticator(a)`          | anonymous  | Turns request headers into a `Principal` before every sync RPC.                                                                                                                                                                                                                                                              |
-| `WithPermissions(p)`            | `AllowAll` | Workspace access, write and per-row read policy.                                                                                                                                                                                                                                                                             |
-| `WithLimits(l)`                 | see below  | Request bounds; non-positive fields keep their default.                                                                                                                                                                                                                                                                      |
-| `WithChunkSize(n)`              | 256        | Bootstrap chunk size in rows.                                                                                                                                                                                                                                                                                                |
-| `WithHeartbeat(d)`              | 30s        | `Subscribe` heartbeat; also how often a live stream re-checks access.                                                                                                                                                                                                                                                        |
-| `WithNotifyCoalescing(w)`       | —          | Coalesces commit notifications; 0 disables.                                                                                                                                                                                                                                                                                  |
-| `WithNotifier(n)`               | in-process | Replaces the in-process poke fan-out with one shared across nodes — `pgnotify` ships such an implementation over Postgres `LISTEN`/`NOTIFY`. A replacement should implement `pubsub.Activity` too, or background consumers lose the signal that announces a new workspace and fall back to listing on a timer.               |
-| `WithCursorStateStore(st)`      | adapter    | Where the membership tail of issued cursors lives, so the wire carries a reference instead of restating it. Defaults to a store the adapter provides (both shipped adapters do); `nil` disables the indirection and every cursor inlines its sets. See [Cursor state](#cursor-state).                                        |
-| `WithLeases(l)`                 | adapter    | The `lease.Locker` per-workspace background work dedups through: the GC and index sweeps, and any effects runtime built on the server, skip a workspace whose lease another process holds. Defaults to a locker the adapter provides (both shipped adapters do), falling back to a process-local one. See [Leases](#leases). |
-| `WithGC(retention, interval)`   | —          | Tombstone retention and background pass interval; `interval <= 0` is manual-only.                                                                                                                                                                                                                                            |
-| `WithTextDeltaRetention(d)`     | 1h         | How long the collaborative-text delta log is kept.                                                                                                                                                                                                                                                                           |
-| `WithIdempotencyRetention(d)`   | 24h        | How long claimed `MutateIdempotent` keys are kept.                                                                                                                                                                                                                                                                           |
-| `WithHistoryRetention(d)`       | 90d        | How long field-history records are kept; `HistoryForever` disables time-based expiry. See [Field history](#field-history).                                                                                                                                                                                                   |
-| `WithTextCompaction(minPurged)` | off        | Opt-in purge of unneeded text tombstones and mark ops on the GC pass.                                                                                                                                                                                                                                                        |
-| `WithTextCache(budgetBytes)`    | 8 MiB      | Keeps written text documents decoded between writes; 0 disables.                                                                                                                                                                                                                                                             |
-| `WithSchemaRevision(rev)`       | —          | Advertises an app-defined revision on every frame, push, pull, query and bootstrap.                                                                                                                                                                                                                                          |
-| `WithLogger(l)`                 | —          | An `*slog.Logger`.                                                                                                                                                                                                                                                                                                           |
-| `WithTracerProvider(tp)`        | global     | OpenTelemetry tracer provider; the global one is no-op until an SDK is installed. See [Telemetry](telemetry.md).                                                                                                                                                                                                             |
-| `WithMeterProvider(mp)`         | global     | OpenTelemetry meter provider; same fallback.                                                                                                                                                                                                                                                                                 |
-| `WithEntities(msgs...)`         | —          | Declares syncable entities; repeatable.                                                                                                                                                                                                                                                                                      |
-| `WithMutator(name, args, fn)`   | —          | Declares a server-authoritative named mutation.                                                                                                                                                                                                                                                                              |
-| `WithMerger(proto, path, fn)`   | —          | Declares a merge hook for an opaque field.                                                                                                                                                                                                                                                                                   |
-| `WithHistoryFilter(fn)`         | —          | Admits, rejects or rewrites every field-history record. See [Field history](#field-history).                                                                                                                                                                                                                                 |
-| `WithHistorySession(d)`         | 5m         | How long one row's field-history record stays open to later writes by the same actor; `HistorySessionOff` records every write. See [Field history](#field-history).                                                                                                                                                          |
-| `WithPresenceBus(b)`            | in-process | Fan-out for the ephemeral plane. The default reaches only this process; a multi-node deployment installs a shared one (`engine/presence/pgpresence`). See [Rooms](#rooms).                                                                                                                                                   |
-| `WithRoomAnnounce(d)`           | 5s         | How often a node re-announces the presence records it is responsible for, and so how quickly a session that vanished without saying so disappears — three intervals. See [Rooms](#rooms).                                                                                                                                    |
+| Option                                      | Default      | Effect                                                                                                                                                                                                                                                                                                                                        |
+| ------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WithAuthenticator(a)`                      | anonymous    | Turns request headers into a `Principal` before every sync RPC.                                                                                                                                                                                                                                                                               |
+| `WithPermissions(p)`                        | `AllowAll`   | Workspace access, write and per-row read policy.                                                                                                                                                                                                                                                                                              |
+| `WithLimits(l)`                             | see below    | Request bounds; non-positive fields keep their default.                                                                                                                                                                                                                                                                                       |
+| `WithChunkSize(n)`                          | 256          | Bootstrap chunk size in rows.                                                                                                                                                                                                                                                                                                                 |
+| `WithHeartbeat(d)`                          | 30s          | `Subscribe` heartbeat; also how often a live stream re-checks access.                                                                                                                                                                                                                                                                         |
+| `WithNotifyCoalescing(w)`                   | —            | Coalesces commit notifications; 0 disables.                                                                                                                                                                                                                                                                                                   |
+| `WithNotifier(n)`                           | in-process   | Replaces the in-process poke fan-out with one shared across nodes — `pgnotify` ships such an implementation over Postgres `LISTEN`/`NOTIFY`. A replacement should implement `pubsub.Activity` too, or background consumers lose the signal that announces a new workspace and fall back to listing on a timer.                                |
+| `WithCursorStateStore(st)`                  | adapter      | Where the membership tail of issued cursors lives, so the wire carries a reference instead of restating it. Defaults to a store the adapter provides (both shipped adapters do); `nil` disables the indirection and every cursor inlines its sets. See [Cursor state](#cursor-state).                                                         |
+| `WithLeases(l)`                             | adapter      | The `lease.Locker` per-workspace background work dedups through: the GC, index and text-compaction sweeps, and any effects runtime built on the server, skip a workspace whose lease another process holds. Defaults to a locker the adapter provides (both shipped adapters do), falling back to a process-local one. See [Leases](#leases). |
+| `WithGC(retention, interval)`               | —            | Tombstone retention and background pass interval; `interval <= 0` is manual-only.                                                                                                                                                                                                                                                             |
+| `WithTextDeltaRetention(d)`                 | 1h           | How long the collaborative-text delta log is kept.                                                                                                                                                                                                                                                                                            |
+| `WithIdempotencyRetention(d)`               | 24h          | How long claimed `MutateIdempotent` keys are kept.                                                                                                                                                                                                                                                                                            |
+| `WithHistoryRetention(d)`                   | 90d          | How long field-history records are kept; `HistoryForever` disables time-based expiry. See [Field history](#field-history).                                                                                                                                                                                                                    |
+| `WithTextCompaction(minPurged)`             | off          | Opt-in purge of unneeded text tombstones and mark ops, on a sweep of its own. See [Text compaction](#text-compaction).                                                                                                                                                                                                                        |
+| `WithTextCompactionPacing(interval, batch)` | 5m, 200 rows | How often the compaction sweep looks for newly quiet rows, and how many rows one of its transactions considers.                                                                                                                                                                                                                               |
+| `WithTextCache(budgetBytes)`                | 8 MiB        | Keeps written text documents decoded between writes; 0 disables.                                                                                                                                                                                                                                                                              |
+| `WithSchemaRevision(rev)`                   | —            | Advertises an app-defined revision on every frame, push, pull, query and bootstrap.                                                                                                                                                                                                                                                           |
+| `WithLogger(l)`                             | —            | An `*slog.Logger`.                                                                                                                                                                                                                                                                                                                            |
+| `WithTracerProvider(tp)`                    | global       | OpenTelemetry tracer provider; the global one is no-op until an SDK is installed. See [Telemetry](telemetry.md).                                                                                                                                                                                                                              |
+| `WithMeterProvider(mp)`                     | global       | OpenTelemetry meter provider; same fallback.                                                                                                                                                                                                                                                                                                  |
+| `WithEntities(msgs...)`                     | —            | Declares syncable entities; repeatable.                                                                                                                                                                                                                                                                                                       |
+| `WithMutator(name, args, fn)`               | —            | Declares a server-authoritative named mutation.                                                                                                                                                                                                                                                                                               |
+| `WithMerger(proto, path, fn)`               | —            | Declares a merge hook for an opaque field.                                                                                                                                                                                                                                                                                                    |
+| `WithHistoryFilter(fn)`                     | —            | Admits, rejects or rewrites every field-history record. See [Field history](#field-history).                                                                                                                                                                                                                                                  |
+| `WithHistorySession(d)`                     | 5m           | How long one row's field-history record stays open to later writes by the same actor; `HistorySessionOff` records every write. See [Field history](#field-history).                                                                                                                                                                           |
+| `WithPresenceBus(b)`                        | in-process   | Fan-out for the ephemeral plane. The default reaches only this process; a multi-node deployment installs a shared one (`engine/presence/pgpresence`). See [Rooms](#rooms).                                                                                                                                                                    |
+| `WithRoomAnnounce(d)`                       | 5s           | How often a node re-announces the presence records it is responsible for, and so how quickly a session that vanished without saying so disappears — three intervals. See [Rooms](#rooms).                                                                                                                                                     |
 
 ### Limits
 
@@ -150,9 +151,9 @@ never on message text: the wording here is documentation, not contract.
 
 One GC pass prunes expired tombstones, idle client watermark rows, the
 collaborative-text delta log, claimed trusted-write idempotency keys and
-field-history records, and — when `WithTextCompaction` asks for it — compacts
-quiet collaborative-text documents. `srv.CollectGarbage(ctx, workspaceID)` runs
-it manually.
+field-history records. `srv.CollectGarbage(ctx, workspaceID)` runs it manually.
+Compacting collaborative text is a separate sweep — see
+[Text compaction](#text-compaction).
 
 Keep the tombstone retention comfortably above the longest client offline
 window; a pruned client that returns is re-admitted at whatever mutation id it
@@ -214,6 +215,61 @@ purges them.
 The default is a finite 90 days. `HistoryForever` suits entities whose rows are
 edited by people; on rows machinery rewrites in a loop, the log grows without
 bound for as long as the row lives.
+
+## Text compaction
+
+A collaborative-text field accumulates one item per character ever typed, so a
+document edited over months grows without bound.
+`WithTextCompaction(minPurged)` opts a server into reclaiming the tombstones
+nothing can still refer to; `srv.CompactText(ctx, workspaceID)` runs the sweep
+manually and reports how many rows it rewrote.
+
+```go
+server.WithGC(30*24*time.Hour, time.Hour),
+server.WithTextCompaction(64),
+server.WithTextCompactionPacing(5*time.Minute, 200), // optional
+```
+
+It is a **separate sweep from GC**, on its own interval and its own
+per-workspace lease. The two collect different kinds of thing: GC's collectors
+are deletes over indexed ranges, while compaction scans, decodes and rewrites
+rows. Sharing a transaction would make the cheap half wait behind the expensive
+one, and on an adapter taking a per-workspace lock, so would every writer.
+
+Compaction depends on GC even so, and does nothing without it: it only rewrites
+rows the delta prune has already **quietened** — those whose last write is at or
+below the sequence the text delta log has been pruned through, which is where
+the server has already stopped being able to send a catching-up client a cheap
+delta. With GC on manual, no horizon moves and the background sweep does not
+run.
+
+Each pass sweeps the window between the last pass's position and the current
+horizon, so it reads what has been **edited** rather than what exists: a
+workspace whose documents have gone quiet stops being visited at all. Within a
+window it works in transactions of `batch` rows, resuming from a recorded
+position, so no single transaction holds a workspace's write lock for a full
+entity scan. An interrupted sweep needs no recovery — a rewrite that happens
+twice costs a sequence and nothing else.
+
+Two consequences worth planning for:
+
+- **A rewrite lands at a fresh sequence**, so every client re-fetches that field
+  once. That is the price of the reclaim. A paced sweep spreads those re-fetches
+  over several sequences rather than one.
+- **It is the one thing in the engine that can refuse a client's text write
+  outright.** A client still holding pre-compaction state keeps working until it
+  writes text anchored to something purged; that push is refused with
+  `CodeTextStateStale` and the client re-applies its edit against fresh state.
+
+`minPurged` is how many items a document must give up before its row is worth
+rewriting. **Lowering it re-sweeps every workspace from the beginning**, since
+rows an earlier pass skipped may clear the lower bar; raising it does not,
+because a row skipped under the old threshold is skipped under the higher one
+too.
+
+Enable it for workspaces whose documents are edited over months. Leave it off if
+documents are short-lived — the reclaim buys nothing and the refusal above is
+pure cost. See [the text explanation](../explanation/collaborative-text.md).
 
 ## Registration
 

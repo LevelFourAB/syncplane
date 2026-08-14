@@ -1580,6 +1580,134 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		// The compaction mark is a position in ScanChanges order plus the
+		// threshold the sweep that recorded it ran under. What selects a
+		// workspace is that position sitting below the field-delta horizon: the
+		// prune has quietened rows the sweep has not yet considered.
+		Describe("text compaction mark", func() {
+			compactable := func(minPurged int, after string, limit int) []string {
+				GinkgoHelper()
+				ids, err := store.ListCompactableWorkspaceIDs(ctx, minPurged, after, limit)
+				Expect(err).NotTo(HaveOccurred())
+				return ids
+			}
+			// Puts a row, logs a delta for it and prunes through it, which is
+			// what a workspace with text edited past the retention window looks
+			// like to the sweep.
+			seedQuiet := func(ws string, seq uint64) {
+				GinkgoHelper()
+				write(ws, func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), seq, storage.Actor{})).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", seq, []byte("frag"))).To(Succeed())
+				})
+				write(ws, func(tx storage.WriteTx) {
+					horizon, err := tx.PruneFieldDeltas(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(horizon).To(BeEquivalentTo(seq))
+				})
+			}
+
+			It("reports a workspace whose horizon has moved past its mark", func() {
+				seedQuiet("ws1", 4)
+				Expect(compactable(1, "", 10)).To(Equal([]string{"ws1"}))
+			})
+
+			It("omits a workspace whose log has never been pruned", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				Expect(compactable(1, "", 10)).To(BeEmpty(),
+					"no prune, so no row is quiet and there is nothing to sweep")
+			})
+
+			It("drops a workspace once the mark reaches the horizon", func() {
+				seedQuiet("ws1", 4)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 4, MinPurged: 1})).To(Succeed())
+				})
+				Expect(compactable(1, "", 10)).To(BeEmpty())
+			})
+
+			It("keeps a workspace selected while the mark holds a sub-position", func() {
+				seedQuiet("ws1", 4)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetTextCompactMark(storage.TextCompactMark{
+						Seq: 4, Entity: "widget", Key: "k", MinPurged: 1,
+					})).To(Succeed())
+				})
+				Expect(compactable(1, "", 10)).To(Equal([]string{"ws1"}),
+					"a mark inside a same-sequence group has rows after it, however far the horizon has come")
+			})
+
+			It("re-selects a workspace when the threshold is lowered, but not when it is raised", func() {
+				seedQuiet("ws1", 4)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 4, MinPurged: 10})).To(Succeed())
+				})
+				Expect(compactable(20, "", 10)).To(BeEmpty(),
+					"a row skipped under 10 is skipped under 20 too")
+				Expect(compactable(5, "", 10)).To(Equal([]string{"ws1"}),
+					"a row skipped under 10 may clear 5")
+			})
+
+			It("round-trips the mark, sub-position and threshold", func() {
+				seedQuiet("ws1", 4)
+				want := storage.TextCompactMark{Seq: 3, Entity: "widget", Key: "k", MinPurged: 7}
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetTextCompactMark(want)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.TextCompactMark()).To(Equal(want))
+				})
+			})
+
+			It("reads the zero mark for a workspace no sweep has reached", func() {
+				seedQuiet("ws1", 4)
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.TextCompactMark()).To(Equal(storage.TextCompactMark{}))
+				})
+			})
+
+			It("reports the horizon the prune advanced to", func() {
+				seedQuiet("ws1", 4)
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.FieldDeltaHorizon()).To(BeEquivalentTo(4))
+				})
+			})
+
+			It("reads a zero horizon before anything is pruned", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.FieldDeltaHorizon()).To(BeEquivalentTo(0))
+				})
+			})
+
+			It("does not register a workspace it marks", func() {
+				write("ghost", func(tx storage.WriteTx) {
+					Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 1})).To(Succeed())
+				})
+				Expect(store.ListWorkspaceIDs(ctx)).To(BeEmpty())
+			})
+
+			It("pages in id order from an exclusive cursor", func() {
+				for i, id := range []string{"ws3", "ws1", "ws2"} {
+					seedQuiet(id, uint64(i+1))
+				}
+				Expect(compactable(1, "", 2)).To(Equal([]string{"ws1", "ws2"}))
+				Expect(compactable(1, "ws2", 2)).To(Equal([]string{"ws3"}))
+				Expect(compactable(1, "ws3", 2)).To(BeEmpty())
+			})
+
+			It("rejects a non-positive limit", func() {
+				_, err := store.ListCompactableWorkspaceIDs(ctx, 1, "", 0)
+				Expect(err).To(HaveOccurred())
+				_, err = store.ListCompactableWorkspaceIDs(ctx, 1, "", -1)
+				Expect(err).To(HaveOccurred())
+			})
+		})
+
 		It("tracks client watermarks", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
@@ -3256,6 +3384,25 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 			})
 			Expect(a.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(BeEmpty())
 			Expect(b.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(ConsistOf("ws1"))
+		})
+
+		It("scopes the text compaction mark to the namespace", func() {
+			for _, s := range []storage.Adapter{a, b} {
+				writeTo(s, "ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("frag"))).To(Succeed())
+				})
+				writeTo(s, "ws1", func(tx storage.WriteTx) {
+					_, err := tx.PruneFieldDeltas(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+				})
+			}
+			writeTo(a, "ws1", func(tx storage.WriteTx) {
+				Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 1, MinPurged: 1})).To(Succeed())
+			})
+			Expect(a.ListCompactableWorkspaceIDs(ctx, 1, "", 10)).To(BeEmpty())
+			Expect(b.ListCompactableWorkspaceIDs(ctx, 1, "", 10)).To(ConsistOf("ws1"),
+				"one namespace's sweep does not cover the other's rows")
 		})
 
 		It("scopes tombstone GC to the namespace", func() {
