@@ -32,7 +32,7 @@
 //     single-stream remote protocol) must buffer or page the scan rather than
 //     hold one result set open across fn. Writes are the other way round: the
 //     engine collects a scan's rows and rewrites them after it returns (see
-//     Server.compactWorkspace), so an adapter need not tolerate a write during
+//     Server.compactBatch), so an adapter need not tolerate a write during
 //     iteration.
 //   - Atomicity: a write tx commits iff fn's final attempt returns nil;
 //     savepoints (InSavepoint) nest within it.

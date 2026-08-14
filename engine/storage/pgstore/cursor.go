@@ -9,7 +9,7 @@ import (
 // scanBatch is how many rows one FETCH pulls back. It trades round trips
 // against the memory a scan holds at once: every scan here is bounded by this
 // rather than by the size of its result, which is the point — ScanEntity takes
-// no limit, and compaction walks whole entities through it.
+// no limit, and bootstrap walks whole entities through it.
 const scanBatch = 256
 
 // scanCursor streams query's rows to yield through a server-side cursor.

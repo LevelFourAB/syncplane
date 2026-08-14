@@ -66,7 +66,7 @@
 // not, so holding one result set open across the callback would fail on the
 // engine's first indexed query or first pull of a text entity. Buffering the
 // whole result instead would work but is unbounded: ScanEntity has no limit and
-// compaction walks whole entities through it.
+// bootstrap walks whole entities through it.
 //
 // # Schema and physical layout
 //

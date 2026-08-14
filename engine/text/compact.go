@@ -15,8 +15,8 @@ import (
 // mark operation is never physically removed because removal is itself an
 // operation. That is what makes Merge a pure union with no causal-delivery
 // requirement, and it is also why a long-lived document never shrinks.
-// Compaction is the escape hatch: a maintenance pass (the engine runs it from
-// GC, see engine/server/compact.go) drops the state that nothing can still
+// Compaction is the escape hatch: a maintenance pass (the engine's own sweep,
+// see engine/server/compact.go) drops the state that nothing can still
 // refer to — tombstones nothing points at, mark ops that can no longer win
 // anywhere (see deadMarks) — and records the document's version vector as that
 // field's COMPACTION FLOOR.
@@ -228,10 +228,11 @@ func (d *Doc) deadMarks() map[ID]bool {
 //     formatting whenever a mark's boundary anchor happened to point at deleted
 //     text, which an ExpandBefore/ExpandAfter mark does routinely.
 //
-// Purging is iterated to a fixpoint, so a run of text that was typed and then
-// deleted (a chain of right children) collapses entirely — the common case, and
-// the one setString produces when a whole-value writer shortens a document. The
-// result does not depend on visitation order.
+// Purging cascades, so a run of text that was typed and then deleted (a chain
+// of right children) collapses entirely — the common case, and the one
+// setString produces when a whole-value writer shortens a document. The result
+// does not depend on visitation order, and the cost is linear in the document
+// however deep the chain runs.
 //
 // What it does NOT reclaim, and cannot: a tombstone that still has a live
 // descendant. Deleting the middle of a typed run leaves the characters between
@@ -259,30 +260,141 @@ func (d *Doc) Compact() (items, marks int) {
 			}
 		}
 	}
-	for {
-		var batch []*node
-		for _, n := range d.byID {
-			if !n.deleted || anchored[n.id] {
-				continue
-			}
-			if len(n.left) > 0 || len(n.right) > 0 {
-				continue
-			}
-			batch = append(batch, n)
+	purgeable := func(n *node) bool {
+		return n.deleted && !anchored[n.id] && len(n.left) == 0 && len(n.right) == 0
+	}
+	// A worklist seeded with the leaves, re-testing only the parent each removal
+	// exposes. Re-testing the whole item table once per round instead costs a
+	// round per level, and linear typing builds a chain of right children as
+	// deep as the run is long — quadratic on exactly the shape compaction
+	// exists for.
+	var queue []*node
+	for _, n := range d.byID {
+		if purgeable(n) {
+			queue = append(queue, n)
 		}
-		if len(batch) == 0 {
-			break
+	}
+	for len(queue) > 0 {
+		n := queue[len(queue)-1]
+		queue = queue[:len(queue)-1]
+		parent := n.parent
+		removeChild(parent, n)
+		delete(d.byID, n.id)
+		items++
+		// The parent reaches the queue at most once: it qualifies only on the
+		// removal that empties its last child list, and nothing puts children
+		// back. The root sentinel is never deleted, so it never qualifies.
+		if purgeable(parent) {
+			queue = append(queue, parent)
 		}
-		for _, n := range batch {
-			removeChild(n.parent, n)
-			delete(d.byID, n.id)
-		}
-		items += len(batch)
 	}
 	if items > 0 {
 		d.orderDirty = true
 	}
 	return items, marks
+}
+
+// CouldReclaim reports whether Compact could free at least n items and mark
+// operations from the encoded document. n <= 0 is true for anything; empty
+// input — a field nobody has written — is false.
+//
+// The answer is necessary, never sufficient: it counts every tombstone and
+// every mark op, where Compact frees only the ones nothing can still refer to.
+// So false is a promise that compacting falls short of n, while true has to be
+// confirmed by compacting.
+//
+// Anything that is not a well-formed stored document is an error, without the
+// distinctions Decode draws between a fragment, an unresolved plain-string
+// value and malformed bytes.
+//
+// Cost is proportional to the document's runs where Decode's is proportional to
+// its characters, which is what makes it worth asking first.
+func CouldReclaim(data []byte, n int) (bool, error) {
+	if n <= 0 {
+		return true, nil
+	}
+	if len(data) == 0 {
+		return false, nil
+	}
+	r := &decoder{buf: data}
+	v, err := r.byte()
+	if err != nil {
+		return false, err
+	}
+	if v != formatVersion {
+		// Deliberately not Decode's three-way split on fragment and
+		// plain-string values: this reads what is already stored as a row, and
+		// those two cannot be.
+		return false, fmt.Errorf("text: unsupported format version %d", v)
+	}
+	peerCount, err := r.count("peer count", 2)
+	if err != nil {
+		return false, err
+	}
+	for i := uint64(0); i < peerCount; i++ {
+		if _, err := r.bytes(); err != nil {
+			return false, err
+		}
+	}
+	for i := uint64(0); i < peerCount; i++ {
+		if _, err := r.uvarint(); err != nil {
+			return false, err
+		}
+	}
+	runCount, err := r.count("run count", 6)
+	if err != nil {
+		return false, err
+	}
+	found := 0
+	for i := uint64(0); i < runCount; i++ {
+		// Peer index and start counter, neither of which says anything about
+		// what is reclaimable.
+		for j := 0; j < 2; j++ {
+			if _, err := r.uvarint(); err != nil {
+				return false, err
+			}
+		}
+		itemCount, err := r.uvarint()
+		if err != nil {
+			return false, err
+		}
+		flags, err := r.byte()
+		if err != nil {
+			return false, err
+		}
+		if flags&2 == 0 {
+			// Parent peer index and counter, present only when the parent is
+			// not the root.
+			for j := 0; j < 2; j++ {
+				if _, err := r.uvarint(); err != nil {
+					return false, err
+				}
+			}
+		}
+		content, err := r.bytes()
+		if err != nil {
+			return false, err
+		}
+		if flags&1 == 0 {
+			continue
+		}
+		// A code point is at least one byte, so a run never holds more items
+		// than content bytes; Decode is what rejects a count that disagrees.
+		// Clamping keeps an inflated one from claiming a reclaim the document
+		// cannot have, and keeps the sum in range whatever the input says.
+		if lim := uint64(len(content)); itemCount > lim {
+			itemCount = lim
+		}
+		found += int(itemCount)
+		if found >= n {
+			return true, nil
+		}
+	}
+	markCount, err := r.count("mark count", 7)
+	if err != nil {
+		return false, err
+	}
+	return found+int(markCount) >= n, nil
 }
 
 // removeChild unlinks c from its parent's child list.

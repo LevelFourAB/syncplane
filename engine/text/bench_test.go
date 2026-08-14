@@ -21,6 +21,9 @@ import (
 //
 // Sizes are code points of visible text; documents are built by typing so the
 // canonical run structure matches what a real editing session produces.
+//
+// Compact and CouldReclaim are the exception: they are what the server's
+// maintenance sweep pays per row it considers, not per write.
 
 var benchSizes = []int{5000, 20000, 50000}
 
@@ -254,6 +257,56 @@ func BenchmarkPlainText(b *testing.B) {
 		for i := 0; i < b.N; i++ {
 			if _, err := text.PlainText(state); err != nil {
 				b.Fatal(err)
+			}
+		}
+	})
+}
+
+// BenchmarkCompact runs on the shape compaction exists for: a document typed
+// and then deleted, so every tombstone in it is reclaimable and they form a
+// chain of right children as deep as the run is long. That is the shape a purge
+// re-testing every item per removal round degrades to quadratic on, so the
+// numbers here are only meaningful across sizes.
+func BenchmarkCompact(b *testing.B) {
+	eachSize(b, func(b *testing.B, n int) {
+		d := benchDoc("w", n)
+		if err := d.Delete(0, n); err != nil {
+			b.Fatal(err)
+		}
+		state := d.Encode()
+		b.SetBytes(int64(len(state)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			// Compact mutates, so each iteration needs its own document; only
+			// the compaction itself is timed.
+			doc, err := text.Decode(state, "w")
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.StartTimer()
+			if items, _ := doc.Compact(); items != n {
+				b.Fatalf("purged %d of %d items", items, n)
+			}
+		}
+	})
+}
+
+// BenchmarkCouldReclaim is the gate the sweep opens a stored document with,
+// read against BenchmarkDecode above: the difference is what a row it decides
+// not to rewrite costs instead.
+func BenchmarkCouldReclaim(b *testing.B) {
+	eachSize(b, func(b *testing.B, n int) {
+		state := benchDoc("w", n).Encode()
+		b.SetBytes(int64(len(state)))
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			could, err := text.CouldReclaim(state, 1)
+			if err != nil {
+				b.Fatal(err)
+			}
+			if could {
+				b.Fatal("a document with nothing deleted should not open")
 			}
 		}
 	})

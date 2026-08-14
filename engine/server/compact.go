@@ -80,7 +80,16 @@ type compactLoop struct {
 const (
 	defaultTextCompactionInterval = 5 * time.Minute
 	defaultTextCompactionBatch    = 200
+	// compactBatchBytes caps the row values one batch holds at once, since the
+	// row count cannot: a text row is as large as the document in it, and large
+	// documents are the workload the option exists for. A batch ends at
+	// whichever of the two bounds it reaches first.
+	compactBatchBytes = 8 << 20
 )
+
+// errCompactBatchFull ends a batch's scan from inside its callback, as
+// index.go's candidate budget does. It never leaves compactBatch.
+var errCompactBatchFull = errors.New("compaction batch full")
 
 // WithTextCompaction enables collaborative-text compaction. minPurged is how
 // many tombstoned characters a document must give up before its row is
@@ -115,7 +124,10 @@ func WithTextCompaction(minPurged int) Option {
 // Neither number changes what compaction RECLAIMS — a row that misses one pass
 // is picked up by the next, since the window it belongs to stays unswept — so
 // this is about how long a compaction transaction holds a workspace's write
-// lock, and how promptly the reclaim happens. A non-positive interval disables
+// lock, and how promptly the reclaim happens. batch is a ceiling rather than a
+// target: a transaction also ends once the rows it has taken exceed a fixed
+// byte budget, so raising it past what the workspace's documents fill changes
+// nothing. A non-positive interval disables
 // the background pass, leaving compaction to manual CompactText calls; so does
 // running GC on manual (WithGC with a non-positive interval), since only a GC
 // pass moves the horizon this sweep works below.
@@ -331,11 +343,14 @@ func (s *Server) compactBatch(tx storage.WriteTx) (int, bool, error) {
 	var (
 		// Collect first: the scan and the rewrites share one transaction, and an
 		// adapter is not required to tolerate writes during iteration. Bounded
-		// by batch, which is what keeps this from being the whole entity.
+		// by batch and by compactBatchBytes, which is what keeps this from being
+		// the whole entity.
 		candidates []storage.Row
 		last       storage.TextCompactMark
 		seen       int
+		held       int
 		past       bool
+		full       bool
 	)
 	if err := tx.ScanChanges(mark.Seq, mark.Entity, mark.Key, batch, func(r storage.Row) error {
 		seen++
@@ -357,14 +372,21 @@ func (s *Server) compactBatch(tx storage.WriteTx) (int, bool, error) {
 		// rows it does not care about would resume before them every batch.
 		if info, ok := entities[r.Entity]; ok && len(info.textFields) > 0 {
 			candidates = append(candidates, r)
+			held += len(r.Value)
+			if held >= compactBatchBytes {
+				// The row just taken is inside the batch, and last already
+				// names it, so stopping here leaves nothing unaccounted for.
+				full = true
+				return errCompactBatchFull
+			}
 		}
 		return nil
-	}); err != nil {
+	}); err != nil && !errors.Is(err, errCompactBatchFull) {
 		return 0, false, err
 	}
 
 	next := last
-	more := seen == batch && !past
+	more := (seen == batch || full) && !past
 	if !more {
 		// Everything below the horizon has been considered. Recording the
 		// horizon itself rather than the last row's position is what lets the
@@ -412,6 +434,12 @@ func (s *Server) compactRow(
 	for _, tf := range info.textFields {
 		b := chainGetBytes(msg.ProtoReflect(), tf.chain)
 		if len(b) == 0 {
+			continue
+		}
+		// Most rows the sweep sees have accumulated nothing worth a rewrite, and
+		// asking the stored bytes is orders of magnitude cheaper than decoding
+		// the document to find that out.
+		if could, err := text.CouldReclaim(b, minPurged); err != nil || !could {
 			continue
 		}
 		d, err := text.Decode(b, "")

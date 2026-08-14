@@ -4,6 +4,7 @@ import (
 	"errors"
 	"math/rand"
 	"strings"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -96,13 +97,30 @@ var _ = Describe("Compact", func() {
 		Expect(d.Delete(1, 1)).To(Succeed())
 		Expect(d.Compact()).To(Equal(0))
 		// Deleting the run's last character frees it AND the one before it, in
-		// the same pass — purging iterates to a fixpoint.
+		// the same pass — purging cascades.
 		Expect(d.Delete(1, 1)).To(Succeed())
 		Expect(d.Compact()).To(Equal(2))
 		once := d.Encode()
 		Expect(d.Compact()).To(Equal(0))
 		Expect(d.Encode()).To(Equal(once))
 	})
+
+	// A run typed left to right is a chain of right children as deep as the run
+	// is long, and only its tail is ever purgeable until the tail goes. So a
+	// purge that re-tests every item per removal round costs a round per
+	// character: at this size that is minutes, against milliseconds for a
+	// cascade, which is what the timeout separates.
+	It("collapses a long deleted run in one cascade", func(ctx SpecContext) {
+		const n = 100000
+		d := text.New("alice")
+		Expect(d.Insert(0, strings.Repeat("a", n))).To(Succeed())
+		Expect(d.Delete(0, n)).To(Succeed())
+
+		items, marks := d.Compact()
+		Expect(items).To(Equal(n))
+		Expect(marks).To(BeZero())
+		Expect(d.PlainText()).To(BeEmpty())
+	}, NodeTimeout(15*time.Second))
 
 	It("converges with a replica that compacted independently", func() {
 		a := text.New("alice")
@@ -113,6 +131,91 @@ var _ = Describe("Compact", func() {
 		Expect(a.Compact()).To(Equal(6))
 		Expect(b.Compact()).To(Equal(6))
 		Expect(a.Encode()).To(Equal(b.Encode()))
+	})
+})
+
+var _ = Describe("CouldReclaim", func() {
+	// The gate the maintenance sweep opens a document with, so what matters is
+	// that it never says no to a document Compact would have reclaimed from.
+	couldAndDid := func(d *text.Doc, n int) (bool, int) {
+		GinkgoHelper()
+		could, err := text.CouldReclaim(d.Encode(), n)
+		Expect(err).NotTo(HaveOccurred())
+		items, marks := forked(d, "").Compact()
+		return could, items + marks
+	}
+
+	It("is false for a document with nothing deleted", func() {
+		d := text.New("alice")
+		Expect(d.Insert(0, "hello world")).To(Succeed())
+		could, reclaimed := couldAndDid(d, 1)
+		Expect(could).To(BeFalse())
+		Expect(reclaimed).To(BeZero())
+	})
+
+	It("is false for an empty field", func() {
+		could, err := text.CouldReclaim(nil, 1)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(could).To(BeFalse())
+	})
+
+	It("is true for any document when nothing is required", func() {
+		could, err := text.CouldReclaim(text.New("alice").Encode(), 0)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(could).To(BeTrue())
+	})
+
+	It("counts tombstones against the threshold", func() {
+		d := text.New("alice")
+		Expect(d.Insert(0, "hello world")).To(Succeed())
+		Expect(d.Delete(5, 6)).To(Succeed())
+		could, reclaimed := couldAndDid(d, 6)
+		Expect(could).To(BeTrue())
+		Expect(reclaimed).To(Equal(6))
+
+		could, err := text.CouldReclaim(d.Encode(), 7)
+		Expect(err).NotTo(HaveOccurred())
+		Expect(could).To(BeFalse())
+	})
+
+	It("counts mark operations, which the run table does not carry", func() {
+		d := text.New("alice")
+		Expect(d.Insert(0, "hello")).To(Succeed())
+		_, err := d.Mark(0, 5, "bold", true, text.ExpandNone)
+		Expect(err).NotTo(HaveOccurred())
+		_, err = d.Unmark(0, 5, "bold", text.ExpandNone)
+		Expect(err).NotTo(HaveOccurred())
+		could, reclaimed := couldAndDid(d, 1)
+		Expect(could).To(BeTrue())
+		Expect(reclaimed).To(Equal(2))
+	})
+
+	// The bound is over what a tombstone COULD give up, so a document whose
+	// tombstones are all pinned still opens. Nothing is lost by that: the sweep
+	// compacts it, finds nothing and leaves the row alone.
+	It("may be true for a document Compact reclaims nothing from", func() {
+		a := text.New("alice")
+		Expect(a.Insert(0, "hello world")).To(Succeed())
+		b := forked(a, "bob")
+		Expect(b.Insert(11, "X")).To(Succeed())
+		Expect(a.Delete(5, 6)).To(Succeed())
+		Expect(a.MergeDocs(b)).To(Succeed())
+
+		could, reclaimed := couldAndDid(a, 6)
+		Expect(could).To(BeTrue())
+		Expect(reclaimed).To(BeZero())
+	})
+
+	It("rejects what Decode rejects", func() {
+		_, err := text.CouldReclaim([]byte{0x7f}, 1)
+		Expect(err).To(MatchError("text: unsupported format version 127"))
+
+		d := text.New("alice")
+		Expect(d.Insert(0, "hello")).To(Succeed())
+		Expect(d.Delete(0, 5)).To(Succeed())
+		truncated := d.Encode()
+		_, err = text.CouldReclaim(truncated[:len(truncated)-1], 1000)
+		Expect(err).To(HaveOccurred())
 	})
 })
 

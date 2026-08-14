@@ -78,6 +78,21 @@ describe('compactDoc', () => {
 		expect(encodeTextDoc(d)).toEqual(once);
 	});
 
+	// A run typed left to right is a chain of right children as deep as the run
+	// is long, and only its tail is ever purgeable until the tail goes. So a purge
+	// that re-tests every item per removal round costs a round per character: at
+	// this size that is minutes, against milliseconds for a cascade, which is what
+	// the timeout separates.
+	it('collapses a long deleted run in one cascade', () => {
+		const n = 100000;
+		const d = new TextDoc('alice');
+		d.insert(0, 'a'.repeat(n));
+		d.delete(0, n);
+
+		expect(compactDoc(d)).toEqual({ items: n, marks: 0 });
+		expect(d.plainText()).toBe('');
+	}, 15000);
+
 	it('converges with a replica that compacted independently', () => {
 		const a = new TextDoc('alice');
 		a.insert(0, 'hello world');

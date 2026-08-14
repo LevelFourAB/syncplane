@@ -345,6 +345,15 @@ the same reason it is bounded at all: GC's collectors are deletes over indexed
 ranges, while this scans, decodes and rewrites rows, and one transaction holding
 both would make every writer wait on the expensive half.
 
+A pass is bounded inside a workspace too, because a text row is as large as the
+document in it. One transaction takes at most `batch` rows or a fixed number of
+bytes of them, whichever comes first, and commits its rewrites with the mark
+recording how far it got — so a page of large documents ends early and the next
+transaction resumes where it stopped. And a row is only decoded when the
+tombstones and mark ops its stored bytes carry could reach `minPurged`, which
+the encoding answers without rebuilding the document: a field nothing has been
+deleted from costs almost nothing to skip.
+
 The floor is what makes the purge safe. An incoming write carrying an id the row
 lacks, at an id the floor covers, can only be state from before the purge —
 items and mark ops share one counter space, so one floor decides both:

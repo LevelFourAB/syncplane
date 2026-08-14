@@ -167,8 +167,9 @@ function deadMarks(doc: TextDoc): Set<string> {
  * An item is purgeable when it is deleted, has no children, and no surviving
  * mark operation anchors to it — children keep their parent because the tree is
  * what places them, and an anchored item keeps its mark resolvable. Purging
- * iterates to a fixpoint, so a run that was typed and then deleted collapses
- * entirely, and the result does not depend on visitation order.
+ * cascades, so a run that was typed and then deleted collapses entirely; the
+ * result does not depend on visitation order, and the cost is linear in the
+ * document however deep the chain runs.
  *
  * What it cannot reclaim: a tombstone with a live descendant. Deleting the
  * middle of a typed run leaves the characters between it and the run's
@@ -191,22 +192,28 @@ export function compactDoc(doc: TextDoc): CompactResult {
 			}
 		}
 	}
+	const purgeable = (n: TextNode) =>
+		n.deleted && !anchored.has(n.key) && n.left.length === 0 && n.right.length === 0;
+	// A worklist seeded with the leaves, re-testing only the parent each removal
+	// exposes. Re-testing the whole item table once per round instead costs a
+	// round per level, and linear typing builds a chain of right children as deep
+	// as the run is long — quadratic on exactly the shape compaction exists for.
+	const queue: TextNode[] = [];
+	for (const n of doc.byId.values()) {
+		if (purgeable(n)) queue.push(n);
+	}
 	let items = 0;
-	for (;;) {
-		const batch: TextNode[] = [];
-		for (const n of doc.byId.values()) {
-			if (!n.deleted || anchored.has(n.key)) continue;
-			if (n.left.length > 0 || n.right.length > 0) continue;
-			batch.push(n);
-		}
-		if (batch.length === 0) break;
-		for (const n of batch) {
-			const list = n.side === SIDE_L ? n.parent!.left : n.parent!.right;
-			const i = list.indexOf(n);
-			if (i >= 0) list.splice(i, 1);
-			doc.byId.delete(n.key);
-		}
-		items += batch.length;
+	for (let n = queue.pop(); n !== undefined; n = queue.pop()) {
+		const parent = n.parent!;
+		const list = n.side === SIDE_L ? parent.left : parent.right;
+		const i = list.indexOf(n);
+		if (i >= 0) list.splice(i, 1);
+		doc.byId.delete(n.key);
+		items++;
+		// The parent reaches the queue at most once: it qualifies only on the
+		// removal that empties its last child list, and nothing puts children
+		// back. The root sentinel is never deleted, so it never qualifies.
+		if (purgeable(parent)) queue.push(parent);
 	}
 	if (items > 0) doc.invalidateOrder();
 	return { items, marks };

@@ -681,7 +681,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			// and the first pull of a text entity. Hence these.
 			//
 			// Only reads. The engine collects a scan's rows and rewrites them
-			// after the scan returns (Server.compactWorkspace), so writing during
+			// after the scan returns (Server.compactBatch), so writing during
 			// iteration is deliberately not required of an adapter.
 			BeforeEach(func() {
 				write("ws1", func(tx storage.WriteTx) {

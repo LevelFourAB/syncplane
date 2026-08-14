@@ -4,9 +4,13 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
@@ -126,6 +130,61 @@ func TestCompactTextResweepsOnlyWhenTheThresholdDrops(t *testing.T) {
 	}
 	if !due(5) {
 		t.Fatal("lowering the threshold must re-select: a row skipped at 10 may clear 5")
+	}
+}
+
+// The row count alone does not bound what a batch takes on, because a text row
+// is as large as the document in it — which is the case WithTextCompaction is
+// recommended for. Rows well under the batch count but over the byte cap have to
+// end the batch anyway, or the transaction holding the workspace's write lock is
+// bounded by nothing.
+func TestCompactTextEndsABatchOnTheByteCap(t *testing.T) {
+	ctx := context.Background()
+	base, err := sqlitestore.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatalf("opening store: %v", err)
+	}
+	defer func() { _ = base.Close() }()
+	store := &countingStore{Adapter: base}
+	// widget carries a text field, so its rows are the ones a batch collects.
+	s, err := New(store, WithEntities(&testdatav1.Widget{}), WithTextCompaction(1))
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	// Two rows fill the cap exactly, so four of them are two full batches and a
+	// third that finds the window empty. Uncapped they are one batch, since four
+	// rows is far inside the default count.
+	const rows = 4
+	value, err := proto.Marshal(&testdatav1.Widget{
+		Id:    "k",
+		Label: strings.Repeat("a", compactBatchBytes/2),
+	})
+	if err != nil {
+		t.Fatalf("marshalling row: %v", err)
+	}
+	for i := range rows {
+		if err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			return tx.PutRow("widget", fmt.Sprintf("k%d", i), value, uint64(i+1), storage.Actor{})
+		}); err != nil {
+			t.Fatalf("seeding: %v", err)
+		}
+	}
+	quieten(t, base, "ws1", rows)
+
+	store.writes = 0
+	if _, err := s.CompactText(ctx, "ws1"); err != nil {
+		t.Fatalf("compact: %v", err)
+	}
+	if want := rows/2 + 1; store.writes != want {
+		t.Fatalf("batches = %d, want %d — two rows per batch plus the one that finds the window empty",
+			store.writes, want)
+	}
+	ids, err := base.ListCompactableWorkspaceIDs(ctx, 1, "", 10)
+	if err != nil {
+		t.Fatalf("listing compactable: %v", err)
+	}
+	if len(ids) != 0 {
+		t.Fatalf("workspaces still due = %v, want none — a capped batch must still finish the sweep", ids)
 	}
 }
 

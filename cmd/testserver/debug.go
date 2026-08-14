@@ -264,10 +264,15 @@ func textStringHandler(srv *server.Server) http.Handler {
 }
 
 // gcHandler runs one garbage-collection pass on demand — tombstones, idle
-// clients, the text delta log, and collaborative-text compaction (see
-// server.WithTextCompaction). The suites need compaction to happen at a moment
-// they choose rather than on a timer, and a pass is stateless and re-runnable,
-// so exposing it costs nothing. POST JSON: {"workspace"}.
+// clients and the text delta log — followed by one collaborative-text
+// compaction sweep (see server.WithTextCompaction). The suites need both to
+// happen at a moment they choose rather than on a timer, and either is
+// stateless and re-runnable, so exposing them costs nothing. POST JSON:
+// {"workspace"}.
+//
+// The order is the dependency: the prune is what moves the delta horizon, and
+// the sweep only touches rows at or below it, so compacting first would find
+// this pass's own writes still inside the retention window.
 func gcHandler(srv *server.Server) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -282,6 +287,10 @@ func gcHandler(srv *server.Server) http.Handler {
 			return
 		}
 		if err := srv.CollectGarbage(r.Context(), req.Workspace); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := srv.CompactText(r.Context(), req.Workspace); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
