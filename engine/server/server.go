@@ -49,6 +49,10 @@ type entityInfo struct {
 	// Every row write refreshes all of them together (updateRowIndexes), so
 	// this is the ONE list that decides an entity's index write cost.
 	indexes []compiledIndex
+	// search is the entity's search index, nil for an entity that declares no
+	// search fields. Its entries ride the same storage and maintenance as
+	// indexes, under the reserved searchIndexName.
+	search  *searchIndex
 	mergers lww.Mergers
 	// createPolicy, updatePolicy and deletePolicy are the entity's
 	// (syncplane.v1.entity) write policies. The engine checks them alongside
@@ -90,6 +94,18 @@ type compiledIndex struct {
 	encoder  *query.IndexEncoder
 }
 
+// searchIndex is an entity's term-postings index, compiled from its search
+// declaration. It shares the derived/disposable/pure-optimization contract of
+// compiledIndex and the same storage, state and build machinery; what differs
+// is the entry shape (terms, not field values — see
+// engine/query/searchindex.go) and that reads probe it by term intersection
+// rather than through the planner.
+type searchIndex struct {
+	name     string
+	specHash string
+	decl     *query.SearchDecl
+}
+
 // Index names the engine mints for itself all live under a reserved prefix, so
 // a schema-declared name can never collide with one however the schema evolves.
 // Names are unique within an ENTITY only — they are derived from field names,
@@ -107,8 +123,12 @@ type compiledIndex struct {
 //     field agree on it.
 const (
 	reservedIndexPrefix = "__"
-	refIndexPrefix      = reservedIndexPrefix + "ref_"
-	fieldIndexPrefix    = reservedIndexPrefix + "field_"
+	// searchIndexName is the entity's term-postings index (see
+	// engine/query/searchindex.go). One per entity, so it needs no derived
+	// suffix.
+	searchIndexName  = reservedIndexPrefix + "search"
+	refIndexPrefix   = reservedIndexPrefix + "ref_"
+	fieldIndexPrefix = reservedIndexPrefix + "field_"
 )
 
 // refIndexName is the index over one reference field's stored target key.
@@ -429,6 +449,9 @@ func (c *catalog) indexBuildMark() string {
 		for _, info := range c.entities {
 			for i := range info.indexes {
 				specs = append(specs, info.name+"\x00"+info.indexes[i].name+"\x00"+info.indexes[i].specHash)
+			}
+			if info.search != nil {
+				specs = append(specs, info.name+"\x00"+info.search.name+"\x00"+info.search.specHash)
 			}
 		}
 		sort.Strings(specs)
@@ -1128,6 +1151,15 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// `index` declaration desugar to the same compiled shape.
 	if err := buildDeclaredIndexes(info, eo); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	// Search: a field-level `searchable` mark and an entity-level `search`
+	// declaration compile to one declaration, like the indexes above.
+	decl, err := query.CompileSearchDecl(desc)
+	if err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if decl != nil {
+		info.search = &searchIndex{name: searchIndexName, specHash: decl.SearchSpecHash(), decl: decl}
 	}
 	// Discover (syncplane.v1.field_behavior).text fields and auto-install the
 	// built-in convergent-text merger for each — no RegisterMerger call

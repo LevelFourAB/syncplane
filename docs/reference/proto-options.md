@@ -328,10 +328,11 @@ A path may also fan out over a **map**, written `*` — see
 [Maps and user-defined fields](#maps-and-user-defined-fields) below.
 
 **Not indexable:** a collaborative-text field (every keystroke would rewrite the
-entry — full-text search is a different mechanism), or a repeated message field
-named on its own — index a scalar field of the elements instead. A map is not
-indexable through a field mark either; it needs the `*` syntax, which says which
-entries and which leaf. All are rejected at registration.
+entry — searching text is what [full-text search](#full-text-search) is for), or
+a repeated message field named on its own — index a scalar field of the elements
+instead. A map is not indexable through a field mark either; it needs the `*`
+syntax, which says which entries and which leaf. All are rejected at
+registration.
 
 Indexes are **invisible and additive**. Nothing in a request or response names
 one, a query returns the same rows in the same order whether or not one served
@@ -339,6 +340,52 @@ it, and adding or removing one is never a breaking change — losing the stored
 entries costs a rebuild, not correctness. The cost is on writes: every write to
 the entity re-encodes and re-stores that row's position in **every** index it
 has, bounded by `MaxIndexEntriesPerRow`.
+
+## Full-text search
+
+Two surfaces, like indexes: a field mark for the simple case, an entity block
+for importance order and analyzer options. An entity may use either or both.
+
+```proto
+message Article {
+	option (syncplane.v1.entity) = {
+		name: "article"
+		key_fields: [ "id" ]
+		search: {
+			field: [ { path: "summary" }, { path: "body" } ]
+			keep_diacritics: false
+		}
+	};
+
+	string id = 1;
+	string title = 2 [(syncplane.v1.field_behavior) = { searchable: true }];
+	string summary = 3;
+	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
+}
+```
+
+| Option                      | Meaning                                                                                                          |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `field_behavior.searchable` | Include this field, ahead of the `search` block's fields. Marked fields count as most important, in field order. |
+| `search.field[].path`       | Dotted proto path to a singular string or collaborative-text field. Declaration order is importance order.       |
+| `search.keep_diacritics`    | Keep accents significant: `café` and `cafe` become distinct terms. Off by default, which folds them together.    |
+
+A `match` condition reads the declared fields through the entity's analyzer —
+lowercased, accent-folded unless kept, segmented with CJK bigrams — and
+`relevance` ranks by them, earlier fields first. A collaborative-text field is
+searched as its visible plain string.
+
+**Rejected at registration:** a path to a repeated field, a number, a map or a
+message; a `searchable` mark on any of those; a `search` block naming no fields
+with none marked either. A path may appear once across both surfaces.
+
+Declaring search also declares a term index over the entity, maintained on
+every write and backfilled in the background like any
+[secondary index](#secondary-indexes); a row with more than 256 distinct terms
+across its searchable fields stores an overflow marker instead of postings and
+is considered by every search. Matching, ranking and the analyzer are specified
+in [the search model](../explanation/search.md); the query surface is under
+[Search data](../how-to/search.md).
 
 ## Merge behaviour by field kind
 

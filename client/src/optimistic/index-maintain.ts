@@ -69,17 +69,26 @@ import {
 	IndexEncoder,
 	specHash,
 } from '../query/indexkey.js';
+import { type SearchDecl, searchDeclOf } from '../query/match.js';
+import {
+	SEARCH_INDEX_NAME,
+	searchEntries,
+	searchSpecHash,
+} from '../query/searchindex.js';
 import { reportError } from '../report.js';
 
 /**
  * One compiled index of one entity: the name it is stored under, the
- * fingerprint of the declaration its entries were built from, and the encoder
- * producing a row's position in it.
+ * fingerprint of the declaration its entries were built from, and what
+ * produces a row's positions in it — a component encoder for a value index,
+ * or the entity's search declaration for the term-postings index (exactly one
+ * of the two is set).
  */
 export interface CompiledIndex {
 	name: string;
 	specHash: string;
-	encoder: IndexEncoder;
+	encoder?: IndexEncoder;
+	search?: SearchDecl;
 }
 
 /**
@@ -126,8 +135,21 @@ export function compileIndexes(schema: DescMessage, defs: {
 			);
 		}
 	}
-	const drop = subsumedBy(compiled.map((c) => c.encoder.components));
-	return compiled.filter((_, i) => !drop[i]!);
+	const drop = subsumedBy(compiled.map((c) => c.encoder!.components));
+	const kept = compiled.filter((_, i) => !drop[i]!);
+	// The search index rides the same list: same markers, same build, same
+	// position layout. Compiled last so subsumption above stays about value
+	// indexes, which are the only ones with components to compare.
+	try {
+		const decl = searchDeclOf(schema);
+		if (decl) {
+			kept.push({ name: SEARCH_INDEX_NAME, specHash: searchSpecHash(decl), search: decl });
+		}
+	} catch (err) {
+		// Unusable, not fatal: match queries scan, which is always correct.
+		reportError('the search index cannot be maintained; match queries will scan', err);
+	}
+	return kept;
 }
 
 /**
@@ -195,9 +217,13 @@ export function rowPositions(
 ): string[] {
 	const positions: string[] = [];
 	for (const idx of indexes) {
-		// An index over a repeated field yields one position per element, so the
-		// count is bounded by the data rather than by the number of indexes.
-		for (const encoded of idx.encoder.encode(value, key, schema)) {
+		// An index over a repeated field yields one position per element — and
+		// the search index one per distinct term, bounded by its own cap — so
+		// the count is bounded by the data rather than by the number of indexes.
+		const entries = idx.search
+			? searchEntries(idx.search, value, key, schema)
+			: idx.encoder!.encode(value, key, schema);
+		for (const encoded of entries) {
 			positions.push(indexPosition(entity, idx.name, idx.specHash, workspaceId, encoded));
 		}
 	}

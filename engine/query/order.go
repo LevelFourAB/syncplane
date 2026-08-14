@@ -24,15 +24,48 @@ type Order struct {
 type orderKey struct {
 	fields []pathStep
 	desc   bool
+	// rank orders by match rank instead of a field — the relevance key. The
+	// other members are unused when it is set.
+	rank *Matcher
 }
 
 // CompileOrder validates order keys against the message descriptor and
 // resolves their paths once. An empty key list is valid (ties on row key). A
 // key on an incomparable leaf is rejected rather than accepted: it would tie
 // every pair, so the result would silently come back in row-key order.
+//
+// A relevance key is rejected here: it binds to the predicate's match
+// condition, which this surface does not hold. Use CompileOrderWith.
 func CompileOrder(desc protoreflect.MessageDescriptor, keys []*syncplanev1.OrderKey) (*Order, error) {
+	return CompileOrderWith(desc, keys, nil)
+}
+
+// CompileOrderWith is CompileOrder for orderings that may rank by relevance:
+// a relevance key resolves against predicate, which must contain exactly one
+// match condition. A nil predicate (or one without a match) rejects relevance
+// keys with an error naming what is missing.
+func CompileOrderWith(desc protoreflect.MessageDescriptor, keys []*syncplanev1.OrderKey, predicate *Compiled) (*Order, error) {
 	o := &Order{keys: make([]orderKey, 0, len(keys))}
 	for _, k := range keys {
+		if k.GetRelevance() {
+			if len(k.GetPath()) > 0 {
+				return nil, fmt.Errorf("a relevance order key takes no path, got %v", k.GetPath())
+			}
+			var ms []*Matcher
+			if predicate != nil {
+				ms = predicate.Matchers()
+			}
+			if len(ms) != 1 {
+				return nil, fmt.Errorf("ordering by relevance needs exactly one match condition in the predicate, found %d", len(ms))
+			}
+			switch k.GetDir() {
+			case syncplanev1.Direction_DIRECTION_ASC, syncplanev1.Direction_DIRECTION_DESC:
+			default:
+				return nil, fmt.Errorf("relevance order key needs a direction")
+			}
+			o.keys = append(o.keys, orderKey{rank: ms[0], desc: k.GetDir() == syncplanev1.Direction_DIRECTION_DESC})
+			continue
+		}
 		fields, err := resolveFields(desc, k.GetPath())
 		if err != nil {
 			return nil, err
@@ -64,6 +97,20 @@ func CompileOrder(desc protoreflect.MessageDescriptor, keys []*syncplanev1.Order
 // (UTF-16 order).
 func (o *Order) Compare(a, b protoreflect.Message, keyA, keyB string) int {
 	for _, k := range o.keys {
+		if k.rank != nil {
+			ra, rb := k.rank.Rank(a), k.rank.Rank(b)
+			if ra != rb {
+				c := 1
+				if ra < rb {
+					c = -1
+				}
+				if k.desc {
+					return -c
+				}
+				return c
+			}
+			continue
+		}
 		va, foundA := resolveValue(a, k.fields)
 		vb, foundB := resolveValue(b, k.fields)
 		ra, rb := orderRank(va, foundA), orderRank(vb, foundB)
@@ -164,7 +211,7 @@ var ErrCursorShape = errors.New("query: cursor belongs to a different entity or 
 func (o *Order) cursorComponents() []IndexComponent {
 	comps := make([]IndexComponent, len(o.keys))
 	for i, k := range o.keys {
-		comps[i] = IndexComponent{fields: k.fields, desc: k.desc}
+		comps[i] = IndexComponent{fields: k.fields, desc: k.desc, rank: k.rank}
 	}
 	return comps
 }

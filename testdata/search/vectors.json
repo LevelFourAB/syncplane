@@ -1,0 +1,531 @@
+{
+	"comment": "Shared conformance vectors for the Go (engine/search) and TS (client/src/search) text analyzers. analyzeCases pin Analyze: the exact terms, in order, for a document string. queryCases pin AnalyzeQuery: terms in order plus the prefix flag, which only the final term may carry and only when the query ends inside it. options.keepDiacritics disables the diacritic fold; an absent options object is the default analyzer. Both languages must produce these terms exactly — term-for-term agreement is what makes a locally evaluated match and a server evaluated match interchangeable. Combining marks in expectations are written as \\u escapes so the file survives editors that normalize text.",
+	"analyzeCases": [
+		{
+			"name": "empty string",
+			"text": "",
+			"want": []
+		},
+		{
+			"name": "whitespace and punctuation only",
+			"text": "  ... !?  ",
+			"want": []
+		},
+		{
+			"name": "ascii words lowercase",
+			"text": "Hello, World!",
+			"want": ["hello", "world"]
+		},
+		{
+			"name": "apostrophe splits",
+			"text": "don't panic",
+			"want": ["don", "t", "panic"]
+		},
+		{
+			"name": "underscore and hyphen split",
+			"text": "foo_bar baz-qux",
+			"want": ["foo", "bar", "baz", "qux"]
+		},
+		{
+			"name": "digits and mixed alphanumerics",
+			"text": "MP3 files-2024",
+			"want": ["mp3", "files", "2024"]
+		},
+		{
+			"name": "diacritics fold by default",
+			"text": "Café Ölvemarks résumé naïve",
+			"want": ["cafe", "olvemarks", "resume", "naive"]
+		},
+		{
+			"name": "diacritics kept on request",
+			"text": "Café",
+			"options": { "keepDiacritics": true },
+			"want": ["café"]
+		},
+		{
+			"name": "turkish capital dotted i folds to plain i",
+			"text": "İstanbul",
+			"want": ["istanbul"]
+		},
+		{
+			"name": "turkish capital dotted i keeps its combining dot when diacritics are kept",
+			"text": "İstanbul",
+			"options": { "keepDiacritics": true },
+			"want": ["i\u0307stanbul"]
+		},
+		{
+			"name": "sharp s stays sharp s",
+			"text": "GROẞ straße",
+			"want": ["groß", "straße"]
+		},
+		{
+			"name": "greek final sigma",
+			"text": "ΣΟΦΟΣ",
+			"want": ["σοφος"]
+		},
+		{
+			"name": "greek tonos folds",
+			"text": "καλημέρα",
+			"want": ["καλημερα"]
+		},
+		{
+			"name": "cyrillic lowercase",
+			"text": "Привет, МИР",
+			"want": ["привет", "мир"]
+		},
+		{
+			"name": "hebrew",
+			"text": "שלום עולם",
+			"want": ["שלום", "עולם"]
+		},
+		{
+			"name": "arabic",
+			"text": "مرحبا بالعالم",
+			"want": ["مرحبا", "بالعالم"]
+		},
+		{
+			"name": "devanagari keeps its marks",
+			"text": "नमस्ते दुनिया",
+			"want": ["नमस्ते", "दुनिया"]
+		},
+		{
+			"name": "thai vowel marks survive the fold",
+			"text": "สวัสดี",
+			"want": ["สวัสดี"]
+		},
+		{
+			"name": "fullwidth latin folds via nfkc",
+			"text": "Ｔｏｋｙｏ",
+			"want": ["tokyo"]
+		},
+		{
+			"name": "ligature folds via nfkc",
+			"text": "ﬁle ﬂow",
+			"want": ["file", "flow"]
+		},
+		{
+			"name": "circled digits fold via nfkc and join as one run",
+			"text": "①②",
+			"want": ["12"]
+		},
+		{
+			"name": "han run becomes bigrams",
+			"text": "日本語",
+			"want": ["日本", "本語"]
+		},
+		{
+			"name": "single cjk character is a unigram",
+			"text": "猫 dog",
+			"want": ["猫", "dog"]
+		},
+		{
+			"name": "mixed kanji and kana bigram across the script change",
+			"text": "日本語のテキスト",
+			"want": ["日本", "本語", "語の", "のテ", "テキ", "キス", "スト"]
+		},
+		{
+			"name": "prolonged sound mark stays inside a katakana run",
+			"text": "ラーメン",
+			"want": ["ラー", "ーメ", "メン"]
+		},
+		{
+			"name": "halfwidth katakana folds via nfkc then bigrams",
+			"text": "ｶﾀｶﾅ",
+			"want": ["カタ", "タカ", "カナ"]
+		},
+		{
+			"name": "hangul bigrams",
+			"text": "안녕하세요 세계",
+			"want": ["안녕", "녕하", "하세", "세요", "세계"]
+		},
+		{
+			"name": "latin run adjacent to cjk run",
+			"text": "東京tower",
+			"want": ["東京", "tower"]
+		},
+		{
+			"name": "emoji and symbols are separators",
+			"text": "hello 👋 world ©2024",
+			"want": ["hello", "world", "2024"]
+		},
+		{
+			"name": "long term truncates at 64 code points",
+			"text": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+			"want": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+		}
+	],
+	"matchComment": "matchCases pin the match predicate: whether a row of the named test entity (protojson) satisfies a match condition for `query`, using the entity's own search declaration — Article folds diacritics and reads title (searchable mark), then summary, body (collaborative text), meta.author; Glossary keeps diacritics. rankCases pin the relevance rank VALUES, not just the order: ranks encode into query cursors, so the two languages must produce identical integers. want lists row keys best match first (rank ascending, ties by row key ascending in UTF-16 order) with each row's rank. matchErrorCases must be rejected by both compilers; orderErrorCases must be rejected by both order compilers, given the predicate in cond. cursorCases pin the relevance cursor shape (16 hex digits) and one full encoded cursor, which is what makes a cursor minted on one side replayable on the other.",
+	"matchCases": [
+		{
+			"name": "term in the marked title field",
+			"type": "article",
+			"row": { "id": "a", "title": "Hello World" },
+			"query": "hello",
+			"want": true
+		},
+		{
+			"name": "case and diacritics fold on both sides",
+			"type": "article",
+			"row": { "id": "a", "title": "Café" },
+			"query": "CAFE",
+			"want": true
+		},
+		{
+			"name": "terms are conjunctive across different fields",
+			"type": "article",
+			"row": { "id": "a", "title": "alpha", "summary": "beta" },
+			"query": "alpha beta",
+			"want": true
+		},
+		{
+			"name": "a missing term fails the whole match",
+			"type": "article",
+			"row": { "id": "a", "title": "alpha", "summary": "beta" },
+			"query": "alpha gamma",
+			"want": false
+		},
+		{
+			"name": "final term matches as a prefix",
+			"type": "article",
+			"row": { "id": "a", "title": "searching" },
+			"query": "sear",
+			"want": true
+		},
+		{
+			"name": "trailing space makes the final term exact",
+			"type": "article",
+			"row": { "id": "a", "title": "searching" },
+			"query": "sear ",
+			"want": false
+		},
+		{
+			"name": "collaborative text searches as its plain string",
+			"type": "article",
+			"row": { "id": "a", "body": "AQEFYWxpY2UFAQABBQYFaGVsbG8A" },
+			"query": "hello",
+			"want": true
+		},
+		{
+			"name": "nested declared path",
+			"type": "article",
+			"row": { "id": "a", "meta": { "author": "Knuth" } },
+			"query": "knuth",
+			"want": true
+		},
+		{
+			"name": "an undeclared field is not searched",
+			"type": "article",
+			"row": { "id": "a", "state": "urgent" },
+			"query": "urgent",
+			"want": false
+		},
+		{
+			"name": "empty query matches every row",
+			"type": "article",
+			"row": { "id": "a", "title": "anything" },
+			"query": "",
+			"want": true
+		},
+		{
+			"name": "separators-only query matches every row",
+			"type": "article",
+			"row": { "id": "a", "title": "anything" },
+			"query": "?!, .",
+			"want": true
+		},
+		{
+			"name": "kept diacritics match exactly",
+			"type": "glossary",
+			"row": { "id": "a", "term": "café" },
+			"query": "café",
+			"want": true
+		},
+		{
+			"name": "kept diacritics do not fold the query either",
+			"type": "glossary",
+			"row": { "id": "a", "term": "café" },
+			"query": "cafe",
+			"want": false
+		},
+		{
+			"name": "terms past the 32-term cap are ignored",
+			"type": "article",
+			"row": {
+				"id": "a",
+				"title": "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12 t13 t14 t15 t16 t17 t18 t19 t20 t21 t22 t23 t24 t25 t26 t27 t28 t29 t30 t31 t32"
+			},
+			"query": "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12 t13 t14 t15 t16 t17 t18 t19 t20 t21 t22 t23 t24 t25 t26 t27 t28 t29 t30 t31 t32 zzz",
+			"want": true
+		},
+		{
+			"name": "the 32nd term is still required",
+			"type": "article",
+			"row": {
+				"id": "a",
+				"title": "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12 t13 t14 t15 t16 t17 t18 t19 t20 t21 t22 t23 t24 t25 t26 t27 t28 t29 t30 t31"
+			},
+			"query": "t01 t02 t03 t04 t05 t06 t07 t08 t09 t10 t11 t12 t13 t14 t15 t16 t17 t18 t19 t20 t21 t22 t23 t24 t25 t26 t27 t28 t29 t30 t31 zzz",
+			"want": false
+		},
+		{
+			"name": "cjk queries match by bigram",
+			"type": "article",
+			"row": { "id": "a", "title": "日本語" },
+			"query": "本語",
+			"want": true
+		},
+		{
+			"name": "cjk bigrams respect adjacency",
+			"type": "article",
+			"row": { "id": "a", "title": "日本語" },
+			"query": "語日",
+			"want": false
+		}
+	],
+	"rankCases": [
+		{
+			"name": "earlier declared fields rank ahead",
+			"type": "article",
+			"query": "milk",
+			"rows": [
+				{ "key": "a", "row": { "id": "a", "title": "Milk" } },
+				{ "key": "b", "row": { "id": "b", "summary": "milk" } },
+				{ "key": "c", "row": { "id": "c", "meta": { "author": "milk" } } }
+			],
+			"want": [
+				{ "key": "a", "rank": 254 },
+				{ "key": "b", "rank": 16777470 },
+				{ "key": "c", "rank": 50331902 }
+			]
+		},
+		{
+			"name": "closer terms rank ahead",
+			"type": "article",
+			"query": "red apple",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "red big juicy apple" } },
+				{ "key": "a", "row": { "id": "a", "title": "red apple pie" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 65789 },
+				{ "key": "b", "rank": 196861 }
+			]
+		},
+		{
+			"name": "an exact term ranks ahead of a prefix-only one",
+			"type": "article",
+			"query": "sear",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "searching" } },
+				{ "key": "a", "row": { "id": "a", "title": "sear" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 254 },
+				{ "key": "b", "rank": 4294967550 }
+			]
+		},
+		{
+			"name": "terms spread over fields rank behind one field holding all",
+			"type": "article",
+			"query": "alpha beta",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "alpha", "summary": "beta" } },
+				{ "key": "a", "row": { "id": "a", "title": "alpha beta" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 65789 },
+				{ "key": "b", "rank": 4294967293 }
+			]
+		},
+		{
+			"name": "earlier first occurrence ranks ahead",
+			"type": "article",
+			"query": "goal",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "the goal" } },
+				{ "key": "a", "row": { "id": "a", "title": "goal first" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 254 },
+				{ "key": "b", "rank": 510 }
+			]
+		},
+		{
+			"name": "more occurrences rank ahead",
+			"type": "article",
+			"query": "bee",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "bee" } },
+				{ "key": "a", "row": { "id": "a", "title": "bee bee bee" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 252 },
+				{ "key": "b", "rank": 254 }
+			]
+		},
+		{
+			"name": "title ranks ahead of collaborative text",
+			"type": "article",
+			"query": "hello",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "body": "AQEFYWxpY2UFAQABBQYFaGVsbG8A" } },
+				{ "key": "a", "row": { "id": "a", "title": "hello" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 254 },
+				{ "key": "b", "rank": 33554686 }
+			]
+		},
+		{
+			"name": "a non-matching row ranks behind every matching one",
+			"type": "article",
+			"query": "milk",
+			"rows": [
+				{ "key": "x", "row": { "id": "x", "title": "water" } },
+				{ "key": "a", "row": { "id": "a", "summary": "milk" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 16777470 },
+				{ "key": "x", "rank": 1103806595071 }
+			]
+		},
+		{
+			"name": "equal ranks fall through to the row key",
+			"type": "article",
+			"query": "same",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "same" } },
+				{ "key": "a", "row": { "id": "a", "title": "same" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 254 },
+				{ "key": "b", "rank": 254 }
+			]
+		},
+		{
+			"name": "empty query ranks every row zero",
+			"type": "article",
+			"query": "",
+			"rows": [
+				{ "key": "b", "row": { "id": "b", "title": "beta" } },
+				{ "key": "a", "row": { "id": "a", "title": "alpha" } }
+			],
+			"want": [
+				{ "key": "a", "rank": 0 },
+				{ "key": "b", "rank": 0 }
+			]
+		}
+	],
+	"matchErrorCases": [
+		{
+			"name": "match on an entity without search fields",
+			"type": "widget",
+			"cond": { "match": { "query": "milk" } }
+		},
+		{
+			"name": "match inside any()",
+			"type": "widget",
+			"cond": {
+				"exists": {
+					"path": ["members"],
+					"cond": { "match": { "query": "milk" } }
+				}
+			}
+		}
+	],
+	"orderErrorCases": [
+		{
+			"name": "relevance without a match condition",
+			"type": "article",
+			"orderBy": [{ "relevance": true, "dir": "DIRECTION_ASC" }]
+		},
+		{
+			"name": "relevance with two match conditions",
+			"type": "article",
+			"cond": {
+				"and": {
+					"conds": [
+						{ "match": { "query": "a" } },
+						{ "match": { "query": "b" } }
+					]
+				}
+			},
+			"orderBy": [{ "relevance": true, "dir": "DIRECTION_ASC" }]
+		},
+		{
+			"name": "relevance with a path",
+			"type": "article",
+			"cond": { "match": { "query": "a" } },
+			"orderBy": [
+				{ "path": ["title"], "relevance": true, "dir": "DIRECTION_ASC" }
+			]
+		},
+		{
+			"name": "relevance without a direction",
+			"type": "article",
+			"cond": { "match": { "query": "a" } },
+			"orderBy": [{ "relevance": true }]
+		}
+	],
+	"cursorCases": [
+		{
+			"name": "relevance cursor shape and bytes",
+			"type": "article",
+			"entity": "article",
+			"query": "milk cow",
+			"orderBy": [{ "relevance": true, "dir": "DIRECTION_ASC" }],
+			"row": { "id": "r1", "title": "milk cow" },
+			"key": "r1",
+			"shape": "9dd5eb4dd73b21f1",
+			"cursorHex": "013964643565623464643733623231663101c0f00fd00000000072310000"
+		}
+	],
+	"queryCases": [
+		{
+			"name": "empty query",
+			"query": "",
+			"want": []
+		},
+		{
+			"name": "separators only",
+			"query": "  !! ",
+			"want": []
+		},
+		{
+			"name": "final term is a prefix",
+			"query": "Hello wor",
+			"want": [{ "term": "hello" }, { "term": "wor", "prefix": true }]
+		},
+		{
+			"name": "trailing space makes the final term exact",
+			"query": "hello wor ",
+			"want": [{ "term": "hello" }, { "term": "wor" }]
+		},
+		{
+			"name": "trailing punctuation makes the final term exact",
+			"query": "wor?",
+			"want": [{ "term": "wor" }]
+		},
+		{
+			"name": "single folded term as prefix",
+			"query": "Café",
+			"want": [{ "term": "cafe", "prefix": true }]
+		},
+		{
+			"name": "kept diacritics reach the query terms",
+			"query": "Café",
+			"options": { "keepDiacritics": true },
+			"want": [{ "term": "café", "prefix": true }]
+		},
+		{
+			"name": "cjk query bigrams with prefix on the final bigram",
+			"query": "日本語",
+			"want": [{ "term": "日本" }, { "term": "本語", "prefix": true }]
+		},
+		{
+			"name": "single cjk character query",
+			"query": "日",
+			"want": [{ "term": "日", "prefix": true }]
+		}
+	]
+}

@@ -60,6 +60,11 @@ OPERATORS.isSet = (path) => (): Cond => ({ kind: 'present', path, op: 'isSet' })
 OPERATORS.isNotSet = (path) => (): Cond => ({ kind: 'present', path, op: 'isNotSet' });
 OPERATORS.asc = (path) => () => ({ path, dir: 'asc' as const });
 OPERATORS.desc = (path) => () => ({ path, dir: 'desc' as const });
+// Entity-level full-text match and its ordering. Both record the path they
+// were called at so prepareQuery can reject anything but the query root — the
+// declared search fields are the row's, not a sub-message's.
+OPERATORS.match = (path) => (query: string): Cond => ({ kind: 'match', path, query });
+OPERATORS.relevance = (path) => () => ({ path, dir: 'asc' as const, relevance: true });
 
 /**
  * Names the query DSL claims. A proto field with one of these localNames is

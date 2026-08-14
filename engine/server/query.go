@@ -59,7 +59,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	order, err := query.CompileOrder(desc, msg.GetOrderBy())
+	order, err := query.CompileOrderWith(desc, msg.GetOrderBy(), predicate)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}

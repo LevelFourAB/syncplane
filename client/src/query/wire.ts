@@ -2,6 +2,7 @@ import { type DescField, type DescMessage, type DescOneof, ScalarType } from '@b
 
 import { isTextField, refKeyFields, refTarget } from '../mutations.js';
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
+import { searchDeclOf } from './match.js';
 
 /**
  * Translates a compiled query's paths from JS localNames (the property names
@@ -16,8 +17,10 @@ export function toWirePaths(schema: DescMessage, compiled: CompiledQuery): Compi
 	const out: CompiledQuery = {};
 	if (compiled.where) out.where = translateCond(messageScope(schema), compiled.where);
 	if (compiled.orderBy) {
-		out.orderBy = compiled.orderBy.map(
-			(key): OrderKey => ({ path: translatePath(messageScope(schema), key.path), dir: key.dir }),
+		out.orderBy = compiled.orderBy.map((key): OrderKey =>
+			key.relevance
+				? { path: [], dir: key.dir, relevance: true }
+				: { path: translatePath(messageScope(schema), key.path), dir: key.dir }
 		);
 	}
 	if (compiled.limit !== undefined) out.limit = compiled.limit;
@@ -86,6 +89,9 @@ function translateCond(scope: CondScope, cond: Cond): Cond {
 			}
 			return { kind: 'rel', path: leaf.path, cond: translateCond(messageScope(target), cond.cond) };
 		}
+		case 'match':
+			// Entity-level: no path to translate.
+			return cond;
 		case 'and':
 		case 'or':
 			return { ...cond, conds: cond.conds.map((c) => translateCond(scope, c)) };
@@ -120,6 +126,20 @@ export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): Comp
 	if (compiled.where) out.where = prepareCond(messageScope(schema), compiled.where);
 	if (compiled.orderBy) {
 		out.orderBy = compiled.orderBy.map((key): OrderKey => {
+			if (key.relevance) {
+				if (key.path.length > 0) {
+					throw new Error(`a relevance order key takes no path, got ${key.path.join('.')}`);
+				}
+				// The rank is the match condition's, so the key binds to exactly
+				// one — ambiguity here would rank by an arbitrary choice.
+				const matches = out.where ? matchConds(out.where) : [];
+				if (matches.length !== 1) {
+					throw new Error(
+						`ordering by relevance needs exactly one match condition in the predicate, found ${matches.length}`,
+					);
+				}
+				return { path: [], dir: key.dir, relevance: true, match: matches[0]! };
+			}
 			const leaf = resolveLeafRef(schema, key.path, true);
 			// An incomparable order key ties every pair, so the rows would come
 			// back in row-key order as if no ordering had been asked for.
@@ -142,6 +162,26 @@ export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): Comp
 		);
 	}
 	return out;
+}
+
+/**
+ * The match conditions of a prepared predicate, in tree order. The walk does
+ * not descend into any() or matches() sub-conditions: a match under any() is
+ * rejected at prepare, and one under matches() ranks the TARGET row, which a
+ * relevance key on this entity cannot bind to.
+ */
+function matchConds(cond: Cond): Cond[] {
+	switch (cond.kind) {
+		case 'match':
+			return [ cond ];
+		case 'and':
+		case 'or':
+			return cond.conds.flatMap(matchConds);
+		case 'not':
+			return matchConds(cond.cond);
+		default:
+			return [];
+	}
 }
 
 function prepareCond(scope: CondScope, cond: Cond): Cond {
@@ -257,6 +297,29 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 		case 'present':
 			// Presence works on every leaf, so nothing to check.
 			return { ...cond, path: resolveInScope(scope, cond.path, false).path };
+		case 'match': {
+			if (scope.kind === 'entry' || scope.nested === 'element') {
+				throw new Error(
+					"match cannot nest inside any(); it reads the row's declared search fields, not an element",
+				);
+			}
+			if (cond.path.length > 0) {
+				throw new Error(
+					`query path ${cond.path.join('.')}: match is entity-level; call it on the query root`,
+				);
+			}
+			// Resolving the declaration here is the validation: it throws when
+			// the entity (or, under matches(), the target entity) declares no
+			// search fields or declares them unusably.
+			const decl = searchDeclOf(scope.schema);
+			if (!decl) {
+				throw new Error(
+					`match: ${scope.schema.typeName} declares no search fields; `
+						+ 'mark fields searchable or declare EntityOptions.search',
+				);
+			}
+			return { ...cond };
+		}
 		case 'and':
 		case 'or':
 			return { ...cond, conds: cond.conds.map((c) => prepareCond(scope, c)) };

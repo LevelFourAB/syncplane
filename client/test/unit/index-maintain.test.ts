@@ -167,7 +167,7 @@ describe('client index maintenance', () => {
 			{ name: 'by_sort_key', key: [ { path: [ 'sort_key' ], desc: false } ] },
 		]);
 		expect(compiled).toHaveLength(1);
-		expect(compiled[0]!.encoder.components[0]!.path).toEqual([ 'sortKey' ]);
+		expect(compiled[0]!.encoder!.components[0]!.path).toEqual([ 'sortKey' ]);
 	});
 
 	describe('subsumption', () => {

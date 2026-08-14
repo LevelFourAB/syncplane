@@ -111,6 +111,36 @@ func (c *Compiled) Eval(msg protoreflect.Message) bool {
 	return c.root.eval(msgScope(msg))
 }
 
+// Matchers collects the predicate's compiled match conditions, in tree
+// order. A relevance order key binds to the single one CompileOrderWith
+// requires, and an index-serving executor probes postings with their terms.
+func (c *Compiled) Matchers() []*Matcher {
+	var out []*Matcher
+	var walk func(n node)
+	walk = func(n node) {
+		switch t := n.(type) {
+		case *matchNode:
+			out = append(out, t.m)
+		case *andNode:
+			for _, sub := range t.conds {
+				walk(sub)
+			}
+		case *orNode:
+			for _, sub := range t.conds {
+				walk(sub)
+			}
+		case *notNode:
+			walk(t.cond)
+		}
+		// An exists sub-condition cannot hold a match (compile rejects it), so
+		// the walk does not descend into elements.
+	}
+	if c.root != nil {
+		walk(c.root)
+	}
+	return out
+}
+
 type node interface {
 	eval(s scope) bool
 }
@@ -280,6 +310,16 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		// predicate, an ordering, an exists sub-condition.
 		return nil, fmt.Errorf("path %v: matches is not supported here; a relation condition needs the target entity's rows",
 			kind.Rel.GetPath())
+	case *syncplanev1.Condition_Match:
+		decl, err := CompileSearchDecl(desc)
+		if err != nil {
+			return nil, err
+		}
+		if decl == nil {
+			return nil, fmt.Errorf("match: %s declares no search fields; mark fields searchable or declare EntityOptions.search",
+				desc.FullName())
+		}
+		return &matchNode{m: newMatcher(decl, kind.Match.GetQuery())}, nil
 	default:
 		return nil, fmt.Errorf("condition has no kind")
 	}
@@ -416,6 +456,8 @@ func walkSubPaths(cond *syncplanev1.Condition, check func([]string) error) error
 	case *syncplanev1.Condition_Rel:
 		return fmt.Errorf("path %v: matches cannot nest inside any(); the semi-join is scoped to the row",
 			kind.Rel.GetPath())
+	case *syncplanev1.Condition_Match:
+		return fmt.Errorf("match cannot nest inside any(); it reads the row's declared search fields, not an element")
 	default:
 		return fmt.Errorf("condition has no kind")
 	}

@@ -63,6 +63,11 @@ message EntityOptions {
 	// Collaborative-text fields are edited by PATCH, so an entity carrying one
 	// needs updates allowed for its text to be editable by clients at all.
 	UpdatePolicy update_policy = 8;
+	// Full-text search over this entity's fields. See SearchSpec. An entity
+	// may also mark fields (syncplane.v1.field_behavior).searchable instead of
+	// (or as well as) declaring this; the marked fields come first, in field
+	// order, followed by the fields declared here.
+	SearchSpec search = 9;
 }
 
 // HistoryOptions opts an entity into server-side field history: a PUT or PATCH
@@ -159,6 +164,40 @@ enum UpdatePolicy {
 	UPDATE_POLICY_TRUSTED_ONLY = 2;
 }
 
+// SearchField is one field full-text search reads.
+message SearchField {
+	// Dotted proto field path (e.g. "title", "details.summary") to a singular
+	// string or collaborative-text field. A collaborative-text field is
+	// searched as its visible plain string.
+	string path = 1;
+}
+
+// SearchSpec declares full-text search over an entity: which fields a match
+// condition reads, in importance order, and how their text is analyzed.
+//
+// Fields are listed most important first. Relevance ranks a row whose terms
+// all sit in one earlier field ahead of a row that spreads them over later
+// ones, so "title before body" is declared by putting title first.
+//
+// Analysis is the deterministic pipeline both sides implement identically
+// (engine/search in Go, client/src/search in TS): Unicode normalization,
+// lowercasing, a diacritic fold unless keep_diacritics is set, and
+// segmentation with CJK bigrams. The same pipeline analyzes queries, so a
+// match means "these terms, whatever the case, width or accents".
+//
+// Matching is a predicate like any other: a match condition returns the same
+// rows locally and on the server, ordered identically, with or without a
+// search index behind it.
+message SearchSpec {
+	// At least one field, most important first, counting any
+	// (syncplane.v1.field_behavior).searchable marks ahead of these. A path
+	// may appear once across both surfaces.
+	repeated SearchField field = 1;
+	// Keep diacritics significant: "café" and "cafe" analyze to distinct
+	// terms. The default folds them together.
+	bool keep_diacritics = 2;
+}
+
 // IndexKey is one component of an index, in the order it sorts.
 message IndexKey {
 	// Dotted proto field path, e.g. "settings.size". A path ending at a
@@ -216,7 +255,7 @@ message FieldBehavior {
 	// is the hot one.
 	//
 	// Rejected on a text field: every keystroke changes the value, so the entry
-	// would be rewritten with it. Full-text search is a different mechanism.
+	// would be rewritten with it. Searching text is what SearchSpec is for.
 	bool indexed = 5;
 	// Record this field in the entity's history (see EntityOptions.history).
 	//
@@ -236,6 +275,11 @@ message FieldBehavior {
 	//
 	// Ignored on an entity that has not opted in.
 	bool history = 6;
+	// Include this field in the entity's full-text search, ahead of any
+	// fields the entity's SearchSpec declares (marked fields count as most
+	// important, in field order). Requires a singular string or
+	// collaborative-text field. See SearchSpec for what search means.
+	bool searchable = 7;
 }
 
 extend google.protobuf.MessageOptions {

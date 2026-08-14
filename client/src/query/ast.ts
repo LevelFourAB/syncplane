@@ -37,12 +37,28 @@ export type Cond =
 	// unrewritten.
 	| { kind: 'rel'; path: Path; cond: Cond }
 	| { kind: 'present'; path: Path; op: 'isSet' | 'isNotSet' }
+	// Full-text match over the entity's declared search fields. Entity-level:
+	// `path` must be empty (the DSL records it from the proxy, and prepareQuery
+	// rejects a match called anywhere but the query root).
+	| { kind: 'match'; path: Path; query: string }
 	| { kind: 'and' | 'or'; conds: Cond[] }
 	| { kind: 'not'; cond: Cond };
 
 export interface OrderKey {
 	path: Path;
 	dir: 'asc' | 'desc';
+	/**
+	 * Order by how well each row satisfies the predicate's match condition:
+	 * `asc` is best match first. Requires `path` empty and exactly one match
+	 * condition in the query's `where`.
+	 */
+	relevance?: boolean;
+	/**
+	 * The match condition the rank comes from, attached by prepareQuery so the
+	 * comparator and the cursor codec can reach it without re-walking the
+	 * predicate. Never set by the DSL.
+	 */
+	match?: Cond;
 }
 
 /** A fully-materialized query, independent of the typed DSL. */

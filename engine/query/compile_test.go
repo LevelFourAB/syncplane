@@ -40,6 +40,10 @@ func msgForType(typ string) proto.Message {
 		return &testdatav1.Issue{}
 	case "field_history":
 		return &syncplanev1.FieldHistory{}
+	case "article":
+		return &testdatav1.Article{}
+	case "glossary":
+		return &testdatav1.Glossary{}
 	default:
 		return &testdatav1.Widget{}
 	}

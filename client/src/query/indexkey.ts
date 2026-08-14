@@ -136,6 +136,16 @@ export interface IndexComponent {
 	 * `custom.*.key`.
 	 */
 	keyComponent: boolean;
+	/**
+	 * Makes this a COMPUTED component: its value is the row's match rank (a
+	 * number) rather than anything read through a path, and `path` is empty.
+	 * Only a relevance order key builds one, so it exists in query cursors and
+	 * never in a stored index.
+	 */
+	rank?: {
+		rank(row: unknown, schema: DescMessage | undefined): number;
+		specString(): string;
+	};
 }
 
 /**
@@ -421,6 +431,10 @@ export class IndexEncoder {
 	): string {
 		const out: number[] = [];
 		for (const c of this.components) {
+			if (c.rank) {
+				appendComponent(out, c, true, c.rank.rank(row, schema));
+				continue;
+			}
 			const depth = c.fans.length;
 			if (depth === 0) {
 				const r = resolvePath(row, c.path, schema);
@@ -642,6 +656,13 @@ export function upperBound(prefix: string): string | undefined {
 export function specHash(comps: IndexComponent[]): string {
 	let s = `v${ENCODING_VERSION}`;
 	for (const c of comps) {
+		if (c.rank) {
+			// The whole matcher fingerprint, not a fixed word: a rank depends on
+			// the query's terms and the declaration, so a relevance cursor minted
+			// for one search must not bound a different one.
+			s += `|relevance(${c.rank.specString()}):number:false:${c.desc}:-1`;
+			continue;
+		}
 		// A map fan renders as `<field>.*`, matching how the path is declared.
 		const mapFans = new Set(c.fans.filter((f) => f.isMap).map((f) => f.at));
 		const path = c.protoPath
@@ -714,7 +735,7 @@ function appendComponent(
  * Writes `s` as CESU-8: each UTF-16 code unit encoded as if it were a code
  * point, which is what makes byte order equal code-unit order.
  */
-function appendIndexString(out: number[], s: string): void {
+export function appendIndexString(out: number[], s: string): void {
 	for (let i = 0; i < s.length; i++) {
 		const c = s.charCodeAt(i);
 		if (c === 0) {
@@ -770,7 +791,7 @@ function appendIndexBigint(out: number[], v: bigint, unsigned: boolean): void {
 
 /** One character per byte. Chunked so a long entry cannot blow the argument
  * limit on `String.fromCharCode`. */
-function bytesToKey(bytes: number[]): string {
+export function bytesToKey(bytes: number[]): string {
 	let out = '';
 	for (let i = 0; i < bytes.length; i += 4096) {
 		out += String.fromCharCode(...bytes.slice(i, i + 4096));

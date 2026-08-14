@@ -477,10 +477,36 @@ naming the field. **Enums arrive as numbers**, so it is `t.status.eq(2)`, not
 | singular message                                | drillable (`t.settings.color.eq(...)`) + `isSet`/`isNotSet`; on a reference also `matches(cb)` |
 | oneof group (`OneofRef`)                        | one entry per case: the member's operators + `isSet`/`isNotSet`                                |
 | map (`MapOps`)                                  | `at(key)` → the value's operators + `isSet`/`isNotSet`; `any(cb)`; `isEmpty`                   |
+| the query root (`EntityQueryOps`)               | `match(query)`; `relevance()` in `orderBy`                                                     |
 
 Order: every orderable field exposes `.asc()` / `.desc()` → `OrderKey`.
 
 Boolean combinators (top-level exports): `and(...conds)`, `or(...conds)`, `not(cond)`.
+
+#### Full-text match — `match` / `relevance`
+
+Entity-level, on the query root: `match(query)` is true when every term of the
+query occurs in some [declared search field](proto-options.md#full-text-search)
+of the row, case- and accent-insensitively, with the final term matching as a
+prefix when the query ends inside it. An empty query matches every row.
+`relevance()` orders best match first and requires exactly one `match` in the
+query's `where` — the rank is that condition's.
+
+```ts
+await client.db.article.query({
+	where: (a) => and(a.match('milk cow'), a.state.eq('published')),
+	orderBy: (a) => [ a.relevance() ],
+	limit: 20,
+});
+```
+
+Both compose like any other condition and order key: `watchQuery` keeps a
+ranked result live, `queryServer` runs the identical semantics over everything
+the server holds, and relevance cursors page across the two. Thrown at query
+time: `match` on an entity that declares no search fields, `match` anywhere but
+the query root (including inside `any()`), `relevance()` with no `match`, with
+several, or alongside a `path`. See [Search data](../how-to/search.md) and
+[the search model](../explanation/search.md).
 
 #### Asking about one entry of a map
 
@@ -1384,6 +1410,29 @@ reason for a decline. See [Telemetry](telemetry.md#local-reads).
 
 Set `debugVerifyIndexReads` (or `SYNC_DEBUG_VERIFY_TOUCHES=1`) to run both paths
 on every query and throw if they disagree.
+
+### Full-text search
+
+`.searchable()` marks a singular `text()` field as searched; the entity-level
+`search` option adds fields in importance order (marked fields count ahead of
+it) and analyzer options:
+
+```ts
+const article = schema.entity('article', {
+	id: schema.text().key(),
+	title: schema.text().searchable(),
+	summary: schema.text(),
+}, {
+	search: { fields: [ 'summary' ], keepDiacritics: false },
+});
+```
+
+`.searchable()` throws on anything but a singular `text()`. The declaration is
+what `match(...)` reads and what `relevance()` ranks by, and it also declares
+the term index the previous section's rules apply to — built in the
+background, invisible to results, maintained on every write. See
+[proto options](proto-options.md#full-text-search) for the .proto form and
+[Search data](../how-to/search.md) for querying.
 
 ### Write policies
 

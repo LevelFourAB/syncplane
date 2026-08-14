@@ -15,6 +15,7 @@ import {
 	Direction,
 	ExistsCondSchema,
 	InCondSchema,
+	MatchCondSchema,
 	type OrderKey as PbOrderKey,
 	OrderKeySchema,
 	PresentCondSchema,
@@ -170,6 +171,12 @@ export function condToProto(cond: Cond): Condition {
 					}),
 				},
 			});
+		case 'match':
+			// Entity-level: the recorded path is a DSL artifact prepareQuery has
+			// already required empty, so the wire form carries the query alone.
+			return create(ConditionSchema, {
+				kind: { case: 'match', value: create(MatchCondSchema, { query: cond.query }) },
+			});
 		case 'and':
 		case 'or':
 			return create(ConditionSchema, {
@@ -236,6 +243,8 @@ export function condFromProto(cond: Condition): Cond {
 					throw new Error('present condition needs an op');
 			}
 		}
+		case 'match':
+			return { kind: 'match', path: [], query: kind.value.query };
 		case 'and':
 		case 'or':
 			return { kind: kind.case, conds: kind.value.conds.map(condFromProto) };
@@ -251,17 +260,22 @@ export function orderKeyToProto(key: OrderKey): PbOrderKey {
 	return create(OrderKeySchema, {
 		path: key.path,
 		dir: key.dir === 'desc' ? Direction.DESC : Direction.ASC,
+		relevance: key.relevance === true,
 	});
 }
 
 /** Proto → OrderKey AST (wire paths). */
 export function orderKeyFromProto(key: PbOrderKey): OrderKey {
+	let dir: 'asc' | 'desc';
 	switch (key.dir) {
 		case Direction.ASC:
-			return { path: key.path, dir: 'asc' };
+			dir = 'asc';
+			break;
 		case Direction.DESC:
-			return { path: key.path, dir: 'desc' };
+			dir = 'desc';
+			break;
 		default:
 			throw new Error('order key needs a direction');
 	}
+	return key.relevance ? { path: key.path, dir, relevance: true } : { path: key.path, dir };
 }

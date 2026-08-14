@@ -11,8 +11,9 @@ the entity** — `client.query` over the synced rows, and `queryServer` / the
 the page), never the work.
 
 So: a selective predicate beats deep pagination, and a large entity behind a hot
-endpoint will be felt. There is no full-text search; `contains` is a substring
-test per row and is never index-servable.
+endpoint will be felt. `contains` is a substring test per row and is never
+index-servable; searching text is what a [match query](search.md) is for, which
+brings its own term index.
 
 ## A filter can cross a reference, a sort cannot
 

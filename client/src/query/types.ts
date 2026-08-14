@@ -257,8 +257,31 @@ export type MsgRef<M> = {
 	[K in Exclude<keyof M, '$typeName' | '$unknown'>]-?: FieldOps<M[K]>;
 };
 
+/**
+ * Entity-level operators, offered on the query root alone: full-text search
+ * reads the entity's declared search fields, so it has no field to hang off.
+ */
+export interface EntityQueryOps {
+	/**
+	 * Full-text match over the entity's declared search fields
+	 * ((syncplane.v1.field_behavior).searchable marks and EntityOptions.search).
+	 * Every term of `query` must occur, case- and accent-insensitively per the
+	 * entity's analyzer; the final term matches as a prefix when the query ends
+	 * inside it, so search-as-you-type needs no separate mode. An empty query
+	 * matches every row. Throws at query time on an entity that declares no
+	 * search fields.
+	 */
+	match(query: string): Cond;
+	/**
+	 * Orders best match first. Requires exactly one {@link match} in the
+	 * query's `where`; rows ranking equally fall through to the next key and
+	 * finally the row key.
+	 */
+	relevance(): OrderKey;
+}
+
 /** The root reference handed to `where`/`orderBy` lambdas. */
-export type QueryRef<M> = MsgRef<M>;
+export type QueryRef<M> = MsgRef<M> & EntityQueryOps;
 
 /** Typed query as written by users; compiled via compileQuery(). */
 export interface Query<M> {

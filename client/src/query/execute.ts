@@ -50,10 +50,11 @@ import { sortOrderedFields } from '../ordering.js';
 import { foldTextLog, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow } from './ast.js';
-import { compareRows, evalCond } from './evaluate.js';
+import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
 import { upperBound } from './indexkey.js';
 import type { IndexRange, QueryPlan } from './plan.js';
 import { planQuery } from './plan.js';
+import { requiredMatchCond, searchOverflowRange, searchTermRange } from './searchindex.js';
 
 /**
  * How many ROWS one query may read through an index. An index narrows the
@@ -159,8 +160,36 @@ export async function queryByIndex<D extends DescMessage>(
 	)).filter((idx): idx is CompiledIndex => idx !== undefined);
 	if (built.length === 0) return decline(report, 'not-built');
 
+	// A required match narrows candidates harder than any value range, so the
+	// term-postings intersection goes first. A term-less match (which matches
+	// every row) narrows nothing, and an unbuilt search index simply falls
+	// through to the planner — which cannot serve a match and declines to the
+	// scan.
+	const matchCond = compiled.where === undefined ? undefined : requiredMatchCond(compiled.where);
+	if (matchCond !== undefined) {
+		const searchIdx = built.find((idx) => idx.search !== undefined);
+		if (searchIdx !== undefined) {
+			const matcher = matcherOf(matchCond, schema);
+			if (matcher.terms.length > 0) {
+				return querySearchIndex(
+					tx,
+					registry,
+					def,
+					schema,
+					searchIdx,
+					matcher,
+					compiled,
+					workspaceId,
+					window,
+					report,
+				);
+			}
+		}
+	}
+
 	const plan = planQuery(
-		built.map((idx) => ({ name: idx.name, encoder: idx.encoder })),
+		built.filter((idx) => idx.encoder !== undefined)
+			.map((idx) => ({ name: idx.name, encoder: idx.encoder! })),
 		compiled.where,
 		compiled.orderBy,
 	);
@@ -400,6 +429,145 @@ export async function queryByIndex<D extends DescMessage>(
 		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
 		total,
 		hasMore: end !== undefined && matched > end,
+	};
+}
+
+/**
+ * Answers a query whose predicate carries a required match from the entity's
+ * term-postings index — the mirror of the server's queryBySearch, plus the
+ * overlay merge every local read owes.
+ *
+ * Candidates are the intersection of every query term's postings (a prefix
+ * range for a prefix term) unioned with the overflow rows, minus rows the
+ * overlay shadows; every candidate is re-read and re-checked against the FULL
+ * predicate, and overlay rows are evaluated whole — so the result is exactly
+ * the scan's. No early settling: a relevance ordering is computed per row, so
+ * the walk cannot know which candidates the page will keep, and the candidate
+ * set is already bounded by the budget it declines over.
+ */
+async function querySearchIndex<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	idx: CompiledIndex,
+	matcher: Matcher,
+	compiled: CompiledQuery,
+	workspaceId: string,
+	window?: PageWindow,
+	report?: IndexReport,
+): Promise<IndexedPage<MessageShape<D>> | undefined> {
+	// The overlay is authoritative for rows it holds — edited or tombstoned —
+	// so its keys drop out of the candidate set and matching rows come back
+	// from here.
+	const oPrefix = overlayWsPrefix(def.name, workspaceId);
+	const shadowed = new Set<string>();
+	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
+	for await (const [ k, v ] of tx.scan(oPrefix)) {
+		const key = k.slice(oPrefix.length);
+		shadowed.add(key);
+		const record = v as OverlayRecord;
+		if (record.del) continue;
+		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		if (!matches(decoded.value, compiled.where, schema)) continue;
+		if (window && !window.within(decoded.value, key)) continue;
+		kept.push({ key, ...decoded });
+	}
+	const baseRecords = await tx.getMany(
+		kept.map((c) => confirmedKey(def.name, workspaceId, c.key)),
+	);
+	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c, i) => {
+		const base = baseRecords[i] as ConfirmedRecord | undefined;
+		return {
+			row: { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
+			bytes: c.bytes,
+		};
+	});
+
+	const prefix = indexPositionPrefix(def.name, idx.name, idx.specHash, workspaceId);
+	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
+	let walked = 0;
+	const scanKeys = async (
+		lo: string,
+		hi: string | undefined,
+		keep: (key: string) => void,
+	): Promise<boolean> => {
+		const scanLo = prefix + lo;
+		const scanHi = hi === undefined ? successorOf(prefix) : prefix + hi;
+		for await (const cKey of tx.indexScan(scanLo, scanHi)) {
+			if (++walked > MAX_INDEX_CANDIDATES) return false;
+			if (!cKey.startsWith(rowPrefix)) continue;
+			keep(cKey.slice(rowPrefix.length));
+		}
+		return true;
+	};
+
+	// Intersect term by term. The first term seeds the set; each later term
+	// keeps only the rows it also has. An empty intersection still reads the
+	// overflow rows — they carry no postings to intersect on.
+	let candidates: Set<string> | undefined;
+	for (const t of matcher.terms) {
+		const { lo, hi } = searchTermRange(t);
+		const next = new Set<string>();
+		const ok = await scanKeys(lo, hi, (key) => {
+			if (candidates === undefined || candidates.has(key)) next.add(key);
+		});
+		if (!ok) return decline(report, 'budget', walked);
+		candidates = next;
+	}
+	const all = candidates ?? new Set<string>();
+	const overflow = searchOverflowRange();
+	if (!await scanKeys(overflow.lo, overflow.hi, (key) => all.add(key))) {
+		return decline(report, 'budget', walked);
+	}
+
+	const keys = [ ...all ].filter((k) => !shadowed.has(k)).sort();
+	const confirmed: IndexedRow<MessageShape<D>>[] = [];
+	for (let at = 0; at < keys.length; at += READ_BATCH) {
+		for (
+			const entry of await readConfirmedMany(
+				tx,
+				registry,
+				def,
+				schema,
+				workspaceId,
+				keys.slice(at, at + READ_BATCH),
+			)
+		) {
+			// A position cannot outlive its row (they are one record); the guard
+			// stays because answering from a row that is not there would be
+			// silent and wrong.
+			if (entry === undefined) continue;
+			if (!matches(entry.row.value, compiled.where, schema)) continue;
+			if (window && !window.within(entry.row.value, entry.row.key)) continue;
+			confirmed.push(entry);
+		}
+	}
+
+	if (report) {
+		report.index = idx.name;
+		report.candidates = walked;
+	}
+
+	const out = [ ...confirmed, ...overlayRows ];
+	if (compiled.orderBy && compiled.orderBy.length > 0) {
+		const orderBy = compiled.orderBy;
+		out.sort((a, b) => compareRows(a.row, b.row, orderBy, schema));
+	} else {
+		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
+	}
+	const total = compiled.total !== false ? out.length : undefined;
+	if (compiled.limit !== undefined && window?.backward) {
+		return out.length > compiled.limit
+			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true }
+			: { rows: out, total, hasMore: false };
+	}
+	const start = compiled.offset ?? 0;
+	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
+	return {
+		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+		total,
+		hasMore: end !== undefined && out.length > end,
 	};
 }
 

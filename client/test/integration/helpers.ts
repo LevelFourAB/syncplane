@@ -4,6 +4,7 @@ import { inject } from 'vitest';
 import { SyncClient, type SyncClientOptions } from '../../src/client.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import {
+	ArticleSchema,
 	HistoriedSchema,
 	PairSchema,
 	WidgetSchema,
@@ -28,7 +29,14 @@ export function newClient(
 		transport: createConnectTransport({ baseUrl: inject('serverUrl'), httpVersion: '1.1' }),
 		workspaceId,
 		kvStore: new MemoryKVStore(),
-		entities: [ TodoSchema, WidgetSchema, PairSchema, HistoriedSchema, FieldHistorySchema ],
+		entities: [
+			TodoSchema,
+			WidgetSchema,
+			PairSchema,
+			HistoriedSchema,
+			ArticleSchema,
+			FieldHistorySchema,
+		],
 		// Integration tests drive sync explicitly unless a test opts in.
 		pollIntervalMs: 0,
 		streamEnabled: false,
@@ -64,7 +72,14 @@ export function newMultiClient(
 		workspaces,
 		defaultWorkspace: workspaces[0],
 		kvStore: new MemoryKVStore(),
-		entities: [ TodoSchema, WidgetSchema, PairSchema, HistoriedSchema, FieldHistorySchema ],
+		entities: [
+			TodoSchema,
+			WidgetSchema,
+			PairSchema,
+			HistoriedSchema,
+			ArticleSchema,
+			FieldHistorySchema,
+		],
 		pollIntervalMs: 0,
 		streamEnabled: false,
 		...overrides,

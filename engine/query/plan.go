@@ -38,8 +38,9 @@ import (
 //   - `or` at the top level. Serving it means merging several ranges and
 //     de-duplicating, which is a different execution shape; the scan handles it.
 //   - `contains` / `endsWith`. Neither is a prefix of anything, so no range
-//     bounds them. Full-text search is a different mechanism entirely.
-//   - `not` and presence. Both become residual.
+//     bounds them. Searching text is a match condition's job, served by the
+//     term-postings index (searchindex.go) rather than by this planner.
+//   - `not`, presence, and `match`. All become residual.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.go
 // describes: `has` over a repeated scalar and `any` over a repeated message

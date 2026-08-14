@@ -58,6 +58,9 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 			}
 			return { kind: 'rel', path, cond: toLocalNames(target, cond.cond) };
 		}
+		case 'match':
+			// Entity-level: no path to translate.
+			return cond;
 		case 'and':
 		case 'or':
 			return { ...cond, conds: cond.conds.map((c) => toLocalNames(schema, c)) };
@@ -80,6 +83,8 @@ function entryLocalNames(map: Extract<DescField, { fieldKind: 'map' }>, cond: Co
 		case 'rep':
 		case 'present':
 			return { ...cond, path: translate(cond.path) };
+		case 'match':
+			return cond;
 		case 'exists':
 		case 'rel':
 			// A nested any() inside an entry: its own path translates here, its

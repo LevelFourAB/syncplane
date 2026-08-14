@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"google.golang.org/protobuf/proto"
@@ -205,7 +206,7 @@ func (info *entityInfo) indexByName(name string) *compiledIndex {
 // by the data, which is what makes the per-row limit below load-bearing rather
 // than a formality.
 func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key string, msg proto.Message) error {
-	if len(info.indexes) == 0 {
+	if len(info.indexes) == 0 && info.search == nil {
 		return nil
 	}
 	refl := msg.ProtoReflect()
@@ -213,6 +214,14 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 	for i := range info.indexes {
 		for _, k := range info.indexes[i].encoder.Encode(refl, key) {
 			entries = append(entries, storage.IndexEntry{Index: info.indexes[i].name, Key: k})
+		}
+	}
+	if info.search != nil {
+		// Bounded on its own by the per-row term cap (an oversized document
+		// stores the overflow marker alone), so the shared limit below stays
+		// about value indexes plus a constant.
+		for _, k := range info.search.decl.SearchEntries(refl, key) {
+			entries = append(entries, storage.IndexEntry{Index: info.search.name, Key: k})
 		}
 	}
 	if max := limits.maxIndexEntriesPerRow(); len(entries) > max {
@@ -253,7 +262,7 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 // hold. That asymmetry is fine in practice because the TS client derives a mask
 // from a diff, so ordinary edits arrive as PATCH.
 func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
-	if len(info.indexes) == 0 {
+	if len(info.indexes) == 0 && info.search == nil {
 		return false
 	}
 	for _, path := range paths {
@@ -264,6 +273,9 @@ func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
 					return true
 				}
 			}
+		}
+		if info.search != nil && info.search.decl.MaskTouches(segs) {
+			return true
 		}
 	}
 	return false
@@ -277,7 +289,7 @@ func (info *entityInfo) maskTouchesIndexes(paths []string) bool {
 // reading one to compute which entries to remove would put a read on the
 // delete path.
 func (info *entityInfo) clearRowIndexes(tx storage.WriteTx, key string) error {
-	if len(info.indexes) == 0 {
+	if len(info.indexes) == 0 && info.search == nil {
 		return nil
 	}
 	return tx.DeleteIndexEntries(info.name, key)
@@ -289,11 +301,19 @@ func (info *entityInfo) clearRowIndexes(tx storage.WriteTx, key string) error {
 // evolved, or the encoding version moved), and an unfinished build means they
 // cover only part of the entity. Either way a read must scan instead.
 func (ci *compiledIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
-	hash, ready, err := tx.IndexState(entity, ci.name)
+	return indexReadyState(tx, entity, ci.name, ci.specHash)
+}
+
+func (si *searchIndex) ready(tx storage.ReadTx, entity string) (bool, error) {
+	return indexReadyState(tx, entity, si.name, si.specHash)
+}
+
+func indexReadyState(tx storage.ReadTx, entity, name, specHash string) (bool, error) {
+	hash, ready, err := tx.IndexState(entity, name)
 	if err != nil {
 		return false, err
 	}
-	return ready && hash == ci.specHash, nil
+	return ready && hash == specHash, nil
 }
 
 // rowBatch resolves row keys to rows a batch at a time, so that a walk over k
@@ -407,7 +427,17 @@ func queryByIndex(
 		discard()
 		return false, nil
 	}
-	if limits.DisableIndexes || len(info.indexes) == 0 {
+	if limits.DisableIndexes {
+		return decline()
+	}
+	// A required match narrows candidates harder than any value range, so the
+	// postings intersection goes first. Its declines never offered a row (the
+	// budget is spent before any candidate is resolved), so falling through to
+	// the planner — and from there to the scan — needs nothing undone.
+	if served, err := queryBySearch(tx, info, predicate, limits, consider); err != nil || served {
+		return served, err
+	}
+	if len(info.indexes) == 0 {
 		return decline()
 	}
 	candidates := make([]query.Index, 0, len(info.indexes))
@@ -508,6 +538,111 @@ func queryByIndex(
 			return decline()
 		}
 		if err != nil {
+			return false, err
+		}
+	}
+	if err := batch.flush(); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// queryBySearch answers a query from the entity's term-postings index when a
+// REQUIRED match condition narrows it, reporting whether it did. Candidates
+// are the intersection of every query term's postings — a prefix range for a
+// prefix term — unioned with the overflow rows, whose term sets outgrew their
+// postings; every candidate is then re-read and re-checked against the FULL
+// predicate, so the index changes which rows are considered, never which
+// match. A relevance ordering needs nothing from the walk: the caller's heap
+// and sort rank whatever is offered, exactly as they rank a scan's rows.
+//
+// Declines — no declaration, no required match, a term-less match (which
+// matches every row, so the postings narrow nothing), an unbuilt index, or a
+// term whose postings blow the candidate budget — all happen before any row
+// is offered, so the caller falls through with nothing to discard.
+func queryBySearch(
+	tx storage.ReadTx,
+	info *entityInfo,
+	predicate *query.Compiled,
+	limits Limits,
+	consider func(storage.Row, *query.Compiled) error,
+) (bool, error) {
+	si := info.search
+	if si == nil || predicate == nil {
+		return false, nil
+	}
+	m := predicate.RequiredMatcher()
+	if m == nil || len(m.Terms()) == 0 {
+		return false, nil
+	}
+	ready, err := si.ready(tx, info.name)
+	if err != nil || !ready {
+		return false, err
+	}
+
+	budget := limits.maxIndexScanCandidates()
+	scanKeys := func(lo, hi []byte, keep func(rowKey string)) (bool, error) {
+		seen := 0
+		err := tx.ScanIndex(info.name, si.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+			seen++
+			if seen > budget {
+				return errIndexBudget
+			}
+			keep(rowKey)
+			return nil
+		})
+		if errors.Is(err, errIndexBudget) {
+			return false, nil
+		}
+		return err == nil, err
+	}
+
+	// Intersect term by term. The first term seeds the set; each later term
+	// keeps only the rows it also has. An empty intersection still reads the
+	// overflow rows — they carry no postings to intersect on.
+	var candidates map[string]struct{}
+	for _, t := range m.Terms() {
+		lo, hi := query.SearchTermRange(t)
+		next := make(map[string]struct{})
+		ok, err := scanKeys(lo, hi, func(rowKey string) {
+			if candidates == nil {
+				next[rowKey] = struct{}{}
+				return
+			}
+			if _, in := candidates[rowKey]; in {
+				next[rowKey] = struct{}{}
+			}
+		})
+		if !ok || err != nil {
+			return false, err
+		}
+		candidates = next
+	}
+	lo, hi := query.SearchOverflowRange()
+	ok, err := scanKeys(lo, hi, func(rowKey string) {
+		candidates[rowKey] = struct{}{}
+	})
+	if !ok || err != nil {
+		return false, err
+	}
+
+	// Sorted so the batched reads visit rows in a deterministic order; the
+	// caller's heap and sort make the result independent of it either way.
+	keys := make([]string, 0, len(candidates))
+	for k := range candidates {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
+		if row.Deleted {
+			// An entry that outlived its row; skipping keeps the answer
+			// identical to the scan's, and a rebuild drops the entry.
+			return nil
+		}
+		return consider(row, predicate)
+	}}
+	for _, k := range keys {
+		if err := batch.add(k); err != nil {
 			return false, err
 		}
 	}

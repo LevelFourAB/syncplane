@@ -49,8 +49,10 @@ import { type DescField, type DescMessage, ScalarType } from '@bufbuild/protobuf
 
 import { isTextField } from '../mutations.js';
 import type { Row } from '../read.js';
+import { analyze, analyzeQuery, type QueryTerm } from '../search/index.js';
 import { plainTextOf } from '../text/index.js';
 import type { CompiledQuery, Cond, OrderKey, PageWindow, Path, Scalar } from './ast.js';
+import { type SearchDecl, searchDeclOf } from './match.js';
 
 interface Resolved {
 	found: boolean;
@@ -373,6 +375,200 @@ function isPlainMap(v: unknown): boolean {
 	return typeof v === 'object' && v !== null && !Array.isArray(v) && !(v instanceof Uint8Array);
 }
 
+/** Cap on how many distinct terms of a query a match requires; terms past it
+ * are ignored rather than rejected. Mirror of engine/query maxMatchTerms. */
+const MAX_MATCH_TERMS = 32;
+
+const RANK_BYTE_MAX = 255;
+
+/**
+ * One compiled match condition: the declaration it reads and the required
+ * terms of its query, with ranks memoized per row value object. Mirror of
+ * engine/query's Matcher; testdata/search/vectors.json pins the rank values
+ * of both, because ranks encode into query cursors.
+ */
+export class Matcher {
+	readonly terms: QueryTerm[];
+	private readonly ranks = new WeakMap<object, number>();
+
+	constructor(readonly decl: SearchDecl, query: string) {
+		this.terms = requiredTerms(analyzeQuery(query, decl.options));
+	}
+
+	/** Whether every required term occurs in some declared field of the row. A
+	 * matcher with no terms matches every row. */
+	matches(row: unknown, schema: DescMessage | undefined): boolean {
+		return Math.floor(this.rank(row, schema) / 2 ** 40) === 0;
+	}
+
+	/**
+	 * Scores the row against the query: a 48-bit integer where SMALLER IS
+	 * BETTER, so ascending rank order is best-match-first. Byte for byte, most
+	 * significant first: terms missing entirely, terms found only as a prefix,
+	 * first declared field containing every term (255 when none does), smallest
+	 * token window covering every term there, earliest matched position there,
+	 * and 255 minus the total matching-token count — each capped at 255. The
+	 * rank reads the row alone, never the store, which is what keeps a client
+	 * ranking over its synced subset identical to the server's over everything.
+	 */
+	rank(row: unknown, schema: DescMessage | undefined): number {
+		if (typeof row === 'object' && row !== null) {
+			const cached = this.ranks.get(row);
+			if (cached !== undefined) return cached;
+			const r = this.computeRank(row, schema);
+			this.ranks.set(row, r);
+			return r;
+		}
+		return this.computeRank(row, schema);
+	}
+
+	private computeRank(row: unknown, schema: DescMessage | undefined): number {
+		const n = this.terms.length;
+		if (n === 0) return 0;
+		const matched: boolean[] = new Array<boolean>(n).fill(false);
+		const exact: boolean[] = new Array<boolean>(n).fill(false);
+		let occ = 0;
+		let attribute = RANK_BYTE_MAX;
+		let proximity = RANK_BYTE_MAX;
+		let first = RANK_BYTE_MAX;
+
+		for (let fi = 0; fi < this.decl.fields.length; fi++) {
+			const { found, value } = resolvePath(row, this.decl.fields[fi]!.path, schema);
+			if (!found || typeof value !== 'string') continue;
+			const tokens = analyze(value, this.decl.options);
+			if (tokens.length === 0) continue;
+			const events: { pos: number; term: number }[] = [];
+			const seen: boolean[] = new Array<boolean>(n).fill(false);
+			let inField = 0;
+			for (let pos = 0; pos < tokens.length; pos++) {
+				const tok = tokens[pos]!;
+				for (let j = 0; j < n; j++) {
+					const t = this.terms[j]!;
+					if (t.prefix ? !tok.startsWith(t.term) : tok !== t.term) continue;
+					events.push({ pos, term: j });
+					occ++;
+					matched[j] = true;
+					if (tok === t.term) exact[j] = true;
+					if (!seen[j]) {
+						seen[j] = true;
+						inField++;
+					}
+				}
+			}
+			if (attribute === RANK_BYTE_MAX && inField === n) {
+				// 254, not 255: the sentinel byte must stay worse than any real
+				// field, however many are declared.
+				attribute = Math.min(fi, RANK_BYTE_MAX - 1);
+				proximity = Math.min(minWindow(events, n), RANK_BYTE_MAX);
+				first = Math.min(events[0]!.pos, RANK_BYTE_MAX);
+			}
+		}
+
+		let miss = 0;
+		let prefixOnly = 0;
+		for (let j = 0; j < n; j++) {
+			if (!matched[j]) miss++;
+			else if (!exact[j]) prefixOnly++;
+		}
+		miss = Math.min(miss, RANK_BYTE_MAX);
+		prefixOnly = Math.min(prefixOnly, RANK_BYTE_MAX);
+		const occComp = RANK_BYTE_MAX - Math.min(occ, RANK_BYTE_MAX);
+		// Multiplication, not shifts: the rank is 48 bits and JS bitwise
+		// operators truncate to 32.
+		return ((((miss * 256 + prefixOnly) * 256 + attribute) * 256 + proximity) * 256 + first)
+				* 256
+			+ occComp;
+	}
+
+	/**
+	 * Fingerprints everything this matcher's ranks depend on — declaration and
+	 * required terms — for the cursor shape. Non-ASCII code units render as
+	 * \uXXXX escapes because the two fingerprint implementations walk different
+	 * units (Go UTF-8 bytes, TS UTF-16 code units) and only agree on ASCII.
+	 */
+	specString(): string {
+		let s = this.decl.spec + '?';
+		this.terms.forEach((t, i) => {
+			if (i > 0) s += ' ';
+			for (let j = 0; j < t.term.length; j++) {
+				const u = t.term.charCodeAt(j);
+				s += u < 0x80 ? t.term[j]! : '\\u' + u.toString(16).padStart(4, '0');
+			}
+			if (t.prefix) s += '*';
+		});
+		return s;
+	}
+}
+
+/**
+ * Reduces an analyzed query to the terms a row must satisfy: duplicates
+ * collapse, a prefix term subsumed by an equal exact term drops, and
+ * everything past MAX_MATCH_TERMS is ignored.
+ */
+function requiredTerms(terms: QueryTerm[]): QueryTerm[] {
+	const exact = new Set(terms.filter((t) => !t.prefix).map((t) => t.term));
+	const out: QueryTerm[] = [];
+	const seen = new Set<string>();
+	for (const t of terms) {
+		if (t.prefix && exact.has(t.term)) continue;
+		if (seen.has(t.term)) continue;
+		seen.add(t.term);
+		out.push(t);
+		if (out.length === MAX_MATCH_TERMS) break;
+	}
+	return out;
+}
+
+/**
+ * The smallest position span covering at least one event of every term — the
+ * classic two-pointer minimal cover. Events must be sorted by position
+ * (generation order guarantees it) and cover all n terms.
+ */
+function minWindow(events: { pos: number; term: number }[], n: number): number {
+	if (n === 1) return 0;
+	const counts: number[] = new Array<number>(n).fill(0);
+	let have = 0;
+	let best = Number.MAX_SAFE_INTEGER;
+	let l = 0;
+	for (let r = 0; r < events.length; r++) {
+		if (counts[events[r]!.term]! === 0) have++;
+		counts[events[r]!.term]!++;
+		while (have === n) {
+			const w = events[r]!.pos - events[l]!.pos;
+			if (w < best) best = w;
+			counts[events[l]!.term]!--;
+			if (counts[events[l]!.term] === 0) have--;
+			l++;
+		}
+	}
+	return best;
+}
+
+const matchers = new WeakMap<Cond, Matcher>();
+
+/**
+ * The compiled matcher of a match condition, built once per condition object
+ * and memoized. Throws when the entity declares no search fields, or when no
+ * schema is available to read the declaration from.
+ */
+export function matcherOf(
+	cond: Cond & { kind: 'match' },
+	schema: DescMessage | undefined,
+): Matcher {
+	const cached = matchers.get(cond);
+	if (cached) return cached;
+	if (!schema) throw new Error('match needs the entity schema to resolve its search fields');
+	const decl = searchDeclOf(schema);
+	if (!decl) {
+		throw new Error(
+			`match: ${schema.typeName} declares no search fields; mark fields searchable or declare EntityOptions.search`,
+		);
+	}
+	const m = new Matcher(decl, cond.query);
+	matchers.set(cond, m);
+	return m;
+}
+
 /**
  * Order ranks, the coarse bucket a resolved value falls into before its value
  * is looked at. The rank is compared BEFORE the key's direction is applied,
@@ -488,6 +684,11 @@ export function evalCond(
 			throw new Error(
 				`query path ${cond.path.join('.')}: matches() must be resolved before evaluation`,
 			);
+		case 'match':
+			// prepareQuery rejects a match inside any(); a map entry has no
+			// searchable fields, so answer false rather than throw.
+			if (entry) return false;
+			return matcherOf(cond, schema).matches(row, schema);
 		case 'exists': {
 			const { found, value, field } = resolveIn(row, cond.path, schema, entry);
 			// An unset or empty collection matches nothing, like every other
@@ -529,6 +730,15 @@ export function compareRows<T>(
 	schema?: DescMessage,
 ): number {
 	for (const key of orderBy) {
+		if (key.relevance) {
+			if (key.match?.kind !== 'match') {
+				throw new Error('a relevance order key must be prepared against its query (prepareQuery)');
+			}
+			const m = matcherOf(key.match, schema);
+			const c = cmp(m.rank(a.value, schema), m.rank(b.value, schema));
+			if (c !== 0) return key.dir === 'desc' ? -c : c;
+			continue;
+		}
 		const ra = resolvePath(a.value, key.path, schema);
 		const rb = resolvePath(b.value, key.path, schema);
 		const rankA = orderRank(ra);

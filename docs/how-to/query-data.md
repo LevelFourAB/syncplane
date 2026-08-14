@@ -145,13 +145,13 @@ is bounded by the limit. The composite is exactly O(limit).
 
 What an index cannot serve, so don't declare one hoping it will:
 
-| Shape                      | Why                                                                |
-| -------------------------- | ------------------------------------------------------------------ |
-| `contains` / `endsWith`    | Neither is a prefix, so no range bounds it. Not full-text search.  |
-| `or`                       | Needs a merge of several ranges; falls back to a scan.             |
-| a collaborative-text field | Every keystroke would rewrite the entry. Rejected at registration. |
-| a map, or a message list   | No comparison reaches it. Index a scalar field of the elements.    |
-| ordering **by** a list     | A row has many values there, so it has no sort position.           |
+| Shape                      | Why                                                                                                          |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `contains` / `endsWith`    | Neither is a prefix, so no range bounds it. [Search](search.md) is a different mechanism with its own index. |
+| `or`                       | Needs a merge of several ranges; falls back to a scan.                                                       |
+| a collaborative-text field | Every keystroke would rewrite the entry. Rejected at registration.                                           |
+| a map, or a message list   | No comparison reaches it. Index a scalar field of the elements.                                              |
+| ordering **by** a list     | A row has many values there, so it has no sort position.                                                     |
 
 Two things to know about how this behaves. **A new index is not usable
 immediately** — a background pass walks the entity first, and until it finishes

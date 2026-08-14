@@ -28,8 +28,9 @@
 // - `or` at the top level. Serving it means merging several ranges and
 //   de-duplicating, which is a different execution shape; the scan handles it.
 // - `contains` / `endsWith`. Neither is a prefix of anything, so no range
-//   bounds them. Full-text search is a different mechanism entirely.
-// - `not` and presence. Both become residual.
+//   bounds them. Searching text is a match condition's job, served by the
+//   term-postings index (searchindex.ts) rather than by this planner.
+// - `not`, presence, and `match`. All become residual.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.ts
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -386,6 +387,9 @@ function orderServedBy(
 	if (orderBy === undefined || orderBy.length === 0) return false;
 	if (pinned + orderBy.length > comps.length) return false;
 	return orderBy.every((k, i) => {
+		// A relevance rank is computed per row, so no stored component can
+		// supply it.
+		if (k.relevance) return false;
 		const j = pinned + i;
 		const c = comps[j]!;
 		if (c.desc !== (k.dir === 'desc')) return false;

@@ -150,6 +150,25 @@ message RelCond {
 	Condition cond = 2;
 }
 
+// MatchCond matches a row when its entity's declared search fields (see
+// syncplane.v1.SearchSpec) contain every term of `query`. The query is
+// analyzed by the entity's analyzer — the same pipeline that analyzes the
+// fields — and the final term matches as a prefix when the query ends inside
+// it, which is what makes search-as-you-type work without a separate mode.
+// Terms are conjunctive, each satisfiable by any searchable field. A query
+// that yields no terms (empty, or separators only) matches every row.
+//
+// It is a predicate, not a mode: it composes under and/or/not like any other
+// condition, and matching rows come back in the query's declared order. Rank
+// by how well rows match by ordering on OrderKey.relevance.
+//
+// Rejected on an entity that declares no search fields, inside any() (its
+// scope is the row, not an element), and inside a rel condition's target
+// scope unless the TARGET entity declares search.
+message MatchCond {
+	string query = 1;
+}
+
 message ConditionList {
 	repeated Condition conds = 1;
 }
@@ -166,10 +185,19 @@ message Condition {
 		Condition not = 8;
 		ExistsCond exists = 9;
 		RelCond rel = 10;
+		MatchCond match = 11;
 	}
 }
 
 message OrderKey {
 	repeated string path = 1;
 	Direction dir = 2;
+	// Order by how well each row satisfies the predicate's match condition
+	// instead of by a field: ascending is best match first. Requires `path`
+	// empty and the predicate to contain exactly one match condition — the
+	// rank is that condition's, computed the same way on both sides from the
+	// row alone, so it never depends on what else is in the store. Rows that
+	// rank equally fall through to the next key and finally the row key, like
+	// any other ordering.
+	bool relevance = 3;
 }

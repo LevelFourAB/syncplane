@@ -171,9 +171,19 @@ func EndsWith(path, suffix string) *syncplanev1.Condition {
 
 // Contains matches a string (or collaborative-text) field by substring,
 // case-sensitively. It is a substring test per row, not search: no
-// tokenization, no stemming, no ranking, and no index behind it.
+// tokenization, no stemming, no ranking, and no index behind it. For search,
+// declare the entity's search fields and use Match.
 func Contains(path, substr string) *syncplanev1.Condition {
 	return str(path, syncplanev1.StrOp_STR_OP_CONTAINS, substr)
+}
+
+// Match matches rows whose declared search fields contain every term of q,
+// case- and accent-insensitively, with the final term matching as a prefix
+// when q ends inside it. It requires the entity to declare search fields
+// (SearchSpec or searchable marks) and rejects at compile time otherwise. An
+// empty q matches every row. Order the result by Relevance to rank it.
+func Match(q string) *syncplanev1.Condition {
+	return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Match{Match: &syncplanev1.MatchCond{Query: q}}}
 }
 
 func rep[T Value](path string, op syncplanev1.RepOp, vs []T) *syncplanev1.Condition {
@@ -290,4 +300,11 @@ func Asc(path string) *syncplanev1.OrderKey {
 // Desc orders by a field, descending.
 func Desc(path string) *syncplanev1.OrderKey {
 	return &syncplanev1.OrderKey{Path: Path(path), Dir: syncplanev1.Direction_DIRECTION_DESC}
+}
+
+// Relevance orders best match first. It requires exactly one Match condition
+// in the query's predicate — the rank is that condition's. Rows ranking
+// equally fall through to the next key and finally the row key.
+func Relevance() *syncplanev1.OrderKey {
+	return &syncplanev1.OrderKey{Relevance: true, Dir: syncplanev1.Direction_DIRECTION_ASC}
 }

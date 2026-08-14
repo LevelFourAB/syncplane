@@ -118,6 +118,11 @@ const indexEncodingVersion = 1
 type IndexComponent struct {
 	fields []pathStep
 	desc   bool
+	// rank makes this a COMPUTED component: its value is the row's match rank
+	// (a number) rather than anything read through a path, and fields is
+	// empty. Only a relevance order key builds one, so it exists in query
+	// cursors and never in a stored index.
+	rank *Matcher
 }
 
 // isEntryKey reports that this component stores the KEY of the map entry its
@@ -225,12 +230,18 @@ func (c IndexComponent) leafField() protoreflect.FieldDescriptor {
 // Anything else is a genuine divergence at a field the component does not read,
 // and only that returns false.
 func (c IndexComponent) MaskTouches(segs []string) bool {
+	return maskTouchesSteps(c.fields, segs)
+}
+
+// maskTouchesSteps is MaskTouches over any resolved path — the search
+// declaration's fields share the rule and the conservative cases.
+func maskTouchesSteps(fields []pathStep, segs []string) bool {
 	for i := 0; ; i++ {
-		if i == len(segs) || i == len(c.fields) {
+		if i == len(segs) || i == len(fields) {
 			// One path is a prefix of the other, which is the whole test.
 			return true
 		}
-		fd := c.fields[i].fd
+		fd := fields[i].fd
 		if segs[i] == string(fd.Name()) {
 			if fd.IsList() || fd.IsMap() {
 				// Whatever follows addresses an item of this collection, so it
@@ -741,7 +752,7 @@ func componentLen(c IndexComponent, buf []byte) (int, error) {
 		return 0, fmt.Errorf("tag %#02x is none of %#02x, %#02x, %#02x", buf[0], tagPresent, tagNaN, tagMissing)
 	}
 	rest := buf[1:]
-	switch singularKind(c.leafField()) {
+	switch c.payloadKind() {
 	case rvString:
 		n, err := indexStringLen(rest, c.desc)
 		if err != nil {
@@ -797,6 +808,9 @@ func indexStringLen(buf []byte, inverted bool) (int, error) {
 // valueAt resolves this component against one position of the encoder's fan
 // chain.
 func (c IndexComponent) valueAt(msg protoreflect.Message, pos position) (rowValue, bool) {
+	if c.rank != nil {
+		return rowValue{kind: rvNumber, num: float64(c.rank.Rank(msg))}, true
+	}
 	levels := fanLevels(c.fields)
 	if len(levels) == 0 {
 		return resolveValue(msg, c.fields)
@@ -895,6 +909,13 @@ func SpecHash(comps []IndexComponent) string {
 	fmt.Fprintf(&b, "v%d", indexEncodingVersion)
 	for _, c := range comps {
 		b.WriteByte('|')
+		if c.rank != nil {
+			// The whole matcher fingerprint, not a fixed word: a rank depends
+			// on the query's terms and the declaration, so a relevance cursor
+			// minted for one search must not bound a different one.
+			fmt.Fprintf(&b, "relevance(%s):number:false:%t:-1", c.rank.specString(), c.desc)
+			continue
+		}
 		for i, st := range c.fields {
 			if i > 0 {
 				b.WriteByte('.')
@@ -934,6 +955,15 @@ func SpecHash(comps []IndexComponent) string {
 		}
 	}
 	return fingerprint(b.String())
+}
+
+// payloadKind is the payload shape this component encodes: the leaf field's
+// kind, or number for a computed rank component, which has no leaf.
+func (c IndexComponent) payloadKind() rvKind {
+	if c.rank != nil {
+		return rvNumber
+	}
+	return singularKind(c.leafField())
 }
 
 // fanPositions lists the indices in fields that fan out, outermost first.

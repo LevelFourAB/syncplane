@@ -343,6 +343,93 @@ message Blob {
 	string note = 2;
 }
 
+// Search fixture exercising both declaration surfaces at once: `title` is
+// marked searchable, so it counts as the most important field, ahead of the
+// declared `summary`, `body` (collaborative text, searched as its plain
+// string) and the nested `meta.author`.
+message Article {
+	option (syncplane.v1.entity) = {
+		name: "article"
+		key_fields: [ "id" ]
+		search: {
+			field: [
+				{ path: "summary" },
+				{ path: "body" },
+				{ path: "meta.author" }
+			]
+		}
+	};
+
+	string id = 1;
+	string title = 2 [(syncplane.v1.field_behavior) = { searchable: true }];
+	string summary = 3;
+	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
+	ArticleMeta meta = 5;
+	// Not searchable — a filter to compose with match in queries.
+	string state = 6;
+}
+
+message ArticleMeta {
+	string author = 1;
+	string note = 2;
+}
+
+// Search fixture with diacritics kept significant: "café" and "cafe" are
+// distinct terms here, where Article folds them together.
+message Glossary {
+	option (syncplane.v1.entity) = {
+		name: "glossary"
+		key_fields: [ "id" ]
+		search: {
+			field: [ { path: "term" }, { path: "definition" } ]
+			keep_diacritics: true
+		}
+	};
+
+	string id = 1;
+	string term = 2;
+	string definition = 3;
+}
+
+// Search-rejection fixtures. Each must fail registration: search reads
+// singular string (or collaborative-text) fields only, and a declaration
+// that names nothing has asked for a search that could never match.
+
+// A search field path to a repeated field.
+message SearchRepeatedEntity {
+	option (syncplane.v1.entity) = {
+		name: "search_repeated"
+		key_fields: [ "id" ]
+		search: { field: [ { path: "tags" } ] }
+	};
+
+	string id = 1;
+	repeated string tags = 2;
+}
+
+// A searchable mark on a numeric field.
+message SearchNumberEntity {
+	option (syncplane.v1.entity) = {
+		name: "search_number"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	int32 count = 2 [(syncplane.v1.field_behavior) = { searchable: true }];
+}
+
+// A search declaration naming no fields, with none marked either.
+message SearchEmptyEntity {
+	option (syncplane.v1.entity) = {
+		name: "search_empty"
+		key_fields: [ "id" ]
+		search: {}
+	};
+
+	string id = 1;
+	string title = 2;
+}
+
 // Delete-policy fixture: an entity whose rows only a trusted write may delete.
 // Stands in for the root objects a cascade hangs off, where deletion is meant
 // to be a considered server-side act rather than a verb clients hold.

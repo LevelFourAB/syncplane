@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIrYCCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeSIQCg5IaXN0b3J5T3B0aW9ucyImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IncKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCCpmCgxEZWxldGVQb2xpY3kSHQoZREVMRVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0RFTEVURV9QT0xJQ1lfQUxMT1cQARIeChpERUxFVEVfUE9MSUNZX1RSVVNURURfT05MWRACKmYKDENyZWF0ZVBvbGljeRIdChlDUkVBVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTQ1JFQVRFX1BPTElDWV9BTExPVxABEh4KGkNSRUFURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMVXBkYXRlUG9saWN5Eh0KGVVQREFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNVUERBVEVfUE9MSUNZX0FMTE9XEAESHgoaVVBEQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAjpWCgZlbnRpdHkSHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtIcDIAEoCzIbLnN5bmNwbGFuZS52MS5FbnRpdHlPcHRpb25zUgZlbnRpdHk6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXkiiwEKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -114,6 +114,16 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: syncplane.v1.UpdatePolicy update_policy = 8;
    */
   updatePolicy: UpdatePolicy;
+
+  /**
+   * Full-text search over this entity's fields. See SearchSpec. An entity
+   * may also mark fields (syncplane.v1.field_behavior).searchable instead of
+   * (or as well as) declaring this; the marked fields come first, in field
+   * order, followed by the fields declared here.
+   *
+   * @generated from field: syncplane.v1.SearchSpec search = 9;
+   */
+  search?: SearchSpec | undefined;
 };
 
 /**
@@ -167,6 +177,75 @@ export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
 
 /**
+ * SearchField is one field full-text search reads.
+ *
+ * @generated from message syncplane.v1.SearchField
+ */
+export type SearchField = Message<"syncplane.v1.SearchField"> & {
+  /**
+   * Dotted proto field path (e.g. "title", "details.summary") to a singular
+   * string or collaborative-text field. A collaborative-text field is
+   * searched as its visible plain string.
+   *
+   * @generated from field: string path = 1;
+   */
+  path: string;
+};
+
+/**
+ * Describes the message syncplane.v1.SearchField.
+ * Use `create(SearchFieldSchema)` to create a new message.
+ */
+export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 2);
+
+/**
+ * SearchSpec declares full-text search over an entity: which fields a match
+ * condition reads, in importance order, and how their text is analyzed.
+ *
+ * Fields are listed most important first. Relevance ranks a row whose terms
+ * all sit in one earlier field ahead of a row that spreads them over later
+ * ones, so "title before body" is declared by putting title first.
+ *
+ * Analysis is the deterministic pipeline both sides implement identically
+ * (engine/search in Go, client/src/search in TS): Unicode normalization,
+ * lowercasing, a diacritic fold unless keep_diacritics is set, and
+ * segmentation with CJK bigrams. The same pipeline analyzes queries, so a
+ * match means "these terms, whatever the case, width or accents".
+ *
+ * Matching is a predicate like any other: a match condition returns the same
+ * rows locally and on the server, ordered identically, with or without a
+ * search index behind it.
+ *
+ * @generated from message syncplane.v1.SearchSpec
+ */
+export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
+  /**
+   * At least one field, most important first, counting any
+   * (syncplane.v1.field_behavior).searchable marks ahead of these. A path
+   * may appear once across both surfaces.
+   *
+   * @generated from field: repeated syncplane.v1.SearchField field = 1;
+   */
+  field: SearchField[];
+
+  /**
+   * Keep diacritics significant: "café" and "cafe" analyze to distinct
+   * terms. The default folds them together.
+   *
+   * @generated from field: bool keep_diacritics = 2;
+   */
+  keepDiacritics: boolean;
+};
+
+/**
+ * Describes the message syncplane.v1.SearchSpec.
+ * Use `create(SearchSpecSchema)` to create a new message.
+ */
+export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 3);
+
+/**
  * IndexKey is one component of an index, in the order it sorts.
  *
  * @generated from message syncplane.v1.IndexKey
@@ -196,7 +275,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * IndexSpec is one declared secondary index: a name unique within the entity,
@@ -228,7 +307,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * FieldBehavior tunes how a field participates in merges and queries.
@@ -288,7 +367,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * is the hot one.
    *
    * Rejected on a text field: every keystroke changes the value, so the entry
-   * would be rewritten with it. Full-text search is a different mechanism.
+   * would be rewritten with it. Searching text is what SearchSpec is for.
    *
    * @generated from field: bool indexed = 5;
    */
@@ -316,6 +395,16 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * @generated from field: bool history = 6;
    */
   history: boolean;
+
+  /**
+   * Include this field in the entity's full-text search, ahead of any
+   * fields the entity's SearchSpec declares (marked fields count as most
+   * important, in field order). Requires a singular string or
+   * collaborative-text field. See SearchSpec for what search means.
+   *
+   * @generated from field: bool searchable = 7;
+   */
+  searchable: boolean;
 };
 
 /**
@@ -323,7 +412,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * DeletePolicy says which callers may DELETE rows of an entity. The engine

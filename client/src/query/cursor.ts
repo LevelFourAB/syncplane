@@ -27,6 +27,7 @@
 import type { DescMessage } from '@bufbuild/protobuf';
 
 import type { CompiledQuery, OrderKey, PageWindow } from './ast.js';
+import { matcherOf } from './evaluate.js';
 import {
 	fingerprint,
 	type IndexComponent,
@@ -181,6 +182,21 @@ export function pageWindowOf(
  * index declares.
  */
 function orderComponent(schema: DescMessage, key: OrderKey): IndexComponent {
+	if (key.relevance) {
+		if (key.match?.kind !== 'match') {
+			throw new Error('a relevance order key must be prepared against its query (prepareQuery)');
+		}
+		return {
+			path: [],
+			protoPath: [],
+			desc: key.dir === 'desc',
+			kind: 'number',
+			unsigned: false,
+			fans: [],
+			keyComponent: false,
+			rank: matcherOf(key.match, schema),
+		};
+	}
 	const leaf = resolveLeafRef(schema, key.path, true);
 	requireComparable(key.path, leaf);
 	return {

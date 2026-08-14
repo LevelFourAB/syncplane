@@ -281,8 +281,10 @@ describe('reserved operator names', () => {
 			'isSet',
 			'lt',
 			'lte',
+			'match',
 			'matches',
 			'neq',
+			'relevance',
 			'startsWith',
 		]);
 	});

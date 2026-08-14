@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/query.proto.
  */
 export const file_syncplane_v1_query: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIjcKDUNvbmRpdGlvbkxpc3QSJgoFY29uZHMYASADKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIqgDCglDb25kaXRpb24SJAoDY21wGAEgASgLMhUuc3luY3BsYW5lLnYxLkNtcENvbmRIABIiCgJpbhgCIAEoCzIULnN5bmNwbGFuZS52MS5JbkNvbmRIABIkCgNzdHIYAyABKAsyFS5zeW5jcGxhbmUudjEuU3RyQ29uZEgAEiQKA3JlcBgEIAEoCzIVLnN5bmNwbGFuZS52MS5SZXBDb25kSAASLAoHcHJlc2VudBgFIAEoCzIZLnN5bmNwbGFuZS52MS5QcmVzZW50Q29uZEgAEioKA2FuZBgGIAEoCzIbLnN5bmNwbGFuZS52MS5Db25kaXRpb25MaXN0SAASKQoCb3IYByABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEiYKA25vdBgIIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb25IABIqCgZleGlzdHMYCSABKAsyGC5zeW5jcGxhbmUudjEuRXhpc3RzQ29uZEgAEiQKA3JlbBgKIAEoCzIVLnN5bmNwbGFuZS52MS5SZWxDb25kSABCBgoEa2luZCI+CghPcmRlcktleRIMCgRwYXRoGAEgAygJEiQKA2RpchgCIAEoDjIXLnN5bmNwbGFuZS52MS5EaXJlY3Rpb24qfAoFQ21wT3ASFgoSQ01QX09QX1VOU1BFQ0lGSUVEEAASDQoJQ01QX09QX0VREAESDgoKQ01QX09QX05FURACEg0KCUNNUF9PUF9HVBADEg4KCkNNUF9PUF9HVEUQBBINCglDTVBfT1BfTFQQBRIOCgpDTVBfT1BfTFRFEAYqYgoFU3RyT3ASFgoSU1RSX09QX1VOU1BFQ0lGSUVEEAASFgoSU1RSX09QX1NUQVJUU19XSVRIEAESFAoQU1RSX09QX0VORFNfV0lUSBACEhMKD1NUUl9PUF9DT05UQUlOUxADKmwKBVJlcE9wEhYKElJFUF9PUF9VTlNQRUNJRklFRBAAEg4KClJFUF9PUF9IQVMQARISCg5SRVBfT1BfSEFTX0FOWRACEhIKDlJFUF9PUF9IQVNfQUxMEAMSEwoPUkVQX09QX0lTX0VNUFRZEAQqWQoJUHJlc2VudE9wEhoKFlBSRVNFTlRfT1BfVU5TUEVDSUZJRUQQABIVChFQUkVTRU5UX09QX0lTX1NFVBABEhkKFVBSRVNFTlRfT1BfSVNfTk9UX1NFVBACKk0KCURpcmVjdGlvbhIZChVESVJFQ1RJT05fVU5TUEVDSUZJRUQQABIRCg1ESVJFQ1RJT05fQVNDEAESEgoORElSRUNUSU9OX0RFU0MQAkJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z");
+  fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhoKCU1hdGNoQ29uZBINCgVxdWVyeRgBIAEoCSI3Cg1Db25kaXRpb25MaXN0EiYKBWNvbmRzGAEgAygLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiLSAwoJQ29uZGl0aW9uEiQKA2NtcBgBIAEoCzIVLnN5bmNwbGFuZS52MS5DbXBDb25kSAASIgoCaW4YAiABKAsyFC5zeW5jcGxhbmUudjEuSW5Db25kSAASJAoDc3RyGAMgASgLMhUuc3luY3BsYW5lLnYxLlN0ckNvbmRIABIkCgNyZXAYBCABKAsyFS5zeW5jcGxhbmUudjEuUmVwQ29uZEgAEiwKB3ByZXNlbnQYBSABKAsyGS5zeW5jcGxhbmUudjEuUHJlc2VudENvbmRIABIqCgNhbmQYBiABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEikKAm9yGAcgASgLMhsuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkxpc3RIABImCgNub3QYCCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uSAASKgoGZXhpc3RzGAkgASgLMhguc3luY3BsYW5lLnYxLkV4aXN0c0NvbmRIABIkCgNyZWwYCiABKAsyFS5zeW5jcGxhbmUudjEuUmVsQ29uZEgAEigKBW1hdGNoGAsgASgLMhcuc3luY3BsYW5lLnYxLk1hdGNoQ29uZEgAQgYKBGtpbmQiUQoIT3JkZXJLZXkSDAoEcGF0aBgBIAMoCRIkCgNkaXIYAiABKA4yFy5zeW5jcGxhbmUudjEuRGlyZWN0aW9uEhEKCXJlbGV2YW5jZRgDIAEoCCp8CgVDbXBPcBIWChJDTVBfT1BfVU5TUEVDSUZJRUQQABINCglDTVBfT1BfRVEQARIOCgpDTVBfT1BfTkVREAISDQoJQ01QX09QX0dUEAMSDgoKQ01QX09QX0dURRAEEg0KCUNNUF9PUF9MVBAFEg4KCkNNUF9PUF9MVEUQBipiCgVTdHJPcBIWChJTVFJfT1BfVU5TUEVDSUZJRUQQABIWChJTVFJfT1BfU1RBUlRTX1dJVEgQARIUChBTVFJfT1BfRU5EU19XSVRIEAISEwoPU1RSX09QX0NPTlRBSU5TEAMqbAoFUmVwT3ASFgoSUkVQX09QX1VOU1BFQ0lGSUVEEAASDgoKUkVQX09QX0hBUxABEhIKDlJFUF9PUF9IQVNfQU5ZEAISEgoOUkVQX09QX0hBU19BTEwQAxITCg9SRVBfT1BfSVNfRU1QVFkQBCpZCglQcmVzZW50T3ASGgoWUFJFU0VOVF9PUF9VTlNQRUNJRklFRBAAEhUKEVBSRVNFTlRfT1BfSVNfU0VUEAESGQoVUFJFU0VOVF9PUF9JU19OT1RfU0VUEAIqTQoJRGlyZWN0aW9uEhkKFURJUkVDVElPTl9VTlNQRUNJRklFRBAAEhEKDURJUkVDVElPTl9BU0MQARISCg5ESVJFQ1RJT05fREVTQxACQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM");
 
 /**
  * QueryValue is a scalar literal in a condition. The branch preserves the
@@ -294,6 +294,39 @@ export const RelCondSchema: GenMessage<RelCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 7);
 
 /**
+ * MatchCond matches a row when its entity's declared search fields (see
+ * syncplane.v1.SearchSpec) contain every term of `query`. The query is
+ * analyzed by the entity's analyzer — the same pipeline that analyzes the
+ * fields — and the final term matches as a prefix when the query ends inside
+ * it, which is what makes search-as-you-type work without a separate mode.
+ * Terms are conjunctive, each satisfiable by any searchable field. A query
+ * that yields no terms (empty, or separators only) matches every row.
+ *
+ * It is a predicate, not a mode: it composes under and/or/not like any other
+ * condition, and matching rows come back in the query's declared order. Rank
+ * by how well rows match by ordering on OrderKey.relevance.
+ *
+ * Rejected on an entity that declares no search fields, inside any() (its
+ * scope is the row, not an element), and inside a rel condition's target
+ * scope unless the TARGET entity declares search.
+ *
+ * @generated from message syncplane.v1.MatchCond
+ */
+export type MatchCond = Message<"syncplane.v1.MatchCond"> & {
+  /**
+   * @generated from field: string query = 1;
+   */
+  query: string;
+};
+
+/**
+ * Describes the message syncplane.v1.MatchCond.
+ * Use `create(MatchCondSchema)` to create a new message.
+ */
+export const MatchCondSchema: GenMessage<MatchCond> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_query, 8);
+
+/**
  * @generated from message syncplane.v1.ConditionList
  */
 export type ConditionList = Message<"syncplane.v1.ConditionList"> & {
@@ -308,7 +341,7 @@ export type ConditionList = Message<"syncplane.v1.ConditionList"> & {
  * Use `create(ConditionListSchema)` to create a new message.
  */
 export const ConditionListSchema: GenMessage<ConditionList> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 8);
+  messageDesc(file_syncplane_v1_query, 9);
 
 /**
  * @generated from message syncplane.v1.Condition
@@ -377,6 +410,12 @@ export type Condition = Message<"syncplane.v1.Condition"> & {
      */
     value: RelCond;
     case: "rel";
+  } | {
+    /**
+     * @generated from field: syncplane.v1.MatchCond match = 11;
+     */
+    value: MatchCond;
+    case: "match";
   } | { case: undefined; value?: undefined };
 };
 
@@ -385,7 +424,7 @@ export type Condition = Message<"syncplane.v1.Condition"> & {
  * Use `create(ConditionSchema)` to create a new message.
  */
 export const ConditionSchema: GenMessage<Condition> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 9);
+  messageDesc(file_syncplane_v1_query, 10);
 
 /**
  * @generated from message syncplane.v1.OrderKey
@@ -400,6 +439,19 @@ export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
    * @generated from field: syncplane.v1.Direction dir = 2;
    */
   dir: Direction;
+
+  /**
+   * Order by how well each row satisfies the predicate's match condition
+   * instead of by a field: ascending is best match first. Requires `path`
+   * empty and the predicate to contain exactly one match condition — the
+   * rank is that condition's, computed the same way on both sides from the
+   * row alone, so it never depends on what else is in the store. Rows that
+   * rank equally fall through to the next key and finally the row key, like
+   * any other ordering.
+   *
+   * @generated from field: bool relevance = 3;
+   */
+  relevance: boolean;
 };
 
 /**
@@ -407,7 +459,7 @@ export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
  * Use `create(OrderKeySchema)` to create a new message.
  */
 export const OrderKeySchema: GenMessage<OrderKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_query, 10);
+  messageDesc(file_syncplane_v1_query, 11);
 
 /**
  * @generated from enum syncplane.v1.CmpOp

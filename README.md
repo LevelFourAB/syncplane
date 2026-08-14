@@ -22,6 +22,10 @@ It ships as two halves joined by a protobuf wire contract: a Go server
   identically in Go and TypeScript and pinned by shared vectors. Declare a
   secondary index and the same query becomes a range read on both sides;
   without one it falls back to a scan that returns the same rows.
+- 🔦 **Full-text search** — mark fields `searchable` and query with `match`,
+  ranked by relevance. Case- and accent-insensitive, CJK-aware,
+  typeahead-friendly, and deterministic: the browser ranks its synced subset
+  exactly as the server ranks everything, with a term index on both sides.
 - ✍️ **Collaborative text** — mark a `bytes` field `text: true` and it holds a
   convergent text document, with Peritext-style marks and anchors that travel
   with the characters they cover.

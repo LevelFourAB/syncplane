@@ -91,6 +91,12 @@ func main() {
 			// that the client's local refusal and the server's rejection
 			// classify the same write the same way.
 			&testdatav1.Comment{},
+			// Article declares full-text search (a searchable mark plus an
+			// EntityOptions.search spec): integration tests verify a match
+			// predicate and a relevance ordering return the same rows in the
+			// same order locally and through queryServer, and that cursors
+			// minted by one side page the other.
+			&testdatav1.Article{},
 		),
 	)
 	if *gcInterval > 0 || *gcRetention > 0 {

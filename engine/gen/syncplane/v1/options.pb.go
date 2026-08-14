@@ -271,7 +271,12 @@ type EntityOptions struct {
 	//
 	// Collaborative-text fields are edited by PATCH, so an entity carrying one
 	// needs updates allowed for its text to be editable by clients at all.
-	UpdatePolicy  UpdatePolicy `protobuf:"varint,8,opt,name=update_policy,json=updatePolicy,proto3,enum=syncplane.v1.UpdatePolicy" json:"update_policy,omitempty"`
+	UpdatePolicy UpdatePolicy `protobuf:"varint,8,opt,name=update_policy,json=updatePolicy,proto3,enum=syncplane.v1.UpdatePolicy" json:"update_policy,omitempty"`
+	// Full-text search over this entity's fields. See SearchSpec. An entity
+	// may also mark fields (syncplane.v1.field_behavior).searchable instead of
+	// (or as well as) declaring this; the marked fields come first, in field
+	// order, followed by the fields declared here.
+	Search        *SearchSpec `protobuf:"bytes,9,opt,name=search,proto3" json:"search,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -362,6 +367,13 @@ func (x *EntityOptions) GetUpdatePolicy() UpdatePolicy {
 	return UpdatePolicy_UPDATE_POLICY_UNSPECIFIED
 }
 
+func (x *EntityOptions) GetSearch() *SearchSpec {
+	if x != nil {
+		return x.Search
+	}
+	return nil
+}
+
 // HistoryOptions opts an entity into server-side field history: a PUT or PATCH
 // that changes one of the fields marked (syncplane.v1.field_behavior).history
 // records what those fields held BEFORE the write, as a
@@ -427,6 +439,127 @@ func (*HistoryOptions) Descriptor() ([]byte, []int) {
 	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{1}
 }
 
+// SearchField is one field full-text search reads.
+type SearchField struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Dotted proto field path (e.g. "title", "details.summary") to a singular
+	// string or collaborative-text field. A collaborative-text field is
+	// searched as its visible plain string.
+	Path          string `protobuf:"bytes,1,opt,name=path,proto3" json:"path,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchField) Reset() {
+	*x = SearchField{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchField) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchField) ProtoMessage() {}
+
+func (x *SearchField) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchField.ProtoReflect.Descriptor instead.
+func (*SearchField) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *SearchField) GetPath() string {
+	if x != nil {
+		return x.Path
+	}
+	return ""
+}
+
+// SearchSpec declares full-text search over an entity: which fields a match
+// condition reads, in importance order, and how their text is analyzed.
+//
+// Fields are listed most important first. Relevance ranks a row whose terms
+// all sit in one earlier field ahead of a row that spreads them over later
+// ones, so "title before body" is declared by putting title first.
+//
+// Analysis is the deterministic pipeline both sides implement identically
+// (engine/search in Go, client/src/search in TS): Unicode normalization,
+// lowercasing, a diacritic fold unless keep_diacritics is set, and
+// segmentation with CJK bigrams. The same pipeline analyzes queries, so a
+// match means "these terms, whatever the case, width or accents".
+//
+// Matching is a predicate like any other: a match condition returns the same
+// rows locally and on the server, ordered identically, with or without a
+// search index behind it.
+type SearchSpec struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// At least one field, most important first, counting any
+	// (syncplane.v1.field_behavior).searchable marks ahead of these. A path
+	// may appear once across both surfaces.
+	Field []*SearchField `protobuf:"bytes,1,rep,name=field,proto3" json:"field,omitempty"`
+	// Keep diacritics significant: "café" and "cafe" analyze to distinct
+	// terms. The default folds them together.
+	KeepDiacritics bool `protobuf:"varint,2,opt,name=keep_diacritics,json=keepDiacritics,proto3" json:"keep_diacritics,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *SearchSpec) Reset() {
+	*x = SearchSpec{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchSpec) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchSpec) ProtoMessage() {}
+
+func (x *SearchSpec) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchSpec.ProtoReflect.Descriptor instead.
+func (*SearchSpec) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *SearchSpec) GetField() []*SearchField {
+	if x != nil {
+		return x.Field
+	}
+	return nil
+}
+
+func (x *SearchSpec) GetKeepDiacritics() bool {
+	if x != nil {
+		return x.KeepDiacritics
+	}
+	return false
+}
+
 // IndexKey is one component of an index, in the order it sorts.
 type IndexKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -444,7 +577,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -456,7 +589,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -469,7 +602,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -503,7 +636,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +648,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +661,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -579,7 +712,7 @@ type FieldBehavior struct {
 	// is the hot one.
 	//
 	// Rejected on a text field: every keystroke changes the value, so the entry
-	// would be rewritten with it. Full-text search is a different mechanism.
+	// would be rewritten with it. Searching text is what SearchSpec is for.
 	Indexed bool `protobuf:"varint,5,opt,name=indexed,proto3" json:"indexed,omitempty"`
 	// Record this field in the entity's history (see EntityOptions.history).
 	//
@@ -598,14 +731,19 @@ type FieldBehavior struct {
 	// marking any member marks the whole oneof.
 	//
 	// Ignored on an entity that has not opted in.
-	History       bool `protobuf:"varint,6,opt,name=history,proto3" json:"history,omitempty"`
+	History bool `protobuf:"varint,6,opt,name=history,proto3" json:"history,omitempty"`
+	// Include this field in the entity's full-text search, ahead of any
+	// fields the entity's SearchSpec declares (marked fields count as most
+	// important, in field order). Requires a singular string or
+	// collaborative-text field. See SearchSpec for what search means.
+	Searchable    bool `protobuf:"varint,7,opt,name=searchable,proto3" json:"searchable,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -617,7 +755,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -630,7 +768,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -675,6 +813,13 @@ func (x *FieldBehavior) GetHistory() bool {
 	return false
 }
 
+func (x *FieldBehavior) GetSearchable() bool {
+	if x != nil {
+		return x.Searchable
+	}
+	return false
+}
+
 var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	{
 		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
@@ -712,7 +857,7 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\x8d\x03\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xbf\x03\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
@@ -723,14 +868,21 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"serverOnly\x126\n" +
 	"\ahistory\x18\x06 \x01(\v2\x1c.syncplane.v1.HistoryOptionsR\ahistory\x12?\n" +
 	"\rcreate_policy\x18\a \x01(\x0e2\x1a.syncplane.v1.CreatePolicyR\fcreatePolicy\x12?\n" +
-	"\rupdate_policy\x18\b \x01(\x0e2\x1a.syncplane.v1.UpdatePolicyR\fupdatePolicy\"\x10\n" +
-	"\x0eHistoryOptions\"2\n" +
+	"\rupdate_policy\x18\b \x01(\x0e2\x1a.syncplane.v1.UpdatePolicyR\fupdatePolicy\x120\n" +
+	"\x06search\x18\t \x01(\v2\x18.syncplane.v1.SearchSpecR\x06search\"\x10\n" +
+	"\x0eHistoryOptions\"!\n" +
+	"\vSearchField\x12\x12\n" +
+	"\x04path\x18\x01 \x01(\tR\x04path\"f\n" +
+	"\n" +
+	"SearchSpec\x12/\n" +
+	"\x05field\x18\x01 \x03(\v2\x19.syncplane.v1.SearchFieldR\x05field\x12'\n" +
+	"\x0fkeep_diacritics\x18\x02 \x01(\bR\x0ekeepDiacritics\"2\n" +
 	"\bIndexKey\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\x12\x12\n" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xad\x01\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xcd\x01\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -738,7 +890,10 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"orderField\x12\x12\n" +
 	"\x04text\x18\x04 \x01(\bR\x04text\x12\x18\n" +
 	"\aindexed\x18\x05 \x01(\bR\aindexed\x12\x18\n" +
-	"\ahistory\x18\x06 \x01(\bR\ahistory*f\n" +
+	"\ahistory\x18\x06 \x01(\bR\ahistory\x12\x1e\n" +
+	"\n" +
+	"searchable\x18\a \x01(\bR\n" +
+	"searchable*f\n" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
@@ -767,35 +922,39 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 3)
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 5)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
 	(CreatePolicy)(0),                   // 1: syncplane.v1.CreatePolicy
 	(UpdatePolicy)(0),                   // 2: syncplane.v1.UpdatePolicy
 	(*EntityOptions)(nil),               // 3: syncplane.v1.EntityOptions
 	(*HistoryOptions)(nil),              // 4: syncplane.v1.HistoryOptions
-	(*IndexKey)(nil),                    // 5: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 6: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 7: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 8: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 9: google.protobuf.FieldOptions
+	(*SearchField)(nil),                 // 5: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 6: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 7: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 8: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 9: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 10: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 11: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	6,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	8,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
 	0,  // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
 	4,  // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
 	1,  // 3: syncplane.v1.EntityOptions.create_policy:type_name -> syncplane.v1.CreatePolicy
 	2,  // 4: syncplane.v1.EntityOptions.update_policy:type_name -> syncplane.v1.UpdatePolicy
-	5,  // 5: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	8,  // 6: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	9,  // 7: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	3,  // 8: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	7,  // 9: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	10, // [10:10] is the sub-list for method output_type
-	10, // [10:10] is the sub-list for method input_type
-	8,  // [8:10] is the sub-list for extension type_name
-	6,  // [6:8] is the sub-list for extension extendee
-	0,  // [0:6] is the sub-list for field type_name
+	6,  // 5: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	5,  // 6: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	7,  // 7: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	10, // 8: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	11, // 9: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	3,  // 10: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	9,  // 11: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	12, // [12:12] is the sub-list for method output_type
+	12, // [12:12] is the sub-list for method input_type
+	10, // [10:12] is the sub-list for extension type_name
+	8,  // [8:10] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -809,7 +968,7 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      3,
-			NumMessages:   5,
+			NumMessages:   7,
 			NumExtensions: 2,
 			NumServices:   0,
 		},

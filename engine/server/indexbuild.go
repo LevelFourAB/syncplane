@@ -181,13 +181,20 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 	cat := s.catalogPtr()
 	allReady := true
 	for _, info := range cat.entities {
+		targets := make([]struct{ name, specHash string }, 0, len(info.indexes)+1)
 		for i := range info.indexes {
+			targets = append(targets, struct{ name, specHash string }{info.indexes[i].name, info.indexes[i].specHash})
+		}
+		if info.search != nil {
+			targets = append(targets, struct{ name, specHash string }{info.search.name, info.search.specHash})
+		}
+		for _, t := range targets {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			ready, err := s.buildIndex(ctx, workspaceID, info, &info.indexes[i])
+			ready, err := s.buildIndex(ctx, workspaceID, info, t.name, t.specHash)
 			if err != nil {
-				return fmt.Errorf("entity %q index %q: %w", info.name, info.indexes[i].name, err)
+				return fmt.Errorf("entity %q index %q: %w", info.name, t.name, err)
 			}
 			allReady = allReady && ready
 		}
@@ -219,7 +226,7 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 //     leaves entries in place and the index unready, so reads keep scanning
 //     and the next pass redoes the walk over rows that mostly already have
 //     their entries.
-func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci *compiledIndex) (ready bool, err error) {
+func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, name, specHash string) (ready bool, err error) {
 	// Until an index is ready, every read that would have used it scans
 	// instead — so how long a build takes and how far it has got are the
 	// explanation for a query latency regression that no query-side metric can
@@ -228,7 +235,7 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 	start := time.Now()
 	buildAttrs := metric.WithAttributes(
 		telemetry.AttrEntity.String(info.name),
-		telemetry.AttrIndex.String(ci.name),
+		telemetry.AttrIndex.String(name),
 	)
 	var alreadyReady bool
 	defer func() {
@@ -242,7 +249,7 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		}
 		s.tel().indexBuildDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 			telemetry.AttrEntity.String(info.name),
-			telemetry.AttrIndex.String(ci.name),
+			telemetry.AttrIndex.String(name),
 			telemetry.AttrOutcome.String(outcome),
 		))
 	}()
@@ -251,7 +258,7 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 	// below, whose own transactions re-check against the primary.
 	if err := s.readTx(ctx, ws, 0, func(tx storage.ReadTx) error {
 		var err error
-		alreadyReady, err = ci.ready(tx, info.name)
+		alreadyReady, err = indexReadyState(tx, info.name, name, specHash)
 		return err
 	}); err != nil {
 		return false, err
@@ -263,7 +270,7 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 	// stops a reader from trusting entries written under the old one: the
 	// state row now names the new spec and says not ready.
 	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
-		return tx.SetIndexState(info.name, ci.name, ci.specHash, false)
+		return tx.SetIndexState(info.name, name, specHash, false)
 	}); err != nil {
 		return false, err
 	}
@@ -317,15 +324,15 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, ci
 		// the closure, and a ready carried over from a rolled-back attempt would
 		// let the caller record a build mark for an index that has none.
 		ready = false
-		hash, _, err := tx.IndexState(info.name, ci.name)
+		hash, _, err := tx.IndexState(info.name, name)
 		if err != nil {
 			return err
 		}
-		if hash != ci.specHash {
+		if hash != specHash {
 			return nil
 		}
 		ready = true
-		return tx.SetIndexState(info.name, ci.name, ci.specHash, true)
+		return tx.SetIndexState(info.name, name, specHash, true)
 	}); err != nil {
 		return false, err
 	}

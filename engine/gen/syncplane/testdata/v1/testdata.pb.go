@@ -1482,6 +1482,368 @@ func (x *Blob) GetNote() string {
 	return ""
 }
 
+// Search fixture exercising both declaration surfaces at once: `title` is
+// marked searchable, so it counts as the most important field, ahead of the
+// declared `summary`, `body` (collaborative text, searched as its plain
+// string) and the nested `meta.author`.
+type Article struct {
+	state   protoimpl.MessageState `protogen:"open.v1"`
+	Id      string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title   string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Summary string                 `protobuf:"bytes,3,opt,name=summary,proto3" json:"summary,omitempty"`
+	Body    []byte                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	Meta    *ArticleMeta           `protobuf:"bytes,5,opt,name=meta,proto3" json:"meta,omitempty"`
+	// Not searchable — a filter to compose with match in queries.
+	State         string `protobuf:"bytes,6,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Article) Reset() {
+	*x = Article{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Article) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Article) ProtoMessage() {}
+
+func (x *Article) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Article.ProtoReflect.Descriptor instead.
+func (*Article) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Article) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Article) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Article) GetSummary() string {
+	if x != nil {
+		return x.Summary
+	}
+	return ""
+}
+
+func (x *Article) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
+func (x *Article) GetMeta() *ArticleMeta {
+	if x != nil {
+		return x.Meta
+	}
+	return nil
+}
+
+func (x *Article) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
+type ArticleMeta struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Author        string                 `protobuf:"bytes,1,opt,name=author,proto3" json:"author,omitempty"`
+	Note          string                 `protobuf:"bytes,2,opt,name=note,proto3" json:"note,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArticleMeta) Reset() {
+	*x = ArticleMeta{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArticleMeta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArticleMeta) ProtoMessage() {}
+
+func (x *ArticleMeta) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArticleMeta.ProtoReflect.Descriptor instead.
+func (*ArticleMeta) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *ArticleMeta) GetAuthor() string {
+	if x != nil {
+		return x.Author
+	}
+	return ""
+}
+
+func (x *ArticleMeta) GetNote() string {
+	if x != nil {
+		return x.Note
+	}
+	return ""
+}
+
+// Search fixture with diacritics kept significant: "café" and "cafe" are
+// distinct terms here, where Article folds them together.
+type Glossary struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Term          string                 `protobuf:"bytes,2,opt,name=term,proto3" json:"term,omitempty"`
+	Definition    string                 `protobuf:"bytes,3,opt,name=definition,proto3" json:"definition,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Glossary) Reset() {
+	*x = Glossary{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Glossary) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Glossary) ProtoMessage() {}
+
+func (x *Glossary) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Glossary.ProtoReflect.Descriptor instead.
+func (*Glossary) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *Glossary) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Glossary) GetTerm() string {
+	if x != nil {
+		return x.Term
+	}
+	return ""
+}
+
+func (x *Glossary) GetDefinition() string {
+	if x != nil {
+		return x.Definition
+	}
+	return ""
+}
+
+// A search field path to a repeated field.
+type SearchRepeatedEntity struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Tags          []string               `protobuf:"bytes,2,rep,name=tags,proto3" json:"tags,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchRepeatedEntity) Reset() {
+	*x = SearchRepeatedEntity{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchRepeatedEntity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchRepeatedEntity) ProtoMessage() {}
+
+func (x *SearchRepeatedEntity) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchRepeatedEntity.ProtoReflect.Descriptor instead.
+func (*SearchRepeatedEntity) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *SearchRepeatedEntity) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SearchRepeatedEntity) GetTags() []string {
+	if x != nil {
+		return x.Tags
+	}
+	return nil
+}
+
+// A searchable mark on a numeric field.
+type SearchNumberEntity struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Count         int32                  `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchNumberEntity) Reset() {
+	*x = SearchNumberEntity{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchNumberEntity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchNumberEntity) ProtoMessage() {}
+
+func (x *SearchNumberEntity) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchNumberEntity.ProtoReflect.Descriptor instead.
+func (*SearchNumberEntity) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *SearchNumberEntity) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SearchNumberEntity) GetCount() int32 {
+	if x != nil {
+		return x.Count
+	}
+	return 0
+}
+
+// A search declaration naming no fields, with none marked either.
+type SearchEmptyEntity struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SearchEmptyEntity) Reset() {
+	*x = SearchEmptyEntity{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SearchEmptyEntity) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SearchEmptyEntity) ProtoMessage() {}
+
+func (x *SearchEmptyEntity) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SearchEmptyEntity.ProtoReflect.Descriptor instead.
+func (*SearchEmptyEntity) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *SearchEmptyEntity) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SearchEmptyEntity) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 // Delete-policy fixture: an entity whose rows only a trusted write may delete.
 // Stands in for the root objects a cascade hangs off, where deletion is meant
 // to be a considered server-side act rather than a verb clients hold.
@@ -1495,7 +1857,7 @@ type Ledger struct {
 
 func (x *Ledger) Reset() {
 	*x = Ledger{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1507,7 +1869,7 @@ func (x *Ledger) String() string {
 func (*Ledger) ProtoMessage() {}
 
 func (x *Ledger) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[16]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1520,7 +1882,7 @@ func (x *Ledger) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ledger.ProtoReflect.Descriptor instead.
 func (*Ledger) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{16}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Ledger) GetId() string {
@@ -1550,7 +1912,7 @@ type Activity struct {
 
 func (x *Activity) Reset() {
 	*x = Activity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1562,7 +1924,7 @@ func (x *Activity) String() string {
 func (*Activity) ProtoMessage() {}
 
 func (x *Activity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[17]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1575,7 +1937,7 @@ func (x *Activity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Activity.ProtoReflect.Descriptor instead.
 func (*Activity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{17}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *Activity) GetId() string {
@@ -1605,7 +1967,7 @@ type Comment struct {
 
 func (x *Comment) Reset() {
 	*x = Comment{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1617,7 +1979,7 @@ func (x *Comment) String() string {
 func (*Comment) ProtoMessage() {}
 
 func (x *Comment) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[18]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1630,7 +1992,7 @@ func (x *Comment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Comment.ProtoReflect.Descriptor instead.
 func (*Comment) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{18}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Comment) GetId() string {
@@ -1664,7 +2026,7 @@ type Historied struct {
 
 func (x *Historied) Reset() {
 	*x = Historied{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1676,7 +2038,7 @@ func (x *Historied) String() string {
 func (*Historied) ProtoMessage() {}
 
 func (x *Historied) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[19]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1689,7 +2051,7 @@ func (x *Historied) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Historied.ProtoReflect.Descriptor instead.
 func (*Historied) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{19}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Historied) GetId() string {
@@ -1734,7 +2096,7 @@ type HistoriedAll struct {
 
 func (x *HistoriedAll) Reset() {
 	*x = HistoriedAll{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1746,7 +2108,7 @@ func (x *HistoriedAll) String() string {
 func (*HistoriedAll) ProtoMessage() {}
 
 func (x *HistoriedAll) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[20]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1759,7 +2121,7 @@ func (x *HistoriedAll) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedAll.ProtoReflect.Descriptor instead.
 func (*HistoriedAll) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{20}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *HistoriedAll) GetId() string {
@@ -1802,7 +2164,7 @@ type HistoriedOneof struct {
 
 func (x *HistoriedOneof) Reset() {
 	*x = HistoriedOneof{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1814,7 +2176,7 @@ func (x *HistoriedOneof) String() string {
 func (*HistoriedOneof) ProtoMessage() {}
 
 func (x *HistoriedOneof) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[21]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1827,7 +2189,7 @@ func (x *HistoriedOneof) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedOneof.ProtoReflect.Descriptor instead.
 func (*HistoriedOneof) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{21}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *HistoriedOneof) GetId() string {
@@ -1899,7 +2261,7 @@ type HistoriedNested struct {
 
 func (x *HistoriedNested) Reset() {
 	*x = HistoriedNested{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1911,7 +2273,7 @@ func (x *HistoriedNested) String() string {
 func (*HistoriedNested) ProtoMessage() {}
 
 func (x *HistoriedNested) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1924,7 +2286,7 @@ func (x *HistoriedNested) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedNested.ProtoReflect.Descriptor instead.
 func (*HistoriedNested) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{22}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *HistoriedNested) GetId() string {
@@ -1954,7 +2316,7 @@ type HistoriedUnmarked struct {
 
 func (x *HistoriedUnmarked) Reset() {
 	*x = HistoriedUnmarked{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1966,7 +2328,7 @@ func (x *HistoriedUnmarked) String() string {
 func (*HistoriedUnmarked) ProtoMessage() {}
 
 func (x *HistoriedUnmarked) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1979,7 +2341,7 @@ func (x *HistoriedUnmarked) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedUnmarked.ProtoReflect.Descriptor instead.
 func (*HistoriedUnmarked) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{23}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *HistoriedUnmarked) GetId() string {
@@ -2157,7 +2519,50 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x05ratio\x18\x04 \x01(\x01R\x05ratio\".\n" +
 	"\x04Blob\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\x12\x12\n" +
-	"\x04note\x18\x02 \x01(\tR\x04note\"B\n" +
+	"\x04note\x18\x02 \x01(\tR\x04note\"\xf2\x01\n" +
+	"\aArticle\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\x05title\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x028\x01R\x05title\x12\x18\n" +
+	"\asummary\x18\x03 \x01(\tR\asummary\x12\x1a\n" +
+	"\x04body\x18\x04 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body\x126\n" +
+	"\x04meta\x18\x05 \x01(\v2\".syncplane.testdata.v1.ArticleMetaR\x04meta\x12\x14\n" +
+	"\x05state\x18\x06 \x01(\tR\x05state:5\xa2\xbb\x181\n" +
+	"\aarticle\x12\x02idJ\"\n" +
+	"\t\n" +
+	"\asummary\n" +
+	"\x06\n" +
+	"\x04body\n" +
+	"\r\n" +
+	"\vmeta.author\"9\n" +
+	"\vArticleMeta\x12\x16\n" +
+	"\x06author\x18\x01 \x01(\tR\x06author\x12\x12\n" +
+	"\x04note\x18\x02 \x01(\tR\x04note\"|\n" +
+	"\bGlossary\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04term\x18\x02 \x01(\tR\x04term\x12\x1e\n" +
+	"\n" +
+	"definition\x18\x03 \x01(\tR\n" +
+	"definition:,\xa2\xbb\x18(\n" +
+	"\bglossary\x12\x02idJ\x18\n" +
+	"\x06\n" +
+	"\x04term\n" +
+	"\f\n" +
+	"\n" +
+	"definition\x10\x01\"_\n" +
+	"\x14SearchRepeatedEntity\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04tags\x18\x02 \x03(\tR\x04tags:#\xa2\xbb\x18\x1f\n" +
+	"\x0fsearch_repeated\x12\x02idJ\b\n" +
+	"\x06\n" +
+	"\x04tags\"[\n" +
+	"\x12SearchNumberEntity\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x1c\n" +
+	"\x05count\x18\x02 \x01(\x05B\x06\xaa\xbb\x18\x028\x01R\x05count:\x17\xa2\xbb\x18\x13\n" +
+	"\rsearch_number\x12\x02id\"S\n" +
+	"\x11SearchEmptyEntity\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title:\x18\xa2\xbb\x18\x14\n" +
+	"\fsearch_empty\x12\x02idJ\x00\"B\n" +
 	"\x06Ledger\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
 	"\x05label\x18\x02 \x01(\tR\x05label:\x12\xa2\xbb\x18\x0e\n" +
@@ -2210,7 +2615,7 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 29)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 35)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                // 0: syncplane.testdata.v1.Widget
 	(*FieldValue)(nil),            // 1: syncplane.testdata.v1.FieldValue
@@ -2228,26 +2633,32 @@ var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Issue)(nil),                 // 13: syncplane.testdata.v1.Issue
 	(*Settings)(nil),              // 14: syncplane.testdata.v1.Settings
 	(*Blob)(nil),                  // 15: syncplane.testdata.v1.Blob
-	(*Ledger)(nil),                // 16: syncplane.testdata.v1.Ledger
-	(*Activity)(nil),              // 17: syncplane.testdata.v1.Activity
-	(*Comment)(nil),               // 18: syncplane.testdata.v1.Comment
-	(*Historied)(nil),             // 19: syncplane.testdata.v1.Historied
-	(*HistoriedAll)(nil),          // 20: syncplane.testdata.v1.HistoriedAll
-	(*HistoriedOneof)(nil),        // 21: syncplane.testdata.v1.HistoriedOneof
-	(*HistoriedNested)(nil),       // 22: syncplane.testdata.v1.HistoriedNested
-	(*HistoriedUnmarked)(nil),     // 23: syncplane.testdata.v1.HistoriedUnmarked
-	nil,                           // 24: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                           // 25: syncplane.testdata.v1.Widget.ByIdEntry
-	nil,                           // 26: syncplane.testdata.v1.Widget.CustomEntry
-	nil,                           // 27: syncplane.testdata.v1.Issue.CustomEntry
-	nil,                           // 28: syncplane.testdata.v1.Issue.TagsMapEntry
+	(*Article)(nil),               // 16: syncplane.testdata.v1.Article
+	(*ArticleMeta)(nil),           // 17: syncplane.testdata.v1.ArticleMeta
+	(*Glossary)(nil),              // 18: syncplane.testdata.v1.Glossary
+	(*SearchRepeatedEntity)(nil),  // 19: syncplane.testdata.v1.SearchRepeatedEntity
+	(*SearchNumberEntity)(nil),    // 20: syncplane.testdata.v1.SearchNumberEntity
+	(*SearchEmptyEntity)(nil),     // 21: syncplane.testdata.v1.SearchEmptyEntity
+	(*Ledger)(nil),                // 22: syncplane.testdata.v1.Ledger
+	(*Activity)(nil),              // 23: syncplane.testdata.v1.Activity
+	(*Comment)(nil),               // 24: syncplane.testdata.v1.Comment
+	(*Historied)(nil),             // 25: syncplane.testdata.v1.Historied
+	(*HistoriedAll)(nil),          // 26: syncplane.testdata.v1.HistoriedAll
+	(*HistoriedOneof)(nil),        // 27: syncplane.testdata.v1.HistoriedOneof
+	(*HistoriedNested)(nil),       // 28: syncplane.testdata.v1.HistoriedNested
+	(*HistoriedUnmarked)(nil),     // 29: syncplane.testdata.v1.HistoriedUnmarked
+	nil,                           // 30: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                           // 31: syncplane.testdata.v1.Widget.ByIdEntry
+	nil,                           // 32: syncplane.testdata.v1.Widget.CustomEntry
+	nil,                           // 33: syncplane.testdata.v1.Issue.CustomEntry
+	nil,                           // 34: syncplane.testdata.v1.Issue.TagsMapEntry
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	14, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
 	15, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	24, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	25, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
-	26, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
+	30, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	31, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	32, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
 	8,  // 5: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
 	10, // 6: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
 	9,  // 7: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
@@ -2262,17 +2673,18 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	12, // 16: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
 	12, // 17: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
 	10, // 18: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
-	27, // 19: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
-	28, // 20: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
+	33, // 19: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
+	34, // 20: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
 	15, // 21: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
-	14, // 22: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
-	1,  // 23: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	1,  // 24: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	25, // [25:25] is the sub-list for method output_type
-	25, // [25:25] is the sub-list for method input_type
-	25, // [25:25] is the sub-list for extension type_name
-	25, // [25:25] is the sub-list for extension extendee
-	0,  // [0:25] is the sub-list for field type_name
+	17, // 22: syncplane.testdata.v1.Article.meta:type_name -> syncplane.testdata.v1.ArticleMeta
+	14, // 23: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
+	1,  // 24: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	1,  // 25: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_v1_testdata_proto_init() }
@@ -2308,7 +2720,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 		(*OneofRefEntity_Project)(nil),
 		(*OneofRefEntity_User)(nil),
 	}
-	file_syncplane_testdata_v1_testdata_proto_msgTypes[21].OneofWrappers = []any{
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[27].OneofWrappers = []any{
 		(*HistoriedOneof_ChoiceText)(nil),
 		(*HistoriedOneof_ChoiceNumber)(nil),
 	}
@@ -2318,7 +2730,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   29,
+			NumMessages:   35,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

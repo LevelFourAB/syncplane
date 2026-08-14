@@ -178,7 +178,7 @@ func runQuerySpec(srv *Server, tx storage.ReadTx, info *entityInfo, spec query.S
 	if err != nil {
 		return nil, fmt.Errorf("server: query %s: %w", info.name, err)
 	}
-	order, err := query.CompileOrder(desc, spec.OrderBy)
+	order, err := query.CompileOrderWith(desc, spec.OrderBy, predicate)
 	if err != nil {
 		return nil, fmt.Errorf("server: query %s order: %w", info.name, err)
 	}

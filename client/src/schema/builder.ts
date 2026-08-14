@@ -64,6 +64,8 @@ import {
 	file_syncplane_v1_options,
 	IndexKeySchema,
 	IndexSpecSchema,
+	SearchFieldSchema,
+	SearchSpecSchema,
 	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
 import { validateEntityName } from '../naming.js';
@@ -152,6 +154,8 @@ interface FieldSpec {
 	orderField?: string;
 	/** Maintain a single-component secondary index over this field. */
 	indexed?: boolean;
+	/** Include this field in the entity's full-text search. */
+	searchable?: boolean;
 }
 
 /**
@@ -264,6 +268,22 @@ export class Field<T> {
 			);
 		}
 		return new Field<T>({ ...this.spec, indexed: true });
+	}
+
+	/**
+	 * Includes this field in the entity's full-text search, ahead of any fields
+	 * the entity's `search` option declares (marked fields count as most
+	 * important, in declaration order). Valid on a singular `text()` field
+	 * alone: search reads strings, and other shapes are rejected here rather
+	 * than at registration so the error names the declaration.
+	 */
+	searchable(): Field<T> {
+		if (this.spec.kind !== 'scalar' || this.spec.scalar !== 'string' || this.spec.repeated) {
+			throw new Error(
+				'searchable() is only valid on a singular text() field: search reads singular string fields',
+			);
+		}
+		return new Field<T>({ ...this.spec, searchable: true });
 	}
 }
 
@@ -431,6 +451,8 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly fields: F;
 	/** Composite secondary indexes declared on the entity, in declaration order. */
 	readonly indexes: readonly IndexDecl[];
+	/** Full-text search declaration, when the entity has one. */
+	readonly search?: SearchOpts;
 	/** Who may create rows of this entity; see {@link EntityOptions.createPolicy}. */
 	readonly createPolicy: PolicyDecl;
 	/** Who may update rows of this entity; see {@link EntityOptions.updatePolicy}. */
@@ -537,11 +559,25 @@ export function entity<F extends Fields>(
 		name,
 		fields,
 		indexes,
+		...(options?.search === undefined ? {} : { search: options.search }),
 		createPolicy: options?.createPolicy ?? 'allow',
 		updatePolicy: options?.updatePolicy ?? 'allow',
 		deletePolicy: options?.deletePolicy ?? 'allow',
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
+}
+
+/** An entity's full-text search declaration; see {@link EntityOptions.search}. */
+export interface SearchOpts {
+	/** Dotted accessor paths to singular string fields, most important first. */
+	fields: string[];
+	/**
+	 * Keep diacritics significant: "café" and "cafe" analyze to distinct
+	 * terms.
+	 *
+	 * @defaultValue false
+	 */
+	keepDiacritics?: boolean;
 }
 
 /** Optional per-entity settings, beyond the fields themselves. */
@@ -552,6 +588,14 @@ export interface EntityOptions {
 	 * surface and desugars to the same thing.
 	 */
 	indexes?: IndexDecl[];
+	/**
+	 * Full-text search over this entity's fields, mirroring
+	 * syncplane.v1.SearchSpec. Fields are dotted accessor paths, most important
+	 * first, counting any `.searchable()` marks ahead of them; a match query
+	 * (`w.match(...)`) reads them through the entity's analyzer. Set
+	 * `keepDiacritics` to keep "café" and "cafe" distinct.
+	 */
+	search?: SearchOpts;
 	/**
 	 * Who may delete rows of this entity. Defaults to `'allow'`.
 	 *
@@ -765,6 +809,18 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 			// Paths are written in accessor names and lowered to proto names
 			// here, which is the same translation a query path takes on the way
 			// to the wire — so an index and a query naming one field agree.
+			...(e.search === undefined ? {} : {
+				search: create(SearchSpecSchema, {
+					// Accessor names lower to proto names, the same translation an
+					// index path takes, so a declaration and a query agree.
+					field: e.search.fields.map((p) =>
+						create(SearchFieldSchema, {
+							path: p.split('.').map(snakeCase).join('.'),
+						})
+					),
+					keepDiacritics: e.search.keepDiacritics === true,
+				}),
+			}),
 			index: e.indexes.map((idx) =>
 				create(IndexSpecSchema, {
 					name: idx.name,
@@ -838,7 +894,7 @@ function fieldProtoOf(
 		case 'scalar': {
 			field.type = SCALAR_TO_TYPE[spec.scalar!];
 			if (spec.opaque) setOpaque(field, spec.indexed ?? false);
-			else if (spec.indexed) setIndexed(field);
+			else if (spec.indexed || spec.searchable) setScalarMarks(field, spec);
 			break;
 		}
 		case 'message': {
@@ -928,10 +984,17 @@ function setOpaque(field: FieldDescriptorProto, indexed = false): void {
 	field.options = fieldOptions;
 }
 
-/** Sets (syncplane.v1.field_behavior).indexed on a field that needs nothing else. */
-function setIndexed(field: FieldDescriptorProto): void {
+/** Sets the (syncplane.v1.field_behavior) marks a plain scalar field carries. */
+function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 	const fieldOptions = create(FieldOptionsSchema);
-	setExtension(fieldOptions, fieldBehaviorExt, create(FieldBehaviorSchema, { indexed: true }));
+	setExtension(
+		fieldOptions,
+		fieldBehaviorExt,
+		create(FieldBehaviorSchema, {
+			indexed: spec.indexed ?? false,
+			searchable: spec.searchable ?? false,
+		}),
+	);
 	field.options = fieldOptions;
 }
 
