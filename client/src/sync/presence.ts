@@ -37,6 +37,7 @@ import {
 } from '../gen/syncplane/v1/presence_pb.js';
 import { reportError } from '../report.js';
 import type { RawParticipant, RoomLink, RoomSink } from '../room.js';
+import { Backoff, sleep, STREAM_STABLE_MS } from './backoff.js';
 import { startStreamLeadership, type StreamLeadership } from './leadership.js';
 
 /** How a room is addressed. Mirrors the wire Topic. */
@@ -58,7 +59,11 @@ export interface PresenceOptions {
 	 * receives. For a client that only writes presence.
 	 */
 	watchEnabled?: boolean;
-	/** Backoff floor and ceiling for stream reconnects, in milliseconds. */
+	/**
+	 * The first and the largest reconnect window, in milliseconds. Each retry
+	 * waits a delay drawn uniformly from zero up to the window, and the window
+	 * doubles per consecutive failure until it reaches the ceiling.
+	 */
 	minBackoffMs?: number;
 	maxBackoffMs?: number;
 	/** How long the leader waits for the census to settle before reopening. */
@@ -500,8 +505,8 @@ export class PresenceCoordinator {
 	}
 
 	/**
-	 * Holds a Watch stream for as long as this tab should, reopening on a
-	 * membership change and backing off on failure.
+	 * Holds a Watch stream for as long as this tab should, reopening at once on a
+	 * membership change and with backoff on any other end of the stream.
 	 *
 	 * It must never reject: as a leader loop, a rejection would make
 	 * startStreamLeadership give up on this tab for the rest of the session —
@@ -510,7 +515,7 @@ export class PresenceCoordinator {
 	 */
 	private async streamLoop(term: AbortSignal | undefined, shared: boolean): Promise<void> {
 		this.receiving = true;
-		let backoff = this.opts.minBackoffMs;
+		const backoff = new Backoff(this.opts.minBackoffMs, this.opts.maxBackoffMs);
 		// Read through a function: `term.aborted` is a readonly property, so a
 		// direct test in the loop condition narrows it for the whole body and the
 		// checks after each await would be compiled away.
@@ -530,29 +535,43 @@ export class PresenceCoordinator {
 				const onTermEnd = (): void => abort.abort();
 				term?.addEventListener('abort', onTermEnd, { once: true });
 				this.openedWith = this.streamKey(topics, fronted);
+				const openedAt = Date.now();
+				let deliberate = false;
 				try {
 					await this.runStream(topics, fronted, abort.signal, shared);
-					backoff = this.opts.minBackoffMs;
+					// runStream returns rather than throws when our own abort lands
+					// between frames, so a clean return is not proof the server
+					// hung up.
+					deliberate = abort.signal.aborted;
 				} catch (err) {
 					if (ended()) return;
 					if (abort.signal.aborted) {
-						// Our own reopen, not a failure.
-						backoff = this.opts.minBackoffMs;
-						continue;
-					}
-					if (isTerminal(err)) {
+						deliberate = true;
+					} else if (isTerminal(err)) {
 						// The server will answer the same way next time. Tell every
 						// room so the app stops showing them, and stop retrying.
 						this.dropAll(errorMessage(err));
 						return;
+					} else {
+						reportError('presence stream failed; retrying', err);
 					}
-					reportError('presence stream failed; retrying', err);
-					await delay(backoff, term);
-					backoff = Math.min(backoff * 2, this.opts.maxBackoffMs);
 				} finally {
 					term?.removeEventListener('abort', onTermEnd);
 					if (this.streamAbort === abort) this.streamAbort = undefined;
 				}
+				if (ended()) return;
+				if (deliberate) {
+					// A reopen we asked for (a membership change): productive, so it
+					// neither waits nor counts against the stream's history.
+					backoff.reset();
+					continue;
+				}
+				// A close the server chose is paced exactly like a failure: a node
+				// that ends every stream the moment it opens would otherwise get an
+				// unthrottled reopen loop from every client it has. Only a stream
+				// that lasted clears the escalation — see STREAM_STABLE_MS.
+				if (Date.now() - openedAt >= STREAM_STABLE_MS) backoff.reset();
+				await sleep(backoff.next(), term);
 			}
 		} finally {
 			this.receiving = false;
@@ -638,7 +657,7 @@ export class PresenceCoordinator {
 	 * while there is nothing at all to watch.
 	 */
 	private async waitForChange(term: AbortSignal | undefined): Promise<void> {
-		await delay(this.opts.reopenDebounceMs * 4, term);
+		await sleep(this.opts.reopenDebounceMs * 4, term);
 	}
 }
 
@@ -699,18 +718,6 @@ function isTerminal(err: unknown): boolean {
 function errorMessage(err: unknown): string {
 	if (err instanceof ConnectError) return err.rawMessage;
 	return err instanceof Error ? err.message : String(err);
-}
-
-function delay(ms: number, signal: AbortSignal | undefined): Promise<void> {
-	return new Promise((resolve) => {
-		const t = setTimeout(done, ms);
-		function done(): void {
-			clearTimeout(t);
-			signal?.removeEventListener('abort', done);
-			resolve();
-		}
-		signal?.addEventListener('abort', done, { once: true });
-	});
 }
 
 function randomId(): string {

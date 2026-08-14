@@ -353,6 +353,10 @@ describe('coordinator subscribe stream', () => {
 
 	it('escalates the reconnect backoff when the stream flaps', async () => {
 		vi.useFakeTimers();
+		// Every delay is drawn uniformly from its window, so pin the draw at the
+		// midpoint: the spec is about how the window escalates, not about where in
+		// one window a given client lands.
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 		try {
 			const h = harness();
 			await h.seed();
@@ -389,17 +393,19 @@ describe('coordinator subscribe stream', () => {
 			await coord.stop();
 
 			// 1s doubling to a 30s cap: under ten reconnects in the minute. Resetting
-			// the backoff on the first frame would instead hold the ~0.75s floor —
-			// some eighty connections a minute, from every client at once.
+			// the backoff on the first frame would instead hold the first window —
+			// well over a hundred connections a minute, from every client at once.
 			expect(opens.length).toBeGreaterThanOrEqual(3);
 			expect(opens.length).toBeLessThanOrEqual(12);
 		} finally {
+			vi.restoreAllMocks();
 			vi.useRealTimers();
 		}
 	});
 
 	it('resets the reconnect backoff after a stream that stays up', async () => {
 		vi.useFakeTimers();
+		vi.spyOn(Math, 'random').mockReturnValue(0.5);
 		try {
 			const h = harness();
 			await h.seed();
@@ -441,9 +447,10 @@ describe('coordinator subscribe stream', () => {
 			expect(opens.length).toBeGreaterThanOrEqual(5);
 			// Third flap: already escalated past the floor...
 			expect(opens[3]! - opens[2]!).toBeGreaterThanOrEqual(2_000);
-			// ...and after the 15s stream, the reconnect is a floor delay again.
+			// ...and after the 15s stream, the reconnect is a base-window delay again.
 			expect(opens[4]! - opens[3]! - 15_000).toBeLessThanOrEqual(1_100);
 		} finally {
+			vi.restoreAllMocks();
 			vi.useRealTimers();
 		}
 	});

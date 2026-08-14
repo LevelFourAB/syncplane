@@ -143,7 +143,12 @@ const harnesses: PresenceCoordinator[] = [];
 
 function harness(
 	sessionId = 's-self',
-	opts: { announceMs?: number; watchEnabled?: boolean } = {},
+	opts: {
+		announceMs?: number;
+		watchEnabled?: boolean;
+		minBackoffMs?: number;
+		maxBackoffMs?: number;
+	} = {},
 ): Harness {
 	const server = scriptedServer(opts.announceMs ?? 0);
 	const coordinator = new PresenceCoordinator({
@@ -152,8 +157,8 @@ function harness(
 		presenceLock: 'test:presencelock',
 		presenceChannel: 'test:presence',
 		watchEnabled: opts.watchEnabled,
-		minBackoffMs: 1,
-		maxBackoffMs: 5,
+		minBackoffMs: opts.minBackoffMs ?? 1,
+		maxBackoffMs: opts.maxBackoffMs ?? 5,
 		reopenDebounceMs: 1,
 	});
 	harnesses.push(coordinator);
@@ -175,6 +180,7 @@ function harness(
 
 afterEach(async () => {
 	for (const c of harnesses.splice(0)) await c.stop();
+	vi.restoreAllMocks();
 	vi.useRealTimers();
 });
 
@@ -598,6 +604,38 @@ describe('Room', () => {
 			await vi.waitFor(() => expect(h.server.watchRequests.length).toBeGreaterThan(1), {
 				timeout: 3000,
 			});
+		});
+
+		// A drained or restarted node ends every stream it holds at once. The
+		// close is clean, so nothing here is an error — but reopening on it
+		// without a delay turns a node that ends streams as fast as it accepts
+		// them into an unthrottled loop, from every client it was serving.
+		it('paces reopens after a close the server chose', async () => {
+			// The window escalates deterministically; where in it a client lands
+			// is the part this spec is not about.
+			vi.spyOn(Math, 'random').mockReturnValue(0.5);
+			const h = harness('s-self', { minBackoffMs: 40, maxBackoffMs: 200 });
+			h.openRoom();
+			await vi.waitFor(() => expect(h.server.watchRequests).toHaveLength(1));
+
+			// Every stream from here ends the moment it opens.
+			h.server.endStream();
+			await new Promise((r) => setTimeout(r, 500));
+
+			expect(h.server.watchRequests.length).toBeGreaterThan(1);
+			expect(h.server.watchRequests.length).toBeLessThanOrEqual(10);
+		});
+
+		it('reopens for a membership change without waiting out the backoff', async () => {
+			const h = harness('s-self', { minBackoffMs: 5_000, maxBackoffMs: 5_000 });
+			h.openRoom('a');
+			await vi.waitFor(() => expect(h.server.watchRequests).toHaveLength(1));
+
+			h.openRoom('b');
+			await vi.waitFor(() => {
+				expect(h.server.watchRequests.at(-1)!.topics.map((t) => t.name).sort())
+					.toEqual([ 'a', 'b' ]);
+			}, { timeout: 1_000 });
 		});
 
 		it('closes once the last room closes', async () => {

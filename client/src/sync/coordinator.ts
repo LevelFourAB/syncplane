@@ -66,7 +66,7 @@ import type { StorageNames } from '../storagenames.js';
 import { decodeTextDoc, encodeTextDoc, textOf } from '../text/index.js';
 import { createPeerLeases, type PeerLeases } from '../text/peer.js';
 import { TouchSet } from '../touch.js';
-import { Backoff, sleep } from './backoff.js';
+import { Backoff, sleep, STREAM_STABLE_MS } from './backoff.js';
 import type { SyncEventHandler, SyncEventOutcome, UnstampedSyncEvent } from './events.js';
 import { emitSyncEvent } from './events.js';
 import { HydrationTracker } from './hydration.js';
@@ -184,17 +184,6 @@ export const DEFAULT_MAX_WORKSPACES_PER_REQUEST = 64;
  * external change.
  */
 const IDLE_STREAM_RECHECK_MS = 30_000;
-
-/**
- * How long a working stream must stay open before its close counts as an
- * ordinary disconnect rather than a flap. Resetting the reconnect backoff on the
- * first frame instead would let a peer that accepts the stream, delivers one
- * frame and hangs up — an aggressive idle timeout in a proxy, a load balancer
- * culling long-lived requests — hold every client at the ~1s reconnect floor
- * indefinitely. Below this threshold the backoff keeps escalating toward its cap,
- * so a persistent flap costs the server a connection every 30s, not every second.
- */
-const STREAM_STABLE_MS = 10_000;
 
 const EMPTY_IDS: ReadonlySet<bigint> = new Set();
 
