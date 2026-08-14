@@ -281,7 +281,11 @@ func TestCollectAllGarbageVisitsOnlyCollectableWorkspaces(t *testing.T) {
 	}
 
 	// Widen the retention past the tombstone and only that workspace is due.
-	s.gc.retention = 0
+	// A negative retention puts the cutoff ahead of now, which is what makes
+	// "old enough" independent of how much wall clock passed since the seed
+	// wrote it — at a retention of zero the two land in the same millisecond
+	// and the strict comparison against updated_at goes either way.
+	s.gc.retention = -time.Second
 	store.writes, locker.tried = 0, nil
 	if err := s.collectAllGarbage(ctx); err != nil {
 		t.Fatalf("collect: %v", err)
