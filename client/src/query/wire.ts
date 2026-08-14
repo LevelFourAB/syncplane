@@ -120,8 +120,18 @@ function translateCond(scope: CondScope, cond: Cond): Cond {
  *
  * Operates on localName paths (the compiled-query form); run before
  * toWirePaths and before local evaluation.
+ *
+ * `perWorkspace` carries the already-prepared predicates of a query that chooses
+ * one per workspace (see WorkspaceQuery), whose shared half has no `where` for a
+ * relevance key to bind to. Each workspace's predicate then needs its own single
+ * match condition, and a row ranks against the one its own workspace was read
+ * under.
  */
-export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): CompiledQuery {
+export function prepareQuery(
+	schema: DescMessage,
+	compiled: CompiledQuery,
+	perWorkspace?: ReadonlyMap<string, Cond>,
+): CompiledQuery {
 	const out: CompiledQuery = {};
 	if (compiled.where) out.where = prepareCond(messageScope(schema), compiled.where);
 	if (compiled.orderBy) {
@@ -132,6 +142,9 @@ export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): Comp
 				}
 				// The rank is the match condition's, so the key binds to exactly
 				// one — ambiguity here would rank by an arbitrary choice.
+				if (perWorkspace !== undefined) {
+					return { path: [], dir: key.dir, relevance: true, matchIn: matchPerWorkspace(perWorkspace) };
+				}
 				const matches = out.where ? matchConds(out.where) : [];
 				if (matches.length !== 1) {
 					throw new Error(
@@ -160,6 +173,31 @@ export function prepareQuery(schema: DescMessage, compiled: CompiledQuery): Comp
 			'query: offset cannot be combined with after/before; page with the cursors, '
 				+ 'or drop them to page by rank',
 		);
+	}
+	return out;
+}
+
+/**
+ * Binds a relevance key across the legs of a per-workspace query: one match
+ * condition per workspace, taken from the predicate that workspace is read
+ * under.
+ *
+ * The ranks stay comparable across the legs because a rank reads the row alone
+ * (see Matcher.rank) — nothing about the workspace it came from enters it — so
+ * one merged result can be ordered by them even where each leg asked its own
+ * question.
+ */
+function matchPerWorkspace(perWorkspace: ReadonlyMap<string, Cond>): Map<string, Cond> {
+	const out = new Map<string, Cond>();
+	for (const [ workspaceId, where ] of perWorkspace) {
+		const matches = matchConds(where);
+		if (matches.length !== 1) {
+			throw new Error(
+				`ordering by relevance needs exactly one match condition in every workspace's predicate, `
+					+ `found ${matches.length} for workspace "${workspaceId}"`,
+			);
+		}
+		out.set(workspaceId, matches[0]!);
 	}
 	return out;
 }

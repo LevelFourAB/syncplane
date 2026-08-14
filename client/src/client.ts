@@ -3042,7 +3042,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// What the scan covers and coverage is reported over: the named prefixes,
 		// or the one workspace, or every workspace in the store.
 		const scanned = named === undefined ? workspaceId : named.workspaces;
-		const compiled = prepareQuery(schema, compileQuery(q as Query<MessageShape<D>>));
+		const compiled = prepareQuery(
+			schema,
+			compileQuery(q as Query<MessageShape<D>>),
+			named?.predicates,
+		);
 		// A cursor names a position under ONE workspace's ordering, so a read
 		// spanning workspaces neither accepts nor mints one; see the tie-break note
 		// in query/execute.ts for why the two orders differ. A named set keeps them
@@ -3458,11 +3462,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		opts?: WatchQueryAllOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
+		const scope = readScopeOf(schema, q as Query<MessageShape<D>>, opts?.workspaces);
 		return this.registerWatch(
-			readScopeOf(schema, q as Query<MessageShape<D>>, opts?.workspaces),
+			scope,
 			schema,
 			cb as WatchCallback<MessageShape<D>>,
-			prepareQuery(schema, compileQuery(q as Query<MessageShape<D>>)),
+			prepareQuery(
+				schema,
+				compileQuery(q as Query<MessageShape<D>>),
+				typeof scope === 'object' ? scope.predicates : undefined,
+			),
 			opts?.include,
 			opts?.onError,
 			opts?.window,

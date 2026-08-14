@@ -274,8 +274,9 @@ export interface EntityQueryOps {
 	match(query: string): Cond;
 	/**
 	 * Orders best match first. Requires exactly one {@link match} in the
-	 * query's `where`; rows ranking equally fall through to the next key and
-	 * finally the row key.
+	 * query's `where` — or, in a {@link WorkspaceQuery}, in every workspace's
+	 * predicate, each row then ranking against its own workspace's. Rows ranking
+	 * equally fall through to the next key and finally the row key.
 	 */
 	relevance(): OrderKey;
 }
@@ -339,6 +340,10 @@ export interface Query<M> {
  * Order, page and total describe the merged result, so `orderBy`, `limit`,
  * `offset` and `total` stay shared; only the predicate varies. `after`/`before`
  * are absent because no position spans workspaces.
+ *
+ * Ordering by {@link EntityQueryOps.relevance} works here too: every workspace's
+ * predicate then needs its own single {@link EntityQueryOps.match}, and each row
+ * ranks against the one its workspace was read under.
  *
  * @example
  * ```ts

@@ -180,7 +180,8 @@ undefined`, giving each workspace its own predicate under one merged result —
 for a condition naming something workspace-scoped, a row id being the usual case.
 Only the predicate varies (`orderBy`, `limit`, `offset` and `total` describe the
 merged result and stay shared), returning `undefined` leaves that workspace out,
-and it requires `workspaces`.
+and it requires `workspaces`. `orderBy` may rank by `relevance()`, in which case
+every workspace's predicate needs its own `match` (see §4).
 
 Every result array is a `RowSet`: an ordinary array carrying non-enumerable
 extras — `coverage` (see §9), `total`, and the three paging fields below. All of
@@ -507,6 +508,13 @@ time: `match` on an entity that declares no search fields, `match` anywhere but
 the query root (including inside `any()`), `relevance()` with no `match`, with
 several, or alongside a `path`. See [Search data](../how-to/search.md) and
 [the search model](../explanation/search.md).
+
+A cross-workspace read ranks its merged result the same way. Under `byWorkspace`
+(§2) the requirement applies to each workspace's predicate rather than to a
+shared one — a workspace whose predicate carries no `match`, or more than one,
+throws and is named — and a row ranks against the match its own workspace was
+read under. Ranks stay comparable across the legs because a rank is computed
+from the row alone.
 
 #### Asking about one entry of a map
 

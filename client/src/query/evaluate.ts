@@ -718,6 +718,20 @@ export function evalCond(
 }
 
 /**
+ * One row's rank under a relevance order key. A per-workspace query binds one
+ * match condition per workspace, so the rank is against the match the row's own
+ * workspace was read under — which is what lets a merged cross-workspace result
+ * be ranked at all, each leg having asked its own question.
+ */
+function relevanceRank<T>(key: OrderKey, row: Row<T>, schema?: DescMessage): number {
+	const cond = key.matchIn?.get(row.workspaceId) ?? key.match;
+	if (cond?.kind !== 'match') {
+		throw new Error('a relevance order key must be prepared against its query (prepareQuery)');
+	}
+	return matcherOf(cond, schema).rank(row.value, schema);
+}
+
+/**
  * Multi-key row comparator. Values rank real < NaN < missing and the rank
  * decides before the direction does, so NaN and missing both sort last under
  * `asc` and `desc` alike; equal non-real ranks and real ties fall through to
@@ -731,11 +745,7 @@ export function compareRows<T>(
 ): number {
 	for (const key of orderBy) {
 		if (key.relevance) {
-			if (key.match?.kind !== 'match') {
-				throw new Error('a relevance order key must be prepared against its query (prepareQuery)');
-			}
-			const m = matcherOf(key.match, schema);
-			const c = cmp(m.rank(a.value, schema), m.rank(b.value, schema));
+			const c = cmp(relevanceRank(key, a, schema), relevanceRank(key, b, schema));
 			if (c !== 0) return key.dir === 'desc' ? -c : c;
 			continue;
 		}

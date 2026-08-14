@@ -94,6 +94,29 @@ condition's rank. Paging works as for any other ordering: pass a result's
 `endCursor` back as `after`, and a cursor minted locally is valid on the
 server and the other way around.
 
+## Searching across workspaces
+
+`queryAll`, `watchQueryAll` and `useQueryAll` rank a merged result the same
+way, including when the predicate is chosen per workspace — a search narrowed
+by something workspace-scoped, "my documents about X" being the usual case:
+
+```ts
+const mine = db.doc.useQueryAll({
+	orderBy: (d) => [ d.relevance() ],
+	byWorkspace: (workspaceId) => {
+		const me = memberIdIn(workspaceId);
+		return me && ((d) => and(d.match(input.value), d.owner.eq(me)));
+	},
+}, { workspaces: followedIds });
+```
+
+Every workspace's predicate then needs its own single `match` — a leg without
+one throws, naming the workspace — and each row ranks against the match its own
+workspace was read under, so the legs may even search for different things. The
+ranks stay comparable across them because a rank is computed from the row alone
+(see [the search model](../explanation/search.md)); nothing about the workspace,
+or about the other rows in it, enters the number.
+
 ## Local, server, or both
 
 A local `query` searches the synced subset, instantly and offline; under

@@ -92,6 +92,10 @@ leg is a single-workspace query and can be index-served. `byWorkspace` needs
 `workspaces` — the predicates are built from the set it runs over — and throws
 without it.
 
+Ordering by [`relevance()`](search.md#searching-across-workspaces) works here as
+anywhere else: give each workspace's predicate its own `match`, and the merged
+result comes back best-match-first across all of them.
+
 ### Rows named one by one
 
 When the set is not a predicate but a list of specific rows — a personal task

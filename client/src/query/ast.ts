@@ -50,7 +50,8 @@ export interface OrderKey {
 	/**
 	 * Order by how well each row satisfies the predicate's match condition:
 	 * `asc` is best match first. Requires `path` empty and exactly one match
-	 * condition in the query's `where`.
+	 * condition in the query's `where` — or, for a query whose predicate is
+	 * chosen per workspace, in each of those.
 	 */
 	relevance?: boolean;
 	/**
@@ -59,6 +60,12 @@ export interface OrderKey {
 	 * predicate. Never set by the DSL.
 	 */
 	match?: Cond;
+	/**
+	 * The match condition per workspace, attached by prepareQuery in place of
+	 * `match` when the query chooses its predicate per workspace: a row ranks
+	 * against the match its own workspace was read under. Never set by the DSL.
+	 */
+	matchIn?: ReadonlyMap<string, Cond>;
 }
 
 /** A fully-materialized query, independent of the typed DSL. */
