@@ -176,13 +176,60 @@ rather than in each deployment's policy where a forgotten branch fails open.
 What they cannot say is anything about a specific row: they range over caller
 class, not over rows. "Only edit your own comment" stays in `CanMutate` when
 ownership is derivable from the key, or in a mutator body when it needs the
-stored row. See [Write policies](../reference/proto-options.md#delete-policy).
+stored row — see [Check ownership in a mutator](#check-ownership-in-a-mutator)
+and [Write policies](../reference/proto-options.md#delete-policy).
 
 `(syncplane.v1.field_behavior).write_policy` does the same for a single field of
 an otherwise writable row — a status a workflow owns, a counter an effect
 maintains. A PATCH whose mask reaches such a field is rejected; a PUT keeps the
 stored value and lands the rest. See
 [Protected fields](../reference/proto-options.md#protected-fields).
+
+## Check ownership in a mutator
+
+Neither a write policy nor `CanMutate` can answer "may this caller edit _this
+row_" when the answer is in the row. A custom mutator can: it is authorized once,
+by name, and its body decides the rest. `EntityTx.GetMeta` hands it the actor the
+engine stamped on the row, so the check does not rest on an author field a client
+filled in.
+
+```go
+server.WithMutator("editComment", &appv1.EditComment{},
+	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+		in := args.(*appv1.EditComment)
+		var comment appv1.Comment
+		found, meta, err := tx.GetMeta(&comment, in.GetId())
+		if err != nil {
+			return err
+		}
+		if !found {
+			return server.Reject(server.CodeConflict, "comment is gone")
+		}
+		caller, _ := server.PrincipalFrom(ctx)
+		if caller.IsAnonymous() || meta.Actor.Subject != caller.Subject {
+			return server.Reject(server.CodePermissionDenied, "not your comment")
+		}
+		comment.Body = in.GetBody()
+		return tx.Put(&comment)
+	})
+```
+
+Refuse the anonymous caller before comparing subjects, as above. A row written
+with no authenticated caller carries an empty `Actor.Subject`, and so does an
+unauthenticated caller — equality alone would read as a match.
+
+`meta.Actor` is the row's **last** writer: a comment its author wrote and a
+moderator then edited reports the moderator. Where the rule is about who created
+a row, the entity has to carry that itself — stamped by the server on create,
+from a mutator like the one above, in a field marked
+`write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY` so no client can move it after.
+
+`meta.Version` arrives with it. A mutator holds the workspace write lock, so the
+read-then-write above is already serializable and needs no guard. The same check
+in an `Apply` closure does: its reads come from a snapshot taken before the
+writes apply, so pass the version to `server.WithExpectedVersion` there and the
+edit is refused if the row moved underneath. `ViewTx.GetMeta` is the same read
+inside a read-only `View`.
 
 ## Protect a field per caller
 

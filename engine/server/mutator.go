@@ -207,6 +207,42 @@ func (e *EntityTx) Get(dst proto.Message, key string) (bool, error) {
 	return found, err
 }
 
+// GetMeta is Get, additionally reporting what the engine recorded about the
+// row's last write (see RowMeta). A missing or deleted row returns
+// (false, RowMeta{}, nil).
+//
+// It is the read a per-row ownership rule — "only the author may edit their own
+// comment", which no write policy can express — is built on, because the actor
+// comes from the engine's own attribution rather than a field the writer filled
+// in:
+//
+//	found, meta, err := tx.GetMeta(&comment, key)
+//	if err != nil {
+//		return err
+//	}
+//	if !found {
+//		return Reject(CodeConflict, "comment is gone")
+//	}
+//	caller, _ := PrincipalFrom(ctx)
+//	if caller.IsAnonymous() || meta.Actor.Subject != caller.Subject {
+//		return Reject(CodePermissionDenied, "not your comment")
+//	}
+//
+// Refuse the anonymous caller before comparing, as above: an unattributed row
+// and an unauthenticated caller both carry an empty Subject, so equality alone
+// reads as a match.
+//
+// Attribution follows the row's last write, so a row its author created and a
+// moderator later edited reports the moderator. Where the rule is about who
+// created a row, the entity has to carry that itself.
+func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMeta, err error) {
+	info, err := e.info(dst)
+	if err != nil {
+		return false, RowMeta{}, err
+	}
+	return readRowMeta(e.tx, info, dst, key, nil)
+}
+
 // Put stores msg as a full-row snapshot; the key derives from key_fields.
 //
 // Exception to "PUT replaces whole rows": collaborative-text fields

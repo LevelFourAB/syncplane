@@ -335,12 +335,13 @@ hook runs inside a transaction, and the closure runs exactly once — so unlike
 the transaction. Reach for it when you need a serializable read-then-write, or
 writes that stream rather than buffer (a bulk import).
 
-`ApplyTx` offers `Get`, `Query`, `ScanPage`, `Put`, `Patch` and `Delete`. Reads
-come from the snapshot taken before the closure ran: they do not see the
-closure's own recorded writes, and `Get` on a key you have written is an error
-rather than a stale row. `EntityTx` offers `Get`, `Put`, `Patch`, `Delete`,
-`Scan`, `Query`, `Seq` and `ScanPage(prototype, afterKey, limit, fn)`. Write
-options on both: `WithTextString(field, value)`, `WithTextPeer(peer)` and
+`ApplyTx` offers `Get`, `GetMeta`, `Query`, `ScanPage`, `Put`, `Patch` and
+`Delete`. Reads come from the snapshot taken before the closure ran: they do not
+see the closure's own recorded writes, and a read of a key you have written is an
+error rather than a stale row. `EntityTx` offers `Get`, `GetMeta`, `Put`,
+`Patch`, `Delete`, `Scan`, `Query`, `Seq` and
+`ScanPage(prototype, afterKey, limit, fn)`. Write options on both:
+`WithTextString(field, value)`, `WithTextPeer(peer)` and
 `WithExpectedVersion(v)`. A text field of the written message holding a
 plain-string value (`text.EncodePlainString`, what a field-history record
 carries) resolves the same way and needs the same `WithTextPeer`; on `Patch` it
@@ -361,10 +362,16 @@ Neither consults a client watermark. See
 func (s *Server) View(ctx, workspaceID string, fn func(tx *ViewTx) error) error
 ```
 
-`ViewTx` offers `Get`, `Query` and `ScanPage`, each reporting a row's `version`
-alongside the message. The caller's `ReadFilter` applies — a filtered row reads
-as absent — but no engine-imposed limit caps a result. See
+`ViewTx` offers `Get`, `GetMeta`, `Query` and `ScanPage`, each reporting a row's
+`version` alongside the message. The caller's `ReadFilter` applies — a filtered
+row reads as absent — but no engine-imposed limit caps a result. See
 [Query from server-side code](../how-to/server-side-queries.md).
+
+`GetMeta` reports a `RowMeta{Version, Actor}` in place of the bare version:
+`Actor` is the `storage.Actor` the engine recorded for the row's last write, so a
+per-row ownership check reads the engine's attribution rather than a field the
+writer filled in. It is on `EntityTx` and `ApplyTx` too — see
+[Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
 
 ## Permissions on the in-process API
 

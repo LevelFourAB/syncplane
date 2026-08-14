@@ -65,6 +65,25 @@ type ViewTx struct {
 	visible func(storage.Row) (bool, error)
 }
 
+// RowMeta is what the engine recorded about a stored row, returned alongside
+// the decoded message by the GetMeta reads. It is the engine's own bookkeeping,
+// never anything the writer put in the message.
+//
+// Both fields are replaced by every write, so RowMeta answers "who last touched
+// this row, at which sequence" and never "who touched it, in order".
+type RowMeta struct {
+	// Version is the workspace sequence of the mutation that last wrote the row.
+	// Hand it back through WithExpectedVersion (or Patch's expected argument) to
+	// make the follow-up write a compare-and-swap.
+	Version uint64
+	// Actor attributes that write — the caller's subject for a client push or an
+	// in-process write, the label a write made under Trusted/TrustedAs gave
+	// itself, or both when a bypass ran inside a caller's request. The zero Actor
+	// means the write was unattributed, which is every write on a server with no
+	// Authenticator installed.
+	Actor storage.Actor
+}
+
 func (v *ViewTx) info(msg proto.Message) (*entityInfo, error) {
 	return entityInfoFor(v.srv, msg)
 }
@@ -78,6 +97,17 @@ func (v *ViewTx) Get(dst proto.Message, key string) (found bool, version uint64,
 		return false, 0, err
 	}
 	return readRowVisible(v.tx, info, dst, key, v.visible)
+}
+
+// GetMeta is Get, reporting the row's whole RowMeta instead of its version
+// alone — the read that answers "who last wrote this". A missing or deleted row
+// returns (false, RowMeta{}, nil).
+func (v *ViewTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMeta, err error) {
+	info, err := v.info(dst)
+	if err != nil {
+		return false, RowMeta{}, err
+	}
+	return readRowMeta(v.tx, info, dst, key, v.visible)
 }
 
 // ScanPage iterates up to limit live rows of the entity identified by prototype
@@ -245,30 +275,43 @@ func readRowVisible(
 	key string,
 	visible func(storage.Row) (bool, error),
 ) (found bool, version uint64, err error) {
+	found, meta, err := readRowMeta(tx, info, dst, key, visible)
+	return found, meta.Version, err
+}
+
+// readRowMeta is readRowVisible reporting the row's whole RowMeta. It backs the
+// GetMeta reads of every facade.
+func readRowMeta(
+	tx storage.ReadTx,
+	info *entityInfo,
+	dst proto.Message,
+	key string,
+	visible func(storage.Row) (bool, error),
+) (found bool, meta RowMeta, err error) {
 	row, err := tx.GetRow(info.name, key)
 	if err == storage.ErrNotFound {
-		return false, 0, nil
+		return false, RowMeta{}, nil
 	}
 	if err != nil {
-		return false, 0, err
+		return false, RowMeta{}, err
 	}
 	if row.Deleted {
-		return false, 0, nil
+		return false, RowMeta{}, nil
 	}
 	if visible != nil {
 		ok, err := visible(row)
 		if err != nil {
-			return false, 0, err
+			return false, RowMeta{}, err
 		}
 		if !ok {
-			return false, 0, nil
+			return false, RowMeta{}, nil
 		}
 	}
 	proto.Reset(dst)
 	if err := proto.Unmarshal(row.Value, dst); err != nil {
-		return false, 0, err
+		return false, RowMeta{}, err
 	}
-	return true, row.Version, nil
+	return true, RowMeta{Version: row.Version, Actor: row.Actor}, nil
 }
 
 // scanPageRows iterates one page of live rows of info, decoding each into a

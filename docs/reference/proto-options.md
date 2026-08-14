@@ -107,7 +107,9 @@ site, so a write that can never land never enters the pending queue.
 They range over caller class — trusted bypass versus any authorized caller — not
 over rows. "Only edit your own comment" is not expressible here; it belongs in
 `CanMutate` when ownership is derivable from the key, or in a mutator body when
-it needs the stored row.
+it needs the stored row — where `EntityTx.GetMeta` reports the actor the engine
+recorded for it. See
+[Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
 
 They also range over whole rows, not fields. To keep one field of an otherwise
 writable row out of a client's reach, mark the field instead — see

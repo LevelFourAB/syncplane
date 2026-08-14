@@ -192,4 +192,153 @@ var _ = Describe("Write attribution", func() {
 			Expect(actorOf("todo", "t1")).To(Equal(storage.Actor{}))
 		})
 	})
+
+	// Attribution has a second reader: server-side code deciding whether this
+	// caller may touch this row, which the feed cannot serve because the
+	// decision happens while the write is being made.
+	Describe("in-process reads", func() {
+		metaOf := func(rctx context.Context, key string) (*todov1.Todo, server.RowMeta, bool) {
+			GinkgoHelper()
+			var (
+				got   todov1.Todo
+				meta  server.RowMeta
+				found bool
+			)
+			Expect(srv.View(rctx, ws, func(tx *server.ViewTx) error {
+				var err error
+				found, meta, err = tx.GetMeta(&got, key)
+				return err
+			})).To(Succeed())
+			return &got, meta, found
+		}
+
+		It("reports the row's actor and the version Get reports", func() {
+			push(server.WithPrincipal(ctx, principal),
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+
+			var (
+				got     todov1.Todo
+				meta    server.RowMeta
+				version uint64
+				found   bool
+			)
+			Expect(srv.View(server.Trusted(ctx), ws, func(tx *server.ViewTx) error {
+				var err error
+				if _, version, err = tx.Get(&got, "t1"); err != nil {
+					return err
+				}
+				found, meta, err = tx.GetMeta(&got, "t1")
+				return err
+			})).To(Succeed())
+
+			Expect(found).To(BeTrue())
+			Expect(got.GetTitle()).To(Equal("one"))
+			Expect(version).NotTo(BeZero())
+			Expect(meta).To(Equal(server.RowMeta{
+				Version: version,
+				Actor:   storage.Actor{Subject: principal.Subject},
+			}))
+		})
+
+		It("reads a missing row as absent", func() {
+			_, meta, found := metaOf(server.Trusted(ctx), "nope")
+
+			Expect(found).To(BeFalse())
+			Expect(meta).To(Equal(server.RowMeta{}))
+		})
+
+		It("reads a deleted row as absent", func() {
+			push(ctx, putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			push(server.WithPrincipal(ctx, principal), deleteMutation("c1", 2, "todo", "t1"))
+
+			_, meta, found := metaOf(server.Trusted(ctx), "t1")
+
+			Expect(found).To(BeFalse())
+			Expect(meta).To(Equal(server.RowMeta{}),
+				"the deleter is feed material; a read reports the row as gone")
+		})
+
+		It("hides a filtered row's actor as thoroughly as its value", func() {
+			srv = newTestServer(server.WithPermissions(&recordingPolicy{hideTitle: "secret"}))
+			push(server.WithPrincipal(ctx, principal),
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "secret"}))
+
+			_, meta, found := metaOf(ctx, "t1")
+
+			Expect(found).To(BeFalse())
+			Expect(meta).To(Equal(server.RowMeta{}),
+				"who wrote a row is as much a leak as the row itself")
+		})
+
+		It("lets a mutator refuse an edit by anyone but the row's last writer", func() {
+			srv = newTestServer(server.WithMutator("retitle", &todov1.Todo{},
+				func(mctx context.Context, tx *server.EntityTx, args proto.Message) error {
+					in := args.(*todov1.Todo)
+					var cur todov1.Todo
+					found, meta, err := tx.GetMeta(&cur, in.GetId())
+					if err != nil {
+						return err
+					}
+					if !found {
+						return server.Reject(server.CodeConflict, "no such todo")
+					}
+					caller, _ := server.PrincipalFrom(mctx)
+					if caller.IsAnonymous() || meta.Actor.Subject != caller.Subject {
+						return server.Reject(server.CodePermissionDenied, "not your todo")
+					}
+					return tx.Put(in)
+				}))
+			push(server.WithPrincipal(ctx, principal),
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+
+			resp, err := srv.Push(server.WithPrincipal(ctx, server.Principal{Subject: "user-9"}),
+				connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+					customMutation("c2", 1, "retitle", &todov1.Todo{Id: "t1", Title: "hijacked"}),
+				})))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pushResults(resp.Msg)[0].GetErrorCode()).To(Equal(server.CodePermissionDenied))
+
+			push(server.WithPrincipal(ctx, principal),
+				customMutation("c3", 1, "retitle", &todov1.Todo{Id: "t1", Title: "mine"}))
+
+			got, _, _ := metaOf(server.Trusted(ctx), "t1")
+			Expect(got.GetTitle()).To(Equal("mine"),
+				"the row's own writer is still allowed through")
+		})
+
+		It("reports attribution from an Apply snapshot", func() {
+			push(server.WithPrincipal(ctx, principal),
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+
+			var (
+				meta  server.RowMeta
+				found bool
+			)
+			Expect(srv.Apply(server.Trusted(ctx), ws, func(tx *server.ApplyTx) error {
+				var (
+					got todov1.Todo
+					err error
+				)
+				found, meta, err = tx.GetMeta(&got, "t1")
+				return err
+			})).To(Succeed())
+
+			Expect(found).To(BeTrue())
+			Expect(meta.Actor).To(Equal(storage.Actor{Subject: principal.Subject}))
+		})
+
+		It("refuses an Apply read of a key the closure has written", func() {
+			err := srv.Apply(server.Trusted(ctx), ws, func(tx *server.ApplyTx) error {
+				if err := tx.Put(&todov1.Todo{Id: "t1", Title: "one"}); err != nil {
+					return err
+				}
+				var got todov1.Todo
+				_, _, err := tx.GetMeta(&got, "t1")
+				return err
+			})
+
+			Expect(err).To(MatchError(ContainSubstring("after writing it")),
+				"a recorded write is invisible to GetMeta exactly as it is to Get")
+		})
+	})
 })

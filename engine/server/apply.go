@@ -362,6 +362,21 @@ func (a *ApplyTx) Get(dst proto.Message, key string) (found bool, version uint64
 	return readRowVisible(a.tx, info, dst, key, a.visible)
 }
 
+// GetMeta is Get, reporting the row's whole RowMeta instead of its version
+// alone — the read that answers "who last wrote this". A missing or deleted row
+// returns (false, RowMeta{}, nil), and reading a key this closure has already
+// written is an error, exactly as in Get.
+func (a *ApplyTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMeta, err error) {
+	info, err := a.info(dst)
+	if err != nil {
+		return false, RowMeta{}, err
+	}
+	if a.written[rowRef{entity: info.name, key: key}] {
+		return false, RowMeta{}, fmt.Errorf("server: Apply: GetMeta of %s/%q after writing it — reads come from the snapshot taken before the closure ran and do not see recorded writes; keep the written value, or use Mutate for read-your-own-writes", info.name, key)
+	}
+	return readRowMeta(a.tx, info, dst, key, a.visible)
+}
+
 // ScanPage iterates up to limit live rows of the entity identified by prototype
 // with key > afterKey, in key order, decoding each into a fresh message and
 // passing it with its version. It returns the key of the last row visited and
