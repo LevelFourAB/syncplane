@@ -20,7 +20,8 @@
 // buildClosure walks it from every seed. That is the answer for any shape and
 // the fallback for all of them, but it costs a hop per holder however little
 // moved, so a pull that can see every row written since its cursor MAINTAINS a
-// reverse-hop closure from those rows instead — see maintainClosure.
+// single-segment closure at depth 1 from those rows instead — either direction
+// — see maintainClosure.
 package server
 
 import (
@@ -834,13 +835,12 @@ func (e *rowEmitter) followReverseIndexed(
 // members it contributes are the rows of rr.sourceEntity whose rr.viaField
 // points at one of its subscription's seeds.
 //
-// This is the shape a closure can be MAINTAINED in rather than walked, and the
-// reason is that its membership rule reads per row: "r is in" is a question
-// about r's own ref field and about whether what it names is a seed, neither of
-// which needs the other members. A forward hop is the other way round — a
-// target is in because some holder points at it, so deciding it needs the
-// holders — and composing segments makes the answer depend on the level before
-// it, so both fall back to buildClosure.
+// Its membership rule reads per row: "r is in" is a question about r's own ref
+// field and about whether what it names is a seed, neither of which needs the
+// other members. Composing segments is what breaks that — each level's
+// membership becomes a function of the level before it, and the cursor carries
+// one flat key-set rather than per-level sets — so a path of more than one
+// segment, and any spec deeper than one round, still fall back to buildClosure.
 type reverseHop struct {
 	rr         *reverseRefRel
 	seedInfo   *entityInfo // the subscription's own entity: what a member points AT
@@ -862,71 +862,154 @@ type seedMemo struct {
 	key      string
 }
 
-// reverseHops resolves every following subscription into hops, reporting false
-// when any of them is a shape maintenance cannot decide per row.
-func (e *rowEmitter) reverseHops(subs []*syncplanev1.Subscription) ([]reverseHop, bool, error) {
+// forwardHop is one follow path that resolves to a single forward relation: the
+// members it contributes are the rows its subscription's seeds name through
+// fr.fd.
+//
+// Membership reads the other way round from a reverseHop — a target is in
+// because some HOLDER points at it — so a target's own row does not settle it.
+// What makes it maintainable anyway is that the holders' ref index answers the
+// question from the target's side, at one probe per target whose membership is
+// actually in doubt. See heldForward for when it is, and anySeedPointsAt for
+// what the probe costs and when it gives up.
+type forwardHop struct {
+	fr         *forwardRefRel
+	seedInfo   *entityInfo // the subscription's own entity: what holds the ref
+	targetInfo *entityInfo // the entity members belong to
+	// seedPred is the subscription's predicate, nil for a whole-entity or
+	// windowed subscription; windowed says the seeds are the window's members.
+	seedPred *query.Compiled
+	windowed bool
+	// sole says no other hop can put a row of targetInfo in the closure, which
+	// is what lets a prior member be carried over without a probe (see
+	// heldForward).
+	sole bool
+}
+
+// closureHops is one maintenance pass's hops, split by the direction each is
+// decided in.
+type closureHops struct {
+	reverse []reverseHop
+	forward []forwardHop
+}
+
+// resolveHops resolves every following subscription into hops, reporting false
+// when any of them is a shape maintenance cannot decide per row: a path of more
+// than one segment, a spec deeper than one round, or a to-many reference walked
+// forwards, whose index the probe in anySeedPointsAt cannot read.
+func (e *rowEmitter) resolveHops(subs []*syncplanev1.Subscription) (closureHops, bool, error) {
 	g, err := e.srv.catalogPtr().refGraphLazy()
 	if err != nil {
-		return nil, false, connect.NewError(connect.CodeFailedPrecondition, err)
+		return closureHops{}, false, connect.NewError(connect.CodeFailedPrecondition, err)
 	}
-	var hops []reverseHop
+	var hops closureHops
 	for subIndex, sub := range subs {
 		follow := sub.GetFollow()
 		if follow == nil || len(follow.GetPaths()) == 0 {
 			continue
 		}
 		if d := follow.GetDepth(); d > 1 {
-			return nil, false, nil
+			return closureHops{}, false, nil
 		}
 		seedInfo, ok := e.srv.catalogPtr().entities[sub.GetEntity()]
 		if !ok {
-			return nil, false, connect.NewError(connect.CodeInvalidArgument,
+			return closureHops{}, false, connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("subscription names unknown entity %q", sub.GetEntity()))
 		}
 		var pred *query.Compiled
 		if sub.GetWindow() == nil && sub.GetPredicate() != nil {
 			if pred, err = query.Compile(seedInfo.msgType.Descriptor(), sub.GetPredicate()); err != nil {
-				return nil, false, connect.NewError(connect.CodeInvalidArgument, err)
+				return closureHops{}, false, connect.NewError(connect.CodeInvalidArgument, err)
 			}
 		}
 		for _, path := range follow.GetPaths() {
 			segs := path.GetSegments()
 			if len(segs) != 1 {
-				return nil, false, nil
+				return closureHops{}, false, nil
 			}
-			// A forward segment, or one that names nothing at all: neither is a
-			// shape this decides, and the second is an error buildClosure is
+			if rr := g.reverseBy(sub.GetEntity(), segs[0]); rr != nil {
+				hops.reverse = append(hops.reverse, reverseHop{
+					rr:         rr,
+					seedInfo:   seedInfo,
+					sourceInfo: e.srv.catalogPtr().entities[rr.sourceEntity],
+					subIndex:   subIndex,
+					seedPred:   pred,
+					windowed:   sub.GetWindow() != nil,
+				})
+				continue
+			}
+			fr := g.forwardBy(sub.GetEntity(), segs[0])
+			// A segment that names nothing at all is an error buildClosure is
 			// the right place to raise.
-			rr := g.reverseBy(sub.GetEntity(), segs[0])
-			if rr == nil {
-				return nil, false, nil
+			if fr == nil {
+				return closureHops{}, false, nil
 			}
-			hops = append(hops, reverseHop{
-				rr:         rr,
+			// A to-many ref stores several target keys in one row, and the
+			// probe reads one entry per row (see followReverseIndexed).
+			if fr.fd.IsList() {
+				return closureHops{}, false, nil
+			}
+			targetInfo, ok := e.srv.catalogPtr().entities[fr.targetEntity]
+			if !ok {
+				return closureHops{}, false, nil
+			}
+			hops.forward = append(hops.forward, forwardHop{
+				fr:         fr,
 				seedInfo:   seedInfo,
-				sourceInfo: e.srv.catalogPtr().entities[rr.sourceEntity],
-				subIndex:   subIndex,
+				targetInfo: targetInfo,
 				seedPred:   pred,
 				windowed:   sub.GetWindow() != nil,
 			})
 		}
 	}
+	hops.markSole()
 	return hops, true, nil
 }
 
+// markSole flags each forward hop that is the only hop able to put a row of its
+// target entity in the closure. Where two hops reach one entity the set records
+// no provenance — it is a union of keys — so neither may take a member it did
+// not place for one of its own.
+func (h *closureHops) markSole() {
+	reach := map[string]int{}
+	for i := range h.reverse {
+		reach[h.reverse[i].rr.sourceEntity]++
+	}
+	for i := range h.forward {
+		reach[h.forward[i].targetInfo.name]++
+	}
+	for i := range h.forward {
+		h.forward[i].sole = reach[h.forward[i].targetInfo.name] == 1
+	}
+}
+
+// errMaintenanceDeclined unwinds a pass that met something it cannot decide: an
+// index that cannot serve a probe, or a walk past its candidate bound. It never
+// reaches a caller — maintainClosure turns it into the rebuild, which is always
+// a legal answer.
+var errMaintenanceDeclined = errors.New("closure maintenance declined")
+
 // maintainClosure updates the follow closure from what moved since the cursor
 // instead of walking it again from every holder, reporting false when the
-// subscription set is a shape it cannot decide (see reverseHops) and
-// buildClosure must run.
+// subscription set is a shape it cannot decide (see resolveHops) or when a
+// probe below gives up, and buildClosure must run.
 //
-// Only two things move a member of a reverse-hop closure, and both are named
-// here rather than searched for:
+// Only three things move a member, and all of them are named here rather than
+// searched for:
 //
-//   - the member's own row changed, so its ref may now name a different row, or
-//     it may have been deleted or filtered out. Every such row is in changes.
-//   - a seed entered or left, so the rows pointing at it entered or left with
-//     it. seedsMoved carries those, because a seed can move without its row
-//     changing: a window refills, and the row that moved up was never written.
+//   - the member's own row changed, so a reverse hop's ref may now name a
+//     different row, or the row may have been deleted or filtered out. Every
+//     such row is in changes.
+//   - a seed entered or left. For a reverse hop the rows pointing at it entered
+//     or left with it; for a forward hop the rows IT points at did. A seed that
+//     moved with its own row is in changes; one that moved without being
+//     written — a window refills, and the row that moved up was never written —
+//     is in seedsMoved.
+//   - a forward hop's holder re-pointed. Its new targets are named by its own
+//     ref field, but what it stopped pointing at is not: deciding that needs the
+//     holder's PREVIOUS refs, and the cursor carries only the set they produced.
+//     So the targets of a hop whose holders moved are re-decided from the
+//     target's side instead — see recheckForwardTargets.
 //
 // Everything else the cursor held is carried forward unread, which is the whole
 // saving — a closure the size of the client's working set costs reads
@@ -938,35 +1021,28 @@ func (e *rowEmitter) reverseHops(subs []*syncplanev1.Subscription) ([]reverseHop
 // stays bounded by MaxClosureSize either way, which is the bound that protects
 // the cursor and the client.
 func (e *rowEmitter) maintainClosure(tx storage.ReadTx, prev *syncplanecursorv1.ClosureSet, subs []*syncplanev1.Subscription, changes []storage.Row, seedsMoved []closureKey) (closureRows, bool, error) {
-	hops, ok, err := e.reverseHops(subs)
+	hops, ok, err := e.resolveHops(subs)
 	if err != nil || !ok {
 		return nil, false, err
 	}
+	members := closureSetMembership(prev)
 	cr := closureRows{}
-	for ck := range closureSetMembership(prev) {
+	for ck := range members {
 		cr[ck] = storage.Row{}
 	}
 
-	m := &closureMaint{e: e, tx: tx, hops: hops, cr: cr, seeds: map[seedMemo]bool{}}
-	for _, row := range changes {
-		if err := m.reconsider(row); err != nil {
-			return nil, false, err
-		}
-		// A changed row is also a candidate SEED of a predicate-scoped
-		// subscription, where being one is decided by the row's own fields: an
-		// edit can make it a seed or stop it being one, and the rows pointing
-		// at it move with it. A WINDOWED subscription is the other way round —
-		// its seeds are its window's members, so an edit that leaves a row in
-		// the window leaves its followers alone, and the entering and leaving
-		// members arrive as seedsMoved instead.
-		if err := m.rewalkSeed(closureKey{row.Entity, row.Key}, false); err != nil {
-			return nil, false, err
-		}
+	m := &closureMaint{
+		e: e, tx: tx, hops: hops, cr: cr, prev: members,
+		seeds:       map[seedMemo]bool{},
+		decided:     map[closureKey]bool{},
+		written:     map[string]bool{},
+		windowMoved: map[string]bool{},
 	}
-	for _, seed := range seedsMoved {
-		if err := m.rewalkSeed(seed, true); err != nil {
-			return nil, false, err
-		}
+	switch err := m.run(changes, seedsMoved); {
+	case errors.Is(err, errMaintenanceDeclined):
+		return nil, false, nil
+	case err != nil:
+		return nil, false, err
 	}
 	if len(cr) > e.srv.limits.MaxClosureSize {
 		return nil, false, errClosureTooLarge(len(cr), e.srv.limits.MaxClosureSize)
@@ -975,14 +1051,52 @@ func (e *rowEmitter) maintainClosure(tx storage.ReadTx, prev *syncplanecursorv1.
 }
 
 // closureMaint is one maintenance pass's working state: the hops it decides
-// against, the set it is updating, and a memo of which rows it has already
-// resolved as seeds (a hot key when many changed rows point at the same one).
+// against, the set it is updating, and what it has settled along the way.
 type closureMaint struct {
-	e     *rowEmitter
-	tx    storage.ReadTx
-	hops  []reverseHop
-	cr    closureRows
+	e    *rowEmitter
+	tx   storage.ReadTx
+	hops closureHops
+	cr   closureRows
+	// prev is the membership the cursor carried, which is what says whether a
+	// member may be carried over rather than re-decided.
+	prev map[closureKey]bool
+	// seeds memoizes which rows are follow roots — a hot key when many changed
+	// rows point at the same one.
 	seeds map[seedMemo]bool
+	// decided names the members this pass has already settled, so the forward
+	// recheck neither reads nor re-probes a row it just placed.
+	decided map[closureKey]bool
+	// written names the entities with a row in the change set, windowMoved
+	// those whose window membership moved without one. Together they say
+	// whether a forward hop's holders can have re-pointed.
+	written     map[string]bool
+	windowMoved map[string]bool
+}
+
+// run makes the pass: what changed is re-decided and re-walked, what the window
+// moved is re-walked, and the forward targets that could have lost their last
+// holder are re-decided last, once every addition is in.
+func (m *closureMaint) run(changes []storage.Row, seedsMoved []closureKey) error {
+	for _, row := range changes {
+		m.written[row.Entity] = true
+	}
+	for _, seed := range seedsMoved {
+		m.windowMoved[seed.entity] = true
+	}
+	for _, row := range changes {
+		if err := m.reconsider(row); err != nil {
+			return err
+		}
+		if err := m.rewalkSeed(closureKey{row.Entity, row.Key}, false); err != nil {
+			return err
+		}
+	}
+	for _, seed := range seedsMoved {
+		if err := m.rewalkSeed(seed, true); err != nil {
+			return err
+		}
+	}
+	return m.recheckForwardTargets()
 }
 
 // reconsider re-decides one row's membership from scratch, under every hop that
@@ -990,19 +1104,10 @@ type closureMaint struct {
 // into a tombstone unless base scope also holds it.
 func (m *closureMaint) reconsider(row storage.Row) error {
 	ck := closureKey{row.Entity, row.Key}
-	held := false
-	for i := range m.hops {
-		if m.hops[i].rr.sourceEntity != row.Entity {
-			continue
-		}
-		ok, err := m.holds(row, &m.hops[i])
-		if err != nil {
-			return err
-		}
-		if ok {
-			held = true
-			break
-		}
+	m.decided[ck] = true
+	held, err := m.heldByAny(row)
+	if err != nil {
+		return err
 	}
 	if held {
 		m.cr[ck] = row
@@ -1012,10 +1117,35 @@ func (m *closureMaint) reconsider(row storage.Row) error {
 	return nil
 }
 
-// holds reports whether one hop puts this row in the closure: the row is live
-// and readable, and its ref field names a seed. It is followReverse's test read
-// from the member's side rather than the holder's, which is what lets it be
-// answered without walking anything.
+// heldByAny stops at the first hop that holds the row, because the closure is a
+// union: one path is enough, and the cheap reverse test comes before the
+// forward probe.
+func (m *closureMaint) heldByAny(row storage.Row) (bool, error) {
+	for i := range m.hops.reverse {
+		if m.hops.reverse[i].rr.sourceEntity != row.Entity {
+			continue
+		}
+		held, err := m.holds(row, &m.hops.reverse[i])
+		if err != nil || held {
+			return held, err
+		}
+	}
+	for i := range m.hops.forward {
+		if m.hops.forward[i].targetInfo.name != row.Entity {
+			continue
+		}
+		held, err := m.heldForward(row, &m.hops.forward[i])
+		if err != nil || held {
+			return held, err
+		}
+	}
+	return false, nil
+}
+
+// holds reports whether one reverse hop puts this row in the closure: the row
+// is live and readable, and its ref field names a seed. It is followReverse's
+// test read from the member's side rather than the holder's, which is what lets
+// it be answered without walking anything.
 func (m *closureMaint) holds(row storage.Row, hop *reverseHop) (bool, error) {
 	if row.Deleted {
 		return false, nil
@@ -1104,26 +1234,285 @@ func (m *closureMaint) resolveSeed(hop *reverseHop, ck closureKey) (bool, error)
 	return hop.seedPred == nil || hop.seedPred.Eval(msg.ProtoReflect()), nil
 }
 
-// rewalkSeed re-decides every row that points at one seed, for the hops seeded
-// by its entity. This is the one place maintenance still walks: the rows
-// pointing back cannot be named without asking, and asking is a single index
-// probe per hop (a scan of the source entity where the index cannot serve it,
-// which is also what a deleted seed gets — there is no message left to probe
-// with).
-func (m *closureMaint) rewalkSeed(seed closureKey, windowed bool) error {
-	for i := range m.hops {
-		hop := &m.hops[i]
-		if hop.seedInfo.name != seed.entity || hop.windowed != windowed {
-			continue
+// heldForward reports whether one forward hop puts this row in the closure: the
+// row is live and readable, and some seed's ref field names it. Only the last
+// part needs anything the row itself does not hold, and it is asked of the
+// holders' ref index (anySeedPointsAt) — but only when it has to be. Nothing
+// can have started or stopped pointing at a target while the hop's holders sat
+// still, so a member of a closure whose holders did not move is carried over
+// for the price of the liveness check.
+//
+// That shortcut needs the hop to be the only one reaching this entity (see
+// closureHops.markSole): where two hops overlap, the set records no provenance,
+// so a member this hop never placed cannot be taken for one of its own.
+func (m *closureMaint) heldForward(row storage.Row, hop *forwardHop) (bool, error) {
+	if row.Deleted {
+		return false, nil
+	}
+	ok, err := m.e.readable(row)
+	if err != nil || !ok {
+		return false, err
+	}
+	if hop.sole && m.prev[closureKey{row.Entity, row.Key}] && !m.holdersMoved(hop) {
+		return true, nil
+	}
+	msg, ok := m.e.decodeRow(hop.targetInfo, row)
+	if !ok {
+		return false, nil // quarantined: followForward drops it too
+	}
+	return m.anySeedPointsAt(hop, msg.ProtoReflect())
+}
+
+// holdersMoved reports whether anything can have changed what a hop's seeds
+// point at: a write to the holder entity, or — where the seeds are a window's
+// members — a window that refilled.
+func (m *closureMaint) holdersMoved(hop *forwardHop) bool {
+	return m.written[hop.seedInfo.name] || (hop.windowed && m.windowMoved[hop.seedInfo.name])
+}
+
+// anySeedPointsAt asks the holder entity's ref index whether any follow root
+// references this target row. It is a forward hop's whole cost, and it is spent
+// per target in doubt rather than per holder, which is what makes it cheaper
+// than the walk it replaces.
+//
+// A windowed hop is answered from the index ENTRIES alone: an entry names the
+// row that points here, and a window's seeds are its members, so being one is a
+// lookup in a set already in hand. A predicate-scoped hop has to read the
+// holders, because being a seed is a question about their own fields.
+//
+// It declines rather than answering wrongly when the index cannot serve the
+// probe, and when the walk runs past MaxIndexScanCandidates — a target with a
+// fan-in that wide is one the rebuild settles for less.
+func (m *closureMaint) anySeedPointsAt(hop *forwardHop, msg protoreflect.Message) (bool, error) {
+	limits := m.e.srv.limits
+	if limits.DisableIndexes {
+		return false, errMaintenanceDeclined
+	}
+	ci := hop.seedInfo.indexByName(refIndexName(hop.fr.fd))
+	if ci == nil {
+		return false, errMaintenanceDeclined
+	}
+	if ready, err := ci.ready(m.tx, hop.seedInfo.name); err != nil {
+		return false, err
+	} else if !ready {
+		return false, errMaintenanceDeclined
+	}
+	values := make([]protoreflect.Value, 0, len(hop.targetInfo.keyFields))
+	for _, kf := range hop.targetInfo.keyFields {
+		values = append(values, msg.Get(kf))
+	}
+	lo, hi, err := ci.probeRefIndex(values)
+	if err != nil {
+		return false, err
+	}
+
+	errFound := errors.New("seed found")
+	var holders []string
+	seen := 0
+	err = m.tx.ScanIndex(hop.seedInfo.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+		seen++
+		if seen > limits.maxIndexScanCandidates() {
+			return errMaintenanceDeclined
 		}
-		holder := frontierRow{entity: seed.entity, key: seed.key}
+		if hop.windowed {
+			if m.e.windowMembers.has(hop.seedInfo.name, rowKey) {
+				return errFound
+			}
+			return nil
+		}
+		holders = append(holders, rowKey)
+		return nil
+	})
+	switch {
+	case errors.Is(err, errFound):
+		return true, nil
+	case err != nil:
+		return false, err
+	case len(holders) == 0:
+		return false, nil
+	}
+
+	// Rows are re-read rather than trusted from the entry, for the reason
+	// followReverseIndexed states: the entry says a row pointed here when it was
+	// written, and this snapshot decides whether it still exists and whether
+	// this caller may see it.
+	found := false
+	batch := &rowBatch{tx: m.tx, entity: hop.seedInfo.name, size: maxRowBatch, emit: func(row storage.Row) error {
+		if found || row.Deleted {
+			return nil
+		}
+		holder, ok := m.e.decodeRow(hop.seedInfo, row)
+		if !ok {
+			return nil // quarantined: its ref cannot be read, so it points nowhere
+		}
+		seed, err := m.seedRow(hop, row, holder)
+		if err != nil {
+			return err
+		}
+		found = seed
+		return nil
+	}}
+	for _, key := range holders {
+		if err := batch.add(key); err != nil {
+			return false, err
+		}
+	}
+	if err := batch.flush(); err != nil {
+		return false, err
+	}
+	return found, nil
+}
+
+// seedRow answers whether one live, decoded row of a forward hop's own entity
+// is a follow root, by the rule closureSeeds applies to the whole entity: a
+// window's member, or a readable row the predicate matches. It is resolveSeed's
+// question asked of a row in hand rather than of a key.
+func (m *closureMaint) seedRow(hop *forwardHop, row storage.Row, msg proto.Message) (bool, error) {
+	if hop.windowed {
+		// The window IS the base scope, so a row outside it seeds nothing
+		// whatever its own fields say, and membership already applied the read
+		// filter.
+		return m.e.windowMembers.has(hop.seedInfo.name, row.Key), nil
+	}
+	filter, err := m.e.filterOf(hop.seedInfo.name)
+	if err != nil {
+		return false, err
+	}
+	if filter != nil && !filter(row.Key, msg) {
+		return false, nil
+	}
+	return hop.seedPred == nil || hop.seedPred.Eval(msg.ProtoReflect()), nil
+}
+
+// followTargets adds the rows one seed points at. This is where a forward hop
+// GAINS members, and it costs no probe: the ref stubs name their targets
+// outright, so the walk is the point reads followForward batches.
+func (m *closureMaint) followTargets(hop *forwardHop, row storage.Row) error {
+	if row.Deleted {
+		return nil
+	}
+	msg, ok := m.e.decodeRow(hop.seedInfo, row)
+	if !ok {
+		return nil // quarantined: its ref cannot be read, so it points nowhere
+	}
+	seed, err := m.seedRow(hop, row, msg)
+	if err != nil || !seed {
+		return err
+	}
+	targets, err := m.e.followForward(m.tx,
+		frontierRow{entity: hop.seedInfo.name, key: row.Key, msg: msg.ProtoReflect()}, hop.fr)
+	if err != nil {
+		return err
+	}
+	for _, target := range targets {
+		// followForward resolved these against this snapshot and read-filtered
+		// them, so they are members and the recheck below can skip them.
+		ck := closureKey{target.row.Entity, target.row.Key}
+		m.cr[ck] = target.row
+		m.decided[ck] = true
+	}
+	return nil
+}
+
+// recheckForwardTargets re-decides the prior members a forward hop could have
+// lost. A holder that re-pointed leaves no trace of where it pointed before —
+// the one thing neither the change set nor the cursor records — so when
+// anything can have moved a hop's holders, every prior member of its target
+// entity becomes a candidate and is settled from the target's side instead.
+//
+// The candidates cannot outnumber the seeds the rebuild would walk: this
+// maintains singular references only, so each seed names at most one target and
+// there are at most as many members as seeds. A pull where no holder moved asks
+// nothing here at all.
+func (m *closureMaint) recheckForwardTargets() error {
+	entities := map[string]bool{}
+	for i := range m.hops.forward {
+		if hop := &m.hops.forward[i]; m.holdersMoved(hop) {
+			entities[hop.targetInfo.name] = true
+		}
+	}
+	for entity := range entities {
+		var keys []string
+		for ck := range m.prev {
+			if ck.entity == entity && !m.decided[ck] {
+				keys = append(keys, ck.key)
+			}
+		}
+		// Row-key order, so two runs of the same pull read in the same order.
+		sort.Strings(keys)
+		// A candidate leaves unless the recheck puts it back, which is also the
+		// answer for a key the batch finds no row for: nothing holds a row that
+		// is not there.
+		for _, key := range keys {
+			delete(m.cr, closureKey{entity, key})
+		}
+		batch := &rowBatch{tx: m.tx, entity: entity, size: maxRowBatch, emit: m.reconsider}
+		for _, key := range keys {
+			if err := batch.add(key); err != nil {
+				return err
+			}
+		}
+		if err := batch.flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// rewalkSeed re-walks the closure around one row of a subscription's own entity
+// — a seed — after something moved it. Both directions start from the same read
+// of that row:
+//
+//   - reverse: the rows pointing back cannot be named without asking, and asking
+//     is a single index probe per hop (a scan of the source entity where the
+//     index cannot serve it, which is also what a deleted seed gets — there is
+//     no message left to probe with).
+//   - forward: the rows it points at are named by its own ref field, so they
+//     cost the point reads followForward batches, and nothing at all once it is
+//     no longer a seed. What it STOPPED pointing at is not knowable from here;
+//     recheckForwardTargets covers that.
+//
+// windowed says which of the two ways the seed moved, and the hops that care
+// differ by direction. A windowed subscription's seeds ARE its window's
+// members, so they move when the window does; a predicate-scoped one's move
+// only when their own row changes, since being a seed is decided by the row's
+// own fields. For a reverse hop that is the whole rule — an edit leaving a row
+// in its window leaves the rows pointing at it alone. A forward hop takes both:
+// an edit leaving a seed in its window can still re-point it.
+func (m *closureMaint) rewalkSeed(seed closureKey, windowed bool) error {
+	var (
+		cached storage.Row
+		exists bool
+		read   bool
+	)
+	rowOf := func() (storage.Row, bool, error) {
+		if read {
+			return cached, exists, nil
+		}
+		read = true
 		row, err := m.tx.GetRow(seed.entity, seed.key)
 		switch {
 		case errors.Is(err, storage.ErrNotFound):
 		case err != nil:
+			return storage.Row{}, false, err
+		default:
+			cached, exists = row, true
+		}
+		return cached, exists, nil
+	}
+
+	for i := range m.hops.reverse {
+		hop := &m.hops.reverse[i]
+		if hop.seedInfo.name != seed.entity || hop.windowed != windowed {
+			continue
+		}
+		row, ok, err := rowOf()
+		if err != nil {
 			return err
-		case !row.Deleted:
-			if msg, ok := m.e.decodeRow(hop.seedInfo, row); ok {
+		}
+		holder := frontierRow{entity: seed.entity, key: seed.key}
+		if ok && !row.Deleted {
+			if msg, decoded := m.e.decodeRow(hop.seedInfo, row); decoded {
 				holder.msg = msg.ProtoReflect()
 			}
 		}
@@ -1135,6 +1524,23 @@ func (m *closureMaint) rewalkSeed(seed closureKey, windowed bool) error {
 			if err := m.reconsider(match.row); err != nil {
 				return err
 			}
+		}
+	}
+
+	for i := range m.hops.forward {
+		hop := &m.hops.forward[i]
+		if hop.seedInfo.name != seed.entity || (windowed && !hop.windowed) {
+			continue
+		}
+		row, ok, err := rowOf()
+		if err != nil {
+			return err
+		}
+		if !ok {
+			continue
+		}
+		if err := m.followTargets(hop, row); err != nil {
+			return err
 		}
 	}
 	return nil

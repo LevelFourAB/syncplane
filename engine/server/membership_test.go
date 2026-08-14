@@ -97,6 +97,7 @@ func (t *readCountingTx) ScanIndex(entity, index string, lo, hi []byte, limit in
 // the same order and are asked the same questions.
 type replica struct {
 	client syncplanev1connect.SyncServiceClient
+	srv    *server.Server
 	cursor []byte
 }
 
@@ -120,7 +121,16 @@ func serve(srv *server.Server) *replica {
 	mux.Handle(path, handler)
 	ts := httptest.NewServer(mux)
 	DeferCleanup(ts.Close)
-	return &replica{client: syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)}
+	return &replica{client: syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL), srv: srv}
+}
+
+// buildIndexes marks the workspace's indexes ready. A forward hop is maintained
+// through the holders' ref index, so a script that never built one would only
+// ever exercise the rebuild. Rows written afterwards get their entries from the
+// write path, so this runs before the script rather than after it.
+func (r *replica) buildIndexes(ctx context.Context) {
+	GinkgoHelper()
+	Expect(r.srv.BuildIndexes(ctx, ws)).To(Succeed())
 }
 
 func (r *replica) push(ctx context.Context, muts []*syncplanev1.Mutation) {
@@ -218,11 +228,14 @@ func (hidingPermissions) ReadFilter(_ context.Context, _ server.Principal, _, en
 	return nil, nil
 }
 
-// nameIs is the "name equals" predicate the seed-rule specs narrow a project
-// subscription with.
-func nameIs(v string) *syncplanev1.Condition {
+// nameIs and titleIs are the "equals" predicates the seed-rule specs narrow a
+// project and an issue subscription with.
+func nameIs(v string) *syncplanev1.Condition  { return stringIs("name", v) }
+func titleIs(v string) *syncplanev1.Condition { return stringIs("title", v) }
+
+func stringIs(path, v string) *syncplanev1.Condition {
 	return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
-		Path:  []string{"name"},
+		Path:  []string{path},
 		Op:    syncplanev1.CmpOp_CMP_OP_EQ,
 		Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: v}},
 	}}}
@@ -322,12 +335,17 @@ var _ = Describe("Membership maintenance", func() {
 	//
 	// limit is the per-pull row limit, so a caller can force pages to truncate
 	// (and cursors to carry a sub-position, which is a case maintenance
-	// declines); 0 takes the server's own.
-	drive := func(seed int64, rounds, limit int, opts []server.Option, subs ...*syncplanev1.Subscription) {
+	// declines); 0 takes the server's own. indexed builds both replicas'
+	// indexes first, which is what a forward hop needs to be maintained at all.
+	driveWith := func(seed int64, rounds, limit int, indexed bool, opts []server.Option, subs ...*syncplanev1.Subscription) {
 		GinkgoHelper()
 		maintained := startReplica(opts...)
 		rebuilt := startReplica(append(append([]server.Option{}, opts...),
 			server.WithLimits(server.Limits{DisableMembershipMaintenance: true}))...)
+		if indexed {
+			maintained.buildIndexes(ctx)
+			rebuilt.buildIndexes(ctx)
+		}
 		rng := rand.New(rand.NewSource(seed))
 		view := map[string][]byte{}
 		var nextMut uint64
@@ -352,6 +370,19 @@ var _ = Describe("Membership maintenance", func() {
 		}
 		Expect(viewKeys(view)).To(Equal(maintained.bootstrapRows(ctx, subs)),
 			"converged view differs from a fresh bootstrap (seed %d)", seed)
+	}
+
+	drive := func(seed int64, rounds, limit int, opts []server.Option, subs ...*syncplanev1.Subscription) {
+		GinkgoHelper()
+		driveWith(seed, rounds, limit, false, opts, subs...)
+	}
+
+	// driveIndexed is drive over servers whose ref indexes are ready, which the
+	// forward-follow shapes need: without one the probe declines and both
+	// replicas rebuild, so the script would agree without deciding anything.
+	driveIndexed := func(seed int64, rounds, limit int, opts []server.Option, subs ...*syncplanev1.Subscription) {
+		GinkgoHelper()
+		driveWith(seed, rounds, limit, true, opts, subs...)
 	}
 
 	differential := func(seed int64, rounds int, subs ...*syncplanev1.Subscription) {
@@ -544,6 +575,86 @@ var _ = Describe("Membership maintenance", func() {
 			Expect(counter.count("probe") + counter.count("scan")).To(BeNumerically(">=", projects))
 		})
 
+		// The forward half of the same question. A window over every issue
+		// following issue→project holds all 20 projects through 100 holders, so
+		// the two directions cost very different things and neither costs the
+		// number of holders.
+		//
+		// The window is by_recency because that one is maintained without
+		// reading anything (see the spec below), which leaves the reads these
+		// specs count belonging to the closure alone.
+		followingIssues := func() []*syncplanev1.Subscription {
+			return []*syncplanev1.Subscription{{
+				Entity: "issue",
+				Window: &syncplanev1.Window{ByRecency: true, Limit: projects * perProject},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+			}}
+		}
+
+		It("carries a forward target over without asking who holds it", func() {
+			maintained, counter := startCountingReplica()
+			mut := seed(maintained)
+			subs := followingIssues()
+			maintained.buildIndexes(ctx)
+			maintained.pull(ctx, subs, 0) // settle: the first pull has no state to maintain from
+
+			// A project the client already holds edits itself. Nothing points
+			// anywhere new, so the only question is whether it is still live
+			// and readable — which its own row answers.
+			maintained.push(ctx, []*syncplanev1.Mutation{putMutation("c1", mut+1, "project", "p00",
+				&testdatav1.Project{Id: "p00", Name: "renamed"})})
+			counter.reset()
+			Expect(maintained.pull(ctx, subs, 0).GetPatch().GetChanges()).To(HaveLen(1))
+
+			Expect(counter.count("probe")).To(BeZero())
+			Expect(counter.count("scan")).To(BeZero())
+			Expect(counter.count("get")).To(BeZero())
+			Expect(counter.count("batch")).To(BeZero())
+		})
+
+		It("asks once per target it holds when a forward seed re-points", func() {
+			maintained, counter := startCountingReplica()
+			mut := seed(maintained)
+			subs := followingIssues()
+			maintained.buildIndexes(ctx)
+			maintained.pull(ctx, subs, 0)
+
+			// One issue moves to another project. Which project it LEFT is not
+			// recorded anywhere, so every project the closure holds is asked
+			// whether a seed still points at it — and that is the whole cost.
+			maintained.push(ctx, []*syncplanev1.Mutation{putMutation("c1", mut+1, "issue", "i00-0",
+				&testdatav1.Issue{Id: "i00-0", Project: &testdatav1.Project{Id: "p01"}})})
+			counter.reset()
+			maintained.pull(ctx, subs, 0)
+
+			// One probe per member it still holds — the one the seed moved TO
+			// was settled by following the seed, so it is not asked again —
+			// against the 100 seed reads the rebuild makes to find the same 20
+			// targets.
+			Expect(counter.count("probe")).To(BeNumerically("~", projects, 1))
+			Expect(counter.count("scan")).To(BeZero())
+			Expect(counter.count("batchkeys")).To(BeNumerically("<=", projects+1))
+		})
+
+		It("costs the whole window and its targets when it has to rebuild", func() {
+			rebuilt, counter := startCountingReplica(
+				server.WithLimits(server.Limits{DisableMembershipMaintenance: true}))
+			mut := seed(rebuilt)
+			subs := followingIssues()
+			rebuilt.buildIndexes(ctx)
+			rebuilt.pull(ctx, subs, 0)
+
+			rebuilt.push(ctx, []*syncplanev1.Mutation{putMutation("c1", mut+1, "project", "p00",
+				&testdatav1.Project{Id: "p00", Name: "renamed"})})
+			counter.reset()
+			rebuilt.pull(ctx, subs, 0)
+
+			// The reference point the two specs above are measured against: the
+			// window is resolved again and every one of its members is followed,
+			// however little changed.
+			Expect(counter.count("batchkeys")).To(BeNumerically(">=", projects*perProject))
+		})
+
 		It("reorders a recency window without reading the entity", func() {
 			maintained, counter := startCountingReplica()
 			var muts []*syncplanev1.Mutation
@@ -574,7 +685,7 @@ var _ = Describe("Membership maintenance", func() {
 
 	overSeeds("several windows and a forward follow converge the same way they rebuild",
 		func(seed int64) {
-			differential(seed, 120,
+			driveIndexed(seed, 120, 0, nil,
 				windowSub(2, nil),
 				recencySub(4),
 				&syncplanev1.Subscription{
@@ -583,10 +694,61 @@ var _ = Describe("Membership maintenance", func() {
 						OrderBy: []*syncplanev1.OrderKey{{Path: []string{"rank"}, Dir: syncplanev1.Direction_DIRECTION_DESC}},
 						Limit:   3,
 					},
-					// A forward segment is a shape maintenance declines, so this
-					// pins that a declined closure still agrees with a
-					// maintained window beside it.
 					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+				})
+		},
+	)
+
+	overSeeds("a predicate-scoped subscription following a forward relation converges the same way it rebuilds",
+		func(seed int64) {
+			// A forward hop's seeds are decided by their own fields here, so
+			// being one is asked of the holders the probe finds rather than of
+			// a window's membership.
+			driveIndexed(seed, 120, 0, nil, &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: titleIs("t1"),
+				Follow:    &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+			})
+		},
+	)
+
+	overSeeds("two forward relations onto one entity converge the same way they rebuild",
+		func(seed int64) {
+			// A user can be reached as an assignee and as a reporter, so
+			// losing one relation must not drop a row the other still holds —
+			// and neither hop may carry a member over on the strength of the
+			// set alone, because the set says nothing about which placed it.
+			driveIndexed(seed, 120, 0, nil, &syncplanev1.Subscription{
+				Entity: "issue",
+				Window: &syncplanev1.Window{
+					OrderBy: []*syncplanev1.OrderKey{{Path: []string{"rank"}, Dir: syncplanev1.Direction_DIRECTION_DESC}},
+					Limit:   3,
+				},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{
+					{Segments: []string{"assignee"}},
+					{Segments: []string{"reporter"}},
+				}},
+			})
+		},
+	)
+
+	overSeeds("a read filter narrows a forward closure the same way it rebuilds",
+		func(seed int64) {
+			// The filter hides issues, so it decides which rows seed the hop as
+			// well as which targets survive it.
+			driveIndexed(seed, 120, 0, []server.Option{server.WithPermissions(hidingPermissions{})},
+				&syncplanev1.Subscription{
+					Entity: "issue",
+					Window: &syncplanev1.Window{
+						OrderBy: []*syncplanev1.OrderKey{{Path: []string{"rank"}, Dir: syncplanev1.Direction_DIRECTION_DESC}},
+						Limit:   3,
+					},
+					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+				},
+				&syncplanev1.Subscription{
+					Entity:    "issue",
+					Predicate: titleIs("t2"),
+					Follow:    &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"assignee"}}}},
 				})
 		},
 	)

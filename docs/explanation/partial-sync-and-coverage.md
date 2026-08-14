@@ -105,14 +105,26 @@ sets from those rows instead:
   itself and only a seed that entered or left the base scope is walked again —
   including a seed that moved without being written, which is what a window
   refilling does.
+- A **follow closure** over a forward relation ("the project this issue belongs
+  to") reads the other way round: a target is held because some issue points at
+  it, so its own row cannot settle it. What it costs instead is one probe of the
+  holders' reference index per target whose membership is actually in doubt, and
+  a target is only in doubt once something can have moved the holders. A pull
+  where no issue was written carries every project it holds over untouched;
+  where one was, the closure asks each project it holds whether a seed still
+  points there — never more questions than there are targets, against a rebuild
+  that reads every holder.
 
 Resolving from scratch stays the fallback and every case the maintained path
 declines takes it: a page that truncates, a cursor resuming inside a
 same-version group, a subscription set that no longer lines up with the
 cursor's, a window that would have to locate a tail it never had, a follow path
-that walks forward or through more than one segment. The two must produce the
-same page, and `Limits.DisableMembershipMaintenance` forces the fallback so that
-property is tested rather than assumed.
+through more than one segment or deeper than one round, and a forward hop whose
+reference index cannot answer the probe — a to-many reference, an index not yet
+built, or a target with a fan-in wide enough to run past
+`MaxIndexScanCandidates`. The two must produce the same page, and
+`Limits.DisableMembershipMaintenance` forces the fallback so that property is
+tested rather than assumed.
 
 What stays unbounded is the FIRST resolution, and the fallbacks with it:
 computing an `orderBy` window from scratch costs what the equivalent `Query`
