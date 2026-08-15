@@ -275,6 +275,35 @@ func (n *Notifier) Subscribe(workspaceID string) (<-chan struct{}, func()) {
 	}
 }
 
+func (n *Notifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
+	set := n.core.localFor(n.ns).SubscribeSet(workspaceIDs)
+	keys := make([]nsWorkspace, len(workspaceIDs))
+	for i, ws := range workspaceIDs {
+		keys[i] = nsWorkspace{ns: n.ns, ws: ws}
+		n.core.track(keys[i], 1)
+	}
+	return &trackedSet{Set: set, core: n.core, keys: keys}
+}
+
+// trackedSet holds each member's reconnect re-poke registration for the life
+// of the subscription. Close must survive being called twice, and the
+// reference counts must not go negative when it is.
+type trackedSet struct {
+	pubsub.Set
+	core *core
+	keys []nsWorkspace
+	once sync.Once
+}
+
+func (s *trackedSet) Close() {
+	s.Set.Close()
+	s.once.Do(func() {
+		for _, key := range s.keys {
+			s.core.track(key, -1)
+		}
+	})
+}
+
 // SubscribeActivity reports every workspace of this namespace that sees a
 // notify, local or remote. It is the same stream pubsub.Local serves, which is
 // what makes workspace discovery work across nodes: a workspace first written

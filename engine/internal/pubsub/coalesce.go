@@ -114,6 +114,10 @@ func (c *Coalescing) Subscribe(workspaceID string) (<-chan struct{}, func()) {
 	return c.inner.Subscribe(workspaceID)
 }
 
+func (c *Coalescing) SubscribeSet(workspaceIDs []string) Set {
+	return c.inner.SubscribeSet(workspaceIDs)
+}
+
 // Unwrap exposes the wrapped notifier so optional extensions (Activity) are
 // found on it. Coalescing deliberately does not forward those itself: a
 // forwarding method would satisfy the extension interface even when the inner

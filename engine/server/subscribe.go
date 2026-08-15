@@ -53,11 +53,7 @@ type subScope struct {
 	sparseCursor bool
 	cursorSent   bool
 	owedBytes    int
-	// signals fires when this workspace changes; cancel releases the notifier
-	// subscription.
-	signals <-chan struct{}
-	cancel  func()
-	logger  *slog.Logger
+	logger       *slog.Logger
 	// live is false once the scope has been dropped (reset, revoked, failed).
 	// A dropped scope is silently skipped by the tail loop; the client has
 	// already been told and will reopen when it is ready.
@@ -120,11 +116,6 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 	// dropped frame rather than failing the stream, so one revoked workspace
 	// does not deny the client the nine it still has.
 	scopes := make([]*subScope, 0, len(msg.GetScopes()))
-	defer func() {
-		for _, sc := range scopes {
-			sc.release()
-		}
-	}()
 	noDeltas := noDeltaEntitySet(msg.GetNoDeltaEntities())
 	for _, want := range msg.GetScopes() {
 		sc, reason, err := s.openScope(ctx, want, msg.GetClientId(), noDeltas, msg.GetSparseCursor())
@@ -141,6 +132,20 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 		// holding an inert stream open would just occupy a connection.
 		return nil
 	}
+
+	// One set subscription covers every scope, and the notifier does the
+	// merging: the tail below selects on a single wake channel however many
+	// workspaces the stream spans, instead of holding a subscription, a channel
+	// and a forwarding goroutine per scope. Built before catch-up, so a write
+	// landing during a scope's scan still wakes the tail. Membership is fixed
+	// for the stream — a dropped scope's id keeps arriving and is skipped by
+	// the !live checks below.
+	ids := make([]string, len(scopes))
+	for i, sc := range scopes {
+		ids[i] = sc.ws
+	}
+	set := s.notifier.SubscribeSet(ids)
+	defer set.Close()
 
 	heartbeat := time.NewTicker(s.heartbeat)
 	defer heartbeat.Stop()
@@ -165,31 +170,27 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 		sc.logger.LogAttrs(ctx, slog.LevelDebug, "subscribe caught up")
 	}
 
-	// Merge every scope's notifications into one channel so the tail is a
-	// single select regardless of workspace count. The forwarders carry only a
-	// workspace id — the drain below rescans that partition — so a coalesced
-	// or dropped duplicate signal costs nothing but a wasted scan.
-	notes := s.mergeSignals(ctx, scopes)
-
-	// Live tail. A notification drains the named scope; a heartbeat re-checks
-	// access, drains every live scope (catching any signal lost to a full
-	// buffer) and then sends a stream-level keepalive. The keepalive is
-	// liveness-only, NOT a zero-row page: an idle client would otherwise run a
-	// full empty rebase per tick across every workspace it holds.
+	// Live tail. A wake drains every scope notified since the last drain — the
+	// set carries only workspace ids, and the drain rescans that partition, so
+	// a spurious wake or an already-drained id costs nothing but a wasted scan.
+	// A heartbeat re-checks access, drains every live scope (the backstop for a
+	// shared notifier's best-effort delivery) and then sends a stream-level
+	// keepalive. The keepalive is liveness-only, NOT a zero-row page: an idle
+	// client would otherwise run a full empty rebase per tick across every
+	// workspace it holds.
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
-		case ws, ok := <-notes:
-			if !ok {
-				return nil
-			}
-			for _, sc := range scopes {
-				if sc.ws != ws || !sc.live {
-					continue
-				}
-				if err := s.drainScope(ctx, stream, sc, limit, false); err != nil {
-					return err
+		case <-set.Wake():
+			for _, ws := range set.Changed() {
+				for _, sc := range scopes {
+					if sc.ws != ws || !sc.live {
+						continue
+					}
+					if err := s.drainScope(ctx, stream, sc, limit, false); err != nil {
+						return err
+					}
 				}
 			}
 		case <-heartbeat.C:
@@ -253,8 +254,8 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 // fixed by re-bootstrapping, everything else is worth a retry.
 //
 // Ordering is load-bearing and mirrors Pull. enterWorkspace runs FIRST, so a
-// refused caller leaves no notifier subscription and no epoch lookup behind in
-// a workspace they cannot see. Then every Permissions hook resolves ONCE,
+// refused caller leaves no epoch lookup or warmed filter behind in a
+// workspace they cannot see. Then every Permissions hook resolves ONCE,
 // outside any read snapshot and outside the tail loop: FilterEpoch up front,
 // then the emitter's per-entity read filters are warmed so classify() inside
 // each per-notify scan is a pure cache hit.
@@ -292,7 +293,6 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		}
 	}
 
-	signals, cancel := s.notifier.Subscribe(ws)
 	return &subScope{
 		ws:           ws,
 		clientID:     clientID,
@@ -305,8 +305,6 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		minSeq:       want.GetMinSeq(),
 		sparseCursor: sparseCursor,
 		cursorSent:   len(want.GetCursor()) > 0,
-		signals:      signals,
-		cancel:       cancel,
 		logger:       s.reqLog(ctx, "subscribe", ws, clientID),
 		live:         true,
 	}, syncplanev1.WorkspaceDropped_REASON_UNSPECIFIED, nil
@@ -352,34 +350,6 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 		}
 	}
 	return nil
-}
-
-// mergeSignals fans every scope's notification channel into one, so the tail
-// loop is a single select whatever the workspace count. The merged channel
-// carries workspace ids; a full buffer drops the duplicate rather than blocking
-// a notifier, which is safe because the drain rescans from the cursor and a
-// heartbeat sweeps every scope anyway.
-func (s *Server) mergeSignals(ctx context.Context, scopes []*subScope) <-chan string {
-	merged := make(chan string, len(scopes))
-	for _, sc := range scopes {
-		go func(ws string, signals <-chan struct{}) {
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case _, ok := <-signals:
-					if !ok {
-						return
-					}
-					select {
-					case merged <- ws:
-					default: // a wake for this workspace is already queued
-					}
-				}
-			}
-		}(sc.ws, sc.signals)
-	}
-	return merged
 }
 
 // checkpointDue reports whether the page being sent must carry next_cursor.
@@ -471,19 +441,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 // only if the frame could not be sent (the stream itself is gone).
 func (s *Server) dropScope(stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope, reason syncplanev1.WorkspaceDropped_Reason, cause error) error {
 	sc.live = false
-	sc.release()
 	return s.sendDropped(stream, sc.ws, reason, cause)
-}
-
-// release drops the scope's notifier subscription. It is idempotent: a scope
-// dropped mid-stream releases here, and Subscribe's deferred sweep releases
-// whatever is left when the stream ends.
-func (sc *subScope) release() {
-	if sc.cancel == nil {
-		return
-	}
-	sc.cancel()
-	sc.cancel = nil
 }
 
 // sendDropped emits a WorkspaceDropped frame. The message is for logs only —

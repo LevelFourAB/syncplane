@@ -20,6 +20,32 @@ type Notifier interface {
 	// Subscribe returns a signal channel and a cancel func. The channel is
 	// closed after cancel.
 	Subscribe(workspaceID string) (<-chan struct{}, func())
+	// SubscribeSet subscribes to every workspace in workspaceIDs at once.
+	// Duplicates fold into one membership. Membership is fixed for the Set's
+	// life; a different set of workspaces is a new subscription.
+	SubscribeSet(workspaceIDs []string) Set
+}
+
+// Set is one SubscribeSet subscription: a shared wake channel plus the record
+// of which members were notified since the consumer last drained.
+//
+// One Set replaces a Subscribe per workspace for a consumer of many.
+// Per-workspace channels put the merge on the consumer — a goroutine and a
+// channel per member — where a Set keeps it inside the notifier's fan-out:
+// Notify marks the member dirty and pokes the wake slot, the consumer selects
+// on one channel and drains with Changed. Nothing blocks and nothing is lost;
+// a notify racing a drain either joins the Changed being taken or leaves a
+// wake token behind, so the worst case is one wake with an empty drain.
+type Set interface {
+	// Wake signals that a member may have been notified. The channel has a
+	// one-token buffer and is never closed. A token can outlive the drain that
+	// took its members, so an empty Changed after a wake is expected.
+	Wake() <-chan struct{}
+	// Changed returns the members notified since the previous call and clears
+	// them, in no particular order; nil when there are none.
+	Changed() []string
+	// Close releases the subscription. Idempotent.
+	Close()
 }
 
 // Activity is the optional extension a Notifier implements when it can report
@@ -77,6 +103,7 @@ func SubscribeActivity(n Notifier) (ids <-chan string, cancel func(), ok bool) {
 type Local struct {
 	mu   sync.Mutex
 	subs map[string]map[chan struct{}]struct{}
+	sets map[string]map[*localSet]struct{}
 	all  map[*activitySub]struct{}
 }
 
@@ -111,6 +138,7 @@ type activitySub struct {
 func NewLocal() *Local {
 	return &Local{
 		subs: make(map[string]map[chan struct{}]struct{}),
+		sets: make(map[string]map[*localSet]struct{}),
 		all:  make(map[*activitySub]struct{}),
 	}
 }
@@ -123,6 +151,9 @@ func (l *Local) Notify(workspaceID string) {
 		case ch <- struct{}{}:
 		default: // already has a pending signal; coalesce
 		}
+	}
+	for s := range l.sets[workspaceID] {
+		s.mark(workspaceID)
 	}
 	for s := range l.all {
 		s.push(workspaceID)
@@ -227,4 +258,82 @@ func (l *Local) Subscribe(workspaceID string) (<-chan struct{}, func()) {
 		}
 	}
 	return ch, cancel
+}
+
+// localSet is one SubscribeSet subscription. Unlike activitySub it needs no
+// pump goroutine: the channel there carries ids and must not drop them, so
+// something has to block on the send — here the dirty map is the state and the
+// wake slot only pokes, so a non-blocking send under Notify's lock is already
+// lossless.
+type localSet struct {
+	local *Local
+	// members is the deduplicated membership, kept so Close can unregister.
+	members []string
+	wake    chan struct{}
+
+	mu    sync.Mutex
+	dirty map[string]struct{}
+}
+
+func (l *Local) SubscribeSet(workspaceIDs []string) Set {
+	s := &localSet{
+		local: l,
+		wake:  make(chan struct{}, 1),
+		dirty: make(map[string]struct{}),
+	}
+	l.mu.Lock()
+	for _, ws := range workspaceIDs {
+		set := l.sets[ws]
+		if set == nil {
+			set = make(map[*localSet]struct{})
+			l.sets[ws] = set
+		}
+		if _, dup := set[s]; !dup {
+			s.members = append(s.members, ws)
+		}
+		set[s] = struct{}{}
+	}
+	l.mu.Unlock()
+	return s
+}
+
+// mark records a notified member and pokes the wake slot. Called under Local's
+// lock, so it must not block.
+func (s *localSet) mark(workspaceID string) {
+	s.mu.Lock()
+	s.dirty[workspaceID] = struct{}{}
+	s.mu.Unlock()
+	select {
+	case s.wake <- struct{}{}:
+	default: // an unread token already promises a drain; dirty carries the rest
+	}
+}
+
+func (s *localSet) Wake() <-chan struct{} { return s.wake }
+
+func (s *localSet) Changed() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.dirty) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(s.dirty))
+	for ws := range s.dirty {
+		out = append(out, ws)
+	}
+	clear(s.dirty)
+	return out
+}
+
+func (s *localSet) Close() {
+	s.local.mu.Lock()
+	defer s.local.mu.Unlock()
+	for _, ws := range s.members {
+		if set, ok := s.local.sets[ws]; ok {
+			delete(set, s)
+			if len(set) == 0 {
+				delete(s.local.sets, ws)
+			}
+		}
+	}
 }

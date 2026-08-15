@@ -31,6 +31,10 @@ func (n *recordingNotifier) Subscribe(string) (<-chan struct{}, func()) {
 	return ch, func() { close(ch) }
 }
 
+func (n *recordingNotifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
+	return pubsub.NewLocal().SubscribeSet(workspaceIDs)
+}
+
 func (n *recordingNotifier) notifies(workspaceID string) int {
 	n.mu.Lock()
 	defer n.mu.Unlock()

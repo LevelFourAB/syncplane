@@ -260,13 +260,144 @@ func Conformance(name string, newNotifier func() pubsub.Notifier) bool {
 			})
 		})
 
-		It("is safe under concurrent subscribe, notify and cancel", func() {
+		// A Set is how a multi-workspace stream watches its whole scope set
+		// through one channel. The contract has two halves held here: a wake is
+		// never lost (a notify after a drain always produces another wake) and
+		// never blocks the publisher, while Changed hands over each notified
+		// member at least once and folds repeats within a drain.
+		Context("set subscription", func() {
+			subscribeSet := func(ids ...string) pubsub.Set {
+				GinkgoHelper()
+				set := n.SubscribeSet(ids)
+				DeferCleanup(set.Close)
+				return set
+			}
+
+			// drained accumulates Changed across polls, deduplicated: an
+			// asynchronous transport may deliver two notifies in separate
+			// wakes, and one that echoes the publisher's own notification back
+			// may report a member twice.
+			drained := func(set pubsub.Set) func() []string {
+				seen := make(map[string]struct{})
+				return func() []string {
+					for _, ws := range set.Changed() {
+						seen[ws] = struct{}{}
+					}
+					out := make([]string, 0, len(seen))
+					for ws := range seen {
+						out = append(out, ws)
+					}
+					return out
+				}
+			}
+
+			It("starts with nothing changed", func() {
+				set := subscribeSet("ws")
+				Expect(set.Changed()).To(BeEmpty())
+			})
+
+			It("wakes for a member and reports it", func() {
+				set := subscribeSet("ws-a", "ws-b")
+				n.Notify("ws-a")
+				Eventually(set.Wake()).Should(Receive())
+				Expect(set.Changed()).To(ConsistOf("ws-a"),
+					"the wake's members must be visible to the drain it triggers")
+			})
+
+			It("accumulates every notified member for one drain", func() {
+				set := subscribeSet("ws-a", "ws-b", "ws-c")
+				n.Notify("ws-a")
+				n.Notify("ws-c")
+				Eventually(drained(set)).Should(ConsistOf("ws-a", "ws-c"))
+			})
+
+			It("ignores a workspace outside the set", func() {
+				set := subscribeSet("ws-a")
+				n.Notify("ws-other")
+				Consistently(set.Wake(), "100ms").ShouldNot(Receive(),
+					"a notify outside the membership must not wake the set")
+				Expect(set.Changed()).To(BeEmpty())
+			})
+
+			It("wakes again after a drain", func() {
+				set := subscribeSet("ws")
+				n.Notify("ws")
+				Eventually(set.Wake()).Should(Receive())
+				Expect(set.Changed()).To(ConsistOf("ws"))
+				n.Notify("ws")
+				Eventually(set.Wake()).Should(Receive(), "a drained set must be woken by the next notify")
+				Eventually(drained(set)).Should(ConsistOf("ws"))
+			})
+
+			It("coalesces a burst for a consumer that is not draining", func() {
+				const burst = 10
+				set := subscribeSet("ws")
+				for i := 0; i < burst; i++ {
+					n.Notify("ws")
+				}
+				Eventually(set.Wake()).Should(Receive())
+				wakes := 1
+				Eventually(func() bool { // drain until the channel stays quiet
+					select {
+					case <-set.Wake():
+						wakes++
+						return false
+					default:
+						return true
+					}
+				}, "500ms", "10ms").Should(BeTrue())
+				Expect(wakes).To(BeNumerically("<", burst),
+					"an undrained set must not queue one wake per notify")
+				Expect(set.Changed()).To(ConsistOf("ws"),
+					"however many notifies, the member drains once")
+			})
+
+			It("does not block a publisher whose consumer never drains", func() {
+				subscribeSet("ws") // never drained
+				done := make(chan struct{})
+				go func() {
+					defer GinkgoRecover()
+					defer close(done)
+					for i := 0; i < 100; i++ {
+						n.Notify("ws")
+					}
+				}()
+				Eventually(done, "2s").Should(BeClosed(), "Notify must not block on an undrained set")
+			})
+
+			It("stops delivering after Close and survives a double Close", func() {
+				set := n.SubscribeSet([]string{"ws"})
+				set.Close()
+				Expect(set.Close).NotTo(Panic(), "Close is the deferred teardown of every stream; it must be idempotent")
+				Expect(func() { n.Notify("ws") }).NotTo(Panic())
+				Consistently(set.Wake(), "100ms").ShouldNot(Receive())
+				Expect(set.Changed()).To(BeEmpty())
+			})
+
+			It("leaves one set's Close to the others", func() {
+				survivor := subscribeSet("ws")
+				other := n.SubscribeSet([]string{"ws"})
+				other.Close()
+				n.Notify("ws")
+				Eventually(survivor.Wake()).Should(Receive())
+			})
+
+			It("folds duplicate members", func() {
+				set := subscribeSet("ws", "ws")
+				n.Notify("ws")
+				Eventually(set.Wake()).Should(Receive())
+				Expect(set.Changed()).To(HaveLen(1))
+				Expect(set.Close).NotTo(Panic())
+			})
+		})
+
+		It("is safe under concurrent subscribe, notify, cancel and set churn", func() {
 			// Run with -race; this spec exists for the detector, not for its
 			// assertions.
 			var wg sync.WaitGroup
 			for i := 0; i < 8; i++ {
 				ws := fmt.Sprintf("ws-%d", i%3)
-				wg.Add(2)
+				wg.Add(3)
 				go func() {
 					defer GinkgoRecover()
 					defer wg.Done()
@@ -284,6 +415,19 @@ func Conformance(name string, newNotifier func() pubsub.Notifier) bool {
 						default:
 						}
 						cancel()
+					}
+				}()
+				go func() {
+					defer GinkgoRecover()
+					defer wg.Done()
+					for j := 0; j < 50; j++ {
+						set := n.SubscribeSet([]string{ws})
+						select {
+						case <-set.Wake():
+							set.Changed()
+						default:
+						}
+						set.Close()
 					}
 				}()
 			}

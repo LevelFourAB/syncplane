@@ -195,6 +195,11 @@ var _ = Describe("pgnotify", func() {
 		DeferCleanup(func() { Expect(nodeB.Close()).To(Succeed()) })
 
 		ch, _ := nodeB.Subscribe("ws")
+		// A set member must be covered by the same re-poke as a plain
+		// subscription; "ws-set" sees no notify before the kill, so a wake can
+		// only come from the reconnect.
+		set := nodeB.SubscribeSet([]string{"ws-set"})
+		DeferCleanup(set.Close)
 		// Prove the pair works before breaking it, so a failure below is the
 		// reconnect and not the setup.
 		nodeA.Notify("ws")
@@ -215,6 +220,9 @@ var _ = Describe("pgnotify", func() {
 		// back, because anything published during the gap is unrecoverable.
 		Eventually(ch, 10*time.Second).Should(Receive(),
 			"a reconnect must re-poke live subscriptions rather than leave them waiting for a poll")
+		Eventually(set.Wake(), 10*time.Second).Should(Receive(),
+			"the re-poke must cover set members as well as plain subscriptions")
+		Expect(set.Changed()).To(ContainElement("ws-set"))
 
 		// And the re-LISTEN took: fresh pokes flow again.
 		Eventually(func() bool {

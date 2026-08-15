@@ -207,3 +207,7 @@ func (d deafNotifier) Notify(workspaceID string) { d.inner.Notify(workspaceID) }
 func (d deafNotifier) Subscribe(workspaceID string) (<-chan struct{}, func()) {
 	return d.inner.Subscribe(workspaceID)
 }
+
+func (d deafNotifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
+	return d.inner.SubscribeSet(workspaceIDs)
+}

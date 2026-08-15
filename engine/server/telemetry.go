@@ -336,6 +336,10 @@ func (n *countingNotifier) Subscribe(workspaceID string) (<-chan struct{}, func(
 	return n.inner.Subscribe(workspaceID)
 }
 
+func (n *countingNotifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
+	return n.inner.SubscribeSet(workspaceIDs)
+}
+
 // Unwrap exposes the wrapped notifier, per the pubsub chain convention.
 func (n *countingNotifier) Unwrap() pubsub.Notifier { return n.inner }
 
