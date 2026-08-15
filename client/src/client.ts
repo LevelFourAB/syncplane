@@ -180,7 +180,7 @@ import {
 	type RejectionInfo,
 	type RejectionTarget,
 } from './sync/coordinator.js';
-import type { SyncEventHandler, UnstampedSyncEvent } from './sync/events.js';
+import type { SyncEvent, SyncEventHandler, UnstampedSyncEvent } from './sync/events.js';
 import { emitSyncEvent, queryEventOf } from './sync/events.js';
 import { IntentRegistry } from './sync/intent.js';
 import { PresenceCoordinator, type PresenceTopic } from './sync/presence.js';
@@ -1467,6 +1467,29 @@ interface QueryPage<T> {
 }
 
 /**
+ * State the devtools helper reads that the public surface has no reason to
+ * carry; see SyncClient.inspect(). Every method answers for the moment it is
+ * called — nothing here is a live view.
+ *
+ * @internal
+ */
+export interface ClientInternals {
+	/**
+	 * Runs a read against the shared store under the read lock, so the view is
+	 * not straddled by a concurrent commit. Rejects once the client is closed.
+	 */
+	read<T>(fn: (tx: KVRead) => Promise<T>): Promise<T>;
+	/** Coverage of one entity, per workspace or across every held one. */
+	coverageOf(entity: string, workspaceId?: string): Coverage;
+	/** Whether this tab holds the account's stream leadership right now. */
+	isStreamLeader(): boolean;
+	/** Text writer identities held by this tab's open text handles. */
+	textPeers(): string[];
+	/** Rooms opened through this client and not yet closed. */
+	rooms(): readonly Room<unknown, unknown>[];
+}
+
+/**
  * Local-read/local-write sync client. Mutations apply optimistically and
  * queue locally (works fully offline); start() begins background sync.
  *
@@ -1544,6 +1567,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private closed = false;
 	/** Subscribers of the dead-letter surface; see onMutationRejected(). */
 	private rejectionListeners = new Set<(info: RejectionInfo) => void>();
+	/** Subscribers of the observability stream; see onSyncEvent(). */
+	private syncEventListeners = new Set<SyncEventHandler>();
+	/**
+	 * Text writer identities held by this tab's open handles, for inspect().
+	 * The coordinator's transient restore identities are not in it — they are
+	 * held per restore batch, not by anything the app opened.
+	 */
+	private liveTextPeers = new Set<string>();
+	/** Rooms opened through this client and not yet closed, for inspect(). */
+	private openRooms = new Set<Room<unknown, unknown>>();
 	private statusTracker = new StatusTracker();
 	private scopes = new Map<string, WorkspaceScope<E>>();
 	/**
@@ -1856,12 +1889,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			opts = d;
 		}
 		const presence = this.presenceCoordinator();
-		return createRoom<S, M>(
+		const room = createRoom<S, M>(
 			topic.name,
 			this.sessionId,
 			opts,
 			(sink) => presence.attach(topic, sink),
 		);
+		// Registered for inspect(), and re-wrapped so closing unregisters. Spread
+		// is safe: createRoom returns a literal whose methods close over their
+		// state rather than reading `this`.
+		const tracked: Room<S, M> = {
+			...room,
+			close: async () => {
+				this.openRooms.delete(tracked as Room<unknown, unknown>);
+				await room.close();
+			},
+		};
+		this.openRooms.add(tracked as Room<unknown, unknown>);
+		return tracked;
 	}
 
 	/** The ephemeral plane's coordinator, started with the first room. */
@@ -2017,7 +2062,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				? undefined
 				: (row as Record<string, unknown>)[local] as Uint8Array | undefined;
 		return openTextHandle({
-			acquirePeer: async () => (await this.textPeerLeases()).acquire(),
+			acquirePeer: async () => {
+				const lease = await (await this.textPeerLeases()).acquire();
+				this.liveTextPeers.add(lease.peer);
+				return {
+					peer: lease.peer,
+					release: () => {
+						this.liveTextPeers.delete(lease.peer);
+						lease.release();
+					},
+				};
+			},
 			load: async () => fieldOf(await scope.get(schema, rowKey)),
 			patch: (state, inverseOps, coalesce) => {
 				const crud = buildPatch(def, schema, rowKey, { [local]: state } as MessageInitShape<D>);
@@ -2264,7 +2319,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				(schema) => this.entityRegistry.bySchema(schema).name,
 			),
 			onMutationRejected: (info) => this.reportRejection(info),
-			onSyncEvent: this.opts.onSyncEvent,
+			onSyncEvent: this.dispatchSyncEvent,
 			pollIntervalMs: this.opts.pollIntervalMs,
 			pushDebounceMs: this.opts.pushDebounceMs,
 			pushMaxDelayMs: this.opts.pushMaxDelayMs,
@@ -2388,7 +2443,42 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	/** Reports one read-path event, on the seam the coordinator reports sync on. */
 	private emit(event: UnstampedSyncEvent): void {
-		emitSyncEvent(this.opts.onSyncEvent, event);
+		// Gated here so the no-listener default stays free of the stamping the
+		// dispatcher would otherwise pay per read.
+		if (!this.opts.onSyncEvent && this.syncEventListeners.size === 0) return;
+		emitSyncEvent(this.dispatchSyncEvent, event);
+	}
+
+	/**
+	 * Delivers one stamped event to the option handler and every subscribed
+	 * listener, each in isolation — one throwing must not skip the rest, or be
+	 * mistaken for a failure of the work that emitted it. Bound, because the
+	 * coordinator holds it as its onSyncEvent handler.
+	 */
+	private readonly dispatchSyncEvent: SyncEventHandler = (event: SyncEvent): void => {
+		const handler = this.opts.onSyncEvent;
+		if (handler) safeInvoke(handler, event, 'onSyncEvent');
+		for (const listener of [ ...this.syncEventListeners ]) {
+			safeInvoke(listener, event, 'onSyncEvent listener');
+		}
+	};
+
+	/**
+	 * Subscribes to the observability event stream; returns an unsubscribe
+	 * function.
+	 *
+	 * Reports exactly what the `onSyncEvent` OPTION does — that stays the
+	 * single-owner form a client is constructed with, and this is the
+	 * multi-listener one, so a debug overlay can attach and detach at any point
+	 * without owning (or stealing) the option. Same split as `onStatusChange`
+	 * and `onMutationRejected`. Events emitted before a listener subscribes are
+	 * not replayed.
+	 */
+	onSyncEvent(cb: SyncEventHandler): () => void {
+		this.syncEventListeners.add(cb);
+		return () => {
+			this.syncEventListeners.delete(cb);
+		};
 	}
 
 	/**
@@ -2540,6 +2630,28 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** Subscribes to sync status changes; returns an unsubscribe function. */
 	onStatusChange(cb: (status: SyncStatus) => void): () => void {
 		return this.statusTracker.onChange(cb);
+	}
+
+	/** @internal backs devtools.ts; see ClientInternals. */
+	inspect(): ClientInternals {
+		return {
+			read: async (fn) => {
+				this.assertOpen();
+				const kv = await this.kv();
+				return this.kvMutex.runShared(async () => {
+					const tx = await kv.read();
+					try {
+						return await fn(tx);
+					} finally {
+						tx.release();
+					}
+				});
+			},
+			coverageOf: (entity, workspaceId) => this.coverage.coverageOf(entity, workspaceId),
+			isStreamLeader: () => this.coordinator?.isLeader() ?? false,
+			textPeers: () => [ ...this.liveTextPeers ],
+			rooms: () => [ ...this.openRooms ],
+		};
 	}
 
 	/**

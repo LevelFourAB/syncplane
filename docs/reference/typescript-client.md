@@ -104,6 +104,7 @@ await client.pendingCount(): Promise<number> // locally queued, not-yet-acked mu
 client.status(): SyncStatus                          // snapshot (works before start())
 client.onStatusChange(cb): () => void                // subscribe; returns unsubscribe
 client.onMutationRejected(cb): () => void            // multi-listener sibling of the option
+client.onSyncEvent(cb): () => void                   // multi-listener sibling of the option
 client.setSubscriptions(specs: SubscriptionSpec[]): void  // swap partial-sync scope at runtime
 ```
 
@@ -1283,6 +1284,45 @@ proto codes `CodeConflict`, `CodeInvalidArgument`, `CodePermissionDenied` are ex
 
 Which channel reports which failure, and the full code vocabulary, are in
 [Sync status and failure codes](sync-status-and-codes.md).
+
+### Devtools — `attachDevtools(client, opts?)`
+
+Console-first debugging over one client: the state a "why doesn't this row show
+up" investigation needs, without wiring any callbacks in advance. Purely
+observational — it writes nothing and changes no sync behavior.
+
+```ts
+import { attachDevtools } from 'syncplane';
+
+attachDevtools(client); // published as globalThis.__syncplane
+
+// later, in the browser console:
+await __syncplane.snapshot(); // one report over everything below
+await __syncplane.explain('todo', 't42'); // why is this row (not) visible?
+__syncplane.rejections(); // rejection buffer, oldest first
+__syncplane.events(); // SyncEvent buffer, oldest first
+```
+
+`snapshot()` reports the sync status, stream leadership (`thisTab`, and
+`heldByAnyTab` where Web Locks can answer), each workspace's pending queue
+(decoded: targets, mutator, whether a push has carried it) and pushed-through
+watermark, per-entity coverage, every row holding optimistic state (overlay
+entries, tombstones, queued text edits), both buffers, the text writer
+identities held by this tab's open text handles (and device-wide, via Web
+Locks), and every open room with its roster.
+
+`explain(entity, key, workspaceId?)` — entity by name or schema, workspace
+defaulting to the client's — answers with the row's local presence, overlay
+state, queued mutations and retained rejections targeting it, its entity's
+coverage, and a one-sentence `verdict` distinguishing "deleted locally",
+"visible optimistically", "rejected and rolled back", "outside the sync scope"
+and "the server holds no such row".
+
+Options: `eventBufferSize` (default 200), `rejectionBufferSize` (default 100),
+`expose` — the `globalThis` name, or `false` to publish nothing. The buffers
+start at attach, so attach next to `new SyncClient(...)`; `detach()` unsubscribes
+and withdraws the global. Snapshots carry `bigint` mutation ids, so
+`JSON.stringify` needs a replacer for them.
 
 ---
 

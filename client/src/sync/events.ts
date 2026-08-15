@@ -9,8 +9,8 @@
  * an observability vendor is a choice that belongs to the app rather than to
  * its sync library. So the client emits plain structured events and an adopter
  * maps them to whatever they already run — OpenTelemetry, a product analytics
- * pipe, a debug overlay, or nothing at all, which is the default and costs one
- * undefined check per event.
+ * pipe, a debug overlay, or nothing at all, which is the default and costs no
+ * more than building the dropped event.
  *
  * # Events vs. status
  *

@@ -56,6 +56,21 @@ export type {
 	ForwardRefAccessor,
 	ReverseRelAccessor,
 } from './db.js';
+// Console devtools: attach next to the client's construction; everything else
+// is reached through the returned (or globalThis-published) handle.
+export { attachDevtools } from './devtools.js';
+export type {
+	DevtoolsOptions,
+	DevtoolsSnapshot,
+	OverlayEntryInfo,
+	QueuedMutationInfo,
+	RetainedRejection,
+	RoomDebugInfo,
+	RowExplanation,
+	StreamLeadershipInfo,
+	SyncDevtools,
+	WorkspaceDebugInfo,
+} from './devtools.js';
 export { BASE_62_DIGITS, generateKeyBetween, generateNKeysBetween } from './fractional.js';
 export { newId } from './id.js';
 export { IDBKVStore } from './kv/idb.js';

@@ -429,6 +429,8 @@ export class Coordinator {
 	 */
 	private readonly hydration = new HydrationTracker();
 	private leadership?: StreamLeadership;
+	/** Whether this tab currently holds a leadership term; see isLeader(). */
+	private leaderNow = false;
 	/**
 	 * Cross-tab "reopen the stream" channel: a scope change on any tab reaches
 	 * whichever tab holds the leader stream so it re-scopes. Present only while
@@ -678,10 +680,12 @@ export class Coordinator {
 				// exactly the leadership. A tab that never leads emits nothing,
 				// which is the normal case for all but one tab.
 				runLeaderLoop: async (termSignal) => {
+					this.leaderNow = true;
 					this.emit({ type: 'leadership', leader: true });
 					try {
 						await this.subscribeLoop(termSignal);
 					} finally {
+						this.leaderNow = false;
 						this.emit({ type: 'leadership', leader: false });
 					}
 				},
@@ -2615,6 +2619,16 @@ export class Coordinator {
 	 */
 	hydrationOf(workspaceId: string): ReadonlySet<string> | undefined {
 		return this.hydration.pendingOf(workspaceId);
+	}
+
+	/**
+	 * Whether this tab currently holds the account's stream leadership — the
+	 * current-state counterpart of the LeadershipEvent stream. False wherever
+	 * elections do not run (server runtimes, no Web Locks), including for a tab
+	 * that holds a session-long stream of its own.
+	 */
+	isLeader(): boolean {
+		return this.leaderNow;
 	}
 
 	/**

@@ -353,6 +353,12 @@ const client = new SyncClient({
 Every event carries `at` (a `Date.now()` stamp). `outcome` separates `offline`
 from `error`, so an error rate does not track connectivity.
 
+The option is the single-owner form; `client.onSyncEvent(cb)` subscribes (and
+unsubscribes) any number of additional listeners at runtime. For ad-hoc
+debugging rather than metrics, `attachDevtools(client)` retains the recent
+events in a buffer and publishes them on the browser console — see
+[the client reference](typescript-client.md#devtools--attachdevtoolsclient-opts).
+
 Counting `poke` against `pull` is what separates changes that took the realtime
 path from ones that waited for the poll floor.
 
