@@ -21,7 +21,7 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import { queryByIndex } from '../../src/query/execute.js';
-import { and, compileQuery, not, type Query, type QueryCursor } from '../../src/query/index.js';
+import { and, compileQuery, not, or, type Query, type QueryCursor } from '../../src/query/index.js';
 import { prepareQuery } from '../../src/query/wire.js';
 import type { Row } from '../../src/read.js';
 import {
@@ -52,12 +52,16 @@ const issue = entity('issue', {
 	rank: int32(),
 	done: bool(),
 	labels: list(text()).indexed(),
+	// A leaf behind a message that can be unset — the shape whose index carries
+	// the missing rank, which is what presence plans against.
+	meta: message({ due: int32() }),
 	// User-defined fields: `custom.*.<side>` fans out over EVERY entry, which is
 	// the fourth shape — one entry per (key, value) pair rather than per element.
 	custom: map('string', message({ number: int32(), tag: text() })),
 }, {
 	indexes: [
 		{ name: 'by_state_rank', key: [ { path: 'state' }, { path: 'rank', desc: true } ] },
+		{ name: 'by_due', key: [ { path: 'meta.due' } ] },
 		// A fan-out component pinned by the equality prefix, followed by an
 		// ordinary one: the shape that serves "labelled X, ordered by rank".
 		{ name: 'by_label_rank', key: [ { path: 'labels' }, { path: 'rank', desc: true } ] },
@@ -85,12 +89,15 @@ const issue = entity('issue', {
 });
 
 type Issue = Infer<typeof issue>;
+/** A seed row: `meta` may be absent — the builder's inferred shape requires
+ * it, but a row without one is exactly what the missing rank encodes. */
+type SeedIssue = Omit<Issue, 'meta'> & { meta?: Issue['meta'] };
 const bundle = defineSchema(issue);
 const IssueSchema = bundle.descMessage('issue');
 const registry = new EntityRegistry([ IssueSchema ]);
 const WS = 'ws1';
 
-const SEED: Issue[] = [
+const SEED: SeedIssue[] = [
 	{
 		id: 'i1',
 		title: 'one',
@@ -100,7 +107,16 @@ const SEED: Issue[] = [
 		labels: [ 'bug', 'ui' ],
 		custom: { priority: { number: 5, tag: 'hi' }, team: { number: 0, tag: 'platform' } },
 	},
-	{ id: 'i2', title: 'two', state: 'open', rank: 9, done: true, labels: [ 'ui' ], custom: {} },
+	{
+		id: 'i2',
+		title: 'two',
+		state: 'open',
+		rank: 9,
+		done: true,
+		labels: [ 'ui' ],
+		meta: { due: 2 },
+		custom: {},
+	},
 	{
 		id: 'i3',
 		title: 'three',
@@ -122,6 +138,7 @@ const SEED: Issue[] = [
 		rank: 7,
 		done: false,
 		labels: [ 'ui', 'ui' ],
+		meta: { due: 8 },
 		custom: { size: { number: 5, tag: '' } },
 	},
 	// Implicit-presence empty string. Matching it is not the same as matching a
@@ -169,7 +186,7 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
  * same query — which is what makes a divergence a bug rather than a difference
  * in setup.
  */
-async function clientWith(built: boolean, overlay?: Issue[], deletes?: string[]) {
+async function clientWith(built: boolean, overlay?: SeedIssue[], deletes?: string[]) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
 	await seedConfirmed(kv, indexes);
@@ -203,7 +220,7 @@ const run = (client: SyncClient<never>, q: Query<Issue>): Promise<RowSet<Issue>>
 	client.query(IssueSchema, q as never) as unknown as Promise<RowSet<Issue>>;
 
 /** The two arms of one query, as comparable plain data. */
-async function both(q: Query<Issue>, overlay?: Issue[], deletes?: string[]) {
+async function both(q: Query<Issue>, overlay?: SeedIssue[], deletes?: string[]) {
 	// `total` is part of the answer, so it is part of what the two arms have to
 	// agree on: an index that early-exits still has to count what it skipped.
 	const shape = (rows: RowSet<Issue>) => ({
@@ -229,7 +246,7 @@ async function both(q: Query<Issue>, overlay?: Issue[], deletes?: string[]) {
 }
 
 /** Asserts the two arms agree, and pins what they agree ON. */
-function same(name: string, q: Query<Issue>, want: string[], overlay?: Issue[]): void {
+function same(name: string, q: Query<Issue>, want: string[], overlay?: SeedIssue[]): void {
 	it(name, async () => {
 		const { scanned, indexed } = await both(q, overlay);
 		expect(indexed).toEqual(scanned);
@@ -342,6 +359,20 @@ describe('the index path is actually taken', () => {
 		expect(await served(true, { where: (i) => i.done.eq(true) })).toBe(false);
 	});
 
+	it('serves a top-level or whose every branch has an index', async () => {
+		expect(await served(true, { where: (i) => or(i.state.eq('done'), i.labels.has('bug')) }))
+			.toBe(true);
+		// A branch no index serves declines the whole union: a union that scans
+		// for one branch has become the scan with extra steps.
+		expect(await served(true, { where: (i) => or(i.state.eq('done'), i.done.eq(true)) }))
+			.toBe(false);
+	});
+
+	it('serves presence against a component that can hold the missing rank', async () => {
+		expect(await served(true, { where: (i) => i.meta.due.isNotSet() })).toBe(true);
+		expect(await served(true, { where: (i) => i.meta.due.isSet() })).toBe(true);
+	});
+
 	it('declines a cross-workspace query', async () => {
 		// The index nests the workspace inside its prefix, and its tie-break
 		// across workspaces differs from the scan path's; see execute.ts.
@@ -435,6 +466,56 @@ describe('index-served local queries', () => {
 	}, [ 'i4', 'i1', 'i2' ]);
 
 	same('no predicate and no ordering', {}, [ 'i1', 'i2', 'i3', 'i4', 'i5', 'i6' ]);
+
+	// A top-level or: one probe set per branch, on DIFFERENT indexes, deduped
+	// by row key. i3 matches both branches — the row the dedupe exists for.
+	same('an or of indexed branches unions their probes', {
+		where: (i) => or(i.state.eq('done'), i.labels.has('bug')),
+	}, [ 'i1', 'i3', 'i5', 'i6' ]);
+
+	same("a union's residual is the whole or, not the branch's", {
+		// i1, i3 and i6 sit in the labels range and FAIL the first branch —
+		// they must come back through the or, not be dropped by a branch-local
+		// check.
+		where: (i) => or(and(i.state.eq('open'), i.done.eq(true)), i.labels.has('bug')),
+	}, [ 'i1', 'i2', 'i3', 'i6' ]);
+
+	same('an ordered or is re-sorted by the caller', {
+		where: (i) => or(i.state.eq('done'), i.labels.has('bug')),
+		orderBy: (i) => [ i.rank.asc() ],
+	}, [ 'i3', 'i6', 'i1', 'i5' ]);
+
+	same(
+		'a union merges the overlay like any other indexed read',
+		{
+			where: (i) => or(i.state.eq('done'), i.labels.has('bug')),
+		},
+		[ 'i1', 'i5', 'i6' ],
+		[
+			// i3 no longer matches either branch; the confirmed positions that
+			// still name it are shadowed by the overlay.
+			{ id: 'i3', title: 'three', state: 'open', rank: 3, done: true, labels: [], custom: {} },
+		],
+	);
+
+	same('two inequalities intersect into one bounded range', {
+		where: (i) => and(i.meta.due.gte(2), i.meta.due.lt(8)),
+	}, [ 'i2' ]);
+
+	same('bounds that contradict intersect into an empty range', {
+		where: (i) => and(i.meta.due.gte(8), i.meta.due.lt(2)),
+	}, []);
+
+	// Presence: the by_due index carries the missing rank for every row whose
+	// `meta` is unset, and both the encoder's "missing" and the evaluator's
+	// isNotSet come from the same resolution rule.
+	same('isNotSet pins the missing rank', {
+		where: (i) => i.meta.due.isNotSet(),
+	}, [ 'i1', 'i3', 'i4', 'i6' ]);
+
+	same('isSet bounds the set ranks', {
+		where: (i) => i.meta.due.isSet(),
+	}, [ 'i2', 'i5' ]);
 
 	// Map fan-out. cf_number stores (entry key, number) per entry, so a
 	// predicate naming one custom field is a contiguous range — and every case

@@ -662,12 +662,20 @@ type probeCase struct {
 	Want    json.RawMessage   `json:"want"`
 }
 
-// probeWant is the non-"scan" form of a probeCase's expectation.
+// probeWant is the non-"scan" form of a probeCase's expectation. A case with
+// `union` expects a union plan — one branch per entry, unordered by
+// construction — and leaves index/ranges/ordered unset.
 type probeWant struct {
-	Index    string `json:"index"`
-	Ranges   int    `json:"ranges"`
-	Ordered  bool   `json:"ordered"`
-	Residual bool   `json:"residual"`
+	Index    string       `json:"index"`
+	Ranges   int          `json:"ranges"`
+	Ordered  bool         `json:"ordered"`
+	Residual bool         `json:"residual"`
+	Union    []branchWant `json:"union"`
+}
+
+type branchWant struct {
+	Index  string `json:"index"`
+	Ranges int    `json:"ranges"`
 }
 
 // groupCase pins one group-planner decision. A case carrying `perGroup` is a
@@ -748,6 +756,17 @@ var _ = Describe("Planner conformance vectors", func() {
 			var want probeWant
 			Expect(json.Unmarshal(tc.Want, &want)).To(Succeed())
 			Expect(plan).NotTo(BeNil())
+			if len(want.Union) > 0 {
+				Expect(plan.Union).To(HaveLen(len(want.Union)))
+				for i, b := range want.Union {
+					Expect(plan.Union[i].Index).To(Equal(b.Index))
+					Expect(plan.Union[i].Ranges).To(HaveLen(b.Ranges))
+				}
+				Expect(plan.Ordered).To(BeFalse(), "a union cannot be read in order without a cross-index merge")
+				Expect(plan.Residual != nil).To(Equal(want.Residual))
+				return
+			}
+			Expect(plan.Union).To(BeEmpty())
 			Expect(plan.Index).To(Equal(want.Index))
 			Expect(plan.Ranges).To(HaveLen(want.Ranges))
 			Expect(plan.Ordered).To(Equal(want.Ordered))

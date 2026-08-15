@@ -387,9 +387,61 @@ var _ = Describe("Secondary indexes", func() {
 			query.Spec{Where: query.Contains("title", "i1")},
 			[]string{"i1"})
 
-		same("or is not servable in v1 and falls back",
+		same("an or with an unindexed branch falls back whole",
+			// No index serves `rank` alone (by_state_rank needs state pinned),
+			// so the union declines rather than scanning for one branch.
 			query.Spec{Where: query.Or(query.Eq("state", "done"), query.Eq("rank", 1))},
 			[]string{"i3", "i4", "i5"})
+
+		same("an or of indexed branches unions their probes",
+			// The branches resolve to DIFFERENT indexes (the state mark and the
+			// labels fan-out), and i3 matches both — the row the cross-branch
+			// dedupe exists for.
+			query.Spec{Where: query.Or(query.Eq("state", "done"), query.Has("labels", "bug"))},
+			[]string{"i1", "i3", "i5", "i6"})
+
+		same("a union's residual is the whole or, not the branch's",
+			// i3 sits in the labels range and FAILS the first branch — it must
+			// come back through the or, not be dropped by a branch-local check.
+			query.Spec{Where: query.Or(
+				query.And(query.Eq("state", "open"), query.Gte("rank", 5)),
+				query.Has("labels", "bug"))},
+			[]string{"i1", "i2", "i3", "i6"})
+
+		same("an ordered or is re-sorted by the caller",
+			query.Spec{
+				Where:   query.Or(query.Eq("state", "done"), query.Has("labels", "bug")),
+				OrderBy: []*syncplanev1.OrderKey{query.Asc("rank")},
+			},
+			[]string{"i3", "i6", "i1", "i5"})
+
+		same("two inequalities intersect into one bounded range",
+			query.Spec{Where: query.And(query.Eq("state", "open"), query.Gt("rank", 1), query.Lt("rank", 9))},
+			[]string{"i1"})
+
+		same("bounds that contradict intersect into an empty range",
+			query.Spec{Where: query.And(query.Eq("state", "open"), query.Gt("rank", 9), query.Lt("rank", 1))},
+			nil)
+
+		same("isNotSet on an implicit-presence field matches nothing",
+			// `state` is always found at its zero value, so the missing-rank
+			// range the planner probes is empty — on both paths.
+			query.Spec{Where: query.IsNotSet("state")},
+			nil)
+
+		same("isSet on an implicit-presence field matches every row",
+			query.Spec{Where: query.IsSet("state")},
+			[]string{"i1", "i2", "i3", "i4", "i5", "i6"})
+
+		same("isNotSet reads the missing rank of the derived ref index",
+			// No row here sets `project`, so every one encodes the missing rank
+			// in the reference's index — the range presence pins to.
+			query.Spec{Where: query.IsNotSet("project.id")},
+			[]string{"i1", "i2", "i3", "i4", "i5", "i6"})
+
+		same("isSet over an unset reference matches nothing",
+			query.Spec{Where: query.IsSet("project.id")},
+			nil)
 
 		same("a predicate matching nothing",
 			query.Spec{Where: query.Eq("state", "archived")},

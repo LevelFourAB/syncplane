@@ -491,55 +491,61 @@ func queryByIndex(
 		}
 		return consider(row, residual)
 	}}
-	for _, r := range plan.Ranges {
-		// The batch carries across ranges, so the fill check at a boundary has
-		// to see what the previous range buffered — keys still buffered were
-		// never offered, and want would be answering for the page before them.
-		if err := batch.flush(); err != nil {
-			return false, err
-		}
-		if plan.Ordered && want() == 0 {
-			return true, nil
-		}
-		lo, hi, err := seekRange(plan, order, pg, r)
-		if err != nil {
-			return false, err
-		}
-		err = tx.ScanIndex(info.name, plan.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
-			if plan.Ordered {
-				// want only moves during a flush, and a flush empties the
-				// batch, so this is reached with nothing buffered — which is
-				// what makes stopping here drop no row the page still wanted.
-				// Sizing the batch to what is left is the other half: the walk
-				// reads ahead by a batch, so a batch larger than the page's
-				// remaining room would resolve rows it must then throw away.
-				room := want()
-				if room == 0 {
-					return errPageFilled
+	// A union plan reads one set of ranges per branch, each from its own
+	// index; a single plan is one branch of itself. The row-key dedupe above
+	// spans branches, so a row two branches yield is offered once.
+	for _, br := range plan.Branches() {
+		for _, r := range br.Ranges {
+			// The batch carries across ranges, so the fill check at a boundary
+			// has to see what the previous range buffered — keys still buffered
+			// were never offered, and want would be answering for the page
+			// before them.
+			if err := batch.flush(); err != nil {
+				return false, err
+			}
+			if plan.Ordered && want() == 0 {
+				return true, nil
+			}
+			lo, hi, err := seekRange(plan, order, pg, r)
+			if err != nil {
+				return false, err
+			}
+			err = tx.ScanIndex(info.name, br.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
+				if plan.Ordered {
+					// want only moves during a flush, and a flush empties the
+					// batch, so this is reached with nothing buffered — which is
+					// what makes stopping here drop no row the page still wanted.
+					// Sizing the batch to what is left is the other half: the walk
+					// reads ahead by a batch, so a batch larger than the page's
+					// remaining room would resolve rows it must then throw away.
+					room := want()
+					if room == 0 {
+						return errPageFilled
+					}
+					batch.size = min(room, maxRowBatch)
 				}
-				batch.size = min(room, maxRowBatch)
+				seen++
+				if seen > budget {
+					return errIndexBudget
+				}
+				if _, dup := seenRows[rowKey]; dup {
+					return nil
+				}
+				seenRows[rowKey] = struct{}{}
+				return batch.add(rowKey)
+			})
+			if errors.Is(err, errPageFilled) {
+				return true, nil
 			}
-			seen++
-			if seen > budget {
-				return errIndexBudget
+			if errors.Is(err, errIndexBudget) {
+				// Buffered keys are dropped unread: they were never offered, so
+				// the scan the caller falls back to is the only thing that will
+				// offer them.
+				return decline()
 			}
-			if _, dup := seenRows[rowKey]; dup {
-				return nil
+			if err != nil {
+				return false, err
 			}
-			seenRows[rowKey] = struct{}{}
-			return batch.add(rowKey)
-		})
-		if errors.Is(err, errPageFilled) {
-			return true, nil
-		}
-		if errors.Is(err, errIndexBudget) {
-			// Buffered keys are dropped unread: they were never offered, so
-			// the scan the caller falls back to is the only thing that will
-			// offer them.
-			return decline()
-		}
-		if err != nil {
-			return false, err
 		}
 	}
 	if err := batch.flush(); err != nil {

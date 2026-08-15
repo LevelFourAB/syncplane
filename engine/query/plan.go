@@ -1,6 +1,7 @@
 package query
 
 import (
+	"bytes"
 	"math/big"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -33,14 +34,36 @@ import (
 // that can only serve the ordering, because a range has already spread the
 // entries out and nothing further is contiguous.
 //
+// A top-level `or` plans as a UNION: each branch is planned on its own, with
+// no ordering, and if EVERY branch resolves to an index the plan carries one
+// (index, ranges) access path per branch — see Plan.Union. The executors'
+// row-key dedupe already covers a row two branches both yield, so a union
+// asks nothing of them beyond reading each branch's ranges from its own
+// index. If ANY branch declines, the whole `or` declines: a union that scans
+// for one branch is the scan with extra steps. A union is never Ordered — its
+// ranges would need a cross-index merge — so the caller re-sorts, and a paged
+// union walks its ranges whole rather than seeking.
+//
 // What is NOT servable, and why:
 //
-//   - `or` at the top level. Serving it means merging several ranges and
-//     de-duplicating, which is a different execution shape; the scan handles it.
+//   - `or` below the top level (inside an `and` term). The branches would have
+//     to be intersected with the other terms first; the term stays residual,
+//     which still narrows through whatever the other terms pin.
 //   - `contains` / `endsWith`. Neither is a prefix of anything, so no range
 //     bounds them. Searching text is a match condition's job, served by the
 //     term-postings index (searchindex.go) rather than by this planner.
-//   - `not`, presence, and `match`. All become residual.
+//   - `not` and `match`. Both become residual.
+//
+// Presence DOES plan, against a component whose path is exactly the term's and
+// that does not fan out: the encoder writes every row into every index, with a
+// rank tag ahead of the payload (real < NaN < missing), and both the encoder's
+// "missing" and the evaluator's isNotSet come from the same resolution rule.
+// So isNotSet pins the component to the missing rank — an equality in all but
+// name, and the components after it still pin, range and order — while isSet
+// bounds the next free component to the two set ranks. A fan-out component is
+// excluded from both: an empty collection encodes as missing while presence
+// on the collection itself reads as set, so the ranks and the evaluator
+// disagree exactly there.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.go
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -109,6 +132,29 @@ type Plan struct {
 	// index the page resumes at. Nil when the plan produced several ranges,
 	// which share no single prefix, and empty when it pinned nothing.
 	Prefix []byte
+	// Union, when non-empty, is a plan for a top-level `or`: one access path
+	// per branch, each naming its own index, read through Branches. Index,
+	// Ranges and Prefix are unset, Ordered is false, and Residual — nil only
+	// when every branch's range was exact — is the whole predicate: a branch's
+	// range can yield a row that fails that branch yet matches another, so no
+	// branch-local re-check is correct.
+	Union []PlanBranch
+}
+
+// PlanBranch is one access path of a union plan: the index to read and the
+// ranges to read from it.
+type PlanBranch struct {
+	Index  string
+	Ranges []Range
+}
+
+// Branches lists the access paths to read — the union's branches, or the plan
+// itself as the single one — so executing any plan is one loop over it.
+func (p *Plan) Branches() []PlanBranch {
+	if len(p.Union) > 0 {
+		return p.Union
+	}
+	return []PlanBranch{{Index: p.Index, Ranges: p.Ranges}}
 }
 
 // Range is a half-open byte range over an index: Lo inclusive, Hi exclusive. A
@@ -139,6 +185,24 @@ func PlanQuery(candidates []Index, pred *Compiled, order *Order) *Plan {
 	if len(terms) == 0 && (order == nil || len(order.keys) == 0) {
 		return nil
 	}
+	if len(terms) == 1 {
+		if or, ok := terms[0].(*orNode); ok {
+			// A union is preferred over what the fallback below could still
+			// find — an index that only supplies the ordering, with the whole
+			// `or` as residual. That walk costs a row read per rejection until
+			// the page fills where the union costs O(branch matches), and with
+			// no row counts to weigh the two, selective branches are the bet.
+			if p := planUnion(candidates, or, pred, order); p != nil {
+				return p
+			}
+		}
+	}
+	return bestPlan(candidates, terms, order)
+}
+
+// bestPlan picks an index for one set of AND-ed terms — PlanQuery's candidate
+// loop, shared with the per-branch planning a union does.
+func bestPlan(candidates []Index, terms []node, order *Order) *Plan {
 	var best *Plan
 	var bestScore int
 	for _, c := range candidates {
@@ -156,6 +220,69 @@ func PlanQuery(candidates []Index, pred *Compiled, order *Order) *Plan {
 		}
 	}
 	return best
+}
+
+// planUnion plans a top-level `or` as one access path per branch, or returns
+// nil when any branch declines — a union that scans for one branch has become
+// the scan with extra steps, so all-or-nothing is the rule.
+//
+// Branches are planned with no ordering: their ranges cannot be read in the
+// query's order without a cross-index merge, so the caller re-sorts whatever
+// ordering was asked for.
+func planUnion(candidates []Index, or *orNode, pred *Compiled, order *Order) *Plan {
+	branches := orBranches(or)
+	if len(branches) == 0 {
+		return nil
+	}
+	if len(branches) == 1 {
+		// A one-branch `or` is its branch; planning it directly keeps the
+		// ordering and the seek a plain predicate would have had.
+		return bestPlan(candidates, branches[0], order)
+	}
+	out := make([]PlanBranch, 0, len(branches))
+	ranges := 0
+	exact := true
+	for _, terms := range branches {
+		p := bestPlan(candidates, terms, nil)
+		if p == nil {
+			return nil
+		}
+		// The same fan-out guard an `in` has, across the whole union: past it
+		// the probes cost more than the scan they replace.
+		ranges += len(p.Ranges)
+		if ranges > maxIndexProbes {
+			return nil
+		}
+		if p.Residual != nil {
+			exact = false
+		}
+		out = append(out, PlanBranch{Index: p.Index, Ranges: p.Ranges})
+	}
+	var residual *Compiled
+	if !exact {
+		// The WHOLE predicate, not the branches' residuals: a row a branch's
+		// range yields may fail that branch and still match another, so only
+		// the full `or` is a correct per-row re-check.
+		residual = pred
+	}
+	return &Plan{Union: out, Residual: residual}
+}
+
+// orBranches splits an `or` into one term list per branch: a branch that is an
+// `and` contributes its conjuncts, a nested `or` flattens into more branches.
+func orBranches(or *orNode) [][]node {
+	var out [][]node
+	for _, c := range or.conds {
+		switch n := c.(type) {
+		case *orNode:
+			out = append(out, orBranches(n)...)
+		case *andNode:
+			out = append(out, append([]node(nil), n.conds...))
+		default:
+			out = append(out, []node{c})
+		}
+	}
+	return out
 }
 
 // prefixWalk is what the leading component walk consumed: the encoded equality
@@ -225,9 +352,15 @@ func walkEqualityPrefix(comps []IndexComponent, terms []node) prefixWalk {
 		if !found {
 			break
 		}
-		next := make([][]byte, 0, len(w.prefixes)*len(red.values))
+		next := make([][]byte, 0, len(w.prefixes)*max(len(red.values), 1))
 		ok := true
 		for _, p := range w.prefixes {
+			if red.missing {
+				// The missing rank is a tag with no payload, so the "value" is
+				// the tag itself — never inverted, whatever the direction.
+				next = append(next, append(append([]byte(nil), p...), tagMissing))
+				continue
+			}
 			for _, v := range red.values {
 				buf, appended := appendLiteral(append([]byte(nil), p...), c, v)
 				if !appended {
@@ -323,6 +456,17 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 			w.taken[ti] = true
 			w.exact[ti] = true
 			w.needKeys[ti] = keys
+			// A second inequality on the same component (a BETWEEN) intersects
+			// with the first: both encode as sub-ranges of the component's set
+			// ranks, so the tighter bound on each side is their conjunction.
+			// A third stays residual, which is correct if not optimal.
+			if lo2, hi2, ti2, keys2, found2 := inequalityBoundsFor(c, terms, w.taken, onlyFor(c, w.mapFanTerm)); found2 {
+				w.taken[ti2] = true
+				w.exact[ti2] = true
+				w.needKeys[ti2] = keys2
+				lo = maxBytes(lo, lo2)
+				hi = minBytes(hi, hi2)
+			}
 			rangedComp = w.pinned
 			ranges = make([]Range, 0, len(w.prefixes))
 			for _, p := range w.prefixes {
@@ -443,6 +587,9 @@ type reduction struct {
 	term   int
 	exact  bool
 	keys   []condValue
+	// missing pins the component to the MISSING rank tag instead of to values
+	// — what an isNotSet term reduces to. values is empty then.
+	missing bool
 	// conjunct is which sub-condition of an any() this reduction consumed, and
 	// conjuncts how many there are in all. A conjunction is answered only once
 	// EVERY conjunct is consumed — by whichever components happen to consume
@@ -578,9 +725,35 @@ func equalityValuesFor(c IndexComponent, terms []node, taken []bool, only int) (
 				red.term = i
 				return red, true
 			}
+		case *presentNode:
+			if red, ok := presenceEqualityFor(c, n); ok {
+				red.term = i
+				return red, true
+			}
 		}
 	}
 	return reduction{}, false
+}
+
+// presenceEqualityFor pins a component to the missing rank from an isNotSet
+// term. The encoder's "missing" and the evaluator's "not found" are the same
+// resolution rule over the same path, so the rank range IS the term — an
+// equality on the tag rather than on a payload — and the components after it
+// keep pinning, ranging and ordering.
+//
+// A component that fans out is excluded: an empty collection encodes as
+// missing while the collection itself always resolves as found, so the ranks
+// and the evaluator disagree exactly there. So is a term naming a map entry —
+// a row without that entry holds no position for it, so no range contains it.
+func presenceEqualityFor(c IndexComponent, n *presentNode) (reduction, bool) {
+	if n.op != syncplanev1.PresentOp_PRESENT_OP_IS_NOT_SET || len(fanLevels(c.fields)) > 0 {
+		return reduction{}, false
+	}
+	keys, ok := matchFanPath(c.fields, n.fields)
+	if !ok || len(keys) > 0 {
+		return reduction{}, false
+	}
+	return reduction{missing: true, exact: true}, true
 }
 
 // fanPathEq reports whether a condition path addresses exactly what this
@@ -879,6 +1052,20 @@ func inequalityBoundsFor(c IndexComponent, terms []node, taken []bool, only int)
 			if lo, hi, ok := cmpBounds(c, n); ok {
 				return lo, hi, i, named, true
 			}
+		case *presentNode:
+			// isSet is a rank range: every set row carries the present or NaN
+			// tag, both below the missing tag, and the tag is never inverted —
+			// so the bounds hold whatever the component's direction. The no-fan
+			// rule from presenceEqualityFor holds here too, and isNotSet never
+			// reaches this: the equality walk pins it first.
+			if n.op != syncplanev1.PresentOp_PRESENT_OP_IS_SET || len(fanLevels(c.fields)) > 0 {
+				continue
+			}
+			named, ok := matchFanPath(c.fields, n.fields)
+			if !ok || len(named) > 0 {
+				continue
+			}
+			return []byte{tagPresent}, []byte{tagMissing}, i, nil, true
 		case *strNode:
 			named, ok := matchFanPath(c.fields, n.fields)
 			if !ok || n.op != syncplanev1.StrOp_STR_OP_STARTS_WITH {
@@ -1021,6 +1208,36 @@ func fitsColumn(leaf protoreflect.FieldDescriptor, b *big.Int) bool {
 }
 
 var minInt64 = new(big.Int).Lsh(big.NewInt(-1), 63)
+
+// maxBytes is the tighter of two inclusive lower bounds on one component; nil
+// means open on that side.
+func maxBytes(a, b []byte) []byte {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case bytes.Compare(a, b) < 0:
+		return b
+	default:
+		return a
+	}
+}
+
+// minBytes is the tighter of two exclusive upper bounds on one component; nil
+// means open on that side.
+func minBytes(a, b []byte) []byte {
+	switch {
+	case a == nil:
+		return b
+	case b == nil:
+		return a
+	case bytes.Compare(a, b) > 0:
+		return b
+	default:
+		return a
+	}
+}
 
 // concatBound joins an equality prefix to a bound on the next component. A nil
 // bound means the range is open on that side, which after a prefix means "the

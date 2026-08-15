@@ -96,6 +96,11 @@ result is in memory to scroll.
 `client.query` is served from an index when one covers it: a workspace-scoped
 query whose predicate and ordering the planner can express as a range reads that
 range and merges the optimistic overlay over it, instead of reading the entity.
+A top-level `or` is served as a union — each branch planned on its own, the
+probes deduped by row key — as long as **every** branch has an index; one
+unindexed branch declines the whole thing, because a union that scans for one
+branch is the scan with extra steps. A union comes back unordered, so an
+ordered `or` pays a sort over its matches rather than reading in index order.
 A cross-workspace query declines — the index nests the workspace inside its own
 prefix, and reproducing the scan's cross-workspace tie-break through a merge is
 not worth the divergence risk.

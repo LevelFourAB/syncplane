@@ -21,7 +21,7 @@ export interface OrderOps {
 	desc(): OrderKey;
 }
 
-export interface StringOps extends OrderOps {
+export interface StringOps extends OrderOps, PresenceOps {
 	eq(value: string): Cond;
 	neq(value: string): Cond;
 	in(values: string[]): Cond;
@@ -30,7 +30,7 @@ export interface StringOps extends OrderOps {
 	contains(value: string): Cond;
 }
 
-export interface NumericOps<V extends number | bigint> extends OrderOps {
+export interface NumericOps<V extends number | bigint> extends OrderOps, PresenceOps {
 	eq(value: V): Cond;
 	neq(value: V): Cond;
 	in(values: V[]): Cond;
@@ -40,7 +40,7 @@ export interface NumericOps<V extends number | bigint> extends OrderOps {
 	lte(value: V): Cond;
 }
 
-export interface BoolOps extends OrderOps {
+export interface BoolOps extends OrderOps, PresenceOps {
 	eq(value: boolean): Cond;
 	neq(value: boolean): Cond;
 }
@@ -82,7 +82,14 @@ export interface RepeatedMessageOps<E> {
 	matches(cond: (target: MsgRef<E>) => Cond): Cond;
 }
 
-/** Bytes and singular message fields. */
+/**
+ * Bytes, singular message fields, and scalar leaves.
+ *
+ * Presence follows the proto rules, so a scalar leaf with implicit presence
+ * is always set; on scalars the operators are meaningful for `optional`
+ * fields and for leaves behind a message that can be unset. Both are served
+ * from an index when one covers the exact path.
+ */
 export interface PresenceOps {
 	isSet(): Cond;
 	isNotSet(): Cond;

@@ -23,14 +23,36 @@
 // that can only serve the ordering, because a range has already spread the
 // entries out and nothing further is contiguous.
 //
+// A top-level `or` plans as a UNION: each branch is planned on its own, with
+// no ordering, and if EVERY branch resolves to an index the plan carries one
+// (index, ranges) access path per branch — see QueryPlan.union. The executor's
+// row-key dedupe already covers a row two branches both yield, so a union
+// asks nothing of it beyond reading each branch's ranges from its own index.
+// If ANY branch declines, the whole `or` declines: a union that scans for one
+// branch is the scan with extra steps. A union is never ordered — its ranges
+// would need a cross-index merge — so the caller re-sorts, and a paged union
+// walks its ranges whole rather than seeking.
+//
 // What is NOT servable, and why:
 //
-// - `or` at the top level. Serving it means merging several ranges and
-//   de-duplicating, which is a different execution shape; the scan handles it.
+// - `or` below the top level (inside an `and` term). The branches would have
+//   to be intersected with the other terms first; the term stays residual,
+//   which still narrows through whatever the other terms pin.
 // - `contains` / `endsWith`. Neither is a prefix of anything, so no range
 //   bounds them. Searching text is a match condition's job, served by the
 //   term-postings index (searchindex.ts) rather than by this planner.
-// - `not`, presence, and `match`. All become residual.
+// - `not` and `match`. Both become residual.
+//
+// Presence DOES plan, against a component whose path is exactly the term's and
+// that does not fan out: the encoder writes every row into every index, with a
+// rank tag ahead of the payload (real < NaN < missing), and both the encoder's
+// "missing" and the evaluator's isNotSet come from the same resolution rule.
+// So isNotSet pins the component to the missing rank — an equality in all but
+// name, and the components after it still pin, range and order — while isSet
+// bounds the next free component to the two set ranks. A fan-out component is
+// excluded from both: an empty collection encodes as missing while presence
+// on the collection itself reads as set, so the ranks and the evaluator
+// disagree exactly there.
 //
 // Repeated fields DO plan, through the multi-entry indexes indexkey.ts
 // describes: `has` over a repeated scalar and `any` over a repeated message
@@ -120,6 +142,21 @@ export interface QueryPlan {
 	 * It is what lets a caller read a range's position count as a row count.
 	 */
 	distinctPerRange: boolean;
+	/**
+	 * When set, the plan is a union for a top-level `or`: one access path per
+	 * branch, each naming its own index. `index` is empty and `ranges` empty,
+	 * `ordered` and `distinctPerRange` are false, and `residual` — absent only
+	 * when every branch's range was exact — is the whole predicate: a branch's
+	 * range can yield a row that fails that branch yet matches another, so no
+	 * branch-local re-check is correct.
+	 */
+	union?: PlanBranch[];
+}
+
+/** One access path of a union plan: the index to read and its ranges. */
+export interface PlanBranch {
+	index: string;
+	ranges: IndexRange[];
 }
 
 /** One candidate index: its name and the encoder over its components. */
@@ -189,6 +226,11 @@ interface Reduction {
 	exact: boolean;
 	keys: Scalar[];
 	/**
+	 * Pins the component to the MISSING rank tag instead of to values — what
+	 * an isNotSet term reduces to. `values` is empty then.
+	 */
+	missing?: boolean;
+	/**
 	 * Which sub-condition of an any() this reduction consumed, and how many there
 	 * are in all. A conjunction is answered only once EVERY conjunct is consumed
 	 * — by whichever components happen to consume them, since components of one
@@ -215,7 +257,27 @@ export function planQuery(
 	if (candidates.length === 0) return undefined;
 	const terms = flattenAnd(where);
 	if (terms.length === 0 && (orderBy === undefined || orderBy.length === 0)) return undefined;
+	if (terms.length === 1 && terms[0]!.kind === 'or') {
+		// A union is preferred over what the fallback below could still find —
+		// an index that only supplies the ordering, with the whole `or` as
+		// residual. That walk costs a row read per rejection until the page
+		// fills where the union costs O(branch matches), and with no row
+		// counts to weigh the two, selective branches are the bet.
+		const union = planUnion(candidates, terms[0]!, where!, orderBy);
+		if (union) return union;
+	}
+	return bestPlan(candidates, terms, orderBy);
+}
 
+/**
+ * Picks an index for one set of AND-ed terms — planQuery's candidate loop,
+ * shared with the per-branch planning a union does.
+ */
+function bestPlan(
+	candidates: PlannableIndex[],
+	terms: Cond[],
+	orderBy: OrderKey[] | undefined,
+): QueryPlan | undefined {
 	let best: QueryPlan | undefined;
 	let bestScore = -1;
 	for (const c of candidates) {
@@ -228,6 +290,68 @@ export function planQuery(
 		}
 	}
 	return best;
+}
+
+/**
+ * Plans a top-level `or` as one access path per branch, or returns undefined
+ * when any branch declines — a union that scans for one branch has become the
+ * scan with extra steps, so all-or-nothing is the rule.
+ *
+ * Branches are planned with no ordering: their ranges cannot be read in the
+ * query's order without a cross-index merge, so the caller re-sorts whatever
+ * ordering was asked for.
+ */
+function planUnion(
+	candidates: PlannableIndex[],
+	or: Extract<Cond, { kind: 'and' | 'or' }>,
+	where: Cond,
+	orderBy: OrderKey[] | undefined,
+): QueryPlan | undefined {
+	const branches = orBranches(or);
+	if (branches.length === 0) return undefined;
+	if (branches.length === 1) {
+		// A one-branch `or` is its branch; planning it directly keeps the
+		// ordering and the seek a plain predicate would have had.
+		return bestPlan(candidates, branches[0]!, orderBy);
+	}
+	const union: PlanBranch[] = [];
+	let ranges = 0;
+	let exact = true;
+	for (const terms of branches) {
+		const p = bestPlan(candidates, terms, undefined);
+		if (p === undefined) return undefined;
+		// The same fan-out guard an `in` has, across the whole union: past it
+		// the probes cost more than the scan they replace.
+		ranges += p.ranges.length;
+		if (ranges > MAX_INDEX_PROBES) return undefined;
+		if (p.residual !== undefined) exact = false;
+		union.push({ index: p.index, ranges: p.ranges });
+	}
+	return {
+		index: '',
+		ranges: [],
+		// The WHOLE predicate, not the branches' residuals: a row a branch's
+		// range yields may fail that branch and still match another, so only
+		// the full `or` is a correct per-row re-check.
+		...(exact ? {} : { residual: where }),
+		ordered: false,
+		distinctPerRange: false,
+		union,
+	};
+}
+
+/**
+ * Splits an `or` into one term list per branch: a branch that is an `and`
+ * contributes its conjuncts, a nested `or` flattens into more branches.
+ */
+function orBranches(or: Extract<Cond, { kind: 'and' | 'or' }>): Cond[][] {
+	const out: Cond[][] = [];
+	for (const c of or.conds) {
+		if (c.kind === 'or') out.push(...orBranches(c));
+		else if (c.kind === 'and') out.push([ ...c.conds ]);
+		else out.push([ c ]);
+	}
+	return out;
 }
 
 /**
@@ -303,6 +427,12 @@ function walkEqualityPrefix(idx: PlannableIndex, terms: Cond[]): PrefixWalk {
 		const next: string[] = [];
 		let ok = true;
 		for (const p of w.prefixes) {
+			if (found.missing) {
+				// The missing rank is a tag with no payload, so the "value" is
+				// the tag itself — never inverted, whatever the direction.
+				next.push(p + TAG_MISSING);
+				continue;
+			}
 			for (const v of found.values) {
 				const encoded = encodeLiteral(idx, w.pinned, v);
 				if (encoded === undefined) {
@@ -387,6 +517,24 @@ function planAgainst(
 			w.taken[bounds.index] = true;
 			w.exact[bounds.index] = true;
 			w.needKeys.set(bounds.index, bounds.keys);
+			// A second inequality on the same component (a BETWEEN) intersects
+			// with the first: both encode as sub-ranges of the component's set
+			// ranks, so the tighter bound on each side is their conjunction. A
+			// third stays residual, which is correct if not optimal.
+			const second = inequalityBoundsFor(
+				idx,
+				w.pinned,
+				terms,
+				w.taken,
+				onlyFor(comps[w.pinned]!, w.mapFanTerm),
+			);
+			if (second) {
+				w.taken[second.index] = true;
+				w.exact[second.index] = true;
+				w.needKeys.set(second.index, second.keys);
+				bounds.lo = tighterLo(bounds.lo, second.lo);
+				bounds.hi = tighterHi(bounds.hi, second.hi);
+			}
 			ranged = true;
 			ranges = w.prefixes.map((p) => ({
 				lo: bounds.lo === undefined ? p : p + bounds.lo,
@@ -669,6 +817,16 @@ function mapLeafPinned(
 	return false;
 }
 
+/** The tighter of two inclusive lower bounds on one component; undefined
+ * means open on that side. */
+const tighterLo = (a?: string, b?: string): string | undefined =>
+	a === undefined ? b : b === undefined ? a : (a < b ? b : a);
+
+/** The tighter of two exclusive upper bounds on one component; undefined
+ * means open on that side. */
+const tighterHi = (a?: string, b?: string): string | undefined =>
+	a === undefined ? b : b === undefined ? a : (a > b ? b : a);
+
 const samePath = (a: Path, b: Path): boolean =>
 	a.length === b.length && a.every((seg, i) => seg === b[i]);
 
@@ -782,8 +940,34 @@ function equalityValuesFor(
 			const got = existsEqualityFor(c, t);
 			if (got) return { ...got, index: i };
 		}
+		if (t.kind === 'present') {
+			const got = presenceEqualityFor(c, t);
+			if (got) return { ...got, index: i };
+		}
 	}
 	return undefined;
+}
+
+/**
+ * Pins a component to the missing rank from an isNotSet term. The encoder's
+ * "missing" and the evaluator's "not found" are the same resolution rule over
+ * the same path, so the rank range IS the term — an equality on the tag rather
+ * than on a payload — and the components after it keep pinning, ranging and
+ * ordering.
+ *
+ * A component that fans out is excluded: an empty collection encodes as
+ * missing while the collection itself always resolves as found, so the ranks
+ * and the evaluator disagree exactly there. So is a term naming a map entry —
+ * a row without that entry holds no position for it, so no range contains it.
+ */
+function presenceEqualityFor(
+	c: IndexComponent,
+	t: Extract<Cond, { kind: 'present' }>,
+): Omit<Reduction, 'index'> | undefined {
+	if (t.op !== 'isNotSet' || c.fans.length > 0) return undefined;
+	const keys = matchFanPath(c, t.path);
+	if (keys === undefined || keys.length > 0) return undefined;
+	return { values: [], exact: true, keys: [], missing: true };
 }
 
 /** Whether a condition path addresses exactly what this component stores. */
@@ -1017,6 +1201,17 @@ function inequalityBoundsFor(
 				if (bounds) return { ...bounds, index: i, keys };
 			}
 		}
+		if (t.kind === 'present' && t.op === 'isSet' && c.fans.length === 0) {
+			// isSet is a rank range: every set row carries the present or NaN
+			// tag, both below the missing tag, and the tag is never inverted —
+			// so the bounds hold whatever the component's direction. The no-fan
+			// rule from presenceEqualityFor holds here too, and isNotSet never
+			// reaches this: the equality walk pins it first.
+			const keys = matchFanPath(c, t.path);
+			if (keys !== undefined && keys.length === 0) {
+				return { lo: TAG_PRESENT, hi: TAG_MISSING, index: i, keys: [] };
+			}
+		}
 	}
 	return undefined;
 }
@@ -1073,6 +1268,10 @@ function cmpBounds(
 	}
 	return undefined;
 }
+
+/** The missing tag, as a one-character key — the ceiling of every rank, and
+ * the whole payload of a component whose path resolved to nothing. */
+const TAG_MISSING = '\u00ff';
 
 /** The present tag, as a one-character key — the floor of every real value. */
 const TAG_PRESENT = '\u0001';

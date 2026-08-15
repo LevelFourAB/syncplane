@@ -1,6 +1,7 @@
 package query_test
 
 import (
+	"fmt"
 	"strings"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -129,10 +130,115 @@ var _ = Describe("PlanQuery", func() {
 		},
 		Entry("contains, which no range bounds", query.Contains("label", "x")),
 		Entry("endsWith, likewise", query.EndsWith("label", "x")),
-		Entry("or, which needs a merge of several ranges", query.Or(query.Eq("label", "a"), query.Eq("count", 1))),
+		Entry("an or with a branch no index serves", query.Or(query.Eq("label", "a"), query.Eq("count", 1))),
 		Entry("a predicate on a field no index covers", query.Eq("flag", true)),
 		Entry("an ordering no index covers", nil, query.Asc("big")),
 	)
+
+	Describe("over a top-level or", func() {
+		byCount := index("by_count", "count")
+
+		It("unions one probe set per branch, each on its own index", func() {
+			p := query.PlanQuery([]query.Index{byLabel, byCount},
+				compile(query.Or(query.Eq("label", "a"), query.Eq("count", 1))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Union).To(HaveLen(2))
+			Expect(p.Union[0].Index).To(Equal("by_label"))
+			Expect(p.Union[1].Index).To(Equal("by_count"))
+			Expect(p.Residual).To(BeNil(), "every branch's range is exact")
+			Expect(p.Ordered).To(BeFalse())
+			Expect(p.Prefix).To(BeNil())
+		})
+
+		It("widens a branch's residual to the whole or", func() {
+			// A row a branch's range yields may fail that branch and still match
+			// another, so only the full predicate is a correct per-row re-check.
+			pred := compile(query.Or(
+				query.And(query.Eq("label", "a"), query.Eq("flag", true)),
+				query.Eq("count", 1)))
+			p := query.PlanQuery([]query.Index{byLabel, byCount}, pred, nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Residual).To(Equal(pred))
+		})
+
+		It("plans a one-branch or as the branch itself, ordering intact", func() {
+			p := query.PlanQuery([]query.Index{byLabelCount},
+				compile(query.Or(query.Eq("label", "a"))),
+				order(query.Desc("count")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Union).To(BeEmpty())
+			Expect(p.Ordered).To(BeTrue())
+		})
+
+		It("declines a union whose probes outgrow the fan-out guard", func() {
+			labels := make([]string, 40)
+			for i := range labels {
+				labels[i] = fmt.Sprintf("v%02d", i)
+			}
+			counts := make([]int, 30)
+			for i := range counts {
+				counts[i] = i
+			}
+			p := query.PlanQuery([]query.Index{byLabel, byCount},
+				compile(query.Or(query.In("label", labels...), query.In("count", counts...))), nil)
+			Expect(p).To(BeNil())
+		})
+	})
+
+	Describe("over two inequalities on one component", func() {
+		byCount := index("by_count", "count")
+
+		It("intersects them into one bounded range", func() {
+			p := query.PlanQuery([]query.Index{byCount},
+				compile(query.And(query.Gte("count", 1), query.Lt("count", 5))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil(), "both bounds are the range, so nothing is re-checked")
+		})
+
+		It("keeps a third bound residual", func() {
+			p := query.PlanQuery([]query.Index{byCount},
+				compile(query.And(query.Gte("count", 1), query.Lt("count", 5), query.Lt("count", 3))), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).NotTo(BeNil())
+		})
+	})
+
+	Describe("over presence", func() {
+		byMaybe := index("by_maybe", "maybe")
+		byMaybeLabel := index("by_maybe_label", "maybe", "label")
+		byTags := index("by_tags", "tags")
+
+		It("pins isNotSet to the missing rank", func() {
+			p := query.PlanQuery([]query.Index{byMaybe}, compile(query.IsNotSet("maybe")), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Index).To(Equal("by_maybe"))
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil(), "the missing rank IS the term")
+		})
+
+		It("keeps the components after a pinned isNotSet usable", func() {
+			p := query.PlanQuery([]query.Index{byMaybeLabel},
+				compile(query.IsNotSet("maybe")), order(query.Asc("label")))
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ordered).To(BeTrue())
+		})
+
+		It("bounds isSet to the set ranks", func() {
+			p := query.PlanQuery([]query.Index{byMaybe}, compile(query.IsSet("maybe")), nil)
+			Expect(p).NotTo(BeNil())
+			Expect(p.Ranges).To(HaveLen(1))
+			Expect(p.Residual).To(BeNil())
+		})
+
+		It("declines presence over a fan-out component", func() {
+			// An empty list encodes as missing while the list itself always
+			// resolves as found, so the ranks and the evaluator disagree.
+			Expect(query.PlanQuery([]query.Index{byTags}, compile(query.IsSet("tags")), nil)).To(BeNil())
+			Expect(query.PlanQuery([]query.Index{byTags}, compile(query.IsNotSet("tags")), nil)).To(BeNil())
+		})
+	})
 
 	It("declines when there are no candidates", func() {
 		Expect(query.PlanQuery(nil, compile(query.Eq("label", "a")), nil)).To(BeNil())

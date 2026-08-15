@@ -2693,7 +2693,7 @@
 			"want": "scan"
 		},
 		{
-			"name": "or is not servable in v1",
+			"name": "a top-level or unions one probe set per branch",
 			"indexes": [
 				{
 					"name": "by_label",
@@ -2746,7 +2746,19 @@
 					]
 				}
 			},
-			"want": "scan"
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 1
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					}
+				],
+				"residual": false
+			}
 		},
 		{
 			"name": "a predicate on a field no index covers",
@@ -4538,6 +4550,678 @@
 				"index": "by_source",
 				"ranges": 1,
 				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an or with a branch no index serves declines whole",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "an or branch's residual widens to the whole or",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"and": {
+								"conds": [
+									{
+										"cmp": {
+											"path": [
+												"label"
+											],
+											"op": "CMP_OP_EQ",
+											"value": {
+												"stringValue": "a"
+											}
+										}
+									},
+									{
+										"cmp": {
+											"path": [
+												"flag"
+											],
+											"op": "CMP_OP_EQ",
+											"value": {
+												"boolValue": true
+											}
+										}
+									}
+								]
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 1
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					}
+				],
+				"residual": true
+			}
+		},
+		{
+			"name": "a nested or flattens into one union",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"or": {
+								"conds": [
+									{
+										"cmp": {
+											"path": [
+												"count"
+											],
+											"op": "CMP_OP_EQ",
+											"value": {
+												"doubleValue": 1
+											}
+										}
+									},
+									{
+										"cmp": {
+											"path": [
+												"count"
+											],
+											"op": "CMP_OP_EQ",
+											"value": {
+												"doubleValue": 2
+											}
+										}
+									}
+								]
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 1
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					}
+				],
+				"residual": false
+			}
+		},
+		{
+			"name": "an in inside an or branch still fans its probes",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"in": {
+								"path": [
+									"label"
+								],
+								"values": [
+									{
+										"stringValue": "a"
+									},
+									{
+										"stringValue": "b"
+									}
+								]
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 2
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					}
+				],
+				"residual": false
+			}
+		},
+		{
+			"name": "an ordered or is a union the caller re-sorts",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						}
+					]
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 1
+					},
+					{
+						"index": "by_count",
+						"ranges": 1
+					}
+				],
+				"residual": false
+			}
+		},
+		{
+			"name": "two inequalities on one component intersect into one range",
+			"indexes": [
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GTE",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_LT",
+								"value": {
+									"doubleValue": 5
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a third inequality on the component stays residual",
+			"indexes": [
+				{
+					"name": "by_count",
+					"key": [
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_GTE",
+								"value": {
+									"doubleValue": 1
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_LT",
+								"value": {
+									"doubleValue": 5
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"count"
+								],
+								"op": "CMP_OP_LT",
+								"value": {
+									"doubleValue": 3
+								}
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"index": "by_count",
+				"ranges": 1,
+				"ordered": false,
+				"residual": true
+			}
+		},
+		{
+			"name": "isNotSet pins the component to the missing rank",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"want": {
+				"index": "by_maybe",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "the components after a pinned isNotSet still order",
+			"indexes": [
+				{
+					"name": "by_maybe_label",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_NOT_SET"
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"label"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_maybe_label",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
+			"name": "isSet bounds the component to the set ranks",
+			"indexes": [
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"maybe"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": {
+				"index": "by_maybe",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "presence over a fan-out component is not servable",
+			"indexes": [
+				{
+					"name": "by_tags",
+					"key": [
+						{
+							"path": [
+								"tags"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"present": {
+					"path": [
+						"tags"
+					],
+					"op": "PRESENT_OP_IS_SET"
+				}
+			},
+			"want": "scan"
+		},
+		{
+			"name": "an equality unions with a presence probe",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_maybe",
+					"key": [
+						{
+							"path": [
+								"maybe"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"or": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"present": {
+								"path": [
+									"maybe"
+								],
+								"op": "PRESENT_OP_IS_NOT_SET"
+							}
+						}
+					]
+				}
+			},
+			"want": {
+				"union": [
+					{
+						"index": "by_label",
+						"ranges": 1
+					},
+					{
+						"index": "by_maybe",
+						"ranges": 1
+					}
+				],
 				"residual": false
 			}
 		}

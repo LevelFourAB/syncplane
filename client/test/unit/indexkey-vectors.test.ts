@@ -216,7 +216,15 @@ interface ProbeCase {
 	indexes: SpecVector[];
 	cond?: JsonValue;
 	orderBy?: JsonValue[];
-	want: 'scan' | { index: string; ranges: number; ordered: boolean; residual: boolean };
+	want: 'scan' | {
+		index: string;
+		ranges: number;
+		ordered: boolean;
+		residual: boolean;
+		/** A union plan: one branch per entry, unordered by construction, with
+		 * index/ranges/ordered unset. */
+		union?: { index: string; ranges: number }[];
+	};
 }
 
 const probeVectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { probeCases: ProbeCase[] };
@@ -250,6 +258,17 @@ describe('planner conformance vectors', () => {
 				return;
 			}
 			expect(plan).toBeDefined();
+			if (tc.want.union !== undefined) {
+				expect(plan!.union).toHaveLength(tc.want.union.length);
+				for (let i = 0; i < tc.want.union.length; i++) {
+					expect(plan!.union![i]!.index).toBe(tc.want.union[i]!.index);
+					expect(plan!.union![i]!.ranges).toHaveLength(tc.want.union[i]!.ranges);
+				}
+				expect(plan!.ordered).toBe(false);
+				expect(plan!.residual !== undefined).toBe(tc.want.residual);
+				return;
+			}
+			expect(plan!.union).toBeUndefined();
 			expect(plan!.index).toBe(tc.want.index);
 			expect(plan!.ranges).toHaveLength(tc.want.ranges);
 			expect(plan!.ordered).toBe(tc.want.ordered);

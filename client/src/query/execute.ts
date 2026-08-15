@@ -234,7 +234,10 @@ export async function queryByIndex<D extends DescMessage>(
 		compiled.orderBy,
 	);
 	if (plan === undefined) return decline(report, 'no-plan');
-	const chosen = built.find((idx) => idx.name === plan.index)!;
+	// A union plan reads one set of ranges per branch, each from its own
+	// index; a single plan is one branch of itself. Every index a branch
+	// names came from `built`, because those were the planner's candidates.
+	const branches = plan.union ?? [ { index: plan.index, ranges: plan.ranges } ];
 
 	// The overlay first, so its size bounds how far the confirmed walk has to
 	// go: only an overlay row can displace a confirmed one from the result.
@@ -295,7 +298,6 @@ export async function queryByIndex<D extends DescMessage>(
 	});
 
 	const budget = candidateBudget(compiled, overlayRows.length, window);
-	const prefix = indexPositionPrefix(def.name, chosen.name, chosen.specHash, workspaceId);
 	// indexScan yields the KV keys of the records holding each position, which
 	// for an index position is always the c/ row it was computed from.
 	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
@@ -358,86 +360,90 @@ export async function queryByIndex<D extends DescMessage>(
 		}
 	};
 
-	ranges: for (const range of plan.ranges) {
-		const seek = seekRange(plan, range, window);
-		const lo = seek.lo === undefined ? prefix : prefix + seek.lo;
-		const hi = seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi;
-		for await (const cKey of tx.indexScan(lo, hi)) {
-			walked++;
-			// A position of THIS index can only sit on a row of this entity and
-			// workspace — that is what its prefix means, and the bounds above are
-			// inside it. The guard is a fence against a record that acquired one
-			// some other way, not a path the layout can reach.
-			if (!cKey.startsWith(rowPrefix)) continue;
-			const key = cKey.slice(rowPrefix.length);
-			// One row can appear several times: across ranges (an `in` whose
-			// values overlap nothing else is disjoint, but the planner does not
-			// promise it), and within one range, because an index over a repeated
-			// field puts one position per element on the row. The scan path visits
-			// each row once and the two must agree.
-			if (seen.has(key)) continue;
-			seen.add(key);
-			// The overlay is authoritative for a row it holds — edited or
-			// tombstoned — so the confirmed copy drops out here and reappears,
-			// if it still matches, from the overlay stream.
-			if (shadowed.has(key)) continue;
-			// An ordered plan yields matches in result order, so once enough of
-			// them are in hand no later one can reach the page — bounded above by
-			// how many the overlay could displace. A batched key is in hand only
-			// when nothing left can reject its row; with a residual or a window
-			// the row still decides, so only flushed rows count.
-			const inHand = confirmed.length
-				+ (plan.residual === undefined && window === undefined ? batch.length : 0);
-			const settled = budget !== undefined && plan.ordered && inHand >= budget;
-			// With nothing left for the row to decide, a position IS a match, so
-			// counting the rest of the range costs no row reads at all. A residual
-			// predicate takes that away — the row is the only thing that can
-			// settle it — which is the price of reporting a total here.
-			if (settled && plan.residual === undefined) {
-				// With the total opted out the walk only owes hasMore, and this
-				// position settles it: not seen, not shadowed, no residual left to
-				// reject its row — one distinct live match past the page. A `before`
-				// bound is the exception (its end tie group could still fail
-				// `within`), so that shape keeps walking.
-				if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
-					beyond = 1;
-					break ranges;
-				}
-				if (countable) {
-					// Shadowed rows' confirmed positions are in the count — whether
-					// the walk already skipped them or never reached them — without
-					// being matches. Each one inside the counted range comes back
-					// out; under distinctPerRange that is at most one per row,
-					// exactly what the walk would have skipped.
-					let shadowedInRange = 0;
-					for (const record of bases.values()) {
-						for (const p of record.ix ?? []) {
-							if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
-						}
+	ranges: for (const br of branches) {
+		const branchIdx = built.find((idx) => idx.name === br.index)!;
+		const prefix = indexPositionPrefix(def.name, branchIdx.name, branchIdx.specHash, workspaceId);
+		for (const range of br.ranges) {
+			const seek = seekRange(plan, range, window);
+			const lo = seek.lo === undefined ? prefix : prefix + seek.lo;
+			const hi = seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi;
+			for await (const cKey of tx.indexScan(lo, hi)) {
+				walked++;
+				// A position of THIS index can only sit on a row of this entity and
+				// workspace — that is what its prefix means, and the bounds above are
+				// inside it. The guard is a fence against a record that acquired one
+				// some other way, not a path the layout can reach.
+				if (!cKey.startsWith(rowPrefix)) continue;
+				const key = cKey.slice(rowPrefix.length);
+				// One row can appear several times: across ranges (an `in` whose
+				// values overlap nothing else is disjoint, but the planner does not
+				// promise it), and within one range, because an index over a repeated
+				// field puts one position per element on the row. The scan path visits
+				// each row once and the two must agree.
+				if (seen.has(key)) continue;
+				seen.add(key);
+				// The overlay is authoritative for a row it holds — edited or
+				// tombstoned — so the confirmed copy drops out here and reappears,
+				// if it still matches, from the overlay stream.
+				if (shadowed.has(key)) continue;
+				// An ordered plan yields matches in result order, so once enough of
+				// them are in hand no later one can reach the page — bounded above by
+				// how many the overlay could displace. A batched key is in hand only
+				// when nothing left can reject its row; with a residual or a window
+				// the row still decides, so only flushed rows count.
+				const inHand = confirmed.length
+					+ (plan.residual === undefined && window === undefined ? batch.length : 0);
+				const settled = budget !== undefined && plan.ordered && inHand >= budget;
+				// With nothing left for the row to decide, a position IS a match, so
+				// counting the rest of the range costs no row reads at all. A residual
+				// predicate takes that away — the row is the only thing that can
+				// settle it — which is the price of reporting a total here.
+				if (settled && plan.residual === undefined) {
+					// With the total opted out the walk only owes hasMore, and this
+					// position settles it: not seen, not shadowed, no residual left to
+					// reject its row — one distinct live match past the page. A `before`
+					// bound is the exception (its end tie group could still fail
+					// `within`), so that shape keeps walking.
+					if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
+						beyond = 1;
+						break ranges;
 					}
-					// Assigned, not accumulated: the count covers every position past
-					// the ones in hand, including any a too-large flush has already
-					// classified as beyond — adding would count those twice. The
-					// flush below still classifies the in-hand tail, and either way
-					// the total comes out as the range's position count, less the
-					// boundary positions a page window rejected and the shadowed
-					// positions the overlay answers for.
-					beyond = (await tx.indexCount(lo, hi))
-						- confirmed.length - batch.length - windowRejected - shadowedInRange;
-					break ranges;
+					if (countable) {
+						// Shadowed rows' confirmed positions are in the count — whether
+						// the walk already skipped them or never reached them — without
+						// being matches. Each one inside the counted range comes back
+						// out; under distinctPerRange that is at most one per row,
+						// exactly what the walk would have skipped.
+						let shadowedInRange = 0;
+						for (const record of bases.values()) {
+							for (const p of record.ix ?? []) {
+								if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
+							}
+						}
+						// Assigned, not accumulated: the count covers every position past
+						// the ones in hand, including any a too-large flush has already
+						// classified as beyond — adding would count those twice. The
+						// flush below still classifies the in-hand tail, and either way
+						// the total comes out as the range's position count, less the
+						// boundary positions a page window rejected and the shadowed
+						// positions the overlay answers for.
+						beyond = (await tx.indexCount(lo, hi))
+							- confirmed.length - batch.length - windowRejected - shadowedInRange;
+						break ranges;
+					}
+					beyond++;
+					continue;
 				}
-				beyond++;
-				continue;
+				if (++reads > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+				batch.push(key);
+				if (batch.length >= READ_BATCH) await flush();
 			}
-			if (++reads > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
-			batch.push(key);
-			if (batch.length >= READ_BATCH) await flush();
 		}
 	}
 	await flush();
 
 	if (report) {
-		report.index = chosen.name;
+		report.index = [ ...new Set(branches.map((b) => b.index)) ].join('+');
 		report.candidates = walked;
 	}
 

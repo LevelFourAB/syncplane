@@ -599,9 +599,9 @@ naming the field. **Enums arrive as numbers**, so it is `t.status.eq(2)`, not
 
 | Field type                                      | Operators                                                                                      |
 | ----------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains` + order                                |
-| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte` + order                                            |
-| `boolean` (`BoolOps`)                           | `eq`, `neq` + order                                                                            |
+| `string` (`StringOps`)                          | `eq`, `neq`, `in`, `startsWith`, `endsWith`, `contains`, `isSet`, `isNotSet` + order           |
+| `number`/`bigint` (`NumericOps`)                | `eq`, `neq`, `in`, `gt`, `gte`, `lt`, `lte`, `isSet`, `isNotSet` + order                       |
+| `boolean` (`BoolOps`)                           | `eq`, `neq`, `isSet`, `isNotSet` + order                                                       |
 | `Uint8Array` & singular message (`PresenceOps`) | `isSet`, `isNotSet`                                                                            |
 | repeated scalar (`RepeatedScalarOps`)           | `has`, `hasAny`, `hasAll`, `isEmpty`                                                           |
 | repeated message (`RepeatedMessageOps`)         | `any(cb)`, `isEmpty`; on a reference also `matches(cb)`                                        |
@@ -1564,8 +1564,9 @@ its field mask cannot reach any of them.
 What the client index does and does not cover:
 
 - **`query()`** uses it when the query is scoped to one workspace and the
-  planner can express its predicate and ordering as a range. A cross-workspace
-  query always scans.
+  planner can express its predicate and ordering as a range — or, for a
+  top-level `or`, as one range set per branch, taken only when every branch
+  has an index. A cross-workspace query always scans.
 - **`watchQuery()`** uses it for its first read, under the same planner as
   `query()`. It asks for every match rather than one page — that set is what it
   goes on to maintain — so a query whose matches run into the thousands can
