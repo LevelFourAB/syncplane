@@ -44,6 +44,8 @@ package pglisten
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -101,6 +103,9 @@ type Listener interface {
 type Conn struct {
 	dsn    string
 	logger *slog.Logger
+	// ctl is the private channel Listen pokes to wake the listener goroutine
+	// out of its wait with the session — and so every LISTEN on it — intact.
+	ctl string
 
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -115,8 +120,9 @@ type Conn struct {
 	// caller that returns from Listen knows the subscription is live and not
 	// merely promised.
 	ready map[string]chan struct{}
-	// interrupt aborts the current WaitForNotification so a new registration is
-	// picked up. nil while the listener goroutine is not waiting.
+	// interrupt aborts the current WaitForNotification, dropping the session —
+	// the fallback wake for when the control-channel poke cannot be sent. nil
+	// while the listener goroutine is not waiting.
 	interrupt context.CancelFunc
 	closed    bool
 
@@ -160,6 +166,7 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Conn, error) {
 	c := &Conn{
 		dsn:       dsn,
 		logger:    cfg.logger,
+		ctl:       controlChannel(),
 		cancel:    cancel,
 		done:      make(chan struct{}),
 		listeners: make(map[string]Listener),
@@ -170,6 +177,16 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Conn, error) {
 	go func() { defer c.wg.Done(); c.listenLoop(runCtx, listener) }()
 
 	return c, nil
+}
+
+// controlChannel names the private channel Listen pokes to wake the listener
+// goroutine. Random per Conn: the channel namespace is shared by every process
+// on the database, and a fixed name would wake all of them for each other's
+// registrations.
+func controlChannel() string {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return "syncplane_ctl_" + hex.EncodeToString(b[:])
 }
 
 // dial opens a connection outside any pool. Both of the transport's connections
@@ -192,10 +209,11 @@ func dial(ctx context.Context, dsn string) (*pgx.Conn, error) {
 // reconnect if the database is down — and abandoning it unregisters the
 // channel. Returns ErrClosed on a closed Conn.
 //
-// Registering a channel while others are already carrying traffic costs those
-// others whatever is published over the next round trip — the same gap a
-// reconnect leaves. Registering every channel before any of them is published
-// to avoids it.
+// Registering while other channels carry traffic does not disturb them: the
+// listener goroutine is woken over a private control channel with its session
+// — and so its subscriptions — intact. Only when that wake cannot be sent
+// does Listen fall back to breaking the wait, which cycles the connection and
+// costs every channel the same gap a reconnect leaves.
 func (c *Conn) Listen(ctx context.Context, channel string, l Listener) error {
 	if err := ValidateChannel(channel); err != nil {
 		return fmt.Errorf("pglisten: %w", err)
@@ -216,10 +234,18 @@ func (c *Conn) Listen(ctx context.Context, channel string, l Listener) error {
 	interrupt := c.interrupt
 	c.mu.Unlock()
 
-	// The listener goroutine is parked in WaitForNotification and cannot issue
-	// a statement until it is out; cancelling its context is what gets it out.
+	// A non-nil interrupt means the listener goroutine is parked in
+	// WaitForNotification and cannot issue a statement until it is out. A poke
+	// on the control channel gets it out with the session intact; cancelling
+	// the wait is the fallback, because pgx does not survive an aborted read
+	// and the redial gaps every channel. When the loop is anywhere else — nil
+	// interrupt, or a poke that lands between statements and is swallowed —
+	// armInterrupt re-checks registrations before any wait begins, so no wake
+	// is needed and none can be lost.
 	if interrupt != nil {
-		interrupt()
+		if err := c.Publish(ctx, c.ctl, ""); err != nil {
+			interrupt()
+		}
 	}
 
 	select {
@@ -411,10 +437,10 @@ func (c *Conn) listenLoop(ctx context.Context, conn *pgx.Conn) {
 		stop()
 
 		if err != nil {
-			// Cancelling the context to pick up a registration breaks the
-			// connection just as a real fault does — pgx aborts the read by
-			// deadline and the session does not survive it — so both go down
-			// the same redial path, and only the fault is worth a log line.
+			// The fallback interrupt breaks the connection just as a real
+			// fault does — pgx aborts the read by deadline and the session
+			// does not survive it — so both go down the same redial path, and
+			// only the fault is worth a log line.
 			_ = conn.Close(context.WithoutCancel(ctx))
 			conn = nil
 			if ctx.Err() != nil {
@@ -433,6 +459,14 @@ func (c *Conn) listenLoop(ctx context.Context, conn *pgx.Conn) {
 // subscribe issues LISTEN for every registered channel this connection has not
 // subscribed yet, releasing each channel's waiting Listen as it lands.
 func (c *Conn) subscribe(ctx context.Context, conn *pgx.Conn, subscribed map[string]bool) error {
+	if !subscribed[c.ctl] {
+		// The control channel comes first, so a registration racing a redial
+		// can wake the loop as soon as the connection is up.
+		if _, err := conn.Exec(ctx, "LISTEN "+c.ctl); err != nil {
+			return fmt.Errorf("listen on control channel: %w", err)
+		}
+		subscribed[c.ctl] = true
+	}
 	for _, channel := range c.unsubscribed(subscribed) {
 		if _, err := conn.Exec(ctx, "LISTEN "+channel); err != nil {
 			return fmt.Errorf("listen on %q: %w", channel, err)

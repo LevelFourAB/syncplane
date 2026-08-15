@@ -2,6 +2,7 @@ package pglisten_test
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -129,8 +130,8 @@ var _ = Describe("pglisten", func() {
 	})
 
 	It("picks up a channel registered after traffic is already flowing", func() {
-		// Registering cycles the listener connection, so the channels already
-		// subscribed have to come back with it.
+		// Registering wakes the parked listener over the control channel, and
+		// the channels already subscribed must keep delivering around it.
 		dsn := pgtest.ServerDSN()
 		first := pgtest.UniqueName("sp_listen")
 		second := pgtest.UniqueName("sp_listen")
@@ -154,6 +155,35 @@ var _ = Describe("pglisten", func() {
 				return false
 			}
 		}, 10*time.Second).Should(BeTrue(), "an existing subscription must survive a registration")
+	})
+
+	It("registers a channel without gapping the ones already flowing", func() {
+		// The registration wake keeps the listener session — and so its
+		// LISTENs — alive, which makes this deterministic: everything
+		// published to the first channel is queued for the session and must
+		// arrive, wherever the registration falls between the publishes. A
+		// transport that cycled its connection instead would lose whatever sat
+		// undelivered at the cycle and announce a reconnect nothing caused.
+		dsn := pgtest.ServerDSN()
+		first := pgtest.UniqueName("sp_listen")
+		second := pgtest.UniqueName("sp_listen")
+		sender, receiver := conn(dsn), conn(dsn)
+
+		toFirst := listenOn(receiver, first)
+		for i := 1; i <= 5; i++ {
+			Expect(sender.Publish(ctx, first, fmt.Sprintf("p-%d", i))).To(Succeed())
+		}
+		listenOn(receiver, second)
+		for i := 6; i <= 10; i++ {
+			Expect(sender.Publish(ctx, first, fmt.Sprintf("p-%d", i))).To(Succeed())
+		}
+
+		for i := 1; i <= 10; i++ {
+			Eventually(toFirst.payloads, 5*time.Second).Should(Receive(Equal(fmt.Sprintf("p-%d", i))),
+				"no payload may fall into a registration gap")
+		}
+		Consistently(toFirst.reconnects, "300ms").ShouldNot(Receive(),
+			"a registration must not read as a reconnect")
 	})
 
 	It("drops a payload on a channel nobody registered", func() {
