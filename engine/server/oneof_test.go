@@ -52,6 +52,13 @@ var _ = Describe("Oneofs", func() {
 				`reference field "project" is a member of oneof "target"`)))
 		})
 
+		It("rejects a keyed-list identity inside the element's oneof", func() {
+			_, err := server.New(newTestStore(),
+				server.WithEntities(&testdatav1.OneofListIdentityEntity{}))
+			Expect(err).To(MatchError(ContainSubstring(
+				`"uid" is a member of oneof "which"`)))
+		})
+
 		It("rejects a merger on a oneof member", func() {
 			Expect(newTestServerErr(
 				server.WithMerger(&testdatav1.Widget{}, "choice_settings", concatDocs),

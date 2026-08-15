@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
 	OneofKeyEntitySchema,
+	OneofListIdentityEntitySchema,
 	OneofNestedTextEntitySchema,
 	OneofRefEntitySchema,
 	OneofTextEntitySchema,
@@ -233,6 +234,11 @@ describe('oneof registration', () => {
 	it('rejects a reference inside a oneof', () => {
 		expect(() => new EntityRegistry([ ProjectSchema, UserSchema, OneofRefEntitySchema ]))
 			.toThrow(/reference field is a member of oneof "target"/);
+	});
+
+	it("rejects a keyed-list identity inside the element's oneof", () => {
+		expect(() => new EntityRegistry([ OneofListIdentityEntitySchema ]))
+			.toThrow(/"uid" is a member of oneof "which"/);
 	});
 
 	it('accepts an entity that merely has a oneof', () => {

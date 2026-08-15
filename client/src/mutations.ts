@@ -1021,16 +1021,18 @@ export function keyFieldsFor(field: DescField): DescField[] {
  * (syncplane.v1.field_behavior).text field, validating its shape. Mirror of the
  * server's collectTextFields.
  *
- * oneof names the group crossed on the way here (empty when none). The walk
- * still descends through oneof members so that a text field below one is
+ * oneof names the group crossed on the way here, and container the repeated or
+ * map field (both empty when none). The walk still descends through oneof
+ * members, list elements and map values so that a text field below one is
  * reported rather than quietly skipped: its merger could never fire, because a
- * oneof is replaced whole and no mask path reaches inside it.
+ * oneof is replaced whole, and so is a collection element addressed by a mask.
  */
 export function collectTextFieldPaths(
 	schema: DescMessage,
 	prefix: string,
 	visiting: string[],
 	oneof = '',
+	container = '',
 ): string[] {
 	const out: string[] = [];
 	for (const field of schema.fields) {
@@ -1055,20 +1057,36 @@ export function collectTextFieldPaths(
 						+ `a oneof is replaced whole, so the text merger could never run`,
 				);
 			}
+			if (container !== '') {
+				throw new Error(
+					`${schema.typeName}.${field.name}: text field is inside ${container}; `
+						+ `an element is replaced whole, so the text merger could never run`,
+				);
+			}
 			out.push(prefix + field.name);
 			continue;
 		}
-		if (
-			field.fieldKind !== 'message' || behavior?.opaque || isRef(field)
-			|| visiting.includes(field.message.typeName)
-		) {
-			continue;
+		if (behavior?.opaque || isRef(field)) continue;
+		// Descend into embedded sub-messages, and into collection elements
+		// purely to refuse text there.
+		let sub: DescMessage | undefined;
+		let enclosing = container;
+		if (field.fieldKind === 'message') {
+			sub = field.message;
+		} else if (field.fieldKind === 'list' && field.listKind === 'message') {
+			sub = field.message;
+			enclosing = `repeated field "${prefix}${field.name}"`;
+		} else if (field.fieldKind === 'map' && field.mapKind === 'message') {
+			sub = field.message;
+			enclosing = `map field "${prefix}${field.name}"`;
 		}
+		if (sub === undefined || visiting.includes(sub.typeName)) continue;
 		out.push(...collectTextFieldPaths(
-			field.message,
+			sub,
 			`${prefix}${field.name}.`,
 			[ ...visiting, schema.typeName ],
 			memberOf,
+			enclosing,
 		));
 	}
 	return out;

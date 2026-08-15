@@ -693,8 +693,12 @@ export type QueryRequest = Message<"syncplane.v1.QueryRequest"> & {
   /**
    * Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
    * in `order_by` order. Required there and rejected under every other
-   * aggregate; clamped to the server's own row maximum, which `limit` groups
-   * of it multiply against.
+   * aggregate.
+   *
+   * The response carries `limit` × `per_group` rows, so both are clamped
+   * against the row maximum an ungrouped page is clamped to: a request asking
+   * for more groups than that leaves room for gets the first of them, with
+   * has_more set.
    *
    * @generated from field: uint32 per_group = 12;
    */

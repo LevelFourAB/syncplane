@@ -1150,6 +1150,9 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		}
 		info.refFields = append(info.refFields, refField{fd: fd, keyFields: kf})
 	}
+	if err := validateListIdentities(desc, info.name); err != nil {
+		return nil, err
+	}
 	// Derive one index per reference field, over the target key the row
 	// stores. This is not a schema decision: a reverse lookup is what every
 	// follow spec does on every pull, the engine already knows the exact
@@ -1175,7 +1178,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// Discover (syncplane.v1.field_behavior).text fields and auto-install the
 	// built-in convergent-text merger for each — no RegisterMerger call
 	// needed, and PATCHes to the field merge instead of replacing.
-	if err := collectTextFields(desc, "", "", nil, &info.textFields); err != nil {
+	if err := collectTextFields(desc, "", "", "", nil, &info.textFields); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	if len(info.textFields) > 0 {
@@ -1207,6 +1210,38 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		}
 	}
 	return info, nil
+}
+
+// validateListIdentities refuses a keyed-list identity (key_field or
+// order_field) that names a member of the element's oneof. An identity that is
+// only present while its case is active is not an identity — elements would
+// collide on the zero value the moment a sibling case won — and
+// lww.keyFieldsFor would treat it as no identity at all, silently downgrading
+// the list to whole-replace. The client's validateOneofs is the mirror.
+func validateListIdentities(desc protoreflect.MessageDescriptor, entity string) error {
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if !fd.IsList() || fd.Kind() != protoreflect.MessageKind {
+			continue
+		}
+		b := fieldBehaviorOf(fd)
+		identity := b.GetKeyField()
+		if of := b.GetOrderField(); of != "" {
+			identity = append(identity[:len(identity):len(identity)], of)
+		}
+		for _, name := range identity {
+			member := fd.Message().Fields().ByName(protoreflect.Name(name))
+			if member == nil {
+				continue
+			}
+			if od := lww.OneofOf(member); od != nil {
+				return fmt.Errorf("server: entity %q list field %q: %q is a member of oneof %q; "+
+					"a list identity cannot be inside a oneof", entity, fd.Name(), name, od.Name())
+			}
+		}
+	}
+	return nil
 }
 
 // historyFieldsOf resolves an entity's capture set: the top-level units a
@@ -1318,14 +1353,16 @@ func protectedFieldsOf(
 // types on the current descent path (cycle guard — a recursive message type
 // cannot carry a text field through itself anyway).
 //
-// oneof names the group crossed on the way here (empty when none). The walk
-// still descends through oneof members so that a text field below one is
+// oneof names the group crossed on the way here, and container the repeated or
+// map field (both empty when none). The walk still descends through oneof
+// members, list elements and map values so that a text field below one is
 // reported rather than quietly skipped: its merger could never fire, because a
-// oneof is replaced whole and no mask path reaches inside it.
+// oneof is replaced whole, and so is a collection element addressed by a mask.
 func collectTextFields(
 	desc protoreflect.MessageDescriptor,
 	prefix string,
 	oneof string,
+	container string,
 	chain []protoreflect.FieldDescriptor,
 	out *[]textField,
 ) error {
@@ -1348,26 +1385,45 @@ func collectTextFields(
 				return fmt.Errorf("text field %q is inside oneof %q; a oneof is replaced whole, "+
 					"so the text merger could never run", prefix+string(fd.Name()), memberOf)
 			}
+			if container != "" {
+				return fmt.Errorf("text field %q is inside %s; an element is replaced whole, "+
+					"so the text merger could never run", prefix+string(fd.Name()), container)
+			}
 			fieldChain := make([]protoreflect.FieldDescriptor, len(chain)+1)
 			copy(fieldChain, chain)
 			fieldChain[len(chain)] = fd
 			*out = append(*out, textField{path: prefix + string(fd.Name()), chain: fieldChain})
 			continue
 		}
-		// Descend into embedded sub-messages only: opaque messages are
-		// replaced whole (a nested merger could never fire) and references
-		// project down to key fields. Recursive types terminate because a
-		// message cannot contain itself as a required finite path — guard by
-		// refusing to re-enter a type already on the descent path.
-		if fd.Kind() != protoreflect.MessageKind || fd.IsList() || fd.IsMap() ||
-			behavior.GetOpaque() || lww.IsRef(fd) {
+		// Descend into embedded sub-messages, and into collection elements
+		// purely to refuse text there. Opaque messages are skipped either way:
+		// they are replaced whole, so a nested merger could never fire — and
+		// references, which project down to key fields. Recursive types
+		// terminate because a message cannot contain itself as a required
+		// finite path — guard by refusing to re-enter a type already on the
+		// descent path.
+		var sub protoreflect.MessageDescriptor
+		enclosing := container
+		switch {
+		case behavior.GetOpaque() || lww.IsRef(fd):
+		case fd.IsMap():
+			if fd.MapValue().Kind() == protoreflect.MessageKind {
+				sub = fd.MapValue().Message()
+				enclosing = fmt.Sprintf("map field %q", prefix+string(fd.Name()))
+			}
+		case fd.IsList():
+			if fd.Kind() == protoreflect.MessageKind {
+				sub = fd.Message()
+				enclosing = fmt.Sprintf("repeated field %q", prefix+string(fd.Name()))
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			sub = fd.Message()
+		}
+		if sub == nil || onChain(chain, sub.FullName()) {
 			continue
 		}
-		if onChain(chain, fd.Message().FullName()) {
-			continue
-		}
-		if err := collectTextFields(fd.Message(), prefix+string(fd.Name())+".",
-			memberOf, append(chain, fd), out); err != nil {
+		if err := collectTextFields(sub, prefix+string(fd.Name())+".",
+			memberOf, enclosing, append(chain, fd), out); err != nil {
 			return err
 		}
 	}
@@ -1375,9 +1431,20 @@ func collectTextFields(
 }
 
 // onChain reports whether a message type is already being descended through.
+// The type compared is the one the walk enters: a map field's value message,
+// not its synthetic entry message.
 func onChain(chain []protoreflect.FieldDescriptor, name protoreflect.FullName) bool {
 	for _, fd := range chain {
-		if fd.Kind() == protoreflect.MessageKind && fd.Message().FullName() == name {
+		var md protoreflect.MessageDescriptor
+		switch {
+		case fd.IsMap():
+			if fd.MapValue().Kind() == protoreflect.MessageKind {
+				md = fd.MapValue().Message()
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			md = fd.Message()
+		}
+		if md != nil && md.FullName() == name {
 			return true
 		}
 	}

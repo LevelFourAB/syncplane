@@ -128,9 +128,9 @@ message Guarded {
 	}
 }
 
-// Registration-rejection fixtures. Each carries a construct that may not cross
-// a oneof, because the group is replaced whole: the merge core never descends
-// into a member, so nothing below one can be keyed, merged or projected.
+// Registration-rejection fixtures. Each carries a construct on a path no mask
+// ever reaches: below a oneof, whose group is replaced whole, or inside a
+// repeated element or map value, which masked writes replace whole.
 // Registering any of these must fail.
 
 // A key field inside a oneof: the row key would vanish whenever a sibling case
@@ -193,6 +193,51 @@ message OneofNestedTextEntity {
 
 message TextHolder {
 	bytes body = 1 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// A text field inside a repeated element: an element is replaced whole, so the
+// CRDT merger could never run.
+message ListTextEntity {
+	option (syncplane.v1.entity) = {
+		name: "list_text"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	repeated TextHolder notes = 2;
+}
+
+// A text field inside a map value: same reason, one container kind over.
+message MapTextEntity {
+	option (syncplane.v1.entity) = {
+		name: "map_text"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	map<string, TextHolder> notes = 2;
+}
+
+// A keyed-list identity inside the element's oneof: the moment a sibling case
+// won a write, every such element would collapse onto the zero value and
+// collide.
+message OneofListIdentityEntity {
+	option (syncplane.v1.entity) = {
+		name: "oneof_list_identity"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	repeated VariantElement entries = 2
+		[(syncplane.v1.field_behavior) = { key_field: "uid" }];
+}
+
+message VariantElement {
+	oneof which {
+		string uid = 1;
+		int32 num = 2;
+	}
+	string label = 3;
 }
 
 // A reference inside a oneof. Polymorphic targets are a real modelling wish,

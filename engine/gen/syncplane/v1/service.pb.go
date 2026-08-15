@@ -1018,8 +1018,12 @@ type QueryRequest struct {
 	Aggregate AggregateOp `protobuf:"varint,11,opt,name=aggregate,proto3,enum=syncplane.v1.AggregateOp" json:"aggregate,omitempty"`
 	// Rows to return per group under AGGREGATE_OP_ROWS, counted from the first
 	// in `order_by` order. Required there and rejected under every other
-	// aggregate; clamped to the server's own row maximum, which `limit` groups
-	// of it multiply against.
+	// aggregate.
+	//
+	// The response carries `limit` × `per_group` rows, so both are clamped
+	// against the row maximum an ungrouped page is clamped to: a request asking
+	// for more groups than that leaves room for gets the first of them, with
+	// has_more set.
 	PerGroup uint32 `protobuf:"varint,12,opt,name=per_group,json=perGroup,proto3" json:"per_group,omitempty"`
 	// Whether each row group reports how many rows it holds in all. It costs a
 	// walk of every matching row of every returned group, where the rows

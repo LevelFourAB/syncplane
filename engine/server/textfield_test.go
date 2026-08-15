@@ -61,6 +61,20 @@ var _ = Describe("Text fields", func() {
 			To(MatchError(ContainSubstring("already registered")))
 	})
 
+	It("rejects a text field inside a repeated element", func() {
+		_, err := server.New(newTestStore(),
+			server.WithEntities(&testdatav1.ListTextEntity{}))
+		Expect(err).To(MatchError(ContainSubstring(
+			`text field "notes.body" is inside repeated field "notes"`)))
+	})
+
+	It("rejects a text field inside a map value", func() {
+		_, err := server.New(newTestStore(),
+			server.WithEntities(&testdatav1.MapTextEntity{}))
+		Expect(err).To(MatchError(ContainSubstring(
+			`text field "notes.body" is inside map field "notes"`)))
+	})
+
 	Describe("over push", func() {
 		var (
 			ctx    context.Context
