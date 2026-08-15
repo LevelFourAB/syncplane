@@ -54,6 +54,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
 - [Restore a field to a previous value](how-to/restore-a-field.md)
 - [Handle failures](how-to/handle-failures.md)
+- [Test your app without a server](how-to/test-your-app.md)
 
 **Working on syncplane itself**
 

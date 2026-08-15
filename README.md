@@ -56,6 +56,10 @@ It ships as two halves joined by a protobuf wire contract: a Go server
 - 🧩 **Runtime schemas** — an app's entities can arrive as a
   `FileDescriptorSet` at runtime instead of compiled-in Go, and one process can
   host many apps.
+- 🧪 **App-author test kit** — `syncplane/testing` runs a real client against
+  an in-process fake server in any test runner: go offline, reject a write,
+  hold pushes, force a re-bootstrap, and assert exactly what the user would
+  see.
 - 🖧 **One node or many** — SQLite plus an in-process notifier needs no
   infrastructure; swap in `pgstore` and `pgnotify` and several nodes share one
   Postgres database. Nothing above the storage seam changes.

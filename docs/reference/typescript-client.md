@@ -2122,6 +2122,39 @@ are missing, every tab runs its own stream. See
 
 ---
 
+## 15. Test kit (`syncplane/testing`)
+
+An in-process fake of the engine's `SyncService`, for testing app logic in
+any test runner — see
+[Test your app without a server](../how-to/test-your-app.md) for the recipes.
+
+```ts
+createTestClient(opts): Promise<TestClient>   // real SyncClient + in-memory server
+createTestServer(opts): TestServer            // share one across clients
+```
+
+- `TestClientOptions` — every `SyncClientOptions` field except
+  `transport`/`url`/`wireFormat`/`kvStore`, plus `server` (connect to an
+  existing `TestServer`; `entities` may then be omitted), `clientId`
+  (deterministic, default `test-client-<n>`) and `start` (default true).
+- `TestClient` — `client`, `db`, `server`, `net`
+  (`offline()`/`online()`/`isOffline`), `clientId`, `rejections`
+  (every `RejectionInfo`, oldest first), `sync()`, `close()`.
+- `TestServer` — `transport()`, `reject(match?, code?, message?)`,
+  `holdPushes()`, `gc(workspace?)`, `revoke(id)`/`restore(id)`,
+  `mutator(name, m)`, seeding and assertions via
+  `put`/`del`/`get`/`rows`, recorded `pushes`. Applies mutations with engine
+  semantics: watermarks, per-field LWW, text union on PUT, CAS, atomic
+  batches, tombstones and a GC horizon.
+- Types: `TestClientOptions`, `TestNet`, `TestServerOptions`, `TestMutator`,
+  `TestMutatorTx`, `RejectMatch`, `RejectPredicate`, `PushHold`; class
+  `Rejection` (throw from a mutator to reject); `DEFAULT_WORKSPACE` (`'main'`).
+
+Not simulated: partial-sync scoping, server queries, presence rooms,
+multi-tab.
+
+---
+
 ## Quick mental model
 
 - **Local-first:** every read/write hits the local store immediately; sync is in the
