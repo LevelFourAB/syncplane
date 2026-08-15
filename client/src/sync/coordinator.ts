@@ -41,9 +41,14 @@ import {
 import { CountingWrite, type KVRead, type KVStore } from '../kv/store.js';
 import { type EntityRegistry, setTextFieldBytes, textFieldBytes } from '../mutations.js';
 import type { Mutex } from '../mutex.js';
-import { compactPending, readPushedThrough, writePushedThrough } from '../optimistic/compact.js';
+import { compactPending } from '../optimistic/compact.js';
 import type { IndexCache } from '../optimistic/index-maintain.js';
-import { enqueuePending, readPending } from '../optimistic/queue.js';
+import {
+	enqueuePending,
+	readPending,
+	readPushedThrough,
+	writePushedThrough,
+} from '../optimistic/queue.js';
 import {
 	applyBootstrapRows,
 	applyCrudLocally,
@@ -1506,7 +1511,7 @@ export class Coordinator {
 		const own = this.opts.undoRefIds?.(workspaceId) ?? EMPTY_IDS;
 		const intent = this.opts.intent;
 		const result = await this.opts.kvMutex.run(() =>
-			compactPending(this.opts.kv, this.opts.registry, workspaceId, (tx) =>
+			compactPending(this.opts.kv, this.opts.registry, this.opts.mirrors, workspaceId, (tx) =>
 				// The undo-ref union — every live tab's record, this one included — is
 				// read INSIDE the compaction transaction: atomic with the renumber, so
 				// referenced mutations are never folded or renumbered out from under

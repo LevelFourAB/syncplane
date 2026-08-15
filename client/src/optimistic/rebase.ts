@@ -51,10 +51,9 @@ import { reportError } from '../report.js';
 import { applyTextDeltas, TextDeltaUnusableError } from '../sync/textdelta.js';
 import { isFragment } from '../text/index.js';
 import { TouchSet } from '../touch.js';
-import { writePushedThrough } from './compact.js';
 import { markIndexesBuilt } from './index-build.js';
 import { deletePrefixes, type IndexCache, indexedRecord } from './index-maintain.js';
-import { dropAcked, enqueuePending, readPending } from './queue.js';
+import { dropAcked, enqueuePending, readPending, writePushedThrough } from './queue.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve

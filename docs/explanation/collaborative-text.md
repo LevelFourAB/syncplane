@@ -92,8 +92,10 @@ in the one transaction that makes a local edit crash-safe.
 
 Reads fold the log back, so stored rows, rebase replay and the `Changes` feed
 all still see whole documents and nothing that reads a row has to know. The log
-is derived state with the overlay's lifetime: a rebase clears both, and replay
-rebuilds them from the queue.
+is derived state with the overlay's lifetime: anything that renumbers the queue
+— a rebase, a resequence, a compaction — clears both, and replay rebuilds them
+from the queue. It has to, because a log entry is keyed by the mutation id that
+wrote it.
 
 Only a pure text PATCH whose fields all carry fragments takes that path — a mask
 that also names a scalar, or a whole-document write, writes the row and drops

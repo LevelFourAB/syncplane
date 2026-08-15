@@ -386,6 +386,22 @@ describe('planCompaction', () => {
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		expect(plan.changed).toBe(false);
 	});
+
+	it('leaves the queue it planned from untouched', () => {
+		// compactPending deletes the old pending keys through the very array it
+		// handed over, so a plan that renumbered in place would strand whatever
+		// it moved — under an id nothing ever deletes.
+		const original = [
+			put(1n, { id: 't1', title: 'a' }),
+			put(2n, { id: 't1', title: 'b' }),
+			custom(3n),
+		];
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+
+		expect(plan.changed).toBe(true);
+		expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+		expect(ids(original)).toEqual([ 1n, 2n, 3n ]);
+	});
 });
 
 describe('planCompaction with mergers', () => {
@@ -469,7 +485,7 @@ describe('compactPending', () => {
 			patch(2n, 't1', { completed: true }, [ 'completed' ]),
 			patch(3n, 't1', { title: 'c' }, [ 'title' ]),
 		]);
-		const result = await compactPending(kv, registry, WS, () => NO_PROTECTED);
+		const result = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
 		expect(result.changed).toBe(true);
 		expect(result.pendingCount).toBe(1);
 
@@ -483,9 +499,31 @@ describe('compactPending', () => {
 		}
 	});
 
+	it('deletes the old key of a barrier the renumbering moved', async () => {
+		const kv = await seedQueue([
+			put(1n, { id: 't1', title: 'a' }),
+			put(2n, { id: 't1', title: 'b' }),
+			custom(3n),
+		]);
+		const result = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
+		expect(result.changed).toBe(true);
+		expect(result.pendingCount).toBe(2);
+
+		const tx = await kv.read();
+		try {
+			// An entry left behind at id 3 is the custom mutation a SECOND time,
+			// under an id the server has never seen — so the watermark cannot
+			// dedupe it and the mutator runs twice.
+			expect(ids(await readPending(tx, WS))).toEqual([ 1n, 2n ]);
+			expect(await tx.get(metaLastMutationId(WS))).toBe('2');
+		} finally {
+			tx.release();
+		}
+	});
+
 	it('is a no-op (no write) when nothing compacts', async () => {
 		const kv = await seedQueue([ put(1n, { id: 't1' }), put(2n, { id: 't2' }) ]);
-		const result = await compactPending(kv, registry, WS, () => NO_PROTECTED);
+		const result = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
 		expect(result.changed).toBe(false);
 		expect(result.pendingCount).toBe(2);
 

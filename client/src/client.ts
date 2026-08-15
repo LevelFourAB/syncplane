@@ -20,7 +20,7 @@ import {
 	withCoverage,
 } from './coverage.js';
 import { buildEntityApis, type EntityApis } from './db.js';
-import { reconcileStoreEntities } from './entities.js';
+import { reconcileStoreEntities, syncableEntities } from './entities.js';
 import { debugVerifyTouchesEnv } from './env.js';
 import {
 	type CrudMutation,
@@ -49,6 +49,7 @@ import {
 	metaLastMutationId,
 	metaPushedThrough,
 	metaWsPrefix,
+	overlayTextWsPrefix,
 	overlayWsPrefix,
 	PENDING_ROOT,
 	pendingPrefix,
@@ -1670,8 +1671,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	/**
 	 * Deletes every trace of a workspace from the local store: confirmed rows,
-	 * optimistic overlay, bootstrap staging, pending queue and cursor. Watchers
-	 * are notified so the UI drops the rows immediately.
+	 * optimistic overlay and its text log, bootstrap staging, pending queue and
+	 * cursor. Watchers are notified so the UI drops the rows immediately.
+	 *
+	 * It sweeps every entity the STORE syncs rather than the ones this build
+	 * registered, for the reason wipeConfirmedState does: another build's tab may
+	 * have filled rows this one cannot read, and leaving them behind would hand
+	 * them to whichever build registers that entity next.
 	 *
 	 * The mutation-id counter and its push mark are the exception and survive:
 	 * the server's per-(workspace, client) watermark is not purged with the
@@ -1693,9 +1699,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			try {
 				const queued = await readPending(tx, workspaceId);
 				const doomed: string[] = [];
-				for (const entity of this.entityRegistry.names()) {
+				for (const entity of await syncableEntities(tx, this.entityRegistry)) {
 					for await (const [ k ] of tx.scan(confirmedWsPrefix(entity, workspaceId))) doomed.push(k);
 					for await (const [ k ] of tx.scan(overlayWsPrefix(entity, workspaceId))) doomed.push(k);
+					// The text log is overlay state under a root of its own, so it does
+					// not come along with the `o/` sweep above; left behind, its
+					// fragments would fold onto whatever rows land under this workspace
+					// next.
+					for await (const [ k ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
+						doomed.push(k);
+					}
 					// The index positions ride on the confirmed rows above, so they
 					// are deleted with them and need nothing here.
 					touched.entity(workspaceId, entity);

@@ -3,9 +3,13 @@ import { describe, expect, it, vi } from 'vitest';
 import { SyncClient } from '../../src/client.js';
 import { CodeWorkspacePurged } from '../../src/codes.js';
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { overlayTextWsPrefix } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import type { KVStore } from '../../src/kv/store.js';
 import type { Row } from '../../src/read.js';
 import type { RejectionInfo } from '../../src/sync/coordinator.js';
+import { encodeTextDoc, TextDoc } from '../../src/text/index.js';
 
 // One client, several workspaces, one store. These specs stay entirely local
 // (no start(), so no transport): they cover the partitioning the account-scoped
@@ -32,6 +36,24 @@ function newClient(
 }
 
 const flush = () => new Promise((r) => setTimeout(r, 5));
+
+function bodyDoc(peer: string, s: string): Uint8Array {
+	const d = new TextDoc(peer);
+	d.insert(0, s);
+	return encodeTextDoc(d);
+}
+
+/** One workspace's optimistic text-log keys for the widget entity. */
+async function logKeys(kv: KVStore, workspaceId: string): Promise<string[]> {
+	const tx = await kv.read();
+	try {
+		const keys: string[] = [];
+		for await (const [ k ] of tx.scan(overlayTextWsPrefix('widget', workspaceId))) keys.push(k);
+		return keys;
+	} finally {
+		tx.release();
+	}
+}
 
 describe('multi-workspace client', () => {
 	it('requires an accountId once it holds more than one workspace', () => {
@@ -228,6 +250,35 @@ describe('multi-workspace client', () => {
 		} finally {
 			errSpy.mockRestore();
 		}
+	});
+
+	it('a purge takes the optimistic text log with it', async () => {
+		const kv = new MemoryKVStore();
+		const client = new SyncClient({
+			accountId: 'acct',
+			workspaces: [ A, B ],
+			defaultWorkspace: A,
+			kvStore: kv,
+			entities: [ WidgetSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		for (const ws of [ A, B ]) {
+			await client.ws(ws).mutate.put(WidgetSchema, { id: 'w1', body: bodyDoc('seed', 'hello') });
+			const handle = await client.ws(ws).text(WidgetSchema, 'w1', 'body');
+			await handle.insert(5, ' world');
+			handle.close();
+		}
+		expect(await logKeys(kv, B)).not.toEqual([]);
+
+		await client.removeWorkspace(B, { purge: true });
+
+		// Left behind, the fragments fold onto whatever rows land under this
+		// workspace next — a re-added workspace's fresh bootstrap rows.
+		expect(await logKeys(kv, B)).toEqual([]);
+		// And a purge is scoped to the one workspace, here as everywhere else.
+		expect(await logKeys(kv, A)).not.toEqual([]);
+		await client.close();
 	});
 
 	it('reports nothing discarded when the workspace is removed without a purge', async () => {

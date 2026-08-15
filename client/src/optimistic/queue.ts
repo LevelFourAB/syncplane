@@ -1,7 +1,7 @@
 import { fromBinary, toBinary } from '@bufbuild/protobuf';
 
 import { type Mutation, MutationSchema } from '../gen/syncplane/v1/mutation_pb.js';
-import { pendingKey, pendingPrefix } from '../keys.js';
+import { metaPushedThrough, pendingKey, pendingPrefix } from '../keys.js';
 import type { KVRead, KVWrite } from '../kv/store.js';
 
 /**
@@ -28,6 +28,25 @@ export async function readPending(tx: KVRead, workspaceId: string): Promise<Muta
 		result.push(fromBinary(MutationSchema, v as Uint8Array));
 	}
 	return result;
+}
+
+/**
+ * Reads a workspace's durable pushed-through watermark — how much of its queue
+ * has been handed to the server. Absent — a workspace that has never pushed —
+ * reads as 0. Compaction may only renumber/fold ids strictly above it.
+ */
+export async function readPushedThrough(tx: KVRead, workspaceId: string): Promise<bigint> {
+	const raw = (await tx.get(metaPushedThrough(workspaceId))) as string | undefined;
+	return raw ? BigInt(raw) : 0n;
+}
+
+/** Advances a workspace's pushed-through watermark. Monotonic; callers raise it. */
+export async function writePushedThrough(
+	tx: KVWrite,
+	workspaceId: string,
+	id: bigint,
+): Promise<void> {
+	await tx.put(metaPushedThrough(workspaceId), id.toString());
 }
 
 /** Drops pending mutations of one workspace with id <= acked; returns the survivors. */

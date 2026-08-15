@@ -7,8 +7,8 @@ import {
 	type Mutation,
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
-import { metaLastMutationId, metaPushedThrough, pendingKey } from '../keys.js';
-import type { KVRead, KVStore, KVWrite } from '../kv/store.js';
+import { metaLastMutationId, pendingKey } from '../keys.js';
+import type { KVRead, KVStore } from '../kv/store.js';
 import {
 	type EntityDef,
 	type EntityMergers,
@@ -16,7 +16,9 @@ import {
 	mergeMask,
 } from '../mutations.js';
 import { isFragment, mergeFragments, mergeText } from '../text/index.js';
-import { enqueuePending, readPending } from './queue.js';
+import { TouchSet } from '../touch.js';
+import { enqueuePending, readPending, readPushedThrough } from './queue.js';
+import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
 
 /**
  * Pending-queue compaction. Offline, every edit enqueues its own mutation, so a
@@ -27,7 +29,10 @@ import { enqueuePending, readPending } from './queue.js';
  * one DELETE — so the queue the rebase replays and the push ships is short.
  *
  * The merge is overlay-preserving by construction (per-field LWW, applied in
- * order), so the optimistic overlay does NOT need rebuilding afterwards.
+ * order), so the merged view a reader sees is the same either side of it. The
+ * overlay is still rebuilt from the renumbered queue, because the optimistic
+ * text log is keyed by the mutation id that wrote it and the renumbering frees
+ * those ids to be minted again — see compactPending.
  *
  * Safety rails (see planCompaction):
  *  - Only the never-pushed tail (id > pushedThrough) is touched. Anything the
@@ -141,8 +146,14 @@ export function planCompaction(
 	let nextId = pushedThrough;
 	for (const slot of slots) {
 		nextId += 1n;
+		// A passthrough is CLONED rather than renumbered where it lies: the
+		// caller deletes the old pending keys through the very array it handed
+		// over, so moving an id in place would leave that entry's key un-deleted
+		// — a second copy of the mutation, under an id the server's watermark has
+		// never seen and so cannot dedupe.
 		const mutation = slot.passthrough
-			?? create(MutationSchema, {
+			? clone(MutationSchema, slot.passthrough)
+			: create(MutationSchema, {
 				clientId: slot.clientId,
 				payload: { case: 'crud', value: slot.crud! },
 			});
@@ -314,31 +325,12 @@ export interface CompactionResult {
 }
 
 /**
- * Reads a workspace's durable pushed-through watermark. Absent — a workspace
- * that has never pushed — reads as 0. Compaction may only renumber/fold ids
- * strictly above it.
- */
-export async function readPushedThrough(tx: KVRead, workspaceId: string): Promise<bigint> {
-	const raw = (await tx.get(metaPushedThrough(workspaceId))) as string | undefined;
-	return raw ? BigInt(raw) : 0n;
-}
-
-/** Advances a workspace's pushed-through watermark. Monotonic; callers raise it. */
-export async function writePushedThrough(
-	tx: KVWrite,
-	workspaceId: string,
-	id: bigint,
-): Promise<void> {
-	await tx.put(metaPushedThrough(workspaceId), id.toString());
-}
-
-/**
  * Compacts ONE workspace's pending queue in one KV transaction: reads it AND
  * that workspace's durable pushed-through watermark, plans, and — when anything
- * changed — rewrites the tail and lowers its mutation-id counter to the new
- * high-water mark. Compaction never spans workspaces: ids are counted per
- * (workspace, client) and must stay gap-free within that pair. The
- * optimistic overlay is left untouched (the merge preserves it). Reading the
+ * changed — rewrites the tail, lowers its mutation-id counter to the new
+ * high-water mark, and rebuilds the optimistic overlay from the renumbered
+ * queue. Compaction never spans workspaces: ids are counted per
+ * (workspace, client) and must stay gap-free within that pair. Reading the
  * watermark inside this transaction is what makes the safety invariant hold
  * across tabs: a peer that advanced it (before its own push) is observed here,
  * so we never renumber ids the server may already have seen. The protected
@@ -351,6 +343,7 @@ export async function writePushedThrough(
 export async function compactPending(
 	kv: KVStore,
 	registry: EntityRegistry,
+	mirrors: MirrorMap,
 	workspaceId: string,
 	readProtectedIds: (tx: KVRead) => ReadonlySet<bigint> | Promise<ReadonlySet<bigint>>,
 ): Promise<CompactionResult> {
@@ -370,6 +363,26 @@ export async function compactPending(
 			? plan.mutations[plan.mutations.length - 1]!.mutationId
 			: pushedThrough;
 		await tx.put(metaLastMutationId(workspaceId), maxId.toString());
+		// The fold preserves the overlay ROW by construction, but the optimistic
+		// text log does not ride on the row: an entry is keyed by the mutation id
+		// that wrote it (keys.ts), and the renumbering above frees the ids above
+		// the new high-water mark for the next local write to mint. Left alone,
+		// the entry that write appends lands on top of an edit only the log still
+		// holds, and the fold then drops that edit and everything queued behind
+		// it. runResequence rebuilds both for the same reason; here the replay
+		// costs a pass over the queue this call has already shortened.
+		//
+		// Nothing to notify: the replay reproduces the merged view the fold
+		// preserved, which expectSameOverlay pins, so the TouchSet is filled and
+		// dropped rather than fanned out to every watcher on every push cycle.
+		await clearOverlayAndReplay(
+			tx,
+			registry,
+			mirrors,
+			workspaceId,
+			plan.mutations,
+			new TouchSet(),
+		);
 		await tx.commit();
 		return { remap: plan.remap, pendingCount: plan.mutations.length, changed: true };
 	} catch (err) {

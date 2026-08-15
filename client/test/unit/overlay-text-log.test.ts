@@ -7,12 +7,15 @@ import { CrudOp, type Mutation, MutationSchema } from '../../src/gen/syncplane/v
 import {
 	confirmedKey,
 	type ConfirmedRecord,
+	metaLastMutationId,
 	overlayKey,
 	overlayTextRowPrefix,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVWrite } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
+import { compactPending } from '../../src/optimistic/compact.js';
+import { enqueuePending } from '../../src/optimistic/queue.js';
 import {
 	applyMutationLocally,
 	clearOverlayAndReplay,
@@ -250,6 +253,49 @@ describe('optimistic text log', () => {
 		await clearOverlayAndReplay(tx, registry, noMirrors, WS, [], new TouchSet());
 		expect(await countLog(tx)).toBe(0);
 		expect(await mergedText(tx)).toBe('ab');
+		tx.release();
+	});
+
+	it('survives the renumbering a compaction does', async () => {
+		const kv = new MemoryKVStore();
+		let state = (() => {
+			const d = new TextDoc('p1');
+			d.insert(0, 'x');
+			return encodeTextDoc(d);
+		})();
+
+		// Three keystrokes, each its own queued mutation and its own log entry.
+		{
+			const tx = await kv.write();
+			await seedConfirmed(tx, state);
+			let id = 1n;
+			for (const ch of [ ...'abc' ]) {
+				const edit = typeInto(state, 'p1', 0, ch);
+				state = edit.state;
+				const m = bodyPatch(id++, edit.fragment);
+				await enqueuePending(tx, WS, m);
+				await applyMutationLocally(tx, registry, noMirrors, WS, m, new TouchSet());
+			}
+			await tx.put(metaLastMutationId(WS), '3');
+			await tx.commit();
+		}
+
+		// The push cycle folds the burst into one slot and brings the mutation-id
+		// counter down with it, so ids 2 and 3 are free to be minted again.
+		const result = await compactPending(kv, registry, noMirrors, WS, () => new Set<bigint>());
+		expect(result.changed).toBe(true);
+
+		const tx = await kv.write();
+		expect(await tx.get(metaLastMutationId(WS))).toBe('1');
+		expect(await mergedText(tx)).toBe('cbax');
+
+		// The next keystroke mints id 2 — an id the log used before the fold. Its
+		// entry must not land on top of an edit that is still only in the log.
+		const edit = typeInto(state, 'p1', 0, 'd');
+		const next = bodyPatch(2n, edit.fragment);
+		await enqueuePending(tx, WS, next);
+		await applyMutationLocally(tx, registry, noMirrors, WS, next, new TouchSet());
+		expect(await mergedText(tx)).toBe('dcbax');
 		tx.release();
 	});
 
