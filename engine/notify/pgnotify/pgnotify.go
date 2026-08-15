@@ -369,6 +369,11 @@ func (c *core) subscribed() []nsWorkspace {
 type payload struct {
 	NS string `json:"ns"`
 	WS string `json:"ws"`
+	// More carries the rest of a batched publish — see nextBatch. A decoder
+	// from before this field existed ignores it and still delivers the head
+	// entry, so a mixed-version deployment degrades to slower pokes, not
+	// lost ones.
+	More []payload `json:"more,omitempty"`
 }
 
 // deliver routes one received notification to its namespace's fan-out.
@@ -378,8 +383,15 @@ func (c *core) deliver(raw string) {
 		c.logger.Warn("pgnotify: undecodable notification", "error", err)
 		return
 	}
-	if local := c.lookup(p.NS); local != nil {
-		local.Notify(p.WS)
+	c.notifyLocal(p.NS, p.WS)
+	for _, m := range p.More {
+		c.notifyLocal(m.NS, m.WS)
+	}
+}
+
+func (c *core) notifyLocal(ns, ws string) {
+	if local := c.lookup(ns); local != nil {
+		local.Notify(ws)
 	}
 }
 
@@ -389,31 +401,93 @@ func (c *core) deliver(raw string) {
 // time an entry lands here.
 func (c *core) publishLoop(ctx context.Context) {
 	for {
-		key, ok := c.q.pop(ctx)
+		body, ok := c.nextBatch(ctx)
 		if !ok {
 			return
 		}
-		body, err := json.Marshal(payload{NS: key.ns, WS: key.ws})
-		if err != nil {
-			c.logger.Error("pgnotify: encode notification", "error", err)
+		if body == "" {
 			continue
 		}
-		if len(body) > pglisten.MaxPayload {
-			// A workspace id long enough to hit this is pathological, and the
-			// alternative to skipping it is failing a write path over a poke.
-			c.logger.Warn("pgnotify: notification exceeds the NOTIFY payload limit; dropping",
-				"workspace", key.ws, "bytes", len(body))
-			continue
-		}
-		if err := c.link.Publish(ctx, c.channel, string(body)); err != nil {
+		if err := c.link.Publish(ctx, c.channel, body); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			// Best-effort: subscribers on other nodes fall back to polling, and
 			// this node's own subscribers were served before the entry queued.
-			c.logger.Warn("pgnotify: publish failed", "workspace", key.ws, "error", err)
+			c.logger.Warn("pgnotify: publish failed", "error", err)
 		}
 	}
+}
+
+// nextBatch blocks for the next queued key, then drains as many more as one
+// NOTIFY can carry, encoded as the head payload with the rest in More.
+//
+// Batching is what lifts the publish ceiling. One entry per publish costs one
+// database round trip per key, capping a node at one notification per RTT with
+// the queue absorbing — and eventually dropping — the overshoot. Filling each
+// round trip up to MaxPayload lifts that ceiling by the batch factor, and
+// divides by the same factor the async-queue entries every listening backend
+// in the deployment must scan. A quiet deployment batches one: the loop takes
+// only what is already queued, never waits for more.
+//
+// It returns ok=false once ctx is done. An empty body with ok=true is a key
+// whose id alone overflows a NOTIFY, dropped as the licensed failure.
+func (c *core) nextBatch(ctx context.Context) (string, bool) {
+	key, ok := c.q.pop(ctx)
+	if !ok {
+		return "", false
+	}
+	head := payload{NS: key.ns, WS: key.ws}
+	body, err := json.Marshal(head)
+	if err != nil {
+		c.logger.Error("pgnotify: encode notification", "error", err)
+		return "", true
+	}
+	if len(body) > pglisten.MaxPayload {
+		// A workspace id long enough to hit this is pathological, and the
+		// alternative to skipping it is failing a write path over a poke.
+		c.logger.Warn("pgnotify: notification exceeds the NOTIFY payload limit; dropping",
+			"workspace", key.ws, "bytes", len(body))
+		return "", true
+	}
+	// size tracks the encoded batch exactly without re-marshaling it per
+	// entry: appending entry n costs its own bytes plus a separating comma,
+	// and the first appended entry also opens the `,"more":[` … `]` framing
+	// (9 bytes, with its closing bracket paid for by the comma the entry
+	// does not need).
+	size := len(body)
+	for {
+		var entry []byte
+		next, ok := c.q.popIf(func(k nsWorkspace) bool {
+			var err error
+			entry, err = json.Marshal(payload{NS: k.ns, WS: k.ws})
+			if err != nil {
+				return false
+			}
+			delta := len(entry) + 1
+			if len(head.More) == 0 {
+				delta += 9
+			}
+			return size+delta <= pglisten.MaxPayload
+		})
+		if !ok {
+			break
+		}
+		size += len(entry) + 1
+		if len(head.More) == 0 {
+			size += 9
+		}
+		head.More = append(head.More, payload{NS: next.ns, WS: next.ws})
+	}
+	if len(head.More) == 0 {
+		return string(body), true
+	}
+	batched, err := json.Marshal(head)
+	if err != nil {
+		c.logger.Error("pgnotify: encode notification", "error", err)
+		return "", true
+	}
+	return string(batched), true
 }
 
 // repoke signals every workspace with a live subscription, after a reconnect
@@ -471,6 +545,28 @@ func (q *queue) wake() {
 	case q.signal <- struct{}{}:
 	default: // a poke is already outstanding; the queue carries the rest
 	}
+}
+
+// popIf pops the head entry if accept approves it, without blocking. It
+// returns ok=false when the queue is empty or the head was refused; a refused
+// head stays queued and leads the next batch.
+func (q *queue) popIf(accept func(nsWorkspace) bool) (nsWorkspace, bool) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.items) == 0 {
+		return nsWorkspace{}, false
+	}
+	key := q.items[0]
+	if !accept(key) {
+		return nsWorkspace{}, false
+	}
+	if len(q.items) == 1 {
+		q.items = nil
+	} else {
+		q.items = q.items[1:]
+	}
+	delete(q.pending, key)
+	return key, true
 }
 
 // pop blocks until an entry is available, returning ok=false once ctx is done.

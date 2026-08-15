@@ -2,6 +2,7 @@ package pgnotify_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -68,6 +69,31 @@ var _ = Describe("pgnotify", func() {
 		nodeA.Notify("ws")
 		Eventually(ch, 5*time.Second).Should(Receive(),
 			"a write on one node must wake a client connected to another")
+	})
+
+	It("delivers a burst of workspaces batched over one channel", func() {
+		// A burst outruns the publisher's round trips, so most of these keys
+		// cross the wire inside a batched payload — this is the end-to-end
+		// check that the other node's decoder unpacks them all.
+		nodeA, nodeB := twoNodes()
+		const workspaces = 300
+		ids := make([]string, workspaces)
+		for i := range ids {
+			ids[i] = fmt.Sprintf("ws-%03d", i)
+		}
+		set := nodeB.SubscribeSet(ids)
+		DeferCleanup(set.Close)
+		for _, ws := range ids {
+			nodeA.Notify(ws)
+		}
+		seen := make(map[string]struct{}, workspaces)
+		Eventually(func() int {
+			for _, ws := range set.Changed() {
+				seen[ws] = struct{}{}
+			}
+			return len(seen)
+		}, 10*time.Second).Should(Equal(workspaces),
+			"every workspace of a burst must arrive, however it was batched")
 	})
 
 	It("reports another node's workspace on the activity stream", func() {
