@@ -2210,6 +2210,93 @@
 			}
 		},
 		{
+			"name": "the ordered index with the longer equality prefix wins over one declared earlier",
+			"indexes": [
+				{
+					"name": "by_label_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				},
+				{
+					"name": "by_label_flag_count",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"count"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"label"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "a"
+								}
+							}
+						},
+						{
+							"cmp": {
+								"path": [
+									"flag"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"boolValue": true
+								}
+							}
+						}
+					]
+				}
+			},
+			"orderBy": [
+				{
+					"path": [
+						"count"
+					],
+					"dir": "DIRECTION_ASC"
+				}
+			],
+			"want": {
+				"index": "by_label_flag_count",
+				"ranges": 1,
+				"ordered": true,
+				"residual": false
+			}
+		},
+		{
 			"name": "an ordering the index stores the other way is not served",
 			"indexes": [
 				{

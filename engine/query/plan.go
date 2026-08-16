@@ -171,8 +171,8 @@ type Index struct {
 }
 
 // PlanQuery picks an index for a predicate plus an ordering, or returns nil to
-// mean "scan". Candidates are considered in order and the first exact-ordered
-// match wins; failing that, the one that narrows the most.
+// mean "scan". The narrowest exact-ordered match wins; failing that, the one
+// that narrows the most. Ties keep the earliest-declared candidate.
 //
 // A nil predicate with a nil/empty order is a full scan of the entity in key
 // order, which no index improves on — the row keyspace IS that index — so it
@@ -205,18 +205,22 @@ func PlanQuery(candidates []Index, pred *Compiled, order *Order) *Plan {
 func bestPlan(candidates []Index, terms []node, order *Order) *Plan {
 	var best *Plan
 	var bestScore int
+	bestServes := false
 	for _, c := range candidates {
 		p, score := planAgainst(c, terms, order)
 		if p == nil {
 			continue
 		}
-		if p.Ordered && score > 0 {
-			// An ordered plan with at least one pinned component can serve the
-			// query end to end; nothing later can beat that.
-			return p
-		}
-		if best == nil || score > bestScore {
-			best, bestScore = p, score
+		// An ordered plan with at least one pinned component serves the query
+		// end to end. Those outrank everything, and among themselves the longer
+		// equality prefix wins — a later `[status, priority, created]` narrows
+		// strictly more than an earlier `[status, created]` even though both
+		// are ordered. Elsewhere the score alone decides, so an ordered plan
+		// that pins nothing still competes with narrower unordered ones rather
+		// than trumping them.
+		serves := p.Ordered && score > 0
+		if best == nil || (serves && !bestServes) || (serves == bestServes && score > bestScore) {
+			best, bestScore, bestServes = p, score, serves
 		}
 	}
 	return best

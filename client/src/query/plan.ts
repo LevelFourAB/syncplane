@@ -242,8 +242,8 @@ interface Reduction {
 
 /**
  * Picks an index for a predicate plus an ordering, or returns undefined to mean
- * "scan". Candidates are considered in order; the first exact-ordered match
- * wins, failing that the one that narrows the most.
+ * "scan". The narrowest exact-ordered match wins, failing that the one that
+ * narrows the most. Ties keep the earliest-declared candidate.
  *
  * A query with neither a predicate nor an ordering is a full scan in key order,
  * which no index improves on — the row keyspace IS that index — so it declines
@@ -280,13 +280,22 @@ function bestPlan(
 ): QueryPlan | undefined {
 	let best: QueryPlan | undefined;
 	let bestScore = -1;
+	let bestServes = false;
 	for (const c of candidates) {
 		const got = planAgainst(c, terms, orderBy);
 		if (!got) continue;
-		if (got.plan.ordered && got.score > 0) return got.plan;
-		if (got.score > bestScore) {
+		// An ordered plan with at least one pinned component serves the query
+		// end to end. Those outrank everything, and among themselves the longer
+		// equality prefix wins — a later `[status, priority, created]` narrows
+		// strictly more than an earlier `[status, created]` even though both
+		// are ordered. Elsewhere the score alone decides, so an ordered plan
+		// that pins nothing still competes with narrower unordered ones rather
+		// than trumping them.
+		const serves = got.plan.ordered && got.score > 0;
+		if ((serves && !bestServes) || (serves === bestServes && got.score > bestScore)) {
 			best = got.plan;
 			bestScore = got.score;
+			bestServes = serves;
 		}
 	}
 	return best;
