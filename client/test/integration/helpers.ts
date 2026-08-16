@@ -6,6 +6,7 @@ import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import {
 	ArticleSchema,
 	HistoriedSchema,
+	KeyedTextEntitySchema,
 	PairSchema,
 	WidgetSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
@@ -35,6 +36,7 @@ export function newClient(
 			PairSchema,
 			HistoriedSchema,
 			ArticleSchema,
+			KeyedTextEntitySchema,
 			FieldHistorySchema,
 		],
 		// Integration tests drive sync explicitly unless a test opts in.
@@ -78,6 +80,7 @@ export function newMultiClient(
 			PairSchema,
 			HistoriedSchema,
 			ArticleSchema,
+			KeyedTextEntitySchema,
 			FieldHistorySchema,
 		],
 		pollIntervalMs: 0,

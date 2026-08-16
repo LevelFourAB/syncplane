@@ -1155,30 +1155,32 @@ func historyPrior(info *entityInfo, base proto.Message, paths []string) ([]byte,
 // recording an empty before-state would make a later restore wipe the field.
 func reduceHistoryText(info *entityInfo, prior protoreflect.Message, paths []string) error {
 	for _, tf := range info.textFields {
-		if !maskCovers(paths, tf.path) {
-			continue
+		for _, ti := range tf.instances(prior) {
+			if !maskCovers(paths, ti.path) {
+				continue
+			}
+			doc := ti.bytes()
+			if len(doc) == 0 {
+				continue
+			}
+			plain, err := text.PlainText(doc)
+			if err != nil {
+				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.path, err)
+			}
+			if plain == "" {
+				// An emptied document still encodes to bytes — its tombstoned runs
+				// outlive the text. Clearing keeps "held nothing" indistinguishable
+				// from "was never set", which is what a restore of either has to do,
+				// and is why the empty plain-string value is not recorded instead.
+				ti.clear()
+				continue
+			}
+			value, err := text.EncodePlainString(plain)
+			if err != nil {
+				return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, ti.path, err)
+			}
+			ti.set(value)
 		}
-		doc := chainGetBytes(prior, tf.chain)
-		if len(doc) == 0 {
-			continue
-		}
-		plain, err := text.PlainText(doc)
-		if err != nil {
-			return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, tf.path, err)
-		}
-		if plain == "" {
-			// An emptied document still encodes to bytes — its tombstoned runs
-			// outlive the text. Clearing keeps "held nothing" indistinguishable
-			// from "was never set", which is what a restore of either has to do,
-			// and is why the empty plain-string value is not recorded instead.
-			chainClearBytes(prior, tf.chain)
-			continue
-		}
-		value, err := text.EncodePlainString(plain)
-		if err != nil {
-			return fmt.Errorf("server: entity %q history: text field %q: %w", info.name, tf.path, err)
-		}
-		chainSetBytes(prior, tf.chain, value)
 	}
 	return nil
 }

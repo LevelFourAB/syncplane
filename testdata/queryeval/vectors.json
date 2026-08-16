@@ -1249,6 +1249,95 @@
 			"want": true
 		},
 		{
+			"name": "text inside a keyed list element projects per element under any",
+			"type": "keyed_text",
+			"row": {
+				"id": "k1",
+				"notes": [
+					{
+						"id": "n1",
+						"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+					},
+					{
+						"id": "n2"
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"notes"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"body"
+							],
+							"op": "STR_OP_CONTAINS",
+							"value": "lo wo"
+						}
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "text inside a keyed list element mismatch",
+			"type": "keyed_text",
+			"row": {
+				"id": "k1",
+				"notes": [
+					{
+						"id": "n1",
+						"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+					}
+				]
+			},
+			"cond": {
+				"exists": {
+					"path": [
+						"notes"
+					],
+					"cond": {
+						"str": {
+							"path": [
+								"body"
+							],
+							"op": "STR_OP_CONTAINS",
+							"value": "goodbye"
+						}
+					}
+				}
+			},
+			"want": false
+		},
+		{
+			"name": "text inside a map value is addressed by entry key",
+			"type": "keyed_text",
+			"row": {
+				"id": "k1",
+				"sections": {
+					"intro": {
+						"body": "AQEBcAsBAAELBgtoZWxsbyB3b3JsZAA="
+					}
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"sections",
+						"intro",
+						"body"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "hello world"
+					}
+				}
+			},
+			"want": true
+		},
+		{
 			"name": "unset text field reads as empty string",
 			"row": {},
 			"cond": {

@@ -426,30 +426,35 @@ func (e *rowEmitter) emitChange(tx storage.ReadTx, row storage.Row) (*syncplanev
 	}
 	var deltas []*syncplanev1.FieldDelta
 	for _, tf := range info.textFields {
-		cur := chainGetBytes(msg.ProtoReflect(), tf.chain)
-		if len(cur) == 0 {
-			continue // nothing to save, and nothing the recipient must keep
+		for _, ti := range tf.instances(msg.ProtoReflect()) {
+			cur := ti.bytes()
+			if len(cur) == 0 {
+				continue // nothing to save, and nothing the recipient must keep
+			}
+			// The log — and so FieldDelta.field — is keyed by instance path:
+			// each element of a keyed list or map is its own document with its
+			// own span of entries.
+			frags, complete, err := tx.FieldDeltas(row.Entity, row.Key, ti.path, e.deltaAfter)
+			if err != nil {
+				return nil, err
+			}
+			if !complete {
+				continue // the log does not cover the span; ship the document
+			}
+			folded, ok := foldFragments(frags)
+			if !ok {
+				continue
+			}
+			// An empty fold means the document did not move over the span — the
+			// recipient keeps what it holds, and the document rides nowhere. That
+			// is the case a row whose OTHER fields changed hits, and it is the one
+			// that saves the most.
+			if len(folded) > 0 && float64(len(folded)) >= float64(len(cur))*fragmentSizeRatio {
+				continue
+			}
+			deltas = append(deltas, &syncplanev1.FieldDelta{Field: ti.path, Fragment: folded})
+			ti.clear()
 		}
-		frags, complete, err := tx.FieldDeltas(row.Entity, row.Key, tf.path, e.deltaAfter)
-		if err != nil {
-			return nil, err
-		}
-		if !complete {
-			continue // the log does not cover the span; ship the document
-		}
-		folded, ok := foldFragments(frags)
-		if !ok {
-			continue
-		}
-		// An empty fold means the field did not move over the span — the
-		// recipient keeps what it holds, and the document rides nowhere. That is
-		// the case a row whose OTHER fields changed hits, and it is the one that
-		// saves the most.
-		if len(folded) > 0 && float64(len(folded)) >= float64(len(cur))*fragmentSizeRatio {
-			continue
-		}
-		deltas = append(deltas, &syncplanev1.FieldDelta{Field: tf.path, Fragment: folded})
-		chainClearBytes(msg.ProtoReflect(), tf.chain)
 	}
 	if len(deltas) == 0 {
 		return rc, nil

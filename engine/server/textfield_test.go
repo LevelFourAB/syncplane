@@ -61,18 +61,17 @@ var _ = Describe("Text fields", func() {
 			To(MatchError(ContainSubstring("already registered")))
 	})
 
-	It("rejects a text field inside a repeated element", func() {
+	It("rejects a text field inside an unkeyed repeated element", func() {
 		_, err := server.New(newTestStore(),
 			server.WithEntities(&testdatav1.ListTextEntity{}))
 		Expect(err).To(MatchError(ContainSubstring(
 			`text field "notes.body" is inside repeated field "notes"`)))
 	})
 
-	It("rejects a text field inside a map value", func() {
+	It("accepts a text field inside a keyed list element and a map value", func() {
 		_, err := server.New(newTestStore(),
-			server.WithEntities(&testdatav1.MapTextEntity{}))
-		Expect(err).To(MatchError(ContainSubstring(
-			`text field "notes.body" is inside map field "notes"`)))
+			server.WithEntities(&testdatav1.KeyedTextEntity{}, &testdatav1.MapTextEntity{}))
+		Expect(err).NotTo(HaveOccurred())
 	})
 
 	Describe("over push", func() {
@@ -329,6 +328,216 @@ var _ = Describe("Text fields", func() {
 			})
 		})
 
+		Describe("inside keyed list elements and map values", func() {
+			getKeyed := func(key string) *testdatav1.KeyedTextEntity {
+				GinkgoHelper()
+				resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+					WorkspaceId: ws,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				for _, rc := range resp.Msg.GetPatch().GetChanges() {
+					if rc.GetEntity() == "keyed_text" && rc.GetKey() == key && !rc.GetTombstone() {
+						var e testdatav1.KeyedTextEntity
+						Expect(proto.Unmarshal(rc.GetValue(), &e)).To(Succeed())
+						return &e
+					}
+				}
+				Fail("keyed_text " + key + " not found")
+				return nil
+			}
+
+			noteOf := func(e *testdatav1.KeyedTextEntity, id string) *testdatav1.KeyedNote {
+				GinkgoHelper()
+				for _, n := range e.GetNotes() {
+					if n.GetId() == id {
+						return n
+					}
+				}
+				Fail("note " + id + " not found")
+				return nil
+			}
+
+			It("merges concurrent PATCHes to the same element's document", func() {
+				base := bodyDoc("seed", "[]")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id: "k1",
+					Notes: []*testdatav1.KeyedNote{
+						{Id: "n1", Label: "first", Body: base},
+						{Id: "n2", Label: "second", Body: bodyDoc("seed", "other")},
+					},
+				}))
+
+				aliceState := editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.Insert(1, "alice")).To(Succeed())
+				})
+				bobState := editBody(base, "bob", func(d *text.Doc) {
+					Expect(d.Insert(1, "bob")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: aliceState}},
+				}, "notes.n1.body"))
+				push(patchMutation("c3", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: bobState}},
+				}, "notes.n1.body"))
+
+				e := getKeyed("k1")
+				Expect(plainBody(noteOf(e, "n1").GetBody())).To(Equal("[alicebob]"))
+				Expect(plainBody(noteOf(e, "n2").GetBody())).To(Equal("other"),
+					"a sibling element's document must stay untouched")
+				Expect(noteOf(e, "n1").GetLabel()).To(Equal("first"),
+					"a body-only mask must leave the element's other fields alone")
+			})
+
+			It("PUT unions each element's document by key and drops removed elements", func() {
+				base1 := bodyDoc("seed", "one two")
+				base2 := bodyDoc("seed", "gone")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id: "k1",
+					Notes: []*testdatav1.KeyedNote{
+						{Id: "n1", Label: "a", Body: base1},
+						{Id: "n2", Label: "b", Body: base2},
+					},
+				}))
+
+				// A concurrent PATCH lands on n1 before the PUT below...
+				patched := editBody(base1, "client", func(d *text.Doc) {
+					Expect(d.Insert(7, " three")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: patched}},
+				}, "notes.n1.body"))
+
+				// ...and the PUT, built from the stale base, rewrites n1's text,
+				// drops n2 and keeps replace semantics for labels.
+				putState := editBody(base1, "editor", func(d *text.Doc) {
+					Expect(d.SetString("ONE two")).To(Succeed())
+				})
+				push(putMutation("c3", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id: "k1",
+					Notes: []*testdatav1.KeyedNote{
+						{Id: "n1", Label: "a2", Body: putState},
+					},
+				}))
+
+				e := getKeyed("k1")
+				Expect(e.GetNotes()).To(HaveLen(1), "the PUT dropped n2, document and all")
+				Expect(noteOf(e, "n1").GetLabel()).To(Equal("a2"))
+				Expect(plainBody(noteOf(e, "n1").GetBody())).To(Equal("ONE two three"),
+					"the element's document unions with the stored one, matched by key")
+			})
+
+			It("replaces the element whole — document included — when the mask names the element", func() {
+				base := bodyDoc("seed", "original")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Label: "a", Body: base}},
+				}))
+				replacement := bodyDoc("editor", "replacement")
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Label: "b", Body: replacement}},
+				}, "notes.n1"))
+
+				// An ancestor mask replaces its subtree — same contract as a mask
+				// naming a singular message above a fixed text field.
+				Expect(getKeyed("k1").GetNotes()[0].GetBody()).To(Equal(replacement))
+			})
+
+			It("applies a fragment PATCH addressed to an element's document", func() {
+				base := bodyDoc("seed", "the quick fox")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: base}},
+				}))
+				full := editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.SetString("the quick brown fox")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: fragmentOf(full, base)}},
+				}, "notes.n1.body"))
+
+				Expect(plainBody(noteOf(getKeyed("k1"), "n1").GetBody())).
+					To(Equal("the quick brown fox"))
+			})
+
+			It("rejects a fragment whose mask names only the whole element", func() {
+				base := bodyDoc("seed", "hello")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: base}},
+				}))
+				frag := fragmentOf(editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.Insert(5, " world")).To(Succeed())
+				}), base)
+
+				// "notes.n1" replaces the element whole, so the fragment would be
+				// persisted as if it were a document.
+				results := push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: frag}},
+				}, "notes.n1"))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal("text_full_state_required"))
+			})
+
+			It("merges concurrent PATCHes to a map value's document", func() {
+				base := bodyDoc("seed", "[]")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id:       "k1",
+					Sections: map[string]*testdatav1.TextHolder{"intro": {Body: base}},
+				}))
+				aliceState := editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.Insert(1, "alice")).To(Succeed())
+				})
+				bobState := editBody(base, "bob", func(d *text.Doc) {
+					Expect(d.Insert(1, "bob")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Sections: map[string]*testdatav1.TextHolder{"intro": {Body: aliceState}},
+				}, "sections.intro.body"))
+				push(patchMutation("c3", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Sections: map[string]*testdatav1.TextHolder{"intro": {Body: bobState}},
+				}, "sections.intro.body"))
+
+				Expect(plainBody(getKeyed("k1").GetSections()["intro"].GetBody())).
+					To(Equal("[alicebob]"))
+			})
+
+			It("reaches a document below a singular message inside an element", func() {
+				base := bodyDoc("seed", "[]")
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id: "k1",
+					Notes: []*testdatav1.KeyedNote{
+						{Id: "n1", Deep: &testdatav1.TextHolder{Body: base}},
+					},
+				}))
+				aliceState := editBody(base, "alice", func(d *text.Doc) {
+					Expect(d.Insert(1, "alice")).To(Succeed())
+				})
+				bobState := editBody(base, "bob", func(d *text.Doc) {
+					Expect(d.Insert(1, "bob")).To(Succeed())
+				})
+				push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Deep: &testdatav1.TextHolder{Body: aliceState}}},
+				}, "notes.n1.deep.body"))
+				push(patchMutation("c3", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Deep: &testdatav1.TextHolder{Body: bobState}}},
+				}, "notes.n1.deep.body"))
+
+				Expect(plainBody(noteOf(getKeyed("k1"), "n1").GetDeep().GetBody())).
+					To(Equal("[alicebob]"))
+			})
+
+			It("rejects junk text bytes inside an element", func() {
+				push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Id: "k1", Notes: []*testdatav1.KeyedNote{{Id: "n1"}},
+				}))
+				results := push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: []byte{0xff}}},
+				}, "notes.n1.body"))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal("invalid_argument"))
+			})
+		})
+
 		It("keeps marks attached across concurrent edits", func() {
 			base := bodyDoc("seed", "hello world")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
@@ -496,6 +705,70 @@ var _ = Describe("Text fields", func() {
 				return tx.Patch(&testdatav1.Widget{Id: "w1", Body: concurrent}, []string{"body"}, nil)
 			})).To(Succeed())
 			Expect(plainBody(getW("w1").GetBody())).To(Equal("d"))
+		})
+
+		It("writes a string into a keyed element's document by instance path", func() {
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Label: "a"}},
+				},
+					server.WithTextString("notes.n1.body", "hello"),
+					server.WithTextPeer("writer:1"))
+			})).To(Succeed())
+
+			var e testdatav1.KeyedTextEntity
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				found, err := tx.Get(&e, "k1")
+				Expect(found).To(BeTrue())
+				return err
+			})).To(Succeed())
+			Expect(plainBody(e.GetNotes()[0].GetBody())).To(Equal("hello"))
+		})
+
+		It("three-way merges a string Patch on an element with a concurrent edit", func() {
+			base := bodyDoc("seed", "one two three")
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: base}},
+				})
+			})).To(Succeed())
+			clientState := editBody(base, "client", func(d *text.Doc) {
+				Expect(d.Insert(13, " four")).To(Succeed())
+			})
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: clientState}},
+				}, []string{"notes.n1.body"}, nil)
+			})).To(Succeed())
+			// The string write's message must carry the addressed element; the
+			// mask is added automatically.
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.KeyedTextEntity{
+					Id:    "k1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1"}},
+				}, nil, nil,
+					server.WithTextString("notes.n1.body", "one TWO three four"),
+					server.WithTextPeer("writer:1"))
+			})).To(Succeed())
+
+			var e testdatav1.KeyedTextEntity
+			Expect(srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				_, err := tx.Get(&e, "k1")
+				return err
+			})).To(Succeed())
+			Expect(plainBody(e.GetNotes()[0].GetBody())).To(Equal("one TWO three four"))
+		})
+
+		It("rejects a string addressing an element the value does not carry", func() {
+			err := srv.Mutate(ctx, ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.KeyedTextEntity{Id: "k1"},
+					server.WithTextString("notes.n1.body", "hello"),
+					server.WithTextPeer("writer:1"))
+			})
+			Expect(err).To(MatchError(ContainSubstring("addresses a list element the value does not carry")))
 		})
 
 		It("requires WithTextPeer alongside WithTextString", func() {

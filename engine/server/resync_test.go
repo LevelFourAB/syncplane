@@ -222,7 +222,7 @@ var _ = Describe("Delta resync", func() {
 			cursor, _ := bootstrap()
 
 			changes, drops, _ := drain(cursor, widgetSub(nil))
-			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "ledger", "pair", "project", "todo", "user"}))
+			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "keyed_text", "ledger", "pair", "project", "todo", "user"}))
 			Expect(changes).To(BeEmpty(), "widgets were already held under full sync")
 		})
 
@@ -393,7 +393,7 @@ var _ = Describe("Delta resync", func() {
 
 			perms.setHiddenWord("plain")
 			changes, drops, _ := drain(cursor, &syncplanev1.Subscription{Entity: "todo"})
-			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "ledger", "pair", "project", "user", "widget"}))
+			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "keyed_text", "ledger", "pair", "project", "user", "widget"}))
 			Expect(tombstoneKeys(changes)).To(Equal([]string{"t-plain"}))
 			Expect(valueKeys(changes, "todo")).To(Equal([]string{"t-alpha"}))
 		})

@@ -383,6 +383,10 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
 		return err
 	}
+	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,
+		prevText, msg.ProtoReflect()); err != nil {
+		return err
+	}
 	if err := info.updateRowIndexes(e.tx, e.srv.limits, key, msg); err != nil {
 		return err
 	}
@@ -545,6 +549,10 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {
 		return err
 	}
+	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,
+		prevText, base.ProtoReflect()); err != nil {
+		return err
+	}
 	// Same guard as the wire PATCH: a mask that reaches no index component
 	// leaves every entry of the row exactly as it is.
 	if info.maskTouchesIndexes(mask) {
@@ -581,11 +589,23 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	if err != nil {
 		return err
 	}
-	if err := info.recordTextDeltaGaps(e.tx, key, seq); err != nil {
+	// Mirrors the wire DELETE: per-document side state is keyed by instance
+	// path, so a row with element-borne text is decoded to name what it holds.
+	textPaths := info.textStatePaths(nil)
+	if info.hasNestedText() {
+		if row, rowErr := e.tx.GetRow(info.name, key); rowErr == nil && !row.Deleted {
+			if decoded, decErr := info.decode(row.Value); decErr == nil {
+				textPaths = info.textStatePaths(decoded.ProtoReflect())
+			}
+		} else if rowErr != nil && rowErr != storage.ErrNotFound {
+			return rowErr
+		}
+	}
+	if err := info.recordTextDeltaGaps(e.tx, key, textPaths, seq); err != nil {
 		return err
 	}
-	e.srv.textCache.forget(e.ws, info.name, key, info.textFields)
-	if err := info.clearTextFloors(e.tx, key); err != nil {
+	e.srv.textCache.forget(e.ws, info.name, key, textPaths)
+	if err := info.clearTextFloors(e.tx, key, textPaths); err != nil {
 		return err
 	}
 	if err := info.clearRowIndexes(e.tx, key); err != nil {

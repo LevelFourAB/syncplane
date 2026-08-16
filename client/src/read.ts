@@ -123,7 +123,16 @@ function applyTextLog(
 	const fields = new Map<string, Uint8Array>();
 	let changed = false;
 	for (const [ field, list ] of fragments) {
-		const base = textFieldBytes(def.schema, field, msg) ?? new Uint8Array();
+		// The field string is an instance path; it stops resolving when the
+		// element it addresses is gone (removed under the edit, or a schema
+		// this build does not know). The row keeps what it holds — delete-wins
+		// — and the entry ages out with the overlay.
+		let base: Uint8Array;
+		try {
+			base = textFieldBytes(def.schema, field, msg) ?? new Uint8Array();
+		} catch {
+			continue;
+		}
 		const folded = foldFragments(base, list, entity, field, reusable(prior, field, list));
 		if (folded === undefined) continue;
 		fields.set(field, folded.bytes);
@@ -131,7 +140,11 @@ function applyTextLog(
 		// field and any reader rendering it will look for it.
 		textResidency.put(folded.bytes, folded.doc);
 		if (folded.bytes !== base) {
-			setTextFieldBytes(def.schema, field, msg, folded.bytes);
+			try {
+				setTextFieldBytes(def.schema, field, msg, folded.bytes);
+			} catch {
+				continue;
+			}
 			changed = true;
 		}
 	}

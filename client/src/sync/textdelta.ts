@@ -9,7 +9,13 @@ import {
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
 import { confirmedKey, type ConfirmedRecord } from '../keys.js';
 import type { KVRead } from '../kv/store.js';
-import { type EntityRegistry, setTextFieldBytes, textFieldBytes } from '../mutations.js';
+import {
+	type EntityRegistry,
+	setTextFieldBytes,
+	textFieldBytes,
+	textInstancePaths,
+	textSchemaPathOf,
+} from '../mutations.js';
 import { readMergedRow } from '../read.js';
 import {
 	applyFragment,
@@ -154,16 +160,20 @@ function crudsOf(m: Mutation): CrudMutation[] | undefined {
 
 /**
  * The text fields one crud writes: everything the entity declares for a PUT
- * (which carries a whole row), only what the mask names outright for a PATCH.
- * A mask naming just an ancestor replaces that subtree whole, so the field is
- * not written through the text merger and carries no delta state.
+ * (which carries a whole row; planCrud enumerates the value's instances), and
+ * for a PATCH the mask paths that land on a text field outright — instance
+ * paths where the field sits under a keyed list or map. A mask naming just an
+ * ancestor (a whole element included) replaces that subtree whole, so the
+ * field is not written through the text merger and carries no delta state.
  */
 function textPathsIn(registry: EntityRegistry, crud: CrudMutation): readonly string[] {
 	const paths = registry.textPathsOf(crud.entity);
 	if (paths.length === 0 || crud.op === CrudOp.DELETE) return [];
 	if (crud.op !== CrudOp.PATCH) return paths;
+	const def = registry.get(crud.entity);
+	if (!def) return [];
 	const mask = crud.fieldMask?.paths ?? [];
-	return paths.filter((p) => mask.includes(p));
+	return mask.filter((p) => textSchemaPathOf(def.schema, p) !== undefined);
 }
 
 /**
@@ -198,14 +208,17 @@ async function planCrud(
 	acc: Accumulated,
 	pinned: ReadonlySet<string>,
 ): Promise<Uint8Array | undefined> {
-	const paths = textPathsIn(registry, crud);
+	const schemaOrMaskPaths = textPathsIn(registry, crud);
 	const def = registry.get(crud.entity);
-	if (paths.length === 0 || !def) {
+	if (schemaOrMaskPaths.length === 0 || !def) {
 		if (crud.op === CrudOp.DELETE) {
 			// The row is gone; anything queued for it before is not a base for
-			// anything queued after (a PATCH of a deleted row is rejected).
-			for (const path of registry.textPathsOf(crud.entity)) {
-				acc.delete(accKey(crud.entity, crud.key, path));
+			// anything queued after (a PATCH of a deleted row is rejected). The
+			// accumulation is keyed by instance path, so this drops by row
+			// prefix rather than by the entity's schema paths.
+			const rowPrefix = `${crud.entity}\u0000${crud.key}\u0000`;
+			for (const k of [ ...acc.keys() ]) {
+				if (k.startsWith(rowPrefix)) acc.delete(k);
 			}
 		}
 		return undefined;
@@ -222,6 +235,11 @@ async function planCrud(
 		return undefined;
 	}
 	const asFragment = shipsFragments(workspaceId, crud, pinned);
+	// A PATCH's mask already names instances; a PUT's value is enumerated for
+	// them — one accumulation per document, not per schema path.
+	const paths = crud.op === CrudOp.PATCH
+		? schemaOrMaskPaths
+		: schemaOrMaskPaths.flatMap((p) => textInstancePaths(def.schema, p, local));
 	let changed = false;
 	for (const path of paths) {
 		const key = accKey(crud.entity, crud.key, path);

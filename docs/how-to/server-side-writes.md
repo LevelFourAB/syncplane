@@ -136,6 +136,10 @@ A text field of the written message that already holds a plain-string value
 resolves the same way, which is what makes restoring a field-history record an
 ordinary `Patch`. See [Restore a field](restore-a-field.md).
 
+A document inside a keyed list or map element is named by its instance path —
+`WithTextString("comments.<id>.body", s)` — and the written message must carry
+the addressed element; the write does not invent one from its key.
+
 ## Writes that may be retried
 
 `ApplyIdempotent` is the same write guarded by a caller-supplied key, for

@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest';
 import type { DescMessage, Message } from '@bufbuild/protobuf';
 import {
 	IssueSchema,
+	KeyedTextEntitySchema,
 	PairSchema,
 	ProjectSchema,
 	UserSchema,
@@ -42,7 +43,12 @@ interface EvalCase {
 	want: boolean;
 }
 
-const schemaFor = (type?: string) => (type === 'issue' ? IssueSchema : WidgetSchema);
+const schemaFor = (type?: string) =>
+	type === 'issue'
+		? IssueSchema
+		: type === 'keyed_text'
+		? KeyedTextEntitySchema
+		: WidgetSchema;
 
 interface CompareCase {
 	name: string;

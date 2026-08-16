@@ -37,6 +37,7 @@ import {
 	mergeMask,
 	type MergerSpec,
 	mergeTextFieldsInto,
+	textSchemaPathOf,
 } from '../mutations.js';
 
 /** The workspace the kit reads and writes when none is named. */
@@ -691,9 +692,8 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				try {
 					mergeMask(def.schema, dst, src, paths, this.registry.mergersFor(def.name));
 				} catch (err) {
-					const textPaths = this.registry.textPathsOf(def.name);
 					const detail = err instanceof Error ? err.message : String(err);
-					if (paths.some((p) => textPaths.includes(p))) {
+					if (paths.some((p) => textSchemaPathOf(def.schema, p) !== undefined)) {
 						throw new Rejection(
 							CodeTextFullStateRequired,
 							`${crud.entity} "${crud.key}": ${detail}`,

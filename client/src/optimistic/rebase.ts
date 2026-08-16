@@ -45,6 +45,7 @@ import {
 	mergeMask,
 	mergeTextFieldsInto,
 	textFieldBytes,
+	textSchemaPathOf,
 } from '../mutations.js';
 import { readMergedRow, rowPresent, scanMergedRows } from '../read.js';
 import { reportError } from '../report.js';
@@ -263,8 +264,11 @@ async function appendTextLog(
 ): Promise<LocalApplyOutcome | 'fallthrough'> {
 	const paths = crud.fieldMask?.paths ?? [];
 	if (paths.length === 0) return 'fallthrough';
-	const textPaths = registry.textPathsOf(def.name);
-	if (textPaths.length === 0 || !paths.every((p) => textPaths.includes(p))) return 'fallthrough';
+	// Every mask path must land on a text field outright — as an instance path
+	// where the field sits under a keyed list or map ("items.<key>.body"),
+	// which resolves to its schema path here.
+	if (registry.textPathsOf(def.name).length === 0) return 'fallthrough';
+	if (paths.some((p) => textSchemaPathOf(def.schema, p) === undefined)) return 'fallthrough';
 	let src;
 	try {
 		src = fromBinary(def.schema, crud.value);
@@ -330,8 +334,8 @@ function withoutUnapplicableText(
 	mergers: EntityMergers | undefined,
 	err: unknown,
 ): Message {
-	const textPaths = new Set(registry.textPathsOf(def.name));
-	const rest = paths.filter((p) => !textPaths.has(p));
+	if (registry.textPathsOf(def.name).length === 0) throw err;
+	const rest = paths.filter((p) => textSchemaPathOf(def.schema, p) === undefined);
 	if (rest.length === paths.length) throw err;
 	// From the stored bytes again: the failed merge may have written part of the
 	// message before it threw.

@@ -410,6 +410,106 @@ var _ = Describe("Downstream text delta state", func() {
 		})
 	})
 
+	Describe("documents inside keyed list elements", func() {
+		keyedChange := func(resp *syncplanev1.PullResponse) *syncplanev1.RowChange {
+			GinkgoHelper()
+			for _, rc := range resp.GetPatch().GetChanges() {
+				if rc.GetEntity() == "keyed_text" && rc.GetKey() == "k1" {
+					return rc
+				}
+			}
+			Fail("no change for keyed_text k1")
+			return nil
+		}
+		noteOf := func(e *testdatav1.KeyedTextEntity, id string) *testdatav1.KeyedNote {
+			for _, n := range e.GetNotes() {
+				if n.GetId() == id {
+					return n
+				}
+			}
+			return nil
+		}
+
+		It("ships each element's edit as its own fragment, and folding reproduces the row", func() {
+			longText := "the quick brown fox jumps over the lazy dog, again and again and again"
+			base := bodyDoc("seed", longText)
+			push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Id: "k1",
+				Notes: []*testdatav1.KeyedNote{
+					{Id: "n1", Body: base},
+					{Id: "n2", Body: bodyDoc("seed", longText)},
+				},
+			}))
+			first := pull(nil)
+			var held testdatav1.KeyedTextEntity
+			Expect(proto.Unmarshal(keyedChange(first).GetValue(), &held)).To(Succeed())
+
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: edited}},
+			}, "notes.n1.body"))
+
+			rc := keyedChange(pull(first.GetNextCursor()))
+			frags := make(map[string][]byte)
+			for _, fd := range rc.GetTextDeltas() {
+				frags[fd.GetField()] = fd.GetFragment()
+			}
+			Expect(frags).To(HaveKey("notes.n1.body"))
+			Expect(frags["notes.n1.body"]).NotTo(BeEmpty())
+			Expect(frags).To(HaveKey("notes.n2.body"))
+			Expect(frags["notes.n2.body"]).To(BeEmpty(),
+				"the untouched sibling rides as 'keep what you hold'")
+
+			// The client half: fold each delta into the held documents.
+			var next testdatav1.KeyedTextEntity
+			Expect(proto.Unmarshal(rc.GetValue(), &next)).To(Succeed())
+			Expect(noteOf(&next, "n1").GetBody()).To(BeEmpty())
+			Expect(noteOf(&next, "n2").GetBody()).To(BeEmpty())
+			merged, err := text.ApplyFragmentBytes(noteOf(&held, "n1").GetBody(), frags["notes.n1.body"])
+			Expect(err).NotTo(HaveOccurred())
+			noteOf(&next, "n1").Body = merged
+			noteOf(&next, "n2").Body = noteOf(&held, "n2").GetBody()
+
+			var stored testdatav1.KeyedTextEntity
+			Expect(proto.Unmarshal(keyedChange(pull(nil)).GetValue(), &stored)).To(Succeed())
+			Expect(noteOf(&next, "n1").GetBody()).To(Equal(noteOf(&stored, "n1").GetBody()))
+			Expect(noteOf(&next, "n2").GetBody()).To(Equal(noteOf(&stored, "n2").GetBody()))
+		})
+
+		It("ships the document when the span covers the element's removal and re-creation", func() {
+			base := bodyDoc("seed", "here today")
+			push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Id:    "k1",
+				Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: base}},
+			}))
+			first := pull(nil)
+
+			// The element goes away and comes back with an unrelated document; a
+			// reader folding across the removal would union the old text back in.
+			push(patchMutation("c2", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Notes: []*testdatav1.KeyedNote{},
+			}, "notes.n1"))
+			push(patchMutation("c2", 2, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Notes: []*testdatav1.KeyedNote{{Id: "n1", Body: bodyDoc("seed", "reborn")}},
+			}, "notes.n1"))
+
+			rc := keyedChange(pull(first.GetNextCursor()))
+			for _, fd := range rc.GetTextDeltas() {
+				Expect(fd.GetField()).NotTo(Equal("notes.n1.body"),
+					"a span with a removal cannot be folded")
+			}
+			var next testdatav1.KeyedTextEntity
+			Expect(proto.Unmarshal(rc.GetValue(), &next)).To(Succeed())
+			body := noteOf(&next, "n1").GetBody()
+			Expect(body).NotTo(BeEmpty())
+			plain, err := text.PlainText(body)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(plain).To(Equal("reborn"))
+		})
+	})
+
 	It("serves the same rows over Subscribe as over Pull", func() {
 		base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
 		push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))

@@ -15,6 +15,34 @@ message Doc {
 Nothing else to wire: registration auto-installs the merge hook on both sides
 (no `WithMerger` / `MergerSpec`).
 
+A text field may also sit inside a keyed message list or a message-valued map —
+a comment with a collaborative body per element, a section per map entry. Each
+element then holds its own document, addressed by its **instance path**: the
+dotted proto path with the element key in it.
+
+```proto
+message Doc {
+	option (syncplane.v1.entity) = { name: "doc" key_fields: [ "id" ] };
+	string id = 1;
+	repeated Comment comments = 2
+		[(syncplane.v1.field_behavior) = { key_field: [ "id" ] }];
+}
+
+message Comment {
+	string id = 1;
+	string author = 2;
+	bytes body = 3 [(syncplane.v1.field_behavior) = { text: true }];
+}
+```
+
+Everything below works the same for such a field with the instance path in
+place of the field name — `text(id, 'comments.<commentId>.body')`,
+`WithTextString("comments.<commentId>.body", s)`, a string in the element's
+init. The element's lifecycle is the document's: removing the element removes
+its document, and only a list with a `key_field` (or a map) can carry text —
+an unkeyed list's elements have no identity a path could address, so
+registration refuses text inside one.
+
 ## Edit through a live handle
 
 ```ts

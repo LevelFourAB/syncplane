@@ -280,6 +280,39 @@ names outright, validated the same way and unfolded by the merger; a PUT, or a
 field the mask only reaches through an ancestor, must carry a whole document,
 because nothing would merge it there.
 
+## One document per element
+
+A text field's path may cross a keyed message list or a message-valued map. The
+field then holds one document **per element**, and everything that names a
+document names it by **instance path** — the mask form of its position, element
+key included: `comments.<id>.body`. The instance path is the document's
+identity everywhere per-document state lives: the PATCH mask that routes an
+edit through the merger, the server's delta log and compaction floors, the
+decoded-document caches on both sides, the client's optimistic text log, and
+`FieldDelta.field` on the wire.
+
+What makes this sound is that the element key is a **stable identity**. The
+merge already descends into a keyed element and looks its mergers up by schema
+path (`comments.body` serves every element), so concurrent edits to the same
+element's document union exactly as edits to a top-level field do, and edits to
+two different elements never touch each other. The same reasoning is why the
+other container shapes stay refused: an unkeyed list element has no identity a
+path could address, and a field inside a oneof vanishes whenever a sibling case
+wins — in both, a masked write replaces the enclosing unit whole and the merger
+could never run.
+
+The element's lifecycle is the document's. Removing the element removes its
+document: the write gaps the delta log at that position (a reader whose span
+covers a removal and a re-creation is served full state rather than a fold that
+would resurrect the old text) and clears its compaction floor, so an element
+re-created later under the same key starts a fresh document rather than being
+measured against the old one's purges. A mask that names a whole element
+(`comments.<id>` with no sub-path) replaces it, document included — the same
+contract as a mask naming a singular message above a fixed text field — which
+is why the client's diff never emits one for a text-bearing element: a changed
+element narrows to per-unit paths, so its document goes through the merger and
+its other fields keep last-writer-wins.
+
 ## Undo is op-level and local-only
 
 A snapshot inverse would merge to a silent no-op on a state CRDT, so handle

@@ -37,7 +37,9 @@ func testEntities() server.Option {
 		// Both opt into field history, which also brings the engine's
 		// server-only history entity into every spec's catalog — the state an
 		// app that uses the feature runs in.
-		&testdatav1.Historied{}, &testdatav1.HistoriedAll{})
+		&testdatav1.Historied{}, &testdatav1.HistoriedAll{},
+		// Collaborative text inside keyed-list elements and map values.
+		&testdatav1.KeyedTextEntity{})
 }
 
 // newTestServer builds a server on a fresh SQLite store with the test

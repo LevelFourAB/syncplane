@@ -231,7 +231,19 @@ export const overlayTextFieldPrefix = (
 	workspaceId: string,
 	key: string,
 	field: string,
-): string => `${overlayTextRowPrefix(entity, workspaceId, key)}${field}/`;
+): string => `${overlayTextRowPrefix(entity, workspaceId, key)}${textLogFieldSegment(field)}/`;
+
+/**
+ * Renders a field path as a slash-free key segment. A field path is an
+ * INSTANCE path, and the item key of an element under a keyed list or map may
+ * carry any character — including the '/' the right-to-left parse below cuts
+ * on — so the segment escapes rather than trusts.
+ */
+const textLogFieldSegment = (field: string): string =>
+	field.replaceAll('%', '%25').replaceAll('/', '%2F');
+
+const textLogFieldOf = (segment: string): string =>
+	segment.replaceAll('%2F', '/').replaceAll('%25', '%');
 
 /**
  * A secondary-index POSITION: `i/<entity>/<index>@<hash>/<ws>/<entry>`, where
@@ -341,10 +353,10 @@ export const overlayTextKey = (
  *
  * Parsed from the RIGHT, unlike the row keyspaces: a row key may contain
  * slashes, and here it is no longer the last segment. The three trailing
- * segments are the field path (dot-separated, never slashed), the mutation id
- * and the batch index, all of which are slash-free, so everything before them
- * is the row key verbatim — and everything before THAT, up to the first slash,
- * is the workspace segment.
+ * segments are the field path (escaped slash-free — see textLogFieldSegment),
+ * the mutation id and the batch index, all of which are slash-free, so
+ * everything before them is the row key verbatim — and everything before THAT,
+ * up to the first slash, is the workspace segment.
  */
 export function splitOverlayTextSuffix(
 	suffix: string,
@@ -358,7 +370,7 @@ export function splitOverlayTextSuffix(
 	return {
 		workspaceId: wsFromSegment(suffix.slice(0, wsEnd)),
 		key: suffix.slice(wsEnd + 1, field),
-		field: suffix.slice(field + 1, id),
+		field: textLogFieldOf(suffix.slice(field + 1, id)),
 	};
 }
 

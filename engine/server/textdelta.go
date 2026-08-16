@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"sort"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -34,32 +35,40 @@ import (
 // Not byte-observable across languages: only the sender decides what to send.
 const fragmentSizeRatio = 0.5
 
-// textSnapshot captures the current bytes of every text field of msg, keyed by
-// dotted path. Callers take it BEFORE merging into msg — the merge replaces
-// field values rather than mutating them, so the captured slices stay valid as
-// the pre-write state. A nil message (an absent row) snapshots to nil.
+// textSnapshot captures the current bytes of every text document of msg, keyed
+// by instance path — one entry per element for a field under a keyed list or
+// map. Callers take it BEFORE merging into msg — the merge replaces field
+// values rather than mutating them, so the captured slices stay valid as the
+// pre-write state. A nil message (an absent row) snapshots to nil.
 func (info *entityInfo) textSnapshot(msg proto.Message) map[string][]byte {
 	if msg == nil || len(info.textFields) == 0 {
 		return nil
 	}
 	out := make(map[string][]byte, len(info.textFields))
 	for _, tf := range info.textFields {
-		if b := chainGetBytes(msg.ProtoReflect(), tf.chain); len(b) > 0 {
-			out[tf.path] = b
+		for _, ti := range tf.instances(msg.ProtoReflect()) {
+			if b := ti.bytes(); len(b) > 0 {
+				if _, ok := out[ti.path]; !ok {
+					out[ti.path] = b
+				}
+			}
 		}
 	}
 	return out
 }
 
-// recordTextDeltas logs how this write moved each text field, at the write's
-// sequence. next is the message about to be stored; prev is the snapshot taken
-// before the merge (nil for a row this write creates).
+// recordTextDeltas logs how this write moved each text document, at the
+// write's sequence. next is the message about to be stored; prev is the
+// snapshot taken before the merge (nil for a row this write creates).
 //
-// A field whose bytes did not move records nothing: "no entry in the span" is
-// how a pull learns the reader can keep what it holds. Anything else records a
-// fragment, or a gap marker when one would not help — the new state is not
-// built on the old (a cleared or replaced document), or the fragment is no
-// smaller than the document it describes.
+// A document whose bytes did not move records nothing: "no entry in the span"
+// is how a pull learns the reader can keep what it holds. Anything else
+// records a fragment, or a gap marker when one would not help — the new state
+// is not built on the old (a cleared or replaced document), or the fragment is
+// no smaller than the document it describes. A document prev holds and next
+// does not (a cleared field, or a dropped element) records a gap: no fragment
+// can express a removal, and a reader whose span also covers a later
+// re-creation must be served full state rather than fold across it.
 func (info *entityInfo) recordTextDeltas(
 	tx storage.WriteTx,
 	key string,
@@ -67,26 +76,46 @@ func (info *entityInfo) recordTextDeltas(
 	next protoreflect.Message,
 	seq uint64,
 ) error {
+	seen := make(map[string]bool, len(info.textFields))
 	for _, tf := range info.textFields {
-		before, after := prev[tf.path], chainGetBytes(next, tf.chain)
-		if bytes.Equal(before, after) {
-			continue
+		for _, ti := range tf.instances(next) {
+			if seen[ti.path] {
+				continue
+			}
+			seen[ti.path] = true
+			before, after := prev[ti.path], ti.bytes()
+			if bytes.Equal(before, after) {
+				continue
+			}
+			frag := textFragmentOf(after, before)
+			if err := info.putTextDelta(tx, key, ti.path, seq, frag); err != nil {
+				return err
+			}
 		}
-		frag := textFragmentOf(after, before)
-		if err := info.putTextDelta(tx, key, tf.path, seq, frag); err != nil {
+	}
+	var dropped []string
+	for path := range prev {
+		if !seen[path] {
+			dropped = append(dropped, path)
+		}
+	}
+	sort.Strings(dropped)
+	for _, path := range dropped {
+		if err := info.putTextDelta(tx, key, path, seq, nil); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// recordTextDeltaGaps marks every text field of a row as un-deltaable at seq.
-// Used by DELETE: the row's documents go away wholesale, which no fragment can
-// express. (The tombstone itself tells readers to drop the row, so the marker
-// only matters for a reader whose span also covers a later re-creation.)
-func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, seq uint64) error {
-	for _, tf := range info.textFields {
-		if err := info.putTextDelta(tx, key, tf.path, seq, nil); err != nil {
+// recordTextDeltaGaps marks the named document paths as un-deltaable at seq.
+// Used by DELETE with the row's textStatePaths: the documents go away
+// wholesale, which no fragment can express. (The tombstone itself tells
+// readers to drop the row, so the marker only matters for a reader whose span
+// also covers a later re-creation.)
+func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, paths []string, seq uint64) error {
+	for _, path := range paths {
+		if err := info.putTextDelta(tx, key, path, seq, nil); err != nil {
 			return err
 		}
 	}

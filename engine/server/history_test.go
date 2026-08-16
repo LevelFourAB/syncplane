@@ -216,6 +216,51 @@ var _ = Describe("Field history", func() {
 				"a field the mask does not name carries no before-state")
 		})
 
+		It("reduces each element's document to its text in the before-state", func() {
+			srv := newHistoryServer(server.WithEntities(&testdatav1.HistoriedKeyedText{}))
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.HistoriedKeyedText{
+					Id:    "h1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1"}, {Id: "n2"}},
+				},
+					server.WithTextString("notes.n1.body", "alpha"),
+					server.WithTextString("notes.n2.body", "beta"),
+					server.WithTextPeer("p1"))
+			})).To(Succeed())
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&testdatav1.HistoriedKeyedText{
+					Id:    "h1",
+					Notes: []*testdatav1.KeyedNote{{Id: "n1"}},
+				}, nil, nil,
+					server.WithTextString("notes.n1.body", "ALPHA"),
+					server.WithTextPeer("p1"))
+			})).To(Succeed())
+
+			recs := historyOf(srv, ws, "historied_keyed_text", "h1")
+			Expect(recs).To(HaveLen(2))
+			Expect(recs[0].GetMask().GetPaths()).To(Equal([]string{"notes.n1.body"}))
+			var prior testdatav1.HistoriedKeyedText
+			Expect(proto.Unmarshal(recs[0].GetPrior(), &prior)).To(Succeed())
+			Expect(prior.GetNotes()).To(HaveLen(1), "only the addressed element is recorded")
+			plain, err := text.PlainText(prior.GetNotes()[0].GetBody())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(plain).To(Equal("alpha"))
+
+			// The two steps of a restore: patch the prior back under its mask.
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Patch(&prior, recs[0].GetMask().GetPaths(), nil,
+					server.WithTextPeer("p2"))
+			})).To(Succeed())
+			var restored testdatav1.HistoriedKeyedText
+			Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				_, err := tx.Get(&restored, "h1")
+				return err
+			})).To(Succeed())
+			restoredPlain, err := text.PlainText(restored.GetNotes()[0].GetBody())
+			Expect(err).NotTo(HaveOccurred())
+			Expect(restoredPlain).To(Equal("alpha"))
+		})
+
 		It("captures a oneof as its group", func() {
 			// A oneof is one field to the merge and may only be masked by its
 			// group name, so that is the only form the capture set — and any

@@ -318,6 +318,122 @@ var _ = Describe("Collaborative-text compaction", func() {
 		})
 	})
 
+	Describe("documents inside keyed list elements", func() {
+		getKeyed := func(key string) *testdatav1.KeyedTextEntity {
+			GinkgoHelper()
+			for _, rc := range pull(nil).GetPatch().GetChanges() {
+				if rc.GetEntity() == "keyed_text" && rc.GetKey() == key {
+					var e testdatav1.KeyedTextEntity
+					Expect(proto.Unmarshal(rc.GetValue(), &e)).To(Succeed())
+					return &e
+				}
+			}
+			Fail("no keyed_text " + key)
+			return nil
+		}
+		noteBody := func(key, id string) []byte {
+			GinkgoHelper()
+			for _, n := range getKeyed(key).GetNotes() {
+				if n.GetId() == id {
+					return n.GetBody()
+				}
+			}
+			return nil
+		}
+		patchNote := func(mutationID uint64, id string, body []byte) *syncplanev1.Mutation {
+			return patchMutation("c1", mutationID, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Notes: []*testdatav1.KeyedNote{{Id: id, Body: body}},
+			}, "notes."+id+".body")
+		}
+
+		// seedElements creates a row whose n1 document is typed and trimmed —
+		// six reclaimable tombstones — while n2 stays quiet. Returns n1's
+		// pre-compaction document.
+		seedElements := func() []byte {
+			GinkgoHelper()
+			full := bodyDoc("seed", "hello world")
+			push(putMutation("c1", 1, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Id: "k1",
+				Notes: []*testdatav1.KeyedNote{
+					{Id: "n1", Body: full},
+					{Id: "n2", Body: bodyDoc("seed", "quiet")},
+				},
+			}))
+			trimmed := editBody(full, "seed", func(d *text.Doc) {
+				Expect(d.Delete(5, 6)).To(Succeed())
+			})
+			push(patchNote(2, "n1", trimmed))
+			return trimmed
+		}
+
+		It("compacts and floors each element's document on its own", func() {
+			stale := seedElements()
+			collect()
+
+			after := noteBody("k1", "n1")
+			Expect(plainText(after)).To(Equal("hello"))
+			Expect(tombstones(after)).To(BeZero())
+
+			// An edit anchored to n1's purged text is refused by n1's floor...
+			edited := editBody(stale, "other", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			results := pushRaw(patchNote(3, "n1", edited))
+			Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(results[0].GetErrorCode()).To(Equal(server.CodeTextStateStale))
+
+			// ...while n2, never compacted, keeps accepting whatever merges.
+			grown := editBody(noteBody("k1", "n2"), "other", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), " still")).To(Succeed())
+			})
+			push(patchNote(4, "n2", grown))
+			Expect(plainText(noteBody("k1", "n2"))).To(Equal("quiet still"))
+		})
+
+		It("drops the floor with the element, so a re-created element starts clean", func() {
+			seedElements()
+			collect()
+
+			// Removing n1 (clear-on-absent under its mask path) ends the document.
+			push(patchMutation("c1", 3, "keyed_text", "k1", &testdatav1.KeyedTextEntity{
+				Notes: []*testdatav1.KeyedNote{},
+			}, "notes.n1"))
+			Expect(noteBody("k1", "n1")).To(BeNil())
+
+			// A fresh document whose peer counters start over would be measured
+			// against the old floor if the removal had not cleared it — this
+			// merge runs against an absent base, where the floor is the only gate.
+			recreated := bodyDoc("seed", "brand new")
+			push(patchNote(4, "n1", recreated))
+			Expect(plainText(noteBody("k1", "n1"))).To(Equal("brand new"))
+		})
+
+		It("ships full state to a reader whose span covers an element's purge", func() {
+			seedElements()
+			cursor := pull(nil).GetNextCursor()
+			typed := editBody(noteBody("k1", "n1"), "seed", func(d *text.Doc) {
+				Expect(d.Insert(d.Len(), "!")).To(Succeed())
+			})
+			push(patchNote(3, "n1", typed))
+			collect()
+
+			var change *syncplanev1.RowChange
+			for _, rc := range pull(cursor).GetPatch().GetChanges() {
+				if rc.GetKey() == "k1" {
+					change = rc
+				}
+			}
+			Expect(change).NotTo(BeNil())
+			Expect(change.GetTextDeltas()).To(BeEmpty(),
+				"a span containing a purge cannot be folded and must ship the documents")
+			var e testdatav1.KeyedTextEntity
+			Expect(proto.Unmarshal(change.GetValue(), &e)).To(Succeed())
+			for _, n := range e.GetNotes() {
+				Expect(n.GetBody()).NotTo(BeEmpty(), "every element ships its document")
+			}
+		})
+	})
+
 	It("ships full state to a reader whose span covers the compaction", func() {
 		seedTyped()
 		// A reader caught up through the create, before the trim and the purge.

@@ -38,6 +38,13 @@ type MergeFunc func(base, incoming []byte) ([]byte, error)
 // Merger is one field's merge hook plus the gate it runs under.
 type Merger struct {
 	Fn MergeFunc
+	// FnAt, when non-nil, is called instead of Fn and additionally receives the
+	// instance path of the value being merged: the mask form of the position,
+	// with the item keys the descent crossed ("items.<key>.body"), whereas the
+	// Mergers map is keyed by the schema path with keys stripped ("items.body").
+	// One registered merger therefore serves every element of a keyed list or
+	// map, and FnAt is how it can keep per-element state.
+	FnAt func(instancePath string, base, incoming []byte) ([]byte, error)
 	// MergeAbsentBase runs Fn even when the stored row does not carry the
 	// field, passing an empty base. Only safe for a merger whose empty state is
 	// a real value rather than "no value" — the convergent-text merger, where
@@ -76,14 +83,17 @@ func MergeWithMergers(dst, src proto.Message, paths []string, m Mergers) error {
 			dst.ProtoReflect().Descriptor().FullName(), src.ProtoReflect().Descriptor().FullName())
 	}
 	for _, path := range paths {
-		if err := mergePath(dst.ProtoReflect(), src.ProtoReflect(), path, "", m); err != nil {
+		if err := mergePath(dst.ProtoReflect(), src.ProtoReflect(), path, "", "", m); err != nil {
 			return fmt.Errorf("lww: path %q: %w", path, err)
 		}
 	}
 	return nil
 }
 
-func mergePath(dst, src protoreflect.Message, path, prefix string, m Mergers) error {
+// mergePath applies one mask path. prefix is the schema-path prefix walked so
+// far (field names only — the Mergers key space); instPrefix is the same walk
+// with the item keys kept, which is what a Merger.FnAt receives.
+func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m Mergers) error {
 	seg, rest := splitSeg(path)
 	desc := dst.Descriptor()
 	fd := desc.Fields().ByName(protoreflect.Name(seg))
@@ -109,7 +119,14 @@ func mergePath(dst, src protoreflect.Message, path, prefix string, m Mergers) er
 	if rest == "" || opaque {
 		mg, hasMerger := m[prefix+seg]
 		if hasMerger && opaque && src.Has(fd) && (dst.Has(fd) || mg.MergeAbsentBase) {
-			return applyMerger(dst, src, fd, mg.Fn)
+			fn := mg.Fn
+			if mg.FnAt != nil {
+				instPath := instPrefix + seg
+				fn = func(base, incoming []byte) ([]byte, error) {
+					return mg.FnAt(instPath, base, incoming)
+				}
+			}
+			return applyMerger(dst, src, fd, fn)
 		}
 		copyField(dst, src, fd)
 		return nil
@@ -118,7 +135,7 @@ func mergePath(dst, src protoreflect.Message, path, prefix string, m Mergers) er
 	// rest != "" and non-opaque: a collection merges per item, a singular
 	// message descends, a scalar cannot be sub-pathed.
 	if fd.IsMap() || fd.IsList() {
-		return mergeItem(dst, src, fd, seg, rest, prefix, m)
+		return mergeItem(dst, src, fd, seg, rest, prefix, instPrefix, m)
 	}
 	if fd.Kind() != protoreflect.MessageKind {
 		return fmt.Errorf("field %q does not support sub-paths", seg)
@@ -131,7 +148,7 @@ func mergePath(dst, src protoreflect.Message, path, prefix string, m Mergers) er
 		return nil
 	}
 	sub := dst.Mutable(fd).Message()
-	if err := mergePath(sub, src.Get(fd).Message(), rest, prefix+seg+".", m); err != nil {
+	if err := mergePath(sub, src.Get(fd).Message(), rest, prefix+seg+".", instPrefix+seg+".", m); err != nil {
 		return err
 	}
 	// A leaf write never moves its container's presence on its own: a container
@@ -167,13 +184,16 @@ func isEmptyMessage(m protoreflect.Message) bool {
 func mergeItem(
 	dst, src protoreflect.Message,
 	fd protoreflect.FieldDescriptor,
-	fieldSeg, afterField, prefix string,
+	fieldSeg, afterField, prefix, instPrefix string,
 	m Mergers,
 ) error {
 	itemKey, rest := splitSeg(afterField)
+	// The schema prefix drops the item key — a merger serves every element —
+	// while the instance prefix keeps it, escaped exactly as the mask carries it.
+	itemInstPrefix := instPrefix + fieldSeg + "." + itemKey + "."
 	switch {
 	case fd.IsMap():
-		return mergeMapItem(dst, src, fd, itemKey, rest, prefix+fieldSeg+".", m)
+		return mergeMapItem(dst, src, fd, itemKey, rest, prefix+fieldSeg+".", itemInstPrefix, m)
 	case fd.Kind() == protoreflect.MessageKind:
 		keyFields := keyFieldsFor(fd)
 		if len(keyFields) == 0 {
@@ -182,7 +202,7 @@ func mergeItem(
 			copyField(dst, src, fd)
 			return nil
 		}
-		return mergeKeyedListItem(dst, src, fd, keyFields, itemKey, rest, prefix+fieldSeg+".", m)
+		return mergeKeyedListItem(dst, src, fd, keyFields, itemKey, rest, prefix+fieldSeg+".", itemInstPrefix, m)
 	default:
 		return mergeScalarSetItem(dst, src, fd, itemKey, rest)
 	}
@@ -193,7 +213,7 @@ func mergeItem(
 func mergeMapItem(
 	dst, src protoreflect.Message,
 	fd protoreflect.FieldDescriptor,
-	itemKey, rest, prefix string,
+	itemKey, rest, prefix, instPrefix string,
 	m Mergers,
 ) error {
 	mk, err := decodeMapKey(fd, itemKey)
@@ -210,7 +230,7 @@ func mergeMapItem(
 			return fmt.Errorf("map %q value does not support sub-paths", fd.Name())
 		}
 		dstVal := dst.Mutable(fd).Map().Mutable(mk).Message()
-		return mergePath(dstVal, sm.Get(mk).Message(), rest, prefix, m)
+		return mergePath(dstVal, sm.Get(mk).Message(), rest, prefix, instPrefix, m)
 	}
 	if dst.Has(fd) {
 		dst.Mutable(fd).Map().Clear(mk)
@@ -224,7 +244,7 @@ func mergeKeyedListItem(
 	dst, src protoreflect.Message,
 	fd protoreflect.FieldDescriptor,
 	keyFields []protoreflect.FieldDescriptor,
-	itemKey, rest, prefix string,
+	itemKey, rest, prefix, instPrefix string,
 	m Mergers,
 ) error {
 	sl := src.Get(fd).List()
@@ -275,7 +295,7 @@ func mergeKeyedListItem(
 		}
 		dl.Append(protoreflect.ValueOfMessage(dstElem))
 	}
-	return mergePath(dstElem, srcElem, rest, prefix, m)
+	return mergePath(dstElem, srcElem, rest, prefix, instPrefix, m)
 }
 
 // mergeScalarSetItem applies one element of a scalar set list (identity is the
@@ -487,6 +507,27 @@ func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 // IsRef reports whether fd is a first-class typed reference (see RefKeyFields).
 func IsRef(fd protoreflect.FieldDescriptor) bool {
 	return RefKeyFields(fd) != nil
+}
+
+// EncodeItemKey renders a keyed-list element's identity as the mask segment a
+// path addressing it carries. Exported for instance-path construction (see
+// Merger.FnAt): a consumer enumerating a row's elements must render each key
+// exactly as the merge decodes it, or the two would address different elements.
+func EncodeItemKey(msg protoreflect.Message, keyFields []protoreflect.FieldDescriptor) string {
+	return encodeItemKey(msg, keyFields)
+}
+
+// EncodeMapKeySegment renders a map key as the mask segment a path addressing
+// its entry carries — the inverse of DecodeMapKey. Exported for instance-path
+// construction, like EncodeItemKey.
+func EncodeMapKeySegment(fd protoreflect.FieldDescriptor, mk protoreflect.MapKey) string {
+	return escapeKeySegment(scalarKeyString(fd.MapKey(), mk.Value()), false)
+}
+
+// KeyFieldsFor exposes keyFieldsFor: the identity fields of a keyed message
+// list, or nil when the list has none (and so merges whole).
+func KeyFieldsFor(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
+	return keyFieldsFor(fd)
 }
 
 // encodeItemKey renders a message-list element's identity as a mask segment. A

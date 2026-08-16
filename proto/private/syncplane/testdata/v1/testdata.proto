@@ -129,9 +129,9 @@ message Guarded {
 }
 
 // Registration-rejection fixtures. Each carries a construct on a path no mask
-// ever reaches: below a oneof, whose group is replaced whole, or inside a
-// repeated element or map value, which masked writes replace whole.
-// Registering any of these must fail.
+// ever reaches: below a oneof, whose group is replaced whole, or inside an
+// unkeyed repeated element, which masked writes replace whole. Registering any
+// of these must fail.
 
 // A key field inside a oneof: the row key would vanish whenever a sibling case
 // won.
@@ -195,8 +195,9 @@ message TextHolder {
 	bytes body = 1 [(syncplane.v1.field_behavior) = { text: true }];
 }
 
-// A text field inside a repeated element: an element is replaced whole, so the
-// CRDT merger could never run.
+// A text field inside an UNKEYED repeated element: without an element identity
+// no mask can address the element, so it is replaced whole and the CRDT merger
+// could never run.
 message ListTextEntity {
 	option (syncplane.v1.entity) = {
 		name: "list_text"
@@ -207,7 +208,11 @@ message ListTextEntity {
 	repeated TextHolder notes = 2;
 }
 
-// A text field inside a map value: same reason, one container kind over.
+// Accepted shapes: a text field inside a keyed list element or a map value
+// holds one document PER ELEMENT, addressed by instance path
+// ("notes.<id>.body", "sections.<key>.body").
+
+// A map whose values carry collaborative text.
 message MapTextEntity {
 	option (syncplane.v1.entity) = {
 		name: "map_text"
@@ -216,6 +221,30 @@ message MapTextEntity {
 
 	string id = 1;
 	map<string, TextHolder> notes = 2;
+}
+
+// A keyed list whose elements carry collaborative text, directly and one
+// singular message deeper, plus a map alongside — the shapes the per-element
+// plumbing (delta log, floors, cache, history, plain-string writes) must key
+// by instance path.
+message KeyedTextEntity {
+	option (syncplane.v1.entity) = {
+		name: "keyed_text"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string title = 2;
+	repeated KeyedNote notes = 3
+		[(syncplane.v1.field_behavior) = { key_field: [ "id" ] }];
+	map<string, TextHolder> sections = 4;
+}
+
+message KeyedNote {
+	string id = 1;
+	string label = 2;
+	bytes body = 3 [(syncplane.v1.field_behavior) = { text: true }];
+	TextHolder deep = 4;
 }
 
 // A keyed-list identity inside the element's oneof: the moment a sibling case
@@ -584,6 +613,23 @@ message Historied {
 	bytes body = 3
 		[(syncplane.v1.field_behavior) = { text: true history: true }];
 	string note = 4;
+}
+
+// History capture of documents inside keyed elements: marking the list marks
+// the unit, and each element's document reduces to its visible text in the
+// recorded before-state.
+message HistoriedKeyedText {
+	option (syncplane.v1.entity) = {
+		name: "historied_keyed_text"
+		key_fields: [ "id" ]
+		history: {}
+	};
+
+	string id = 1;
+	repeated KeyedNote notes = 2 [(syncplane.v1.field_behavior) = {
+		key_field: [ "id" ]
+		history: true
+	}];
 }
 
 // History fixture whose capture set covers EVERY non-key field, spelled out one

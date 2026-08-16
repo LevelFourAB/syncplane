@@ -86,7 +86,11 @@ import {
 	type PatchInit,
 	protectedFieldOf,
 	takeTextStrings,
+	textFieldBytes,
+	textFieldInit,
 	type TextInit,
+	textInstancePaths,
+	textSchemaPathOf,
 	type TextStringEdits,
 } from './mutations.js';
 import { createKvMutex, type Mutex } from './mutex.js';
@@ -2039,10 +2043,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	/**
 	 * Opens a live handle over a collaborative text field (see TextHandle).
-	 * The field must carry (syncplane.v1.field_behavior).text and the row must
-	 * already exist — edits ship as PATCHes, which never upsert. Each handle
-	 * leases its own writer identity for as long as it is open; close() returns
-	 * the slot to the pool (see text/peer.ts).
+	 * `fieldName` is the field's dotted proto path; a document inside a keyed
+	 * list or map element is named by its instance path ("notes.<id>.body"),
+	 * which addresses that one element's document. The field must carry
+	 * (syncplane.v1.field_behavior).text and the row — and the addressed
+	 * element — must already exist: edits ship as PATCHes, which never upsert
+	 * the row, and an edit to a removed element is dropped by delete-wins.
+	 * Each handle leases its own writer identity for as long as it is open;
+	 * close() returns the slot to the pool (see text/peer.ts).
 	 * @internal
 	 */
 	async textHandleIn<D extends DescMessage>(
@@ -2052,15 +2060,29 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		fieldName: string,
 	): Promise<TextHandle> {
 		const def = this.entityRegistry.bySchema(schema);
-		const field = schema.fields.find((f) => f.name === fieldName || f.localName === fieldName);
-		if (!field || !isTextField(field)) {
+		// A bare field may be named by its localName for compatibility with the
+		// property the row object exposes; a dotted path uses proto names, the
+		// mask form.
+		const topLevel = fieldName.includes('.')
+			? undefined
+			: schema.fields.find((f) => f.name === fieldName || f.localName === fieldName);
+		const path = topLevel !== undefined ? topLevel.name : fieldName;
+		const schemaPath = textSchemaPathOf(schema, path);
+		if (schemaPath === undefined) {
 			throw new Error(`${schema.typeName}.${fieldName} is not a text field`);
 		}
-		const local = field.localName;
-		const fieldOf = (row: MessageShape<D> | undefined): Uint8Array | undefined =>
-			row === undefined
-				? undefined
-				: (row as Record<string, unknown>)[local] as Uint8Array | undefined;
+		// undefined means the row — or, for a document inside a keyed list or
+		// map, the addressed element — does not exist; an existing position with
+		// no document yet reads as the empty document.
+		const fieldOf = (row: MessageShape<D> | undefined): Uint8Array | undefined => {
+			if (row === undefined) return undefined;
+			try {
+				if (!textInstancePaths(schema, schemaPath, row).includes(path)) return undefined;
+				return textFieldBytes(schema, path, row) ?? new Uint8Array(0);
+			} catch {
+				return undefined;
+			}
+		};
 		return openTextHandle({
 			acquirePeer: async () => {
 				const lease = await (await this.textPeerLeases()).acquire();
@@ -2075,14 +2097,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			},
 			load: async () => fieldOf(await scope.get(schema, rowKey)),
 			patch: (state, inverseOps, coalesce) => {
-				const crud = buildPatch(def, schema, rowKey, { [local]: state } as MessageInitShape<D>);
+				const crud = buildPatch(
+					def,
+					schema,
+					rowKey,
+					textFieldInit(schema, path, state) as MessageInitShape<D>,
+					[ path ],
+				);
 				// The symbolic op-level inverse replaces the snapshot inverse:
 				// a state-CRDT snapshot merged back would be a silent no-op.
 				const override: Inverse | undefined = inverseOps && {
 					kind: 'text',
 					entity: def.name,
 					key: rowKey,
-					field: field.name,
+					field: path,
 					ops: inverseOps,
 				};
 				return this.enqueue(scope, { case: 'crud', value: crud }, undefined, {
@@ -4406,10 +4434,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * converted the string itself, so no caller-side override exists, but a
 	 * snapshot inverse would merge the old document back in — a silent no-op
 	 * for a state CRDT. Only the expressible case is covered: a PATCH whose
-	 * mask names exactly one (top-level) text field, which is what
-	 * `db.x.mutate.patch(key, { body: '...' })` produces. Anything wider (a
-	 * PUT, or a mixed mask) keeps the snapshot inverse: non-text fields still
-	 * restore, and the text field's restore degrades to a no-op union.
+	 * mask names exactly one text field — by its own path, or by the instance
+	 * path of a document inside a keyed list or map element — which is what
+	 * `db.x.mutate.patch(key, { body: '...' })` (and its element-borne
+	 * equivalent) produces. Anything wider (a PUT, or a mixed mask) keeps the
+	 * snapshot inverse: non-text fields still restore, and the text field's
+	 * restore degrades to a no-op union.
 	 */
 	private textStringInverse(
 		crud: CrudMutation,
@@ -4417,7 +4447,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	): Inverse | undefined {
 		if (edits === undefined || edits.size !== 1 || crud.op !== CrudOp.PATCH) return undefined;
 		const [ path, result ] = [ ...edits.entries() ][0]!;
-		if (path.includes('.')) return undefined;
+		const def = this.entityRegistry.get(crud.entity);
+		if (!def || textSchemaPathOf(def.schema, path) === undefined) return undefined;
 		const maskPaths = crud.fieldMask?.paths ?? [];
 		if (maskPaths.length !== 1 || maskPaths[0] !== path) return undefined;
 		const ops: TextInverseOp[] = [];
@@ -4639,15 +4670,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	): Promise<{ crud: CrudMutation; opposite: Inverse } | undefined> {
 		const def = this.entityRegistry.get(inverse.entity);
 		if (!def) return undefined;
-		const field = def.schema.fields.find((f) => f.name === inverse.field);
-		if (!field) return undefined;
+		const schemaPath = textSchemaPathOf(def.schema, inverse.field);
+		if (schemaPath === undefined) return undefined;
 		const cacheKey = `${inverse.entity}\u0000${inverse.key}\u0000${inverse.field}`;
 		let doc = docs.get(cacheKey);
 		if (doc === undefined) {
 			const row = await this.getIn(scope.workspaceId, def.schema, inverse.key);
 			if (row === undefined) return undefined;
-			const bytes = (row as Record<string, unknown>)[field.localName] as Uint8Array | undefined;
-			doc = decodeTextDoc(bytes, peer);
+			// An element that no longer exists is delete-wins for the edits made
+			// inside it — nothing to undo. A fixed field reports its own path
+			// whether or not it is set, so an empty field still restores.
+			if (!textInstancePaths(def.schema, schemaPath, row).includes(inverse.field)) {
+				return undefined;
+			}
+			doc = decodeTextDoc(textFieldBytes(def.schema, inverse.field, row), peer);
 			docs.set(cacheKey, doc);
 		}
 		const oppositeOps = applyTextInverse(doc, inverse.ops);
@@ -4655,7 +4691,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			def,
 			def.schema,
 			inverse.key,
-			{ [field.localName]: encodeTextDoc(doc) } as MessageInitShape<typeof def.schema>,
+			textFieldInit(def.schema, inverse.field, encodeTextDoc(doc)) as MessageInitShape<
+				typeof def.schema
+			>,
+			[ inverse.field ],
 		);
 		return {
 			crud,

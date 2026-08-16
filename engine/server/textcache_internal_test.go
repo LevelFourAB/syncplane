@@ -98,7 +98,7 @@ var _ = Describe("textDocCache", func() {
 		c.put(textCacheKey("ws", "note", "n1", "body"), body.Encode(), body)
 		c.put(textCacheKey("ws", "note", "n1", "title"), title.Encode(), title)
 
-		c.forget("ws", "note", "n1", []textField{{path: "body"}, {path: "title"}})
+		c.forget("ws", "note", "n1", []string{"body", "title"})
 		Expect(c.used).To(BeZero())
 		Expect(c.take(textCacheKey("ws", "note", "n1", "body"), body.Encode())).To(BeNil())
 		Expect(c.take(textCacheKey("ws", "note", "n1", "title"), title.Encode())).To(BeNil())

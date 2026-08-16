@@ -89,16 +89,19 @@ func newTextDocCache(budget int64) *textDocCache {
 	}
 }
 
-// textCacheKey identifies one text field of one row. Workspace is part of it
-// because row keys are only unique within a workspace, and leaving it out would
-// make two tenants writing the same key evict each other on every write.
+// textCacheKey identifies one text document of one row: field is the instance
+// path, so each element of a keyed list or map gets its own entry. Workspace is
+// part of it because row keys are only unique within a workspace, and leaving
+// it out would make two tenants writing the same key evict each other on every
+// write.
 func textCacheKey(workspace, entity, key, field string) string {
 	var b strings.Builder
 	b.Grow(len(workspace) + len(entity) + len(key) + len(field) + 3)
-	// None of the four can contain a NUL: entity names and workspace ids are
-	// validated identifiers, row keys reject control characters, and a field
-	// path is a proto field name (see engine/internal/naming). So the separator
-	// cannot be forged into a collision between two different rows.
+	// The first three cannot contain a NUL: entity names and workspace ids are
+	// validated identifiers, and row keys reject control characters. An
+	// instance path CAN carry one, by way of a string item key, but a forged
+	// collision costs nothing: a hit is validated against the bytes it was
+	// built from (see take), so a colliding key only shares an eviction slot.
 	b.WriteString(workspace)
 	b.WriteByte(0)
 	b.WriteString(entity)
@@ -167,17 +170,18 @@ func (c *textDocCache) put(key string, encoded []byte, doc *text.Doc) {
 	}
 }
 
-// forget drops a row's entries for every text field of an entity. Called when
-// the row is deleted, so a document does not sit in memory for a key nothing
-// will write again.
-func (c *textDocCache) forget(workspace, entity, key string, fields []textField) {
+// forget drops a row's entries for the named document paths (instance paths —
+// see textStatePaths). Called when the row is deleted, and when an element
+// carrying a document is dropped, so a document does not sit in memory for a
+// position nothing will write again.
+func (c *textDocCache) forget(workspace, entity, key string, paths []string) {
 	if c == nil {
 		return
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	for _, tf := range fields {
-		k := textCacheKey(workspace, entity, key, tf.path)
+	for _, path := range paths {
+		k := textCacheKey(workspace, entity, key, path)
 		el, ok := c.byKey[k]
 		if !ok {
 			continue

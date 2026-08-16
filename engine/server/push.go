@@ -850,6 +850,10 @@ func (s *Server) applyCrud(
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
 			return err
 		}
+		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),
+			prevText, msg.ProtoReflect()); err != nil {
+			return err
+		}
 		if err := info.updateRowIndexes(tx, s.limits, crud.GetKey(), msg); err != nil {
 			return err
 		}
@@ -957,6 +961,10 @@ func (s *Server) applyCrud(
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {
 			return err
 		}
+		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),
+			prevText, base.ProtoReflect()); err != nil {
+			return err
+		}
 		// Only when the mask can reach one: the entries are derived from the row,
 		// so a mask that changed nothing an index reads produces the set already
 		// stored, and replacing it would be write amplification for nothing.
@@ -980,11 +988,26 @@ func (s *Server) applyCrud(
 		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
-		if err := info.recordTextDeltaGaps(tx, crud.GetKey(), seq); err != nil {
+		// Per-document side state is keyed by instance path, and the nested
+		// paths a row holds can only be named by looking at it — so a delete of
+		// an entity with element-borne text decodes the row it removes. An
+		// undecodable row falls back to the fixed paths (nothing nested could
+		// have been written through the guarded write paths for it anyway).
+		textPaths := info.textStatePaths(nil)
+		if info.hasNestedText() {
+			base, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
+			}
+			if base != nil {
+				textPaths = info.textStatePaths(base.ProtoReflect())
+			}
+		}
+		if err := info.recordTextDeltaGaps(tx, crud.GetKey(), textPaths, seq); err != nil {
 			return err
 		}
-		s.textCache.forget(ws, info.name, crud.GetKey(), info.textFields)
-		if err := info.clearTextFloors(tx, crud.GetKey()); err != nil {
+		s.textCache.forget(ws, info.name, crud.GetKey(), textPaths)
+		if err := info.clearTextFloors(tx, crud.GetKey(), textPaths); err != nil {
 			return err
 		}
 		if err := info.clearRowIndexes(tx, crud.GetKey()); err != nil {

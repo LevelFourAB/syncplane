@@ -44,6 +44,8 @@ func msgForType(typ string) proto.Message {
 		return &testdatav1.Article{}
 	case "glossary":
 		return &testdatav1.Glossary{}
+	case "keyed_text":
+		return &testdatav1.KeyedTextEntity{}
 	default:
 		return &testdatav1.Widget{}
 	}

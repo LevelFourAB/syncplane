@@ -432,28 +432,30 @@ func (s *Server) compactRow(
 	}
 	floors := make(map[string][]byte, len(info.textFields))
 	for _, tf := range info.textFields {
-		b := chainGetBytes(msg.ProtoReflect(), tf.chain)
-		if len(b) == 0 {
-			continue
+		for _, ti := range tf.instances(msg.ProtoReflect()) {
+			b := ti.bytes()
+			if len(b) == 0 {
+				continue
+			}
+			// Most rows the sweep sees have accumulated nothing worth a rewrite,
+			// and asking the stored bytes is orders of magnitude cheaper than
+			// decoding the document to find that out.
+			if could, err := text.CouldReclaim(b, minPurged); err != nil || !could {
+				continue
+			}
+			d, err := text.Decode(b, "")
+			if err != nil {
+				continue
+			}
+			// Items and mark ops count the same towards the threshold: it asks
+			// whether the reclaim earned a row rewrite and a sequence number, and
+			// either kind shrinks the row.
+			if items, marks := d.Compact(); items+marks < minPurged {
+				continue
+			}
+			ti.set(d.Encode())
+			floors[ti.path] = text.EncodeVV(d.VersionVector())
 		}
-		// Most rows the sweep sees have accumulated nothing worth a rewrite, and
-		// asking the stored bytes is orders of magnitude cheaper than decoding
-		// the document to find that out.
-		if could, err := text.CouldReclaim(b, minPurged); err != nil || !could {
-			continue
-		}
-		d, err := text.Decode(b, "")
-		if err != nil {
-			continue
-		}
-		// Items and mark ops count the same towards the threshold: it asks
-		// whether the reclaim earned a row rewrite and a sequence number, and
-		// either kind shrinks the row.
-		if items, marks := d.Compact(); items+marks < minPurged {
-			continue
-		}
-		chainSetBytes(msg.ProtoReflect(), tf.chain, d.Encode())
-		floors[tf.path] = text.EncodeVV(d.VersionVector())
 	}
 	if len(floors) == 0 {
 		return false, nil

@@ -102,6 +102,11 @@ func main() {
 			// same order locally and through queryServer, and that cursors
 			// minted by one side page the other.
 			&testdatav1.Article{},
+			// Collaborative text inside keyed-list elements and map values:
+			// integration tests verify that both sides address one document
+			// per element by instance path ("notes.<id>.body") and merge
+			// concurrent edits element by element.
+			&testdatav1.KeyedTextEntity{},
 		),
 	)
 	if *gcInterval > 0 || *gcRetention > 0 {

@@ -278,6 +278,12 @@ message FieldBehavior {
 	// anchors. Requires a singular bytes field; implies opaque; the engine
 	// auto-installs the text merger so concurrent PATCHes merge without
 	// interleaving. Incompatible with key_field/order_field.
+	//
+	// The field's path may cross keyed message lists and message-valued maps,
+	// in which case each element holds its own document, addressed by its
+	// instance path ("notes.<key>.body"). Refused inside a oneof or an unkeyed
+	// repeated element: those units are replaced whole, so the merger could
+	// never run.
 	bool text = 4;
 	// Maintain a single-component secondary index over this field, so filtering
 	// or ordering by it costs O(result) instead of a scan of the entity.

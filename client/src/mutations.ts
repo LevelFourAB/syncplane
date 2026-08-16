@@ -1017,22 +1017,29 @@ export function keyFieldsFor(field: DescField): DescField[] {
 
 /**
  * Walks a message's fields (descending through singular, non-opaque,
- * non-reference message fields) and returns the dotted proto path of every
+ * non-reference message fields, keyed message lists and message-valued maps)
+ * and returns the dotted proto path of every
  * (syncplane.v1.field_behavior).text field, validating its shape. Mirror of the
  * server's collectTextFields.
  *
- * oneof names the group crossed on the way here, and container the repeated or
- * map field (both empty when none). The walk still descends through oneof
- * members, list elements and map values so that a text field below one is
- * reported rather than quietly skipped: its merger could never fire, because a
- * oneof is replaced whole, and so is a collection element addressed by a mask.
+ * A text field below a keyed list or map is accepted: the element identity is
+ * stable, a mask path can address the element ("items.<key>.body"), and the
+ * merge descends into it, so the merger fires per element and the field holds
+ * one document per element. The returned path is the SCHEMA path with the
+ * item keys stripped ("items.body") — the merger key space.
+ *
+ * oneof names the group crossed on the way here, and unkeyed the message list
+ * with no element identity (both empty when none). The walk still descends
+ * through oneof members and unkeyed list elements so that a text field below
+ * one is reported rather than quietly skipped: its merger could never fire,
+ * because a oneof is replaced whole, and an element no mask can address is too.
  */
 export function collectTextFieldPaths(
 	schema: DescMessage,
 	prefix: string,
 	visiting: string[],
 	oneof = '',
-	container = '',
+	unkeyed = '',
 ): string[] {
 	const out: string[] = [];
 	for (const field of schema.fields) {
@@ -1057,28 +1064,31 @@ export function collectTextFieldPaths(
 						+ `a oneof is replaced whole, so the text merger could never run`,
 				);
 			}
-			if (container !== '') {
+			if (unkeyed !== '') {
 				throw new Error(
-					`${schema.typeName}.${field.name}: text field is inside ${container}; `
-						+ `an element is replaced whole, so the text merger could never run`,
+					`${schema.typeName}.${field.name}: text field is inside ${unkeyed}, `
+						+ `whose elements have no identity; an element is replaced whole, so the `
+						+ `text merger could never run — give the list a key_field to hold one `
+						+ `document per element`,
 				);
 			}
 			out.push(prefix + field.name);
 			continue;
 		}
 		if (behavior?.opaque || isRef(field)) continue;
-		// Descend into embedded sub-messages, and into collection elements
-		// purely to refuse text there.
+		// Descend into embedded sub-messages and collection elements — unkeyed
+		// list elements purely to refuse text there.
 		let sub: DescMessage | undefined;
-		let enclosing = container;
+		let enclosing = unkeyed;
 		if (field.fieldKind === 'message') {
 			sub = field.message;
 		} else if (field.fieldKind === 'list' && field.listKind === 'message') {
 			sub = field.message;
-			enclosing = `repeated field "${prefix}${field.name}"`;
+			if (keyFieldsFor(field).length === 0) {
+				enclosing = `repeated field "${prefix}${field.name}"`;
+			}
 		} else if (field.fieldKind === 'map' && field.mapKind === 'message') {
 			sub = field.message;
-			enclosing = `map field "${prefix}${field.name}"`;
 		}
 		if (sub === undefined || visiting.includes(sub.typeName)) continue;
 		out.push(...collectTextFieldPaths(
@@ -1096,12 +1106,16 @@ export function collectTextFieldPaths(
  * Widens the bytes-typed fields of an init shape to also accept a plain
  * string: collaborative-text fields ((syncplane.v1.field_behavior).text) may
  * be written as strings, which the client diffs into CRDT operations at
- * enqueue time. The widening is shallow and type-level only — at runtime a
- * string reaching a bytes field that is NOT a text field throws.
+ * enqueue time. The widening is recursive — through embedded messages, list
+ * elements and map values, where a text field may live — and type-level only:
+ * at runtime a string reaching a bytes field that is NOT a text field throws.
  */
-export type TextInit<T> = {
-	[K in keyof T]: NonNullable<T[K]> extends Uint8Array ? T[K] | string : T[K];
-};
+export type TextInit<T> = T | TextInitDeep<T>;
+
+type TextInitDeep<T> = NonNullable<T> extends Uint8Array ? T | string
+	: NonNullable<T> extends readonly (infer E)[] ? readonly TextInit<E>[]
+	: NonNullable<T> extends object ? { [K in keyof NonNullable<T>]?: TextInit<NonNullable<T>[K]> }
+	: T;
 
 /**
  * The init a PATCH takes: the fields to change, never a whole row.
@@ -1169,6 +1183,51 @@ function extractFrom(
 		) {
 			const sub = extractFrom(field.message, v as Rec, `${prefix}${field.name}.`, texts);
 			if (sub !== v) ensure()[key] = sub;
+			continue;
+		}
+		// A keyed list element or map value may hold text fields of its own;
+		// their strings extract under the element's instance path.
+		if (field.fieldKind === 'list' && field.listKind === 'message' && Array.isArray(v)) {
+			const keyFields = keyFieldsFor(field);
+			if (keyFields.length === 0) continue;
+			let list = v;
+			for (let i = 0; i < v.length; i++) {
+				const elem = v[i];
+				if (elem === null || typeof elem !== 'object') continue;
+				const itemKey = encodeItemKey(elem as Message, keyFields);
+				const sub = extractFrom(
+					field.message,
+					elem as Rec,
+					`${prefix}${field.name}.${itemKey}.`,
+					texts,
+				);
+				if (sub !== elem) {
+					if (list === v) list = [ ...v ];
+					list[i] = sub;
+				}
+			}
+			if (list !== v) ensure()[key] = list;
+			continue;
+		}
+		if (
+			field.fieldKind === 'map' && field.mapKind === 'message' && v !== null && typeof v === 'object'
+		) {
+			let map = v as Rec;
+			for (const jsKey of Object.keys(v as Rec)) {
+				const entry = (v as Rec)[jsKey];
+				if (entry === null || typeof entry !== 'object') continue;
+				const sub = extractFrom(
+					field.message,
+					entry as Rec,
+					`${prefix}${field.name}.${encodeMapKey(field, jsKey)}.`,
+					texts,
+				);
+				if (sub !== entry) {
+					if (map === (v as Rec)) map = { ...(v as Rec) };
+					map[jsKey] = sub;
+				}
+			}
+			if (map !== v) ensure()[key] = map;
 		}
 	}
 	return out;
@@ -1196,73 +1255,264 @@ export function takeTextStrings(crud: CrudMutation): ReadonlyMap<string, string>
 	return texts;
 }
 
-/** Resolves a dotted proto path to a text field's descriptor chain. */
-function textFieldChain(schema: DescMessage, path: string): DescField[] {
-	const segs = path.split('.');
-	const chain: DescField[] = [];
+/**
+ * One resolved step of a text-field instance path: the field walked through,
+ * plus the addressed element when the step crosses a keyed message list
+ * (itemKey/keyFields) or a message-valued map (mapKey, the JS object key).
+ */
+interface TextRefStep {
+	field: DescField;
+	itemKey?: string;
+	keyFields?: DescField[];
+	mapKey?: string;
+}
+
+/**
+ * Resolves a dotted path — instance form, with item keys where it crosses
+ * keyed lists and maps — to the steps addressing a text field. Mirror of the
+ * server's textFieldRefByPath.
+ */
+function textFieldSteps(schema: DescMessage, path: string): TextRefStep[] {
+	const bad = () => new Error(`${schema.typeName} has no text field "${path}"`);
+	const steps: TextRefStep[] = [];
 	let cur: DescMessage = schema;
-	for (let i = 0; i < segs.length; i++) {
-		const field = cur.fields.find((f) => f.name === segs[i]);
-		if (!field) throw new Error(`${schema.typeName} has no text field "${path}"`);
-		chain.push(field);
-		if (i < segs.length - 1) {
-			if (field.fieldKind !== 'message') {
-				throw new Error(`${schema.typeName} has no text field "${path}"`);
-			}
+	let rest = path;
+	for (;;) {
+		const [ seg, afterSeg ] = splitSeg(rest);
+		rest = afterSeg;
+		const field = cur.fields.find((f) => f.name === seg);
+		if (!field) throw bad();
+		if (field.fieldKind === 'map') {
+			if (field.mapKind !== 'message' || rest === '') throw bad();
+			const [ keySeg, afterKey ] = splitSeg(rest);
+			rest = afterKey;
+			if (rest === '') throw bad();
+			steps.push({ field, mapKey: decodeMapKey(field, keySeg) });
 			cur = field.message;
 			continue;
 		}
-		if (!isTextField(field)) {
-			throw new Error(`${schema.typeName} has no text field "${path}"`);
+		if (field.fieldKind === 'list') {
+			const keyFields = keyFieldsFor(field);
+			if (field.listKind !== 'message' || keyFields.length === 0 || rest === '') throw bad();
+			const [ keySeg, afterKey ] = splitSeg(rest);
+			rest = afterKey;
+			if (rest === '') throw bad();
+			steps.push({ field, itemKey: keySeg, keyFields });
+			cur = field.message;
+			continue;
 		}
+		if (rest === '') {
+			if (!isTextField(field)) throw bad();
+			steps.push({ field });
+			return steps;
+		}
+		if (field.fieldKind !== 'message') throw bad();
+		steps.push({ field });
+		cur = field.message;
 	}
-	return chain;
 }
 
-function getBytesAt(msg: Rec | undefined, chain: DescField[]): Uint8Array | undefined {
-	let cur: unknown = msg;
-	for (const f of chain) {
-		if (cur === null || typeof cur !== 'object') return undefined;
-		cur = (cur as Rec)[f.localName];
+function stepInto(cur: unknown, st: TextRefStep): unknown {
+	if (cur === null || typeof cur !== 'object') return undefined;
+	const raw: unknown = (cur as Rec)[st.field.localName];
+	if (st.mapKey !== undefined) {
+		if (raw === null || typeof raw !== 'object') return undefined;
+		return (raw as Rec)[st.mapKey];
 	}
+	if (st.itemKey !== undefined) {
+		if (!Array.isArray(raw)) return undefined;
+		return raw.find((e) => encodeItemKey(e as Message, st.keyFields!) === st.itemKey);
+	}
+	return raw;
+}
+
+function getBytesAt(msg: Rec | undefined, steps: TextRefStep[]): Uint8Array | undefined {
+	let cur: unknown = msg;
+	for (const st of steps) cur = stepInto(cur, st);
 	return cur instanceof Uint8Array && cur.length > 0 ? cur : undefined;
 }
 
-function setBytesAt(msg: Rec, chain: DescField[], value: Uint8Array): void {
+/**
+ * Writes the leaf bytes, materializing singular intermediates. A missing
+ * addressed element or entry is an error rather than created — an element is
+ * more than its key, and a caller that means to create one puts it in the
+ * value. Mirrors the server's textFieldRef.set.
+ */
+function setBytesAt(msg: Rec, steps: TextRefStep[], value: Uint8Array): void {
 	let cur = msg;
-	for (let i = 0; i < chain.length - 1; i++) {
-		const f = chain[i]!;
-		let next = cur[f.localName] as Rec | undefined | null;
+	for (let i = 0; i < steps.length - 1; i++) {
+		const st = steps[i]!;
+		if (st.mapKey !== undefined || st.itemKey !== undefined) {
+			const next = stepInto(cur, st);
+			if (next === undefined || next === null) {
+				throw new Error(
+					`text field path addresses a ${st.mapKey !== undefined ? 'map entry' : 'list element'} `
+						+ `the value does not carry (at "${st.field.name}")`,
+				);
+			}
+			cur = next as Rec;
+			continue;
+		}
+		let next = cur[st.field.localName] as Rec | undefined | null;
 		if (next === undefined || next === null) {
-			next = create(f.message!) as unknown as Rec;
-			cur[f.localName] = next;
+			next = create(st.field.message!) as unknown as Rec;
+			cur[st.field.localName] = next;
 		}
 		cur = next;
 	}
-	cur[chain[chain.length - 1]!.localName] = value;
+	cur[steps[steps.length - 1]!.field.localName] = value;
+}
+
+/**
+ * Enumerates the instance paths of one text field within a message: the schema
+ * path itself when it crosses no keyed list or map (whether or not the leaf is
+ * set), else one path per element reachable through present containers — the
+ * mask form each per-element document is addressed by ("items.<key>.body").
+ * Deterministic: list order, map entries sorted by encoded key. Mirror of the
+ * server's textField.instances.
+ */
+export function textInstancePaths(
+	schema: DescMessage,
+	textPath: string,
+	msg: Message,
+): string[] {
+	const out: string[] = [];
+	const walk = (
+		cur: unknown,
+		desc: DescMessage,
+		rest: string,
+		prefix: string,
+	): void => {
+		const [ seg, after ] = splitSeg(rest);
+		const field = desc.fields.find((f) => f.name === seg);
+		if (!field) return;
+		if (field.fieldKind === 'list' && field.listKind === 'message') {
+			const keyFields = keyFieldsFor(field);
+			if (keyFields.length === 0) return;
+			const raw = cur === null || typeof cur !== 'object'
+				? undefined
+				: (cur as Rec)[field.localName];
+			if (!Array.isArray(raw)) return;
+			for (const elem of raw) {
+				const key = encodeItemKey(elem as Message, keyFields);
+				walk(elem, field.message, after, `${prefix}${seg}.${key}.`);
+			}
+			return;
+		}
+		if (field.fieldKind === 'map' && field.mapKind === 'message') {
+			const raw = cur === null || typeof cur !== 'object'
+				? undefined
+				: (cur as Rec)[field.localName];
+			if (raw === null || typeof raw !== 'object') return;
+			const entries = Object.keys(raw as Rec)
+				.map((k) => [ encodeMapKey(field, k), k ] as const)
+				.sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0));
+			for (const [ encoded, jsKey ] of entries) {
+				walk((raw as Rec)[jsKey], field.message, after, `${prefix}${seg}.${encoded}.`);
+			}
+			return;
+		}
+		if (after === '') {
+			out.push(prefix + seg);
+			return;
+		}
+		if (field.fieldKind !== 'message') return;
+		const next = cur === null || typeof cur !== 'object'
+			? undefined
+			: (cur as Rec)[field.localName];
+		if (next === undefined || next === null) return;
+		walk(next, field.message, after, `${prefix}${seg}.`);
+	};
+	if (!textPathNested(schema, textPath)) return [ textPath ];
+	walk(msg as unknown as Rec, schema, textPath, '');
+	return out;
+}
+
+/**
+ * Whether a text field's schema path crosses a keyed list or map — the shape
+ * whose documents are per-element rather than per-row.
+ */
+export function textPathNested(schema: DescMessage, textPath: string): boolean {
+	let cur: DescMessage = schema;
+	let rest = textPath;
+	for (;;) {
+		const [ seg, after ] = splitSeg(rest);
+		const field = cur.fields.find((f) => f.name === seg);
+		if (!field) return false;
+		if (field.fieldKind === 'list' || field.fieldKind === 'map') return true;
+		if (after === '' || field.fieldKind !== 'message') return false;
+		cur = field.message;
+		rest = after;
+	}
+}
+
+/**
+ * Resolves a mask path back to the schema path of the text field it addresses
+ * outright, or undefined when it lands anywhere else. This is the gate every
+ * mask-driven text fast path asks at: an instance path ("items.<key>.body")
+ * resolves to its merger key ("items.body"), a fixed path to itself, and a
+ * path naming a whole element — which replaces it, document included — to
+ * undefined.
+ */
+export function textSchemaPathOf(schema: DescMessage, maskPath: string): string | undefined {
+	let cur: DescMessage = schema;
+	let rest = maskPath;
+	let out = '';
+	for (;;) {
+		const [ seg, after ] = splitSeg(rest);
+		rest = after;
+		const field = cur.fields.find((f) => f.name === seg);
+		if (!field) return undefined;
+		out += (out === '' ? '' : '.') + field.name;
+		if (field.fieldKind === 'map') {
+			if (field.mapKind !== 'message' || rest === '') return undefined;
+			[ , rest ] = splitSeg(rest);
+			if (rest === '') return undefined;
+			cur = field.message;
+			continue;
+		}
+		if (field.fieldKind === 'list') {
+			if (field.listKind !== 'message' || keyFieldsFor(field).length === 0 || rest === '') {
+				return undefined;
+			}
+			[ , rest ] = splitSeg(rest);
+			if (rest === '') return undefined;
+			cur = field.message;
+			continue;
+		}
+		if (rest === '') return isTextField(field) ? out : undefined;
+		if (field.fieldKind !== 'message') return undefined;
+		cur = field.message;
+	}
 }
 
 /**
  * Reads the encoded document of one text field, or undefined when the message
- * does not carry it (an unset intermediate, or empty bytes — for a state CRDT
- * those mean the same thing).
+ * does not carry it (an unset intermediate, an absent element, or empty bytes
+ * — for a state CRDT those mean the same thing). `path` is an instance path:
+ * where the field sits under a keyed list or map, the element key is part of
+ * it ("items.<key>.body").
  */
 export function textFieldBytes(
 	schema: DescMessage,
 	path: string,
 	msg: Message,
 ): Uint8Array | undefined {
-	return getBytesAt(msg as unknown as Rec, textFieldChain(schema, path));
+	return getBytesAt(msg as unknown as Rec, textFieldSteps(schema, path));
 }
 
-/** Writes one text field's encoded document, materializing intermediates. */
+/**
+ * Writes one text field's encoded document, materializing singular
+ * intermediates. Throws when the instance path addresses a list element or map
+ * entry the message does not carry.
+ */
 export function setTextFieldBytes(
 	schema: DescMessage,
 	path: string,
 	msg: Message,
 	value: Uint8Array,
 ): void {
-	setBytesAt(msg as unknown as Rec, textFieldChain(schema, path), value);
+	setBytesAt(msg as unknown as Rec, textFieldSteps(schema, path), value);
 }
 
 /** What one text field's string conversion did (setString's op-level shapes),
@@ -1282,9 +1532,11 @@ export function crudHasPlainString(
 	textPaths: readonly string[],
 ): boolean {
 	if (textPaths.length === 0) return false;
-	const value = fromBinary(def.schema, crud.value) as unknown as Rec;
+	const value = fromBinary(def.schema, crud.value);
 	return textPaths.some((path) =>
-		isPlainString(getBytesAt(value, textFieldChain(def.schema, path)))
+		textInstancePaths(def.schema, path, value).some((inst) =>
+			isPlainString(getBytesAt(value as unknown as Rec, textFieldSteps(def.schema, inst)))
+		)
 	);
 }
 
@@ -1330,19 +1582,22 @@ export async function applyTextStringsToCrud(
 
 	// Embedded values first, so an explicit string for the same path wins: it
 	// is the caller's stated intent for this write, while an embedded value
-	// arrived with whatever they decoded it from.
+	// arrived with whatever they decoded it from. Paths here are instance
+	// paths — one per element for a field under a keyed list or map.
 	const pending = new Map<string, string>();
 	let cleared = false;
-	for (const path of textPaths) {
-		const chain = textFieldChain(def.schema, path);
-		const current = getBytesAt(value, chain);
-		if (!isPlainString(current)) continue;
-		if (!masked(path)) {
-			setBytesAt(value, chain, new Uint8Array(0));
-			cleared = true;
-			continue;
+	for (const schemaPath of textPaths) {
+		for (const path of textInstancePaths(def.schema, schemaPath, value as unknown as Message)) {
+			const steps = textFieldSteps(def.schema, path);
+			const current = getBytesAt(value, steps);
+			if (!isPlainString(current)) continue;
+			if (!masked(path)) {
+				setBytesAt(value, steps, new Uint8Array(0));
+				cleared = true;
+				continue;
+			}
+			pending.set(path, plainString(current!));
 		}
-		pending.set(path, plainString(current!));
 	}
 	if (texts) { for (const [ path, s ] of texts) pending.set(path, s); }
 
@@ -1362,10 +1617,10 @@ export async function applyTextStringsToCrud(
 		: undefined;
 	const edits: TextStringEdits = new Map();
 	for (const [ path, s ] of pending) {
-		const chain = textFieldChain(def.schema, path);
-		const doc = decodeTextDoc(getBytesAt(prev, chain), peer);
+		const steps = textFieldSteps(def.schema, path);
+		const doc = decodeTextDoc(getBytesAt(prev, steps), peer);
 		edits.set(path, doc.setString(s));
-		setBytesAt(value, chain, encodeTextDoc(doc));
+		setBytesAt(value, steps, encodeTextDoc(doc));
 		if (crud.op === CrudOp.PATCH && crud.fieldMask && texts?.has(path)) {
 			const covered = crud.fieldMask.paths.some(
 				(p) => p === path || path.startsWith(`${p}.`),
@@ -1378,9 +1633,11 @@ export async function applyTextStringsToCrud(
 }
 
 /**
- * Unions every text field of base into next in place (where both sides carry
- * a document) — the client mirror of the server's PUT exception: a full-row
- * write must merge text fields with the stored row rather than reset them.
+ * Unions every text document of base into next in place, pairing documents by
+ * instance path (where both sides carry one for the same position) — the
+ * client mirror of the server's PUT exception: a full-row write must merge
+ * text documents with the stored row rather than reset them. An element base
+ * holds and next dropped is being deleted, and its document goes with it.
  */
 export function mergeTextFieldsInto(
 	schema: DescMessage,
@@ -1388,12 +1645,14 @@ export function mergeTextFieldsInto(
 	base: Message,
 	next: Message,
 ): void {
-	for (const path of textPaths) {
-		const chain = textFieldChain(schema, path);
-		const baseBytes = getBytesAt(base as unknown as Rec, chain);
-		const nextBytes = getBytesAt(next as unknown as Rec, chain);
-		if (baseBytes === undefined || nextBytes === undefined) continue;
-		setBytesAt(next as unknown as Rec, chain, mergeText(baseBytes, nextBytes));
+	for (const schemaPath of textPaths) {
+		for (const path of textInstancePaths(schema, schemaPath, next)) {
+			const steps = textFieldSteps(schema, path);
+			const baseBytes = getBytesAt(base as unknown as Rec, steps);
+			const nextBytes = getBytesAt(next as unknown as Rec, steps);
+			if (baseBytes === undefined || nextBytes === undefined) continue;
+			setBytesAt(next as unknown as Rec, steps, mergeText(baseBytes, nextBytes));
+		}
 	}
 }
 
@@ -1533,6 +1792,91 @@ export function encodeItemKey(elem: Message, keyFields: DescField[]): string {
 	return keyFields
 		.map((kf) => escapeKeySegment(keyComponent(kf, rec[kf.localName]), true))
 		.join('/');
+}
+
+/**
+ * Parses an encoded item-key mask segment back into the element key-field
+ * values it renders from — the inverse of encodeItemKey, for building a value
+ * that carries the addressed element. Strings unescape; numbers parse base-10
+ * (bigint where protobuf-es uses one); bools parse true/false; enums parse by
+ * number.
+ */
+function decodeItemKeyInit(keyFields: DescField[], itemKey: string): Rec {
+	const parts = keyFields.length === 1 ? [ itemKey ] : splitCompositeKey(itemKey);
+	if (parts.length !== keyFields.length) {
+		throw new Error(`item key "${itemKey}" does not match its ${keyFields.length} key fields`);
+	}
+	const out: Rec = {};
+	for (let i = 0; i < keyFields.length; i++) {
+		const field = keyFields[i]!;
+		const raw = decodeStringKey(parts[i]!);
+		out[field.localName] = decodeKeyPart(field, raw);
+	}
+	return out;
+}
+
+/** Splits a composite item key at unescaped '/' separators. */
+function splitCompositeKey(s: string): string[] {
+	const parts: string[] = [];
+	let cur = '';
+	for (let i = 0; i < s.length; i++) {
+		const c = s[i]!;
+		if (c === '\\' && i + 1 < s.length) {
+			cur += c + s[i + 1];
+			i++;
+		} else if (c === '/') {
+			parts.push(cur);
+			cur = '';
+		} else {
+			cur += c;
+		}
+	}
+	parts.push(cur);
+	return parts;
+}
+
+function decodeKeyPart(field: DescField, raw: string): unknown {
+	if (field.fieldKind === 'enum') return Number(raw);
+	switch (field.fieldKind === 'scalar' ? field.scalar : undefined) {
+		case ScalarType.STRING:
+			return raw;
+		case ScalarType.BOOL:
+			return raw === 'true';
+		case ScalarType.INT64:
+		case ScalarType.SINT64:
+		case ScalarType.SFIXED64:
+		case ScalarType.UINT64:
+		case ScalarType.FIXED64:
+			return BigInt(raw);
+		default:
+			return Number(raw);
+	}
+}
+
+/**
+ * Builds a row init that carries `state` at one text field's instance path:
+ * each keyed-list step on the way becomes a single-element list seeded with
+ * the identity the path names, each map step a single entry, and singular
+ * steps empty shells. Paired with the path as a PATCH mask this is the write a
+ * text handle sends — the merge descends to the addressed element and the
+ * text merger fires there, leaving the element's other fields alone.
+ */
+export function textFieldInit(schema: DescMessage, path: string, state: Uint8Array): object {
+	const steps = textFieldSteps(schema, path);
+	let inner: Rec = { [steps[steps.length - 1]!.field.localName]: state };
+	for (let i = steps.length - 2; i >= 0; i--) {
+		const st = steps[i]!;
+		if (st.itemKey !== undefined) {
+			inner = {
+				[st.field.localName]: [ { ...decodeItemKeyInit(st.keyFields!, st.itemKey), ...inner } ],
+			};
+		} else if (st.mapKey !== undefined) {
+			inner = { [st.field.localName]: { [st.mapKey]: inner } };
+		} else {
+			inner = { [st.field.localName]: inner };
+		}
+	}
+	return inner;
 }
 
 /** Renders a scalar list element's value as a mask segment. */
@@ -1749,8 +2093,24 @@ function expandMap(field: MapField, seg: string, prior: Rec, next: Rec): string[
 	for (const k of new Set([ ...Object.keys(pm), ...Object.keys(nm) ])) {
 		const inP = Object.hasOwn(pm, k);
 		const inN = Object.hasOwn(nm, k);
-		const changed = inP !== inN || !mapValueEquals(field, pm[k], nm[k]);
-		if (changed) out.push(`${seg}.${encodeMapKey(field, k)}`);
+		if (inP !== inN || mapValueEquals(field, pm[k], nm[k])) {
+			if (inP !== inN) out.push(`${seg}.${encodeMapKey(field, k)}`);
+			continue;
+		}
+		// Both sides carry the entry and it changed. When its type holds text,
+		// the entry cannot be replaced whole — that would clobber concurrent
+		// edits to its documents — so the diff narrows inside it.
+		if (field.mapKind === 'message' && hasTextDescendant(field.message)) {
+			expandElementDiff(
+				field.message,
+				`${seg}.${encodeMapKey(field, k)}.`,
+				pm[k] as Message,
+				nm[k] as Message,
+				out,
+			);
+			continue;
+		}
+		out.push(`${seg}.${encodeMapKey(field, k)}`);
 	}
 	return out;
 }
@@ -1776,12 +2136,112 @@ function expandKeyedList(
 	for (const k of new Set([ ...pMap.keys(), ...nMap.keys() ])) {
 		const p = pMap.get(k);
 		const n = nMap.get(k);
-		const changed = (p === undefined) !== (n === undefined)
-			|| (p !== undefined && n !== undefined
-				&& !bytesEqual(toBinary(field.message, p), toBinary(field.message, n)));
-		if (changed) out.push(`${seg}.${k}`);
+		if (p === undefined || n === undefined) {
+			if (p !== n) out.push(`${seg}.${k}`); // added or removed: the element is the unit
+			continue;
+		}
+		if (bytesEqual(toBinary(field.message, p), toBinary(field.message, n))) continue;
+		// A changed element whose type holds text cannot be replaced whole —
+		// that would clobber concurrent edits to its documents — so the diff
+		// narrows to the units that moved inside it.
+		if (hasTextDescendant(field.message)) {
+			expandElementDiff(field.message, `${seg}.${k}.`, p, n, out);
+			continue;
+		}
+		out.push(`${seg}.${k}`);
 	}
 	return out;
+}
+
+/**
+ * Narrows a changed element (or singular message on the way to one) to the
+ * units that moved, emitting one mask path per unit under `prefix`. A changed
+ * text field gets its own path, which is what routes it through the merger; a
+ * changed singular message holding text recurses; a nested keyed list or map
+ * holding text re-enters the per-item expansion; everything else is replaced
+ * as the unit the mask names, exactly as a top-level diff would.
+ */
+function expandElementDiff(
+	desc: DescMessage,
+	prefix: string,
+	p: Message,
+	n: Message,
+	out: string[],
+): void {
+	const before = out.length;
+	for (const unit of maskFromDiff(desc, p, n)) {
+		const field = desc.fields.find((f) => f.name === unit);
+		if (!field) {
+			// A oneof group; nothing below one can be text, so it replaces whole.
+			out.push(prefix + unit);
+			continue;
+		}
+		const pv = (p as unknown as Rec)[field.localName];
+		const nv = (n as unknown as Rec)[field.localName];
+		if (
+			field.fieldKind === 'message' && !isOpaque(field) && refKeyFields(field).length === 0
+			&& hasTextDescendant(field.message)
+			&& pv !== undefined && pv !== null && nv !== undefined && nv !== null
+		) {
+			expandElementDiff(field.message, `${prefix}${unit}.`, pv as Message, nv as Message, out);
+			continue;
+		}
+		if (
+			field.fieldKind === 'list' && field.listKind === 'message'
+			&& !isOpaque(field) && hasTextDescendant(field.message)
+		) {
+			const kfs = keyFieldsFor(field);
+			if (kfs.length > 0) {
+				out.push(...expandKeyedList(
+					field,
+					prefix + unit,
+					kfs,
+					p as unknown as Rec,
+					n as unknown as Rec,
+				));
+				continue;
+			}
+		}
+		if (
+			field.fieldKind === 'map' && field.mapKind === 'message' && hasTextDescendant(field.message)
+		) {
+			out.push(...expandMap(field, prefix + unit, p as unknown as Rec, n as unknown as Rec));
+			continue;
+		}
+		out.push(prefix + unit);
+	}
+	if (out.length === before) {
+		// The bytes differ but no unit does (unknown fields, most likely). The
+		// change must still land, and a whole-element write is the only mask
+		// that can carry what the diff cannot name.
+		out.push(prefix.slice(0, -1));
+	}
+}
+
+/** Memoized: whether a message type carries a text field anywhere a mask can
+ * reach — through singular messages, keyed lists and map values, past opaque
+ * fields and references (where a merger could never fire anyway). */
+const textDescendantMemo = new WeakMap<DescMessage, boolean>();
+
+function hasTextDescendant(desc: DescMessage): boolean {
+	const memo = textDescendantMemo.get(desc);
+	if (memo !== undefined) return memo;
+	const walk = (d: DescMessage, visiting: string[]): boolean => {
+		for (const field of d.fields) {
+			if (isTextField(field)) return true;
+			if (isOpaque(field) || isRef(field)) continue;
+			let sub: DescMessage | undefined;
+			if (field.fieldKind === 'message') sub = field.message;
+			else if (field.fieldKind === 'list' && field.listKind === 'message') sub = field.message;
+			else if (field.fieldKind === 'map' && field.mapKind === 'message') sub = field.message;
+			if (sub === undefined || visiting.includes(sub.typeName)) continue;
+			if (walk(sub, [ ...visiting, d.typeName ])) return true;
+		}
+		return false;
+	};
+	const result = walk(desc, []);
+	textDescendantMemo.set(desc, result);
+	return result;
 }
 
 function expandScalarSet(field: DescField, seg: string, prior: Rec, next: Rec): string[] {
