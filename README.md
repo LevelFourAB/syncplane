@@ -1,68 +1,66 @@
-# syncplane
+# Syncplane
 
-A sync engine for local-first apps. Clients read and write a local KV store; a
-server-authoritative mutation log keeps every replica converged by optimistic
-rebase on the client.
-
-It ships as two halves joined by a protobuf wire contract: a Go server
-(`engine/`) and a TypeScript client (`client/`, published as `syncplane`).
+A sync engine for local-first apps. Clients read and write a local KV store, so
+an app works fully offline; a server-authoritative mutation log keeps every
+replica converged by optimistic rebase — pending mutations replay on top of
+server-confirmed state.
 
 ## Features
 
-- 🗃️ **Local-first** — reads and writes hit a local KV store; the app works
-  fully offline and syncs in the background.
-- ↩️ **Optimistic rebase** — mutations queue locally and replay on top of
-  server-confirmed state; divergence self-heals on the next pull.
-- 🔔 **Live change stream** — a server-streaming `Subscribe` pushes changed rows
-  straight to connected clients, reconnects with backoff, falls back to polling.
-- 🪟 **Partial sync** — subscribe to a subset of rows by predicate _and_ by rank
-  ("the 1000 most recently updated open issues"). Every read reports its own
-  `coverage`, so partial data is never mistaken for the whole answer.
-- 🔎 **Queries, local and server-side** — one predicate language, evaluated
-  identically in Go and TypeScript and pinned by shared vectors. Declare a
-  secondary index and the same query becomes a range read on both sides;
-  without one it falls back to a scan that returns the same rows.
-- 🔦 **Full-text search** — mark fields `searchable` and query with `match`,
-  ranked by relevance. Case- and accent-insensitive, CJK-aware,
-  typeahead-friendly, and deterministic: the browser ranks its synced subset
-  exactly as the server ranks everything, with a term index on both sides.
-- ✍️ **Collaborative text** — mark a `bytes` field `text: true` and it holds a
-  convergent text document, with Peritext-style marks and anchors that travel
-  with the characters they cover.
-- 👥 **Presence and broadcast** — a second, non-durable plane for cursors, "who
-  is here" and typing indicators. A room anchored to a row inherits that row's
-  read permission, so it needs no policy of its own, and nothing it carries
-  touches the mutation log.
-- 🕰️ **Field history** — opt an entity into `history: {}` and the server logs
-  what its marked fields held before each editing session, with the actor;
-  restoring one is an ordinary `patch`.
-- 🔐 **Auth & permission seams** — an `Authenticator` turns headers into a
-  `Principal`; `CanAccessWorkspace`, `CanMutate` and `ReadFilter` decide what it
-  may do. Rejections come back as results, not RPC errors.
-- 🧬 **CRUD + custom mutations** — generated `put`/`patch`/`del` plus named,
-  server-authoritative Go mutators with optional TypeScript mirrors. An entity
-  can reserve `DELETE` for trusted writes in its own schema.
-- 📤 **Server-side reactions** — a durable change feed, an `effects` runtime
-  that runs handlers on committed writes with before-state and backoff, and
-  `connect` for keeping an external store converged bidirectionally.
-- 🗂️ **Multi-tab, multi-workspace** — tabs share one IndexedDB store; one
-  visible tab holds the stream (Web Locks leader election) and the rest see its
-  writes. One client holds every workspace an account belongs to, over one
-  stream and one push.
-- ⚛️ **React adapter** — `syncplane/react` mirrors `client.db` as hooks
-  (`useQuery`, `useRow`, `useMutate`, `useText`, `useSyncStatus`, `useUndo`,
-  `useOnMutationRejected`), with suspense variants, a provider that owns the
-  client, and per-workspace scoping.
-- 🧩 **Runtime schemas** — an app's entities can arrive as a
-  `FileDescriptorSet` at runtime instead of compiled-in Go, and one process can
-  host many apps.
-- 🧪 **App-author test kit** — `syncplane/testing` runs a real client against
-  an in-process fake server in any test runner: go offline, reject a write,
-  hold pushes, force a re-bootstrap, and assert exactly what the user would
-  see.
-- 🖧 **One node or many** — SQLite plus an in-process notifier needs no
-  infrastructure; swap in `pgstore` and `pgnotify` and several nodes share one
-  Postgres database. Nothing above the storage seam changes.
+### Sync
+
+- **Partial sync** — sync only the rows a user needs: filter by predicate, or
+  keep a bounded window such as the N most recently updated. Every read
+  reports whether it saw complete data.
+- **Live updates** — the server pushes changed rows to connected clients, with
+  polling as a fallback.
+- **Multi-tab, multi-workspace** — open the app in any number of tabs and they
+  share one local store and one server connection. A user in several
+  workspaces syncs them all over that same connection.
+
+### Queries & search
+
+- **One query language** — a query returns the same rows whether it runs
+  against the local store or on the server. Declare an index and it becomes a
+  range read on both sides instead of a scan.
+- **Full-text search** — mark fields `searchable` and query with `match`,
+  ranked by relevance. The client ranks whatever it has synced exactly as the
+  server would.
+
+### Collaboration
+
+- **Collaborative text** — a field can hold a text document that merges
+  concurrent edits. Formatting and comment anchors stay attached to the
+  characters they cover as others edit around them.
+- **Presence & broadcast** — cursors, "who is here" and typing indicators,
+  delivered live and never stored. Attach a room to a row and whoever may
+  read the row may join.
+- **Field history** — record what chosen fields held before each editing
+  session and who changed them; an old value can be restored with a normal
+  write.
+
+### Server
+
+- **Authentication & permissions** — plug in your own authentication, then
+  decide per workspace and per write what a user may do, and filter what they
+  may read.
+- **Custom mutations** — beyond the generated `put`/`patch`/`del`, define
+  named mutations that run in Go on the server, with optional optimistic
+  client versions.
+- **Effects & connectors** — run your own code when writes commit, and keep
+  an external system in two-way sync.
+- **Runtime schemas** — register an app's entities at runtime instead of
+  compiling them in; one server can host many apps.
+- **One node or many** — start on SQLite with no extra infrastructure; switch
+  to Postgres to run several nodes. Application code does not change.
+
+### Tooling
+
+- **React adapter** — `syncplane/react` exposes queries, rows and mutations
+  as hooks, with a provider that owns the client.
+- **Test kit** — `syncplane/testing` runs your app's real client against an
+  in-process fake server: go offline, reject a write, and assert what the
+  user sees.
 
 ## Quick start
 
