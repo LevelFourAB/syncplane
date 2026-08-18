@@ -69,6 +69,41 @@ describe('undo/redo over sync', () => {
 		await b.close();
 	});
 
+	it('refuses to undo a delete once another client has taken the key', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws, { undo: {} });
+		const b = newClient(ws);
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(TodoSchema, { id: 't1', title: 'original' });
+		await a.syncNow();
+		await b.syncNow();
+
+		await a.mutate.del(TodoSchema, 't1');
+		await a.syncNow();
+		await b.syncNow();
+
+		// B re-uses the key for something else. A's undo restores a row that is
+		// no longer free, so the guarded create conflicts instead of replacing
+		// B's row, and the rejection drops the undo group.
+		await b.mutate.put(TodoSchema, { id: 't1', title: "B's row" });
+		await b.syncNow();
+		await a.syncNow();
+
+		await a.undo();
+		await a.syncNow();
+		expect((await a.get(TodoSchema, 't1'))?.title).toBe("B's row");
+		// The refused undo left nothing to redo.
+		expect(a.canRedo()).toBe(false);
+
+		await b.syncNow();
+		expect((await b.get(TodoSchema, 't1'))?.title).toBe("B's row");
+
+		await a.close();
+		await b.close();
+	});
+
 	it('a rejected mutation drops its undo group', async () => {
 		const ws = freshWorkspace();
 		const a = newClient(ws, { undo: {} });

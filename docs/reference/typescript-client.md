@@ -1191,7 +1191,9 @@ interface UndoOptions {
 } // enabled defaults true when object present; maxDepth default 100
 ```
 
-Semantics: PUT/PATCH/DELETE invert against the pre-mutation row; a `transact()` batch
+Semantics: PUT/PATCH/DELETE invert against the pre-mutation row; undoing a DELETE
+restores the row as a guarded create (`expectedVersion: 0n`), so it is rejected as a
+conflict if the key was taken again rather than replacing the new row; a `transact()` batch
 is one undo group (replays atomically); custom mutations are a **barrier** (both
 stacks clear); a new user edit clears the redo stack; a rejected mutation drops its
 whole group. Undo is driven entirely through the client — `undo()`, `redo()`,

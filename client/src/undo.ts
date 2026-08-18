@@ -6,7 +6,9 @@
 // Semantics the tests pin down:
 //   - PUT      → inverse PUT(prev) or DELETE when the row did not exist
 //   - PATCH    → inverse PATCH(prev snapshot, same mask) or DELETE
-//   - DELETE   → inverse PUT(prev), or nothing when the row did not exist
+//   - DELETE   → inverse PUT(prev) guarded by expectedVersion 0 (so it fails
+//                rather than overwrite a row that took the key since), or
+//                nothing when the row did not exist
 //   - text-field edits (a state CRDT, where a snapshot inverse would merge to
 //     a no-op) → a SYMBOLIC inverse (src/text/undo-ops.ts) materialised
 //     against the then-current document at undo time; only local ops are
@@ -66,7 +68,9 @@ export type StackName = 'undo' | 'redo';
 /**
  * Computes the inverse of a CRUD mutation given the merged row bytes as they
  * were BEFORE the mutation applied. Returns undefined for no-ops (deleting
- * a row that did not exist).
+ * a row that did not exist). The inverse of a DELETE asserts
+ * `expectedVersion` 0, so restoring the row is refused rather than silently
+ * replacing a row that took the key in the meantime.
  */
 export function invertCrud(
 	crud: CrudMutation,
@@ -102,11 +106,15 @@ export function invertCrud(
 			if (prev === undefined) {
 				return undefined;
 			}
+			// Version 0 means "row must not exist". The restore is a create, so
+			// asserting that conflicts instead of overwriting whatever took the
+			// key since, and keeps the undo legal where updates are trustedOnly.
 			return create(CrudMutationSchema, {
 				entity: crud.entity,
 				key: crud.key,
 				op: CrudOp.PUT,
 				value: prev,
+				expectedVersion: 0n,
 			});
 		default:
 			return undefined;

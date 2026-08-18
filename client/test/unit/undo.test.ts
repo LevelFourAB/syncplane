@@ -14,7 +14,7 @@ import {
 	CrudOp,
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { type Inverse, UndoManager } from '../../src/undo.js';
+import { type Inverse, invertCrud, UndoManager } from '../../src/undo.js';
 
 function newLocalClient(undo: { enabled?: boolean; maxDepth?: number } | undefined = {}) {
 	return new SyncClient({
@@ -109,6 +109,20 @@ describe('undo/redo', () => {
 		await c.undo();
 		expect((await c.get(TodoSchema, 't1'))?.title).toBe('keep me');
 		await c.close();
+	});
+
+	it('restores a deleted row as a guarded create, not an unguarded PUT', () => {
+		const del = create(CrudMutationSchema, {
+			entity: 'todo',
+			key: 't1',
+			op: CrudOp.DELETE,
+		});
+		const inv = invertCrud(del, new Uint8Array([ 1, 2, 3 ]));
+		expect(inv?.op).toBe(CrudOp.PUT);
+		// Version 0 means "row must not exist": the undo conflicts instead of
+		// overwriting whatever took the key, and it is a provable create, so it
+		// is legal where updates are trustedOnly.
+		expect(inv?.expectedVersion).toBe(0n);
 	});
 
 	it('deleting a missing row records nothing to undo', async () => {
