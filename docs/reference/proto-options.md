@@ -149,19 +149,25 @@ client reads the option off the schema it registers, so a subscription set namin
 one throws where it is built rather than reaching that server error.
 
 ```proto
-message AuditEvent {
+message ProjectStats {
 	option (syncplane.v1.entity) = {
-		name: "audit_event"
-		key_fields: [ "id" ]
+		name: "project_stats"
+		key_fields: [ "project_id" ]
 		server_only: true
 	};
-	string id = 1;
+	string project_id = 1;
+	int64 open_issue_count = 2;
 }
 ```
 
-Server-side reads are untouched. The `Query` RPC (`queryServer` in the
-TypeScript client), `ViewTx` and mutators all still reach the entity — it is
-**queryable, not syncable**.
+It is **queryable, not syncable**: `ViewTx` and mutators still reach the
+entity, and so does the `Query` RPC (`queryServer` in the TypeScript client) —
+which is a client-facing call. Any client that can reach the workspace can
+read these rows through it; the entity's
+[`ReadFilter`](../how-to/authentication-and-permissions.md#canmutate-and-readfilter),
+if it has one, is the only thing narrowing that further. `server_only` takes a
+row off the sync path, not out of a client's reach — give it a `ReadFilter` if
+workspace membership is not enough.
 
 Subscriptions are not a substitute for this. An empty subscription list means
 full sync, and full sync is _absorbing_ across the tabs sharing one local store:
