@@ -290,6 +290,16 @@ member removed mid-stream is dropped within one interval. Authentication stays a
 check at open, so a credential that expires mid-stream rides to the end of the
 stream. Bound stream lifetime if that matters.
 
+The same division holds for load. `Limits` bounds what one request may cost,
+never how often a caller may ask: nothing counts requests per caller, and
+nothing caps how many concurrent `Bootstrap` or `Subscribe` streams one caller
+holds — and a bootstrap streams a whole workspace. Enforcement belongs in the
+HTTP stack in front of the handlers, where authentication already lives and
+where a limit can attach to a connection, an address or a credential; the
+engine sees only the `Principal`, which under the default posture is nobody.
+The ephemeral plane carries the same caveat — see
+[rooms](rooms.md#what-is-not-guaranteed).
+
 ## Revocation stops future reads; erasing past ones is opt-in
 
 A permanent denial reaches the client as `workspace_access_revoked` and it stops

@@ -115,6 +115,10 @@ Every field defaults when left non-positive.
 Raising `MaxMutationsPerPush` or `MaxValueBytes` means raising
 `MaxRequestBytes` in tandem.
 
+Every limit bounds one request or one stream. None bounds request rate or how
+many streams a caller holds — see
+[the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
+
 Crossing any of these produces an error naming what was counted, the field it
 crossed with the value in force, and the option that moves it — so the message
 is enough on its own:

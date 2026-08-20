@@ -281,7 +281,10 @@ type refField struct {
 	keyFields []protoreflect.FieldDescriptor
 }
 
-// Limits bounds request payloads and response sizes. Every field must be
+// Limits bounds request payloads and response sizes. It bounds what one
+// request may cost, never request rate or concurrent streams; those limits
+// belong in the HTTP stack in front of the handlers, where they can attach
+// to a connection, an address or a credential. Every field must be
 // positive to take effect: zero means "unset", and a negative value is a
 // misconfiguration, so both fall back to the documented default (the same rule
 // WithChunkSize follows). Letting a negative through would not merely relax a
