@@ -3,8 +3,10 @@ package server_test
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"time"
 
@@ -204,6 +206,24 @@ var _ = Describe("Authentication seam", func() {
 			Expect(epoch).To(BeEmpty())
 		})
 
+		It("keeps the verifier's rejection reason off the wire but in the log", func() {
+			logs := &recordingHandler{}
+			start(newTestServer(
+				server.WithPermissions(perms),
+				server.WithAuthenticator(authn()),
+				server.WithLogger(slog.New(logs)),
+			), bearer("wrong-token"))
+
+			_, err := push()
+			var cerr *connect.Error
+			Expect(errors.As(err, &cerr)).To(BeTrue())
+			Expect(cerr.Code()).To(Equal(connect.CodeUnauthenticated))
+			Expect(cerr.Message()).To(Equal("authentication failed"),
+				"a verifier's reasons are an oracle; the wire carries a fixed message")
+			Expect(loggedErrContaining(logs, "invalid bearer token")).To(BeTrue(),
+				"the verifier's reason must still reach the log")
+		})
+
 		It("rejects a missing credential as unauthenticated", func() {
 			start(newTestServer(
 				server.WithPermissions(perms),
@@ -256,6 +276,7 @@ var _ = Describe("Authentication seam", func() {
 		It("surfaces a verifier outage as internal, not as unauthenticated", func() {
 			// A client must not read "identity provider is down" as "your
 			// credential is bad" — that would have it discard a valid session.
+			logs := &recordingHandler{}
 			broken := server.AuthenticatorFunc(
 				func(context.Context, http.Header) (server.Principal, error) {
 					return server.Principal{}, errors.New("JWKS endpoint unreachable")
@@ -263,11 +284,34 @@ var _ = Describe("Authentication seam", func() {
 			start(newTestServer(
 				server.WithPermissions(perms),
 				server.WithAuthenticator(broken),
+				server.WithLogger(slog.New(logs)),
 			), bearer("alice-token"))
 
 			_, err := push()
-			Expect(err).To(HaveOccurred())
-			Expect(connect.CodeOf(err)).To(Equal(connect.CodeInternal))
+			var cerr *connect.Error
+			Expect(errors.As(err, &cerr)).To(BeTrue())
+			Expect(cerr.Code()).To(Equal(connect.CodeInternal))
+			Expect(cerr.Message()).To(Equal("authenticating request failed"),
+				"infrastructure error text stays out of the response")
+			Expect(loggedErrContaining(logs, "JWKS endpoint unreachable")).To(BeTrue(),
+				"the fault's cause must still reach the log")
+		})
+
+		It("keeps an invalid subject's value off the wire", func() {
+			bad := server.AuthenticatorFunc(
+				func(context.Context, http.Header) (server.Principal, error) {
+					return server.Principal{Subject: "bad\u0000subject"}, nil
+				})
+			start(newTestServer(
+				server.WithPermissions(perms),
+				server.WithAuthenticator(bad),
+			), bearer("alice-token"))
+
+			_, err := push()
+			var cerr *connect.Error
+			Expect(errors.As(err, &cerr)).To(BeTrue())
+			Expect(cerr.Code()).To(Equal(connect.CodeInternal))
+			Expect(cerr.Message()).To(Equal("authenticating request failed"))
 		})
 
 		It("admits an anonymous caller when the authenticator says so", func() {
@@ -453,6 +497,27 @@ func visibleTitles(changes []*syncplanev1.RowChange) []string {
 		out = append(out, todo.GetTitle())
 	}
 	return out
+}
+
+// loggedErrContaining reports whether any captured record carries an "err"
+// attribute whose message contains substr.
+func loggedErrContaining(h *recordingHandler, substr string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	for _, r := range h.records {
+		found := false
+		r.Attrs(func(a slog.Attr) bool {
+			if a.Key == "err" && strings.Contains(a.Value.String(), substr) {
+				found = true
+				return false
+			}
+			return true
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // headerInterceptor stamps fixed headers onto every outgoing request, standing

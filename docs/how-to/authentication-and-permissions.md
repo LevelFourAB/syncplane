@@ -37,8 +37,9 @@ srv, err := server.New(store, server.WithAuthenticator(myAuth{verifier: v}))
 Return `ErrUnauthenticated` (or an error wrapping it) to reject the request as
 401; **any other error is treated as an infrastructure fault (500)**, so an
 identity-provider outage never reads to a client as "your credential is bad".
-Returning the zero `Principal` with a nil error deliberately admits an anonymous
-caller.
+Either way the error's message is logged but never sent to the client — the
+wire carries a fixed message, so wrap freely. Returning the zero `Principal`
+with a nil error deliberately admits an anonymous caller.
 
 `server.StaticTokenAuthenticator` is a ready-made implementation for fixed API
 keys; it is not a login system. Authenticating in your own HTTP middleware works

@@ -1098,7 +1098,7 @@ func (s *Server) interceptors() []connect.Interceptor {
 	}
 	interceptors = append(interceptors, loggingInterceptor(s.log()))
 	if s.authn != nil {
-		interceptors = append(interceptors, &authInterceptor{authn: s.authn})
+		interceptors = append(interceptors, &authInterceptor{authn: s.authn, log: s.log()})
 	}
 	return interceptors
 }

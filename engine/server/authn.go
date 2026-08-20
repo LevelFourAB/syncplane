@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -97,11 +98,12 @@ func WithAuthenticator(a Authenticator) Option {
 // Deployments needing prompt credential expiry should bound stream lifetime.
 type authInterceptor struct {
 	authn Authenticator
+	log   *slog.Logger
 }
 
 func (i *authInterceptor) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
 	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
-		ctx, err := i.authenticate(ctx, req.Header())
+		ctx, err := i.authenticate(ctx, req.Header(), req.Spec().Procedure)
 		if err != nil {
 			return nil, err
 		}
@@ -117,7 +119,7 @@ func (i *authInterceptor) WrapStreamingClient(next connect.StreamingClientFunc) 
 
 func (i *authInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
 	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
-		ctx, err := i.authenticate(ctx, conn.RequestHeader())
+		ctx, err := i.authenticate(ctx, conn.RequestHeader(), conn.Spec().Procedure)
 		if err != nil {
 			return err
 		}
@@ -128,28 +130,43 @@ func (i *authInterceptor) WrapStreamingHandler(next connect.StreamingHandlerFunc
 // authenticate runs the authenticator and returns the ctx the handler should
 // see. Rejections become unauthenticated; every other error is an
 // infrastructure fault and stays internal (see the Authenticator contract).
-// The client-visible message is fixed either way — the authenticator's own
-// wording is left to the logging interceptor, which records the full error.
+// The client-visible message is fixed either way: the authenticator's own
+// wording is logged here, since the outer logging interceptor only sees the
+// fixed message this returns. A verifier's reasons are an oracle — "token
+// expired" versus "bad signature" tells a probing caller which guesses are
+// close — and the internal branch's text names infrastructure (endpoints,
+// stores) no caller should see.
 //
 // A Subject the engine cannot record as an actor falls under the same rule: an
 // authenticator that returns one is misconfigured, not a caller misbehaving.
 // Failing here rather than at write time keeps the request from authorizing
 // under an identity no row could carry.
-func (i *authInterceptor) authenticate(ctx context.Context, header http.Header) (context.Context, error) {
+func (i *authInterceptor) authenticate(ctx context.Context, header http.Header, proc string) (context.Context, error) {
 	p, err := i.authn.Authenticate(ctx, header)
 	if err != nil {
 		if errors.Is(err, ErrUnauthenticated) {
+			i.logErr(ctx, slog.LevelInfo, "request rejected as unauthenticated", proc, err)
 			return nil, connect.NewError(connect.CodeUnauthenticated,
-				fmt.Errorf("authentication failed: %w", err))
+				errors.New("authentication failed"))
 		}
+		i.logErr(ctx, slog.LevelError, "authenticator failed", proc, err)
 		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("authenticating request: %w", err))
+			errors.New("authenticating request failed"))
 	}
 	if err := naming.ValidateActorSubject(p.Subject); err != nil {
+		i.logErr(ctx, slog.LevelError, "authenticator returned an unusable subject", proc, err)
 		return nil, connect.NewError(connect.CodeInternal,
-			fmt.Errorf("authenticating request: %w", err))
+			errors.New("authenticating request failed"))
 	}
 	return WithPrincipal(ctx, p), nil
+}
+
+func (i *authInterceptor) logErr(ctx context.Context, level slog.Level, msg, proc string, err error) {
+	attrs := append([]slog.Attr{
+		slog.String("rpc", procedure(proc)),
+		slog.Any("err", err),
+	}, traceIDAttrs(ctx)...)
+	i.log.LogAttrs(ctx, level, msg, attrs...)
 }
 
 // StaticTokenAuthenticator admits a request iff it carries
