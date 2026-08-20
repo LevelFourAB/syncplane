@@ -175,7 +175,7 @@ var _ = Describe("Registry", func() {
 		Expect(reg.Publish(ctx, presence.Event{
 			Topic:       topic,
 			Kind:        presence.KindLeave,
-			Participant: presence.Participant{SessionID: "s1"},
+			Participant: presence.Participant{SessionID: "s1", Subject: "u:s1"},
 		})).To(Succeed())
 
 		ev := receive(w)
@@ -199,6 +199,79 @@ var _ = Describe("Registry", func() {
 		Expect(string(ev.Payload)).To(Equal("ping"))
 		Expect(join(open("late"), topic)).To(BeEmpty(),
 			"a broadcast must not put its sender in the room")
+	})
+
+	// A session id is echoed to every watcher, so a co-present caller knows it.
+	// On a multi-node bus a publish for that session can arrive stamped with a
+	// different subject than the one that owns the record — the session's binding
+	// is only enforced on the node holding its stream. The registry is the
+	// cluster-wide backstop: a record belongs to its subject, and only an event
+	// carrying that subject may change or withdraw it.
+	Describe("record ownership", func() {
+		It("ignores a leave that names a different subject than the record's", func() {
+			w := open("s1")
+			join(w, topic)
+			publishState(topic, "s1", 1, "mine") // records subject u:s1
+			receive(w)
+
+			Expect(reg.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindLeave,
+				Participant: presence.Participant{SessionID: "s1", Subject: "attacker"},
+			})).To(Succeed())
+
+			Consistently(w.Events(), "100ms").ShouldNot(Receive(),
+				"a foreign-subject leave must not evict the record")
+			Expect(join(open("late"), topic)).To(HaveLen(1))
+		})
+
+		It("ignores a state overwrite from a different subject even at a higher revision", func() {
+			w := open("s1")
+			join(w, topic)
+			publishState(topic, "s1", 1, "mine") // records subject u:s1
+			receive(w)
+
+			Expect(reg.Publish(ctx, presence.Event{
+				Topic: topic,
+				Kind:  presence.KindState,
+				Participant: presence.Participant{
+					SessionID: "s1",
+					Subject:   "attacker",
+					State:     []byte("spoofed"),
+					Revision:  1 << 62,
+				},
+			})).To(Succeed())
+
+			Consistently(w.Events(), "100ms").ShouldNot(Receive(),
+				"a foreign-subject overwrite must not reach a watcher")
+			got := join(open("late"), topic)
+			Expect(got).To(HaveLen(1))
+			Expect(got[0].Subject).To(Equal("u:s1"))
+			Expect(string(got[0].State)).To(Equal("mine"),
+				"the record's own subject and state must survive the spoof")
+		})
+
+		// First-writer sets the owner: an unclaimed session id is still admitted,
+		// which is what makes a record arriving over the bus from another node work
+		// at all.
+		It("admits a state event for a session it holds no record for", func() {
+			w := open("s2")
+			join(w, topic)
+			Expect(reg.Publish(ctx, presence.Event{
+				Topic: topic,
+				Kind:  presence.KindState,
+				Participant: presence.Participant{
+					SessionID: "s1",
+					Subject:   "u:s1",
+					State:     []byte("hello"),
+					Revision:  1,
+				},
+			})).To(Succeed())
+
+			ev := receive(w)
+			Expect(ev.Participant.SessionID).To(Equal("s1"))
+			Expect(string(ev.Participant.State)).To(Equal("hello"))
+		})
 	})
 
 	Describe("liveness", func() {

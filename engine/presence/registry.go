@@ -413,7 +413,16 @@ func (r *Registry) apply(ev Event) {
 		// Broadcasts hold no state, so they pass straight through.
 		rm.fanOutLocked(ev)
 	case KindLeave:
-		if _, held := rm.participants[ev.Participant.SessionID]; !held {
+		held, ok := rm.participants[ev.Participant.SessionID]
+		if !ok {
+			return
+		}
+		// A record belongs to its subject. On a multi-node bus a session id is
+		// known to every watcher, so a withdrawal stamped with a different
+		// subject is a foreign node writing into a slot it does not own, not the
+		// owner leaving. Ignore it; the owner's node keeps re-announcing the
+		// record and the roster stays honest.
+		if held.p.Subject != ev.Participant.Subject {
 			return
 		}
 		rm.removeLocked(ev.Participant.SessionID)
@@ -428,6 +437,14 @@ func (rm *room) upsertLocked(ev Event, maxParticipants int, now time.Time) {
 	sid := ev.Participant.SessionID
 	held, exists := rm.participants[sid]
 	if exists {
+		// A record belongs to the subject that created it, and only that subject
+		// may overwrite it — checked before the revision, so a spoof at a high
+		// revision cannot raise the ceiling the owner then has to climb past.
+		// First-writer sets the owner, so an unheld session is still admitted
+		// below; that is what lets a record arriving from another node land.
+		if held.p.Subject != ev.Participant.Subject {
+			return
+		}
 		if ev.Participant.Revision < held.p.Revision {
 			return // an older delivery of state we already have
 		}

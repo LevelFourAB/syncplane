@@ -200,10 +200,14 @@ func (c *anchorCache) expire(now time.Time) {
 //
 // It is node-local by construction: a Publish that lands on a node holding no
 // stream for the session has nothing to check against and is admitted on its
-// own principal, which is the same posture the rest of the plane takes — the
-// subject a participant is shown under is always stamped from the publisher's
-// own principal, never from the payload, so the worst an unbound publish can do
-// is write into a session slot under its own name.
+// own principal. That alone would let a caller on another node evict or
+// overwrite a session it does not own, since the session id is echoed to every
+// watcher. The cluster-wide backstop is in the registry, not here: a presence
+// record belongs to its subject, and the registry ignores a bus event that
+// would change or withdraw a record under a different subject (see
+// presence.Registry). With that in place the worst an unbound publish can do is
+// occupy an as-yet-unclaimed session slot under its own name — never touch
+// another subject's record.
 type sessionBindings struct {
 	mu    sync.Mutex
 	bound map[string]*sessionBinding
