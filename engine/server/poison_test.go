@@ -107,15 +107,20 @@ var _ = Describe("Undecodable rows", func() {
 		})).To(Succeed())
 	}
 
-	pull := func(subs ...*syncplanev1.Subscription) *syncplanev1.PullResponse {
+	pullFrom := func(cursor []byte, subs ...*syncplanev1.Subscription) *syncplanev1.PullResponse {
 		GinkgoHelper()
 		resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
 			WorkspaceId:   ws,
 			ClientId:      "c1",
+			Cursor:        cursor,
 			Subscriptions: subs,
 		}))
 		Expect(err).NotTo(HaveOccurred())
 		return resp.Msg
+	}
+	pull := func(subs ...*syncplanev1.Subscription) *syncplanev1.PullResponse {
+		GinkgoHelper()
+		return pullFrom(nil, subs...)
 	}
 
 	// changeKinds maps each change's key to whether it arrived as a tombstone.
@@ -146,13 +151,24 @@ var _ = Describe("Undecodable rows", func() {
 			seedWidgets()
 		})
 
-		It("pulls every other row and tombstones the poison one", func() {
+		It("pulls every other row and withholds the poison one from a client that never held it", func() {
 			got := changeKinds(pull(widgetSub(countGte(0))).GetPatch().GetChanges())
 			Expect(got).To(HaveKeyWithValue("w1", false))
 			Expect(got).To(HaveKeyWithValue("w2", false))
-			// Hidden, exactly like a row a read filter denies: a client that
-			// synced it before it went bad is told to drop it.
-			Expect(got).To(HaveKeyWithValue(badKey, true))
+			// Hidden, exactly like a row a read filter denies — and this client
+			// never synced it, so not even a tombstone: the key of a row that
+			// cannot be shown to satisfy the filter must not be disclosed.
+			Expect(got).NotTo(HaveKey(badKey))
+		})
+
+		It("tombstones a row that goes bad after the client synced it", func() {
+			first := pullFrom(nil, widgetSub(countGte(0)))
+			Expect(changeKinds(first.GetPatch().GetChanges())).To(HaveKeyWithValue("w2", false))
+
+			plantPoison("widget", "w2")
+			got := changeKinds(pullFrom(first.GetNextCursor(), widgetSub(countGte(0))).GetPatch().GetChanges())
+			Expect(got).To(HaveKeyWithValue("w2", true),
+				"the client synced w2 before it went bad and is told to drop it")
 		})
 
 		It("bootstraps the rest of the workspace", func() {
@@ -178,8 +194,9 @@ var _ = Describe("Undecodable rows", func() {
 			got := changeKinds(pull(windowSub(3, countGte(0))).GetPatch().GetChanges())
 			Expect(got).To(HaveKeyWithValue("w1", false))
 			Expect(got).To(HaveKeyWithValue("w2", false))
-			// Not a member, so hidden — which pull spells as a tombstone.
-			Expect(got).To(HaveKeyWithValue(badKey, true))
+			// Not a member, so hidden — and never delivered, so not even a
+			// tombstone.
+			Expect(got).NotTo(HaveKey(badKey))
 		})
 	})
 
@@ -193,14 +210,14 @@ var _ = Describe("Undecodable rows", func() {
 			got := changeKinds(pull().GetPatch().GetChanges())
 			Expect(got).To(HaveKeyWithValue("w1", false))
 			Expect(got).To(HaveKeyWithValue("w2", false))
-			Expect(got).To(HaveKeyWithValue(badKey, true))
+			Expect(got).NotTo(HaveKey(badKey))
 		})
 
 		It("keeps it out of a by-recency window", func() {
 			// The poison row is the most recent write, so it would otherwise
 			// take the single window slot; w2 gets it instead.
 			got := changeKinds(pull(recencySub(1)).GetPatch().GetChanges())
-			Expect(got).To(HaveKeyWithValue(badKey, true))
+			Expect(got).NotTo(HaveKey(badKey))
 			Expect(got).To(HaveKeyWithValue("w2", false))
 		})
 
@@ -238,11 +255,20 @@ var _ = Describe("Undecodable rows", func() {
 					Id: "i1", Title: "first", Project: &testdatav1.Project{Id: "p1"},
 				}),
 			)
-			plantPoison("project", "p1")
+			// The client syncs p1 through the closure while it still decodes.
+			first := pullFrom(nil, followProject)
+			Expect(changeKinds(first.GetPatch().GetChanges())).To(HaveKeyWithValue("p1", false))
 
-			got := changeKinds(pull(followProject).GetPatch().GetChanges())
-			Expect(got).To(HaveKeyWithValue("i1", false))
-			Expect(got).To(HaveKeyWithValue("p1", true))
+			plantPoison("project", "p1")
+			// Touch the holder too: closure maintenance only re-decodes a
+			// member when its holders moved, and what this spec pins is the
+			// verdict of that re-check, not the shortcut.
+			push(putMutation("c1", 3, "issue", "i1", &testdatav1.Issue{
+				Id: "i1", Title: "renamed", Project: &testdatav1.Project{Id: "p1"},
+			}))
+			got := changeKinds(pullFrom(first.GetNextCursor(), followProject).GetPatch().GetChanges())
+			Expect(got).To(HaveKeyWithValue("p1", true),
+				"the target left the closure by going bad, and the client held it")
 		})
 
 		It("skips an undecodable seed row and follows from the rest", func() {

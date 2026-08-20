@@ -192,6 +192,24 @@ var _ = Describe("Reference-following subscriptions", func() {
 			Expect(tombstones(r2.GetPatch())).To(ContainElement("project/A"))
 			Expect(projectName(r2.GetPatch(), "B")).To(Equal("beta"))
 		})
+
+		It("sends nothing for a changed target that was never in the closure", func() {
+			push(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "project", "B", &testdatav1.Project{Id: "B", Name: "beta"}),
+				putMutation("c1", 3, "issue", "i1", issue("i1", "first", "A")),
+			)
+			sub := followProject(1)
+			r1 := pull(nil, sub)
+			Expect(values(r1.GetPatch())).To(ConsistOf("issue/i1", "project/A"))
+
+			// B changes but nothing references it. The cursor's stored closure
+			// proves the client never held it, so a tombstone would only
+			// disclose that the row exists and just changed.
+			push(putMutation("c1", 4, "project", "B", &testdatav1.Project{Id: "B", Name: "beta 2"}))
+			r2 := pull(r1.GetNextCursor(), sub)
+			Expect(r2.GetPatch().GetChanges()).To(BeEmpty())
+		})
 	})
 
 	Describe("a changed follow-target that is only follow-visible", func() {

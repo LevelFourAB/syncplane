@@ -74,6 +74,14 @@ var migrations = []migration{
 		ADD COLUMN text_compact_key         TEXT COLLATE "C" NOT NULL DEFAULT '',
 		ADD COLUMN text_compact_min_purged  INTEGER NOT NULL DEFAULT 0;
 	`)},
+	// 7: the sequence that created each row (see storage.Row.CreatedVersion):
+	// stamped on insert, kept on every overwrite. The 0 default is "unknown",
+	// which pre-existing rows keep — the pull path treats unknown
+	// conservatively, so there is no backfill (the creating sequence of an
+	// existing row is not recorded anywhere). Additive both ways: an older
+	// binary's inserts leave the default, which reads back as unknown.
+	{additive: true, sql: fixed(
+		`ALTER TABLE rows ADD COLUMN created_version BIGINT NOT NULL DEFAULT 0;`)},
 }
 
 // migration is one step of the ledger.

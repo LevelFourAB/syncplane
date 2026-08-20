@@ -100,13 +100,13 @@ func (t *pgTx) TombstoneHorizon() (uint64, error) {
 
 func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
-	var version int64
+	var version, created int64
 	err := t.tx.QueryRow(t.ctx,
-		`SELECT value, version, deleted, actor_subject, actor_system
+		`SELECT value, version, created_version, deleted, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4`,
 		t.ns, t.ws, entity, key,
-	).Scan(&row.Value, &version, &row.Deleted,
+	).Scan(&row.Value, &version, &created, &row.Deleted,
 		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storage.Row{}, storage.ErrNotFound
@@ -115,6 +115,7 @@ func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 		return storage.Row{}, err
 	}
 	row.Version = uint64(version)
+	row.CreatedVersion = uint64(created)
 	return row, nil
 }
 
@@ -150,7 +151,7 @@ func (t *pgTx) GetRows(entity string, keys []string, fn func(storage.Row) error)
 
 func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
 	rows, err := t.tx.Query(t.ctx,
-		`SELECT key, value, version, deleted, actor_subject, actor_system
+		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = ANY($4)`,
 		t.ns, t.ws, entity, keys,
@@ -162,12 +163,13 @@ func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.R
 	byKey := make(map[string]storage.Row, len(keys))
 	for rows.Next() {
 		r := storage.Row{Entity: entity}
-		var version int64
-		if err := rows.Scan(&r.Key, &r.Value, &version, &r.Deleted,
+		var version, created int64
+		if err := rows.Scan(&r.Key, &r.Value, &version, &created, &r.Deleted,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return nil, err
 		}
 		r.Version = uint64(version)
+		r.CreatedVersion = uint64(created)
 		byKey[r.Key] = r
 	}
 	return byKey, rows.Err()
@@ -178,12 +180,13 @@ func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.R
 func decodeEntityRow(entity string) func(pgx.Rows) (storage.Row, error) {
 	return func(rows pgx.Rows) (storage.Row, error) {
 		r := storage.Row{Entity: entity}
-		var version int64
-		if err := rows.Scan(&r.Key, &r.Value, &version,
+		var version, created int64
+		if err := rows.Scan(&r.Key, &r.Value, &version, &created,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return storage.Row{}, err
 		}
 		r.Version = uint64(version)
+		r.CreatedVersion = uint64(created)
 		return r, nil
 	}
 }
@@ -194,7 +197,7 @@ func (t *pgTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 
 func (t *pgTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(storage.Row) error) error {
 	return scanCursor(t,
-		`SELECT key, value, version, actor_subject, actor_system
+		`SELECT key, value, version, created_version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted AND key > $4
 		 ORDER BY key
@@ -208,7 +211,7 @@ func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage
 	// partial on NOT deleted), so this reads the index prefix and stops at the
 	// limit instead of sorting the entity.
 	return scanCursor(t,
-		`SELECT key, value, version, actor_subject, actor_system
+		`SELECT key, value, version, created_version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted
 		 ORDER BY version DESC, key
@@ -220,18 +223,19 @@ func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage
 func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
 	decode := func(rows pgx.Rows) (storage.Row, error) {
 		var r storage.Row
-		var version int64
-		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &version, &r.Deleted,
+		var version, created int64
+		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &version, &created, &r.Deleted,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return storage.Row{}, err
 		}
 		r.Version = uint64(version)
+		r.CreatedVersion = uint64(created)
 		if r.Deleted {
 			r.Value = nil
 		}
 		return r, nil
 	}
-	const cols = `SELECT entity, key, value, version, deleted,
+	const cols = `SELECT entity, key, value, version, created_version, deleted,
 	                     actor_subject, actor_system
 	              FROM rows `
 
@@ -831,16 +835,18 @@ func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor st
 	if err := t.register(); err != nil {
 		return err
 	}
+	// created_version stays out of the conflict SET: the stored value is the
+	// key's original creation, which every overwrite keeps (see storage.Row).
 	_, err := t.tx.Exec(t.ctx,
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
+		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES ($1, $2, $3, $4, $5, $6, FALSE, $7, $8, $9)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8, $9, $10)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = FALSE,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, value, int64(version), time.Now().UnixMilli(),
+		t.ns, t.ws, entity, key, value, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
@@ -851,15 +857,15 @@ func (t *pgTx) DeleteRow(entity, key string, version uint64, actor storage.Actor
 		return err
 	}
 	_, err := t.tx.Exec(t.ctx,
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
+		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES ($1, $2, $3, $4, NULL, $5, TRUE, $6, $7, $8)
+		 VALUES ($1, $2, $3, $4, NULL, $5, $6, TRUE, $7, $8, $9)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = TRUE,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, int64(version), time.Now().UnixMilli(),
+		t.ns, t.ws, entity, key, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err

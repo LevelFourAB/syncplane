@@ -208,6 +208,18 @@ type Permissions interface {
 	// Resolved before the read snapshot opens and memoized for the row scan, so
 	// keep it fast (see the interface doc).
 	//
+	// A filter hides row VALUES, not row existence. A subscribed client can
+	// still learn a denied row's entity, key and version: a deletion reaches
+	// every subscribed client as a tombstone, and a write that leaves a row
+	// denied may reach clients as one too — that tombstone is what revokes the
+	// row from a client that could read it before the write (see FilterEpoch).
+	// The server withholds it wherever the cursor proves the client never held
+	// the row — rows created past the cursor's position, non-members of a
+	// windowed or followed scope — but cannot prove that for older rows, so
+	// keys must not themselves be secrets: key rows by surrogate id and put
+	// the email, slug or invite code in a field the filter covers. See
+	// docs/explanation/limits-and-trade-offs.md.
+	//
 	// It gates the in-process reads too — Server.View and the reads an Apply
 	// closure makes — where a filtered row reads as absent rather than as a
 	// tombstone. Those callers can touch any entity, so they resolve every

@@ -88,7 +88,7 @@ var _ = Describe("SQLite schema versioning", func() {
 	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 5
+	const latestVersion = 6
 
 	// foreign creates a database holding one table under the given stamps,
 	// standing in for whatever a binary other than this one left behind.
@@ -182,6 +182,7 @@ var _ = Describe("SQLite schema versioning", func() {
 			ALTER TABLE workspaces DROP COLUMN text_compact_entity;
 			ALTER TABLE workspaces DROP COLUMN text_compact_key;
 			ALTER TABLE workspaces DROP COLUMN text_compact_min_purged;
+			ALTER TABLE rows DROP COLUMN created_version;
 			PRAGMA user_version = %d;
 		`, baselineVersion))
 		Expect(err).NotTo(HaveOccurred())

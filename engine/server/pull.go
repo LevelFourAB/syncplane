@@ -750,6 +750,11 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// below — which emit rows AT or BELOW the cursor — stay full-state.
 	emitter.deltas = true
 	emitter.deltaAfter = cur.seq
+	// What the cursor proves the client holds, for the hidden branches below:
+	// the exact membership sets it carried (window and closure), and — for
+	// scopes with no stored set — the fact that nothing created past its seq
+	// can ever have been delivered.
+	priorClosure := closureSetMembership(cur.closure)
 	// Scan one row past the limit: seeing it proves truncation without
 	// emitting it.
 	scanned := 0
@@ -763,9 +768,10 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// The cursor tracks the last SCANNED row, not the last emitted
 		// one: filtered or unsubscribed rows must still advance it or the
 		// client's pagination loop would never progress past them. Hidden
-		// rows consume limit slots as tombstones, keeping pagination
-		// monotone. The (version, entity, key) of this row is the resume
-		// point if the page truncates inside a same-version group.
+		// rows consume limit slots whether or not they emit a tombstone,
+		// keeping pagination monotone. The (version, entity, key) of this row
+		// is the resume point if the page truncates inside a same-version
+		// group.
 		lastScanned = row
 		class, err := emitter.classify(row)
 		if err != nil {
@@ -779,6 +785,25 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			}
 			resp.Patch.Changes = append(resp.Patch.Changes, change)
 		case rowHidden:
+			// Revoke only what the client can hold. A row created past the
+			// cursor was never delivered under it, so a tombstone would only
+			// disclose a key the read filter may exist to withhold. An older
+			// row stays conservative — CreatedVersion 0 is "unknown" and
+			// clears no bar — because without history the server cannot prove
+			// the client never saw a state of it that was visible.
+			if row.CreatedVersion > cur.seq {
+				return nil
+			}
+			resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+		case rowHiddenNonMember:
+			// Hidden solely by set-membership, and the cursor stores those
+			// sets: a prior member left and must drop; anything else was never
+			// delivered, so there is nothing to revoke and nothing to
+			// disclose.
+			ck := closureKey{entity: row.Entity, key: row.Key}
+			if !oldWindow[ck] && !priorClosure[ck] {
+				return nil
+			}
 			resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
 		case rowUnsubscribed:
 			// Skip: the client holds no state for this entity.

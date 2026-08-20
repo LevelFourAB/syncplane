@@ -75,6 +75,15 @@ this is the part an implementer must not get wrong.
   [field history](proto-options.md#field-history) is ordinary rows of an
   ordinary entity, written through `PutRow` on the same write path as everything
   else. What it does need is `PurgeEntityRows` — see below.
+- **Creation tracking.** The adapter derives `Row.CreatedVersion` itself —
+  `PutRow` and `DeleteRow` take no argument for it. A write to a key with no
+  stored state stamps the write's version; every overwrite keeps the stored
+  value, tombstones and re-creations included, so the creation survives a
+  delete-then-recreate and restarts only once `CollectTombstones` or
+  `PurgeEntityRows` removed the key's state outright. Returned by the same
+  reads the actor is; `0` means "stored before the adapter kept creations",
+  which the engine treats conservatively (the pull path reads it to prove a
+  cursor predates a row, and `0` proves nothing).
 - **`PurgeEntityRows(entity, keyPrefix, before, limit)`** hard-deletes rows of
   one entity — **live rows included** — together with their index entries,
   leaving no tombstone and not moving the tombstone horizon. It is the only

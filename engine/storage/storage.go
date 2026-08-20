@@ -45,6 +45,13 @@
 //     some paths and silently zero on others reads as "unattributed" and
 //     misleads the caller rather than failing; an adapter that cannot store it
 //     yet must say so, not drop it.
+//   - Creation round-trip: the adapter derives Row.CreatedVersion itself —
+//     PutRow and DeleteRow take no argument for it. A write that creates the
+//     key's stored state stamps the write's version; one that overwrites keeps
+//     the stored value, tombstones included, so a delete-then-recreate keeps
+//     the original creation. Returned by the same reads Actor is, and for the
+//     same uniformity reason: 0 means "recorded before the adapter kept
+//     creations", never "this read path skips the column".
 //   - Context: every method honors ctx. A call made with a cancelled or
 //     expired context fails without committing — the engine never observes a
 //     partial commit from a cancelled write.
@@ -122,7 +129,18 @@ type Row struct {
 	Value []byte
 	// Workspace sequence of the mutation that last wrote this row.
 	Version uint64
-	Deleted bool
+	// CreatedVersion is the workspace sequence of the write that created the
+	// row — its key's first PutRow or DeleteRow — kept unchanged by every
+	// later write, deletion and re-creation included. It restarts only when
+	// the key's stored state is removed outright (a collected tombstone, a
+	// PurgeEntityRows), after which the next write is a creation again.
+	//
+	// 0 means unknown: the row was stored before the adapter recorded
+	// creations. Consumers must treat unknown conservatively — the pull path
+	// reads this to prove a client's cursor predates the row, and 0 proves
+	// nothing.
+	CreatedVersion uint64
+	Deleted        bool
 	// Actor attributes the write that produced this state — including a
 	// tombstone, which records who deleted the row. Every read that returns a
 	// Row populates it; the zero Actor means the write was unattributed — an
@@ -679,10 +697,14 @@ type WriteTx interface {
 	// PutRow stores a live row snapshot at the given version, attributed to
 	// actor (see Row.Actor). The actor is stored as given — a zero Actor
 	// records "unattributed" and must not be filled in from anything the
-	// adapter knows.
+	// adapter knows. The adapter derives Row.CreatedVersion: stamped from
+	// version when the key holds no stored state, kept otherwise (see the
+	// package contract).
 	PutRow(entity, key string, value []byte, version uint64, actor Actor) error
 	// DeleteRow writes a tombstone at the given version, attributed to actor:
-	// a tombstone records who deleted the row.
+	// a tombstone records who deleted the row. Row.CreatedVersion is derived
+	// exactly as PutRow derives it — a tombstone overwriting a live row keeps
+	// its creation.
 	DeleteRow(entity, key string, version uint64, actor Actor) error
 	// SetClientLastMutationID bumps the idempotency watermark.
 	SetClientLastMutationID(clientID string, mutationID uint64) error

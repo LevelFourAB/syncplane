@@ -20,11 +20,22 @@ type rowClass int
 const (
 	// rowVisible rows are sent as-is (a value, or a real tombstone in pull).
 	rowVisible rowClass = iota
-	// rowHidden rows are read-filtered or outside the subscribed predicate.
-	// Pull emits them as tombstones so clients that saw the row earlier drop
-	// it (the revocation fix); bootstrap just skips them. Tombstones reveal
-	// entity + key existence — keys are not secrets.
+	// rowHidden rows are read-filtered, outside the subscribed predicate, or
+	// quarantined. Pull emits them as tombstones so clients that saw the row
+	// earlier drop it (the revocation fix); bootstrap just skips them. Such a
+	// tombstone reveals entity + key existence and that the row just changed,
+	// so pull suppresses it when the row's CreatedVersion proves the client
+	// never held it — for everything older it stays conservative, because the
+	// server keeps no history to prove non-possession against.
 	rowHidden
+	// rowHiddenNonMember rows are hidden SOLELY because they are outside a
+	// bounded membership set — a purely windowed scope, or a follow-only
+	// entity's closure. Split from rowHidden because possession is provable
+	// here: the cursor stores those sets, so pull tombstones a non-member only
+	// if the cursor's prior set held it, and skips the rest instead of
+	// disclosing keys the client may not even be allowed to read. Everything
+	// except pull treats it exactly as rowHidden.
+	rowHiddenNonMember
 	// rowUnsubscribed rows belong to an entity outside the (non-empty)
 	// subscription set, or to no registered entity at all; either way nothing
 	// is emitted for them.
@@ -290,6 +301,9 @@ func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 //	real tombstone                       → visible (pull passes it through)
 //	entity unsubscribed (subs non-empty) → unsubscribed (skip)
 //	follow-closure or window member      → visible (already read-filtered)
+//	outside a purely windowed scope,
+//	or a follow-only entity's closure    → hidden-non-member (pull: tombstone
+//	                                       only prior members; bootstrap: skip)
 //	row will not decode                  → hidden (quarantined, see poison.go)
 //	ReadFilter denies                    → hidden (pull: tombstone; bootstrap: skip)
 //	predicate non-match                  → hidden (pull: tombstone; bootstrap: skip)
@@ -349,13 +363,13 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 			// spec (no base scope of its own): a row outside the current closure
 			// is hidden, so pull tombstones one that has left the closure. Full
 			// sync (e.scopes == nil) never reaches here — everything is visible.
-			return rowHidden, nil
+			return rowHiddenNonMember, nil
 		}
 	}
 	if scope != nil && !scope.whole && len(scope.preds) == 0 {
 		// A purely windowed scope: the window check above was the whole test,
 		// so a non-member is hidden without paying for a decode.
-		return rowHidden, nil
+		return rowHiddenNonMember, nil
 	}
 	needPred := scope != nil && !scope.whole
 	filter, err := e.filterOf(row.Entity)
@@ -550,6 +564,13 @@ func (e *rowEmitter) computeDeltaSafe(entity string) (bool, error) {
 
 // hiddenChange turns a live-but-hidden row into a tombstone at the row's
 // version, so clients that synced it before it went out of scope delete it.
+//
+// It discloses the row's entity, key and version to a client that may not
+// read the row, so every caller owes proof — or at least the absence of
+// disproof — that the client could have held it: the pull scan checks
+// CreatedVersion against the cursor and prior membership sets, the resync
+// diff evaluates the old visibility rules, and the membership diff only
+// visits keys the cursor carried.
 func hiddenChange(row storage.Row) *syncplanev1.RowChange {
 	return &syncplanev1.RowChange{
 		Entity:  row.Entity,

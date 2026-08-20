@@ -110,6 +110,12 @@ full re-bootstrap.
 for, and folding the two together is how a single `nil` return leaks an entity
 across tenants.
 
+**Keep secrets out of keys.** A filter hides a row's value, but its entity, key
+and version can still reach subscribed clients as tombstones — every deletion
+does, and so does an edit that hides a row a client may have held. Key rows by
+surrogate id and put the email, slug or invite code in a filtered field. See
+[the trade-off in full](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
+
 ### Performance
 
 Hooks run outside storage transactions, so a slow one does not hold the

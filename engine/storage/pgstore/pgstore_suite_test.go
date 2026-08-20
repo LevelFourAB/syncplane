@@ -235,7 +235,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6, 7}), "every migration, each recorded exactly once")
 	})
 
 	Describe("a ledger ahead of this binary", func() {

@@ -265,6 +265,22 @@ var _ = Describe("Windowed subscriptions", func() {
 			_, changes := drain(cursor, sub)
 			Expect(changes).To(BeEmpty())
 		})
+
+		It("sends nothing for a changed row that was never in the window", func() {
+			putWidget("a", 30)
+			putWidget("b", 20)
+			putWidget("c", 10)
+			sub := windowSub(2, nil)
+			cursor, rows := bootstrap(sub)
+			Expect(valueKeys(rows)).To(ConsistOf("a", "b"))
+
+			// "c" changes but stays outside the window. The cursor's stored
+			// membership proves the client never held it, so a tombstone would
+			// only disclose that the row exists and just changed.
+			putWidget("c", 5)
+			_, changes := drain(cursor, sub)
+			Expect(changes).To(BeEmpty())
+		})
 	})
 
 	Describe("by_recency", func() {

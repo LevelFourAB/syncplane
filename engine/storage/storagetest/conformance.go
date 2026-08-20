@@ -256,6 +256,106 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		Describe("creation tracking", func() {
+			It("stamps CreatedVersion on insert and returns it from every read that yields a row", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v1"), 3, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(3), "GetRow")
+
+					var scanned []storage.Row
+					collect := func(r storage.Row) error {
+						scanned = append(scanned, r)
+						return nil
+					}
+					Expect(tx.GetRows("widget", []string{"k1"}, collect)).To(Succeed())
+					Expect(scanned).To(HaveLen(1))
+					Expect(scanned[0].CreatedVersion).To(BeEquivalentTo(3), "GetRows")
+
+					scanned = nil
+					Expect(tx.ScanEntity("widget", collect)).To(Succeed())
+					Expect(scanned).To(HaveLen(1))
+					Expect(scanned[0].CreatedVersion).To(BeEquivalentTo(3), "ScanEntity")
+
+					scanned = nil
+					Expect(tx.ScanEntityByVersionDesc("widget", 0, collect)).To(Succeed())
+					Expect(scanned).To(HaveLen(1))
+					Expect(scanned[0].CreatedVersion).To(BeEquivalentTo(3), "ScanEntityByVersionDesc")
+
+					scanned = nil
+					Expect(tx.ScanChanges(0, "", "", 0, collect)).To(Succeed())
+					Expect(scanned).To(HaveLen(1))
+					Expect(scanned[0].CreatedVersion).To(BeEquivalentTo(3), "ScanChanges")
+				})
+			})
+
+			It("keeps CreatedVersion across overwrite, deletion and re-creation", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.PutRow("widget", "k1", []byte("v2"), 2, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.Version).To(BeEquivalentTo(2))
+					Expect(row.CreatedVersion).To(BeEquivalentTo(1), "an overwrite keeps the creation")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.DeleteRow("widget", "k1", 3, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.Deleted).To(BeTrue())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(1), "a tombstone keeps the creation")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v3"), 4, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(1),
+						"re-creating over a tombstone keeps the original creation: a client whose cursor "+
+							"predates the delete may still hold the old row, so the key must not read as born-later")
+				})
+			})
+
+			It("stamps a tombstone written as the key's first state", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.DeleteRow("widget", "k1", 5, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(5))
+				})
+			})
+
+			It("restarts CreatedVersion once a collected tombstone removed the key's state", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())
+					Expect(tx.DeleteRow("widget", "k1", 2, storage.Actor{})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					_, err := tx.CollectTombstones(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutRow("widget", "k1", []byte("v2"), 3, storage.Actor{})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					row, err := tx.GetRow("widget", "k1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(row.CreatedVersion).To(BeEquivalentTo(3),
+						"with the tombstone gone the key has no stored state: the next write is a creation")
+				})
+			})
+		})
+
 		It("isolates workspaces", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())

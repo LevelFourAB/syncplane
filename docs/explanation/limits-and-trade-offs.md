@@ -301,6 +301,38 @@ A purge also discards whatever was still queued for that workspace; those
 mutations can never be acked, so they come back from the call (and through
 `onMutationRejected`) for the app to persist if it wants them.
 
+## A read filter hides values, not existence
+
+A `ReadFilter` decides which rows a client may **read**; it does not make their
+keys unobservable. Two mechanisms disclose that a denied row exists to a client
+whose subscription scope covers the entity:
+
+- **Deletions.** A tombstone carries entity, key and version to every
+  subscribed client — the value is gone, so there is nothing left to run the
+  filter over.
+- **Revocation.** When a write leaves a row filter-denied — say it rewrites the
+  member list the filter consults — pull tombstones the row so a client that
+  could read it before the write drops its copy. The server stores only each
+  row's current state, so it cannot always tell that client apart from one that
+  never saw the row. It withholds the tombstone wherever the cursor proves
+  non-possession: a row created past the cursor's position was never delivered
+  under it, and a windowed or followed scope carries its exact membership on
+  the cursor, so a non-member the cursor never held emits nothing. Everywhere
+  else it stays conservative and sends the tombstone. Bootstrap discloses
+  nothing — hidden rows are skipped, and a client that holds nothing reconciles
+  by absence — and a permission-change resync evaluates the cursor's old
+  filter, so it tombstones only rows that were visible under it.
+
+The consequence for schema design: **keys must not themselves be secrets**. An
+entity keyed by email, slug or invite code hands subscribed clients those
+values as rows are deleted or hidden; key by surrogate id and keep the secret
+in a field, where the filter covers it.
+
+What remains either way is a timing channel: versions are workspace-global, so
+a client can infer from gaps in the versions it does see that writes it cannot
+see happened — but not for which rows, and, given surrogate keys, not what
+they concern.
+
 ## One node by default, more than one on purpose
 
 The defaults are single-node, and deliberately so: SQLite plus an in-process
@@ -359,8 +391,10 @@ a row — a read filter, a subscription predicate, a query, a window, a follow h
 — the server **quarantines** it rather than failing the request: the row is
 logged once (`undecodable row quarantined`, at warn, with entity, key and
 version) and then treated as absent. Pull sends a tombstone for it, so a client
-that already holds it drops it; bootstrap, queries, windows and follow closures
-skip it. Everything else in the workspace keeps syncing.
+that already holds it drops it — unless the row was created past the client's
+cursor, in which case nothing was ever delivered and nothing is sent; bootstrap,
+queries, windows and follow closures skip it. Everything else in the workspace
+keeps syncing.
 
 Nothing is deleted. Any PUT of that key replaces the bytes and the row syncs
 normally again, which is the repair; a PATCH of it is rejected as a `conflict`

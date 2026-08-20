@@ -308,6 +308,12 @@ var migrations = []string{
 	 ALTER TABLE workspaces ADD COLUMN text_compact_entity TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE workspaces ADD COLUMN text_compact_key TEXT NOT NULL DEFAULT '';
 	 ALTER TABLE workspaces ADD COLUMN text_compact_min_purged INTEGER NOT NULL DEFAULT 0;`,
+	// The sequence that created each row (see storage.Row.CreatedVersion):
+	// stamped on insert, kept on every overwrite. The 0 default is "unknown",
+	// which pre-existing rows keep — the pull path treats unknown
+	// conservatively, so a backfill is neither needed nor possible (the
+	// creating sequence of an existing row is not recorded anywhere).
+	`ALTER TABLE rows ADD COLUMN created_version INTEGER NOT NULL DEFAULT 0;`,
 }
 
 // Store implements storage.Adapter. Stores derived via Namespace share the
@@ -1088,10 +1094,10 @@ func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
 	var deleted int
 	err := t.tx.QueryRow(
-		`SELECT value, version, deleted, actor_subject, actor_system FROM rows
+		`SELECT value, version, created_version, deleted, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, entity, key,
-	).Scan(&row.Value, &row.Version, &deleted,
+	).Scan(&row.Value, &row.Version, &row.CreatedVersion, &deleted,
 		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.Row{}, storage.ErrNotFound
@@ -1133,7 +1139,7 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 		limit = -1 // SQLite: negative LIMIT means unlimited
 	}
 	rows, err := t.tx.Query(
-		`SELECT key, value, version, actor_subject, actor_system FROM rows
+		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
 		 ORDER BY key LIMIT ?`,
 		t.ns, t.ws, entity, afterKey, limit,
@@ -1144,7 +1150,7 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 	defer rows.Close()
 	for rows.Next() {
 		r := storage.Row{Entity: entity}
-		if err := rows.Scan(&r.Key, &r.Value, &r.Version,
+		if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
@@ -1163,7 +1169,7 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	// partial on deleted = 0), so this reads the index prefix and stops at
 	// LIMIT instead of sorting the entity.
 	rows, err := t.tx.Query(
-		`SELECT key, value, version, actor_subject, actor_system FROM rows
+		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0
 		 ORDER BY version DESC, key LIMIT ?`,
 		t.ns, t.ws, entity, limit,
@@ -1174,7 +1180,7 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	defer rows.Close()
 	for rows.Next() {
 		r := storage.Row{Entity: entity}
-		if err := rows.Scan(&r.Key, &r.Value, &r.Version,
+		if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
@@ -1199,7 +1205,7 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 	if afterEntity == "" {
 		// Clean version boundary: everything strictly past afterSeq.
 		rows, err = t.tx.Query(
-			`SELECT entity, key, value, version, deleted,
+			`SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND version > ?
 			 ORDER BY version, entity, key LIMIT ?`,
@@ -1209,7 +1215,7 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		// Resume inside a same-version group: past afterSeq, plus the rest of
 		// the split group whose (entity, key) sorts after (afterEntity, afterKey).
 		rows, err = t.tx.Query(
-			`SELECT entity, key, value, version, deleted,
+			`SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND (
 			   version > ?
@@ -1226,7 +1232,7 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 	for rows.Next() {
 		var r storage.Row
 		var deleted int
-		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &r.Version, &deleted,
+		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &r.Version, &r.CreatedVersion, &deleted,
 			&r.Actor.Subject, &r.Actor.System); err != nil {
 			return err
 		}
@@ -1799,16 +1805,18 @@ func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, acto
 	if err := t.register(); err != nil {
 		return err
 	}
+	// created_version stays out of the conflict SET: the stored value is the
+	// key's original creation, which every overwrite keeps (see storage.Row).
 	_, err := t.tx.Exec(
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
+		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = 0,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, value, version, time.Now().UnixMilli(),
+		t.ns, t.ws, entity, key, value, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
@@ -1819,15 +1827,15 @@ func (t *sqliteTx) DeleteRow(entity, key string, version uint64, actor storage.A
 		return err
 	}
 	_, err := t.tx.Exec(
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, deleted, updated_at,
+		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES (?, ?, ?, ?, NULL, ?, 1, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = 1,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, version, time.Now().UnixMilli(),
+		t.ns, t.ws, entity, key, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err

@@ -173,6 +173,79 @@ var _ = Describe("Permissions and custom mutations", func() {
 			Expect(titles(pull().GetPatch().GetChanges())).To(Equal([]string{"public"}))
 		})
 
+		Describe("hidden rows are not disclosed as tombstones", func() {
+			pullFrom := func(cursor []byte) *syncplanev1.PullResponse {
+				GinkgoHelper()
+				resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+					WorkspaceId: ws,
+					ClientId:    "c1",
+					Cursor:      cursor,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				return resp.Msg
+			}
+			tombstoneKeys := func(resp *syncplanev1.PullResponse) []string {
+				var out []string
+				for _, rc := range resp.GetPatch().GetChanges() {
+					if rc.GetTombstone() {
+						out = append(out, rc.GetKey())
+					}
+				}
+				return out
+			}
+
+			It("sends nothing for a filtered row created past the client's cursor", func() {
+				push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}))
+				first := pullFrom(nil)
+				Expect(titles(first.GetPatch().GetChanges())).To(Equal([]string{"public"}))
+
+				push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret invite code"}))
+				resp := pullFrom(first.GetNextCursor())
+				Expect(resp.GetPatch().GetChanges()).To(BeEmpty(),
+					"a tombstone here would hand the client the key and change time of a row it may not read")
+			})
+
+			It("sends no tombstones on a first pull, which delivers to a client that holds nothing", func() {
+				push(
+					putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}),
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret stash"}),
+				)
+				resp := pullFrom(nil)
+				Expect(titles(resp.GetPatch().GetChanges())).To(Equal([]string{"public"}))
+				Expect(tombstoneKeys(resp)).To(BeEmpty())
+			})
+
+			It("still revokes with a tombstone when an edit hides a row the client holds", func() {
+				push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}))
+				first := pullFrom(nil)
+				Expect(titles(first.GetPatch().GetChanges())).To(Equal([]string{"public"}))
+
+				push(putMutation("c1", 2, "todo", "t1", &todov1.Todo{Id: "t1", Title: "now secret"}))
+				resp := pullFrom(first.GetNextCursor())
+				Expect(tombstoneKeys(resp)).To(Equal([]string{"t1"}),
+					"the client holds t1 and must drop it")
+			})
+
+			It("stays conservative for hidden rows the cursor cannot rule out", func() {
+				// t2 is born hidden after the client's first pull (no tombstone),
+				// but once the cursor has advanced past its creation the server
+				// cannot prove the client never held it — it keeps no history of
+				// what t2 said back then — so a later edit tombstones it. The
+				// disclosure this leaves open is documented on
+				// Permissions.ReadFilter.
+				push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}))
+				first := pullFrom(nil)
+
+				push(putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret v1"}))
+				second := pullFrom(first.GetNextCursor())
+				Expect(second.GetPatch().GetChanges()).To(BeEmpty())
+
+				push(putMutation("c1", 3, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret v2"}))
+				third := pullFrom(second.GetNextCursor())
+				Expect(tombstoneKeys(third)).To(Equal([]string{"t2"}))
+			})
+		})
+
 		It("filters rows out of bootstrap streams", func() {
 			push(
 				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "public"}),

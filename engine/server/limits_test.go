@@ -162,8 +162,8 @@ var _ = Describe("Limits", func() {
 			}
 			Expect(titles).To(Equal([]string{"visible one", "visible two"}),
 				"the loop terminates and sees every visible row exactly once")
-			Expect(tombstoned).To(Equal([]string{"t2"}),
-				"read-filtered rows surface as tombstones so stale copies get dropped")
+			Expect(tombstoned).To(BeEmpty(),
+				"a filtered row this client never held emits nothing — it still consumes its page slot, which is what the loop above proves")
 		})
 
 		It("clamps the requested limit to MaxPullChanges", func() {
