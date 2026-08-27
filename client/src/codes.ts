@@ -16,7 +16,8 @@
  * | Mutation dropped after repeated      | `onMutationRejected`           | `poison_dropped`           |
  * | deterministic push failures          |                                |                            |
  * | Mutation discarded by a purge        | `onMutationRejected` + the     | `workspace_purged`         |
- * |                                      | `removeWorkspace` result       |                            |
+ * |                                      | `removeWorkspace` /            |                            |
+ * |                                      | `purgeLocalData` result        |                            |
  * | Mutation lost to a format upgrade    | `onMutationRejected` +         | `format_upgraded`          |
  * |                                      | `status().lastError`           |                            |
  * | Sync cycle failed                    | `status().lastError`           | `unavailable`, `internal`, or the server's code |
@@ -141,11 +142,12 @@ export const ErrorCodeMetadataKey = 'syncplane-error-code';
 export const CodePoisonDropped = 'poison_dropped';
 
 /**
- * The mutation was queued for a workspace that was purged
- * (`removeWorkspace(id, { purge: true })`) and can never be sent now. Reported
- * once per discarded mutation; the same mutations are also returned from
- * `removeWorkspace`, which is the channel to use when the app wants to keep the
- * unsent work rather than merely learn that it is gone.
+ * The mutation was queued in local data that has been deleted — one workspace's
+ * (`removeWorkspace(id, { purge: true })`) or the whole account's
+ * (`purgeLocalData()`) — and can never be sent now. Reported once per discarded
+ * mutation; the same mutations are also returned from whichever call deleted
+ * them, which is the channel to use when the app wants to keep the unsent work
+ * rather than merely learn that it is gone.
  */
 export const CodeWorkspacePurged = 'workspace_purged';
 

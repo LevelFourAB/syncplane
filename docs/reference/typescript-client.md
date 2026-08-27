@@ -96,7 +96,8 @@ client.defaultWorkspace: string | undefined  // readonly; undefined when there i
 client.workspaceId: string                   // readonly; the default workspace, throwing when there is none
 
 await client.start(): Promise<void>          // idempotent + retryable; begins background sync
-await client.close(): Promise<void>          // idempotent; teardown. Not reopenable.
+await client.close(): Promise<void>          // idempotent; teardown, local data kept. Not reopenable.
+await client.purgeLocalData(): Promise<DiscardedMutation[]>  // delete the account's local data, then close
 await client.syncNow(): Promise<void>        // force one push+pull cycle (mostly tests). Needs start() first.
 await client.clientId(): Promise<string>     // stable per-device id (persisted in KV)
 await client.pendingCount(): Promise<number> // locally queued, not-yet-acked mutations
@@ -107,6 +108,17 @@ client.onMutationRejected(cb): () => void            // multi-listener sibling o
 client.onSyncEvent(cb): () => void                   // multi-listener sibling of the option
 client.setSubscriptions(specs: SubscriptionSpec[]): void  // swap partial-sync scope at runtime
 ```
+
+`close()` leaves the store on the device for the next client on the account.
+`purgeLocalData()` deletes it first: sync stops, everything the store holds goes
+— every workspace's rows, overlay, staging, cursors and queues, plus the
+`clientId` — and then the client closes. Queued mutations are discarded rather
+than pushed; they come back in the result, grouped by workspace, and each also
+reaches `onMutationRejected` with code `workspace_purged`. The store's IndexedDB
+database is left in place, empty. A call on an already-closed client keeps the
+data and returns an empty list; a rejected one leaves the client open but no
+longer syncing, ready to be called again. See
+[Wipe local data on sign-out](../how-to/sign-out.md).
 
 ### Workspaces
 
@@ -134,7 +146,8 @@ A purge discards whatever was still queued for the workspace. Those mutations
 can never be acked, so they come back in `discarded` — read inside the
 transaction that deleted them, so the list is exactly what was lost — and each
 also reaches `onMutationRejected` with code `workspace_purged`. Removing the
-default workspace leaves the client without one.
+default workspace leaves the client without one. `purgeLocalData()` is the
+account-wide deletion.
 
 A `WorkspaceClient` carries the same surface bound to one workspace: the reads,
 `mutate`, `db`, `transact`, `text`, `undoScope`, `pendingCount`,

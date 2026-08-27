@@ -21,21 +21,21 @@ Failures reach the app on more than one channel, because they are not the same
 kind of event: a mutation the server refused is not an outage, and neither is a
 standing condition that retrying cannot clear.
 
-| Failure                                                    | Channel                                             | Code                                                                       |
-| ---------------------------------------------------------- | --------------------------------------------------- | -------------------------------------------------------------------------- |
-| A mutation was refused by the app's rules                  | `onMutationRejected`                                | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined one |
-| The client gave up on a mutation the server kept failing   | `onMutationRejected`                                | `poison_dropped`                                                           |
-| A purge discarded a queued mutation                        | `onMutationRejected` + the `removeWorkspace` result | `workspace_purged`                                                         |
-| A local format upgrade could not salvage a queued mutation | `onMutationRejected` + `lastError` (a count)        | `format_upgraded`                                                          |
-| A sync cycle failed                                        | `status().lastError`                                | the server's code, else `unavailable` / `internal`                         |
-| A workspace's queue was refused for a mutation-id gap      | `status().lastError` + a `resequence` sync event    | `mutation_id_gap`                                                          |
-| A watch could not be registered                            | `status().lastError`                                | `watch_failed`                                                             |
-| A text handle could not merge remote state                 | `TextHandle.status()` + `TextHandle.onError`        | `text_merge_failed`                                                        |
-| The server withdrew a room                                 | `Room.status()` + `Room.onError`                    | `room_dropped`                                                             |
-| A room publish could not be sent                           | `Room.onError`                                      | `room_offline`                                                             |
-| `Room.send` was called on a closed or dropped room         | the `RoomSendError` it rejects with                 | `room_closed`, `room_dropped`                                              |
-| Access to a workspace was withdrawn                        | `status().workspaces[id].access`                    | —                                                                          |
-| Server and client schema revisions differ                  | `status().schemaSkew`                               | —                                                                          |
+| Failure                                                    | Channel                                                                | Code                                                                       |
+| ---------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------- |
+| A mutation was refused by the app's rules                  | `onMutationRejected`                                                   | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined one |
+| The client gave up on a mutation the server kept failing   | `onMutationRejected`                                                   | `poison_dropped`                                                           |
+| A purge discarded a queued mutation                        | `onMutationRejected` + the `removeWorkspace` / `purgeLocalData` result | `workspace_purged`                                                         |
+| A local format upgrade could not salvage a queued mutation | `onMutationRejected` + `lastError` (a count)                           | `format_upgraded`                                                          |
+| A sync cycle failed                                        | `status().lastError`                                                   | the server's code, else `unavailable` / `internal`                         |
+| A workspace's queue was refused for a mutation-id gap      | `status().lastError` + a `resequence` sync event                       | `mutation_id_gap`                                                          |
+| A watch could not be registered                            | `status().lastError`                                                   | `watch_failed`                                                             |
+| A text handle could not merge remote state                 | `TextHandle.status()` + `TextHandle.onError`                           | `text_merge_failed`                                                        |
+| The server withdrew a room                                 | `Room.status()` + `Room.onError`                                       | `room_dropped`                                                             |
+| A room publish could not be sent                           | `Room.onError`                                                         | `room_offline`                                                             |
+| `Room.send` was called on a closed or dropped room         | the `RoomSendError` it rejects with                                    | `room_closed`, `room_dropped`                                              |
+| Access to a workspace was withdrawn                        | `status().workspaces[id].access`                                       | —                                                                          |
+| Server and client schema revisions differ                  | `status().schemaSkew`                                                  | —                                                                          |
 
 The rule of thumb: **`onMutationRejected` is per mutation** (something the user
 wrote is gone, and the local state has already been rolled back before the

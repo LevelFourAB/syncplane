@@ -52,6 +52,7 @@ Task-oriented recipes. Each assumes you already have something running.
 - [Add presence to an app](how-to/add-presence.md)
 - [Build a UI with React](how-to/react.md)
 - [Hold several workspaces on one client](how-to/multiple-workspaces.md)
+- [Wipe local data on sign-out](how-to/sign-out.md)
 - [Restore a field to a previous value](how-to/restore-a-field.md)
 - [Handle failures](how-to/handle-failures.md)
 - [Test your app without a server](how-to/test-your-app.md)

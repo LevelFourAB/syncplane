@@ -2957,8 +2957,119 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
+	 * Deletes the account's local data, then closes the client.
+	 *
+	 * Everything the store holds goes: every workspace's rows, overlay,
+	 * bootstrap staging, cursors and queues, and the `clientId` with them.
+	 * Watchers are woken before the close, so the UI drops the rows. A client
+	 * built on the account afterwards mints a new `clientId` and bootstraps from
+	 * empty; to delete one workspace of an account the device keeps, use
+	 * `removeWorkspace(id, { purge: true })`.
+	 *
+	 * Queued mutations are discarded rather than sent, and come back as the
+	 * result — grouped by workspace, in queue order within each — which is the
+	 * only copy left of them. Each is also reported through `onMutationRejected`
+	 * with code `workspace_purged`.
+	 *
+	 * The client is closed on return and cannot be reopened. A client that was
+	 * already closed keeps its data and answers with an empty list, so purge
+	 * before closing. Rejects with the store's error if the wipe cannot be
+	 * committed, leaving the client open but no longer syncing — call again to
+	 * retry the deletion, or `close()`.
+	 *
+	 * The store's IndexedDB database is left in place, empty. Other tabs sharing
+	 * the store see the rows disappear; one whose credential still works reads
+	 * the empty store as a fresh install and bootstraps the data back.
+	 */
+	async purgeLocalData(): Promise<DiscardedMutation[]> {
+		if (this.closed) return [];
+		// Sync stops before the wipe: a pull or a bootstrap swap committing after
+		// it would write the account's rows straight back. Clearing the fields
+		// keeps close() below from stopping either one a second time.
+		await this.coordinator?.stop();
+		this.coordinator = undefined;
+		await this.presence?.stop();
+		this.presence = undefined;
+		// reportRejection refreshes this tab's intent record from the trimmed
+		// undo stacks; the registry has to go first, or that refresh writes a
+		// record back into the emptied store.
+		this.intentReg = undefined;
+		const discarded = await this.wipeAccount();
+		for (const d of discarded) {
+			this.reportRejection({
+				workspaceId: d.workspaceId,
+				mutationId: d.mutationId,
+				errorCode: CodeWorkspacePurged,
+				errorMessage: "the account's local data was purged",
+				...describeMutation(d.mutation),
+			});
+		}
+		await this.close();
+		return discarded;
+	}
+
+	/**
+	 * Empties the store — every key, the clientId and the mutation-id counters
+	 * included — and returns the queues it deleted, read inside the transaction
+	 * that deletes them so the result is exactly what was lost. A queue entry
+	 * this build cannot decode goes unreported: there is nothing to hand back.
+	 *
+	 * ensureFormatVersion's wipe keeps the clientId so freshly minted ids stay
+	 * above the server's watermarks. This one deletes it, because the counters
+	 * go too: a client that kept the identity would mint ids the server has
+	 * already acked and have every edit dropped.
+	 */
+	private async wipeAccount(): Promise<DiscardedMutation[]> {
+		const kv = await this.kv();
+		const touched = new TouchSet();
+		const discarded = await this.kvMutex.run(async () => {
+			const tx = await kv.write();
+			try {
+				const queued: DiscardedMutation[] = [];
+				// Every queue the STORE holds, not just this client's workspaces:
+				// another tab's unsent work is deleted here too, so it is reported
+				// here too. The workspace is only recoverable from the key — the
+				// Mutation envelope does not carry one.
+				for await (const [ k, v ] of tx.scan(PENDING_ROOT)) {
+					let workspaceId: string;
+					try {
+						workspaceId = workspaceOfPendingKey(k);
+					} catch {
+						continue;
+					}
+					if (!workspaceId) continue;
+					try {
+						const mutation = fromBinary(MutationSchema, v as Uint8Array);
+						queued.push({ workspaceId, mutationId: mutation.mutationId, mutation });
+					} catch {
+						continue;
+					}
+				}
+				// Before the delete: the entity list the watchers are woken for is
+				// itself a record this wipe removes.
+				for (const entity of await syncableEntities(tx, this.entityRegistry)) {
+					for (const workspaceId of this.scopes.keys()) touched.entity(workspaceId, entity);
+				}
+				const doomed: string[] = [];
+				for await (const [ k ] of tx.scan('')) doomed.push(k);
+				for (const k of doomed) await tx.del(k);
+				await tx.commit();
+				return queued;
+			} catch (err) {
+				tx.release();
+				throw err;
+			}
+		});
+		await this.notifyChange(touched);
+		return discarded;
+	}
+
+	/**
 	 * Stops sync, drops watchers and closes the KV store. Idempotent. A
 	 * closed client cannot be reopened — create a new SyncClient instead.
+	 *
+	 * Local data survives for the next client on the account; `purgeLocalData()`
+	 * deletes it.
 	 */
 	async close(): Promise<void> {
 		if (this.closed) return;
