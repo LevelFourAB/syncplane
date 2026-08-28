@@ -1,8 +1,17 @@
-# Use collaborative text
+# Using collaborative text
 
-A `bytes` field marked `text: true` holds a convergent text document instead of
-raw bytes: concurrent edits merge without interleaving, and formatting or
-comment ranges travel with the characters they cover.
+This guide shows you how to define collaborative text fields in your schema and edit them concurrently across clients. Use this guide when your application needs real-time collaborative text editing with convergent merging and range annotations.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- A Syncplane schema and database client.
+- An existing entity row to edit.
+
+## 1. Define the collaborative text field
+
+Add a `bytes` field with `[(syncplane.v1.field_behavior) = { text: true }]` to your protobuf message definition. This field stores a convergent text document where concurrent edits merge without interleaving:
 
 ```proto
 message Doc {
@@ -12,13 +21,9 @@ message Doc {
 }
 ```
 
-Nothing else to wire: registration auto-installs the merge hook on both sides
-(no `WithMerger` / `MergerSpec`).
+Registration automatically installs the merge hook on both sides without requiring `WithMerger` or `MergerSpec`.
 
-A text field may also sit inside a keyed message list or a message-valued map —
-a comment with a collaborative body per element, a section per map entry. Each
-element then holds its own document, addressed by its **instance path**: the
-dotted proto path with the element key in it.
+If you need collaborative text inside repeated elements or maps, place the text field inside a keyed message list or a message-valued map:
 
 ```proto
 message Doc {
@@ -35,15 +40,11 @@ message Comment {
 }
 ```
 
-Everything below works the same for such a field with the instance path in
-place of the field name — `text(id, 'comments.<commentId>.body')`,
-`WithTextString("comments.<commentId>.body", s)`, a string in the element's
-init. The element's lifecycle is the document's: removing the element removes
-its document, and only a list with a `key_field` (or a map) can carry text —
-an unkeyed list's elements have no identity a path could address, so
-registration refuses text inside one.
+Each element holds its own document addressed by an instance path, which is the dotted proto path containing the element key (for example, `text(id, 'comments.<commentId>.body')` or `WithTextString("comments.<commentId>.body", s)`). The element lifecycle controls the document: removing the element removes its document. Unkeyed lists cannot contain collaborative text fields.
 
-## Edit through a live handle
+## 2. Edit text with a live handle
+
+To edit a collaborative text field interactively, open a live handle:
 
 ```ts
 const text = await client.db.doc.text(id, 'body'); // row must exist
@@ -61,122 +62,102 @@ text.subscribe((delta, value) => editor.applyDelta(delta)); // in-place diffs
 await text.close(); // stops watching, returns the peer, drains queued PATCHes
 ```
 
-Positions are UTF-16 string indices; conversion to code points happens inside.
+Positions use UTF-16 string indices. The handle converts indices to code points internally.
 
-Remote changes arrive as item-graph deltas (retain/insert/delete), so an editor
-patches in place and carets transform through the delta instead of jumping. A
-delta's `marksChanged` says whether the binding must re-read `marks()`: spans are
-resolved against the item order rather than stored, so it is set both when mark
-ops arrive and when an edit could have moved a span. A marked document
-re-resolves on ordinary typing; an unmarked one never does.
+Remote changes arrive as item-graph deltas containing retain, insert, and delete operations. Editors patch in place and transform carets through deltas without jumping. When a delta sets `marksChanged` to `true`, re-read `marks()`.
 
-### Close handles you are done with
+When you finish editing, call `text.close()` to stop watching and return the leased writer identity. Identities are leased per handle and must never be shared. For more information, see [Collaborative text](../explanation/collaborative-text.md#writer-identities).
 
-`close()` stops the watch and returns the writer identity the handle leased
-(identities are leased per handle and must never be shared — see
-[Collaborative text](../explanation/collaborative-text.md#writer-identities)).
-It returns a promise that resolves once the PATCHes queued before it have been
-enqueued; awaiting is optional and it never rejects.
+### Recovering from handle failures
 
-## Read without a handle
+If a handle fails to decode, merge, or diff state, it stops merging and refuses edits. The handle sets its status to `{ state: 'failed', error }` with code `text_merge_failed` and notifies `onError` listeners.
 
-Rendering a text field you merely read needs no handle — no peer lease, no
-watch:
+Reads continue to return the last known value. To recover, close the handle and open a new handle to rebuild state from the stored row.
+
+## 3. Bind text to a textarea
+
+A handle streams changes so that an editor can patch text in place instead of re-rendering from a string. Bind the handle to a `<textarea>` element:
+
+```ts
+const area = document.querySelector('textarea')!;
+const text = await client.db.scratch.text('notes', 'body');
+
+area.value = text.value;
+text.subscribe((delta, value) => {
+	area.value = value; // a real editor would apply `delta` in place
+});
+
+area.addEventListener('input', () => {
+	void text.setString(area.value);
+});
+```
+
+The `setString` method diffs the string against the current merged document and sends operations. Untouched regions retain their identity, which protects concurrent remote edits from being overwritten by the `<textarea>` contents.
+
+Release the handle when you finish editing. Closing the handle stops the watch, releases the leased writer identity, and drains queued edits:
+
+```ts
+await text.close();
+```
+
+## 4. Use collaborative text in React
+
+In React applications, bind text fields with the `useText` hook:
+
+```tsx
+const { value, setText } = db.scratch.useText('notes', 'body');
+<textarea value={ value } onChange={ (e) => setText(e.target.value) } />;
+```
+
+In React, `useText` automatically closes the handle on unmount.
+
+The hook opens a handle in the [resolved workspace](react.md#integrating-syncplane-into-your-application). Pass `{ workspaceId }` as the third argument to override the workspace.
+
+The hook re-renders on local and remote deltas. It closes the handle on unmount or when the workspace, row, or field changes. The `marks` array keeps its reference until spans move, and `setText(s)` performs whole-value writes for controlled `<textarea>` components:
+
+```tsx
+const { value, marks, handle, error, setText } = db.doc.useText(id, 'body');
+```
+
+If the handle fails, `useText` surfaces the failure in `error` while rendering the last value.
+
+## 5. Read and write text without a handle
+
+If you only need to read a text field without watching for live updates, read the bytes directly:
 
 ```ts
 const rows = await client.db.doc.query({});
 rows.map((r) => textOf(r.value.body)); // no handle, no lease
 ```
 
-`textOf(bytes)` is the visible string and `textMarksOf(bytes)` its resolved
-spans, both memoized per byte instance. `text.PlainText` is the Go equivalent.
+Use `textOf(bytes)` to get the visible string and `textMarksOf(bytes)` to get resolved spans. Both functions are memoized per byte instance. In Go, use `text.PlainText`.
 
-## Write a plain string
+To update a text field without opening a live handle, pass a plain string to `mutate.put`, `mutate.patch`, or `create`. The client computes a multi-hunk Myers diff over code points against the current merged row and sends full-state operations:
 
-`mutate.put` / `mutate.patch` (and `create`) accept a plain string for a text
-field. The client diffs it against the current merged row under a leased writer
-identity — a multi-hunk Myers diff over code points, so untouched regions keep
-their items and the marks attached to them — and ships ordinary full-state
-operations.
+- Passing an empty string performs a select-all-delete. Concurrent inserts from other clients survive the union.
+- Strings with a difference exceeding the `maxDiffCost` bound (1024) fall back to a single replacement hunk.
+- The input must be valid code points. The client rejects invalid UTF-8 in Go or unpaired surrogates in JavaScript.
 
-- An **empty string is select-all-delete**: concurrent inserts survive the union.
-- Strings further apart than the shared `maxDiffCost` bound (1024) fall back to
-  one replacement hunk.
-- The boundary takes **text, not bytes**: a string that cannot be represented as
-  code points is rejected — invalid UTF-8 on the Go side, an unpaired surrogate
-  on the JS side — rather than stored with U+FFFD in its place.
+If you write from the server side, pass `WithTextString(field, s)` and `WithTextPeer(peer)` to `EntityTx.Put` or `EntityTx.Patch`. The diff base is the stored document. Any text in the row that is missing from the string is deleted. For more information, see [Write from server-side code](server-side-writes.md#writing-collaborative-text).
 
-Server-side, `EntityTx.Put` / `Patch` take `WithTextString(field, s)` plus
-`WithTextPeer(peer)`. The diff base there is the **stored** document rather than
-a state the writer saw earlier, so text the row already holds and the string does
-not contain is deleted — see
-[Write from server-side code](server-side-writes.md#collaborative-text).
+## 6. Add annotations to text ranges
 
-## In React
+To attach comments or annotations to text ranges, store the mark range in the document and the comment metadata in a separate entity:
 
-```tsx
-const { value, marks, handle, error, setText } = db.doc.useText(id, 'body');
-```
-
-It opens a handle in the hook's [resolved workspace](react.md#choosing-a-workspace)
-(add `{ workspaceId }` as a third argument to override it), re-renders on every
-local and remote delta, and closes the handle on unmount or when the
-workspace/row/field identity changes (the previous row's text is never shown
-under the new key). `marks` keeps its array reference until
-a delta reports the spans may have moved, and `setText(s)` is the whole-value
-write a controlled `<textarea>` needs.
-
-## Annotations (comments on a range)
-
-Annotations are a pattern, not an engine feature. The **range** lives inside the
-document as a mark keyed `comment:<id>` (value `true`, `ExpandNone`) so it
-follows the text; the **body, author and resolved state** live in an ordinary
-entity row keyed by that id, getting last-writer-wins merge, permissions,
-queries and CRUD undo for free.
-
-Write the mark PATCH and the row in one `transact()` so they land atomically and
-undo as one step, and join them for rendering:
+1. Store the range as a mark keyed `comment:<id>` with value `true` and policy `ExpandNone`.
+2. Store the comment body, author, and resolved status in an entity row keyed by that ID.
+3. Write the mark `PATCH` and the comment row inside a single `transact()` call to apply them atomically.
+4. Join the rows with marks for rendering:
 
 ```ts
 joinAnnotations(rows, idOf, text.marks());
 ```
 
-Per-key resolution means overlapping comments coexist, and resolution costs
-O(document + marked text) rather than O(keys × document), so a document carrying
-hundreds of comments resolves in about the same time as one carrying a single
-mark. The todo demo's notes panel is the worked example.
+Per-key resolution allows overlapping comments to coexist. Resolution scales at O(document + marked text).
 
-## Undo
+## 7. Apply collapsed marks for pending formats and position notes
 
-Undo is op-level and local-only: it removes exactly your edits and leaves
-concurrent peers' work intact. Typing coalesces into word-sized undo groups
-(idle timeout plus whitespace boundary), and selection restore rides the same
-delta subscription editors already use.
-
-Undoing a **delete** restores the text and its formatting but not its item
-identities. Two consequences: anchors you held _outside_ the document — a cached
-cursor, a saved position — do not follow the restored text, so read positions
-back from the marks rather than keeping your own anchors across an undo; and
-restored marks come back `ExpandNone`, because the original `expand` policy is
-not recorded.
-
-## When a handle gives up
-
-Decoding, merging and diffing all run on state the handle did not produce, and
-each refuses input it cannot reconcile. When that happens the handle **stops
-merging and refuses edits**, and reports itself on `status()`
-(`{ state: 'failed', error }`, code `text_merge_failed`) and to `onError`
-listeners, plus `console.error` for the app that registered neither.
-
-Reads keep working, so what the user was looking at can be salvaged, but it is
-stale from then on. **Recovery is to close the handle and open a new one**,
-which rebuilds from the stored row. `useText` surfaces the same condition as its
-`error` while still rendering the last value it had.
-
-## Pending formats and notes on a position
-
-`mark(i, i, …)` — start equal to end — is a **collapsed** mark, covering no
-character:
+Use collapsed marks (where start index equals end index) to set pending formatting or position notes:
 
 ```ts
 await text.mark(i, i, 'bold', true, ExpandBoth); // pending: the next character typed at i is bold
@@ -184,34 +165,18 @@ await text.unmark(i, i, 'bold', ExpandBoth); // changed your mind
 await text.mark(i, i, 'note:n1', 'look here', ExpandNone); // a note at a position, never widens
 ```
 
-`ExpandBoth` gives the pending-format state a rich-text editor needs between
-Cmd-B and the first keystroke — kept in the document, so it survives a reload
-and other peers can see it. `ExpandNone` gives a zero-width annotation that
-drifts with the surrounding text without ever covering any of it. The one-sided
-policies are rejected here: there is no side to expand on.
+Use `ExpandBoth` for pending formats at a caret position. Use `ExpandNone` for zero-width annotations that drift with surrounding text without covering characters. One-sided expand policies are not supported for collapsed marks.
 
-Neither shows up in `marks()`, which reports spans over characters that exist.
-Read them back with `marksAt(index)` — the active formatting for a caret,
-including ordinary marks whose expand policy would take in text typed there —
-and `points()`, the zero-width marks with their current positions.
+To read collapsed marks, call `marksAt(index)` for active formatting at a caret or `points()` for zero-width marks and their positions. Collapsed marks do not appear in `marks()`.
 
-## Bounding growth on the server
+## Confirming the result
 
-A document otherwise keeps one item per character ever typed and one mark
-operation per formatting action. `server.WithTextCompaction(minPurged)` runs a
-background sweep that purges the tombstones and mark operations a document can
-no longer need — including a pending format and the unmark that cancelled it,
-which reclaim as a pair. It needs `WithGC` alongside it: the sweep only touches
-rows the delta prune has already quietened.
+To verify that collaborative text editing works:
 
-It is **off by default because it is the one place the engine can drop a user's
-work**: a client editing on top of state the purge dropped is asked to redo its
-edit, and mark operations it applied over dropped characters do not survive the
-re-diff. Enable it for documents edited over months; leave it off for
-short-lived ones. [Collaborative text](../explanation/collaborative-text.md#compaction) explains the mechanism.
+1. Open handles from two client sessions on the same row.
+2. Type into both tabs or client sessions at the same time and verify that both streams of characters appear in a stable order and merge without interleaving.
+3. Apply a mark with `text.mark()` and verify that `text.marks()` reports the updated spans after concurrent edits.
 
-## What is out of scope
+## Related
 
-- There is no presence/awareness channel.
-- Formatting is out of scope — marks are for annotations; keep rich text in the
-  source format (e.g. Markdown).
+- [The text CRDT](../explanation/collaborative-text.md)

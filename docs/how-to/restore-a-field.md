@@ -1,33 +1,18 @@
-# Restore a field to a previous value
+# Restoring a field to a previous value
 
-Someone overwrites a description by mistake and it has to come back. Opt the
-entity into field history, read the log when a history panel opens, and put the
-old value back with an ordinary `patch`.
+This guide shows you how to restore an entity field to a previous value using field history. Use this process when you need to recover earlier values for specific fields without overwriting unrelated data.
 
-## Restore is a PATCH, and that matters
+## Prerequisites
 
-The restore is a **`patch` with the recorded mask**, never a `put` of the
-decoded prior value. The recorded prior carries only the fields the mask names
-(plus the row's key fields), and a `put` replaces whole rows — so it would blank
-every field the record never recorded.
+Before you begin, ensure you have:
 
-A collaborative-text field needs no handling of its own. A record holds its
-**text** rather than its document, in a form the field itself can carry, and the
-write path resolves it: the text is diffed against the stored document and the
-difference applied as **real edits**. The characters come back as new
-insertions, untouched regions keep their items, and a peer typing concurrently
-merges instead of losing their work. See
-[Collaborative text](../explanation/collaborative-text.md) for why the text is
-what gets recorded.
+- A Syncplane server and TypeScript client configured in your project.
+- An entity defined with Protocol Buffers (Protobuf).
+- Active network connectivity to the server.
 
-Marks do not survive that round trip. The restored span is re-inserted text, so
-formatting that covered it is gone even though formatting on untouched regions
-stays. Deep history restores a value, not a rendering.
+## 1. Opt the entity into field history
 
-The restore is itself an ordinary optimistic mutation — offline-queueable,
-undoable, and itself captured, so undoing a restore is another restore.
-
-## 1. Opt the entity in
+Enable field history in your Protobuf schema by setting `history: {}` on the entity and marking each field to track with `history: true`:
 
 ```proto
 message Issue {
@@ -43,24 +28,17 @@ message Issue {
 }
 ```
 
-Capture is **explicit**: the fields you mark are recorded and nothing else, and
-an entity that opts in without marking a field is rejected at registration.
-Leave a field like `sort_key` unmarked and a drag never touches the log.
+Field capture is explicit: the server records only marked fields. An entity that opts into history without marking at least one field is rejected at registration. Unmarked fields, such as `sort_key`, do not generate history records when modified.
 
-Nothing else is needed on the server. The engine registers the history entity
-(`syncplane.v1.FieldHistory`, wire name `syncplane_field_history`) the first time
-some entity opts in, and captures on every write path: a client push, a mutator,
-a connector, a trusted write. See
-[Proto options → Field history](../reference/proto-options.md#field-history) for
-what a record contains and
-[Go server API → Field history](../reference/server.md#field-history) for the
-retention and admission-hook options.
+The engine registers the history entity (`syncplane.v1.FieldHistory`, wire name `syncplane_field_history`) when an entity opts in. The server captures changes across all write paths, including client pushes, mutators, connectors, and trusted writes.
+
+For details on record contents, see [Proto options → Field history](../reference/proto-options.md#field-history). For retention and admission-hook options, see [Go server API → Field history](../reference/server.md#field-history).
 
 ## 2. Register the history entity on the client
 
-History never syncs — it is a `server_only` entity — so it is read on demand
-through `queryServer`, which resolves the entity by name from the client's
-registry. Add the schema there; it costs a name and nothing else.
+Field history is a `server_only` entity that does not sync automatically. The client reads history records on demand through `queryServer`.
+
+Add `FieldHistorySchema` to your client configuration:
 
 ```ts
 import { FieldHistorySchema } from 'syncplane/gen/syncplane/v1/history_pb.js';
@@ -71,12 +49,11 @@ const client = new SyncClient({
 });
 ```
 
-Registering the entity does not sync it: it holds no local rows, and adding it to
-a build costs no re-bootstrap. Keep it out of any subscription set — naming an
-entity that never syncs throws — which is worth a check if the app builds that
-set from its entity list.
+Registering the entity does not sync local rows or require a re-bootstrap. Do not add `FieldHistorySchema` to subscription sets, because subscribing to a server-only entity throws an error.
 
-## 3. Read the log when the panel opens
+## 3. Read the history log
+
+To fetch history records for an entity row, query the server:
 
 ```ts
 const log = await client.queryServer(FieldHistorySchema, {
@@ -86,35 +63,21 @@ const log = await client.queryServer(FieldHistorySchema, {
 });
 ```
 
-`queryServer` needs connectivity: this tier is deep history, not a synced
-previous-value cache, so a restore is unavailable offline.
+`queryServer` requires active network connectivity. Field history is not cached locally, so history cannot be read offline.
 
-**Permissions come along for free.** A record is served under the read filter of
-the row it describes — a caller who cannot read `issue/i-42` gets nothing back
-for it, prior values, masks and actors included. There is nothing to register:
-the rule is the engine's, not a filter you write for the history entity. Tighten
-the source entity's filter and the log follows — deny someone a row and its
-history goes with it.
+The server checks permissions using the read filter of the source row. A user who cannot read `issue/i-42` receives no history records for that row. You do not need to register a separate filter for the history entity.
 
-Each row renders straightforwardly: `recordedAt` for the timestamp,
-`actorSubject` for who (and `actorSystem` when the engine or a connector wrote
-it rather than a person), `mask.paths` for which fields — the
-server records changes rather than writes, so a mask names the fields that
-actually moved and an entry never says "nothing happened here".
+Each returned history row provides the following fields:
 
-**An entry is an editing session, not a write.** A run of writes to one row by
-one actor folds into the record the first of them opened, so `prior` is what the
-fields held before that whole run and `seq`…`throughSeq` is the span it covers;
-`writes` says how many folded in. Render `writes` when it is worth showing ("12
-changes"), and expect one entry per session rather than per write — the server
-keeps the log proportional to editing sessions rather than to keystrokes. The
-window is a server option,
-[`WithHistorySession`](../reference/server.md#field-history).
+- `recordedAt`: The timestamp of the change.
+- `actorSubject`: The user who made the change, or `actorSystem` if written by the engine or a connector.
+- `mask.paths`: The fields that changed during the session.
 
-## 4. Restore
+An entry represents an editing session rather than an individual write. Sequential writes to one row by the same actor fold into a single record. `prior` holds the values before the session began, `seq` through `throughSeq` specifies the sequence range, and `writes` contains the number of folded writes. You can configure the session window using [`WithHistorySession`](../reference/server.md#field-history).
 
-Decode `prior` as the source entity type and hand `patch` the recorded mask.
-That is the whole thing, text field or not:
+## 4. Restore the field value
+
+To restore a previous value, decode `prior` into the source entity type and pass the recorded mask to `client.mutate.patch`:
 
 ```ts
 import { fromBinary } from '@bufbuild/protobuf';
@@ -126,28 +89,15 @@ await client.mutate.patch(IssueSchema, issueId, prior, {
 });
 ```
 
-From Go it is `tx.Patch(prior, rec.GetMask().GetPaths(), nil)`, plus
-`server.WithTextPeer(…)` when the entity has a text field: that names the
-identity the restored edits are minted under, and the engine invents none.
+In Go, call `tx.Patch(prior, rec.GetMask().GetPaths(), nil)`. If the entity contains a text field, pass `server.WithTextPeer(...)` to specify the identity under which the restored edits are minted.
 
-Restoring a **text** field needs an implementation that can resolve the recorded
-value into edits, which the TypeScript client and server-side Go both are. The
-wire refuses the value in every position, so a third-party client speaking the
-RPCs directly can restore a record's other fields — clearing the text field and
-dropping its path from the mask — and has to leave that one to a server-side
-handler ([Write from server-side code](server-side-writes.md#collaborative-text)).
+Restoring a collaborative text field requires an implementation that resolves the recorded value into edits, such as the TypeScript client or server-side Go. A direct RPC client can restore non-text fields by removing the text field from the mask, leaving text field restoration to a server-side handler. See [Write from server-side code](server-side-writes.md#writing-collaborative-text).
 
-To **display** a recorded value rather than restore it, read text fields with
-`plainTextOf` (Go: `text.PlainText`), which takes either form. The document
-decoder refuses a recorded value by name rather than returning something wrong.
+To display a recorded value without restoring it, read text fields with `plainTextOf` (in Go, `text.PlainText`).
 
-## 5. Show before and after, not only before
+## 5. Show before and after values
 
-A record holds the value a field had **before** its write. The value it changed
-_to_ is the next newer recorded value of that field, or the live row when no
-newer record names it — so one descending query plus the current row is enough
-to render a full timeline. Walk newest to oldest, folding each record's `prior`
-back over a cursor:
+A history record contains the value a field had before the write. The value it changed to is the next newer recorded value or the live row. To construct a timeline, query records in descending order and fold each record's `prior` value back over a cursor:
 
 ```ts
 import { mergeMask } from 'syncplane';
@@ -175,37 +125,19 @@ const timeline = log.map(({ value: rec }) => {
 });
 ```
 
-Each entry now has both sides for every field its mask names: `entry.before` for
-what the field held, `entry.after` for what the write made of it. Diff the two
-under `paths` and you have the highlight.
+Each entry in `timeline` contains `entry.before` for the previous values and `entry.after` for the resulting values across all fields in `paths`.
 
-Read text on both sides with `plainTextOf`, which takes the recorded form and
-the live row's document alike — the fold puts recorded values into the cursor,
-so a text field's `after` is a document only for the newest entry.
+Read text values on both sides with `plainTextOf`, which accepts both the recorded format and the live row document.
 
-One thing the fold does not do for you: **the oldest entry is not necessarily
-the row's creation.** It is only that when `rowCreated` is set. Otherwise
-retention or your page limit truncated the log, and the entry to render is
-"nothing recorded before this".
+**Note:** The oldest entry represents row creation only when `rowCreated` is `true`. Otherwise, log retention or page limits truncated earlier history.
 
-## Edge cases worth handling in the UI
+## Confirming the restore
 
-- **`rowCreated`** means the row did not exist before that write — the record
-  marks its creation. Its `mask` and `prior` are empty and restoring from it
-  patches nothing; render it as "created" rather than as a restorable state.
-  Test the flag, not the mask: a [history filter](../reference/server.md#the-admission-hook)
-  that redacts every path leaves an empty mask on a record that is an ordinary
-  change.
-- **A `DELETE` is not captured, and it purges the row's log.** A row's
-  disappearance is not a field change, nothing can restore into a tombstone, and
-  a row re-created under the same key starts clean rather than inheriting the
-  previous one's history. This tier restores fields, not rows — to make a
-  removal recoverable and attributable, model it as a field instead
-  ([Recover a deleted row](recover-a-deleted-row.md)).
-- **Key fields are never in the mask**, so a restore can never move a row's
-  identity. `prior` still carries them, which is how a decoded record says which
-  row it belongs to.
-- **Records expire.** The default retention is 90 days
-  (`WithHistoryRetention`); a panel that pages deep enough will run out. To tie
-  a record's lifetime to its row's alone — kept until the row is deleted, however
-  old — configure `server.WithHistoryRetention(server.HistoryForever)`.
+To verify that the field was restored:
+
+1. Fetch the entity row using `client.get(IssueSchema, issueId)`.
+2. Verify that the field value matches the restored `prior` value.
+
+## Related
+
+- [Limits and trade-offs](../explanation/limits-and-trade-offs.md)

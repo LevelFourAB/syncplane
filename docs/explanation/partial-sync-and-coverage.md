@@ -1,144 +1,74 @@
 # Partial sync and coverage
 
+This document explains how partial sync bounds local working sets, how the server maintains window and relation memberships efficiently, and how clients track whether local data provides a complete or partial view of an entity.
+
 ## Why windows exist
 
-A predicate scope — "every open todo" — is enough for small entities and wrong
-for real views. A busy project, "all open", an active label routinely match tens
-of thousands of rows, and no more selective predicate means the same thing.
+A window handles cases that a predicate cannot express. A predicate scope, such as "every open to-do", works for small entities but fails for large views. A busy project or an active label routinely matches tens of thousands of rows, and no selective predicate can represent it.
 
-A **window** is a rank scope: a `limit` plus an ordering. `orderBy` (or
-`byRecency`) decides which rows win the ranks, ties break on row key. With a
-window, working-set size becomes a policy choice rather than the size of the
-entity.
+A window is a rank scope: a `limit` plus an ordering. The `orderBy` or `byRecency` parameter decides which rows win the ranks, and ties break on the row key. With a window, working-set size becomes a policy choice rather than entity size.
 
 ## Window maintenance is exact, not best-effort
 
-The cursor records the window's membership as a key-set, and every pull with
-anything to deliver brings the window up to date and diffs it against that set:
+The cursor records window membership as a key set. Every pull that delivers data brings the window up to date and computes a diff against that set:
 
-- rows that **entered** arrive as values,
-- rows that **left** arrive as tombstones and leave the local store.
+- Rows that entered arrive as values.
+- Rows that left arrive as tombstones and leave the local store.
 
-That includes a row which merely _sank_ below the boundary — no predicate
-changed, nothing was deleted. Precision here is what makes the local store
-trustworthy: without it, a client would accumulate rows that no longer belong to
-any view it holds.
+This diff includes a row that sank below the rank boundary when no predicate changed and nothing was deleted. Exact window maintenance makes the local store trustworthy. Without exact diffing, a client accumulates rows that no longer belong to any active view.
 
-`byRecency` is the cheapest ordering to maintain, since ranking by write
-sequence needs no field comparison.
+`byRecency` is the cheapest ordering to maintain because ranking by write sequence requires no field comparisons.
 
 ## Changing the scope resyncs the difference
 
-Changing subscriptions delta-resyncs the visible-set difference rather than
-forcing a full re-bootstrap. The same applies to permission changes when the
-policy implements `EpochReadFilters`: `FilterEpoch` versions the inputs behind
-`ReadFilter`, so a revoked label or a changed membership syncs as a diff.
+Changing subscriptions delta-resyncs the visible-set difference rather than forcing a full re-bootstrap. The same applies to permission changes when the policy implements `EpochReadFilters`. `FilterEpoch` versions the inputs behind `ReadFilter`, so a revoked label or a changed membership syncs as a diff.
 
-A pull whose cursor already sits at the head of the workspace skips the
-recomputation entirely: nothing has been written, so no membership can have
-moved, and the cursor's key-set is carried forward as issued. A polling client
-on a quiet workspace therefore costs nothing to tell "nothing happened".
+A pull whose cursor already sits at the head of the workspace skips recomputation entirely. Because nothing was written, memberships cannot move, and the server carries the cursor key set forward as issued. Polling a quiet workspace costs nothing to return an empty update.
 
 ## The cursor references its membership instead of restating it
 
-Membership is what makes a cursor big: a window at its limit carries that many
-row keys, and a reference-following closure can carry far more. Exactness
-demands that the set be _stored_ — a diff needs the previous membership, and
-nothing else can reproduce it — but not that it be stored in the cursor. With
-a cursor-state store the server keeps the sets under an opaque reference, the
-cursor on the wire stays a few dozen bytes however large the client's holdings
-grow, and a new entry is written only when membership actually moves: an idle
-poll costs one store read and reissues the reference it was handed.
+Membership sets make cursors large. A window at its limit carries that many row keys, and a reference-following closure can carry far more. Exact diffing requires stored membership sets, because a diff needs the previous membership and nothing else can reproduce it. However, the membership does not need to be stored inside the cursor itself.
 
-The store is allowed to forget. A cursor whose entry was evicted resets the
-client onto a fresh bootstrap — the same recovery as falling below the
-tombstone GC horizon, and the reason eviction must be rare rather than
-impossible. When the store is down or absent the cursor inlines the sets
-exactly as every cursor once did, so the indirection degrades to extra bytes,
-never to a wrong answer.
+With a cursor-state store, the server retains sets under an opaque reference. The cursor on the wire stays a few dozen bytes regardless of how large client holdings grow. The server writes a new entry only when membership changes: an idle poll costs one store read and reissues the existing reference.
+
+The store can evict entries. A cursor whose entry was evicted resets the client to a fresh bootstrap. This is the same recovery mechanism as falling below the tombstone garbage collection (GC) horizon, so eviction must remain rare. When the cursor-state store is unavailable or absent, the cursor inlines the sets directly. Indirection degrades to extra payload bytes rather than an incorrect response.
 
 ## The cursor is a checkpoint on a stream, not a per-frame receipt
 
-A server running without a cursor-state store still has fat cursors, and on
-`Subscribe` their cost is avoidable even then: the server keeps the scope's
-position itself, and the cursor on a frame exists only so the client can
-resume from it later.
+A server running without a cursor-state store produces large cursors. On `Subscribe`, you can avoid this cost because the server tracks the scope position, and the cursor on a frame exists only so the client can resume later.
 
-So a client that sets `sparse_cursor` gets the cursor as a periodic checkpoint
-instead of on every frame, and the steady-state cost of a live subscription
-becomes the row that changed rather than the row plus a restatement of
-everything the client holds. Between checkpoints its stored position sits behind
-the rows it has already applied; a reopened stream resumes from that position
-and re-delivers what followed, which the client's own stored-sequence guard
-discards as already-applied.
+When a client sets `sparse_cursor`, the server sends the cursor as a periodic checkpoint instead of on every frame. The steady-state cost of a live subscription becomes the changed row rather than the row plus the entire membership set. Between checkpoints, the stored position sits behind rows that the client already applied. A reopened stream resumes from that position and redelivers subsequent rows, which the client stored-sequence guard discards as already applied.
 
-The server withholds a cursor only while the rows it has sent since the last
-checkpoint weigh less than the cursor itself, so the re-delivery after a
-reconnect can never cost more than the restatements it avoided. A subscription
-with no window and no follow has a cursor smaller than any page it rides on,
-which never clears that bar — those streams checkpoint on every frame, and the
-setting changes nothing for them.
+The server withholds a cursor only while the rows sent since the last checkpoint weigh less than the cursor itself. Redelivery after a reconnection never costs more than the avoided cursor restatements. A subscription without a window or follow closure has a cursor smaller than any data page, which never meets this threshold. Those streams checkpoint on every frame, and `sparse_cursor` changes nothing for them.
 
 ## What a bounded membership costs the server
 
-A window bounds the **client** by construction: what it holds, bootstraps and
-materializes. Bounding what the SERVER does per pull takes more, because a
-window and a follow closure are both memberships that cannot be decided one row
-at a time — resolve either from scratch and the cost is the size of the set, not
-the size of what changed. On a shared workspace under constant writes, where no
-pull ever sits at the head, that is one pass over every connected client's whole
-working set per write, which is the wrong shape for the deployment windows exist
-for.
+A window bounds the client, not the server. A window bounds client-side storage, bootstrapping, and materialization. Bounding what the server does per pull requires additional mechanisms. A window and a follow closure represent memberships that cannot be decided one row at a time. Resolving either from scratch costs the size of the set rather than the size of the change. On a shared workspace with frequent writes where pulls rarely sit at the head, full recomputations require scanning the entire working set of every connected client per write.
 
-So a pull that can see **every** row written since its cursor maintains both
-sets from those rows instead:
+A pull that can inspect every row written since its cursor maintains both sets incrementally from those rows:
 
-- A **window** carries its members and the position of the weakest of them, so a
-  changed row's membership is one comparison. Only a row entering or leaving a
-  full window costs a read, and then a bounded ordered walk either side of that
-  position rather than a pass over the window. A `byRecency` window costs no
-  read at all: its ordering is the workspace sequence, so anything written since
-  the cursor enters at the front and the tail falls off a list the cursor
-  already holds in order.
-- A **follow closure** over a reverse relation ("every issue of this project")
-  is decidable from the member's own reference field, so a changed row settles
-  itself and only a seed that entered or left the base scope is walked again —
-  including a seed that moved without being written, which is what a window
-  refilling does.
-- A **follow closure** over a forward relation ("the project this issue belongs
-  to") reads the other way round: a target is held because some issue points at
-  it, so its own row cannot settle it. What it costs instead is one probe of the
-  holders' reference index per target whose membership is actually in doubt, and
-  a target is only in doubt once something can have moved the holders. A pull
-  where no issue was written carries every project it holds over untouched;
-  where one was, the closure asks each project it holds whether a seed still
-  points there — never more questions than there are targets, against a rebuild
-  that reads every holder.
+- A window retains its members and the rank position of its boundary row. Determining membership for a changed row takes one comparison. Only a row entering or leaving a full window requires a database read, consisting of a bounded ordered walk on either side of that boundary position rather than a full window scan. A `byRecency` window requires no reads because its ordering matches workspace write sequence; new rows enter at the front and tail rows fall off the ordered list in the cursor.
+- A follow closure over a reverse relation (such as every issue in a project) is decidable from the member's own reference field. A changed row settles itself, and only a seed that enters or leaves the base scope requires re-evaluation. This includes a seed that shifted without being written, such as when a window refills.
+- A follow closure over a forward relation (such as the project that an issue belongs to) reads in reverse: a target entity is retained because a holder references it, so changes to the target row alone do not determine membership. The server instead executes one probe of the holder reference index for each target whose membership is in doubt. A target is in doubt only when a write affects the holder scope. When no holders change, the pull carries existing targets forward untouched. When a holder changes, the server probes whether an active seed still points to each held target.
 
-Resolving from scratch stays the fallback and every case the maintained path
-declines takes it: a page that truncates, a cursor resuming inside a
-same-version group, a subscription set that no longer lines up with the
-cursor's, a window that would have to locate a tail it never had, a follow path
-through more than one segment or deeper than one round, and a forward hop whose
-reference index cannot answer the probe — a to-many reference, an index not yet
-built, or a target with a fan-in wide enough to run past
-`MaxIndexScanCandidates`. The two must produce the same page, and
-`Limits.DisableMembershipMaintenance` forces the fallback so that property is
-tested rather than assumed.
+Resolving from scratch remains the fallback for cases that incremental maintenance does not support:
 
-What stays unbounded is the FIRST resolution, and the fallbacks with it:
-computing an `orderBy` window from scratch costs what the equivalent `Query`
-costs — a range read where an index serves the predicate and ordering, and a
-full entity scan where none does.
+- A page that truncates
+- A cursor that resumes inside a same-version group
+- A subscription set that does not match the cursor
+- A window that must locate a tail it never held
+- A follow path through multiple segments or deeper than one round
+- A forward relation hop whose reference index cannot answer the probe, such as a to-many reference, an unbuilt index, or a target whose fan-in exceeds `MaxIndexScanCandidates`
+
+Incremental maintenance and full resolution produce identical pages. Setting `Limits.DisableMembershipMaintenance` forces the fallback path so this equivalence can be tested.
+
+The first resolution and the fallback path remain unbounded. Computing an `orderBy` window costs what the equivalent `Query` costs: a range read where a [secondary index](../reference/proto-options.md#secondary-indexes) serves the predicate and the ordering, and a full entity scan where none does.
 
 ## Coverage: knowing when the answer is partial
 
-Bounded working sets create a hazard worth naming: a client holding the top N by
-one order **cannot correctly answer a local query ordered by another**, and an
-empty local result for an unsubscribed entity looks exactly like "there is
-nothing there".
+Bounded working sets introduce a key constraint: a client holding the top rows by one order cannot correctly answer a local query ordered by a different field. Furthermore, an empty local result for an unsubscribed entity appears identical to an empty entity.
 
-So every result array carries a `coverage` report:
+Every result array carries a `coverage` report:
 
 ```ts
 if (!rows.coverage.complete) {
@@ -147,56 +77,28 @@ if (!rows.coverage.complete) {
 }
 ```
 
-`relation` is the cross-entity case: a query whose predicate crosses a
-reference (`matches()`) answers from the target rows the store holds, and a
-holder whose target never synced reads as a non-match. See
-[relational queries](relational-queries.md) for the rule that clears it.
+The `relation` bound represents cross-entity queries. When a query predicate crosses a reference with `matches()`, the query resolves against target rows in the local store. If a holder references a target that was never synced, the query treats it as a non-match. For more information on clearing this bound, see [relational queries](relational-queries.md).
 
-`coverage.complete` is true only when the local store **provably** holds every
-row of the entity.
+`coverage.complete` is `true` only when the local store provably holds every row of the entity.
 
-It resolves against **this tab's own** declared scope, not the peer-widened
-union the coordinator actually syncs. The union is always a superset, so
-own-scope coverage errs toward claiming _less_ completeness than reality — and,
-more importantly, it does not flap as peer tabs come and go.
+Coverage resolves against the current tab's declared scope rather than the peer-widened union synced by the coordinator. Because the union is always a superset, scope coverage can claim less completeness than what is locally present, preventing coverage from flapping as peer tabs open and close.
 
-`RowSet<T>` is an array — `.map`, `.length`, spreads and destructuring all
-behave as they would on one, and `coverage` rides along non-enumerably, so it
-never shows up in `Object.keys` or `JSON.stringify`. `queryServer` reports
-coverage too: a server query sees the whole entity, so it is complete unless its
-own `limit` truncated the page.
+`RowSet<T>` extends standard arrays. Methods such as `.map()`, `.length`, spreads, and destructuring behave normally. The `coverage` property is non-enumerable, so it does not appear in `Object.keys()` or `JSON.stringify()`. The `queryServer` function also returns coverage; server queries inspect the entire entity, so results are complete unless a query-level `limit` truncates the page.
 
-The same bounds reach `total`, the match count a paged result carries beside its
-coverage. It is counted from the rows the read could see, so under a window or a
-predicate scope it reports what this device holds rather than what the workspace
-does, and the two can differ by any amount. Nothing in the number says which one
-it is — that is what the coverage beside it is for.
+The `total` property on a paged result reflects these same bounds. The count includes only the rows visible to the local read. Under a window or predicate scope, `total` reports what the local device holds rather than the workspace total. Coverage metadata clarifies whether that count represents a partial or complete entity.
 
 ### Hydrating: the bound that clears itself
 
-The other way a local result is not the whole answer has nothing to do with
-scope: a cold client's first snapshot is applied **entity by entity** and is
-readable as it lands, so an entity that has not started downloading reads as
-`[]` — indistinguishable from an empty one, and now with rows already on screen
-beside it. `hydrating` is that state, and it is the only transient bound: it
-clears on its own as the snapshot arrives, and the result grows with nothing
-else having changed.
+A local result can also be partial during initial data loading. A cold client applies its initial snapshot entity by entity, and data is readable as each entity lands. An entity that has not started downloading returns `[]`, which is indistinguishable from an empty collection. The `hydrating` bound represents this state. It is the only transient bound: it clears automatically as the snapshot arrives, and result sets grow without scope changes.
 
-It composes with the scope bounds rather than replacing them — a windowed
-entity mid-download reports `['window', 'hydrating']` and keeps its `limit`,
-because the cap still says what the entity converges to. Only a **cold** start
-reports it. A re-bootstrap stages its rows and swaps atomically, so readers see
-the intact previous snapshot throughout and nothing is ever half-arrived.
+The `hydrating` state combines with scope bounds. For example, a windowed entity in the middle of downloading reports `['window', 'hydrating']` alongside its `limit`, which indicates the target boundary once hydration completes. Only a cold start reports `hydrating`. A re-bootstrap stages rows and swaps them atomically, so queries read the intact previous snapshot until the new snapshot is ready.
 
-Which entity arrives first is the client's call: `bootstrapPriority` names what
-the first screen renders, and the server delivers those entities before the
-rest (a subscribed client that names none is served in `subscriptions` order).
-`status().workspaces[id].hydration` is the same fact workspace-wide — what is
-still outstanding, and how much of the snapshot is in — for a progress
-indicator.
+Clients can prioritize entity delivery:
+
+- `bootstrapPriority` specifies entities required for the initial render, which the server delivers first. Subscribed clients without priorities receive entities in `subscriptions` order.
+- `status().workspaces[id].hydration` exposes workspace-wide hydration progress, including outstanding entities and transferred snapshot percentages, for use in progress indicators.
 
 ## Related
 
-- [Sync only part of a workspace](../how-to/partial-sync.md) — the API.
-- [Limits and trade-offs](limits-and-trade-offs.md) — the missing index, and
-  where it is felt.
+- [Sync only part of a workspace](../how-to/partial-sync.md): API instructions for configuring partial sync.
+- [Limits and trade-offs](limits-and-trade-offs.md): Details on indexing constraints and query trade-offs.

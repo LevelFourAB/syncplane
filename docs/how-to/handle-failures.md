@@ -1,124 +1,85 @@
-# Handle failures
+# Handling failures
 
-Failures reach the app on more than one channel, because they are not the same
-kind of event: a mutation the server refused is not an outage, and neither is a
-standing condition that retrying cannot clear. The rule of thumb:
+This guide shows you how to handle mutation rejections, connection errors, revoked workspace access, and schema version skew in your application. Use this guide to notify users when operations fail and to recover from standing failure conditions.
 
-- **`onMutationRejected` is per mutation.** Something the user wrote is gone, and
-  the local state has already been rolled back before the callback runs.
-- **`status().lastError` is the sync loop.** Transient, cleared by the next
-  successful cycle.
-- **Access revocation and schema skew are standing conditions.** They survive a
-  successful cycle, because retrying cannot change them.
+For a complete listing of failure channels and error codes, see the [sync status and failure codes reference](../reference/sync-status-and-codes.md#where-failures-show-up).
 
-The [full table of failures, channels and
-codes](../reference/sync-status-and-codes.md#where-failures-show-up) is in the
-reference.
+## Prerequisites
 
-## Tell the user a write was refused
+Before you begin, ensure you have a configured `SyncClient` instance.
 
-```ts
-const client = new SyncClient({
-	// ...
-	onMutationRejected: (info) => {
-		switch (info.errorCode) {
-			case CodeConflict:
-				return toast('Someone else changed this first');
-			case CodePermissionDenied:
-				return toast(info.errorMessage);
-			case CodeWorkspacePurged:
-				return; // handled by the code that called removeWorkspace
-			default:
-				return toast('Change could not be saved');
-		}
-	},
-});
-```
+## Steps
 
-Codes are exported as constants with `RejectionCode` and `SyncErrorCode` unions
-over them. Both fields widen the union with `(string & {})`, so a code your own
-mutator invented still typechecks while the known ones autocomplete — `switch`
-on it with a `default`.
+1. **Handle rejected writes.** Configure the `onMutationRejected` callback to notify users when the server rejects a mutation. The client rolls back local state before the callback runs:
 
-`info.targets` says WHAT died: the rows the mutation would have written, one
-entry for a CRUD mutation and one per member for a batch, so a message can name
-the thing the user lost rather than "a change". A custom mutator writes no rows
-by this route, so its `targets` is empty and `info.mutator` carries its name.
+   ```ts
+   const client = new SyncClient({
+   	// ...
+   	onMutationRejected: (info) => {
+   		switch (info.errorCode) {
+   			case CodeConflict:
+   				return toast('Someone else changed this first');
+   			case CodePermissionDenied:
+   				return toast(info.errorMessage);
+   			case CodeWorkspacePurged:
+   				return; // handled by the code that called removeWorkspace
+   			default:
+   				return toast('Change could not be saved');
+   		}
+   	},
+   });
+   ```
 
-In React, `useOnMutationRejected(handler)` is the same surface with a component's
-lifetime ([Build a UI with React](react.md#the-hooks)); outside a constructor,
-`client.onMutationRejected(cb)` subscribes and returns an unsubscribe, so several
-listeners can coexist with the option above.
+   Codes are exported as constants with `RejectionCode` and `SyncErrorCode` unions over them. Both fields widen the union with `(string & {})`, so custom mutator codes typecheck while known codes autocomplete. Use a `switch` statement with a `default` case.
 
-A rejection whose push response was lost still reaches the handler: the server
-records the verdict with the watermark and replays it to the resend, and the
-client keeps the mutation queued until that resend collects it
-([the convergence model](../explanation/convergence-model.md#rejections-are-results-not-errors)).
-It arrives one sync cycle late, so a handler that closes a dialog or drops a
-draft should be safe to run after a delay.
+   Use `info.targets` to identify which rows were affected. For CRUD mutations, `info.targets` contains one entry. For batch mutations, it contains one entry per member. If you use a custom mutator, `info.targets` is empty and `info.mutator` contains the mutator name.
 
-## Show connectivity
+   If you use React, call `useOnMutationRejected(handler)` to tie the handler to the component lifecycle ([Build a UI with React](../reference/typescript-client.md#the-hooks)). Outside a constructor, call `client.onMutationRejected(cb)` to subscribe and receive an unsubscribe function.
 
-```ts
-client.onStatusChange((s) => {
-	setBanner(s.state === 'error' ? s.lastError?.message : undefined);
-	setPending(s.pendingMutations);
-});
-```
+   If a push response is lost, the server records the verdict with the watermark and replays it on the resend. The client keeps the mutation queued until the resend collects it ([the convergence model](../explanation/convergence-model.md#rejections-are-results-not-errors)). Because the rejection arrives one sync cycle late, ensure that handlers closing dialogs or dropping drafts can safely run after a delay.
 
-`start()` returns immediately and never throws on the first sync: an unreachable
-server surfaces as `state: "error"` while mutations stay queued, and sync
-recovers automatically with backoff.
+2. **Monitor connection status.** Register an `onStatusChange` listener to update your UI when connectivity changes or when mutations are pending:
 
-What it _can_ reject on is the local set-up it awaits before sync begins —
-missing `url`/`transport`, or a local store that will not open. Such a start
-leaves the client startable: fix the cause (or wait out a flaky store) and
-call `start()` again. Concurrent callers share one start attempt.
+   ```ts
+   client.onStatusChange((s) => {
+   	setBanner(s.state === 'error' ? s.lastError?.message : undefined);
+   	setPending(s.pendingMutations);
+   });
+   ```
 
-## Handle losing access to a workspace
+   `start()` returns immediately and does not throw on the first sync. An unreachable server surfaces as `state: "error"` while mutations stay queued, and sync recovers automatically with backoff.
 
-When the server permanently denies a workspace — a `WorkspaceDropped` frame with
-reason `ACCESS_REVOKED`, or `workspace_access_revoked` on a push batch — the
-client stops syncing that workspace and reports it on
-`status().workspaces[id].access`. Other workspaces on the same stream are
-unaffected.
+   If local setup fails before sync begins (such as a missing `url` or `transport`, or a local store that fails to open), `start()` rejects. Fix the cause or wait for the store to recover, then call `start()` again. Concurrent callers share one start attempt.
 
-The local copy is **not** deleted automatically: discarding a user's rows on one
-server verdict is an app decision.
+3. **Handle revoked workspace access.** Check the access state and remove revoked workspaces from the client.
 
-```ts
-if (client.status().workspaces[id]?.access === 'revoked') {
-	const { discarded } = await client.removeWorkspace(id, { purge: true });
-	if (discarded.length) await stashSomewhere(discarded);
-}
-```
+   When the server permanently denies access to a workspace (using a `WorkspaceDropped` frame with reason `ACCESS_REVOKED` or a `workspace_access_revoked` error on a push batch), the client stops syncing that workspace and sets `status().workspaces[id].access` to `'revoked'`. Other workspaces on the same stream continue syncing.
 
-## Handle a version skew during a deploy
+   The client does not automatically delete the local copy. To remove the workspace and handle discarded rows, run:
 
-`WithSchemaRevision` makes the server advertise an app-defined revision on every
-stream frame, push, pull, server query and bootstrap. A client configured with
-its own `schemaRevision` compares the two and runs `onSchemaSkew` on a
-mismatch — surface "update required" on the status, go read-only (`block`), or
-force a clean re-bootstrap (`resync`).
+   ```ts
+   if (client.status().workspaces[id]?.access === 'revoked') {
+   	const { discarded } = await client.removeWorkspace(id, { purge: true });
+   	if (discarded.length) await stashSomewhere(discarded);
+   }
+   ```
 
-This does not replace additive schema evolution; it makes a skew window during a
-rolling deploy visible and actionable instead of a silent stream of dropped
-writes.
+4. **Handle schema version skew during deployment.** Configure `schemaRevision` and `onSchemaSkew` to detect and respond to schema differences between the client and server.
 
-## A throw from your own callback is contained
+   When the server uses `WithSchemaRevision`, it advertises an application-defined revision on every stream frame, push, pull, server query, and bootstrap. Configure `schemaRevision` on the client to compare revisions. When a mismatch occurs, the client runs `onSchemaSkew`. Use this callback to surface an update notification, switch to read-only mode (`block`), or force a clean re-bootstrap (`resync`).
 
-Every app callback the library invokes — `onStatusChange`, watch callbacks,
-`onMutationRejected`, `onUndoChange`, a text handle's `subscribe`,
-`onSchemaSkew` — runs isolated. The commit or pull being reported has already
-landed by the time it is called, so an exception is logged to `console.error`
-and dropped rather than failing the write, skipping the callbacks queued behind
-it, or marking the sync cycle errored.
+   This makes the skew window during a rolling deployment visible and actionable instead of silently dropping writes.
 
-`onSchemaSkew` is the one that owes an answer; a throwing policy falls back to
-`'warn'`, the action an unconfigured one gets.
+## Confirming the result
+
+To verify your failure handling setup:
+
+- Trigger a write conflict and confirm that `onMutationRejected` runs and displays the expected notification.
+- Disconnect the network and verify that `onStatusChange` reports `state: "error"` with `lastError` and updates the pending mutation count.
+- Revoke workspace access on the server and confirm that `status().workspaces[id]?.access` updates to `'revoked'`.
 
 ## Related
 
-- [Sync status and failure codes](../reference/sync-status-and-codes.md).
-- [Authentication and permissions](authentication-and-permissions.md) — the
-  server side of a rejection.
+- [Callback isolation](../reference/sync-status-and-codes.md#callback-isolation)
+- [Sync status and failure codes](../reference/sync-status-and-codes.md)
+- [Authentication and permissions](authentication-and-permissions.md)

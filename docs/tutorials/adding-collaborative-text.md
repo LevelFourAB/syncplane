@@ -1,12 +1,17 @@
 # Adding collaborative text
 
-Per-field last-writer-wins is the wrong tool for prose: if two people edit the
-same description at once, one of them loses the whole field. In this tutorial
-you will add a field that two people can type into simultaneously, watch both
-sets of keystrokes survive, and see what makes that possible.
+Per-field last-writer-wins causes data loss when multiple users edit the same
+text at the same time. In this tutorial, you add a collaborative text field to a
+schema, bind it to an input element, and edit it concurrently from two clients.
+By the end of this tutorial, you can create collaborative text fields and merge
+concurrent edits across clients.
 
-It continues from [Your first sync app](your-first-sync-app.md) — you should
-have the demo server and web app running.
+## Prerequisites
+
+Before you start this tutorial, ensure you have:
+
+- Completed [Your first sync app](your-first-sync-app.md).
+- Running instances of the demo server and web app.
 
 ## 1. Declare a text field
 
@@ -25,30 +30,36 @@ message Scratch {
 }
 ```
 
-The field holds an encoded convergent text document rather than a UTF-8 string.
-Both implementations — Go in `engine/text`, TypeScript in `client/src/text` —
-produce byte-identical encodings, pinned by shared vectors in `testdata/text/`.
+The field holds an encoded convergent text document rather than a UTF-8
+string. Both the Go implementation in `engine/text` and the TypeScript
+implementation in `client/src/text` produce byte-identical encodings, pinned by
+shared vectors in `testdata/text/`.
 
-Regenerate and declare it exactly as you did for `Tag`:
+Regenerate the code and declare the entity:
 
 ```sh
 task generate
 ```
 
+Register the entity in the Go server in `internal/exampleapp`:
+
 ```go
 server.WithEntities(/* ... */ &todov1.Scratch{})   // internal/exampleapp
 ```
+
+Register the entity schema in TypeScript in `examples/todo/src/main.ts`:
 
 ```ts
 entities: [ /* ... */ ScratchSchema ]; // examples/todo/src/main.ts
 ```
 
-There is nothing else to wire. Registration installs the merge hook on both
-sides; you do not declare a merger.
+Registration installs the merge hook on both sides. You do not need to declare
+a merger.
 
 ## 2. Edit through a handle
 
-A row has to exist before you can open a handle on one of its text fields:
+A row must exist before you can open a handle on one of its text fields. Create
+a row and open a handle:
 
 ```ts
 await client.db.scratch.mutate.put({ id: 'notes' });
@@ -60,18 +71,19 @@ await text.insert(5, ', world');
 text.value; // 'hello, world'
 ```
 
-Positions are UTF-16 string indices, the same ones `String.prototype.slice`
-uses; the conversion to code points happens inside the handle.
+Positions are UTF-16 string indices, the same indices used by
+`String.prototype.slice`. The handle converts indices to code points
+internally.
 
-Open the app in two tabs and run that in both consoles, typing into the _same_
-position. Neither edit is lost and the characters do not interleave: you get
-one insertion then the other, never `hbeollolo`. That ordering guarantee is
-[Fugue](https://arxiv.org/abs/2305.00583).
+Open the app in two browser tabs and run the script in the developer console of
+both tabs, typing into the same position. Neither edit is lost and characters do
+not interleave. You see one insertion followed by the other. This ordering
+guarantee comes from [Fugue](https://arxiv.org/abs/2305.00583).
 
 ## 3. Bind it to a textarea
 
-A handle streams changes, so an editor can patch in place instead of being
-re-rendered from a string:
+A handle streams changes so that an editor can patch text in place instead of
+re-rendering from a string. Bind the handle to a `<textarea>` element:
 
 ```ts
 const area = document.querySelector('textarea')!;
@@ -87,55 +99,55 @@ area.addEventListener('input', () => {
 });
 ```
 
-`setString` diffs the string you hand it against the current merged document —
-a multi-hunk diff, so untouched regions keep their identity — and ships ordinary
-operations. That is what makes it safe for a controlled `<textarea>`: a
-concurrent remote edit survives instead of being clobbered by whatever string
-the textarea happened to hold.
+The `setString` method diffs the string against the current merged document and
+sends operations. Untouched regions retain their identity, which protects
+concurrent remote edits from being overwritten by the `<textarea>` contents.
 
-Now type into both tabs at once. Both streams of characters land, in a stable
-order, in both tabs.
+Type into both tabs at the same time. Both streams of characters appear in a
+stable order in both tabs.
 
-In React the same binding is one hook:
+Release the handle when you finish editing. Closing the handle stops the watch,
+releases the leased writer identity, and drains queued edits:
 
-```tsx
-const { value, setText } = db.scratch.useText('notes', 'body');
-<textarea value={ value } onChange={ (e) => setText(e.target.value) } />;
+```ts
+await text.close();
 ```
 
-Remember to release the handle when you are done with it — `await text.close()`
-stops the watch, returns the writer identity it leased, and drains the edits
-still queued behind it. `useText` does this for you on unmount.
+In React, the `useText` hook does this for you. See
+[Use collaborative text](../how-to/use-collaborative-text.md#4-use-collaborative-text-in-react).
 
 ## 4. Read without a handle
 
-Rendering text you are not editing needs no handle, no lease and no watch:
+Rendering text that you do not edit requires no handle, lease, or watch. Query
+the rows directly:
 
 ```ts
 const rows = await client.db.scratch.query({});
 rows.map((r) => textOf(r.value.body)); // the visible string
 ```
 
-Use a handle when the user is editing; use `textOf` everywhere else.
+Use a handle when you edit text. Use `textOf` when you only read text.
 
 ## 5. Attach a comment to a range
 
-Marks are key/value ranges attached to the characters themselves, so they move
-with the text as it is edited:
+Marks are key-value ranges attached to characters. Marks move with the text
+during edits. Add a mark to a range:
 
 ```ts
 await text.mark(0, 5, 'comment:c1', true);
 text.marks(); // resolved spans, re-resolved after every edit
 ```
 
-Annotations in the demo are built on exactly this: the _range_ lives inside the
-document as a mark keyed `comment:<id>`, while the comment's body, author and
-resolved flag live in an ordinary entity row keyed by that id — so the comment
-text gets last-writer-wins merge, permissions, queries and undo for free. Write
-both in one `client.transact()` so they land atomically and undo as one step.
+The range lives inside the document as a mark keyed by `comment:<id>`. The
+comment body, author, and resolved status live in a standard entity row keyed
+by that ID. This entity structure provides last-writer-wins merging,
+permissions, queries, and undo support.
 
-The demo's notes panel is the worked example; open it and add a comment to see
-the range follow the text as you type in front of it.
+To make edits land atomically and undo in a single step, write both operations
+in one `client.transact()` call.
+
+Open the notes panel in the demo app and add a comment. The comment range
+follows the text as you type in front of it.
 
 ## What you can rely on
 
@@ -150,7 +162,12 @@ the range follow the text as you type in front of it.
 
 ## Where to go next
 
-- [Use collaborative text](../how-to/use-collaborative-text.md) — the full
-  working surface: anchors, `expand` policies, undo, error handling.
-- [Collaborative text](../explanation/collaborative-text.md) — how the CRDT
-  works, why deltas are safe, and what compaction can cost you.
+You now have a collaborative text field that merges concurrent edits across
+multiple clients.
+
+To learn more about collaborative text, see the following guides:
+
+- [Use collaborative text](../how-to/use-collaborative-text.md) — Learn about
+  anchors, `expand` policies, undo, and error handling.
+- [Collaborative text](../explanation/collaborative-text.md) — Learn how the
+  CRDT works, why deltas are safe, and compaction behavior.

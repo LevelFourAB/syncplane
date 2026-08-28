@@ -1,82 +1,92 @@
 # The convergence model
 
-Everything in syncplane follows from a small set of decisions. This page states
-them, and what each one costs.
+This document explains how syncplane converges concurrent state between
+clients and the server, why the system uses this design, and what each decision
+costs.
 
 ## Optimistic overlay and rebase
 
-Mutations apply to a local **optimistic overlay** and queue. A background
-coordinator pushes the queue, pulls server changes, and **rebases**:
+Mutations apply locally to an **optimistic overlay** and a pending queue. A
+background coordinator pushes the queue, pulls server changes, and rebases:
 
-1. apply the server patch,
-2. drop the mutations the server acknowledged,
-3. clear the overlay,
-4. replay the still-pending mutations on the new base.
+1. Apply the server patch.
+2. Drop the mutations that the server acknowledged.
+3. Clear the overlay.
+4. Replay the remaining pending mutations on the new base.
 
-Reads go through the merged view, so the UI sees local edits immediately and
-converges without a flash when the server's answer arrives.
+Reads query the merged view. The user interface reflects local edits
+immediately and converges without visual flicker when the server response
+arrives.
 
 ## One sequence per workspace
 
 The server linearizes mutations per workspace with a monotonic sequence.
-Applying PATCH field masks in sequence order is **per-field last-writer-wins**.
-There are no per-field timestamps anywhere.
+Applying `PATCH` field masks in sequence order provides **per-field
+last-writer-wins (LWW)** resolution. The system does not store or compare
+per-field timestamps.
 
 ### "Last writer" means last to reach the server
 
-Order is the push-arrival sequence, not wall clock. A client offline for a week
-pushes on reconnect, gets the _newest_ sequence numbers, and its stale edits win
-per-field over everything written while it was gone.
+Conflict resolution order follows the push-arrival sequence, not the wall-clock
+time. When a client that was offline for a week reconnects and pushes its queue,
+it receives the newest sequence numbers. Its edits overwrite modifications made
+by other clients while it was disconnected on a per-field basis.
 
-Field masks keep the damage to the fields that client actually touched. This is
-an accepted trade-off for Linear-class apps. If you need to _notice_ a
-concurrent edit instead of silently merging, reach for compare-and-swap below,
-not time-ordering — an HLC per mutation compared per field would be the only
-path to real time-order, and is out of scope.
+Field masks limit overwrites to the fields that the client modified. This is an
+accepted trade-off for collaborative applications. If you need to detect a
+concurrent edit instead of silently merging it, use compare-and-swap (see
+[Opting out of silent convergence](#opting-out-of-silent-convergence)) rather
+than time ordering. Using a hybrid logical clock (HLC) per mutation compared
+per field is the only alternative for real-time ordering, and is out of scope.
 
 ### A mask through a nested message does not move its presence
 
-Message presence is observable — `isSet`/`isNotSet` can read it, and a
-subscription predicate can be built on it. So a mask that names a leaf inside a
-nested message (`settings.color`) only ever writes that leaf: the container
-appears when the write puts something in it, and disappears when the write
-leaves it empty. A patch that turns out to be a no-op leaves presence exactly as
-it found it, on either side of the merge.
+Message presence is observable. You can read presence with `isSet` and
+`isNotSet`, or use it in subscription predicates. Because presence is
+observable, a mask that names a leaf inside a nested message (such as
+`settings.color`) modifies only that leaf:
 
-The trade-off is at the other end: a deliberately present-but-empty message does
-not survive a masked merge into it. Writing `settings: {}` and then patching
-`settings.color` to unset drops `settings` entirely, because an empty container
-and an absent one are indistinguishable to the merge. Carry a real field if the
-distinction matters.
+- The container message appears when a write sets a field inside it.
+- The container disappears when a write unsets all fields inside it.
+- A patch that is a no-op leaves container presence unchanged on both sides of
+  the merge.
+
+The trade-off is that an empty message container does not survive a masked merge.
+Writing `settings: {}` and then patching `settings.color` to unset drops
+`settings` completely, because the merge logic treats an empty container and an
+absent container identically. If you need to preserve container presence,
+include an explicit field.
 
 ### A oneof is one field
 
-A mask names the **group**, never a member — `choice`, not `choice_text` — and
-the whole group is replaced: the writer's active case wins, and a writer whose
-group is empty clears it. Members are not maskable at all; a mask naming one is
-rejected on both sides.
+A field mask names the entire **oneof group**, not an individual member (for
+example, `choice`, not `choice_text`). The server replaces the whole group: the
+writer's active case wins, and a write with an empty group clears the oneof.
+Individual members cannot be masked; a mask that names a member is rejected by
+both the client and the server.
 
-The group has to be the unit. Protobuf lets only one member hold a value, so a
-member-granular mask can say "`choice_text` is now `x`" but cannot say what
-"`choice_text` is unset" means for its siblings — "`choice_number` survives" and
-"the oneof is now empty" are both defensible readings of the same mask, and
-per-field LWW gives no way to choose. Naming the group asks the question the
-data can answer, and the two implementations cannot drift on the answer.
+The group must be the atomic unit. Protocol Buffers allows only one member of a
+oneof to hold a value. A member-level mask could specify that `choice_text` is
+now `x`, but it cannot define what unsetting `choice_text` means for sibling
+fields. Interpreting whether `choice_number` survives or the entire oneof becomes
+empty are both possible interpretations, and per-field LWW cannot resolve this
+ambiguity. Naming the group eliminates ambiguity and prevents client and server
+implementations from drifting.
 
-Writes to the group still take part in per-field LWW like any other field: a
-concurrent writer who touched only `label` does not disturb it. Two writers who
-both touch the group resolve as one field — the last to arrive wins the case,
-not a blend of the two.
+Writes to a oneof group participate in per-field LWW like any other field. A
+concurrent write to an unrelated field (such as `label`) does not affect the
+group. When two writers modify the oneof group concurrently, the last write to
+arrive wins the entire group rather than combining values.
 
-The cost is that the group is **atomic**: a message inside a oneof is replaced
-whole, and no mask path descends into it. That is also why nothing that must be
-reliably present may live inside a oneof — key fields, keyed-list identities,
-collaborative-text fields and references are all refused at registration (see
-[proto options](../reference/proto-options.md#what-a-oneof-cannot-hold)).
+This design makes the group **atomic**. A message inside a oneof is replaced as
+a whole, and mask paths cannot descend into it. For this reason, schema
+registration rejects types that require permanent presence inside a oneof,
+including key fields, keyed-list identities, collaborative-text fields, and
+references (see [proto options](../reference/proto-options.md#what-a-oneof-cannot-hold)).
 
-Reading is the other way round, because it has no such ambiguity: a **member** is
-addressable on its own in queries, orderings and indexes, and its presence is
-exactly "this case is active".
+Reads operate differently because reading individual members carries no
+ambiguity. You can address a member directly in queries, orderings, and indexes,
+and its presence indicates whether that case is active:
 
 ```ts
 // write: the group
@@ -91,166 +101,195 @@ const anyText = { where: (w) => w.choice.choiceText.isSet() };
 
 ## Opting out of silent convergence
 
-Pass `{ expectedVersion }` to any `mutate.put/patch/del`. The server applies it
-only if the row's current version still matches, otherwise it rejects with
-`conflict` (rolled back locally, surfaced via `onMutationRejected`).
+You can opt out of automatic merging by passing `{ expectedVersion }` to
+`mutate.put`, `mutate.patch`, or `mutate.del`. The server applies the mutation
+only if the row's current version matches `expectedVersion`. Otherwise, the
+server rejects the mutation with a `conflict` status, rolls back the local
+optimistic write, and fires `onMutationRejected`.
 
-Read the base version from `Row.version` (`scan` / `query` / `watch`) or
-`client.getRow`. `expectedVersion: 0n` means "apply only if the row does not
-exist" — create-if-absent. The version is the workspace sequence that last wrote
-the row, so an absent or deleted row reads as 0 regardless of tombstone GC.
+You can read the current version from `Row.version` (using `scan`, `query`, or
+`watch`) or by calling `client.getRow`. Passing `expectedVersion: 0n` creates a
+create-if-absent guard that succeeds only if the row does not exist. The version
+equals the workspace sequence number of the write that last modified the row. An
+absent or deleted row returns a version of `0`, regardless of tombstone garbage
+collection (GC).
 
-A guard is worth reaching for when a concurrent edit must be **noticed** rather
-than merged, and it is worth knowing what it costs before you do. It covers the
-whole row — there are no per-field versions — so it also fires on a change to a
-field yours does not touch. And `Row.version` only ever advances on a pull, so
-every write a client issues between two pulls names the same version: the first
-to reach the server moves the row past it and the rest are rejected against
-their own predecessor. A burst of edits on one row therefore wants plain
-last-writer-wins, not a guard.
+Version guards are useful when concurrent edits must be detected rather than
+merged. However, consider the following constraints:
 
-The client folds a burst that shares one guard into a single guarded mutation,
-which applies or rejects as a unit — but only while the burst is still
-un-pushed, so this narrows the window rather than closing it. In React,
-`useRow`'s writers take `{ cas: true }` to bind the row's current version; they
-are unguarded otherwise, for the reason above.
+- Guards cover the whole row rather than individual fields. A guard fails even
+  if a concurrent change touched only unrelated fields.
+- `Row.version` advances only when the client pulls from the server. If a
+  client issues multiple writes to the same row between pulls, each write names
+  the same `expectedVersion`. The first write to reach the server advances the
+  row version, causing subsequent writes in that batch to reject against their
+  own predecessor. Rapid successive edits on a single row should use plain LWW
+  instead of guards.
+
+The client combines un-pushed writes that share a guard into a single guarded
+mutation that succeeds or fails as a unit. In React bindings, `useRow` mutation
+methods accept `{ cas: true }` to bind the row's current version, but default to
+unguarded writes to prevent self-conflict.
 
 ## Rejections are results, not errors
 
-Each mutation in a push batch runs inside a **savepoint**: a business rejection
-rolls back everything that mutation wrote while the rest of the batch commits. A
-rejected mutation is still an **ack** — the client drops it and fires
-`onMutationRejected` — but it consumes no sequence number.
+Each mutation in a push batch executes inside a database savepoint. If a
+mutation fails business validation, the server rolls back that mutation while
+committing the remaining mutations in the batch. The server still acknowledges
+the rejected mutation (`ack`), causing the client to remove it from the queue
+and invoke `onMutationRejected`, but the mutation consumes no sequence number.
 
-A rejection survives a lost push response. The verdict is recorded against the
-client's watermark in the same transaction that bumps it, so the resend is
-answered `REJECTED` with the original code and message rather than a bare
-`ALREADY_APPLIED` that would drop the edit unexplained. On the client, a queue
-whose push went unanswered keeps its acked mutations through the next rebase
-instead of retiring them on the watermark alone — otherwise the resend that
-collects the verdict would never happen. The callback therefore fires one sync
-cycle later than it would have.
+Rejections persist through dropped push responses. The server records the
+verdict against the client watermark in the transaction that updates the
+watermark. If the client resends the push, the server returns `REJECTED` with
+the original error code and message instead of returning `ALREADY_APPLIED`.
 
-Two bounds are worth knowing, both reached only by a client that is no longer
-really trying: verdicts are dropped oldest-first past 64 KiB of code and message
-text per client, and they are pruned with the watermark row itself once
-idle-client GC collects it (`WithGC`), after which a resend re-applies through
-watermark adoption instead.
+On the client, a queue with an unacknowledged push retains its mutations across
+rebases rather than retiring them based on watermark progress alone. This ensures
+that the client resends the push to retrieve the rejected verdict before firing
+`onMutationRejected`, which occurs one synchronization cycle later.
+
+The server retains rejection verdicts within the following limits:
+
+- The server drops verdicts oldest-first when stored codes and messages exceed
+  64 KiB per client.
+- The server removes stored verdicts when idle-client GC (`WithGC`) deletes the
+  watermark record. Subsequent resends re-apply through watermark adoption.
 
 ## Atomic batches
 
-`client.transact(fn)` bundles the CRUD mutations issued inside `fn` into one
-batch: all-or-nothing on the server (one savepoint, one sequence, one
-ack-or-rejection), one queue entry, and one undo step.
+You can bundle multiple CRUD mutations into a single transaction using
+`client.transact(fn)`. The batch executes atomically on the server using one
+savepoint, one sequence number, and one acknowledgment or rejection. It forms a
+single entry in the client queue and a single undo step.
 
-Sub-mutations apply in order — a later one sees earlier ones — but the batch is
-invisible to reads until `fn` returns, and is discarded whole if `fn` throws.
-Custom mutators, the other route to multi-row invariants, cannot join a batch.
+Within `fn`, subsequent operations observe earlier writes. However, the batch
+remains invisible to reads until `fn` completes, and rolls back completely if
+`fn` throws an error. Custom mutators cannot run inside a `transact()` batch.
+
+The ledger read, the writes, and the key claim all commit in **one transaction**
+under the workspace's write exclusion, so a concurrent retry can never see
+"unclaimed" while the first call is mid-write, and no outcome is recorded that
+the store did not keep.
+
+That coupling also decides what happens on failure: an error or `Reject` rolls
+the key back with the writes, leaving the operation retryable — only committed
+outcomes replay.
 
 ## Idempotency
 
-Idempotency rides on per-client mutation-id **watermarks**, contiguity-checked
-per `(workspace, client_id)`. In-process writes that may be retried use a
-separate ledger keyed by a caller-supplied idempotency key, because an API
-caller's retry key can satisfy neither contiguity nor survive a client being
-pruned as idle.
+Syncplane achieves idempotency through per-client mutation ID watermarks,
+checked for contiguity per `(workspace, client_id)`. In-process writes that
+support retries use a separate ledger keyed by a caller-supplied idempotency key.
+Caller-supplied keys do not require contiguity and survive idle-client garbage
+collection.
 
-`client_id` is an unauthenticated idempotency handle the client asserts. It is
-**not an identity** — never derive authorization from it.
+The `client_id` parameter is an unauthenticated handle asserted by the client.
+It does not represent identity; do not use it for authorization decisions.
 
 ## Deletes and the horizon
 
-Row deletes leave **tombstones** so offline clients learn about them on the next
-pull. GC removes tombstones past a retention window and advances the workspace
-horizon; a client whose cursor predates the horizon transparently re-bootstraps.
+Deleting a row creates a **tombstone** so that offline clients receive the
+deletion on their next pull. Garbage collection removes tombstones after a
+retention window and advances the workspace horizon. If a client cursor
+predates the horizon, the client transparently performs a full re-bootstrap.
 
-Keep the retention comfortably above the longest client offline window. A client
-pruned as idle that later returns is re-admitted at whatever mutation id it
-pushes next.
+Configure the retention window to exceed your longest anticipated client
+offline duration. When an idle client returns after its state is pruned, the
+server re-admits the client at its next pushed mutation ID.
 
 ## A bootstrap survives a dropped connection
 
-A snapshot streams in chunks, and the client keeps what arrives — staged rows
-plus an opaque token saying how far the server got. A dropped connection is
-therefore not a lost download: the next attempt hands the token back and is
-served only the rest. This is durable rather than in-memory, so closing the tab
-mid-snapshot does not restart it either.
+Snapshot bootstrapping streams in chunks. The client stores staged rows and an
+opaque progress token durably in local storage. If the connection drops during
+download, the client resumes the snapshot by sending the token to receive only
+the remaining chunks. Closing the browser tab does not restart the bootstrap.
 
-The resumed stream keeps the cursor its first attempt was given, which is what
-makes a snapshot spread over several attempts equivalent to one. Rows are a
-mixture of workspace states either way — that is already true across the pages of
-a single attempt — and the pull that follows the snapshot runs from that first
-cursor, so everything written since is re-delivered no matter which attempt
-shipped a given row.
+The resumed snapshot stream retains the cursor assigned during its initial
+attempt, ensuring consistent state across chunk boundaries. Because rows can
+span multiple workspace states across pages, the pull that follows the snapshot
+starts from that initial cursor to re-deliver changes written since the snapshot
+began.
 
-The server decides whether a resume can be honoured. A changed subscription set,
-a cursor that has fallen behind the GC horizon, or a store that is not the one
-that issued the cursor all mean a fresh snapshot, and the client is told so on
-`Begin` — it then discards the partial snapshot instead of merging two.
+The server validates whether a snapshot can resume. The server requires a fresh
+bootstrap and informs the client on `Begin` under any of the following
+conditions:
+
+- The subscription set changes.
+- The cursor falls behind the garbage collection horizon.
+- The target store does not match the store that issued the cursor.
+
+When a fresh bootstrap is required, the client discards the partial snapshot.
 
 ## Workspaces are a hard partition
 
-`workspace_id` is a hard partition key everywhere, and the server sequences per
-workspace. A client can hold several workspaces at once — they share one store,
-one change stream and one push — but each keeps its own cursor, pending queue
-and mutation-id counter.
+The `workspace_id` is a hard partition key everywhere, and the server sequences
+per workspace. Each workspace keeps its own cursor, pending queue, and
+mutation-id counter. The server requires per-`(workspace, client_id)` gap-free
+IDs.
 
-A write, a `transact()` batch, an undo step, a reference and `queryServer` never
-cross a workspace. Reads may, on request.
+Sharing occurs at the transport and storage layers only: a single client can
+manage multiple workspaces simultaneously, sharing a local store, change
+stream, and push transport while maintaining independent cursors, pending
+queues, and mutation ID counters for each workspace.
 
-`workspace_id` is also **self-asserted** by the client. `CanAccessWorkspace` is
-what turns it into a boundary; the default policy admits everyone.
+Writes, `transact()` batches, undo operations, entity references, and
+`queryServer` calls cannot cross workspace boundaries. Reads can query across
+workspaces when explicitly requested.
+
+Clients self-assert `workspace_id`. The server enforces access boundaries
+through `CanAccessWorkspace`; the default authorization policy allows all
+access.
 
 ## Schema evolution is additive
 
-PUT replaces whole rows, so a stale writer — an old client binary, or server code
-deserializing into an outdated message type — silently drops fields it does not
-know about. Prefer PATCH with a field mask for partial updates, and treat entity
-schema evolution as additive.
+`PUT` operations replace entire rows. Stale writers—such as older client builds
+or server components deserializing into outdated message definitions—silently
+drop unknown fields when overwriting rows. To prevent data loss, use `PATCH`
+with field masks for partial updates, and design entity schema changes to be
+additive.
 
-The same shape has a second, everyday form: a client that reads a row, edits one
-field of it, and writes the whole thing back carries its own stale copy of every
-other field, undoing whatever landed in between. That is why the TS client's
-`patch` refuses a whole row as its init and offers `update(key, recipe)` instead
-— it masks only the fields the recipe changed. See
-[Writes](../reference/typescript-client.md#which-write-verb).
+A client that reads a row, modifies a single field, and writes back the entire
+row overwrites any concurrent changes to other fields. To prevent this, the
+TypeScript client's `patch` method rejects full row objects and provides
+`update(key, recipe)` instead, masking only the fields modified by the recipe
+function (see [Writes](../reference/typescript-client.md#which-write-verb)).
 
-Collaborative-text fields are the one exception to whole-row replacement: they
-union with the stored document on every PUT path.
+Collaborative-text fields are the exception to whole-row replacement: they union
+with the stored document on every `PUT` path.
 
 ### A client holds only the entities it declares
 
-The two sides keep separate registries, and they routinely disagree: a full-sync
-client is sent every entity the **server** has, which after a server deploy may
-include ones its own build never declared. Rows it has no schema for cannot be
-decoded, indexed or read, so it does not store them — and the server, for the
-mirror-image reason, never emits rows for an entity missing from **its** catalog,
-whichever sync path asks.
+Clients and servers maintain separate schema registries that can diverge. When
+a server deploys new schemas, a full-sync client receives all server entities,
+including entities omitted from its own build. The client cannot decode, index,
+or query undeclared schemas, so it drops those rows. Similarly, the server never
+returns rows for entities missing from its own catalog.
 
-Declaring an entity the store has not synced before therefore re-bootstraps the
-workspace. Its rows were all written below the cursor the client has already
-advanced past, so no pull can deliver them; a snapshot is the only way in. It is
-a one-time cost, paid the first time a build with the new entity starts.
+Registering a previously unsynced entity triggers a workspace re-bootstrap.
+Because existing rows were written before the client's current cursor, a normal
+pull cannot retrieve them; a snapshot bootstrap is required. This is a one-time
+cost paid when a build containing the new schema runs for the first time.
 
-Tabs of different builds share one store, so what a store syncs is the union of
-every registry that has opened it, not the registry of whichever tab started
-last. A tab that cannot read an entity still keeps its rows current for the tab
-that can. It names those entities on every pull, because a row it cannot decode
-is also one it cannot fold collaborative-text delta state into — see
-[Collaborative text](collaborative-text.md#downstream-pulls-ship-deltas).
+When multiple browser tabs run different builds, they share a single local
+store. The store syncs the union of all registered schemas across open tabs. A
+tab that lacks an entity schema still pulls rows to keep the store current for
+tabs that declare it. The tab includes those entity names in pull requests
+because decoding is required to apply collaborative-text deltas (see
+[Collaborative text](collaborative-text.md#downstream-pulls-ship-deltas)).
 
-The pending queue is shared the same way, and every rebase replays it against the
-registry of whichever tab is pulling — so a tab routinely replays a mutation written
-against a schema it does not have: an unknown entity, or a PATCH whose mask names
-a field only the newer build declares. It skips that entry, reports it over
-`console.error`, and leaves it queued for the push that retires it. What is lost
-is optimism, not the write: the tab that can apply it holds the optimistic state,
-and this one shows the confirmed row until the ack lands. Refusing to replay it
-would stall the workspace instead, because the transaction that rebuilds the
-overlay is the one advancing the cursor.
+Tabs also share the pending mutation queue. When a tab pulls changes, it rebases
+the queue against its local schema registry. If the queue contains mutations for
+unknown entities or fields declared only in newer builds, the tab skips
+optimistic application, logs an error to `console.error`, and retains the entry
+in the queue until push retirement. The confirmed row displays in that tab until
+the server acknowledges the write, while tabs with the updated schema display
+optimistic updates. Replaying unknown mutations is skipped rather than failing
+the rebase to prevent stalling cursor advancement in the shared workspace.
 
 ## Related
 
-- [Limits and trade-offs](limits-and-trade-offs.md) — the consequences, listed.
-- [Partial sync and coverage](partial-sync-and-coverage.md) — what happens when
-  a client holds only part of the workspace.
+- [Limits and trade-offs](limits-and-trade-offs.md): Consequences and system
+  constraints.
+- [Partial sync and coverage](partial-sync-and-coverage.md): Synchronization
+  behavior when a client syncs a subset of a workspace.

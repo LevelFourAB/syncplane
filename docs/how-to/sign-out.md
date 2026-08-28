@@ -1,12 +1,74 @@
-# Wipe local data on sign-out
+# Wiping local data on sign-out
 
-A client keeps the workspace on the device: rows, the optimistic overlay, the
-pending queue, cursors and the `clientId`, all in an IndexedDB database named
-after the account. `close()` leaves every byte of it there — which is what lets
-the next launch read the workspace instead of bootstrapping it, and what leaves
-the previous user's data readable on a shared browser.
+When a user signs out on a shared device or asks to be forgotten, you must wipe their local workspace data from IndexedDB. Calling `close()` leaves rows, the optimistic overlay, the pending queue, cursors, and the `clientId` on the device. Calling `purgeLocalData()` removes this data, empties the store, and closes the client.
 
-`purgeLocalData()` is the sign-out wipe.
+## Prerequisites
+
+Before wiping local data, ensure that you have:
+
+- An active `SyncClient` instance.
+- An authentication layer to clear stored credentials.
+
+## Steps
+
+1. Notify other open tabs:
+
+   If your application runs across multiple tabs, notify other tabs to close their clients before wiping the store. Tabs share one store. If another tab with a valid credential detects an empty store, it treats the store as a fresh install and bootstraps the data again.
+
+   ```ts
+   const auth = new BroadcastChannel('app:auth');
+   auth.onmessage = (e) => {
+   	if (e.data === 'signed-out') void client.close(); // then re-render as signed out
+   };
+
+   // in signOut(), before purgeLocalData():
+   auth.postMessage('signed-out');
+   ```
+
+   Calling `close()` in peer tabs is sufficient because one wipe empties the shared store.
+
+2. Push pending mutations to the server:
+
+   If you have queued changes that you want to preserve, push them before dropping credentials. The wipe does not send unsent changes to the server.
+
+   ```ts
+   await client.syncNow().catch(() => {});
+   ```
+
+3. Call `purgeLocalData()`:
+
+   Call `purgeLocalData()` to wipe the store and close the client. The client cannot be reopened after the wipe; create a new `SyncClient` for subsequent sign-ins.
+
+   ```ts
+   const unsent = await client.purgeLocalData();
+   if (unsent.length > 0) {
+   	console.warn(`${unsent.length} unsent change(s) were discarded`);
+   }
+   ```
+
+   The deletion runs in a single transaction. If the transaction rejects, the store remains unchanged and the client stays open but stops syncing. If the call fails, retry the call until it succeeds.
+
+   The method returns any mutations that were still queued when the store was deleted. Each discarded mutation also triggers `onMutationRejected` with the code `workspace_purged`.
+
+4. Clear credentials and application state:
+
+   Drop your authentication credentials and clear any remaining application state, tokens, or caches:
+
+   ```ts
+   dropCredential(); // your auth layer
+   ```
+
+5. Delete older storage prefix databases (if applicable):
+
+   If your application previously used different `storagePrefix` values, delete leftover databases manually:
+
+   ```ts
+   indexedDB.deleteDatabase(storageNames('old-prefix', accountId).store);
+   ```
+
+## Complete sign-out example
+
+The following example combines the sign-out steps into a single function:
 
 ```ts
 async function signOut(client: SyncClient) {
@@ -23,64 +85,9 @@ async function signOut(client: SyncClient) {
 }
 ```
 
-It stops sync, deletes everything the store holds, wakes the watchers so a
-mounted UI empties, and closes the client. The client cannot be reopened — build
-a new `SyncClient` for whoever signs in next.
+## Handling React lifecycles
 
-The delete is one transaction, so a rejection leaves the store as it was and the
-client open but no longer syncing. Retry the call; while it keeps failing the
-device still holds the account's data, which is the thing a shared-browser
-sign-out has to account for.
-
-## What it does and does not remove
-
-| What                                                          | Happens to it                                             |
-| ------------------------------------------------------------- | --------------------------------------------------------- |
-| Rows, overlay, bootstrap staging, cursors, queues, `clientId` | deleted                                                   |
-| The IndexedDB database itself                                 | kept, empty                                               |
-| Your own tokens, caches and app state                         | yours to clear                                            |
-| Anything on the server                                        | untouched: the wipe is local and tells the server nothing |
-
-The `clientId` goes with the rest, so the next client on the account mints a new
-one and starts with an empty queue and no watermarks of its own. The server's
-idempotency watermarks are keyed by that id, so the old ones are never consulted
-again.
-
-The wipe reaches the database the client is on. An app that has moved between
-`storagePrefix` values deletes what it left behind itself:
-`indexedDB.deleteDatabase(storageNames('old-prefix', accountId).store)`.
-
-## Unsent work
-
-Mutations still queued can never be acked once their queue is gone, so they come
-back from the call — read inside the transaction that deleted them, so the list
-is exactly what was lost. Each also reaches `onMutationRejected` with code
-`workspace_purged`, which is the channel to use if the app already has a
-dead-letter path. Push first (as above) if the work matters; the wipe itself
-never sends anything.
-
-## Sign every tab out
-
-Tabs share one store. A tab whose credential still works will see the rows
-disappear, treat the empty store as a fresh install, and bootstrap them straight
-back. Tell the other tabs before wiping:
-
-```ts
-const auth = new BroadcastChannel('app:auth');
-auth.onmessage = (e) => {
-	if (e.data === 'signed-out') void client.close(); // then re-render as signed out
-};
-
-// in signOut(), before purgeLocalData():
-auth.postMessage('signed-out');
-```
-
-`close()` in the peers is enough — one wipe empties the store they all share.
-
-## With React
-
-Let the app own the client rather than the provider, so the wipe outlives the
-tree:
+If you use React, let the application own the client rather than the provider so that the wipe outlives the component tree:
 
 ```tsx
 function App({ accountId, signedIn }: { accountId: string; signedIn: boolean }) {
@@ -91,13 +98,29 @@ function App({ accountId, signedIn }: { accountId: string; signedIn: boolean }) 
 }
 ```
 
-Render the signed-out view first so the provider unmounts, then
-`await client.purgeLocalData()`. A provider given `options` instead owns its
-client and closes it on unmount, which leaves the data behind.
+Render the signed-out view first so that the provider unmounts, then call `await client.purgeLocalData()`. A provider initialized with `options` owns its client and closes it on unmount without wiping local data.
 
-## Switching accounts
+## Switching accounts without wiping
 
-Give each account its own `accountId`: it then gets its own store and its own
-`SyncClient`. Signing in as someone else therefore needs no wipe on a personal
-device — the first account's data waits under its own database. Purge when the
-device is shared, or when a user asks to be forgotten.
+If you switch accounts on a personal device, assign each account its own `accountId`. Each account receives its own IndexedDB store and `SyncClient`. The first account's data remains isolated in its own database without needing a wipe. Only purge data when the device is shared or when a user requests data deletion.
+
+## Confirming the result
+
+To verify that the local data was wiped:
+
+1. Check that the UI empties when the watchers wake.
+2. Inspect the IndexedDB database in browser developer tools to verify that rows, overlay, bootstrap staging, cursors, queues, and `clientId` are deleted.
+3. Verify that the `SyncClient` instance is closed and cannot be reused.
+
+## Reference: data removed during purge
+
+The following table lists what `purgeLocalData()` removes:
+
+| Item                                                          | Result                                                      |
+| ------------------------------------------------------------- | ----------------------------------------------------------- |
+| Rows, overlay, bootstrap staging, cursors, queues, `clientId` | Deleted                                                     |
+| The IndexedDB database itself                                 | Kept, empty                                                 |
+| Tokens, caches, and application state                         | Kept; clear these in your application                       |
+| Data on the server                                            | Untouched; the wipe is local and does not notify the server |
+
+The `clientId` is deleted with the rest of the store. When the account next creates a client, it mints a new `clientId` with an empty queue and no watermarks. The server keys idempotency watermarks by `clientId`, so it does not consult old watermarks again.

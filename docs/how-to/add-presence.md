@@ -1,64 +1,49 @@
-# Add presence to an app
+# Adding presence to an app
 
-Rooms carry the state that only matters while somebody is connected: cursors,
-selections, "who is here", typing indicators. None of it is stored or replayed
-— see [rooms](../explanation/rooms.md) for the model and the dividing test.
+This guide shows you how to track and display ephemeral presence state—such as
+user rosters, active selections, and cursors—across connected clients in your
+application. Use presence when you need real-time awareness that only matters
+while clients are connected and does not need to be stored or replayed. For more
+details on the room model, see [Rooms](../explanation/rooms.md).
 
-Nothing to configure on the server: the presence service is mounted by
-`HTTPHandler()` and `Handlers()` alongside the sync service, and a single-node
-deployment needs no bus.
+## Prerequisites
 
-## Who's here
+Before adding presence to your application, make sure you have:
+
+- A running Syncplane server. The presence service is mounted by
+  `HTTPHandler()` and `Handlers()` alongside the sync service, with no extra
+  server configuration or bus required for single-node deployments.
+- An established client WebSocket connection (`ws`).
+- An authenticator configured with
+  [`WithAuthenticator`](authentication-and-permissions.md) if you want to
+  display verified user identities from `Peer.subject`.
+
+## Adding presence
+
+Follow these steps to configure and use rooms for presence in your client
+application.
+
+### 1. Join a room
+
+To join a room by name, call `ws.room()` with the state type:
 
 ```ts
 const room = ws.room<{ name: string; color: string }>('lobby');
-
-room.setPresence({ name: 'Ada', color: '#c0f' });
-
-room.subscribe((peers) => {
-	render(peers.map((p) => ({ ...p.state, self: p.self })));
-});
 ```
 
-`peers()` is the roster including your own record, ordered by session id. The
-array is frozen and keeps its reference until something actually changes, so it
-is safe to hand to `useSyncExternalStore`.
-
-Close the room when the view goes away — that withdraws your record at once
-rather than leaving it to expire:
-
-```ts
-await room.close();
-```
-
-In React the hook does both for you:
-
-```tsx
-function Presence() {
-	const peers = usePresence<{ name: string; color: string }>('lobby');
-	return <AvatarStrip people={ peers.filter((p) => !p.self) } />;
-}
-```
-
-## Anchor a room to a row
-
-Passing a schema and key makes membership inherit that row's read permission —
-a caller who could not read the document cannot be in its cursor room, and you
-write no policy for it:
+If you want membership to inherit read permissions from a data row, pass the
+schema and row key:
 
 ```ts
 const room = ws.room(DocumentSchema, docId, 'cursors');
 ```
 
 If the row is hidden by your `ReadFilter`, deleted, or was never created, the
-room is dropped with `room_dropped` and `Room.status()` reports `dropped`. That
-is terminal — reopening meets the same answer.
+room is dropped with `room_dropped` and `Room.status()` reports `dropped`. This
+status is terminal, and reopening returns the same result.
 
-## Live cursors in collaborative text
-
-Publish [text anchors](../explanation/collaborative-text.md), not integer
-offsets. An offset means something different the moment anyone types above it;
-an anchor stays attached to the character it was placed at.
+If you send raw bytes rather than JSON (for example, with text anchors), provide
+custom codec functions in the room options:
 
 ```ts
 import { decodeAnchor, encodeAnchor } from 'syncplane';
@@ -73,16 +58,57 @@ const room = ws.room<Uint8Array>(DocumentSchema, docId, 'cursors', {
 		decodeMessage: (b) => b,
 	},
 });
+```
 
+### 2. Publish your presence state
+
+To announce your state to other peers in the room, call `setPresence()`:
+
+```ts
+room.setPresence({ name: 'Ada', color: '#c0f' });
+```
+
+Calls to `setPresence` are throttled (60 ms by default, configured by
+`throttleMs`). You can call it on every mouse movement; intermediate positions
+are dropped and the latest position is sent.
+
+If you publish collaborative text cursors, publish
+[text anchors](../explanation/collaborative-text.md) instead of integer
+offsets:
+
+```ts
 editor.onSelectionChange((index) => {
 	room.setPresence(encodeAnchor(text.anchorAt(index)), { seq: lastSyncedSeq });
 });
 ```
 
-Reading a peer's cursor back needs a `try`/`catch`. Rooms are not synchronized
-with the data stream, so a peer may be pointing at a character your copy has not
-pulled yet — and an anchor can outlive a compaction that removed the item it
-named:
+If you need to indicate that an asynchronous operation is in progress (such as
+AI generation), publish status updates using presence:
+
+```ts
+stream.setPresence({ status: 'thinking' });
+// …
+stream.setPresence({ status: 'idle' });
+```
+
+### 3. Subscribe to peer updates
+
+To receive updates whenever peers join, leave, or change state, call
+`subscribe()`:
+
+```ts
+room.subscribe((peers) => {
+	render(peers.map((p) => ({ ...p.state, self: p.self })));
+});
+```
+
+The `peers` array contains all active peer records including your own, ordered
+by session ID. The array is frozen and keeps its reference until data changes,
+making it safe to pass to `useSyncExternalStore`. `Peer.subject` is stamped by
+the server from the request principal and cannot be forged by the client.
+
+If you resolve collaborative text anchors, wrap resolution in a `try`/`catch`
+block to handle anchors that point to pending or compacted text:
 
 ```ts
 room.subscribe((peers) => {
@@ -98,13 +124,20 @@ room.subscribe((peers) => {
 });
 ```
 
-`setPresence` is throttled (60ms by default, `throttleMs`), so calling it per
-mouse-move is the intended usage: intermediate positions are dropped and the
-last one always goes out.
+If you use React, you can use the `usePresence` hook to manage subscription
+and state:
 
-## Ephemeral messages
+```tsx
+function Presence() {
+	const peers = usePresence<{ name: string; color: string }>('lobby');
+	return <AvatarStrip people={ peers.filter((p) => !p.self) } />;
+}
+```
 
-`send` broadcasts to whoever is watching at that moment:
+### 4. Broadcast ephemeral messages (optional)
+
+To send transient messages to whoever is currently connected, call `send()` and
+listen with `onMessage()`:
 
 ```ts
 room.onMessage((m) => {
@@ -113,15 +146,13 @@ room.onMessage((m) => {
 await room.send({ kind: 'wave' });
 ```
 
-**At most once.** If nobody is watching, or the connection is between
-reconnects, the message is gone — `send` resolves when the server accepted it,
-not when anyone received it. It rejects when the client could not reach the
-server, so a failure you care about is visible rather than swallowed.
+Messages are delivered at most once. The `send()` call resolves when the server
+accepts the message, not when peers receive it. If the client cannot reach the
+server, `send()` rejects.
 
-## Agent chat: durable messages plus a live overlay
-
-The pattern for anything that must not be lost but should still feel live:
-**write the row, broadcast the hint.**
+If you implement features like agent chat where transcript data must persist
+while intermediate tokens are transient, write the durable data to a row and
+broadcast the transient hints:
 
 ```ts
 // The transcript is data. It survives a reload and a new reader gets it.
@@ -132,31 +163,33 @@ const stream = ws.room<string>(ThreadSchema, threadId, 'tokens');
 for await (const token of completion) await stream.send(token);
 ```
 
-A reader who joins mid-generation sees no tokens and the finished message when
-it lands, which is correct: they missed the typing, not the answer.
+### 5. Close the room
 
-Use presence rather than broadcast for the fact that generation is _happening_ —
-`{ status: 'thinking' }` is state, and a reader arriving mid-run should see it:
+When the view or component is unmounted, close the room to withdraw your record
+immediately:
 
 ```ts
-stream.setPresence({ status: 'thinking' });
-// …
-stream.setPresence({ status: 'idle' });
+await room.close();
 ```
 
-## Identity
+If you use the React `usePresence` hook, the hook closes the room
+automatically on unmount.
 
-`Peer.subject` is stamped by the server from the request principal, so it is
-safe to render as an identity. Nothing in the payload names the publisher —
-presence cannot be used to impersonate.
+## Confirming the result
 
-It is empty when the caller is unauthenticated. Install a
-[`WithAuthenticator`](authentication-and-permissions.md) if you want names.
+To confirm that presence is functioning:
 
-## Hiding participants from each other
+1. Open your application in two separate browser windows or tabs.
+2. Verify that each window displays the other user in the peer roster.
+3. Trigger a state change in one window (such as updating presence or moving a
+   cursor) and verify that the other window receives and renders the update.
+4. Close one window and verify that the corresponding peer is removed from the
+   active roster.
 
-Being able to read a row is not the same as being allowed to know who else is
-looking at it. Implement `RoomPermissions` when they differ:
+## Filtering participant visibility
+
+If you need to control which participants can see each other in a room,
+implement `RoomPermissions` on the server:
 
 ```go
 type policy struct {
@@ -174,22 +207,29 @@ func (policy) VisibleParticipants(
 }
 ```
 
-Both hooks run at join and `CanJoinRoom` again on the stream's heartbeat, so a
-revocation takes effect within one heartbeat interval.
+Both hooks run when a client joins, and `CanJoinRoom` runs again on the
+stream heartbeat. Access revocations take effect within one heartbeat interval.
 
-## What to expect when things go wrong
+## Error behavior
+
+The following table describes how the client and server handle failure
+scenarios:
 
 | Situation                                       | What happens                                                                  |
 | ----------------------------------------------- | ----------------------------------------------------------------------------- |
 | Offline when `setPresence` is called            | Remembered and re-sent; the record is re-published when the stream reopens    |
 | Offline when `send` is called                   | Rejects. A broadcast is not queued — one that arrives late is worse than none |
 | Access revoked while the room is open           | `room_dropped` within one heartbeat; terminal                                 |
-| A peer's tab is killed                          | It disappears within three announce intervals (~15s by default)               |
+| A peer's tab is killed                          | Disappears within three announce intervals (~15 seconds by default)           |
 | A peer publishes state your build cannot decode | That peer's `state` is `undefined`; the room carries on                       |
 
-## Sizing
+## Sizing limits
 
-The defaults suit cursors and short status objects, not documents:
-`MaxPresenceStateBytes` and `MaxBroadcastBytes` are 4 KiB,
-`MaxParticipantsPerRoom` is 128, and `MaxRoomsPerStream` is 64. See the
-[`Limits` table](../reference/server.md#limits).
+The default limits suit cursors and short status objects:
+
+- `MaxPresenceStateBytes`: 4 KiB
+- `MaxBroadcastBytes`: 4 KiB
+- `MaxParticipantsPerRoom`: 128
+- `MaxRoomsPerStream`: 64
+
+For more information, see the [Limits table](../reference/server.md#limits).

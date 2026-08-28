@@ -1,157 +1,140 @@
-# Test your app without a server
+# Testing your app without a server
 
-`syncplane/testing` runs your app's sync logic inside an ordinary test — any
-runner (vitest, jest, `node:test`, bun) in a Node or browser environment: a
-real `SyncClient` on an in-memory store, wired to an in-process fake server
-that applies mutations with the engine's semantics. The behaviors that are
-hard to observe in production — optimistic apply, rebase, rejection rollback,
-offline queueing, re-bootstrap — become one-line arrangements.
+This guide shows you how to test your application's sync logic without running a remote server. Use `syncplane/testing` to run a real `SyncClient` on an in-memory store connected to an in-process test server.
 
-```ts
-import { createTestClient } from 'syncplane/testing';
-import { TodoSchema } from './gen/todo_pb.js';
+## Prerequisites
 
-const t = await createTestClient({ entities: [ TodoSchema ] });
-```
+Before you begin, ensure you have:
 
-`t.client` is a real `SyncClient`; `t.db` is its `db` facade. Every
-`SyncClientOptions` field can be passed through (`mutators`, `mergers`,
-`subscriptions`, callbacks, …).
+- A test runner such as Vitest, Jest, `node:test`, or Bun in a Node.js or browser environment.
+- Generated schema definitions for your entities (for example, `TodoSchema`).
 
-## The determinism model
+1. Initialize a test client:
 
-Nothing moves unless the test says so. The kit disables polling, the subscribe
-stream and presence, and defers the push debounce indefinitely — so writes
-apply optimistically and queue, and the wire is touched only when you run a
-cycle:
+   Import `createTestClient` from `syncplane/testing` and pass your entity schemas:
 
-```ts
-await t.db.todo.mutate.put({ id: 't1', title: 'Buy milk' });
-expect(t.server.get(TodoSchema, 't1')).toBeUndefined(); // still queued
-await t.sync(); // one push+pull cycle
-expect(t.server.get(TodoSchema, 't1')).toBeDefined();
-```
+   ```ts
+   import { createTestClient } from 'syncplane/testing';
+   import { TodoSchema } from './gen/todo_pb.js';
 
-There are no timers to await and no sleeps to tune; assertions before and
-after `sync()` see exactly the pre- and post-cycle state.
+   const t = await createTestClient({ entities: [ TodoSchema ] });
+   ```
 
-## Reject a write and assert the rollback
+   `t.client` is a `SyncClient` instance, and `t.db` is its database facade. You can pass any `SyncClientOptions` fields into `createTestClient`, including `mutators`, `mergers`, `subscriptions`, and callbacks.
 
-`server.reject` installs the rule an app's permission hook or mutator would
-enforce. A rejection is an ack: the client drops the mutation, rolls the
-optimistic edit back and fires `onMutationRejected` — the kit collects those
-in `t.rejections`.
+2. Trigger sync cycles manually:
 
-```ts
-await t.net.offline();
-await t.db.todo.mutate.put({ id: 't1', title: 'Not allowed' });
+   Apply local mutations and call `t.sync()` to run a push and pull cycle. The testing kit disables polling, presence, and the subscribe stream, and defers push debouncing indefinitely:
 
-t.server.reject({ entity: TodoSchema, key: 't1' }, 'permission_denied');
-await t.net.online(); // reconnects and runs a full cycle
+   ```ts
+   await t.db.todo.mutate.put({ id: 't1', title: 'Buy milk' });
+   expect(t.server.get(TodoSchema, 't1')).toBeUndefined(); // still queued
+   await t.sync(); // one push+pull cycle
+   expect(t.server.get(TodoSchema, 't1')).toBeDefined();
+   ```
 
-expect(t.rejections[0]?.errorCode).toBe('permission_denied');
-expect(await t.db.todo.get('t1')).toBeUndefined(); // what the user sees
-```
+   Assertions before and after `t.sync()` inspect the pre-cycle and post-cycle states directly without timers or sleeps.
 
-Rules take a field match (`entity`, `key`, `op`, `mutator`, `clientId`,
-`once`) or a predicate over the raw `Mutation`; the returned function removes
-the rule.
+3. Reject a write and assert the rollback:
 
-While offline, every RPC fails as `unavailable` and writes keep queueing —
-`status()` and rejection behavior are exactly the production offline path.
+   Use `t.server.reject` to install rejection rules for permission hooks or mutators. When rejected, the client drops the mutation, rolls back the optimistic edit, and triggers `onMutationRejected`:
 
-## Converge two clients
+   ```ts
+   await t.net.offline();
+   await t.db.todo.mutate.put({ id: 't1', title: 'Not allowed' });
 
-Share one server between clients to test what your app shows while replicas
-catch up, and that it converges by per-field last-writer-wins:
+   t.server.reject({ entity: TodoSchema, key: 't1' }, 'permission_denied');
+   await t.net.online(); // reconnects and runs a full cycle
 
-```ts
-import { createTestServer } from 'syncplane/testing';
+   expect(t.rejections[0]?.errorCode).toBe('permission_denied');
+   expect(await t.db.todo.get('t1')).toBeUndefined(); // what the user sees
+   ```
 
-const server = createTestServer({ entities: [ TodoSchema ] });
-const a = await createTestClient({ server });
-const b = await createTestClient({ server });
+   Rules accept field matches (`entity`, `key`, `op`, `mutator`, `clientId`, `once`) or a predicate over the raw `Mutation`. The returned function removes the rule. While offline, every remote procedure call (RPC) fails as `unavailable` and writes continue queueing.
 
-await a.db.todo.mutate.put({ id: 't1', title: 'Original' });
-await a.sync();
-await b.sync();
+4. Test convergence across multiple clients:
 
-await a.db.todo.mutate.patch('t1', { title: 'Renamed' });
-await b.db.todo.mutate.patch('t1', { completed: true });
-await a.sync();
-await b.sync();
-await a.sync();
-// both now hold { title: 'Renamed', completed: true }
-```
+   Share one server instance between clients to verify that replicas converge using per-field last-writer-wins:
 
-## Seed and inspect server state
+   ```ts
+   import { createTestServer } from 'syncplane/testing';
 
-`server.put`/`server.del` write rows directly — seeding a workspace, or
-playing the part of another client or a server-side effect. `server.get` and
-`server.rows` read committed server state for assertions. Each write consumes
-a sequence number, so synced clients receive it as an ordinary remote change
-on their next cycle.
+   const server = createTestServer({ entities: [ TodoSchema ] });
+   const a = await createTestClient({ server });
+   const b = await createTestClient({ server });
 
-```ts
-server.put(TodoSchema, { id: 'seeded', title: 'Already there' });
-const t = await createTestClient({ server });
-await t.sync();
-```
+   await a.db.todo.mutate.put({ id: 't1', title: 'Original' });
+   await a.sync();
+   await b.sync();
 
-Rows live in workspace `'main'` unless the call names another
-(`{ workspace: 'other' }`).
+   await a.db.todo.mutate.patch('t1', { title: 'Renamed' });
+   await b.db.todo.mutate.patch('t1', { completed: true });
+   await a.sync();
+   await b.sync();
+   await a.sync();
+   // both now hold { title: 'Renamed', completed: true }
+   ```
 
-## Force a re-bootstrap
+5. Seed and inspect server state:
 
-`server.gc()` collects tombstones and advances the GC horizon to the current
-sequence. A client that last synced before the call answers its next pull
-with `reset` and transparently re-bootstraps — the path that otherwise only
-shows up after a long-offline device comes back:
+   Use `server.put` and `server.del` to write rows directly to the server, and use `server.get` and `server.rows` to inspect committed server state:
 
-```ts
-server.del(TodoSchema, 'stale');
-server.gc();
-await t.sync(); // re-bootstraps; 'stale' is gone locally, nothing thrown
-```
+   ```ts
+   server.put(TodoSchema, { id: 'seeded', title: 'Already there' });
+   const t = await createTestClient({ server });
+   await t.sync();
+   ```
 
-## Hold pushes in flight
+   Each write consumes a sequence number, so synced clients receive it as a remote change on their next sync cycle. Rows reside in workspace `'main'` unless you specify another workspace with `{ workspace: 'other' }`.
 
-`server.holdPushes()` parks pushes at the server door — the state your UI is
-in while a save is on the wire:
+6. Force a client re-bootstrap:
 
-```ts
-const hold = t.server.holdPushes();
-const cycle = t.sync(); // don't await yet
-// … assert spinners, status(), optimistic reads …
-hold.release();
-await cycle;
-```
+   Call `server.gc()` to collect tombstones and advance the garbage collection (GC) horizon to the current sequence:
 
-`t.server.pushes` records every `PushRequest` as it arrives, held or not.
+   ```ts
+   server.del(TodoSchema, 'stale');
+   server.gc();
+   await t.sync(); // re-bootstraps; 'stale' is gone locally, nothing thrown
+   ```
 
-## Custom mutators
+   A client that last synced before the call receives a `reset` on its next pull and transparently re-bootstraps.
 
-Register the server half next to the client mirror and test both sides of the
-contract — including that a divergence self-heals on rebase:
+7. Hold pushes in flight:
 
-```ts
-server.mutator('todo.clearCompleted', {
-	apply(tx) {
-		for (const row of tx.scan(TodoSchema)) {
-			if (row.completed) tx.del(TodoSchema, row.id);
-		}
-	},
-});
-await t.client.mutate.custom('todo.clearCompleted');
-await t.sync();
-```
+   Call `server.holdPushes()` to pause pushes at the server and test intermediate user interface states:
 
-Throw `Rejection` from a mutator to reject the mutation; writes it staged are
-discarded, like the engine's savepoint.
+   ```ts
+   const hold = t.server.holdPushes();
+   const cycle = t.sync(); // don't await yet
+   // … assert spinners, status(), optimistic reads …
+   hold.release();
+   await cycle;
+   ```
 
-## What the kit does not simulate
+   `t.server.pushes` records each `PushRequest` as it arrives, whether held or released.
 
-Partial-sync predicates, windows and follows (every row syncs), server
-queries (`queryServer` and friends fail), presence rooms, and multi-tab
-behavior (Node has no shared lock manager). Cover those against the real
-engine — see [Testing](testing.md) for the integration and e2e tiers.
+8. Test custom mutators:
+
+   Register the server implementation of a custom mutator to verify client and server behavior and ensure divergence resolves on rebase:
+
+   ```ts
+   server.mutator('todo.clearCompleted', {
+   	apply(tx) {
+   		for (const row of tx.scan(TodoSchema)) {
+   			if (row.completed) tx.del(TodoSchema, row.id);
+   		}
+   	},
+   });
+   await t.client.mutate.custom('todo.clearCompleted');
+   await t.sync();
+   ```
+
+   Throw `Rejection` from a mutator to reject the mutation and discard staged writes.
+
+## Confirming the results
+
+Run your test runner to execute the test suite. Verify that all sync cycles complete and all assertions pass without unhandled rejections or timeouts.
+
+## Related
+
+- [Test kit](../reference/typescript-client.md#test-kit)

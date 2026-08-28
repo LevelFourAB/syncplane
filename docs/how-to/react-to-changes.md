@@ -1,226 +1,247 @@
-# React to changes (server-side effects)
+# Reacting to changes
 
-The `effects` runtime runs server-side reactions to committed writes — webhooks,
-notifications, search indexing, agents. It sits on the
-[change feed](change-feed.md) and adds the bookkeeping that is easy to get
-subtly wrong: a durable position in the engine's own store, scheduling that
-wakes a workspace when it is written, backoff and health for a handler that
-keeps failing, and before-state for handlers that react to a transition.
+The `effects` runtime runs server-side reactions to committed writes, such as webhooks, notifications, search indexing, and background agents. It tracks durable positions in the engine store, schedules passes when workspaces receive writes, retries failing handlers with backoff, and tracks previous field states for transition handlers.
+
+This guide shows you how to configure the effects runtime, register handlers and raw sinks, handle transitions, deletions, and write-backs, test reactions, and shut down cleanly.
+
+## Prerequisites
+
+Before you begin, ensure that you have:
+
+- A configured server instance (`srv`).
+- Data models defined for your entities (for example, `*issuev1.Issue`).
+- Familiarity with [server-side writes](server-side-writes.md) and the [change feed](change-feed.md).
+
+## Running effects
+
+Follow these steps to configure the runtime, register event handlers, and run reactions.
+
+### 1. Configure and initialize the runtime
+
+Initialize the runtime with `effects.New`, passing your server instance and optional tuning parameters:
 
 ```go
-rt, err := effects.New(effects.Config{Server: srv})
-if err != nil { ... }
-
-err = effects.On(rt, "slack-status",
-    func(ctx context.Context, ev effects.Event[*issuev1.Issue]) error {
-        if ev.Deleted || ev.FirstSeen || !ev.DidChange("status") {
-            return nil
+cfg := effects.Config{
+    Server:    srv,
+    Workers:   16,
+    Interval:  15 * time.Second,
+    BatchSize: 256,
+    RetryMin:  5 * time.Second,
+    RetryMax:  5 * time.Minute,
+    OnHealth: func(h effects.Health) {
+        if h.LastError != nil {
+            slog.Warn("consumer wedged",
+                "consumer", h.Consumer,
+                "workspace", h.WorkspaceID,
+                "failures", h.ConsecutiveFailures,
+                "lag", h.Lag(),
+                "err", h.LastError,
+            )
         }
-        if ev.After.GetStatus() != issuev1.Status_DONE {
-            return nil
-        }
-        return postToSlack(ctx, ev.After)
     },
-    effects.Watch("status"),
-)
+}
 
-if err := rt.Start(ctx); err != nil { ... }
-defer rt.Close()
+rt, err := effects.New(cfg)
+if err != nil {
+    return err
+}
 ```
 
-Register every consumer before `Start`; `Close` stops the workers.
+Tune the following configuration fields for your deployment:
 
-## What a handler is promised
+- `Workers` (default `16`): The maximum number of concurrent drain passes across all consumers and workspaces. Increase this value for slow, I/O-bound sinks such as external webhooks. Decrease this value to reduce read load on the database.
+- `Interval` (default `15s`): How often the runtime sweeps for pending work not caught by notifier signals. Start always sweeps once. Set to a negative duration to disable periodic sweeps and rely entirely on notifier activity and manual triggers.
+- `BatchSize` (default `256`): Maximum rows read per change-feed page. This bounds how many changes one crash can redeliver.
+- `RetryMin` (default `5s`) and `RetryMax` (default `5m`): The minimum and maximum exponential backoff delays for a failing pass. Set `RetryMin` to a negative duration to disable backoff.
+- `OnHealth`: A callback invoked after every pass with the status of that `(consumer, workspace)` pair.
 
-- **Post-commit.** Handlers run on a background goroutine, never inside the
-  write transaction they react to. A handler is free to write back through
-  [`Mutate`](server-side-writes.md) — it is not running inside anything.
-- **At-least-once.** A crash between a handler acting and its position
-  committing redelivers the change. Handlers must be idempotent; one that writes
-  back should use
-  [`MutateIdempotent`](server-side-writes.md#writes-that-may-be-retried) keyed on
-  `(workspace, entity, key, seq)`, which identifies a delivery exactly.
-- **Ordered per workspace**, matching the feed. One consumer's handler runs
-  serially for a workspace; different workspaces and different consumers proceed
-  independently.
+For design details on worker pools and scheduling, see [Effects and the change feed](../explanation/effects-and-the-change-feed.md). For full configuration fields, see the [Effects runtime reference](../reference/effects.md).
 
-## Reacting to a transition
+### 2. Register typed event handlers
 
-The feed reports state, not transitions (see
-[the change feed](change-feed.md#semantics)), so "when status _becomes_ Done" is
-not answerable from a change alone. `Watch` declares the fields a handler needs
-before-state for, and the runtime keeps a shadow of exactly those fields:
-
-| Field                         | Meaning                                                                              |
-| ----------------------------- | ------------------------------------------------------------------------------------ |
-| `ev.After`                    | The row's new state, always complete. Zero when `ev.Deleted`.                        |
-| `ev.Before`                   | The **watched fields only**, as they stood when this consumer last acted on the row. |
-| `ev.Changed` / `ev.DidChange` | Which watched fields differ between the two.                                         |
-| `ev.FirstSeen`                | This consumer held no shadow, so nothing was known to compare against.               |
-
-`FirstSeen` is the case worth deciding about explicitly. It covers a row created
-just now, a row that existed before the consumer was registered, and the first
-sighting after a horizon reset — the shadow is the consumer's memory, not the
-row's history, so the three are indistinguishable. Skip them to react only to
-observed transitions, or treat them as changes to also react to what is already
-there. `DidChange` is false for all of them.
-
-Declaring nothing keeps no shadows and costs nothing, which is why after-state is
-the default. Each watched consumer stores one row per row it has seen.
-
-## When a handler fails
-
-A handler returning an error **wedges its consumer on that workspace**: the
-position does not advance, the change is retried with backoff
-(`RetryMin`/`RetryMax`), and everything behind it waits. Returning `nil` is how a
-handler declines a change it does not care about.
-
-This is deliberate. The alternative — skipping the change — loses it with no
-record and no repair path, because there is no reconcile pass that can un-send an
-email. The wedge is bounded to one consumer: each has its own position, so a bad
-destination stops only itself.
-
-Nothing else will tell you it happened, so watch `Health`:
+Register your handlers using `effects.On` before starting the runtime. Provide a durable consumer name, the handler function, and optional field watchers:
 
 ```go
-cfg.OnHealth = func(h effects.Health) {
-    if h.LastError != nil {
-        log.Warn("effect stuck", "consumer", h.Consumer, "workspace", h.WorkspaceID,
-            "failures", h.ConsecutiveFailures, "lag", h.Lag(), "err", h.LastError)
+err = effects.On(rt, "issue-notifications", func(ctx context.Context, ev effects.Event[*issuev1.Issue]) error {
+    // Handle row deletion
+    if ev.Deleted {
+        return unindexIssue(ctx, ev.Workspace, ev.Key)
     }
+
+    // Handle first sightings
+    if ev.FirstSeen {
+        if ev.After.GetStatus() == issuev1.Status_DONE {
+            return notifyClosed(ctx, ev.After)
+        }
+        return nil
+    }
+
+    // Handle observed field transitions
+    if ev.DidChange("status") && ev.After.GetStatus() == issuev1.Status_DONE {
+        return notifyClosed(ctx, ev.After)
+    }
+
+    return nil
+}, effects.Watch("status"))
+if err != nil {
+    return err
 }
 ```
 
-`Health.Lag()` is how many sequences behind the workspace head the consumer is.
-It stays put while a consumer is wedged and grows as writes pile up behind it. A
-handler failing forever and a handler with nothing to do both look like silence
-from the outside; the lag is what tells them apart.
+When writing handlers, account for the following conditions:
 
-`Health` and `HealthAll` report what the runtime is currently tracking, plus the
-most recently finished pairs (`Config.HealthRetention`, default 1024). A failing
-pair is always among them, for as long as it keeps failing. A pair that drained
-and went quiet eventually is not — so read `Health` to find what is wedged or
-behind, not to enumerate what is healthy.
+- **Consumer names**: The name identifies the durable position stored in the database. Keep consumer names stable across restarts. Renaming a consumer resets its position.
+- **Deletions (`ev.Deleted`)**: When a row is deleted, `ev.Deleted` is `true` and `ev.After` is zero. Always check `ev.Deleted` before dereferencing `ev.After`. If `Watch` was configured, `ev.Before` holds the watched fields as they stood when this consumer last acted on the row, which is the last state it can still see.
+- **First sightings (`ev.FirstSeen`)**: `ev.FirstSeen` is `true` when the consumer holds no shadow state for the row. This occurs when a row is newly created, when a row existed before consumer registration, or after a tombstone horizon reset. `ev.Changed` is empty and `ev.DidChange` returns `false`. Skip `ev.FirstSeen` events if you only want to react to observed transitions, or check `ev.After` to process existing rows.
+- **Watched transitions**: `effects.Watch("field")` stores a shadow copy of only the declared fields. `ev.DidChange("field")` reports whether that field changed since the consumer last processed the row.
+- **Errors and skipping**: Return `nil` to acknowledge and skip changes you do not care about. Return an error to pause the consumer on that workspace and retry with backoff.
 
-If you want bounded retry, dead-lettering, replay or fan-out to many
-destinations, do not build it into a handler. Put a broker behind a `Sink` (see
-below) and let it own that policy.
+### 3. Write back idempotently from a handler
 
-## The sink seam
+Handlers execute post-commit on a background goroutine outside the write transaction, so you can safely write back through the server API.
 
-`On` registers an in-process handler. Underneath, a consumer is a durable name, a
-set of entities and a `Sink`:
+Because the runtime delivers changes with at-least-once semantics, use `server.MutateIdempotent` keyed on the delivery identity (`Workspace`, `Entity`, `Key`, and `Seq`) to prevent duplicate writes on redelivery:
 
 ```go
-type Sink interface {
-    Deliver(ctx context.Context, ch effects.Change) error
+err = effects.On(rt, "issue-indexer", func(ctx context.Context, ev effects.Event[*issuev1.Issue]) error {
+    if ev.Deleted {
+        return nil
+    }
+
+    key := fmt.Sprintf("indexer:%s:%s:%s:%d", ev.Workspace, ev.Entity, ev.Key, ev.Seq)
+    _, err := srv.MutateIdempotent(ctx, ev.Workspace, key,
+        func(tx *server.EntityTx) ([]byte, error) {
+            return nil, tx.Put(&issuev1.IssueSummary{
+                Id:    ev.Key,
+                Title: ev.After.GetTitle(),
+            })
+        })
+    return err
+})
+```
+
+The closure returns the bytes that a replay of the key answers with. Return
+`nil` to record only that the write applied. The key is claimed even when the
+closure writes nothing, and it expires on `WithIdempotencyRetention` (default 24
+hours), so keep that retention above your longest retry window.
+
+For more details on server mutations, see [Writing from server-side code](server-side-writes.md).
+
+### 4. Register a raw sink for external destinations
+
+To stream changes across multiple entities or forward raw events to an external system (such as a message broker), register an `effects.Sink` directly using `rt.Register`:
+
+```go
+type brokerSink struct{}
+
+func (b *brokerSink) Deliver(ctx context.Context, ch effects.Change) error {
+    return publishToBroker(ctx, ch.Workspace, ch.Entity, ch.Key, ch.Seq, ch.Deleted)
+}
+
+// Subscribe to every entity in the workspace:
+err = rt.Register("broker-export", &brokerSink{})
+
+// Or limit delivery to specific entity types:
+err = rt.Register("audit-export", &brokerSink{}, &issuev1.Issue{}, &issuev1.Comment{})
+```
+
+Register all sinks before starting the runtime. Registering a sink after calling `Start` returns an error.
+
+### 5. Start the background runtime
+
+Start the worker routines and background loops:
+
+```go
+if err := rt.Start(ctx); err != nil {
+    return err
 }
 ```
 
-`Runtime.Register` wires a sink directly, for consumers that are not one typed
-handler — publishing every change to a broker, for instance, where retry
-schedules and dead-lettering become the broker's job:
+`Start` subscribes to the engine activity stream, performs an initial sweep across existing workspaces, and launches the worker pool.
+
+### 6. Trigger passes by hand and test with synchronous drains
+
+To trigger passes outside the automatic schedule:
+
+1. **Trigger an immediate background pass with `Kick`**:
+   Call `rt.Kick(workspaceID)` when you know a workspace changed and want the runtime to process it immediately rather than waiting for the next sweep:
+
+   ```go
+   rt.Kick(workspaceID)
+   ```
+
+2. **Drain a consumer synchronously with `Drain`**:
+   In integration tests or batch jobs, call `rt.Drain` to process pending changes synchronously on the calling goroutine:
+
+   ```go
+   err := rt.Drain(ctx, "issue-notifications", workspaceID)
+   if err != nil {
+       // Handle drain error or effects.ErrLeaseHeld.
+   }
+   ```
+
+   `Drain` processes all pending changes for that consumer and workspace to exhaustion before returning. If another process holds the advisory lease, `Drain` returns `effects.ErrLeaseHeld`.
+
+### 7. Shut down cleanly
+
+Stop the runtime when your application terminates by calling `rt.Close()`:
 
 ```go
-rt.Register("publish", mySink)                       // every entity
-rt.Register("publish-issues", mySink, &issuev1.Issue{})  // only these
+err := rt.Close()
+if err != nil {
+    return err
+}
 ```
 
-## When a pass runs
+`Close` performs the following actions:
 
-Work reaches a consumer three ways, all feeding one queue that a fixed pool of
-workers drains:
+- Cancels the runtime context.
+- Stops all active retry timers.
+- Waits for all in-flight worker passes to complete.
+- Unregisters telemetry metrics from the meter provider.
 
-- **The workspace is written.** The notifier reports activity for every
-  workspace, including ones nothing is subscribed to, so a write schedules a
-  pass immediately — no discovery step, and no wait for a poll.
-- **A sweep finds it.** `Start` sweeps once, and `Config.Interval` (default 15s)
-  repeats it. A sweep asks the engine which workspaces each consumer is behind
-  on and queues those, so it costs one query per consumer rather than a pass per
-  workspace. It is the safety net for a signal that was lost, a process that
-  restarted, and a consumer registered against a store that already holds
-  history.
-- **`Runtime.Kick(workspaceID)`** is the manual trigger for anything that knows
-  a workspace changed before the engine does.
+`Close` is idempotent and safe to call multiple times. `Close` does not close caller-provided sinks.
 
-Notifier signals carry no guarantee, so a negative `Interval` — no periodic
-sweep — is a choice to rely on the notifier alone. The default notifier is
-in-process, so a workspace written by **another node** is reported only on that
-node; a shared notifier (`WithNotifier`) fixes that if it reports activity too.
+## Verifying consumer health
 
-`Config.Workers` (default 16) bounds how many passes run at once across every
-consumer and workspace. It is the only concurrency bound in the runtime, so it
-is what to raise for a slow, I/O-bound sink and what to lower to leave more read
-capacity to serving clients. Passes for one consumer on one workspace never
-overlap whatever it is set to.
+To verify that consumers are processing changes and to detect stuck handlers:
 
-## Cost at many workspaces
+1. Inspect individual consumer health with `rt.Health`:
 
-What the runtime holds tracks the work outstanding, not the size of the store. A
-`(consumer, workspace)` pair costs memory only while it has work queued, a pass
-running, or a failure being retried; a workspace that has drained is forgotten
-until it is written again, since everything durable about the consumer's
-progress lives in the workspace's own store. `Runtime.Tracked()` reports that
-resident set — it should stay flat as a store grows, and climb only when
-consumers fall behind the writes.
+   ```go
+   h, ok := rt.Health("issue-notifications", workspaceID)
+   if ok {
+       slog.Info("consumer status",
+           "lag", h.Lag(),
+           "last_attempt", h.LastAttempt,
+           "last_success", h.LastSuccess,
+           "consecutive_failures", h.ConsecutiveFailures,
+       )
+   }
+   ```
 
-The one thing that scales with the store is a sweep, which scans for workspaces
-with pending work once per interval per consumer. Reaction latency does not
-depend on it.
+2. Inspect all active and recently finished pairs with `rt.HealthAll`:
 
-## Consumer names
+   ```go
+   for _, h := range rt.HealthAll() {
+       if h.LastError != nil {
+           slog.Error("handler failing", "consumer", h.Consumer, "workspace", h.WorkspaceID, "err", h.LastError)
+       }
+   }
+   ```
 
-The name is the identity of the durable position, so it must be stable across
-restarts. Renaming a consumer does not carry its progress over — it starts a
-first run, which against a workspace that has collected tombstones means resuming
-at the current sequence rather than replaying history.
+3. Check the resident set size using `rt.Tracked()`:
 
-## What effects cannot do
+   ```go
+   activePairs := rt.Tracked()
+   ```
 
-**The feed is a state feed, not an event log**, in two independent ways:
-
-- Only the latest state of a row is observable. Writes that coalesce leave one
-  change, and no shadow can recover the states in between.
-- Changes older than the workspace's tombstone horizon are collected. A consumer
-  that falls that far behind logs a warning, drops its shadows, and resumes at
-  the current sequence, having permanently missed what it never saw — and it
-  cannot enumerate what that was.
-
-Neither is repairable for an outbound action: current state cannot tell you which
-notifications were never sent. **An effect that must not miss anything needs the
-event persisted as a row through `Mutate`**, where it syncs and is retained under
-normal row rules, with a handler reacting to that row.
-
-The tombstone horizon is therefore the bound on how long a consumer may be down.
-Size [`WithGC`](../reference/server.md) retention accordingly. A consumer
-stranded below the horizon is eventually collected by the GC pass, loudly.
-
-## Running more than one instance
-
-Every pass takes a per-`(consumer, workspace)` lease from the server's locker
-(`server.Leases`), so instances of the same consumer against one store divide
-the workspaces rather than each draining every one. With `pgstore` the lease
-space is the shared database and this needs no configuration; with an adapter
-that provides no locker the lease is process-local and dedups nothing across
-processes.
-
-The lease is advisory, so **single delivery is the common case, not a
-guarantee** — at-least-once stands, and handlers stay idempotent. In
-particular a **rolling deploy** can still overlap: a lease lost to a dropped
-connection frees the workspace while the old holder is mid-pass.
-`Runtime.Close` waits for in-flight passes, which narrows the window without
-closing it — stop before starting if duplicate delivery is expensive.
-
-A skipped pass leaves the consumer's position untouched, which is what brings
-the workspace back on a later sweep if the lease holder dies without
-finishing. `Drain` reports the skip as `effects.ErrLeaseHeld`.
+   `Tracked` reports how many `(consumer, workspace)` pairs currently hold state in memory (queued, running, or backing off). This number returns to `0` as workspaces drain.
 
 ## Related
 
-- [Follow committed changes (change feed)](change-feed.md) — the primitive this
-  is built on, for consumers that want the loop themselves.
-- [Write from server-side code](server-side-writes.md) — including
-  `MutateIdempotent`, which a handler that writes back should use.
-- [Sync an external store (connectors)](sync-an-external-store.md) — the feed
-  plus an ingress path, for keeping an external store converged rather than
-  reacting to changes.
+- [Effects API](../reference/effects.md)
+- [Effects and the change feed](../explanation/effects-and-the-change-feed.md)
+- [Follow committed changes (change feed)](change-feed.md) — Follow the change feed directly.
+- [Write from server-side code](server-side-writes.md) — Use `Mutate` and `MutateIdempotent` in handlers.
+- [Sync an external store (connectors)](sync-an-external-store.md) — Keep an external datastore synchronized with changes.

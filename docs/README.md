@@ -73,6 +73,8 @@ Information-oriented, structured to be looked things up in.
   `(syncplane.v1.field_behavior)`.
 - [Connectors](reference/connectors.md) — the `Source` port and its optional
   halves, every connector `Config` field, error sentinels, and `Health`.
+- [Effects runtime](reference/effects.md) — the `Sink` seam, `Runtime.Register`,
+  consumer names, and the fields a watched change carries.
 - [Naming rules](reference/naming.md) — what an entity may be called, which
   fields may be key fields, and what a row key may contain.
 - [Sync status and failure codes](reference/sync-status-and-codes.md) — the
@@ -100,6 +102,13 @@ Understanding-oriented. Read these when a behaviour surprises you.
   twice, ranking without corpus statistics, and an index that only narrows.
 - [Collaborative text](explanation/collaborative-text.md) — Fugue ordering,
   state-based replication, delta sync, marks, undo, compaction.
+- [Effects and the change feed](explanation/effects-and-the-change-feed.md) —
+  why the feed reports state and not events, what the tombstone horizon costs a
+  consumer that falls behind, and what a handler is promised.
+- [How connectors converge](explanation/connectors.md) — the per-row shadow as
+  echo breaker and three-way merge base, and text across the boundary.
+- [Multi-node architecture](explanation/multi-node-architecture.md) — which tier
+  holds state, what each failure costs, and why leases stay advisory.
 - [Multi-tab behaviour](explanation/multi-tab.md) — one store, one stream
   leader per plane, and what only a real browser can verify.
 - [Rooms: the ephemeral plane](explanation/rooms.md) — presence and broadcast,

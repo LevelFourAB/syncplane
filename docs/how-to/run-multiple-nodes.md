@@ -1,100 +1,96 @@
-# Run more than one node
+# Running multiple nodes
 
-The defaults are single-node on purpose: a SQLite file and an in-process
-notifier need no infrastructure. Running several server processes means
-replacing both, because each one is single-node for a different reason.
+This guide shows you how to configure and run multiple Syncplane server nodes using PostgreSQL. Use this setup when you need multiple server processes to share storage, fan out realtime pokes, and synchronize room presence across instances.
 
-- **Storage** — a SQLite file cannot be shared between processes. Two writer
-  connections contend for the one write lock, and a write that outlives the
-  other's `busy_timeout` fails. Replace it with `pgstore`.
-- **Pokes** — the default notifier fans out in-process, so a client connected
-  to node A never hears about a write that landed on node B. It converges by
-  polling, which is correct but not realtime. Replace it with `pgnotify`.
-- **Rooms** — the default presence bus is in-process too, so each node shows a
-  client only the participants that node happens to be serving. Unlike pokes
-  this does not converge later, because nothing on the
-  [ephemeral plane](../explanation/rooms.md) is durable: a roster split across
-  nodes stays split. Replace it with `pgpresence` — and skip it entirely if the
-  app uses no rooms.
+The default configuration is designed for a single node: a SQLite file for storage, an in-process notifier for pokes, and an in-process presence bus for rooms. To run multiple nodes, you must replace these components:
 
-The three are independent. A Postgres notifier in front of a SQLite store is a
-sensible single-node deployment that gains nothing, and a Postgres store with
-the default notifier is a correct multi-node deployment whose clients converge
-at poll latency. You need all three for multi-node realtime with presence.
+- **Storage:** SQLite does not support concurrent multi-process writes. Replace it with `pgstore`.
+- **Pokes:** The default notifier operates in-process, so writes on one node do not wake clients on another. Replace it with `pgnotify`.
+- **Rooms:** The default presence bus operates in-process, splitting participant rosters across nodes. Replace it with `pgpresence` (or omit it if your application does not use rooms).
 
-## Both, together
+## Prerequisites
 
-```go
-ctx := context.Background()
+Before configuring multiple nodes, ensure you have:
 
-store, err := pgstore.Open(ctx, os.Getenv("DATABASE_URL"))
-if err != nil {
-	log.Fatal(err)
-}
-defer store.Close()
+- A PostgreSQL database instance accessible to all server nodes.
+- The database connection string configured in the `DATABASE_URL` environment variable.
+- (Optional) A read replica connection string in `DATABASE_REPLICA_URL` if you route reads to a standby replica.
 
-link, err := pglisten.Open(ctx, os.Getenv("DATABASE_URL"))
-if err != nil {
-	log.Fatal(err)
-}
-defer link.Close()
+## Configuring a multi-node server
 
-notifier, err := pgnotify.New(ctx, link)
-if err != nil {
-	log.Fatal(err)
-}
-defer notifier.Close()
+To run multiple nodes in Go, replace the default SQLite store and in-process transports with PostgreSQL components.
 
-bus, err := pgpresence.New(ctx, link)
-if err != nil {
-	log.Fatal(err)
-}
-defer bus.Close()
+1. **Connect to the PostgreSQL store.**
+   Call `pgstore.Open` with your database connection URL:
 
-srv, err := server.New(
-	store,
-	server.WithNotifier(notifier),
-	server.WithPresenceBus(bus),
-	server.WithEntities(&todov1.Todo{}),
-)
-```
+   ```go
+   ctx := context.Background()
 
-`pglisten` is the `LISTEN`/`NOTIFY` transport under both: one connection parked
-in `WaitForNotification` and one issuing `pg_notify`, neither pooled. Sharing it
-is what keeps a node running both planes at two connections instead of four —
-each package registers its own channel and sees only that channel's traffic.
-`link` must outlive both, and closing either of them leaves it running.
+   store, err := pgstore.Open(ctx, os.Getenv("DATABASE_URL"))
+   if err != nil {
+   	log.Fatal(err)
+   }
+   defer store.Close()
+   ```
 
-Either package also takes a DSN directly (`pgnotify.Open`, `pgpresence.Open`)
-and opens a transport of its own, which is the shorter wiring when a process
-runs only one of them.
+   If you route read traffic to a hot standby replica, pass `pgstore.WithReadReplica`:
 
-`Open` applies any outstanding migrations, under an advisory lock — so every
-node runs the same code at boot and they race safely. Nothing has to be
-sequenced into a deploy. A fleet that would rather own its DDL runs
-`pgstore.Migrate` (or applies `pgstore.Statements`) from a deploy step and gives
-every node `pgstore.WithoutMigrations()`, which is
-[a decision about privileges and rollbacks](deploy-for-high-availability.md#owning-the-migrations)
-rather than a default worth changing.
+   ```go
+   store, err := pgstore.Open(ctx, os.Getenv("DATABASE_URL"),
+   	pgstore.WithReadReplica(os.Getenv("DATABASE_REPLICA_URL")))
+   ```
 
-A fleet whose primary is sized by its reads can move them to a hot standby:
+   `pgstore.Open` applies pending migrations automatically under an advisory lock. If your deployment process manages database migrations separately, run `pgstore.Migrate` or apply `pgstore.Statements` in a deployment step and pass `pgstore.WithoutMigrations()` to `pgstore.Open`. For more information, see [owning the migrations](deploy-for-high-availability.md#2-run-database-migrations) and [PostgreSQL sizing](deploy-for-high-availability.md#3-configure-database-connections-and-read-replicas).
 
-```go
-store, err := pgstore.Open(ctx, os.Getenv("DATABASE_URL"),
-	pgstore.WithReadReplica(os.Getenv("DATABASE_REPLICA_URL")))
-```
+2. **Open the shared listen transport.**
+   Call `pglisten.Open` to manage a shared `LISTEN`/`NOTIFY` transport:
 
-Migrations still run on the primary only; the replica is probed for the same
-schema version and `Open` fails when it does not answer with one. What routes
-where, how freshness is bounded, and how to size the second pool is
-[deploy-for-high-availability.md](deploy-for-high-availability.md#postgresql).
+   ```go
+   link, err := pglisten.Open(ctx, os.Getenv("DATABASE_URL"))
+   if err != nil {
+   	log.Fatal(err)
+   }
+   defer link.Close()
+   ```
 
-## Hosting several apps
+   `pglisten` maintains one unpooled connection waiting for notifications and one issuing `pg_notify`. Sharing this transport allows both `pgnotify` and `pgpresence` to run on two database connections instead of four. Ensure `link` outlives both services.
 
-`Manager` shares one set of server options across every app it hosts, but a
-notifier must not be shared as-is: workspace ids are namespaced per app, so two
-apps that both have a workspace `team` would wake each other's clients. Derive a
-per-app view instead, which tags what it publishes and filters what it receives:
+   If your process runs only one of the two packages, you can instead call `pgnotify.Open` or `pgpresence.Open` directly with a connection string to let the package manage its own transport.
+
+3. **Initialize the notifier and presence bus.**
+   Pass the transport link to `pgnotify.New` and `pgpresence.New`:
+
+   ```go
+   notifier, err := pgnotify.New(ctx, link)
+   if err != nil {
+   	log.Fatal(err)
+   }
+   defer notifier.Close()
+
+   bus, err := pgpresence.New(ctx, link)
+   if err != nil {
+   	log.Fatal(err)
+   }
+   defer bus.Close()
+   ```
+
+   If your application does not use rooms, omit `pgpresence`. For background on rooms, see the [ephemeral plane documentation](../explanation/rooms.md).
+
+4. **Create the server instance.**
+   Pass the store, notifier, and presence bus to `server.New`:
+
+   ```go
+   srv, err := server.New(
+   	store,
+   	server.WithNotifier(notifier),
+   	server.WithPresenceBus(bus),
+   	server.WithEntities(&todov1.Todo{}),
+   )
+   ```
+
+## Hosting multiple applications
+
+If you host multiple applications with `server.Manager`, derive a namespaced notifier for each application so workspaces with identical names do not notify the wrong clients:
 
 ```go
 mgr, err := server.NewManager(ctx, store,
@@ -104,13 +100,11 @@ mgr, err := server.NewManager(ctx, store,
 )
 ```
 
-The `Manager` namespaces the _store_ per app by itself; only the notifier needs
-this.
+`server.Manager` automatically namespaces the store per application. Only the notifier requires explicit namespacing.
 
-## With the shipped host
+## Running multiple nodes with syncplaned
 
-`syncplaned` tells the two apart by URI scheme on its existing `-db` flag, so a
-Postgres DSN selects `pgstore` and wires `pgnotify` per app for you:
+If you run the standalone `syncplaned` host binary, pass a PostgreSQL connection URI to the `-db` flag. `syncplaned` automatically selects `pgstore` and namespaces `pgnotify` per application:
 
 ```sh
 syncplaned -db postgres://user:pass@host/syncplane   # Postgres, multi-node ready
@@ -121,121 +115,43 @@ syncplaned -db postgres://user:pass@host/syncplane \
 	-db-replica postgres://user:pass@standby/syncplane
 ```
 
-The notifier is not a separate flag because there is no useful deployment that
-picks one and not the other: a Postgres store is the one that can have a second
-node, and on a second node the in-process notifier stops reaching half the
-clients.
+**Note:** `syncplaned` includes no built-in authenticator or permissions system. Run `syncplaned` behind a trusted network boundary.
 
-Note the trust posture — `syncplaned` installs no authenticator and no
-permissions, so it belongs behind a trusted boundary whichever store it uses.
+## Isolating deployments on a shared database
 
-## What you get, and what you do not
+If multiple deployments (such as staging and production) share a PostgreSQL database, isolate their channels, schemas, and namespaces:
 
-Pokes reach every node, so a write on any node wakes clients on all of them.
-Different workspaces commit concurrently instead of serializing behind one
-writer connection.
+1. **Configure separate notification channels.**
+   Pass `WithChannel` to assign unique notification channels:
 
-Background work divides across nodes by per-workspace leases. `pgstore` backs
-them with advisory locks, so a server built on it dedups with no
-configuration: the GC and index sweeps skip a workspace another node is
-collecting, and an effects runtime leases each (consumer, workspace) drain the
-same way. A node that crashes releases everything it held with its connection
-— there is no lease TTL to wait out. The leases are advisory, which cuts both
-ways: work stays correct without them, and none of it may _depend_ on them —
-delivery to an effect handler is still at-least-once, and a rolling deploy can
-still hand one change to two processes. See
-[Limits and trade-offs](../explanation/limits-and-trade-offs.md) for why the
-engine dedups rather than fences.
+   ```go
+   pgnotify.New(ctx, link, pgnotify.WithChannel("syncplane_poke_staging"))
+   pgpresence.New(ctx, link, pgpresence.WithChannel("syncplane_presence_staging"))
+   ```
 
-Two things do not change, and are worth planning around rather than
-discovering:
+   The packages default to `syncplane_poke` and `syncplane_presence`. Keep them on distinct channels so each decoder receives only its intended payloads.
 
-- **Effect handlers must stay idempotent.** The lease makes single delivery
-  the common case across nodes; it does not make it a guarantee.
-- **Connectors do not take leases**, and they keep their cursors and shadows in
-  connector-owned state — shipped default, a local SQLite file — which a second
-  instance never sees. Two instances converging one workspace echo each other's
-  writes, so run a connector in exactly one process.
+2. **Isolate store tables.**
+   Configure different databases or set different schemas using the `search_path` parameter in the connection DSN.
 
-Surviving the loss of one of those nodes, or of the database under them, is a
-separate concern: see
-[Deploy for high availability](deploy-for-high-availability.md).
+3. **Avoid advisory lock contention.**
+   PostgreSQL advisory locks are scoped to the database. Leases hash the schema name to stay isolated, but shared databases still contend on:
 
-## Delivery is best-effort, on purpose
+   - The migration lock (a fixed key), which causes deployments to take turns migrating at startup.
+   - The per-workspace write lock (keyed by namespace and workspace ID), which serializes writes when both deployment namespace and workspace names match.
 
-A missed poke costs one poll interval, never a lost write. `pgnotify` leans on
-that in three places, all of them documented on the package: a full publish
-queue drops rather than blocks the write path, a notification published while
-the listener is reconnecting is gone (Postgres buffers nothing across a dropped
-`LISTEN`), and an oversized payload is skipped.
+   To eliminate lock contention, use separate databases or assign distinct namespaces to each deployment.
 
-Reconnects are the one visible gap. On reconnect the listener re-pokes every
-workspace it has a live subscription for, so watching clients are not left
-waiting for a poll — but a workspace nobody was subscribed to is not announced,
-which is why a background consumer keeps its periodic sweep as a backstop.
+## Verifying the setup
 
-`pgpresence` has the same three lossy paths and heals differently, because a
-presence event _was_ the state and cannot be re-sent from nothing the way a
-content-free poke can. There is no re-poke on reconnect; instead each node
-re-announces the records it is responsible for every `WithRoomAnnounce`
-interval, so the other nodes' rosters are stale for at most one interval. A
-broadcast sent during the gap is gone, which is the primitive's documented
-contract.
-
-The one failure it does **not** swallow is an oversize payload: a presence
-event carries the app's own state base64-encoded inside an 8000-byte NOTIFY
-payload, so one that will not fit is refused at `Publish` rather than dropped.
-The engine caps state and messages well under that
-(`MaxPresenceStateBytes`, `MaxBroadcastBytes`), so reaching it means those
-limits were raised past what the transport can carry.
-
-Presence updates arrive at a far higher rate than pokes — a cursor moves tens of
-times a second — so the publish queue folds state per `(topic, session)` before
-it reaches the database: a hundred users moving cursors cost a hundred
-`pg_notify` round trips per drain rather than a thousand. Broadcasts are each
-distinct and never folded, only dropped.
-
-## Isolating deployments that share a database
-
-One channel carries every namespace. Staging and production on the same
-Postgres would wake each other's clients for workspaces they do not have, so
-give them separate channels:
-
-```go
-pgnotify.New(ctx, link, pgnotify.WithChannel("syncplane_poke_staging"))
-pgpresence.New(ctx, link, pgpresence.WithChannel("syncplane_presence_staging"))
-```
-
-The two default to different channels (`syncplane_poke` and
-`syncplane_presence`) and must stay apart, because the channel is what routes a
-payload to the decoder that understands it — a poke and a presence event share
-one connection but nothing else.
-
-`pgstore` needs no equivalent for its tables: point the two at different
-databases, or at different schemas via the DSN's `search_path`.
-
-Its advisory locks are the exception, because they live in a keyspace that
-belongs to the database rather than to a schema. Leases hash the schema into
-their key and so stay apart, but two deployments sharing a database still
-contend on:
-
-- **the migration lock**, a fixed key, so staging and production take turns
-  migrating at boot;
-- **the per-workspace write lock**, keyed by `(namespace, workspace_id)`, so two
-  deployments serialize their writes wherever both names match — the default
-  namespace and a workspace called `demo` in each, say.
-
-Both cost throughput and never correctness: an advisory lock excludes, and the
-worst case is one deployment's write waiting on the other's. Separate databases
-avoid it outright; a distinct namespace per deployment avoids the write half.
-
-## Testing against a real Postgres
-
-The `pgstore`, `pglisten`, `pgnotify` and `pgpresence` suites run against a
-container started by testcontainers, and **skip** when no Docker is reachable —
-Postgres is not a build dependency of this repo. To run them against a server
-you already have:
+To verify the multi-node packages against a running PostgreSQL instance, run the test suite with `SYNCPLANE_TEST_PG_DSN`:
 
 ```sh
 SYNCPLANE_TEST_PG_DSN=postgres://user:pass@localhost:5432/syncplane task test:go
 ```
+
+When no Docker daemon is reachable, the test suite skips `pgstore`, `pglisten`, `pgnotify`, and `pgpresence` tests unless you provide `SYNCPLANE_TEST_PG_DSN`.
+
+## Related
+
+- [Multi-node architecture](../explanation/multi-node-architecture.md)

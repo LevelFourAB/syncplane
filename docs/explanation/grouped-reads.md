@@ -1,172 +1,97 @@
-# Grouped reads: counts, and the head of each group
+# Grouped reads: counts and the head of each group
 
-A list UI asks two kinds of question. "Which rows" is a query, and everything
-about it — the predicate, the ordering, the page — is built for that. "How many,
-per value" is not. A board with six status columns wants six badges; a facet
-sidebar wants a count per assignee, per label, per priority, under whatever
-filter is currently on; a filter dropdown wants to know which assignees exist
-before it can offer any.
+This document explains how the query engine executes grouped reads (`groupCount`, `distinct`, and `groupRows`), why grouping semantics are designed the way they are, and how index skip-scans avoid full row reads.
 
-Answered with the query surface alone, each of those is a query of its own that
-walks the same match set again for a number. Six columns is six walks; a facet
-sidebar is one per value it already knows about, and it cannot discover a value
-it does not. A grouped read (`groupCount`, `distinct`) answers all of them in one
-walk, and with the right index in one walk that never reads a row.
+## The problem with standard queries
 
-The same board asks a third question the query surface answers just as badly:
-"the first twenty cards of each column". One query per column again, or one query
-that reads every card of every column to keep twenty of each — the read is
-unbounded in the wrong dimension, scaling with the size of the groups where the
-answer wanted is `groups × N`. `groupRows` is that read: the same partition, with
-each group's head instead of its number.
+A list user interface (UI) asks two kinds of questions:
 
-## What a group is
+1. "Which rows match a filter?"
+2. "How many rows exist per value?"
 
-The definition is stated over rows, like every other query construct: partition
-the matching rows by the value at one path, and answer with the partitions.
-Everything below is an optimization that has to reproduce it exactly.
+Standard queries handle the first question. The predicate, ordering, and pagination are designed for row retrieval. However, they handle the second question inefficiently. For example, a board with six status columns needs six badge counts. A facet sidebar needs counts per assignee, label, and priority under the active filter. A filter dropdown needs to know which assignees exist before displaying options.
 
-Three details of that definition are decisions rather than consequences, and
-both implementations pin them in the shared vectors (`testdata/indexkey`,
-`groupCases`):
+Using standard queries for these needs requires running separate queries across the same match set. Six columns require six walks. A facet sidebar requires one query per known value, and it cannot discover unknown values. Grouped reads (`groupCount` and `distinct`) answer these questions in a single walk. With the appropriate index, this walk does not read rows.
 
-**A missing value is a group.** A row whose path resolves to nothing joins a
-group of its own — `value: undefined` on the client, an unset `QueryValue` on the
-wire — never conflated with an empty string or a zero, and never dropped. So the
-counts always cover every matching row, which is what makes a facet's numbers
-add up against the list beside it.
+Boards also ask a third question: "What are the first 20 cards in each column?" Answering this with standard queries requires either one query per column or a query that reads every card across all columns to keep 20 per column. In both cases, the read scales with the total size of the groups rather than `groups × N`. The `groupRows` read solves this problem by returning each group's head in a bounded read.
 
-**Groups come back in ascending value order, with NaN and then the no-value
-group last.** That is the order an ascending `orderBy` on the same path puts
-rows in, so the two surfaces never disagree about where an unset field sits. It
-is also what makes `limit` mean something: the first N groups are a stable
-prefix rather than an arbitrary sample.
+## Group definition
 
-**A repeated path groups per ELEMENT.** A row holding three labels joins three
-groups. The counts therefore do NOT sum to the number of matching rows — they
-count memberships, not rows. That is exactly what a label facet asks for
-("how many issues are tagged `ui`?"), and it is the wrong answer to a different
-question ("how many issues are there?"), which is why it is stated here rather
-than discovered. A row whose list is empty joins the no-value group, so it is
-still somewhere.
+A group partitions matching rows by the value at a single path. The query engine then returns the resulting partitions.
 
-## Only what the rows produce
+Three details of this definition represent explicit design decisions, pinned in shared test vectors (`testdata/indexkey`, `groupCases`):
 
-A grouped read cannot return a group with a count of zero. It reads rows; a
-status no row currently holds leaves no trace to read.
+- **A missing value is a group.** A row whose path resolves to nothing belongs to its own group (`value: undefined` on the client, or an unset `QueryValue` on the wire). Missing values are never conflated with empty strings or zeros, and they are never dropped. As a result, counts cover every matching row, ensuring facet counts match list totals.
+- **Groups return in ascending value order.** The engine returns groups in ascending order, placing `NaN` and the no-value group last. This matches the row order of an ascending `orderBy` on the same path, keeping sort behavior consistent. It also ensures that a `limit` returns a deterministic prefix rather than an arbitrary sample.
+- **A repeated path groups per element.** A row that contains three labels joins three distinct groups. Consequently, counts represent group memberships rather than unique row totals. This design supports label facets (such as "how many issues are tagged `ui`?"). A row with an empty list joins the no-value group.
 
-This is the one place the surface will not give a board UI what it literally
-wants, and it is not an oversight. The set of possible values is the app's
-schema — an enum, a status entity, a saved view's column list — and only the app
-knows it. So the read reports the values that ARE there, and the app joins its
-own domain against them, filling in the zeros. Any other design would have the
-engine inventing a value set it has no way to know is complete.
+## Why zero-count groups are omitted
 
-## The skip-scan
+A grouped read returns only the groups present in matching rows. If no rows hold a specific status, that status leaves no trace in the data.
 
-The row planner recognises one shape (see `engine/query/plan.go`):
+The set of possible values belongs to the application schema, such as an enum, a status entity, or a saved view configuration. The engine cannot know the complete set of possible values. Grouped reads report the values that exist in the matching data, and the application fills in zero-count values by joining against its own domain models.
 
-    equality prefix   →   at most one range component   →   ordering suffix
+## The skip-scan index plan
 
-A grouped read adds a fourth kind of component between the prefix and whatever
-follows: a **partition**, neither pinned to a value nor bounded to one. The walk
-seeks to the first entry sharing the prefix, cuts that entry at the end of the
-partition component — the bytes every entry of one group shares — does the
-group's work inside `[prefix, prefix⁺)`, and then seeks to `prefix⁺`: the next
-distinct value.
+The row planner recognises one shape (defined in `engine/query/plan.go`):
 
-Cost becomes O(groups × work) instead of O(rows). For `distinct` the per-group
-work is nothing at all, so naming a thousand distinct assignees costs a thousand
-seeks and no row reads. For a count it is one range count per group, read off
-index ENTRIES with no row decode — which is the same walk the row planner's
-`total` already pays for, minus the rows.
+```text
+equality prefix   →   at most one range component   →   ordering suffix
+```
 
-The index that serves it is `[eq-filter fields…, groupPath, …]`: the same index a
-board ordering by `[status, rank]` already wants declared. Because the partition
-component stores its values in order, the groups come out in order too, so a
-limited read stops after `limit + 1` groups rather than bucketing the entity.
+A grouped read adds a partition component between the prefix and the trailing components:
 
-Two things the walk has to get right, and both are visible in the plan:
+```text
+equality prefix   →   partition component   →   trailing components
+```
 
-- **A descending component.** Its payload is inverted, so reading the range
-  forward yields groups in DESCENDING value order. The walk reverses direction
-  instead of declining, which is what lets `[status, rank desc]` serve a
-  grouping by `rank`.
-- **Whether one entry is one row.** It is, unless a component PAST the partition
-  fans out over a list — then a single row sits at several positions of the same
-  group, and counting positions would count it twice. That case reads the rows.
+The partition component is neither pinned to a single value nor bounded to a specific range.
 
-Declining is always correct, exactly as it is for a row query: with no such index
-the caller buckets a scan, per the standing rule that an index is an optimization
-and the scan is the definition.
+During a skip-scan, the walk seeks to the first entry sharing the prefix. It cuts the entry at the end of the partition component, which represents the bytes shared by all entries in that group. The engine completes the group's work in the range `[prefix, prefix⁺)` and seeks to `prefix⁺`, the next distinct value.
 
-## The head of a group
+The execution cost is O(groups × work) instead of O(rows). For `distinct`, per-group work is zero, so identifying 1,000 distinct assignees requires 1,000 seeks and no row reads. For `groupCount`, the work consists of one range count per group, read directly from index entries without decoding rows.
 
-Rows per group ride the same walk. Inside one group's sub-range the entries are
-already in the index's own order, so a walk that stops after `perGroup + 1` rows
-has the column's page and knows whether there are more — `groups × perGroup` rows
-read, whatever the groups hold.
+A skip-scan uses an index defined as `[eq-filter fields…, groupPath, …]`. This is the same index structure used for ordering by `[status, rank]`. Because the partition component stores values in order, groups are produced in sorted order. A query with a `limit` can stop after `limit + 1` groups instead of bucketing the entire entity.
 
-That only works when the index's order IS the requested one, so `PlanGroupRows`
-requires two things the counted read does not:
+The index walk accounts for two conditions:
 
-- **The components past the partition supply `orderBy`**, direction included. An
-  index storing `[status, rank desc]` serves "highest rank first" and declines
-  "lowest rank first" — walking a group backward would have to start at the far
-  end of a range whose end is the next group's start. With no `orderBy` at all the
-  rows come back in row-key order, which every entry ends with, so the partition
-  has to be the LAST component for the walk to be that order.
-- **Each entry of a group is a distinct row.** A component past the partition that
-  fans out puts one row at several positions of one group, and the page would
-  carry duplicates ordered by a value nobody asked about.
+- **Descending components:** A descending component inverts the index payload, so a forward scan yields groups in descending order. The walk reverses direction to produce ascending groups. This allows an index like `[status, rank desc]` to serve a grouping on `rank`.
+- **Row-to-entry cardinality:** An index entry corresponds to one row unless a component past the partition fans out over a list. When a fan-out occurs, a single row can appear at multiple positions within the same group. To prevent double counting, the engine reads the rows.
 
-Both declines land on the definition — bucket the match set, sort each bucket, cut
-it — which reads every matching row. That is the difference declaring
-`[status, rank]` makes, and it is why the read is worth a declared index in a way
-a one-off count is not.
+If no suitable index exists, the query declines the skip-scan and falls back to bucketing a full scan. The scan represents the base definition, while the index serves as an optimization.
 
-`total` per group is the one part that is not bounded by `perGroup`: counting a
-group means visiting all of it. It is opt-out (`total: false`) for exactly that
-reason, and a column that shows a badge is paying for the badge, not for the
-preview.
+## Retrieving the head of a group
 
-## What a count off entries gives up
+The `groupRows` operation uses the same skip-scan walk. Within a group's sub-range, entries are already sorted by the index. A walk that stops after `perGroup + 1` rows retrieves the group page and determines whether more rows exist. This bounds the operation to `groups × perGroup` row reads regardless of group size.
 
-Reading a count off index entries means not looking at the rows, and two things
-follow.
+To use an index for `groupRows`, `PlanGroupRows` requires two conditions:
 
-A **read filter** or field history's per-source rule can hide a live row from a
-caller, and no entry can say so. The server reads rows in that case rather than
-counting entries — the walk still beats the scan by every row outside the range,
-but the per-row read is back.
+- **Components past the partition must supply the `orderBy` criteria:** The trailing components must match the requested fields and directions. For example, an index storing `[status, rank desc]` serves "highest rank first" but declines "lowest rank first". Without an explicit `orderBy`, rows return in row-key order. In that case, the partition must be the last component in the index.
+- **Each index entry must represent a distinct row:** A component past the partition that fans out can produce duplicate rows in a group page, ordered by unrequested values. In this case, the index cannot be used.
 
-A row whose stored bytes **will not decode** is counted, where a scan quarantines
-it and drops it (see `engine/server/poison.go`). That is the same trade the
-zero-decode full-sync path already makes: decoding every row to catch a corrupt
-one would tax every healthy workspace for a fault none of them have. A group that
-no row can NAME is different and declines the index outright, because that is the
-case where the two answers would differ in shape and not only in a number.
+When an index does not meet these requirements, the engine falls back to scanning the match set, sorting each bucket, and truncating the results.
 
-## The client's overlay
+Calculating `total` per group requires visiting all entries in the group, which is not bounded by `perGroup`. You can opt out of this calculation by setting `total: false`.
 
-Every local read owes the optimistic overlay: pending writes are authoritative
-for the rows they touch. For a row query the merge is a union — walk the index,
-drop the shadowed rows, add the pending ones back.
+## Trade-offs of counting index entries
 
-A grouped read cannot merge that cheaply. A shadowed row's confirmed positions
-are still in the store's index, so honouring the overlay would mean subtracting
-each one from whichever group it falls in and adding the pending rows' own groups
-back — and for `groupRows`, splicing them into the right place in each group's
-page. So the client's index walk **declines outright while anything is in the
-overlay** and buckets the merged view instead. In the steady state — nothing
-pending, which is where a board spends its time — the skip-scan runs; with a
-write in flight the read costs a scan of what the client holds, which is bounded
-by the synced subset rather than by the entity.
+Counting index entries avoids decoding full rows, which introduces two trade-offs:
 
-## Related
+- **Read filters:** A read filter or field-history rule can hide rows from a caller. Because index entries do not carry visibility metadata, the server reads full rows when filters apply. The walk still skips rows outside the range, but per-row reads are required.
+- **Corrupt rows:** A row whose stored bytes cannot decode is included in index entry counts, whereas a full scan quarantines and drops corrupt rows (defined in `engine/server/poison.go`). This trade-off avoids decoding every row during standard operations. However, if a row cannot produce a valid group name, the engine declines the index and runs a scan.
 
-- [Query data](../how-to/query-data.md) — the recipes, including counted surfaces.
-- [TypeScript client reference](../reference/typescript-client.md) — the API and
-  its exact contract.
-- [Secondary indexes](../reference/proto-options.md#secondary-indexes) — how to
-  declare the index a grouped read wants.
+## Client-side optimistic overlay
+
+Local reads must account for the optimistic overlay, where pending writes are authoritative for modified rows.
+
+For standard row queries, merging the overlay is a union: the engine walks the index, drops shadowed rows, and adds pending rows.
+
+Grouped reads cannot merge overlay changes this cheaply. A shadowed row remains in the index store. Honoring the overlay would require subtracting shadowed entries from their respective groups and adding pending rows into the correct group positions.
+
+For this reason, the client-side index walk declines when writes exist in the overlay and falls back to bucketing the merged local data. In the steady state without pending writes, the skip-scan executes normally. When writes are in flight, the read performs a scan bounded by the synced local dataset.
+
+## Related documentation
+
+- [Query data](../how-to/query-data.md) — Recipes for querying and counting data.
+- [TypeScript client reference](../reference/typescript-client.md) — API reference and contracts.
+- [Secondary indexes](../reference/proto-options.md#secondary-indexes) — How to declare secondary indexes for grouped reads.

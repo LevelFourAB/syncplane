@@ -1,6 +1,13 @@
-# Query data
+# Querying data
 
-Queries come in two flavours, and the difference is which data they can see.
+This guide shows you how to query data with Syncplane in TypeScript. Use this guide to execute local queries, subscribe to live query updates, query the server directly, paginate results, filter list fields, and run grouped aggregations.
+
+## Prerequisites
+
+Before querying data, ensure you have:
+
+- An initialized `SyncClient` instance connected to your backend.
+- Defined entity schemas in your project.
 
 ```ts
 // Local: the synced subset, through the optimistic overlay. Offline, instant.
@@ -25,369 +32,274 @@ const found = await client.db.todo.queryServer({
 
 ## Local queries
 
-`query` / `watchQuery` evaluate **locally**, so they see only what partial sync
-brought down — merged with pending local mutations, which is what makes the UI
-feel instant.
+The `query` and `watchQuery` methods evaluate queries locally against data downloaded by partial sync and merged with pending local mutations.
 
-Every result carries a `coverage` report saying whether that is the whole entity
-or only part of it. Check it before treating an empty result as "there is
-nothing there":
+To run a local query and handle partial sync coverage:
 
-```ts
-const rows = await client.db.issue.query({
-	orderBy: (i) => [ i.createdAtMs.desc() ],
-});
-if (!rows.coverage.complete) {
-	const all = await client.db.issue.queryServer({/* ... */});
-}
-```
+1. Call `client.db.<entity>.query()` with your query criteria:
 
-One bound wants a different answer: `hydrating` means the rows are on their way
-in the client's first snapshot, so it asks for a loading state rather than a
-server round trip, and clears itself when they land.
+   ```ts
+   const rows = await client.db.issue.query({
+   	orderBy: (i) => [ i.createdAtMs.desc() ],
+   });
+   if (!rows.coverage.complete) {
+   	const all = await client.db.issue.queryServer({/* ... */});
+   }
+   ```
 
-See [Sync only part of a workspace](partial-sync.md) and [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
+2. Inspect the `rows.coverage` property before treating an empty result as missing data:
+   - If `coverage.complete` is `false`, the client holds only a subset of rows. Fetch missing rows from the server with `queryServer()`.
+   - If `coverage.hydrating` is `true`, rows are downloading in the client's initial snapshot. Display a loading indicator rather than sending a server request. The flag clears when the snapshot finishes loading.
+
+For more information, see [Sync only part of a workspace](partial-sync.md) and [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
 ## Server queries
 
-`queryServer` pushes the same query down to the server's `Query` RPC and is how
-an app reaches the rows it did **not** sync: search across everything, open an
-id that is not in the current view.
+Use `queryServer` to send a query to the server's `Query` RPC. This method allows your application to access rows that the client did not sync, such as when searching the full dataset or opening an entity ID not present in the local view.
 
-Its results are server truth — not merged with the optimistic overlay, not
-stored locally, and they never feed watchers — so a row edited locally but not
-yet pushed comes back without that edit. It needs connectivity, and read filters
-always apply.
+To execute a server query:
 
-Unless an index serves it, the query costs a full entity scan on the server
-(bounded in memory to the page). Prefer a selective predicate over deep
-pagination.
+1. Call `client.db.<entity>.queryServer()` with your query options.
+2. Process the returned results.
+
+Server queries have the following characteristics:
+
+- Results reflect server state. They are not merged with optimistic local mutations, are not stored locally, and do not trigger watchers.
+- Local unpushed edits are not reflected in the results.
+- Network connectivity is required.
+- Read filters always apply on the server.
+- Queries without a supporting index perform a full entity scan on the server, bounded in memory to the page size. Prefer selective predicates over deep pagination.
 
 ## Paging
 
-Page with `after`/`before` rather than `offset`. They are opaque cursors naming a
-POSITION in the ordering, so the next page is unaffected by rows inserted ahead
-of it — where an offset would repeat or skip a row — and the server can seek to
-that position instead of counting past everything before it.
+To page through results, use `after` and `before` cursors instead of `offset`. Keyset cursors represent a fixed position in the sort order, preventing skipped or duplicated rows when rows are inserted concurrently.
 
-```ts
-let after: QueryCursor | undefined;
-for (;;) {
-	const page = await client.db.issue.query({
-		orderBy: (i) => [ i.createdAtMs.desc() ],
-		limit: 50,
-		after,
-	});
-	render(page);
-	if (!page.hasMore) break;
-	after = page.endCursor;
-}
-```
+To paginate query results:
 
-Every result carries `startCursor`, `endCursor` and `hasMore` (all
-non-enumerable, like `coverage` and `total`). Pass `endCursor` back as `after`
-to step forward and `startCursor` as `before` to step back — with `before`
-alone, `limit` counts backward from it, so it returns the page preceding the one
-the cursor came from. Setting both reads a bounded range, and `total` then counts
-the matches inside it.
+1. Pass a `limit` and an optional `after` cursor to `client.db.<entity>.query()` or `client.db.<entity>.queryServer()`:
 
-Counting the matches costs time linear in their number, and every page pays it
-again. When nothing sizes itself with the total — a walk like the one above
-needs only `hasMore` — add `total: false` to the query and the count is skipped;
-on a large match set that is most of a deep page's cost.
+   ```ts
+   let after: QueryCursor | undefined;
+   for (;;) {
+   	const page = await client.db.issue.query({
+   		orderBy: (i) => [ i.createdAtMs.desc() ],
+   		limit: 50,
+   		after,
+   	});
+   	render(page);
+   	if (!page.hasMore) break;
+   	after = page.endCursor;
+   }
+   ```
 
-A cursor is a base64url string: it survives `JSON.stringify` and drops into a
-URL, which is what a pager actually does with one. It is tied to the entity and
-the ordering it was issued under; replaying it against a different one is an
-error rather than a wrong page, so a query whose `orderBy` changed needs a fresh
-cursor. `queryServer` and `query` mint and accept the same cursors, so a page
-started against the server can continue locally and the other way round.
+2. Read pagination metadata from the result object:
+   - `startCursor`: The cursor for the first item in the page. Pass this as `before` to navigate backward.
+   - `endCursor`: The cursor for the last item in the page. Pass this as `after` to navigate forward.
+   - `hasMore`: A boolean indicating whether more rows remain in the traversal direction.
+   - `total`: The total count of matching rows.
 
-`offset` stays for the one thing keyset paging structurally cannot do: jump to an
-arbitrary rank, which is what dragging a scrollbar into row 8000 asks for. It is
-capped by `MaxQueryOffset` on the server and costs what it says — the rows before
-the page are still scanned and compared. Setting it alongside `after` or `before`
-is rejected: the two describe a page in incompatible terms.
+3. To step backward, pass `startCursor` to `before`. The `limit` option counts backward and returns the preceding page.
+4. To query a bounded range, provide both `after` and `before`. The `total` property counts matches within that range.
+5. If your UI does not need the total count, set `total: false` in the query options to skip the count calculation and improve performance on large datasets.
 
-## Making a query cheap
+Cursors are base64url-encoded strings suitable for URLs and JSON serialization. Note the following rules when using cursors:
 
-Server-side queries can be served from a secondary index. Two ways to declare
-one, and the choice between them is the whole decision:
-
-**Mark the field** you filter or order by. This is the one to reach for: it says
-"this field is worth looking up by" without coupling the schema to any
-particular query.
-
-```proto
-string state = 8 [(syncplane.v1.field_behavior) = { indexed: true }];
-```
-
-**Declare a composite** when a query filters on one field and orders by
-_another_:
-
-```proto
-option (syncplane.v1.entity) = {
-	name: "issue"
-	key_fields: [ "id" ]
-	index: {
-		name: "by_state_rank"
-		key: [ { path: "state" }, { path: "rank" desc: true } ]
-	}
-};
-```
-
-Why the second exists: a sorted key-value store has no posting lists to
-intersect, so `where state = 'open' order by rank desc limit 20` served from a
-single `state` index has to walk the whole `state = 'open'` range to sort it,
-and served from a single `rank` index has to walk the sort order re-checking
-`state` per candidate. Either is far better than decoding every row, and neither
-is bounded by the limit. The composite is exactly O(limit).
-
-What an index cannot serve, so don't declare one hoping it will:
-
-| Shape                      | Why                                                                                                          |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `contains` / `endsWith`    | Neither is a prefix, so no range bounds it. [Search](search.md) is a different mechanism with its own index. |
-| `or`                       | Needs a merge of several ranges; falls back to a scan.                                                       |
-| a collaborative-text field | Every keystroke would rewrite the entry. Rejected at registration.                                           |
-| a map, or a message list   | No comparison reaches it. Index a scalar field of the elements.                                              |
-| ordering **by** a list     | A row has many values there, so it has no sort position.                                                     |
-
-Two things to know about how this behaves. **A new index is not usable
-immediately** — a background pass walks the entity first, and until it finishes
-every query scans, which is correct and merely slower. On the client the same
-applies after every bootstrap, since a snapshot installs unindexed; the
-`indexing` event ([telemetry](../reference/telemetry.md#local-reads)) fires when
-the pass has finished and queries stop scanning. And **using an index never
-changes an answer**: every query has a legal scan fallback and the two produce
-identical results, which is what lets either side decline any plan it is unsure
-of.
-
-The same indexes serve the **local** `query()` too, for a workspace-scoped query
-the planner covers, and the first read of a `watchQuery()` on the same terms; a
-cross-workspace one always scans. Locally the index covers confirmed rows, with
-the optimistic overlay scanned whole and merged over the range — so a query still
-sees your own unpushed writes.
-
-The cost is on writes: every write to the entity re-stores that row's position
-in every index it has, on both sides. An index over a repeated field stores one
-entry per element, so that cost grows with the list — `MaxIndexEntriesPerRow` is
-the ceiling, and a write past it fails rather than storing a partial index.
-
-Because a decline changes nothing about the answer, nothing in a result says
-which path served it. `onSyncEvent` does: every local read reports a `query`
-event carrying `path` (`index` or `scan`), the index that served it, and — when
-it scanned — the reason it did.
-
-```ts
-const client = new SyncClient({
-	url,
-	entities,
-	onSyncEvent: (e) => {
-		if (e.type === 'query' && e.declined) {
-			metrics.increment('query.scan', 1, { entity: e.entity, reason: e.declined });
-		}
-	},
-});
-```
-
-See [Telemetry](../reference/telemetry.md#local-reads) for the reasons and what
-each one asks you to do about it.
+- A cursor is tied to the entity and sort order under which it was issued. Replaying a cursor with a different `orderBy` clause produces an error.
+- Both `query` and `queryServer` accept and emit the same cursors.
+- Use `offset` only when you must jump to an arbitrary position in the result set. The server caps `offset` at `MaxQueryOffset`.
+- Do not combine `offset` with `after` or `before`. Specifying both causes the query to fail.
 
 ## Paging a live result
 
-`offset`/`limit` inside a query are fixed for the life of a watch. To page
-through a live result, pass a `window` instead and move it:
+The `offset` and `limit` options inside a query remain fixed for the lifetime of a watch. To page through live query results, pass a `window` option and adjust it dynamically.
 
-```ts
-const view = client.db.todo.watchQuery(
-	{ orderBy: (t) => [ t.createdAtMs.desc() ] },
-	(rows) => paint(rows, rows.total),
-	{ window: { offset: 0, limit: 50 } },
-);
-onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
-```
+To paginate a live query:
 
-The watch maintains the whole match set, so `setWindow` is a slice rather than a
-read, and `rows.total` reports how many rows the page was cut from. A move that
-lands on the same rows delivers nothing; `setWindow({})` delivers everything.
+1. Initialize a watch query with a `window` object containing `offset` and `limit`:
 
-This is a different mechanism from `after`/`before`, and they compose: a watch's
-cursors bound what it MATCHES, and the window then slices what is left by rank.
-So a live query with an `after` reports a `total` counting only the rows past
-that position, and `setWindow` moves inside them.
+   ```ts
+   const view = client.db.todo.watchQuery(
+   	{ orderBy: (t) => [ t.createdAtMs.desc() ] },
+   	(rows) => paint(rows, rows.total),
+   	{ window: { offset: 0, limit: 50 } },
+   );
+   onScroll((first) => view.setWindow({ offset: first, limit: 50 }));
+   ```
+
+2. Update the visible slice by calling `view.setWindow({ offset, limit })` as the user navigates.
+3. Pass `view.setWindow({})` to deliver all matching rows without slicing.
+4. When finished, call `view.close()` to stop watching.
+
+The watch maintains the complete matching result set in memory. Calling `setWindow` slices the in-memory set without re-executing a database read, and `rows.total` reports the total number of matched rows.
+
+You can combine cursors with a window. The `after` and `before` cursors constrain which rows match the query, while `window` slices the resulting subset by rank.
 
 ## Filtering on a list
 
-A repeated scalar answers `has` / `hasAny` / `hasAll` / `isEmpty`, and marking it
-`indexed` makes membership a range read:
+To filter by repeated scalar fields or message lists, use list operators in your `where` clause.
 
-```proto
-repeated string labels = 10 [(syncplane.v1.field_behavior) = { indexed: true }];
-```
+### Filtering repeated scalar fields
 
-```ts
-await client.db.issue.query({ where: (i) => i.labels.has('bug') });
-```
+For repeated scalar fields, use `has`, `hasAny`, `hasAll`, or `isEmpty`:
 
-A list of **messages** — including a to-many reference — is asked about with
-`any()`, which scopes one element:
+1. Define the repeated field in your schema. Mark it with `indexed: true` for efficient range queries:
 
-```ts
-await client.db.issue.query({
-	where: (i) => i.assignees.any((a) => a.id.eq('maya')),
-});
-await client.db.order.query({
-	where: (o) => o.lineItems.any((li) => and(li.sku.eq('A-1'), li.qty.gt(3))),
-});
-```
+   ```proto
+   repeated string labels = 10 [(syncplane.v1.field_behavior) = { indexed: true }];
+   ```
 
-The element is explicit because two conditions have to be able to describe the
-**same** element. As separate terms —
-`and(o.lineItems.any((li) => li.sku.eq('A-1')), o.lineItems.any((li) => li.qty.gt(3)))`
-— they are a weaker question that two different line items satisfy.
+2. Query using `has` or related operators:
 
-An element of a reference list is the target's stub, so only its key fields are
-addressable; asking for anything else throws. Every reference field is already
-indexed by the engine, so `assignees.any((a) => a.id.eq('maya'))` is a range read
-with nothing declared. For any other message list, name the element field in a
-composite index:
+   ```ts
+   await client.db.issue.query({ where: (i) => i.labels.has('bug') });
+   ```
 
-```proto
-index: {
-	name: "by_sku"
-	key: [ { path: "line_items.sku" } ]
-}
-```
+### Filtering repeated message lists
 
-Such a component fans out — the row takes one position per element — and it
-still supplies the ordering that follows it once an equality has pinned it, so
-`{ key: [ { path: "labels" }, { path: "rank" desc: true } ] }` serves "labelled
-X, newest first" at O(limit). One list per index: components over two different
-lists would pair values from different elements.
+For lists of messages or to-many references, use `any()` to scope conditions to a single element:
+
+1. Use `any()` in the `where` predicate:
+
+   ```ts
+   await client.db.issue.query({
+   	where: (i) => i.assignees.any((a) => a.id.eq('maya')),
+   });
+   await client.db.order.query({
+   	where: (o) => o.lineItems.any((li) => and(li.sku.eq('A-1'), li.qty.gt(3))),
+   });
+   ```
+
+2. When querying reference lists, address only key fields on the target stub. Accessing non-key fields throws an error. Reference fields are automatically indexed by the engine.
+
+3. For other message lists, declare a composite index specifying the element field path:
+
+   ```proto
+   index: {
+   	name: "by_sku"
+   	key: [ { path: "line_items.sku" } ]
+   }
+   ```
+
+Composite indexes over list fields fan out by storing one entry per element. When an equality filter pins the list element, the index supplies the remaining sort order, such as `{ key: [ { path: "labels" }, { path: "rank" desc: true } ] }`. Each index can contain only one list field.
 
 ## Counting per value — badges, facets, dropdowns
 
-The counted surfaces of a list UI are not queries. A board's `In Progress · 12`
-badge, a facet sidebar's numbers, and the values a filter dropdown offers are all
-one question: partition the match set by a field, and report the partitions.
+To calculate aggregation counts or extract unique values for badges, facet filters, and dropdown menus, use `groupCount` and `distinct`.
 
-```ts
-// One badge per status, under the filter the board is showing.
-const byStatus = await client.db.issue.groupCount({
-	by: (i) => i.status,
-	where: (i) => i.projectId.eq(projectId),
-});
-// [ { value: 'done', count: 12 }, { value: 'open', count: 4 } ]
+To count or list distinct values:
 
-// The assignees this project actually has — before any of them is counted.
-const assignees = await client.db.issue.distinct({
-	by: (i) => i.assignee.id,
-	where: (i) => i.projectId.eq(projectId),
-});
-```
+1. Call `client.db.<entity>.groupCount()` to group matching records and return counts per value:
 
-`by` names the field with no operator on the end. Live versions read the same:
+   ```ts
+   // One badge per status, under the filter the board is showing.
+   const byStatus = await client.db.issue.groupCount({
+   	by: (i) => i.status,
+   	where: (i) => i.projectId.eq(projectId),
+   });
+   // [ { value: 'done', count: 12 }, { value: 'open', count: 4 } ]
 
-```tsx
-function StatusBadges({ projectId }: { projectId: string }) {
-	const counts = sync.db.issue.useGroupCount({
-		by: (i) => i.status,
-		where: (i) => i.projectId.eq(projectId),
-	});
-	// Zero-count columns come from YOUR domain, not from the read: a status no
-	// row holds is absent rather than 0.
-	return STATUSES.map((s) => (
-		<Badge
-			key={ s }
-			label={ s }
-			count={ counts.find((g) => g.value === s)?.count ?? 0 }
-		/>
-	));
-}
-```
+   // The assignees this project actually has — before any of them is counted.
+   const assignees = await client.db.issue.distinct({
+   	by: (i) => i.assignee.id,
+   	where: (i) => i.projectId.eq(projectId),
+   });
+   ```
 
-Three things to know before wiring a facet up:
+2. For React applications, use the `useGroupCount` hook:
 
-- **A repeated `by` path counts memberships, not rows.** `by: (i) => i.labels`
-  counts an issue once per label it holds, so the counts do not sum to the number
-  of matching issues. That is what a label facet wants.
-- **Groups come back in ascending value order**, with the group of rows holding
-  no value (`value: undefined`) last. `limit` cuts from the front of that order.
-- **A `groupCountServer` / `distinctServer` pair** pushes the same read to the
-  server, for counts over rows partial sync did not bring down.
+   ```tsx
+   function StatusBadges({ projectId }: { projectId: string }) {
+   	const counts = sync.db.issue.useGroupCount({
+   		by: (i) => i.status,
+   		where: (i) => i.projectId.eq(projectId),
+   	});
+   	// Zero-count columns come from YOUR domain, not from the read: a status no
+   	// row holds is absent rather than 0.
+   	return STATUSES.map((s) => (
+   		<Badge
+   			key={ s }
+   			label={ s }
+   			count={ counts.find((g) => g.value === s)?.count ?? 0 }
+   		/>
+   	));
+   }
+   ```
 
-Declare the index the grouping wants and the read never touches a row: components
-`[eq-filter fields…, groupPath, …]` — the same shape a board ordering by
-`[status, rank]` already needs — let the walk skip from one distinct value to the
-next. Without one it buckets a scan, which is correct and costs the entity. See
-[Grouped reads](../explanation/grouped-reads.md).
+3. If you need counts over rows not synced locally, call `groupCountServer` or `distinctServer`.
+
+When using grouped reads:
+
+- A repeated `by` path counts memberships rather than rows. An issue with two labels increments both label counts.
+- Results return in ascending value order. Rows without a value (`value: undefined`) appear last. The `limit` option truncates from the beginning of this order.
+- Declare composite indexes matching `[eq-filter fields…, groupPath, …]` to allow the query planner to perform index skip-scans instead of scanning all rows. For more information, see [Grouped reads](../explanation/grouped-reads.md).
 
 ## The first rows of each group — column previews, top-N
 
-A board column shows a badge and the first twenty cards; a project list shows
-each project's newest issue. Read with the query surface that is one query per
-column, or one query that reads every row of every column to keep twenty of each.
-`groupRows` is the same partition as `groupCount` with rows instead of numbers:
+To retrieve the top rows of each partition (for example, displaying the first twenty cards in each board column), use `groupRows`.
 
-```ts
-const columns = await client.db.issue.groupRows({
-	by: (i) => i.status,
-	orderBy: (i) => [ i.rank.asc() ],
-	perGroup: 20,
-	where: (i) => i.projectId.eq(projectId),
-});
-// [ { value: 'done', rows: [ …20 issues… ], total: 41, hasMore: true }, … ]
-```
+To fetch the first rows for each group:
 
-`orderBy` decides what "first" means inside a group; `perGroup` how many come
-back; `limit` still caps the groups themselves. Each group carries `total` — the
-matching rows in it, the badge — and `hasMore`, which is what a column's "load
-more" hangs off. The live version is `useGroupRows`, and `groupRowsServer`
-pushes the read down for rows partial sync did not bring.
+1. Call `client.db.<entity>.groupRows()` specifying `by`, `orderBy`, `perGroup`, and any `where` filter:
 
-The read costs `groups × perGroup` rows against an index whose components past
-the grouping path ARE that ordering:
+   ```ts
+   const columns = await client.db.issue.groupRows({
+   	by: (i) => i.status,
+   	orderBy: (i) => [ i.rank.asc() ],
+   	perGroup: 20,
+   	where: (i) => i.projectId.eq(projectId),
+   });
+   // [ { value: 'done', rows: [ …20 issues… ], total: 41, hasMore: true }, … ]
+   ```
 
-```proto
-index: {
-  name: "by_status_rank"
-  key: [ { path: "status" }, { path: "rank" } ]
-}
-```
+2. For React applications, use `useGroupRows`. For server-side execution across unsynced data, call `groupRowsServer`.
+3. Inspect the returned group objects:
+   - `rows`: The array of entity records up to `perGroup` items.
+   - `total`: The total count of matching rows in that group.
+   - `hasMore`: A boolean indicating whether additional rows exist in that group.
 
-Anything else — an ordering the index stores backwards, a field no component
-holds — falls back to reading the whole match set and sorting each bucket, which
-is correct and costs the entity. Two shapes to keep in mind:
+To optimize grouped row queries:
 
-- **`total: false`** drops the per-group count, and with it the walk of every
-  matching row a count needs. A column showing rows but no badge should pass it.
-- **A repeated `by` path** puts a row in one group per element, as it does for a
-  count — so an issue with three labels appears in three columns.
+- Set `total: false` when your UI displays rows without count badges, skipping the full count traversal.
+- Define a composite index where components following the grouping path match the `orderBy` clause:
 
-## Semantics to know
+  ```proto
+  index: {
+    name: "by_status_rank"
+    key: [ { path: "status" }, { path: "rank" } ]
+  }
+  ```
 
-Ordering is identical in both directions, down to UTF-16 collation, pinned by
-vectors both languages run. Two things surprise people:
+- If using a repeated `by` path, note that an entity appears in each group corresponding to its elements.
 
-- A predicate on a leaf that could never satisfy it — comparing or ordering by
-  bytes, a message, a map or a repeated field — is **rejected** when the query is
-  compiled, naming the operator that does work instead, rather than quietly
-  matching nothing.
-- An empty or unset list matches nothing, so `any()` over one is false and
-  `not(...any())` reads as "no element matches".
-- `NaN` is comparable to nothing: `gt`/`gte`/`lt`/`lte` are all false with a `NaN`
-  on either side, as `eq` already is. Ordering ranks values `real < NaN <
-  missing`, and the rank wins over the direction, so `NaN` and missing values
-  both land at the end under `asc` and `desc` alike.
+## Confirming the result
 
-Collaborative text fields query as their visible string:
-`where: (d) => d.body.contains('word')` works on both evaluators.
+To verify that your query works as expected:
+
+1. Confirm that the returned data matches your query filters and ordering criteria.
+2. For local queries, check `rows.coverage.complete` to ensure that partial sync returned complete data.
+3. For live queries (`watchQuery` or React hooks), mutate an entity record and verify that your callback or UI component re-renders with updated data.
+4. To check whether a query used an index or scanned records, inspect the `onSyncEvent` telemetry handler:
+
+   ```ts
+   const client = new SyncClient({
+   	url,
+   	entities,
+   	onSyncEvent: (e) => {
+   		if (e.type === 'query' && e.declined) {
+   			metrics.increment('query.scan', 1, {
+   				entity: e.entity,
+   				reason: e.declined,
+   			});
+   		}
+   	},
+   });
+   ```
 
 ## Related
 
-- [TypeScript client API](../reference/typescript-client.md#4-queries--the-dsl)
-  — the full operator surface per field type.
-- [Grouped reads](../explanation/grouped-reads.md) — what a group is, and the
-  skip-scan behind a counted surface.
-- [Query from server-side code](server-side-queries.md) — the Go equivalents.
+- [Secondary indexes](../reference/proto-options.md#secondary-indexes)
+- [Limits and trade-offs](../explanation/limits-and-trade-offs.md)
+- [TypeScript client API](../reference/typescript-client.md#queries) — Full operator reference per field type.
+- [Grouped reads](../explanation/grouped-reads.md) — How skip-scans and grouped aggregations operate.
+- [Query from server-side code](server-side-queries.md) — Go query equivalents.
+- [Partial sync and coverage](../explanation/partial-sync-and-coverage.md) — Coverage models and sync boundaries.

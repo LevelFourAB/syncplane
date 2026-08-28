@@ -1,25 +1,48 @@
-# Hold several workspaces on one client
+# Holding several workspaces on one client
 
-A user who belongs to several workspaces gets one client, not one per workspace.
-They share a store, a change stream and a push; the client-level API stays bound
-to a **default workspace**, so single-workspace code is unchanged, and
-`client.ws(id)` reaches any other.
+This guide shows you how to configure and use a single client across multiple workspaces. Use this guide when a user belongs to several workspaces and needs to share storage, a change stream, and push operations across them.
 
-```ts
-const client = new SyncClient({
-	url: 'https://sync.example.com',
-	accountId: 'user-42', // the storage scope: one IndexedDB database
-	workspaces: [ 'team', 'personal' ],
-	defaultWorkspace: 'team', // what client.mutate / client.db bind to
-	entities: [ TodoSchema ],
-});
-await client.start();
+## Prerequisites
 
-await client.db.todo.mutate.create({ title }); // → 'team', the default
-await client.ws('personal').db.todo.mutate.create({ title });
-```
+Before you begin, ensure you have:
+
+- An account ID (`accountId`) for the user.
+- The list of workspace IDs the user belongs to.
+- Schema definitions for your entities (for example, `TodoSchema`).
+
+## Configuring the client
+
+1. Initialize and start the `SyncClient` with your account ID, workspace list, and default workspace:
+
+   ```ts
+   const client = new SyncClient({
+   	url: 'https://sync.example.com',
+   	accountId: 'user-42', // the storage scope: one IndexedDB database
+   	workspaces: [ 'team', 'personal' ],
+   	defaultWorkspace: 'team', // what client.mutate / client.db bind to
+   	entities: [ TodoSchema ],
+   });
+   await client.start();
+   ```
+
+   `accountId` names the store and is required when the client holds more than one workspace. For a single-workspace client, `accountId` defaults to the workspace ID. If you have two accounts, create two separate clients because credentials attach per request and cannot share a stream or a `client_id`.
+
+2. Write mutations to the default workspace or to a specific workspace:
+
+   ```ts
+   await client.db.todo.mutate.create({ title }); // → 'team', the default
+   await client.ws('personal').db.todo.mutate.create({ title });
+   ```
+
+   The client-level API binds to the default workspace. To target a different workspace, call `client.ws(id)`.
+
+   **Note:** The server sequences partition operations individually. Operations such as writes, `transact()` batches, undo steps, references, `queryServer`, and bootstraps do not cross workspaces.
 
 ## Reading across workspaces
+
+To read data across multiple workspaces, use cross-workspace query methods such as `scanAll`, `queryAll`, or `watchQueryAll`.
+
+Cross-workspace reads are exact, not a fan-out-and-merge operation. Every workspace's rows for an entity sit under one key prefix, so ordering and limits apply to the merged set. Each row includes its `workspaceId`, which routes write operations back to that workspace:
 
 ```ts
 const mine = await client.ws('personal').db.todo.scan();
@@ -31,13 +54,7 @@ for (const row of everywhere) {
 }
 ```
 
-Cross-workspace reads (`scanAll`, `queryAll`, `watchQueryAll`) are exact, not a
-fan-out-and-merge: every workspace's rows of an entity sit under one key prefix,
-so ordering and limits apply to the merged set. Every row names where it lives,
-which is also how a write routes back.
-
-In React that live read is `db.todo.useQueryAll(query, opts?)` — one
-subscription over the whole client:
+In React, call `db.todo.useQueryAll(query, opts?)` to create a single subscription across the whole client:
 
 ```tsx
 const everywhere = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) });
@@ -46,9 +63,7 @@ const byWorkspace = Map.groupBy(everywhere, (row) => row.workspaceId);
 
 ### Naming the workspaces to read
 
-A view over _some_ of the workspaces — "the areas I follow", a filtered
-dashboard — takes `workspaces` rather than reading everything and filtering in
-the component:
+To restrict a query to specific workspaces instead of filtering in the component, pass the `workspaces` option:
 
 ```tsx
 const followed = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) }, {
@@ -56,24 +71,19 @@ const followed = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) }, {
 });
 ```
 
-The read then scans only the prefixes it names, and `followed.total` counts what
-you asked about — where a component filter leaves a total describing a different
-question. Naming a single workspace is worth it on its own: the read is then a
-one-workspace query by construction, so a
-[secondary index](../reference/proto-options.md#secondary-indexes) can serve it,
-which nothing spanning workspaces can. An empty array reads nothing; it is not
-shorthand for "all".
+The read scans only the specified workspace prefixes, and `followed.total` counts only rows within those workspaces.
 
-The same option is on the one-shot: `client.queryAll(TodoSchema, q, {
-workspaces })`.
+If you specify a single workspace, the query runs as a single-workspace query and can use a [secondary index](../reference/proto-options.md#secondary-indexes). Queries spanning multiple workspaces cannot use secondary indexes. An empty array reads nothing and is not shorthand for all workspaces.
+
+You can also pass `workspaces` to one-shot queries:
+
+```ts
+client.queryAll(TodoSchema, q, { workspaces });
+```
 
 ### A predicate that differs per workspace
 
-A row never crosses a workspace, so anything referenced by id — the member a
-task is assigned to — has a **different id in each one**, and "assigned to me"
-is a different literal per workspace. One `where` cannot say it. `byWorkspace`
-builds one predicate per workspace, still under a single subscription and a
-single merged result:
+Rows do not cross workspaces, and referenced IDs (such as member IDs) differ across workspaces. To apply a different filter condition per workspace under a single subscription, use `byWorkspace`:
 
 ```tsx
 const mine = db.task.useQueryAll({
@@ -86,22 +96,13 @@ const mine = db.task.useQueryAll({
 }, { workspaces: followedIds });
 ```
 
-Only the predicate varies: order, page and total belong to the merged result, so
-`orderBy`, `limit`, `offset` and `total` stay at the top level. Each workspace's
-leg is a single-workspace query and can be index-served. `byWorkspace` needs
-`workspaces` — the predicates are built from the set it runs over — and throws
-without it.
+Only the predicate varies per workspace. Query options such as `orderBy`, `limit`, `offset`, and `total` apply to the merged result. Each workspace query leg runs as a single-workspace query and can use an index. The `byWorkspace` option requires `workspaces` and throws an error without it.
 
-Ordering by [`relevance()`](search.md#searching-across-workspaces) works here as
-anywhere else: give each workspace's predicate its own `match`, and the merged
-result comes back best-match-first across all of them.
+To order results by relevance, use [`relevance()`](search.md#searching-across-workspaces). Give each workspace predicate its own `match` call, and the merged result returns best matches first across all workspaces.
 
 ### Rows named one by one
 
-When the set is not a predicate but a list of specific rows — a personal task
-list, a pinned set — name them by ref instead. `client.watchRowsAll(schema,
-refs, cb, opts?)` and `db.todo.useRowsAll(refs, opts?)` take
-`{ workspaceId, key }` and cost one point read per ref rather than a scan:
+To read specific rows instead of querying by predicate, pass row references to `client.watchRowsAll(schema, refs, cb, opts?)` or `db.todo.useRowsAll(refs, opts?)`. Each reference takes `{ workspaceId, key }` and performs a point read rather than a scan:
 
 ```tsx
 const tasks = db.todo.useRowsAll([
@@ -110,53 +111,49 @@ const tasks = db.todo.useRowsAll([
 ]);
 ```
 
-Writing back does not go through a hook: a mutate hook binds to one workspace,
-so a component that writes into whichever workspace a row came from takes
-`useSyncClient()` and calls `client.ws(row.workspaceId).db.todo.mutate`.
-
-What does **not** cross a workspace is anything the server sequences per
-partition — a write, a `transact()` batch, an undo step, a reference,
-`queryServer` — nor a bootstrap.
+Mutation hooks bind to a single workspace. To write back to the source workspace of a row from a component, call `useSyncClient()` and use `client.ws(row.workspaceId).db.todo.mutate`.
 
 ## Adding and removing
 
-```ts
-client.addWorkspace('archive'); // bootstraps on the next cycle
+To add or remove workspaces dynamically on an active client:
 
-// Stop syncing + delete locally. `discarded` carries whatever was still queued
-// for the workspace — the only copy left, since the purge deleted the queue.
-const { discarded } = await client.removeWorkspace('archive', { purge: true });
-```
+1. Add a new workspace by calling `addWorkspace`:
 
-A purge drops the rows, the overlay, the cursor and anything still queued for
-that workspace. The queued mutations can never be acked, so they are discarded —
-but not silently: they come back as `result.discarded` (each with its decoded
-`mutation`, read inside the transaction that deleted them, so the list is
-exactly what was lost) and each is reported through `onMutationRejected` with
-code `workspace_purged`. Take the return value if the app wants to keep unsent
-work; the callback is what makes ignoring it safe.
+   ```ts
+   client.addWorkspace('archive'); // bootstraps on the next cycle
+   ```
 
-## `accountId`
+2. Remove a workspace and purge local data by calling `removeWorkspace`:
 
-`accountId` names the store. It defaults to the workspace id for a
-single-workspace client (so its database stays exactly where it was) and is
-**required** once the client holds more than one.
+   ```ts
+   // Stop syncing + delete locally. `discarded` carries whatever was still queued
+   // for the workspace — the only copy left, since the purge deleted the queue.
+   const { discarded } = await client.removeWorkspace('archive', {
+   	purge: true,
+   });
+   ```
 
-Two accounts need two clients: a credential is attached per request, so they can
-never share a stream or a `client_id`.
+   A purge drops the rows, overlay, cursor, and queued mutations for that workspace.
 
-## Why the partition is hard
+   Discarded mutations cannot be acknowledged by the server. The client returns them in `result.discarded`, reading each mutation inside the transaction that deleted it. The client also reports each discarded mutation through `onMutationRejected` with the `workspace_purged` code. Use the return value if your application needs to preserve unsent work.
 
-`workspace_id` is a hard partition key everywhere and the server sequences per
-workspace, so each workspace keeps its own cursor, pending queue and mutation-id
-counter — the server requires per-`(workspace, client_id)` gap-free ids. The
-sharing is at the transport and storage layers only.
+## Confirming the result
+
+To confirm that multi-workspace sync works:
+
+1. Run a query across your configured workspaces:
+
+   ```ts
+   const everywhere = await client.queryAll(TodoSchema, {
+   	where: (t) => t.completed.eq(false),
+   });
+   ```
+
+2. Verify that `everywhere` contains rows from multiple workspaces and that each row contains the expected `workspaceId`.
 
 ## Related
 
-- [Build a UI with React](react.md) — `<WorkspaceProvider workspaceId>` scopes a
-  subtree's hooks to one workspace, and `{ workspaceId }` scopes a single call.
-- [Handle failures](handle-failures.md) — losing access to one workspace leaves
-  the others running.
-- [Sync status](../reference/sync-status-and-codes.md) — which fields are
-  account-wide and which are per workspace.
+- [Workspaces are a hard partition](../explanation/convergence-model.md#workspaces-are-a-hard-partition)
+- [Build a UI with React](react.md) — `<WorkspaceProvider workspaceId>` scopes a subtree's hooks to one workspace, and `{ workspaceId }` scopes a single call.
+- [Handle failures](handle-failures.md) — losing access to one workspace leaves the others running.
+- [Sync status](../reference/sync-status-and-codes.md) — which fields are account-wide and which are per workspace.

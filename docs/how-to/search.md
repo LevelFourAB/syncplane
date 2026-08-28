@@ -1,14 +1,21 @@
-# Search data
+# Searching data
 
-Declare which fields an entity is searched by, then query with `match` and
-order by relevance. Search is case- and accent-insensitive, matches the final
-term as a prefix while the user is typing, and works offline over the synced
-subset exactly as it works on the server over everything.
+This guide shows you how to declare searchable fields on an entity and search data using relevance matching. Use this guide when you want to query data with full-text search across local or server databases.
+
+Search is case-insensitive and accent-insensitive, matches the final term as a prefix while you type, and works offline over the synced subset exactly as it works on the server over all data.
+
+## Prerequisites
+
+Before you begin, ensure you have:
+
+- An entity schema defined in Protocol Buffers or TypeScript.
+- An initialized database client or transaction.
 
 ## Declare the search fields
 
-Mark fields in the .proto — `searchable` for the simple case, an entity-level
-`search` block when you want to control importance order or analyzer options:
+To make an entity searchable, mark its string fields in your schema definition.
+
+1. In Protocol Buffers, mark fields with `searchable: true` for individual fields, or add an entity-level `search` block to control field importance and analyzer options:
 
 ```proto
 message Article {
@@ -27,12 +34,9 @@ message Article {
 }
 ```
 
-Order is importance: `searchable`-marked fields come first (in field order),
-then the `search` block's fields (in declaration order). Here a match in
-`title` outranks one in `summary`, which outranks one in `body`. A
-collaborative-text field is searched as the plain text the user sees.
+Field order determines importance. Fields marked with `searchable` come first in field order, followed by fields in the `search` block in declaration order. In this example, a match in `title` outranks a match in `summary`, which outranks a match in `body`. A collaborative-text field is searched as the plain text you see.
 
-The same declaration in a [TS-first schema](define-schemas-in-typescript.md):
+2. In a [TS-first schema](define-schemas-in-typescript.md), mark fields with `.searchable()` or add a `search` options block:
 
 ```ts
 const article = entity('article', {
@@ -44,14 +48,13 @@ const article = entity('article', {
 });
 ```
 
-Search reads **singular string fields** (collaborative text included). A
-repeated field, a number, or a declaration naming no fields at all is rejected
-at registration.
+Search reads singular string fields, including collaborative text. Schema registration rejects repeated fields, numbers, or declarations that name no fields.
 
 ## Query
 
-`match` is entity-level — call it on the query root, not on a field — and
-`relevance()` orders best match first:
+To query searchable data, call `match` at the entity level and sort with `relevance()`:
+
+1. Run a query with `match` in the `where` clause and `relevance()` in `orderBy`:
 
 ```ts
 const hits = await client.db.article.query({
@@ -61,15 +64,9 @@ const hits = await client.db.article.query({
 });
 ```
 
-Every term must occur in some searchable field. The query is analyzed exactly
-like the fields are, so `CAFE` finds `Café`; and the **final term matches as a
-prefix** when the query ends inside it, so wiring an input straight through
-works as search-as-you-type — `mil` finds "milk" — while a trailing space
-makes the term exact. An empty query matches every row.
+Every term must occur in some searchable field. The query analyzer processes terms the same way it processes fields, so `CAFE` matches `Café`. The final term matches as a prefix when the query ends inside it, supporting search-as-you-type (for example, `mil` matches `milk`). A trailing space makes the term exact. An empty query matches every row.
 
-`match` is an ordinary condition: combine it with filters, use it in
-`watchQuery` for a live result, or skip `relevance()` to keep your own
-ordering.
+2. Combine `match` with other filters or use it in a live query:
 
 ```ts
 const view = client.db.article.watchQuery({
@@ -79,7 +76,9 @@ const view = client.db.article.watchQuery({
 }, render);
 ```
 
-From Go, the same query is `query.Match` and `query.Relevance`:
+If you do not need relevance ranking, omit `relevance()` to use custom ordering.
+
+3. To execute the query from Go, use `query.Match` and `query.Relevance`:
 
 ```go
 tx.Query(&articlev1.Article{}, query.Spec{
@@ -89,16 +88,13 @@ tx.Query(&articlev1.Article{}, query.Spec{
 }, collect)
 ```
 
-`relevance()` requires exactly one `match` in the predicate — it is that
-condition's rank. Paging works as for any other ordering: pass a result's
-`endCursor` back as `after`, and a cursor minted locally is valid on the
-server and the other way around.
+The `relevance()` ordering requires exactly one `match` condition in the predicate. For pagination, pass the result `endCursor` as `after`. A cursor created locally is valid on the server, and a cursor created on the server is valid locally.
 
 ## Searching across workspaces
 
-`queryAll`, `watchQueryAll` and `useQueryAll` rank a merged result the same
-way, including when the predicate is chosen per workspace — a search narrowed
-by something workspace-scoped, "my documents about X" being the usual case:
+To query across workspaces, use `queryAll`, `watchQueryAll`, or `useQueryAll`.
+
+1. Specify a workspace predicate with `byWorkspace` and order by `relevance()`:
 
 ```ts
 const mine = db.doc.useQueryAll({
@@ -110,20 +106,16 @@ const mine = db.doc.useQueryAll({
 }, { workspaces: followedIds });
 ```
 
-Every workspace's predicate then needs its own single `match` — a leg without
-one throws, naming the workspace — and each row ranks against the match its own
-workspace was read under, so the legs may even search for different things. The
-ranks stay comparable across them because a rank is computed from the row alone
-(see [the search model](../explanation/search.md)); nothing about the workspace,
-or about the other rows in it, enters the number.
+2. Ensure every workspace predicate contains a single `match` condition. A workspace predicate without a `match` condition throws an error naming the workspace.
+
+Each row ranks against the match condition evaluated for its workspace. Ranks remain comparable across workspaces because rank is computed from the row alone. For more details, see [the search model](../explanation/search.md).
 
 ## Local, server, or both
 
-A local `query` searches the synced subset, instantly and offline; under
-partial sync that may not be everything. The result's `coverage` report says
-so, and `queryServer` runs the same query over everything the server holds —
-same analyzer, same ranking, so falling back does not reorder what was already
-on screen:
+A local `query` searches the synced local subset offline. When partial sync is active, the local database might not contain all server records.
+
+1. Execute a local query and check `local.coverage.complete`.
+2. If `coverage.complete` is `false`, call `queryServer` with the same query parameters to search all server data:
 
 ```ts
 const local = await client.db.article.query({
@@ -140,34 +132,15 @@ if (!local.coverage.complete) {
 }
 ```
 
-See [Query data](query-data.md) for the coverage pattern in general.
+For more information on the coverage pattern, see [Query data](query-data.md).
 
-## The index behind it
+## Confirming the result
 
-Declaring search fields also declares a **term index**, maintained on every
-write on both sides, that a match query uses to narrow its candidates instead
-of scanning the entity. Everything that is true of
-[secondary indexes](../reference/proto-options.md#secondary-indexes) is true
-of it: it is invisible and additive, a new declaration backfills in the
-background (queries scan — correctly — until the pass finishes and the
-`indexing` event fires), and using it never changes an answer.
+To confirm that your search configuration works:
 
-Costs to know:
-
-- **Writes pay for it.** A write re-stores one posting per distinct term of
-  the row's searchable fields — a few dozen for typical rows. A row with more
-  than 256 distinct terms stores a single overflow marker instead and is
-  simply considered by every search, so huge documents degrade the narrowing,
-  never the results.
-- **Common-word queries narrow little.** A term that appears in most rows
-  yields most rows as candidates; the query is still correct, just closer to a
-  scan. Ranking, not the index, is what puts the good hits first. A query of
-  several words costs what its most selective word costs, so adding a word to
-  a search never makes it slower — but a single common word has nothing to be
-  narrowed by.
-
-Why matching and ranking behave as they do — and what search deliberately does
-not attempt — is covered in [the search model](../explanation/search.md).
+1. Run a query with a search term matching known test records.
+2. Verify that the query returns matching records in order of relevance.
+3. If you use search-as-you-type, verify that prefix queries return expected matches before you enter the complete term.
 
 ## Related
 

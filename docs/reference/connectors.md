@@ -1,14 +1,10 @@
 # Connectors
 
-Everything `engine/connect` exposes: the port interfaces an adopter
-implements, every `Config` field, the error sentinels a source wraps, and the
-health surface a product renders. For the task-shaped version, see
-[Sync an external store](../how-to/sync-an-external-store.md).
+The `engine/connect` package provides port interfaces, configuration options, error sentinels, and health monitoring for synchronizing data between external sources and the engine. For a step-by-step guide, see [Sync an external store](../how-to/sync-an-external-store.md).
 
 ## The port
 
-A source implements `Source`, plus whichever optional interfaces it can
-support. The connector type-asserts for the optional ones.
+A source implements `Source`, along with any optional interfaces it supports. The connector type-asserts for optional interfaces:
 
 ```go
 // Required.
@@ -31,24 +27,25 @@ type Incremental interface {
 // Optional, on the value returned by Config.OpenSource: io.Closer.
 ```
 
-Every method takes `workspaceID`, including when `OpenSource` already mints
-one source per workspace, so one implementation can serve both wirings.
+Every method accepts `workspaceID`, including when `OpenSource` creates one source per workspace.
 
-Delivery is at-least-once in both directions: `Write` must be an idempotent
-upsert and `Delete` must treat a missing item as a no-op.
+Delivery is at-least-once in both directions. `Write` must be an idempotent upsert, and `Delete` must treat a missing item as a no-op.
 
 ### Item
 
-| Field         | Meaning                                                                                                                                                                                                                                   |
-| ------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Msg`         | The record decoded into a registered entity message, key fields populated.                                                                                                                                                                |
-| `Fingerprint` | A cheap stamp of the source's content — content hash, mtime+size, rowversion. Equal content **must** yield equal fingerprints between `List` and `Write`; that equality is how the connector tells its own echoed writes from real edits. |
-| `TextFields`  | Plain-string values of the entity's collaborative-text fields, keyed by top-level proto field name. Leave the field bytes unset on `Msg`.                                                                                                 |
+The `Item` struct contains the following fields:
 
-`PlainTextField(msg, field)` renders a text field of an engine message back to
-its visible string — the egress half of `TextFields`.
+| Field         | Description                                                                                                                                                                                                                                                                |
+| ------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Msg`         | The record decoded into a registered entity message with key fields populated.                                                                                                                                                                                             |
+| `Fingerprint` | A fingerprint of the source content, such as a content hash, modification time and size, or row version. Equal content must yield equal fingerprints between `List` and `Write`. The connector uses fingerprint equality to distinguish echoed writes from external edits. |
+| `TextFields`  | Plain-string values of the entity collaborative-text fields, keyed by top-level protobuf field name. Leave the field bytes unset on `Msg`.                                                                                                                                 |
+
+The `PlainTextField(msg, field)` helper renders a collaborative-text field of an engine message back to its visible string representation.
 
 ### Delta and Deletion
+
+The `Delta` and `Deletion` types represent incremental changes:
 
 ```go
 type Delta struct {
@@ -66,6 +63,8 @@ type Deletion struct {
 
 ### Direction and Binding
 
+The `Direction` and `Binding` types define the synchronization direction for entities:
+
 ```go
 type Direction int
 const (
@@ -79,50 +78,51 @@ type Binding struct {
 }
 ```
 
-`Config.Entities` is the all-`Bidirectional` shorthand; `Config.Bindings` is
-the explicit form. They merge, and binding one entity through both is an
-error.
+`Config.Entities` is a shorthand for all `Bidirectional` bindings. `Config.Bindings` defines explicit bindings. The connector merges both fields. Binding the same entity in both fields causes an error.
 
 ## Config
 
-| Field                         | Default          | Meaning                                                                                                                                                                                                                       |
-| ----------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `Server`                      | required         | The engine to ingress into and egress out of.                                                                                                                                                                                 |
-| `Source`                      | one of two       | A single source shared by every workspace.                                                                                                                                                                                    |
-| `OpenSource`                  | one of two       | `func(ctx, workspaceID) (Source, error)`; one source per workspace, built lazily and reused.                                                                                                                                  |
-| `State`                       | required         | Durable bookkeeping; `sqlitestate.Open` is the shipped implementation. Owned by the connector after `New`.                                                                                                                    |
-| `Entities`                    | —                | Prototypes bound bidirectionally.                                                                                                                                                                                             |
-| `Bindings`                    | —                | Prototypes bound with an explicit direction.                                                                                                                                                                                  |
-| `BatchSize`                   | 256              | Rows per change-feed page during egress.                                                                                                                                                                                      |
-| `Workers`                     | 16               | How many passes run at once, across every workspace. The only bound between a fleet of workspaces and the source.                                                                                                             |
-| `ReconcileInterval`           | 1m               | How often each workspace runs a pass, and how often workspaces are discovered and dropped. Negative disables periodic passes; discovery still runs, at 1m. For an `Incremental` source this is how often `Changes` is polled. |
-| `FullReconcileInterval`       | 1h               | How long an `Incremental` source may ride its cursor before a full `List` runs as a safety net. Negative means only on `ErrCursorInvalid` or a missing cursor. Ignored for non-incremental sources.                           |
-| `RetryMin` / `RetryMax`       | 5s / 5m          | Per-workspace backoff bounds after a failed pass. Negative `RetryMin` disables backoff.                                                                                                                                       |
-| `IngestChunk` / `IngestPause` | 0 / 0 (off)      | After every `IngestChunk` engine writes, an ingress pass sleeps `IngestPause`. Only writes count.                                                                                                                             |
-| `OnHealth`                    | nil              | Called with the workspace's `Health` after every pass. Runs on the calling goroutine.                                                                                                                                         |
-| `Workspaces`                  | engine's list    | Which workspaces `Start` manages, re-read every sweep — one it stops naming is dropped. Supply this for source-first workspaces.                                                                                              |
-| `WriterID`                    | per instance     | The connector's collaborative-text writer identity. Pin it to keep one identity across restarts; never share it between connectors that can run at the same time.                                                             |
-| `Logger`                      | `slog.Default()` | Where the background loops log.                                                                                                                                                                                               |
+The `Config` struct contains the following fields:
+
+| Field                         | Default                | Description                                                                                                                                                                                                                         |
+| ----------------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `Server`                      | Required               | The engine instance for ingress and egress operations.                                                                                                                                                                              |
+| `Source`                      | Optional               | A single source shared across all workspaces. Specify either `Source` or `OpenSource`.                                                                                                                                              |
+| `OpenSource`                  | Optional               | A function with signature `func(ctx, workspaceID) (Source, error)` that constructs and caches one source per workspace. Specify either `Source` or `OpenSource`.                                                                    |
+| `State`                       | Required               | Durable state storage. The `sqlitestate.Open` function provides the shipped implementation. The connector takes ownership of `State` after `New`.                                                                                   |
+| `Entities`                    | None                   | Prototypes bound bidirectionally.                                                                                                                                                                                                   |
+| `Bindings`                    | None                   | Prototypes bound with an explicit `Direction`.                                                                                                                                                                                      |
+| `BatchSize`                   | `256`                  | The number of rows per change-feed page during egress.                                                                                                                                                                              |
+| `Workers`                     | `16`                   | The number of concurrent passes across all workspaces.                                                                                                                                                                              |
+| `ReconcileInterval`           | `1m`                   | The interval between workspace passes and discovery sweeps. A negative value disables periodic passes while discovery sweeps continue at `1m` intervals. For an `Incremental` source, this sets the polling interval for `Changes`. |
+| `FullReconcileInterval`       | `1h`                   | The maximum time an `Incremental` source runs using cursor changes before a full `List` pass runs. A negative value runs a full pass only on `ErrCursorInvalid` or a missing cursor. Ignored for non-incremental sources.           |
+| `RetryMin` / `RetryMax`       | `5s` / `5m`            | The per-workspace backoff bounds after a failed pass. A negative `RetryMin` disables backoff.                                                                                                                                       |
+| `IngestChunk` / `IngestPause` | `0` / `0` (disabled)   | The pause duration after every `IngestChunk` writes during an ingress pass. Only writes count toward the chunk count.                                                                                                               |
+| `OnHealth`                    | `nil`                  | A callback invoked with the workspace `Health` status after each pass on the calling goroutine.                                                                                                                                     |
+| `Workspaces`                  | Engine workspace list  | The list of workspaces that `Start` manages, re-evaluated on every sweep. Any workspace omitted from the list is dropped. Provide this function for source-first workspaces.                                                        |
+| `WriterID`                    | Per-instance unique ID | The collaborative-text writer identity for the connector. Set a fixed value to maintain identity across restarts. Do not share this value between connectors running concurrently.                                                  |
+| `Logger`                      | `slog.Default()`       | The logger for background loops.                                                                                                                                                                                                    |
 
 ## Driving a connector
 
-| Call                  | Does                                                                                                                  |
-| --------------------- | --------------------------------------------------------------------------------------------------------------------- |
-| `Start(ctx)`          | Launches the background loops: a pool of `Workers`, the activity subscription, and the discovery sweep.               |
-| `Kick(workspaceID)`   | Schedules a near-immediate pass, coalescing with one already pending. Manages a workspace the engine has never seen.  |
-| `Ingress(ctx, ws)`    | One source→engine pass: incremental when the source supports it and the cursor is live, a full `Reconcile` otherwise. |
-| `Reconcile(ctx, ws)`  | One full source→engine pass: enumerate, ingress every change, tombstone rows the source no longer holds.              |
-| `Drain(ctx, ws)`      | Egresses committed engine changes until the feed is dry. Skips `IngressOnly` entities.                                |
-| `Forget(workspaceID)` | Drops the workspace, cancelling any pass in flight, and releases its source. Shadows and cursors survive.             |
-| `Tracked()`           | How many workspaces the connector holds schedule state for.                                                           |
-| `Close()`             | Stops the workers, closes any opened sources, closes `State`.                                                         |
+The connector provides the following methods:
 
-`Ingress`, `Reconcile` and `Drain` all attempt immediately, even inside a
-backoff window — the caller asked. Only the background schedule waits. They do
-still take the workspace's turn, so a direct call and a background pass for one
-workspace run one after the other rather than interleaving their writes.
+| Method                | Description                                                                                                                                            |
+| --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `Start(ctx)`          | Launches background loops, including the worker pool, activity subscription, and discovery sweep.                                                      |
+| `Kick(workspaceID)`   | Schedules an immediate pass and coalesces with pending passes. Starts managing a workspace if the engine has not yet tracked it.                       |
+| `Ingress(ctx, ws)`    | Runs one source-to-engine pass. Uses incremental synchronization if the source supports it and the cursor is valid; otherwise runs a full `Reconcile`. |
+| `Reconcile(ctx, ws)`  | Runs a full source-to-engine pass by enumerating records, ingesting changes, and deleting rows no longer present in the source.                        |
+| `Drain(ctx, ws)`      | Egresses committed engine changes until the change feed is empty. Skips entities configured as `IngressOnly`.                                          |
+| `Forget(workspaceID)` | Stops managing the workspace, cancels running passes, and releases the source instance. Preserves shadows and cursors.                                 |
+| `Tracked()`           | Returns the number of workspaces with active schedule state.                                                                                           |
+| `Close()`             | Stops worker goroutines, closes open source instances, and closes `State`.                                                                             |
+
+`Ingress`, `Reconcile`, and `Drain` run immediately, even within a backoff window. Background schedules wait for backoff. Direct calls and background passes for the same workspace run sequentially.
 
 ## Errors
+
+The package defines the following error sentinels and helpers:
 
 ```go
 var ErrCursorInvalid   = errors.New("connect: source cursor is invalid")
@@ -131,13 +131,17 @@ var ErrNeedsUserAction = errors.New("connect: source needs user action")
 func RetryAfter(err error, d time.Duration) error
 ```
 
-| Wrap                 | From                        | Effect                                                                                                             |
-| -------------------- | --------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `ErrCursorInvalid`   | `Incremental.Changes`       | A fresh `Checkpoint` plus a full `List`, in the same pass.                                                         |
-| `ErrNeedsUserAction` | any method, or `OpenSource` | `Health.Kind` becomes `FailureUserAction`, and the cached source is dropped so the next pass rebuilds credentials. |
-| `RetryAfter(err, d)` | any method                  | The workspace waits exactly `d` instead of its own backoff.                                                        |
+The connector handles errors as follows:
+
+| Error                | Source                     | Effect                                                                                                       |
+| -------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `ErrCursorInvalid`   | `Incremental.Changes`      | Triggers a fresh `Checkpoint` call and a full `List` pass within the same pass.                              |
+| `ErrNeedsUserAction` | Any method or `OpenSource` | Sets `Health.Kind` to `FailureUserAction` and drops the cached source so the next pass rebuilds credentials. |
+| `RetryAfter(err, d)` | Any method                 | Pauses the workspace for duration `d` instead of applying standard backoff.                                  |
 
 ## Health
+
+The package provides the following health monitoring types and methods:
 
 ```go
 type Health struct {
@@ -154,17 +158,13 @@ func (c *Connector) Health(workspaceID string) (Health, bool)
 func (c *Connector) HealthAll() []Health
 ```
 
-One entry per workspace, updated after every pass — scheduled or a direct
-call — so a manually driven connector is just as observable. A workspace that
-stops being managed (`Forget`, or dropping out of `Config.Workspaces`) loses
-its entry with the rest of its state. Anything the
-source does not explicitly mark as needing user action classifies as
-`FailureTransient`.
+The connector updates the `Health` entry for a workspace after every scheduled or direct pass. When a workspace is no longer managed through `Forget` or removal from `Config.Workspaces`, the connector deletes its health record. Any error not marked with `ErrNeedsUserAction` is classified as `FailureTransient`.
 
 ## State
 
-`State` is a reconstructible cache, not a ledger: losing it costs a full
-reconcile, never data.
+`State` provides reconstructible cache storage. If state data is lost, the connector requires a full reconciliation pass without data loss.
+
+The `State` interface defines the following methods:
 
 ```go
 type State interface {
@@ -183,21 +183,11 @@ type State interface {
 }
 ```
 
-- `Shadow` — `SourceFP`, `EngineVersion`, `Base`, `BaseText`: what both sides
-  of one row looked like when they were last known equal. For a bidirectional
-  row that is the merged row; for an ingress-only row `Base` and `BaseText`
-  hold the **source's** view, which is what keeps a client-only field from
-  reading as a source edit.
-- `SourceSync` — `Cursor` and `LastFullSync`: how far an incremental source's
-  feed has been consumed, and when the last full enumeration ran.
+The state store manages the following types:
 
-Implementations need no cross-row transactionality; the connector orders its
-writes so any crash between two `State` calls is healed by redelivery or
-reconcile.
+- `Shadow`: Contains `SourceFP`, `EngineVersion`, `Base`, and `BaseText`. Represents the last known matching state for both sides of a row. For bidirectional rows, this is the merged row. For ingress-only rows, `Base` and `BaseText` contain the source view to prevent client-only fields from appearing as source edits.
+- `SourceSync`: Contains `Cursor` and `LastFullSync`. Tracks feed progress for an incremental source and the timestamp of the last full enumeration.
 
-Store the egress `server.Cursor` whole, `Epoch` included, and across all 64
-bits — it is a random value, so half of them set the high bit. That field names
-the engine store the cursor came from, and it is the only thing that stops a
-connector from egressing rows out of a database swapped in behind the same
-address (see [Falling behind](../how-to/change-feed.md#falling-behind)). Dropping
-it is not an error: 0 reads as "lineage unknown" and the check goes quiet.
+Implementations do not require cross-row transactions. The connector orders write operations so recovery from crashes occurs during redelivery or reconciliation.
+
+Store the egress `server.Cursor` value in full, including `Epoch` and across all 64 bits. The `Epoch` field identifies the engine store instance to prevent egressing rows if a database is swapped at the same address. For more information, see [Falling behind](../explanation/effects-and-the-change-feed.md#tombstone-horizons-and-falling-behind). A cursor value of `0` indicates an unknown lineage and skips validation.

@@ -1,84 +1,90 @@
-# Sync an external store (connectors)
+# Syncing an external store
 
-The `connect` package layers the engine over a store it does not own — an
-existing database, a folder of files — and keeps the two converged
-bidirectionally.
+Use the `connect` package to synchronize an external store—such as an existing database or a directory of files—bidirectionally with the engine.
 
-The external store stays the source of truth for its own tooling; the engine
-holds a sync-optimized mirror and contributes ordering, per-field conflict
-resolution, delta sync and offline clients. External edits enter through
-`Mutate` on a `server.Trusted` context — a connector has no caller to authorize,
-so it says so rather than being denied as anonymous; committed engine changes
-flow back out through the change feed.
+The external store remains the source of truth for its own tooling. The engine maintains a sync-optimized mirror and provides ordering, per-field conflict resolution, delta sync, and offline client support. External edits enter through `Mutate` on a `server.Trusted` context. Committed engine changes flow out through the change feed.
 
-## Implement one port
+## Prerequisites
+
+Before you start, ensure you have the following:
+
+- An active engine server instance (`srv`).
+- An external data store to synchronize.
+- Generated Protobuf message types for your entities (for example, `&todov1.Todo{}`).
+
+## Steps
+
+1. Implement the store interfaces.
+
+   Implement the `connect.Source` interface to scan data from your external store:
+
+   ```go
+   type Source interface {
+       List(ctx, workspaceID, fn func(connect.Item) error) error   // scan everything
+   }
+   ```
+
+   If your external store supports writes, also implement the `connect.Writer` interface unless every entity is bound as `connect.IngressOnly`:
+
+   ```go
+   // Implement this too unless every entity is bound IngressOnly.
+   type Writer interface {
+       Write(ctx, workspaceID, msg) (fingerprint string, err error) // idempotent upsert
+       Delete(ctx, workspaceID, prototype, key string) error        // missing = no-op
+   }
+   ```
+
+2. Open the state database.
+
+   Open a state database to store connector bookkeeping metadata:
+
+   ```go
+   state, _ := sqlitestate.Open("connector-state.db") // bookkeeping, reconstructible
+   ```
+
+3. Initialize the connector.
+
+   Create a connector instance using `connect.New` and provide your configuration:
+
+   ```go
+   conn, _ := connect.New(connect.Config{
+       Server:   srv,
+       Source:   mySource,
+       State:    state,
+       Entities: []proto.Message{&todov1.Todo{}},
+   })
+   ```
+
+4. Start the sync loop.
+
+   Start the connector to drain commits and sync on an interval, and trigger kicks on external events:
+
+   ```go
+   conn.Start(ctx)        // drains on commit, syncs on an interval
+   conn.Kick(workspaceID) // wire fsnotify / DB triggers / webhooks here
+   ```
+
+## Confirming the sync
+
+Verify that the connector is running and inspect the health of your workspaces:
 
 ```go
-type Source interface {
-    List(ctx, workspaceID, fn func(connect.Item) error) error   // scan everything
-}
+h, ok := conn.Health(workspaceID)
+// h.LastSuccess, h.LastError, h.ConsecutiveFailures, h.NextAttempt
+// h.Kind: FailureNone | FailureTransient | FailureUserAction
 
-// Implement this too unless every entity is bound IngressOnly.
-type Writer interface {
-    Write(ctx, workspaceID, msg) (fingerprint string, err error) // idempotent upsert
-    Delete(ctx, workspaceID, prototype, key string) error        // missing = no-op
-}
+conn.HealthAll() // every workspace, ordered
 ```
 
-## Wire it up
+Check that `h.LastSuccess` updates and `h.LastError` is clear.
 
-```go
-state, _ := sqlitestate.Open("connector-state.db") // bookkeeping, reconstructible
-conn, _ := connect.New(connect.Config{
-    Server:   srv,
-    Source:   mySource,
-    State:    state,
-    Entities: []proto.Message{&todov1.Todo{}},
-})
-conn.Start(ctx)        // drains on commit, syncs on an interval
-conn.Kick(workspaceID) // wire fsnotify / DB triggers / webhooks here
-```
+Set `Config.OnHealth` to persist health states or trigger alerts. This callback fires after every pass, including manually driven passes.
 
-That is the whole setup for a small, local, uniformly reachable store. The
-sections after "How conflicts resolve" are for the ones that are not.
+## Advanced configuration
 
-## How conflicts resolve
+### Configuring incremental ingestion
 
-A per-row shadow (fingerprint + engine version + last-agreed bytes) breaks echo
-loops in both directions and serves as the three-way base, so a source edit to
-one field merges with a concurrent client edit to another instead of clobbering
-it. Conflicts resolve by arrival order at the workspace sequence — exactly as
-between two clients.
-
-Everything is at-least-once with idempotent repair: losing the state database,
-crashing mid-egress, or sleeping past GC retention costs a reconcile pass, never
-data.
-
-## Collaborative text in a connector
-
-Connectors report text as plain strings (`Item.TextFields`). The connector diffs
-against the shadow base — the last state the source observed — and unions the
-result with the engine's current document, so an external file edit and a
-concurrent client edit both survive. The shadow is what buys that: a writer with
-no stored ancestor diffs against the current document instead, and takes the
-field's text whole ([Write from server-side code](server-side-writes.md#collaborative-text)).
-
-Two constraints:
-
-- A connector holds **one writer identity for its lifetime**. Pin `WriterID` to
-  keep it across restarts.
-- Text at the write boundary is **text, not bytes**: a string that cannot be
-  represented as code points is skipped (logged, per item, shadow untouched) so
-  one mis-encoded file does not stall ingress for the rest of the source. It
-  converges on the first pass after its encoding is fixed.
-
-## Make ingestion incremental
-
-`List` enumerates the whole store, and on the default interval that is once a
-minute per workspace. Against a mailbox or a calendar that is unaffordable —
-and unnecessary, because those stores have a change cursor of their own (Gmail
-`historyId`, IMAP `HIGHESTMODSEQ`, CalDAV sync-token). Implement
-`connect.Incremental` and the connector rides it instead:
+By default, `List` enumerates the entire store on each interval (once per minute per workspace). To avoid full scans on stores with change cursors (such as Gmail `historyId`, IMAP `HIGHESTMODSEQ`, or CalDAV sync tokens), implement `connect.Incremental`:
 
 ```go
 func (s *mySource) Checkpoint(ctx context.Context, ws string) (string, error) {
@@ -105,27 +111,21 @@ func (s *mySource) Changes(ctx context.Context, ws, cursor string) (connect.Delt
 }
 ```
 
-`Connector.Ingress` then decides per pass: full enumeration when there is no
-cursor, when the source rejects the one it has, or when
-`FullReconcileInterval` (default 1h) is due — and `Changes` otherwise. Set
-`ReconcileInterval` to how often you want the feed polled and
-`FullReconcileInterval` to how often you want the safety net; a negative one
-means "only when the cursor breaks".
+`Connector.Ingress` selects the pass mode automatically:
 
-Two consequences worth knowing:
+- Runs full enumeration when no cursor exists, when the source rejects the current cursor, or when `FullReconcileInterval` (default 1 hour) is due.
+- Runs `Changes` in all other cases.
 
-- The cursor is persisted **after** its page is applied, so a crash replays
-  that page. Redelivery is a no-op — an unchanged fingerprint short-circuits,
-  and a deletion checks the row before writing a tombstone — but your `Write`
-  must stay idempotent for the same reason.
-- The deletion **sweep** ("a shadow exists but the source did not list it")
-  belongs to the full pass. An incremental pass only knows what `Deletions`
-  told it, so a source that deletes silently needs the safety net left on.
+Set `ReconcileInterval` to the desired polling frequency. Set `FullReconcileInterval` to the desired safety net interval, or set it to a negative value to run full passes only when the cursor breaks.
 
-## Give each workspace its own credentials
+Keep the following operational behaviors in mind:
 
-`Config.Source` is one instance for every workspace. A per-user mailbox needs
-one per workspace instead:
+- The cursor persists after its page applies. A crash causes that page to replay. Redelivery is a no-op because an unchanged fingerprint short-circuits and a deletion checks the row before writing a tombstone, but `Write` must remain idempotent.
+- The deletion sweep (detecting rows where a shadow exists but the source did not list the item) runs during the full pass. An incremental pass only processes explicit entries in `Deletions`. If a source deletes items without reporting them, leave the safety net interval enabled.
+
+### Configuring per-workspace credentials
+
+If your workspaces require separate credentials (such as per-user mailboxes), use `Config.OpenSource` instead of `Config.Source`:
 
 ```go
 conn, _ := connect.New(connect.Config{
@@ -145,25 +145,19 @@ conn, _ := connect.New(connect.Config{
 })
 ```
 
-The source is built on the workspace's first pass and reused after that, so an
-OAuth handshake is not re-run every minute. Implement `io.Closer` on it to
-release a connection when the connector is done with it. It is dropped, and
-rebuilt on the next pass, in three cases: `Close`, `Forget(workspaceID)`, and
-any pass failing with an error that wraps `connect.ErrNeedsUserAction` — which
-is the seam a re-consent flow hangs off. Store the new token, and the next
-pass picks it up without restarting the process.
+The connector builds the source on the workspace's first pass and reuses it for subsequent passes. Implement `io.Closer` on the source to release connections when done. The connector drops and rebuilds the source in three cases:
 
-`Forget` is also the teardown call for "the user disconnected this account":
-it drops the workspace and releases the source, leaving shadows and cursors in
-place so reconnecting resumes instead of re-importing. Exclude the workspace
-from `Config.Workspaces` to keep it from being rediscovered — the sweep re-reads
-that list and drops what it no longer names, so for a workspace that also
-disappears from the engine, excluding it is all that is needed.
+- Calling `Close`.
+- Calling `Forget(workspaceID)`.
+- Encountering a pass failure with an error wrapping `connect.ErrNeedsUserAction`.
 
-## Read-only sources
+Store the new token after re-authentication, and the next pass picks it up without restarting the process.
 
-A source the app never writes back to declares its entities `IngressOnly` and
-may then omit `Writer` entirely:
+Use `Forget` when a user disconnects an account. It drops the workspace and releases the source, but preserves shadows and cursors so reconnecting resumes without re-importing. To prevent a workspace from being rediscovered, exclude it from `Config.Workspaces`.
+
+### Configuring read-only sources
+
+If the application never writes back to the external source, declare entities with `Direction: connect.IngressOnly` and omit `Writer`:
 
 ```go
 Bindings: []connect.Binding{
@@ -171,55 +165,34 @@ Bindings: []connect.Binding{
 },
 ```
 
-Every egress path skips those entities. The three-way merge narrows to match:
-a field the source did not change is left alone (so a client-side flag on the
-row survives), and a field it did change is applied over whatever the engine
-holds. Collaborative text follows the same rule — unchanged means untouched,
-changed means the source wins, applied as a minimal diff onto the live
-document.
+Egress paths skip `IngressOnly` entities. The three-way merge leaves unchanged fields intact and applies changed source fields over the engine state. Collaborative text leaves untouched fields unmodified and applies source changes as minimal diffs onto the live document.
 
-## Surface health, and back off
+### Handling errors and backoff
 
-Loop failures are logged, never returned: convergence work must not take the
-process down. That is the wrong amount of silence for "this user's token
-expired two days ago", so every pass also records:
+Connector loop failures are logged and do not terminate the process.
 
-```go
-h, ok := conn.Health(workspaceID)
-// h.LastSuccess, h.LastError, h.ConsecutiveFailures, h.NextAttempt
-// h.Kind: FailureNone | FailureTransient | FailureUserAction
+Classify errors in the source:
 
-conn.HealthAll() // every workspace, ordered
-```
-
-Set `Config.OnHealth` to persist or alert on it; it fires after every pass,
-including passes you drive by hand.
-
-Classification is the source's job, and there is exactly one distinction to
-make: wrap `connect.ErrNeedsUserAction` when retrying cannot help. Everything
-else is transient and is retried with exponential backoff between
-`Config.RetryMin` and `RetryMax`. When the API tells you how long to wait, say
-so and the connector obeys it verbatim:
+- Wrap `connect.ErrNeedsUserAction` when retries cannot resolve the issue (such as an expired token).
+- Return standard errors for transient issues. The connector applies exponential backoff between `Config.RetryMin` and `Config.RetryMax`.
+- When an API provides a retry delay, wrap the error with `connect.RetryAfter`:
 
 ```go
 return connect.RetryAfter(fmt.Errorf("rate limited: %w", err), resetIn)
 ```
 
-While a workspace is backing off, commit signals, kicks and ticks fold into
-one deferred pass instead of hammering a rate-limited API. Direct calls to
-`Ingress`, `Reconcile` and `Drain` always attempt — the caller asked.
+While a workspace is backing off, commit signals, kicks, and scheduled ticks collapse into a single deferred pass. Direct calls to `Ingress`, `Reconcile`, and `Drain` execute immediately.
 
-## Keep a cold start off the interactive path
+### Pacing cold-start ingestion
 
-The first sync of a large account is one long run of writes into a single
-workspace, each taking that workspace's write lock. Pace it:
+Initial synchronization of a large store performs many consecutive writes into a single workspace, holding that workspace's write lock. Configure pacing options to yield periodically:
 
 ```go
 IngestChunk: 200,                   // after every 200 engine writes…
 IngestPause: 50 * time.Millisecond, // …yield for this long
 ```
 
-Only actual writes count; items that turn out unchanged are free.
+Only actual writes count toward `IngestChunk`; unchanged items do not trigger pauses.
 
 ## A worked example
 
@@ -228,6 +201,7 @@ of Markdown files, including `Note` rows as Markdown documents.
 
 ## Related
 
+- [How connectors converge](../explanation/connectors.md)
 - [Connectors reference](../reference/connectors.md) — every interface,
   `Config` field, sentinel and health value.
 - [Follow committed changes](change-feed.md) — the egress half, on its own.

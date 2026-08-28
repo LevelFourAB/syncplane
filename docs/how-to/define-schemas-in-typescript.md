@@ -1,159 +1,138 @@
-# Define schemas in TypeScript
+# Defining schemas in TypeScript
 
-The engine is descriptor-driven end to end — merge, query, CRUD, bootstrap and
-subscribe all operate on `protoreflect` descriptors, not generated structs — so
-an app's schema can arrive **at runtime** as a serialized
-`google.protobuf.FileDescriptorSet` instead of compiled-in Go. Use this when you
-would rather not run proto codegen, or when the app that owns the schema is the
-Node backend rather than the sync server.
+This guide shows you how to define schemas at runtime in TypeScript and export binary descriptor sets for the Syncplane engine and client. Use this approach when you want to avoid Protocol Buffers code generation, or when your Node backend owns the schema instead of the sync server.
 
-The TypeScript schema builder emits exactly those bytes:
+The Syncplane engine is descriptor-driven. Merge, query, CRUD, bootstrap, and subscribe operations all operate on `protoreflect` descriptors rather than generated Go structs.
+
+## Prerequisites
+
+Before you begin, ensure that you have the `syncplane` package installed in your TypeScript project:
 
 ```ts
 import { schema } from 'syncplane';
-
-const todo = schema.entity('todo', {
-	id: schema.text().key(),
-	title: schema.text(),
-});
-
-const bundle = schema.defineSchema(todo);
-bundle.toBinary(); // a self-contained FileDescriptorSet the engine ingests
 ```
 
-Register it with [a manager](host-multiple-apps.md#registering-a-schema), and
-hand the same bundle to the client as `entities: bundle.descMessages()`.
+## Defining entities and fields
 
-## Full parity with the compiled tier
+1. Define each entity with `schema.entity()`, specifying its name and field map:
 
-Not just scalars, but embedded sub-messages, typed references (to-one, to-many,
-self, composite key), keyed and movable message lists, and scalar maps:
+   ```ts
+   const project = schema.entity('project', {
+   	id: schema.text().key(),
+   	name: schema.text(),
+   });
+   const user = schema.entity('user', {
+   	id: schema.text().key(),
+   	name: schema.text(),
+   });
 
-```ts
-const project = schema.entity('project', {
-	id: schema.text().key(),
-	name: schema.text(),
-});
-const user = schema.entity('user', {
-	id: schema.text().key(),
-	name: schema.text(),
-});
+   const issue = schema.entity('issue', {
+   	id: schema.text().key(),
+   	title: schema.text(),
+   	settings: schema.message({ color: schema.text(), size: schema.int32() }), // embedded
+   	project: schema.ref(() => project), // to-one reference
+   	assignee: schema.ref(() => user),
+   	reporter: schema.ref(() => user), // two refs → issuesByAssignee / issuesByReporter
+   	blockedBy: schema.refList(() => issue), // to-many SELF reference
+   	members: schema.keyedList(
+   		schema.message({ uid: schema.text(), name: schema.text() }),
+   		'uid',
+   	),
+   	items: schema.keyedList(
+   		schema.message({
+   			id: schema.text(),
+   			pos: schema.text(),
+   			label: schema.text(),
+   		}),
+   		'id',
+   	).order('pos'), // movable list (fractional `pos`)
+   	attrs: schema.map('string', schema.text()), // map<string,string>
+   });
 
-const issue = schema.entity('issue', {
-	id: schema.text().key(),
-	title: schema.text(),
-	settings: schema.message({ color: schema.text(), size: schema.int32() }), // embedded
-	project: schema.ref(() => project), // to-one reference
-	assignee: schema.ref(() => user),
-	reporter: schema.ref(() => user), // two refs → issuesByAssignee / issuesByReporter
-	blockedBy: schema.refList(() => issue), // to-many SELF reference
-	members: schema.keyedList(
-		schema.message({ uid: schema.text(), name: schema.text() }),
-		'uid',
-	),
-	items: schema.keyedList(
-		schema.message({
-			id: schema.text(),
-			pos: schema.text(),
-			label: schema.text(),
-		}),
-		'id',
-	).order('pos'), // movable list (fractional `pos`)
-	attrs: schema.map('string', schema.text()), // map<string,string>
-});
+   const bundle = schema.defineSchema(project, user, issue);
+   ```
 
-const bundle = schema.defineSchema(project, user, issue);
-```
+   The schema builder supports the following field types:
+   - **Key fields and scalars**: Mark primary keys with `.key()`, such as `schema.text().key()`.
+   - **Embedded sub-messages**: Use `schema.message({ ... })` for nested structures.
+   - **References**: Use a thunk (`ref(() => target)` or `refList(() => target)`). Thunks defer target resolution to bundle definition time, which avoids definition-order constraints and circular import issues.
+   - **Keyed lists**: Use `schema.keyedList(...)` with a unique key field identifier. Call `.order('fieldName')` to create a movable list.
+   - **Scalar maps**: Use `schema.map('keyType', valueType)`.
 
-## References
+   Reference detection is annotation-free. A message-typed field whose target carries `(syncplane.v1.entity)` is treated as a reference. The stored row retains only the key fields of the target, and the live target resolves on read.
 
-References take a **thunk** (`ref(() => target)`) rather than the target value:
-the thunk defers resolution to `defineSchema` time, so an entity can reference
-one declared later — or itself (`blockedBy` above) — without a definition-order
-constraint. The whole schema is synthesized into **one** proto file, so mutual
-and self references resolve by full name with no circular file-import graph.
+   The inverse relation is automatically named `<plural(source)>` on the target entity, or `<plural(source)>By<Field>` when multiple references point to the same target. These auto-generated names share the namespace of the target entity's reference fields. If a name collision occurs between an explicit field and an auto-named relation, rename one of the fields.
 
-Reference detection is **annotation-free**: a message-typed field whose target
-message carries `(syncplane.v1.entity)` _is_ a reference — the same rule the
-engine already applies. The stored row keeps only the target's key fields
-(write-time projection); the live target is resolved on read, and the inverse
-reverse relation is auto-named on the target.
+   **Note:** If you encounter a TypeScript inference cycle with self-referencing entities, name the recursive field map and annotate the entity type using `type X = Infer<typeof x>`.
 
-The auto-name is `<plural(source)>` — or `<plural(source)>By<Field>` when one
-source has several refs to the same target. It lands in the same namespace as
-the target's own ref fields, since a follow segment, an `include` key and
-`client.db.<entity>.refs` all resolve names against both halves at once. A
-collision is therefore a schema error rather than a shadowing rule: `post` with
-a `comments` ref field plus a `comment.post` back-ref (auto-named `comments` on
-`post`) is rejected by the client registry and the engine alike. Rename one of
-the two.
+2. Configure entity write policies and protected fields.
 
-> Self-references hit a TypeScript inference cycle for the row type. Name the
-> recursive field map and annotate the entity to break it — the same
-> `type X = Infer<typeof x>` escape hatch you would use for "excessively deep"
-> errors.
+   To restrict entity-level write permissions, pass an options object as the third argument to `schema.entity()`:
 
-## Per-entity options
+   ```ts
+   // Server-owned: the server records these rows, clients only read them.
+   const activity = schema.entity('activity', {
+   	id: schema.text().key(),
+   	what: schema.text(),
+   }, {
+   	createPolicy: 'trustedOnly',
+   	updatePolicy: 'trustedOnly',
+   	deletePolicy: 'trustedOnly',
+   });
 
-The third argument to `entity()` carries what is not a field. `indexes`
-declares composite secondary indexes; `createPolicy`, `updatePolicy` and
-`deletePolicy` decide who may write rows:
+   // Append-only: a client may post a comment but not silently edit or remove one.
+   const comment = schema.entity('comment', {
+   	id: schema.text().key(),
+   	body: schema.text(),
+   }, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
+   ```
 
-```ts
-// Server-owned: the server records these rows, clients only read them.
-const activity = schema.entity('activity', {
-	id: schema.text().key(),
-	what: schema.text(),
-}, {
-	createPolicy: 'trustedOnly',
-	updatePolicy: 'trustedOnly',
-	deletePolicy: 'trustedOnly',
-});
+   The `'trustedOnly'` setting lowers to the matching `*_TRUSTED_ONLY` proto option. Clients reject restricted operations at the call site; for example, calling `comment.mutate.del(...)` throws an error. Creating an append-only row requires `{ expectedVersion: 0n }` on `put()`. For more information, see [Write policies](../reference/proto-options.md#write-policies).
 
-// Append-only: a client may post a comment but not silently edit or remove one.
-const comment = schema.entity('comment', {
-	id: schema.text().key(),
-	body: schema.text(),
-}, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
-```
+   To restrict specific fields while keeping the entity writable, add `.protected()` to the field definition:
 
-`'trustedOnly'` lowers to the matching `*_TRUSTED_ONLY` proto option, so a
-runtime-registered entity is protected exactly as a compiled one is — that class
-of write is left to trusted server-side writes and custom mutators.
+   ```ts
+   const task = schema.entity('task', {
+   	id: schema.text().key(),
+   	title: schema.text(),
+   	// Advanced by a server-side workflow; clients read it, never write it.
+   	status: schema.text().protected(),
+   });
+   ```
 
-The client refuses such a write at the call site rather than applying it
-optimistically, so `comment.mutate.del(...)` throws. Creating an append-only row
-takes `{ expectedVersion: 0n }` on the `put()`: an unguarded put could replace an
-existing row, which the entity forbids. See
-[Write policies](../reference/proto-options.md#delete-policy).
+   A `patch` operation that masks a protected field throws an error. A `put` operation succeeds and preserves the existing field value. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
 
-To keep one field of an otherwise writable row out of a client's reach, mark the
-field instead:
+3. Create the schema bundle with `schema.defineSchema()`:
 
-```ts
-const task = schema.entity('task', {
-	id: schema.text().key(),
-	title: schema.text(),
-	// Advanced by a server-side workflow; clients read it, never write it.
-	status: schema.text().protected(),
-});
-```
+   ```ts
+   const todo = schema.entity('todo', {
+   	id: schema.text().key(),
+   	title: schema.text(),
+   });
 
-A `patch` masking `status` throws; a `put` lands and leaves `status` as the row
-already had it. See
-[Protected fields](../reference/proto-options.md#protected-fields).
+   const bundle = schema.defineSchema(todo);
+   ```
 
-## The same power from Go
+4. Export and register the schema.
 
-`server.DynamicField` (`Message`, `Ref`, `KeyField`/`OrderField`,
-`MapKey`/`MapValue`) with `server.BuildDynamicFile` /
-`RegisterDynamicEntities` builds a set of referencing entities into one file
-just like the TS builder.
+   - Export the serialized binary descriptor set by calling `bundle.toBinary()`. Register the resulting `google.protobuf.FileDescriptorSet` with [a manager](host-multiple-apps.md#steps).
+   - Pass the client descriptors to the client configuration using `entities: bundle.descMessages()`.
 
-## What runtime registration guards
+## Confirming the result
 
-Because the engine is descriptor-driven, none of this needs runtime changes
-beyond two registration-time guards: a re-registered message field must keep the
-same message type (so a ref cannot be silently retargeted), and a key field must
-be a singular scalar. Schema evolution rules are otherwise the same as for
-compiled entities — see [Host multiple apps](host-multiple-apps.md#what-registration-guarantees).
+To confirm that the schema is registered and active:
+
+1. Verify that the manager accepts the binary descriptor set without errors during registration.
+2. Verify that the client loads the entity descriptors from `bundle.descMessages()`.
+
+If registration fails, check for the following conditions:
+
+- A re-registered message field changed its message type. Re-registered fields must maintain the same message type.
+- A key field is not a singular scalar. Key fields must be singular scalar types.
+- A field name collides with an auto-generated relation name on the same entity. Rename one of the conflicting fields.
+
+For schema evolution rules, see [Host multiple apps](../reference/server.md#registration-guarantees).
+
+## Related
+
+- [Registration](../reference/server.md#registration)

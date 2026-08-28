@@ -1,8 +1,6 @@
 # Proto options
 
-Two custom options declare how a message participates in sync. They live in
-`syncplane/v1/options.proto`, published as the buf module
-`buf.build/levelfourab/syncplane`; see [Define entities in your own module](../how-to/define-entities.md) for getting that file into your codegen.
+Syncplane provides two custom Protobuf options in `syncplane/v1/options.proto` (published in the Buf module `buf.build/levelfourab/syncplane`) to declare how messages and fields participate in synchronization. For instructions on adding this file to code generation, see [Define entities in your own module](../how-to/define-entities.md).
 
 ## `(syncplane.v1.entity)` — on a message
 
@@ -16,33 +14,26 @@ message Todo {
 }
 ```
 
-| Field           | Meaning                                                                                             |
+| Field           | Description                                                                                         |
 | --------------- | --------------------------------------------------------------------------------------------------- |
-| `name`          | Logical entity name used on the wire and in storage (e.g. `"todo"`).                                |
-| `key_fields`    | Field names, in order, whose values form the row key. Singular scalars.                             |
+| `name`          | Logical entity name used on the wire and in storage (for example, `"todo"`).                        |
+| `key_fields`    | Field names, in order, whose values form the row key. Must be singular scalar fields.               |
 | `index`         | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
-| `create_policy` | Who may create rows of this entity. See [Write policies](#delete-policy).                           |
-| `update_policy` | Who may modify existing rows of this entity. See [Write policies](#delete-policy).                  |
-| `delete_policy` | Who may DELETE rows of this entity. See [Write policies](#delete-policy).                           |
-| `server_only`   | The entity's rows never sync to a client. See [Server-only entities](#server-only-entities).        |
-| `history`       | Record an append-only history of field changes. See [Field history](#field-history).                |
+| `create_policy` | Determines who may create rows of this entity. See [Write policies](#write-policies).               |
+| `update_policy` | Determines who may modify existing rows of this entity. See [Write policies](#write-policies).      |
+| `delete_policy` | Determines who may delete rows of this entity. See [Write policies](#write-policies).               |
+| `server_only`   | When `true`, rows never sync to clients. See [Server-only entities](#server-only-entities).         |
+| `history`       | Configures append-only field history tracking. See [Field history](#field-history).                 |
 
-The first two are constrained: the name must be an identifier, and a key field
-must be a singular string, integer, bool or enum. See [Naming rules](naming.md)
-for the full set and for what a derived row key may contain.
+The `name` field must be a valid identifier. Each entry in `key_fields` must reference a singular string, integer, boolean, or enum field. For complete syntax and constraints, see [Naming rules](naming.md).
 
-A message carrying this option is an **entity**. That is also what makes a
-message-typed field elsewhere a _reference_ to it — reference detection is
-annotation-free.
+A message configured with `(syncplane.v1.entity)` is an **entity**. Message-typed fields that reference this message type automatically become entity references without additional annotations.
 
 <a id="delete-policy"></a>
 
 ### Write policies
 
-Three options decide who may write an entity's rows: `create_policy`,
-`update_policy` and `delete_policy`. Each is unset by default, which allows
-anyone the app's permission policy admits — how every entity behaves that says
-nothing.
+Three options control write access to an entity's rows: `create_policy`, `update_policy`, and `delete_policy`. By default, each option is unset, which permits any caller allowed by the application's permission policy.
 
 ```proto
 // Server-owned: the server records these rows, clients only read them.
@@ -69,57 +60,33 @@ message Comment {
 }
 ```
 
-`*_TRUSTED_ONLY` refuses that class of write to every caller the server
-authorizes, with a `permission_denied` rejection. That includes the in-process
-API — `Apply` and `Mutate` from an app handler are held to the same policy as a
-sync client — and leaves only writes made under the `Trusted` bypass: a
-connector, a migration, a cron job.
+Setting a policy to `*_TRUSTED_ONLY` rejects that class of write for all regular callers with `permission_denied`. This restriction includes in-process API calls such as `Apply` and `Mutate` from an application handler. It permits only writes executed under the `Trusted` bypass, such as a connector, a migration, or a background job.
 
-The engine checks these before the app's `Permissions.CanMutate` hook runs, on
-every path that authorizes a write, so the rule is stated once in the schema
-rather than restated in each deployment's policy.
+The engine evaluates these policies before running the application's `Permissions.CanMutate` hook on every write path.
 
 #### Which policy a write must satisfy
 
-The check runs before the write transaction opens and never reads the row, so
-it classifies from the write alone. `expected_version` is what makes that
-possible: an absent or tombstoned row reads as version 0, so `expected_version:
-0` means "apply only if the row does not exist".
+The engine checks policies before opening the write transaction without reading the existing row. The check classifies the operation based solely on the incoming write request. An absent or tombstoned row has version 0, so `expected_version: 0` indicates that the operation applies only if the row does not exist.
 
-| Write                                    | Must satisfy                                 |
-| ---------------------------------------- | -------------------------------------------- |
-| `PATCH`                                  | `update_policy` — a PATCH never upserts      |
-| `DELETE`                                 | `delete_policy`                              |
-| `PUT` with `expected_version` 0          | `create_policy` — provably a create          |
-| `PUT` with a non-zero `expected_version` | `update_policy` — provably an update         |
-| `PUT` with no `expected_version`         | **both** `create_policy` and `update_policy` |
+| Write                                  | Policy required                           |
+| -------------------------------------- | ----------------------------------------- |
+| `PATCH`                                | `update_policy` (a `PATCH` never creates) |
+| `DELETE`                               | `delete_policy`                           |
+| `PUT` with `expected_version: 0`       | `create_policy`                           |
+| `PUT` with non-zero `expected_version` | `update_policy`                           |
+| `PUT` with no `expected_version`       | Both `create_policy` and `update_policy`  |
 
-An unguarded PUT is create-or-update and cannot be told apart, so it is
-permitted only when it would be permitted either way. A client writing to an
-entity that restricts updates must therefore assert `expected_version: 0` to say
-it means to create — from Go, `server.WithExpectedVersion(0)` on the `Put`.
+An unguarded `PUT` can create or update a row. The engine permits an unguarded `PUT` only when both `create_policy` and `update_policy` allow the caller. To write to an entity that restricts updates, a client must supply `expected_version: 0` (in Go, using `server.WithExpectedVersion(0)` on `Put`).
 
-The TypeScript client applies the same table locally and throws at the call
-site, so a write that can never land never enters the pending queue.
+The TypeScript client evaluates this table locally and throws an error at the call site to prevent invalid writes from entering the pending queue.
 
-#### What they do not cover
+#### Policy scope and limitations
 
-They range over caller class — trusted bypass versus any authorized caller — not
-over rows. "Only edit your own comment" is not expressible here; it belongs in
-`CanMutate` when ownership is derivable from the key, or in a mutator body when
-it needs the stored row — where `EntityTx.GetMeta` reports the actor the engine
-recorded for it. See
-[Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
+Write policies apply to caller classes (trusted bypass versus authorized callers) rather than individual rows. Row-level permissions, such as restricting edits to the author of a comment, cannot be configured here. Implement row-level checks in `CanMutate` when ownership is derivable from the row key, or in a mutator body using `EntityTx.GetMeta` when the check requires reading the stored row. See [Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
 
-They also range over whole rows, not fields. To keep one field of an otherwise
-writable row out of a client's reach, mark the field instead — see
-[Protected fields](#protected-fields).
+Write policies apply to entire rows rather than individual fields. To restrict access to a specific field on a writable row, use [Protected fields](#protected-fields).
 
-They govern the write _primitives_, not the outcome. A custom mutator's rows are
-covered by the verdict on its invocation rather than authorized one by one, so
-an app that wants a client-initiated delete or edit of a protected entity writes
-a mutator, puts the cascade handling and checks it needs in the body, and
-authorizes the invocation by name:
+Write policies govern write primitives rather than high-level operations. Custom mutators are authorized at the invocation level rather than per individual row operation. An application requiring client-initiated modifications to a protected entity can implement a mutator that handles validation and cascading operations:
 
 ```go
 server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
@@ -129,24 +96,15 @@ server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
 	})
 ```
 
-Two more limits are worth knowing. A batch applies in order inside one
-savepoint, so `DELETE(k)` followed by `PUT(k, expected_version: 0)` passes as a
-create and lands as a replace — `update_policy` constrains in-place edits, and
-closing that loop takes `delete_policy` alongside it. And collaborative-text
-fields are edited by PATCH, so an entity carrying one needs updates allowed for
-clients to edit its text at all.
+Additional constraints:
 
-Reach for `delete_policy` on the rows a cascade hangs off: it removes the only
-irreversible verb the wire has, rather than making its damage recoverable after
-the fact.
+- Batch operations apply sequentially in a single savepoint. A `DELETE(k)` followed by `PUT(k, expected_version: 0)` is evaluated as a create and executed as a replace. To prevent row replacement, configure `delete_policy` alongside `update_policy`.
+- Collaborative-text fields are modified using `PATCH`. Clients can edit collaborative-text fields only when `update_policy` permits updates.
+- Set `delete_policy` on rows with cascading dependencies to prevent unintended deletions.
 
 ### Server-only entities
 
-`server_only: true` keeps an entity's rows on the server. They are never
-bootstrapped, pulled or streamed; a subscription naming the entity is refused as
-`invalid_argument`, and a client CRUD targeting it is rejected. The TypeScript
-client reads the option off the schema it registers, so a subscription set naming
-one throws where it is built rather than reaching that server error.
+Setting `server_only: true` keeps an entity's rows on the server. The engine never bootstraps, pulls, or streams server-only rows to clients. Client subscriptions requesting a server-only entity are rejected with `invalid_argument`, and client CRUD operations targeting the entity are rejected. The TypeScript client reads this option from the schema and throws an error when constructing subscriptions to server-only entities.
 
 ```proto
 message ProjectStats {
@@ -160,25 +118,13 @@ message ProjectStats {
 }
 ```
 
-It is **queryable, not syncable**: `ViewTx` and mutators still reach the
-entity, and so does the `Query` RPC (`queryServer` in the TypeScript client) —
-which is a client-facing call. Any client that can reach the workspace can
-read these rows through it; the entity's
-[`ReadFilter`](../how-to/authentication-and-permissions.md#canmutate-and-readfilter),
-if it has one, is the only thing narrowing that further. `server_only` takes a
-row off the sync path, not out of a client's reach — give it a `ReadFilter` if
-workspace membership is not enough.
+Server-only entities are queryable but not syncable. Server-side `ViewTx` and mutators can access the entity, and clients can query it using the `Query` RPC (`queryServer` in TypeScript). Any client with workspace access can read these rows unless restricted by a [`ReadFilter`](../how-to/authentication-and-permissions.md#filtering-reads-and-writes-with-canmutate-and-readfilter). Setting `server_only: true` removes the entity from synchronization streams but does not restrict query access.
 
-Subscriptions are not a substitute for this. An empty subscription list means
-full sync, and full sync is _absorbing_ across the tabs sharing one local store:
-one tab that never calls `setSubscriptions` pulls the entity into shared
-IndexedDB and every sibling tab inherits it. Only a property of the schema holds
-an entity back from all of them.
+Client subscription filters cannot replace `server_only`. An empty subscription list requests a full sync, which syncs across browser tabs sharing local storage (such as IndexedDB). Only the `server_only` schema option prevents an entity from syncing to clients.
 
 ### Field history
 
-`history: {}` records an append-only log of what a row's marked fields held
-**before** each editing session that changed them.
+Setting `history: {}` records an append-only log of field values before each editing session that modified them.
 
 ```proto
 message Issue {
@@ -194,71 +140,39 @@ message Issue {
 }
 ```
 
-Every recorded field is marked; there is no capture-everything default. An
-entity that opts in and marks none is **rejected at registration**.
+Field recording requires explicit annotation on each field. Registration fails if an entity enables `history: {}` without marking any fields.
 
-Capture happens on the server's write path, so every write is covered whatever
-made it: a client push, a mutator, a connector, a trusted write.
+Capture occurs on the server write path for all write sources, including client pushes, mutators, connectors, and trusted writes.
 
-Records land in one entity, `syncplane.v1.FieldHistory` (wire name
-`syncplane_field_history`), which the engine registers automatically the first
-time some entity opts in. It is `server_only`, so none of it syncs; read it with
-`queryServer`. See [Restore a field to a previous value](../how-to/restore-a-field.md).
+History records are stored in the `syncplane.v1.FieldHistory` entity (wire name `syncplane_field_history`), registered automatically when an entity enables history. This entity is `server_only` and does not sync to clients. Query it using `queryServer`. See [Restore a field to a previous value](../how-to/restore-a-field.md).
 
-| `FieldHistory` field            | Meaning                                                                                                                                                                                                                                                               |
-| ------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `source_entity`, `source_key`   | The row that changed.                                                                                                                                                                                                                                                 |
-| `seq`                           | The workspace sequence the before-state precedes — the sequence of the write that opened the record.                                                                                                                                                                  |
-| `through_seq`, `writes`         | The last sequence folded into the record, and how many writes folded in (at least 1). The record covers the span `seq`…`through_seq`; spans of one row can overlap across nodes.                                                                                      |
-| `row_created`                   | **The row did not exist when the session began**, so `mask` and `prior` are empty and there is nothing to restore. Read this rather than an empty `mask`: a history filter can empty a mask too.                                                                      |
-| `mask`                          | The fields the session changed, as dotted proto paths.                                                                                                                                                                                                                |
-| `prior`                         | The source entity, serialized, carrying its key fields plus the masked fields as they stood. A text field holds a **plain-string value** rather than a document; restoring resolves it into edits, and reading it for display takes `plainTextOf` / `text.PlainText`. |
-| `actor_subject`, `actor_system` | Who wrote (see `storage.Actor`): the authenticated caller's subject, the label a trusted write gave itself, or both. One session belongs to one actor. Empty on both means the write was unattributed.                                                                |
-| `recorded_at`                   | Server wall clock when the record opened, for display. Not an ordering; only `seq` orders writes.                                                                                                                                                                     |
+| `FieldHistory` field            | Description                                                                                                                                                                                                         |
+| ------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `source_entity`, `source_key`   | The row that changed.                                                                                                                                                                                               |
+| `seq`                           | The workspace sequence preceding the before-state (the sequence of the write that opened the record).                                                                                                               |
+| `through_seq`, `writes`         | The last sequence folded into the record and the count of writes folded in (minimum 1). The record covers the span `seq`…`through_seq`. Spans for a single row can overlap across nodes.                            |
+| `row_created`                   | Indicates that the row did not exist when the session began (`mask` and `prior` are empty). Read this field rather than checking for an empty `mask`, because history filters can also produce an empty mask.       |
+| `mask`                          | Dotted Protobuf paths of the fields modified during the session.                                                                                                                                                    |
+| `prior`                         | Serialized source entity containing key fields and the masked fields in their prior state. Text fields contain plain-string values rather than documents. Read using `plainTextOf` or `text.PlainText` for display. |
+| `actor_subject`, `actor_system` | The actor who performed the write (see `storage.Actor`): caller subject, trusted write label, or both. Each session belongs to one actor. Unattributed writes leave both fields empty.                              |
+| `recorded_at`                   | Server wall-clock timestamp when the record opened, used for display. Writes are ordered strictly by `seq`.                                                                                                         |
 
-Four rules govern what a record ends up naming:
+History recording rules:
 
-- **Changes are recorded, not writes.** The server compares the stored row with
-  the one replacing it and keeps only the fields that moved; a write that stores
-  what was already there produces no record at all.
-- **Sessions are recorded, not keystrokes.** A run of writes to one row by one
-  actor folds into the record the first of them opened: the record keeps saying
-  what the fields held before the run began, its mask widens to the union of what
-  the run touched, and `through_seq`/`writes` grow instead of the log. No other
-  record of that session covers the states in between. The window is
-  [`WithHistorySession`](server.md#field-history), five minutes by default, and
-  runs from when the record opened rather than from its last write.
-- A **PATCH** starts from its effective mask (text paths a write option added
-  included), a **PUT** from the whole capture set, and the comparison narrows
-  either. Narrowing is per top-level field, the granularity per-field LWW
-  resolves at, so two masked paths under one field stand or fall together. A
-  oneof counts as one field and is named by its group.
-- **Key fields are never in the mask**, however they are marked. A PATCH may not
-  change a key field, so a restore built from a mask naming one could never be
-  applied. `prior` still carries them, so a decoded record always says which row
-  it belongs to.
+- **Changes are recorded, not writes.** The server compares the existing row with the replacement row and records only modified fields. A write that makes no data changes produces no history record.
+- **Sessions are recorded, not individual writes.** Consecutive writes to a row by the same actor fold into the initial session record: the record retains the before-state from the start of the session, expands its mask to include all touched fields, and increments `through_seq` and `writes`. The session window duration is configured by [`WithHistorySession`](server.md#field-history) (default: 5 minutes) from the time the record opened.
+- A **`PATCH`** evaluates from its effective field mask, and a **`PUT`** evaluates from the complete capture set. Comparisons resolve at top-level field granularity. A oneof counts as a single field and is identified by its group name.
+- **Key fields are never included in the mask.** A `PATCH` cannot modify key fields. The `prior` message retains key fields to identify the row.
 
-Why the log is scoped this way, and what it costs, is in
-[Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes).
+For design trade-offs and performance implications, see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes).
 
-`DELETE` is not captured, and it **purges** the row's records — nothing can
-restore into a tombstone, and a row re-created under the same key must not
-inherit the old one's log. A record's lifetime is therefore bounded by its row as
-well as by the clock, and under
-`WithHistoryRetention(server.HistoryForever)` the row is the only bound. This
-tier restores fields, not rows: making a removal recoverable and attributable
-means modelling it as a field — see
-[Recover a deleted row](../how-to/recover-a-deleted-row.md).
+`DELETE` operations are not recorded in history and purge all existing history records for the row. A deleted row cannot be restored from field history. To support recoverable row deletion, model deletion as a status field. See [Recover a deleted row](../how-to/recover-a-deleted-row.md).
 
-Removing `history: {}` later stops capture but does **not** remove what was
-already captured. The engine keeps purging those records on `DELETE` and expiring
-them under retention, for as long as some entity in the schema still opts in.
+Removing `history: {}` stops capture for new writes but retains existing history records. The engine purges and expires those records according to retention settings as long as at least one entity in the schema enables history.
 
-Records are read under **the source row's** permissions, not their own — see
-[Field history](server.md#field-history).
+History records are read under the source row's permissions. See [Field history](server.md#field-history).
 
-Retention and an admission hook are server options — see
-[`WithHistoryRetention` and `WithHistoryFilter`](server.md#field-history).
+Retention policies and admission filters are configured with [`WithHistoryRetention` and `WithHistoryFilter`](server.md#field-history).
 
 ## `(syncplane.v1.field_behavior)` — on a field
 
@@ -269,21 +183,19 @@ repeated Member members = 4 [(syncplane.v1.field_behavior) = { key_field: [ "uid
 repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] order_field: "pos" }];
 ```
 
-| Field          | Type       | Meaning                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| -------------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `opaque`       | `bool`     | Replaced whole, never merged structurally. The escape hatch for CRDT blobs and for any list you want treated as one atomic value (order-sensitive, duplicate-bearing).                                                                                                                                                                                                                                                                                                                                                                                              |
-| `key_field`    | `repeated` | List-of-message identity field(s); composite allowed. Empty, with an element that is a registered entity, reuses that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                                                                                                                                                                                                                                                                                                                                 |
-| `order_field`  | `string`   | Names the position field on the element that orders this keyed list — a **movable list**, whose position the framework manages as a fractional index. Requires a keyed message list.                                                                                                                                                                                                                                                                                                                                                                                |
-| `text`         | `bool`     | **Collaborative text.** The field holds an encoded convergent text document with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`; the engine auto-installs the text merger. Incompatible with `key_field` / `order_field`. The field's path may cross keyed message lists and message-valued maps, in which case each element holds its own document, addressed by instance path (`notes.<key>.body`). Refused inside a oneof or an unkeyed repeated element — those units are replaced whole, so the merger could never run. |
-| `indexed`      | `bool`     | Maintain a single-component secondary index over this field; on a repeated scalar the row takes one entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                                                                                                                                                                                                                                                                 |
-| `history`      | `bool`     | Record this field in the entity's history. Capture is **explicit** — only marked fields are recorded, and an entity that opts in and marks none is rejected at registration. A oneof is captured as a group, so marking any member marks it. Ignored on an entity that has not opted in. See [Field history](#field-history).                                                                                                                                                                                                                                       |
-| `write_policy` | `enum`     | `FIELD_WRITE_POLICY_TRUSTED_ONLY` puts the field out of a client's reach while the rest of the row stays writable. Top-level fields only; a oneof is protected as a group; a key field may not be marked. See [Protected fields](#protected-fields).                                                                                                                                                                                                                                                                                                                |
+| Field          | Type       | Description                                                                                                                                                                                                                                                                                                                                                     |
+| -------------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `opaque`       | `bool`     | Replaces the value as a whole rather than merging structurally. Used for CRDT blobs and atomic lists (order-sensitive, duplicate-bearing).                                                                                                                                                                                                                      |
+| `key_field`    | `repeated` | Identifies element key fields in a repeated message list (composite keys allowed). When empty on a registered entity element type, defaults to that entity's `key_fields`. Ignored for maps (keyed by map key) and scalar lists (keyed by value).                                                                                                               |
+| `order_field`  | `string`   | Names the position field on the element that orders a keyed list (fractional index). Requires a keyed message list.                                                                                                                                                                                                                                             |
+| `text`         | `bool`     | Configures collaborative text with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`. The engine registers the text merger automatically. Incompatible with `key_field` and `order_field`. May cross keyed message lists and message-valued maps (`notes.<key>.body`). Rejected inside a oneof or unkeyed repeated element. |
+| `indexed`      | `bool`     | Maintains a single-component secondary index on this field. On a repeated scalar field, produces one index entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                                                      |
+| `history`      | `bool`     | Records this field in entity history. Capture is explicit: only marked fields are recorded, and registration fails if an entity enables history without marking any fields. Marking any member of a oneof records the entire oneof group. Ignored if the entity does not enable `history`. See [Field history](#field-history).                                 |
+| `write_policy` | `enum`     | Set to `FIELD_WRITE_POLICY_TRUSTED_ONLY` to restrict field modification to trusted callers while leaving the rest of the row writable. Allowed on top-level fields only. Protects a oneof as a group. Cannot be applied to key fields. See [Protected fields](#protected-fields).                                                                               |
 
 ## Protected fields
 
-`create_policy`, `update_policy` and `delete_policy` speak for a whole row.
-`write_policy` speaks for one field, which is what a status a workflow advances,
-a counter an effect maintains or an owner stamped at creation needs:
+The entity options `create_policy`, `update_policy`, and `delete_policy` govern entire rows. The `write_policy` field option restricts write access to an individual field, such as a server-maintained status, counter, or immutable creator field:
 
 ```proto
 message Task {
@@ -297,57 +209,37 @@ message Task {
 }
 ```
 
-The two write primitives are governed differently, because they say different
-things:
+Protected fields handle write operations as follows:
 
-| Write                                | Outcome                                                                   |
-| ------------------------------------ | ------------------------------------------------------------------------- |
-| `PATCH` whose mask reaches the field | Rejected with `permission_denied`                                         |
-| `PUT`                                | Applied; the field keeps its stored value, or its zero value on a new row |
-| `DELETE`                             | Unaffected — a protected field guards a value, not the row                |
+| Write                                | Outcome                                                                             |
+| ------------------------------------ | ----------------------------------------------------------------------------------- |
+| `PATCH` whose mask targets the field | Rejected with `permission_denied`.                                                  |
+| `PUT`                                | Applied; the protected field retains its stored value (or zero value on a new row). |
+| `DELETE`                             | Applied without restriction (field protection guards the value, not the row).       |
 
-A PATCH names its fields, so a mask reaching a protected one asks outright to do
-the forbidden thing. A PUT names none: it carries the whole row because that is
-the only shape it has, so refusing it would reject an honest read-modify-write
-whenever the client's copy of a field it never meant to touch had gone stale.
-Substituting the stored value lets the rest of the write land.
+A `PATCH` explicitly specifies its target fields, so targeting a protected field fails immediately. A `PUT` sends the entire row, so the engine preserves the stored value of protected fields to allow read-modify-write workflows when unrelated fields change.
 
-A mask is matched by its **first segment**, so protecting `audit` also refuses
-`audit.size`, and one leaf of a message a client may otherwise replace cannot be
-singled out. A oneof is protected as a group — the only unit a mask names it in
-— so marking any member marks all of them. A key field may not be marked and is
-rejected at registration: a PATCH can never move one, and a PUT that changed one
-would address a different row.
+Field masks match against the **first path segment**: protecting `audit` also protects `audit.size`. A oneof is protected as a unit; marking any member protects all variants in the oneof. Key fields cannot be marked with `write_policy` and fail schema registration.
 
-A protected collaborative-text field is not editable by clients at all: edits
-ship as PATCHes, and a PUT takes the stored document verbatim rather than
-unioning the client's into it.
+Clients cannot edit a protected collaborative-text field: collaborative edits require `PATCH`, and a `PUT` replaces the document with the stored server copy rather than merging client edits.
 
-The TypeScript client reads the same marks and throws at the call site, so a
-`patch()` naming a protected field never enters the pending queue and a `put()`
-substitutes the local row's value into the optimistic overlay.
+The TypeScript client validates protected fields locally: `patch()` calls targeting a protected field throw an error, and `put()` calls substitute the local cached value into the optimistic overlay.
 
-For a rule that depends on **who** is writing — "the owner may reassign, a viewer
-may not" — a schema enum is the wrong surface; implement the server's
-`FieldPermissions` hook, which adds fields to this set for one caller and can
-never take one away. See
-[Authentication and permissions](../how-to/authentication-and-permissions.md#protect-a-field-per-caller).
+For caller-dependent rules (such as allowing owners to update a field while restricting viewers), configure the server's `FieldPermissions` hook. See [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
 
-Like the entity policies, this governs the write primitives rather than
-modification as an outcome. A custom mutator's rows are covered by the verdict on
-its invocation, so an app that wants a client-initiated change to a protected
-field writes a mutator, checks what it needs in the body, and authorizes the
-invocation by name.
+Mutator operations are authorized at the invocation level. A mutator can update protected fields when invoked by an authorized caller.
 
 ## Secondary indexes
 
-Two surfaces, one mechanism. Mark a field:
+Secondary indexes can be declared on individual fields or as composite indexes on the entity. A field annotation desugars into a single-component index.
+
+Mark a field:
 
 ```proto
 string state = 8 [(syncplane.v1.field_behavior) = { indexed: true }];
 ```
 
-…or declare a composite on the entity:
+Declare a composite index on the entity:
 
 ```proto
 option (syncplane.v1.entity) = {
@@ -360,64 +252,54 @@ option (syncplane.v1.entity) = {
 };
 ```
 
-A field mark desugars to a one-component index, so the engine only ever sees
-one shape. Which to reach for:
+Selection criteria:
 
-- **Mark a field** when you filter or order by it. It says "this field is worth
-  looking up by" without coupling the schema to a query.
-- **Declare a composite** when a query filters on one field and orders by
-  _another_. A sorted key-value store has no posting lists to intersect, so one
-  marked field serving that query walks the sort order re-checking the predicate
-  per candidate — correct, but unbounded in the bad case. A composite makes it
-  exactly O(limit).
+- **Field annotation (`indexed: true`)**: Use for single-field filters or sorting.
+- **Composite index (`index`)**: Use when queries filter by one field and sort by another. A composite index satisfies the query in O(limit) time without scanning and filtering candidate keys.
 
-`IndexSpec.name` must be unique within the entity and must not start with `__`,
-which is reserved: the engine derives one index per reference field for itself
-(`__ref_<field>`), and a field mark becomes `__field_<field>`.
+`IndexSpec.name` must be unique within the entity and must not begin with `__` (reserved for internal indexes: `__ref_<field>` for references and `__field_<field>` for field annotations).
 
-`IndexKey.path` is a dotted proto path. A path ending at a single-key reference
-extends to that reference's key field, so an index and a query naming the same
-reference agree. `desc` sorts that component descending; missing and `NaN`
-values sort last whatever it says, because the index reproduces the query
-ordering exactly and there the rank wins over the direction.
+`IndexKey.path` is a dotted Protobuf path. A path targeting a single-key reference automatically resolves to that reference's key field. Setting `desc: true` sorts that component in descending order; missing and `NaN` values sort last regardless of direction.
 
-A path may run **through** a repeated field, or end at a repeated scalar
-(`assignees.id`, `labels`). Such a component fans out: the row takes one
-position per element, which is what makes `has`/`hasAny` and `any()` range reads
-instead of scans. Three rules come with it:
+A path can traverse repeated fields or target repeated scalars (`assignees.id`, `labels`). This produces a fan-out index where each row generates one index entry per element:
 
-- A row whose list is empty still takes one position, tagged missing, so a range
-  that does not constrain the fan-out component still sees every row.
-- Components of one index may only fan out over a **single** list. A second
-  would need a cross product, which pairs values belonging to different
-  elements — and a query meant to describe one element would match rows where no
-  element does. Registration rejects it.
-- A fan-out component supplies an ordering only where the equality prefix has
-  already pinned it. `{ key: [{ path: "labels" }, { path: "rank" desc: true }] }`
-  serves "labelled X, newest first" at O(limit); nothing can order **by** a
-  repeated path, since a row has many values there.
+- Rows with an empty list generate a single entry tagged as missing, allowing unconstrained queries to locate all rows.
+- An index can fan out over at most **one** repeated list. Multiple list fan-outs require cross products and are rejected at registration.
+- A fan-out component provides ordering only when preceded by equality constraints on earlier index components.
 
-A path may also fan out over a **map**, written `*` — see
-[Maps and user-defined fields](#maps-and-user-defined-fields) below.
+Paths can also fan out over maps using `*` syntax. See [Maps and user-defined fields](#maps-and-user-defined-fields).
 
-**Not indexable:** a collaborative-text field (every keystroke would rewrite the
-entry — searching text is what [full-text search](#full-text-search) is for), or
-a repeated message field named on its own — index a scalar field of the elements
-instead. A map is not indexable through a field mark either; it needs the `*`
-syntax, which says which entries and which leaf. All are rejected at
-registration.
+The following types cannot be indexed and are rejected at registration:
 
-Indexes are **invisible and additive**. Nothing in a request or response names
-one, a query returns the same rows in the same order whether or not one served
-it, and adding or removing one is never a breaking change — losing the stored
-entries costs a rebuild, not correctness. The cost is on writes: every write to
-the entity re-encodes and re-stores that row's position in **every** index it
-has, bounded by `MaxIndexEntriesPerRow`.
+- Collaborative-text fields (use [Full-text search](#full-text-search)).
+- Repeated message fields without a specified sub-field path.
+- Maps using `indexed: true` (use composite `*` path syntax instead).
+
+Secondary indexes are transparent and additive.
+
+### Unsupported index shapes
+
+Secondary indexes do not support the following query shapes:
+
+| Shape                     | Reason                                                                                 |
+| ------------------------- | -------------------------------------------------------------------------------------- |
+| `contains` / `endsWith`   | Neither operator is a prefix. Use [Search](../how-to/search.md) for full-text search.  |
+| `or`                      | Requires merging multiple ranges and falls back to a scan.                             |
+| Collaborative-text fields | Writes would rewrite index entries on every keystroke. Rejected during registration.   |
+| Maps or message lists     | Queries cannot compare nested structures. Index a scalar field on the element instead. |
+| Ordering by a list        | List elements have multiple values, so rows lack a single sort position.               |
+
+### Index lifecycle and write costs
+
+- **Index availability**: A newly declared index is not available immediately. A background process indexes existing records first. Queries perform table scans until indexing finishes. On the client, the `indexing` event fires after bootstrap when indexing completes (see [Telemetry](telemetry.md#local-reads)).
+- **Query results**: Using an index produces the same results as a full scan.
+- **Local queries**: Local indexes cover confirmed rows for workspace-scoped queries. The engine merges the optimistic overlay over the range.
+- **Write costs**: Each write updates the row's position in all defined indexes on both client and server. For repeated fields, the engine creates one entry per element, bounded by `MaxIndexEntriesPerRow`. Writes exceeding this limit fail.
+- **Diagnostics**: The `onSyncEvent` callback reports a `query` event with the execution `path` (`index` or `scan`), the active index name, and any decline reason. For details on decline reasons, see [Telemetry](telemetry.md#local-reads).
 
 ## Full-text search
 
-Two surfaces, like indexes: a field mark for the simple case, an entity block
-for importance order and analyzer options. An entity may use either or both.
+Full-text search can be configured with field annotations, an entity-level `search` block, or both:
 
 ```proto
 message Article {
@@ -437,90 +319,64 @@ message Article {
 }
 ```
 
-| Option                      | Meaning                                                                                                          |
-| --------------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| `field_behavior.searchable` | Include this field, ahead of the `search` block's fields. Marked fields count as most important, in field order. |
-| `search.field[].path`       | Dotted proto path to a singular string or collaborative-text field. Declaration order is importance order.       |
-| `search.keep_diacritics`    | Keep accents significant: `café` and `cafe` become distinct terms. Off by default, which folds them together.    |
+| Option                      | Description                                                                                                          |
+| --------------------------- | -------------------------------------------------------------------------------------------------------------------- |
+| `field_behavior.searchable` | Marks a field as searchable. Annotated fields take highest ranking precedence, evaluated in field declaration order. |
+| `search.field[].path`       | Dotted Protobuf path to a singular string or collaborative-text field, in descending order of ranking precedence.    |
+| `search.keep_diacritics`    | When `true`, preserves accents (for example, `café` and `cafe` remain distinct terms). Default is `false` (folded).  |
 
-A `match` condition reads the declared fields through the entity's analyzer —
-lowercased, accent-folded unless kept, segmented with CJK bigrams — and
-`relevance` ranks by them, earlier fields first. A collaborative-text field is
-searched as its visible plain string.
+The `match` query condition processes configured fields through the search analyzer (lowercasing, accent folding unless disabled, and CJK bigram segmentation). The `relevance` rank orders matches by field precedence. Collaborative-text fields are indexed using their visible plain text.
 
-**Rejected at registration:** a path to a repeated field, a number, a map or a
-message; a `searchable` mark on any of those; a `search` block naming no fields
-with none marked either. A path may appear once across both surfaces.
+Registration rejects:
 
-Declaring search also declares a term index over the entity, maintained on
-every write and backfilled in the background like any
-[secondary index](#secondary-indexes); a row with more than 256 distinct terms
-across its searchable fields stores an overflow marker instead of postings and
-is considered by every search. Matching, ranking and the analyzer are specified
-in [the search model](../explanation/search.md); the query surface is under
-[Search data](../how-to/search.md).
+- Paths to repeated fields, numbers, maps, or messages.
+- `searchable: true` on unsupported field types.
+- A `search` configuration with no searchable fields declared.
+- Duplicate field paths across annotations and the `search` block.
 
-## Merge behaviour by field kind
+Declaring search configures an inverted term index maintained on write and backfilled in the background. Rows exceeding 256 distinct terms store an overflow marker and are evaluated during search execution. For details on matching, ranking, and analyzer behavior, see [Search model](../explanation/search.md) and [Search data](../how-to/search.md).
 
-| Kind            | On PATCH with the field in the mask        | On PUT                    |
-| --------------- | ------------------------------------------ | ------------------------- |
-| Scalar, message | Last writer wins for that field            | Replaced                  |
-| Map             | Merged by map key; a mask may name one key | Replaced                  |
-| Keyed list      | Merged by element key                      | Replaced                  |
-| `opaque`        | Replaced whole (or your registered merger) | Replaced                  |
-| `text`          | Unioned with the stored document           | **Unioned**, not replaced |
-| `oneof`         | Whole group replaced; mask names the group | Replaced                  |
+## Merge behavior by field kind
 
-The `text` row of that table is the one exception to "PUT replaces the whole
-row" — see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#put-replaces-the-whole-row).
+| Field kind      | On `PATCH` with field in mask               | On `PUT`                                        |
+| --------------- | ------------------------------------------- | ----------------------------------------------- |
+| Scalar, message | Last-writer-wins for the field              | Replaced                                        |
+| Map             | Merged by map key (mask can target one key) | Replaced                                        |
+| Keyed list      | Merged by element key                       | Replaced                                        |
+| `opaque`        | Replaced as a whole or via custom merger    | Replaced                                        |
+| `text`          | Unioned with stored document                | **Unioned** with stored document (not replaced) |
+| `oneof`         | Entire group replaced (mask targets group)  | Replaced                                        |
+
+Collaborative-text fields (`text: true`) are the only exception to whole-row replacement on `PUT`. See [Limits and trade-offs](../explanation/limits-and-trade-offs.md#put-replaces-the-whole-row).
 
 ## Oneofs
 
-A oneof is one field. A mask names the **group** (`choice`), never a member
-(`choice_text`), and the whole group is replaced by the writer's active case —
-or cleared, when the writer has none. The client derives that mask for you:
-`patch(schema, key, { choice: { case: 'choiceText', value: 'x' } })` and
-`update(key, draft => …)` both emit the group path. Why the group and not the
-member is in
-[the convergence model](../explanation/convergence-model.md#a-oneof-is-one-field).
+A oneof is treated as a single field. Field masks target the oneof group name (`choice`), not individual variant names (`choice_text`). A write replaces the entire group with the active variant or clears it if unset. Client helpers derive this mask automatically: `patch(schema, key, { choice: { case: 'choiceText', value: 'x' } })` and `update(key, draft => …)` emit the group path. See [Convergence model](../explanation/convergence-model.md#a-oneof-is-one-field).
 
-Reading is member-granular: a member is addressable on its own in queries,
-orderings and `indexed` marks, where its presence means "this case is active".
+Queries, orderings, and `indexed` annotations can reference individual variants directly. An unset variant evaluates to null or false:
 
 ```ts
 const withValue = { where: (w) => w.choice.choiceText.eq('hit') }; // value of one case
 const anyText = { where: (w) => w.choice.choiceText.isSet() }; // which case is active
 ```
 
-That rule is load-bearing beyond oneofs themselves: it is what lets a map of
-user-defined fields hold an **app-defined** value type instead of an engine one.
-See below.
-
 ### What a oneof cannot hold
 
-Because the group is replaced whole, nothing below it is ever addressed on its
-own — so anything that must be reliably present is refused when the server and
-the client register the schema:
+Because oneofs replace as a single unit, schema registration rejects the following definitions inside a oneof:
 
-| Inside a oneof                                   | Why not                                                             |
-| ------------------------------------------------ | ------------------------------------------------------------------- |
-| An entity `key_field`                            | The row key would move when a sibling case won a write              |
-| A list's `key_field` / `order_field`             | Elements would collide on the zero value once the case flipped      |
-| A `text` field (directly or one level below)     | The group replaces whole, so the CRDT merger could never run        |
-| A field with a registered merger                 | Same: the merger sits on a path no mask reaches                     |
-| A reference (a field whose message is an entity) | The reference graph addresses a ref by a field that is always there |
+| Type inside a oneof                              | Reason rejected                                                          |
+| ------------------------------------------------ | ------------------------------------------------------------------------ |
+| Entity `key_field`                               | The row key would change when another variant is written.                |
+| List `key_field` or `order_field`                | List elements would collide on zero values when variants switch.         |
+| `text` field (directly or nested)                | The group replaces as a whole, preventing CRDT merge execution.          |
+| Field with a registered custom merger            | The merger cannot execute on paths bypassed by group replacement.        |
+| Reference field (message type that is an entity) | References require fixed fields for relation graphs and query push-down. |
 
-The last one rules out polymorphic targets
-(`oneof target { Project p = 1; User u = 2; }`). Accessor naming,
-`include`/follow segments and the reverse push-down all key off a ref field
-being in a fixed place; making them handle a sometimes-absent one is a design
-question of its own rather than a missing branch.
+Polymorphic targets (such as `oneof target { Project p = 1; User u = 2; }`) are not supported.
 
 ## Maps and user-defined fields
 
-A `map` is merged per entry by map key, and every entry is addressable — in a
-field mask, in a query, in an ordering. That is what an issue tracker's
-user-defined ("custom") fields are made of:
+Maps merge per entry by map key. Individual entries are addressable in field masks, query conditions, and sort clauses:
 
 ```proto
 message Issue {
@@ -534,14 +390,13 @@ message Issue {
 	map<string, FieldValue> custom = 2;
 }
 
-// The value type is YOURS. The engine never interprets it.
+// Application-defined value type. The engine does not interpret it.
 message FieldValue {
 	oneof kind {
 		string text = 1;
 		double number = 2;
 		bool checked = 3;
-		// Multi-select needs no engine concept: wrap a repeated scalar, and
-		// `custom.<key>.labels.values` is an ordinary repeated leaf.
+		// Repeated scalars can be wrapped in a message.
 		StringList labels = 4;
 	}
 }
@@ -549,50 +404,31 @@ message FieldValue {
 
 ### Addressing one entry
 
-**The path segment after a map field is the entry KEY**, not a field name — the
-same convention a field-mask path already uses, so there is one rule rather than
-two:
+The path segment following a map field is the map entry key:
 
 ```
-custom.priority.number      the `number` variant of the entry keyed "priority"
-custom.priority             the whole entry (isSet / isNotSet)
-custom                      the whole map (isEmpty)
+custom.priority.number      The `number` variant of the entry keyed "priority"
+custom.priority             The entire entry (checked with isSet or isNotSet)
+custom                      The entire map (checked with isEmpty)
 ```
 
-A key that contains a dot is escaped with a backslash where a path is written as
-one string — `custom.due\.date.text` — which is only needed in the Go builders
-and in field masks. On the wire a path is already a list of segments, so a key
-travels verbatim.
+Keys containing dots must be escaped with a backslash in string path representations (for example, `custom.due\.date.text`). Wire representations transmit path segments as discrete elements and require no escaping.
 
-A query names the VARIANT it means. Because a oneof member has explicit
-presence, an entry holding a different variant reads as **not found**:
-the condition is false and the ordering ranks it last, exactly as for any unset
-field. That is why the engine needs no canonical value type, no cross-variant
-sort order, and no rule for comparing a number against an attachment — no path
-ever asks it to.
+Queries reference the specific oneof variant intended. If an entry holds a different variant, the condition evaluates to false and sort clauses rank the entry last.
 
-The one consequence to accept: **there is no ordering by "whatever the value
-is"** across variants. `order by custom.priority` is not a thing;
-`order by custom.priority.number` is. Since a custom field has one declared type
-in your own field-definition table, that is a non-loss in practice — but it does
-follow directly from choosing an app-defined value type.
+Sorting across different variants of a custom field is not supported (`order by custom.priority.number` is valid; `order by custom.priority` is not).
 
-Comparing a whole map, or a whole entry whose value is a message, is rejected at
-compile time with an error naming the key form. `isSet` on a map is not offered:
-a map has implicit presence, so it is constitutionally true. `isEmpty` is what
-asks whether it holds anything.
+Comparing an entire map or an entire message-valued map entry in query predicates is rejected at compile time. Maps have implicit presence and do not support `isSet`; use `isEmpty` to check whether a map contains entries.
 
 ### Searching across keys: `any()`
 
-The mirror question — "**which** custom field holds X", rather than "does THIS
-one" — is an `any()` over the map. Its element is one **entry**, whose two sides
-the sub-condition addresses as `key` and `value`:
+To search across all map entries, use `any()`:
 
 ```go
-query.Any("custom", query.Eq("value.number", 5))            // which field holds 5
+query.Any("custom", query.Eq("value.number", 5))
 query.Any("custom", query.And(
 	query.StartsWith("key", "cf_"), query.Eq("value.checked", true)))
-query.Any("custom", query.In("key", "priority", "severity"))  // any of these set
+query.Any("custom", query.In("key", "priority", "severity"))
 ```
 
 ```ts
@@ -602,34 +438,19 @@ w.custom.any((e) =>
 );
 ```
 
-The entry scope is explicit for the same reason it is on a repeated message
-field: it is what lets two conditions be said to describe the **same** entry.
-`any(and(key == "priority", value.number == 5))` is "the field named priority
-holds 5"; `and(any(key == "priority"), any(value.number == 5))` is the weaker
-"priority is set AND something holds 5".
-
-Two things follow, and both are worth knowing before you reach for it:
-
-- **Comparing the key as a value** costs no escaping — an entry key containing a
-  dot needs none here — and gives `in` and `startsWith` over keys for free.
-- **There is no projection.** The answer is a predicate: some entry matched. It
-  never says _which_ one. An app that needs the field's name reads it off the
-  row's map after the query returns.
+Within an `any()` predicate, `key` addresses the map key and `value` addresses the entry value. `any()` evaluates as a boolean predicate and does not return the matching key names.
 
 ### Indexing every entry: `*`
 
-A `*` segment in an `IndexKey.path` means **fan out over every entry of this
-map**, and the segment after it — `key` or `value` — says which side of the
-entry the component stores. **One declared path is one component**, so an index
-states its own layout:
+The `*` segment in an `IndexKey.path` fans out over every entry in the map. The subsequent segment (`key` or `value`) specifies the indexed component:
 
 ```proto
-// One custom field, addressed by key: equality, ranges and an ordering within it.
+// One custom field, addressed by key: equality, ranges, and ordering.
 index {
 	name: "cf_number"
 	key: [ { path: "custom.*.key" }, { path: "custom.*.value.number" } ]
 }
-// The same, with a second sort key.
+// The same with an additional sort key.
 index {
 	name: "cf_num_recent"
 	key: [
@@ -638,83 +459,51 @@ index {
 		{ path: "updated_at" desc: true }
 	]
 }
-// Which custom field holds X: equality only, cross-key or named-key.
+// Cross-key or named-key equality queries.
 index {
 	name: "cf_by_number"
 	key: [ { path: "custom.*.value.number" }, { path: "custom.*.key" } ]
 }
-// Multi-select, one entry per (key, element).
+// Multi-select entries (one index entry per key-element pair).
 index {
 	name: "cf_labels"
 	key: [ { path: "custom.*.key" }, { path: "custom.*.value.labels.values" } ]
 }
 ```
 
-The two layouts are complementary, and the choice between them is the one real
-decision here:
+Layout selection:
 
-| Layout         | Serves                                                                 |
-| -------------- | ---------------------------------------------------------------------- |
-| `[key, value]` | equality, ranges **and** ordering — within one named field             |
-| `[value, key]` | equality only — cross-key _or_ named-key (pin the value, then the key) |
+| Layout         | Supported operations                                                      |
+| -------------- | ------------------------------------------------------------------------- |
+| `[key, value]` | Equality, ranges, and sorting within a single named custom field.         |
+| `[value, key]` | Equality queries across all custom fields or for a specific custom field. |
 
-An app that only does equality probes declares **one** index, `[value, key]`, and
-gets both axes from it. Declaring both layouts doubles the entries a row
-occupies; see [limits and trade-offs](../explanation/limits-and-trade-offs.md)
-for what that costs and how to measure it.
+An application requiring only equality probes can declare a single `[value, key]` index to satisfy both access patterns. Declaring both layouts doubles index entries per row; see [Limits and trade-offs](../explanation/limits-and-trade-offs.md).
 
-The selector is required rather than defaulted because a bare trailing `*` would
-be genuinely ambiguous: for `map<string, string> attrs`, `attrs.*` could mean
-either side of the entry. `key` and `value` are the same two words the `any()`
-entry scope uses, so one concept has one spelling in a declaration and in a
-query. Neither `*` nor a selector can collide with a field name in a condition
-path — there, the segment after a map is an entry key, and these would be that
-key.
+Indexing properties:
 
-Three properties follow:
+- A `*` component can be followed by a repeated field inside an entry (`custom.*.value.labels.values`), generating one index entry per `(key, element)` pair.
+- When an entry key is fixed by an equality predicate, the value component can serve as an index sort key.
+- Unconstrained sort operations on custom fields fall back to table scans because rows missing the key must sort last.
+- A value component declared without a preceding key component supports cross-key `any()` queries, but single-key equality checks remain in the residual predicate filter.
+- Setting `indexed: true` on a map field is rejected; use composite `*` index definitions instead.
 
-- A `*` may be followed by a repeated field **inside one entry**
-  (`custom.*.value.labels.values`), which stores one entry per (key, element).
-  That is not a cross product: the second fan lives inside one position of the
-  first.
-- Once the entry key is pinned by a predicate, the value **is** an ordering — a
-  map holds at most one value per key, so the row occupies exactly one position.
-  A list fan-out never gets this, which is why the two are distinguished.
-- An ordering by a custom field that no predicate pins **declines to the scan**.
-  Rows lacking that key sit outside every key range and have to sort last, and
-  the executor has no second pass to append them.
+### Admin UI limitations
 
-A value component with **no key component beside it** is legal and useful — it is
-what serves a cross-key `any()` — but a predicate naming one field then stays in
-the residual: the range spans that value under every key, so the key constraint
-has to be re-checked per row rather than dropped.
-
-`indexed: true` on a map is refused: a field mark has no room to say which side,
-which entry or which variant. The error points at the `*` form.
-
-### What the admin UI covers
-
-It renders and filters **scalar-valued** maps only. A message-valued map — the
-shape user-defined fields take — is skipped in the row view, the edit form and
-the filter bar. Everything above works the same either way; this is a gap in the
-UI, not in the index or the query.
+The admin UI displays and filters scalar-valued maps only. Message-valued maps are omitted from the row view, edit form, and filter bar.
 
 ## Custom mergers for opaque fields
 
-`WithMerger` on the server plus a client `MergerSpec` install a merge
-function for one opaque field. It **must be idempotent, commutative and
-associative**: it runs on server apply, on optimistic overlay merge, and again on
-every rebase replay, so a non-idempotent merger (a concat, say) corrupts data.
+The server `WithMerger` option and client `MergerSpec` register a merge function for an opaque field. Merge functions must be idempotent, commutative, and associative. The merge function executes during server apply operations, optimistic overlay merges, and rebase replays. Non-idempotent mergers cause data corruption.
 
-For collaborative prose do not write one — use `text: true`, whose built-in
-union merger satisfies the contract by construction.
+For collaborative text, use `text: true` instead of a custom merger; its built-in union merger satisfies these properties.
 
-## The option field numbers
+## Option field numbers
 
-The custom option field numbers (50100/50101) sit in the range reserved for use
-within a single organization and are not registered. Two libraries claiming one
-number is unrecoverable for an app depending on both — protobuf-go panics at
-init with `extension number 50100 is already registered on message
-google.protobuf.MessageOptions` — so claim numbers in protobuf's global
-extension registry before publishing the protos. Moving them afterwards is a
-breaking change for every adopter's generated code.
+The custom option field numbers (`50100` and `50101`) reside in the Protobuf extension range reserved for internal organization use. If two imported Protobuf libraries claim the same extension number, `protobuf-go` panics at initialization with:
+
+```
+extension number 50100 is already registered on message google.protobuf.MessageOptions
+```
+
+Register extension numbers in the global Protobuf extension registry before publishing Protobuf definitions publicly.

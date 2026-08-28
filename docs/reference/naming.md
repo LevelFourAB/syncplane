@@ -1,143 +1,155 @@
 # Naming rules
 
-Entity names, workspace ids and row keys are part of the wire contract: they
-travel in mutations, scope every RPC, address rows in server storage, and are
-pasted into the client's local key layout. Both implementations enforce the same
-rules — Go in `engine/internal/naming`, TypeScript in `client/src/naming.ts` —
-so a write the server would refuse never lands in the local store first.
+Entity names, workspace IDs, and row keys form part of the wire contract. They
+appear in mutations, scope remote procedure calls (RPCs), address rows in server
+storage, and structure key-value (KV) keys on the client. Both Go
+(`engine/internal/naming`) and TypeScript (`client/src/naming.ts`) enforce these
+rules.
 
 ## Entity names
 
-The `name` in `(syncplane.v1.entity)` (and `entity("todo", …)` in the TypeScript
-schema builder) must be an **identifier**:
+An entity name identifies a schema entity. In Protocol Buffers, set the `name`
+field in `(syncplane.v1.entity)`. In the TypeScript schema builder, call
+`entity("name", ...)`.
 
-| Rule                                                                |
-| ------------------------------------------------------------------- |
-| Non-empty                                                           |
-| ASCII letter or `_`, then letters, digits or `_` (`^[A-Za-z_]\w*$`) |
-| At most 64 characters                                               |
+The following table lists the syntax rules for entity names:
 
-Checked at registration: `RegisterEntity` / `RegisterDescriptorSet` on the
-server, `new SyncClient({ entities })` and `entity()` on the client.
+| Property      | Requirement                                                                       |
+| ------------- | --------------------------------------------------------------------------------- |
+| Character set | ASCII letter or `_`, followed by ASCII letters, digits, or `_` (`^[A-Za-z_]\w*$`) |
+| Length        | 1 to 64 characters                                                                |
 
-The shape is narrow because an entity name is four things at once: a segment in
-every client KV key (so no `/` — otherwise entity `a` row `b/x` and entity `a/b`
-row `x` would occupy the same key), a token in the cross-tab change channel, a
-property name on the client's db facade (`db.todo`), and — for schemas declared
-in TypeScript — the source of a synthesized proto message name.
+Validation timing:
+
+- **Server:** Checked during registration by `RegisterEntity` and `RegisterDescriptorSet`.
+- **Client:** Checked during initialization by `new SyncClient({ entities })` and `entity()`.
 
 ## Key fields
 
-`key_fields` names the fields whose values form the row key, in order. Each must
-be a **singular string, integer, bool or enum**.
+The `key_fields` option specifies the fields whose values compose the row key,
+in order. Each field must be a singular string, integer, boolean, or enum.
 
-| Kind                                                         | Renders as       |
-| ------------------------------------------------------------ | ---------------- |
-| `string`                                                     | Verbatim         |
-| `int32` `int64` `uint32` `uint64` `sint*` `fixed*` `sfixed*` | Base-10          |
-| `bool`                                                       | `true` / `false` |
-| enum                                                         | The number       |
+The following table lists the supported key field types and their string encodings:
 
-Refused: messages, repeated fields, maps, `bytes`, `float` and `double`. The
-first three have no text form at all. The last three have one _per language_ —
-Go renders `bytes` through protoreflect while the client holds a `Uint8Array`,
-and `1e7` formats as `1e+07` in Go against `10000000` in JS — so a key built
-from one would name a different row on each side.
+| Field type                                                         | Key rendering     |
+| ------------------------------------------------------------------ | ----------------- |
+| `string`                                                           | Verbatim          |
+| `int32`, `int64`, `uint32`, `uint64`, `sint*`, `fixed*`, `sfixed*` | Base-10           |
+| `bool`                                                             | `true` or `false` |
+| enum                                                               | Integer value     |
 
-Checked at registration on both sides, and the TypeScript builder refuses
-`bytes().key()` / `double().key()` at the declaration.
+The following field types are not permitted: messages, repeated fields, maps,
+`bytes`, `float`, and `double`.
+
+Validation timing:
+
+- Checked during registration on both the server and the client.
+- The TypeScript schema builder rejects `bytes().key()` and `double().key()` at declaration time.
 
 ## Row keys
 
-The row key is the rendered key-field values joined:
+A row key is formed by joining the rendered values of `key_fields`:
 
-- **One key field** → used verbatim, so the key reads as the id it is.
-- **Several** → each part escapes `\` and `/`, then joined with `/`. This is
-  what keeps the tuples `("a/b", "c")` and `("a", "b/c")` apart, as `a\/b/c`
-  against `a/b\/c`.
+- **Single key field:** The rendered value is used verbatim.
+- **Multiple key fields:** Each value escapes `\` and `/`, and the escaped values are joined with `/`. For example, the tuple `("a/b", "c")` renders as `a\/b/c`, while `("a", "b/c")` renders as `a/b\/c`.
 
-The result must satisfy:
+The following table lists the constraints for row keys:
 
-| Rule                                                      | Why                                                                                       |
-| --------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| Non-empty                                                 | An unset key field derives `""`, whose KV key is the entity prefix itself                 |
-| No ASCII control characters (`\u0000`–`\u001f`, `\u007f`) | `\u001f` separates the fields of a cross-tab change token; keys should stay printable     |
-| Encodable as UTF-8 (no unpaired surrogate)                | The encoder would silently substitute `\ufffd`, storing a key nobody derived              |
-| At most 512 UTF-8 bytes, escaping included                | Keys are stored, scanned and prefix-matched; an unbounded key is an unbounded index entry |
+| Property      | Requirement                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| Character set | Valid UTF-8 with no unpaired surrogates; no ASCII control characters (`\u0000`–`\u001f`, `\u007f`) |
+| Length        | 1 to 512 UTF-8 bytes (including escape characters)                                                 |
+| Comparison    | Bytewise comparison without case folding or Unicode normalization                                  |
 
-Checked when a mutation is **built** on the client (`put` / `patch` / `delete`)
-and when one is **applied** on the server, including trusted server-side writes
-through `EntityTx`. A violation arriving over the wire is rejected with
-`invalid_argument`; a rejection is an ack, so a client that minted a bad key
-drains its queue instead of retrying forever.
+Validation and errors:
 
-Everything else is allowed. Keys may contain `/`, spaces and any printable
-Unicode, and are compared bytewise — no case folding, no normalization, so `é`
-written as one code point and as `e` plus a combining accent are different rows.
+- **Client:** Checked when building mutations with `put`, `patch`, or `delete`.
+- **Server:** Checked when applying mutations, including server-side writes through `EntityTx`.
+- **Errors:** Over-the-wire validation failures return `invalid_argument`.
 
 ## Room names
 
-A room topic is `(workspace_id, name)` plus an optional row anchor — see
-[rooms](../explanation/rooms.md). Nothing declares a room ahead of time, so the
-`name` half is a **character rule** rather than an identifier rule:
+A room topic consists of `(workspace_id, name)` and an optional row anchor. For
+more information, see [Rooms](../explanation/rooms.md).
 
-| Rule                                                      |
-| --------------------------------------------------------- |
-| Non-empty                                                 |
-| No ASCII control characters (`\u0000`–`\u001f`, `\u007f`) |
-| Encodable as UTF-8 (no unpaired surrogate)                |
-| At most 128 UTF-8 bytes                                   |
+The following table lists the constraints for room names:
 
-So `cursors`, `doc:42/cursors` and `Board — Sprint 14` all work. Checked when a
-room is opened on the client (`ws.room(name)`) and at the RPC boundary on the
-server, where a violation is `invalid_argument`.
+| Property      | Requirement                                                                                        |
+| ------------- | -------------------------------------------------------------------------------------------------- |
+| Character set | Valid UTF-8 with no unpaired surrogates; no ASCII control characters (`\u0000`–`\u001f`, `\u007f`) |
+| Length        | 1 to 128 UTF-8 bytes                                                                               |
+| Comparison    | Bytewise comparison without case folding or Unicode normalization                                  |
 
-The cap is smaller than a row key's because the whole topic — workspace id,
-name, anchor key, publisher subject — rides in every presence event alongside
-the app's own state, and a bus over Postgres `LISTEN`/`NOTIFY` has to fit all of
-it in one 7900-byte payload with the state base64-expanded. 128 bytes leaves
-that budget to the state, which is the part an app cannot shorten.
+Examples of valid room names include `cursors`, `doc:42/cursors`, and `Board — Sprint 14`.
 
-Like row keys, names compare bytewise: `Notes` and `notes` are two rooms.
+Validation and errors:
+
+- **Client:** Checked when opening a room with `ws.room(name)`.
+- **Server:** Checked at the RPC boundary.
+- **Errors:** Validation failures return `invalid_argument`.
 
 ## Workspace ids
 
-`workspace_id` is a hard partition key everywhere — see
-[the convergence model](../explanation/convergence-model.md). Apps mint it
-themselves, but it is not free-form:
+The `workspace_id` identifies a partition key. For more information, see
+[the convergence model](../explanation/convergence-model.md).
 
-| Rule                                                                                          |
-| --------------------------------------------------------------------------------------------- |
-| Non-empty                                                                                     |
-| ASCII letter or digit, then letters, digits, `_`, `-` or `:` (`^[A-Za-z0-9][A-Za-z0-9_:-]*$`) |
-| At most 128 bytes                                                                             |
+The following table lists the constraints for workspace IDs:
 
-So `acme`, `acme-corp`, `user:xB12dL`, `org:acme:team:eng` and a bare UUID all
-work; a space, `.`, `/` or `*` does not. An app whose natural id does not fit —
-an email address, a domain — slugifies or hashes it into one.
+| Property      | Requirement                                                                                           |
+| ------------- | ----------------------------------------------------------------------------------------------------- |
+| Character set | ASCII letter or digit, followed by letters, digits, `_`, `-`, or `:` (`^[A-Za-z0-9][A-Za-z0-9_:-]*$`) |
+| Length        | 1 to 128 bytes                                                                                        |
+| Comparison    | Bytewise comparison without case folding or Unicode normalization                                     |
 
-Checked on the client when a workspace is opened (`new SyncClient({ workspaces })`,
-`addWorkspace`) and on the server at the RPC boundary, where a violation is
-`invalid_argument` for the whole request rather than a per-workspace result: the
-id names no partition to report against.
+Examples:
 
-The set is an allowlist because the id is pasted into places that later parse it
-back out, and each excluded character breaks one of them:
+- **Valid:** `acme`, `acme-corp`, `user:xB12dL`, `org:acme:team:eng`, and UUIDs.
+- **Invalid:** Characters such as spaces, `.`, `/`, and `*`.
 
-- `U+001F` separates the fields of the client's cross-tab change tokens, and the
-  workspace is the first field — an id holding one shifts every later field and
-  the notification wakes the wrong watchers.
-- `*` is the sentinel the client's watch layer uses for "every workspace", so a
-  workspace named `*` would share a scan with the cross-workspace watchers of
-  the same entity.
-- `/` forges an extra segment in the client's `c/<entity>/<ws>/<key>` layout.
-- `.` reaches the admin UI as a URL path segment, where an id of `..` reads as a
-  path traversal.
+Validation and errors:
 
-Restricting the first character keeps an id from being pure punctuation. Like
-row keys, ids compare bytewise: no case folding and no normalization, so `Acme`
-and `acme` are two different workspaces.
+- **Client:** Checked when opening a workspace with `new SyncClient({ workspaces })` or `addWorkspace`.
+- **Server:** Checked at the RPC boundary. Validation failures return `invalid_argument` for the whole request.
+- In-process server APIs (`Mutate`, connector paths, and effect paths) do not enforce workspace ID constraints.
 
-The in-process server API (`Mutate`, and the connector and effect paths that
-reach it) does not enforce this — those ids come from application code, at the
-same trust level as the schema it registers.
+## Design rationale
+
+This section documents the technical reasons behind the naming constraints.
+
+### Entity name constraints
+
+An entity name serves four purposes:
+
+- A path segment in client KV storage keys (disallowing `/` prevents collisions between entity `a` with row `b/x` and entity `a/b` with row `x`).
+- A token in the cross-tab change notification channel.
+- A property name on the client database facade (`db.todo`).
+- The source of synthesized Protocol Buffer message names in TypeScript schemas.
+
+### Key field restrictions
+
+Key fields reject complex and floating-point types for the following reasons:
+
+- Messages, repeated fields, and maps have no text representation.
+- `bytes`, `float`, and `double` have language-specific string representations. For example, Go renders `bytes` through `protoreflect` while TypeScript uses `Uint8Array`, and Go formats `1e7` as `1e+07` whereas JavaScript formats it as `10000000`.
+
+### Row key constraints
+
+- **Non-empty:** An unset key field derives `""`, which matches the entity prefix key in KV storage.
+- **No ASCII control characters:** `\u001f` separates fields in cross-tab change tokens.
+- **UTF-8 encoding:** Encoders substitute `\ufffd` for unpaired surrogates, which stores an incorrect key.
+- **512-byte limit:** Keys are stored, scanned, and prefix-matched; bounding key length bounds index entry sizes.
+- **Error handling:** Rejecting an invalid key with `invalid_argument` acts as an acknowledgement, allowing the client to drain its queue instead of retrying.
+
+### Room name limits
+
+Room names are limited to 128 bytes because the full topic (`workspace_id`, `name`, anchor key, and publisher subject) is transmitted in presence events alongside application state. Message buses running over PostgreSQL `LISTEN`/`NOTIFY` must fit the payload within a 7900-byte limit when state is base64-encoded.
+
+### Workspace ID constraints
+
+Workspace IDs use an allowlist to prevent delimiter collisions:
+
+- `U+001F` separates fields in cross-tab change tokens, where `workspace_id` is the first field.
+- `*` is the wildcard sentinel in the client watch layer for matching all workspaces.
+- `/` introduces additional path segments in the client storage layout (`c/<entity>/<ws>/<key>`).
+- `.` creates path traversal issues in admin UI URL paths (such as `..`).
+- Requiring an alphanumeric leading character prevents IDs composed entirely of punctuation.

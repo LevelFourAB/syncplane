@@ -1,99 +1,89 @@
 # Sync status and failure codes
 
+This document describes the sync status properties, error channels, and failure codes in the TypeScript client.
+
 ## `client.status()`
 
-`client.status()` returns a snapshot and `client.onStatusChange(cb)` (or the
-constructor option) subscribes. Both work before `start()`.
+`client.status()` returns a status snapshot. `client.onStatusChange(cb)` and the `onStatusChange` constructor option subscribe to status changes. Both work before `start()`.
 
-Connectivity, the sync-loop state and the schema-revision skew are
-**account-wide** (one stream, one server build); pending counts, scope, access
-and snapshot progress are **per workspace**, with the default workspace's
-mirrored onto the top level so a single-workspace app never indexes
-`workspaces`.
+Status properties have two scopes:
 
-The full shape is in
-[the client reference](typescript-client.md#8-sync-status). This page is about
-which channel reports what.
+- **Account-wide**: Connectivity, sync-loop state, and schema-revision skew apply to the entire account across a single stream and server build.
+- **Per-workspace**: Pending mutation counts, scope, access, and snapshot progress apply to individual workspaces. The client mirrors default workspace properties onto the top level of the status object.
+
+For the full status object type definition, see the [client reference](typescript-client.md#sync-status).
 
 ## Where failures show up
 
-Failures reach the app on more than one channel, because they are not the same
-kind of event: a mutation the server refused is not an outage, and neither is a
-standing condition that retrying cannot clear.
+The client reports failures and errors through specific channels based on their scope and lifecycle:
 
-| Failure                                                    | Channel                                                                | Code                                                                       |
-| ---------------------------------------------------------- | ---------------------------------------------------------------------- | -------------------------------------------------------------------------- |
-| A mutation was refused by the app's rules                  | `onMutationRejected`                                                   | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined one |
-| The client gave up on a mutation the server kept failing   | `onMutationRejected`                                                   | `poison_dropped`                                                           |
-| A purge discarded a queued mutation                        | `onMutationRejected` + the `removeWorkspace` / `purgeLocalData` result | `workspace_purged`                                                         |
-| A local format upgrade could not salvage a queued mutation | `onMutationRejected` + `lastError` (a count)                           | `format_upgraded`                                                          |
-| A sync cycle failed                                        | `status().lastError`                                                   | the server's code, else `unavailable` / `internal`                         |
-| A workspace's queue was refused for a mutation-id gap      | `status().lastError` + a `resequence` sync event                       | `mutation_id_gap`                                                          |
-| A watch could not be registered                            | `status().lastError`                                                   | `watch_failed`                                                             |
-| A text handle could not merge remote state                 | `TextHandle.status()` + `TextHandle.onError`                           | `text_merge_failed`                                                        |
-| The server withdrew a room                                 | `Room.status()` + `Room.onError`                                       | `room_dropped`                                                             |
-| A room publish could not be sent                           | `Room.onError`                                                         | `room_offline`                                                             |
-| `Room.send` was called on a closed or dropped room         | the `RoomSendError` it rejects with                                    | `room_closed`, `room_dropped`                                              |
-| Access to a workspace was withdrawn                        | `status().workspaces[id].access`                                       | —                                                                          |
-| Server and client schema revisions differ                  | `status().schemaSkew`                                                  | —                                                                          |
+| Failure                                                      | Channel                                                                     | Code                                                                              |
+| ------------------------------------------------------------ | --------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| A mutation was refused by application rules                  | `onMutationRejected`                                                        | `permission_denied`, `invalid_argument`, `conflict`, or a custom application code |
+| The client dropped a mutation after repeated server failures | `onMutationRejected`                                                        | `poison_dropped`                                                                  |
+| A purge operation discarded a queued mutation                | `onMutationRejected`, plus the `removeWorkspace` or `purgeLocalData` result | `workspace_purged`                                                                |
+| A local format upgrade could not salvage a queued mutation   | `onMutationRejected`, plus a count in `lastError`                           | `format_upgraded`                                                                 |
+| A sync cycle failed                                          | `status().lastError`                                                        | Server error code, `unavailable`, or `internal`                                   |
+| A workspace queue was refused due to a mutation ID gap       | `status().lastError`, plus a `resequence` sync event                        | `mutation_id_gap`                                                                 |
+| A watch could not be registered                              | `status().lastError`                                                        | `watch_failed`                                                                    |
+| A text handle could not merge remote state                   | `TextHandle.status()`, `TextHandle.onError`                                 | `text_merge_failed`                                                               |
+| The server withdrew a room                                   | `Room.status()`, `Room.onError`                                             | `room_dropped`                                                                    |
+| A room publish message could not be sent                     | `Room.onError`                                                              | `room_offline`                                                                    |
+| `Room.send` was called on a closed or dropped room           | The rejected `RoomSendError`                                                | `room_closed`, `room_dropped`                                                     |
+| Access to a workspace was withdrawn                          | `status().workspaces[id].access`                                            | None                                                                              |
+| Server and client schema revisions differ                    | `status().schemaSkew`                                                       | None                                                                              |
 
-The rule of thumb: **`onMutationRejected` is per mutation** (something the user
-wrote is gone, and the local state has already been rolled back before the
-callback runs), **`lastError` is the sync loop** (transient, cleared by the next
-successful cycle), and the last two are **standing conditions** that survive a
-successful cycle because retrying cannot change them. The text-handle row is
-neither: it belongs to one live handle rather than to the client, which is why
-it has its own channel. The two room rows are the same shape one level over:
-they belong to one open room, and neither touches the client's status.
+Failure reporting channels operate with different lifecycles:
 
-`room_dropped` is terminal — the server re-checks access on every heartbeat, so
-reopening meets the same answer — while `room_offline` is not: it reports that
-one publish did not reach the server, and the room's state is re-sent when the
-stream reopens. Nothing on the room plane is durable, so neither code ever means
-data was lost; see [Rooms](../explanation/rooms.md).
+- `onMutationRejected`: Reports per-mutation rejections. The client rolls back local mutation state before invoking the callback.
+- `status().lastError`: Reports transient sync-loop errors. A successful sync cycle clears `lastError`.
+- `status().workspaces[id].access` and `status().schemaSkew`: Report standing conditions that persist until the underlying condition changes.
+- `TextHandle.status()` and `TextHandle.onError`: Report errors on an individual live text handle without affecting client status.
+- `Room.status()`, `Room.onError`, and `RoomSendError`: Report errors on an individual open room without affecting client status.
+
+Room failure codes have the following behaviors:
+
+- `room_dropped`: Terminal. The server re-evaluates access on every heartbeat.
+- `room_offline`: Non-terminal. Indicates that a publish did not reach the server. The room re-sends state when the stream reconnects.
+- Room data is not durable. Room failure codes do not indicate data loss. For more information, see [Rooms](../explanation/rooms.md).
 
 ## Two codes that deliberately appear nowhere above
 
-- **`text_full_state_required`** answers a collaborative-text PATCH whose
-  delta-state fragment did not fit the row. The edit is intact — the coordinator
-  re-sends it as a whole document — so surfacing it would report a loss that did
-  not happen.
-- **`text_state_stale`** answers one built on state a compaction dropped. The
-  coordinator captures the field's visible text, re-bootstraps, and re-applies
-  it, so the text survives (the marks the stale side minted over dropped
-  characters do not). It reaches `onMutationRejected` only when that capture
-  found nothing to restore.
+The following codes are handled automatically and are not surfaced directly as client errors:
+
+- **`text_full_state_required`**: Returned when a collaborative text `PATCH` delta-state fragment does not fit the row. The coordinator re-sends the update as a complete document.
+- **`text_state_stale`**: Returned when a collaborative text `PATCH` relies on state removed by compaction. The coordinator captures the visible text in the field, re-bootstraps, and re-applies the edit. Visible text is preserved, but marks created over dropped characters are discarded. This code reaches `onMutationRejected` only when the capture finds no text to restore.
 
 ## The code vocabulary
 
-Rejection codes stay free-form on the wire so an app can invent its own, but
-both sides ship constants for the common cases (`permission_denied`,
-`invalid_argument`, `conflict`) and the client types its fields with a union
-over them.
+Rejection codes are extensible strings. The client exports standard constants and union types:
 
-Codes are exported as constants (`CodeConflict`, `CodeWorkspacePurged`, …) with
-`RejectionCode` and `SyncErrorCode` unions over them. Both fields widen the union
-with `(string & {})`, so a code your own mutator invented still typechecks while
-the known ones autocomplete — `switch` on it with a `default`.
+- **Constants**: Named constants such as `CodeConflict` and `CodeWorkspacePurged`.
+- **Types**: `RejectionCode` and `SyncErrorCode` union types. Both types widen the union with `(string & {})` to allow custom application codes while supporting autocomplete for standard codes. Handle these values using a `switch` statement with a `default` case.
 
-`lastError.code` always speaks this vocabulary: a failure the server typed
-carries its own code through, and anything else is classified `unavailable`
-(unreachable, timed out, or a browser fetch that failed without saying why) or
-`internal`. `transportCode` carries the underlying Connect code for the rare
-caller that needs to tell, say, a `NotFound` from a `ResourceExhausted`.
+The `lastError.code` property contains one of the following:
+
+- A server-specified error code.
+- `unavailable`: Indicates that the server is unreachable, a request timed out, or a browser fetch failed without an error reason.
+- `internal`: Indicates an internal client error.
+
+The `lastError.transportCode` property contains the underlying Connect transport code (for example, `NotFound` or `ResourceExhausted`).
 
 ## Callback isolation
 
-A throw from your own callback is not one of these failures, and the library
-does not let it become one. Every app callback it invokes — `onStatusChange`,
-watch callbacks, `onMutationRejected`, `onUndoChange`, a text handle's
-`subscribe`, `onSchemaSkew` — runs isolated: the commit or pull being reported
-has already landed by the time it is called, so an exception is logged to
-`console.error` and dropped rather than failing the write, skipping the
-callbacks queued behind it, or marking the sync cycle errored. `onSchemaSkew` is
-the one that owes an answer; a throwing policy falls back to `'warn'`, the action
-an unconfigured one gets.
+Every application callback that the client invokes runs in isolation after the reported commit or pull completes. The client isolates the following callbacks:
+
+- `onStatusChange`
+- Watch callbacks
+- `onMutationRejected`
+- `onUndoChange`
+- `TextHandle.subscribe`
+- `onSchemaSkew`
+
+An exception in a callback is logged to `console.error` and dropped. It does not fail the write, skip queued callbacks, or mark the sync cycle as errored.
+
+If `onSchemaSkew` throws an error, the policy falls back to `'warn'`, which is the default behavior when no policy is configured.
 
 ## Related
 
-- [Handle failures](../how-to/handle-failures.md) — what to do about each.
+- [Handle failures](../how-to/handle-failures.md): Guidance for handling client failures and errors.

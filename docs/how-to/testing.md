@@ -1,93 +1,129 @@
-# Testing
+# Running tests
 
-Pick the tier that can actually observe the behavior you are changing.
+Use this guide to select and run tests across the server, client, and browser tiers, or to run individual test cases during development.
 
-| Tier                       | Runs                                                                  | Use it for                                     |
-| -------------------------- | --------------------------------------------------------------------- | ---------------------------------------------- |
-| `task test:go`             | Ginkgo/Gomega suites colocated with the engine code, randomized in CI | anything server-side                           |
-| `task test:ts:unit`        | vitest against fake-indexeddb                                         | client logic in isolation                      |
-| `task test:ts:react`       | vitest in jsdom, with @testing-library/react                          | `syncplane/react` hooks and providers          |
-| `task test:ts:integration` | the TS client against a spawned Go testserver                         | **cross-language wire behavior**               |
-| `task test:e2e`            | Playwright, real tabs                                                 | **anything that depends on more than one tab** |
+## Prerequisites
 
-`task ci` runs everything except the browser tier.
-
-## Running a single test
+Before you run end-to-end browser tests, install the browser binaries:
 
 ```sh
-# Go: pass ginkgo args through task, or run ginkgo directly from the repo root
-task test:go -- --focus "rejects a stale version"
-go tool ginkgo run ./engine/server                # one package
-
-# TS: vitest in client/
-cd client && pnpm vitest run --project unit test/unit/kv.test.ts
-cd client && pnpm vitest run --project react test/react/workspace.test.ts
-cd client && pnpm vitest run --project integration -t "poke"
-
-# Browser: Playwright in client/
-cd client && pnpm exec playwright test --project=chromium test/e2e/stream-leader.spec.ts
-task test:e2e BROWSER=firefox -- -g "hands over"          # any installed engine
+task test:e2e:install
 ```
 
-## The browser tier
+This command downloads Chromium by default (approximately 100 MB).
 
-`task test:e2e` is not part of `task ci`: it drives a real browser, which
-`task test:e2e:install` downloads once (~100 MB). It covers what only a browser
-can — cross-tab change sharing, stream leadership and its handover when a tab
-hides, mutation-id minting across tabs, rooms sharing one `Watch` stream across
-an account's tabs, and an IndexedDB store surviving the tab that made it.
+## Steps
 
-Node has no shared lock manager, so outside a browser the client falls back to
-an in-process mutex, declines stream leadership and leases peers locally.
-Multi-tab claims are therefore **only** really covered here. Specs drive a
-JSON-only `window.harness`; invariants no tab can see are asserted against the
-testserver's `/debug/rpc` counters.
+1. Select the test tier for the behavior that you are changing:
 
-Collaborative text has the largest share of the browser tier, because every part
-of the feature is multi-tab: writer identities are leased from a device-wide
-pool over Web Locks, and two tabs of one app share a store, a queue and a
-`clientId`. The specs cover live handles typing at once and a second device
-reaching the same document; string writes meeting a typist; the wire cost of an
-edit in both directions, asserted against the server's own byte counters; and a
-live handle healing when the server compacts the field under it.
+   | Tier               | Command                    | Description                                                                                         |
+   | ------------------ | -------------------------- | --------------------------------------------------------------------------------------------------- |
+   | Server             | `task test:go`             | Ginkgo and Gomega suites colocated with engine code, randomized in CI. Use for server-side changes. |
+   | Client unit        | `task test:ts:unit`        | Vitest against `fake-indexeddb`. Use for client logic in isolation.                                 |
+   | Client React       | `task test:ts:react`       | Vitest in `jsdom` with `@testing-library/react`. Use for `syncplane/react` hooks and providers.     |
+   | Integration        | `task test:ts:integration` | TypeScript client against a spawned Go test server. Use for cross-language wire behavior.           |
+   | End-to-end browser | `task test:e2e`            | Playwright with real browser tabs. Use for behavior that depends on multiple tabs.                  |
 
-[Rooms](../explanation/rooms.md) are multi-tab in the same way and for the same
-reason: the account holds one `Watch` stream however many tabs and rooms are
-open, elected on its own Web Lock and shared over a `BroadcastChannel`. The
-specs prove exactly one stream is open across three tabs, that a settled account
-stops reopening it, that a follower's rooms and its presence reach the server
-through the leader, and that closing the leader tab hands the stream over
-without anyone else seeing the account leave.
+2. Run the test suite for your chosen tier, or run all non-browser suites together:
 
-Chromium by default. The suite uses no engine-specific APIs, so it runs on all
-three — worth doing before a release, since Web Locks and IndexedDB are exactly
-where engines differ:
+   - To run all suites except the browser tier:
 
-```sh
-task test:e2e:install BROWSER="firefox webkit"   # once, ~100 MB each
-task test:e2e BROWSER=firefox
-cd client && pnpm exec playwright test           # every installed engine at once
-```
+     ```sh
+     task ci
+     ```
+
+   - To run a specific tier, execute the corresponding command listed in step 1.
+
+3. Run individual tests to target a specific test case, package, or browser:
+
+   - To run a single Go test by name:
+
+     ```sh
+     task test:go -- --focus "rejects a stale version"
+     ```
+
+   - To run Go tests for a single package:
+
+     ```sh
+     go tool ginkgo run ./engine/server
+     ```
+
+   - To run client unit tests for a specific file:
+
+     ```sh
+     cd client && pnpm vitest run --project unit test/unit/kv.test.ts
+     ```
+
+   - To run client React tests for a specific file:
+
+     ```sh
+     cd client && pnpm vitest run --project react test/react/workspace.test.ts
+     ```
+
+   - To run client integration tests matching a pattern:
+
+     ```sh
+     cd client && pnpm vitest run --project integration -t "poke"
+     ```
+
+   - To run a specific browser test in Chromium:
+
+     ```sh
+     cd client && pnpm exec playwright test --project=chromium test/e2e/stream-leader.spec.ts
+     ```
+
+   - To run browser tests matching a pattern in a specific browser engine:
+
+     ```sh
+     task test:e2e BROWSER=firefox -- -g "hands over"
+     ```
+
+4. Run end-to-end tests across multiple browser engines before a release:
+
+   - To install additional browser engines:
+
+     ```sh
+     task test:e2e:install BROWSER="firefox webkit"
+     ```
+
+   - To run tests in an alternate browser engine:
+
+     ```sh
+     task test:e2e BROWSER=firefox
+     ```
+
+   - To run tests across every installed engine at once:
+
+     ```sh
+     cd client && pnpm exec playwright test
+     ```
+
+## Confirming test results
+
+Verify that all executed tests pass:
+
+- Go tests output passing spec summaries.
+- Vitest and Playwright test runs report zero failed tests.
+- `task ci` completes without error exit codes across all non-browser suites.
 
 ## Shared conformance vectors
 
-Three directories are contracts between the Go and TypeScript implementations.
-Extend them when touching the semantics they pin, and update **both** sides in
-one change:
+Three directories serve as contracts between the Go and TypeScript implementations. Extend them when modifying the semantics that they pin, and update both implementations in one change:
 
-- `testdata/queryeval/` — query-evaluation vectors.
-- `testdata/indexkey/` — index-entry encoding (`encodeCases` pin the bytes),
-  entry-vs-comparator agreement (`orderCases`) and the planner's decisions
-  (`probeCases`). The planner half is the one nothing else would catch: a
-  planner that chose differently still returns the right rows, just at a
-  different cost.
-- `testdata/text/` — text-CRDT vectors. The `encodedHex` checks pin the canonical
-  encoding byte for byte, so any change to `engine/text` or `client/src/text`
-  must land in the other implementation and the vectors together.
+- `testdata/queryeval/`: Query-evaluation vectors.
+- `testdata/indexkey/`: Index-entry encoding (`encodeCases` pin the bytes), entry-vs-comparator agreement (`orderCases`), and query planner decisions (`probeCases`). A planner that chooses differently still returns the right rows, but at a different cost.
+- `testdata/text/`: Text CRDT vectors. The `encodedHex` checks pin the canonical encoding byte for byte. Any change to `engine/text` or `client/src/text` must update the other implementation and the vectors together.
 
 ## Fixing a bug
 
-Test-first: write the failing test that reproduces it, watch it fail for the
-right reason, then fix. A bug that shipped without a test means the suite had a
-hole; closing the hole is part of the fix. For new features, tests land with the
-change.
+Follow a test-first workflow when fixing bugs:
+
+1. Write a failing test that reproduces the bug.
+2. Verify that the test fails for the expected reason.
+3. Apply the fix and verify that the test passes.
+
+A bug that shipped without a test indicates a missing test case; adding the test is part of the fix. When adding new features, include tests with the change.
+
+## Related
+
+- [Multi-tab behaviour](../explanation/multi-tab.md)

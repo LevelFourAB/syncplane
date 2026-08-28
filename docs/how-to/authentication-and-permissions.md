@@ -1,20 +1,14 @@
 # Authentication and permissions
 
-Two separate seams: an `Authenticator` establishes **who** is calling, and
-`Permissions` decides **what** they may do. Neither is installed by default —
-the engine's baseline posture is "embedded behind your own auth", which is safe
-only when the sync surface is unreachable by untrusted traffic.
+Syncplane separates identity from access control: an `Authenticator` establishes who is calling, and `Permissions` decides what the caller can do. Neither is installed by default. The engine's default configuration assumes the server runs behind your own authentication layer, which is safe only when untrusted traffic cannot reach the sync endpoint.
 
-> **The default is open.** `AllowAll` admits every caller into every workspace.
-> That is right for single-tenant and wrong for shared deployments, and nothing
-> will tell you at compile time. A multi-tenant deployment must override
-> `CanAccessWorkspace`.
+**Note:** By default, `server.AllowAll` admits every caller into every workspace. This configuration is suitable for single-tenant deployments, but multi-tenant deployments must override `CanAccessWorkspace`.
 
-## Establish identity
+## Authenticating callers
 
-`Authenticator` turns request headers into a verified `Principal`. Install one
-and the engine runs it ahead of every sync RPC (streams included, at open) and
-hands the result to every permission hook:
+An `Authenticator` converts request headers into a verified `server.Principal`. When you configure an authenticator, the engine runs it before every sync RPC, including stream initialization, and passes the principal to every permission hook.
+
+To implement an authenticator, define a type with an `Authenticate` method and pass it to `server.New`:
 
 ```go
 type myAuth struct{ verifier *oidc.Verifier }
@@ -34,22 +28,17 @@ func (a myAuth) Authenticate(ctx context.Context, h http.Header) (server.Princip
 srv, err := server.New(store, server.WithAuthenticator(myAuth{verifier: v}))
 ```
 
-Return `ErrUnauthenticated` (or an error wrapping it) to reject the request as
-401; **any other error is treated as an infrastructure fault (500)**, so an
-identity-provider outage never reads to a client as "your credential is bad".
-Either way the error's message is logged but never sent to the client — the
-wire carries a fixed message, so wrap freely. Returning the zero `Principal`
-with a nil error deliberately admits an anonymous caller.
+Return `server.ErrUnauthenticated`, or an error wrapping it, to reject the request with HTTP status code 401. The engine treats any other returned error as an infrastructure fault (HTTP 500). This prevents an identity-provider outage from appearing to a client as an invalid credential.
 
-`server.StaticTokenAuthenticator` is a ready-made implementation for fixed API
-keys; it is not a login system. Authenticating in your own HTTP middleware works
-too — call `server.WithPrincipal(ctx, p)` so the hooks see the identity.
+In both cases, the server logs the error message but does not send it to the client. The wire protocol carries a fixed message, so you can wrap errors freely. To admit an anonymous caller, return a zero `server.Principal` with a `nil` error.
 
-## Decide what it may do
+For fixed API keys, you can use `server.StaticTokenAuthenticator`. It is not a login system.
 
-Permission hooks receive the principal as an argument rather than fishing it out
-of `ctx`, so a policy cannot silently authorize as nobody. Embed
-`server.AllowAll` to implement only the hooks you need:
+If you authenticate requests in HTTP middleware, call `server.WithPrincipal(ctx, p)` to attach the principal to the context so permission hooks can access it.
+
+## Configuring permissions
+
+Permission hooks receive the `server.Principal` as a direct argument rather than reading it from `ctx`. This prevents a policy from silently authorizing an anonymous caller. Embed `server.AllowAll` to implement only the hooks you need:
 
 ```go
 type myPermissions struct{ server.AllowAll }
@@ -77,128 +66,90 @@ func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string,
 srv, err := server.New(store, server.WithPermissions(myPermissions{}))
 ```
 
-### `CanAccessWorkspace` — the tenant boundary
+### Authorizing workspace access with CanAccessWorkspace
 
-It runs first for every workspace a request names (`Push` per batch, `Subscribe`
-per scope, and `Pull`/`Bootstrap`/`Query` for their one workspace) — before the
-engine opens a read snapshot, subscribes to the notifier, resolves `FilterEpoch`
-or writes a client watermark, so a refused caller leaves no trace in the
-workspace they were denied. On `Subscribe` it also runs again on every heartbeat,
-so a revocation drops that scope from a live stream rather than waiting for the
-client to reconnect.
+`CanAccessWorkspace` runs first for every workspace named in a request:
 
-**Return the right kind of error.** The split is load-bearing:
+- For `Push`, once per batch.
+- For `Subscribe`, once per scope.
+- For `Pull`, `Bootstrap`, and `Query`, once for their target workspace.
 
-| Return                    | Meaning                     | Client sees                                             |
-| ------------------------- | --------------------------- | ------------------------------------------------------- |
-| `server.DenyWorkspace(…)` | a settled answer            | `permission_denied` + `workspace_access_revoked` — stop |
-| any other error           | the policy could not decide | an infrastructure error — retry                         |
+The engine executes `CanAccessWorkspace` before opening a read snapshot, subscribing to the notifier, resolving `FilterEpoch`, or writing a client watermark. A rejected caller leaves no trace in the denied workspace.
 
-Returning a denial when your membership store is merely down would have clients
-discard good data over an outage.
+For `Subscribe`, `CanAccessWorkspace` also runs on every heartbeat. A revocation drops the revoked scope from an active stream without waiting for the client to reconnect.
 
-### `CanMutate` and `ReadFilter`
+Return the appropriate error type based on the failure condition:
 
-`CanMutate` gates writes; a rejection comes back as a result, not an RPC error,
-and the client rolls the mutation back locally and reports it on
-`onMutationRejected`.
+| Return value                | Meaning              | Client response                                                                 |
+| --------------------------- | -------------------- | ------------------------------------------------------------------------------- |
+| `server.DenyWorkspace(...)` | Settled denial       | Receives `permission_denied` and `workspace_access_revoked`, then stops syncing |
+| Any other error             | Policy cannot decide | Receives an infrastructure error, then retries                                  |
 
-`ReadFilter` returns a per-row predicate, and `FilterEpoch` versions the
-visibility inputs behind it so that a permission change [delta-resyncs the difference](../explanation/partial-sync-and-coverage.md) instead of forcing a
-full re-bootstrap.
+**Note:** Do not return a denial when a membership store is unreachable. Return the transient error so clients retry instead of discarding valid local data.
 
-**Keep membership out of `ReadFilter`** — that is what `CanAccessWorkspace` is
-for, and folding the two together is how a single `nil` return leaks an entity
-across tenants.
+### Filtering reads and writes with CanMutate and ReadFilter
 
-**Keep secrets out of keys.** A filter hides a row's value, but its entity, key
-and version can still reach subscribed clients as tombstones — every deletion
-does, and so does an edit that hides a row a client may have held. Key rows by
-surrogate id and put the email, slug or invite code in a filtered field. See
-[the trade-off in full](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
+`CanMutate` gates write operations. When `CanMutate` rejects a mutation, the engine returns the rejection as an operation result rather than an RPC error. The client rolls back the mutation locally and reports it through `onMutationRejected`.
 
-### Performance
+`ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter` so that a permission change triggers a delta resync instead of requiring a full re-bootstrap. For more information, see [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
-Hooks run outside storage transactions, so a slow one does not hold the
-workspace write lock — but it still stalls its caller. Verify credentials and
-cache membership lookups rather than doing I/O per call. The one exception is
-`Server.Mutate`, which calls `CanMutate` from inside its write transaction
-because the closure's writes are not known until it runs; `Apply` does not.
+Keep membership checks out of `ReadFilter`. Handle membership in `CanAccessWorkspace`. Combining the two can cause a `nil` return to leak entities across tenants.
 
-## The in-process API is gated too
+Keep secrets out of keys. A filter hides row values, but the entity, key, and version can reach subscribed clients as tombstones upon deletion or when an edit hides a row the client previously held. Key rows by surrogate ID and place sensitive data such as email addresses, slugs, or invite codes in filtered fields. For more information, see [Read filter trade-offs](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
 
-`Apply`, `Mutate`, `Invoke` and `View` consult these same hooks, against the
-principal on the **context** — so an HTTP handler that drives the engine
-directly is held to the policy your sync clients are, and `CanMutate` sees the
-same `Write` either way. Put the identity you authenticated on the ctx with
-`server.WithPrincipal`. A ctx with no principal authorizes as anonymous.
+### Performance considerations
 
-Code with no caller to authorize says so explicitly, per call:
+Hooks run outside storage transactions, so a slow hook does not hold the workspace write lock. However, a slow hook stalls its caller. Verify credentials and cache membership lookups to avoid I/O operations on every call.
+
+As an exception, `Server.Mutate` executes `CanMutate` inside its write transaction because writes in the closure are not known until it runs. `Apply` executes outside the write transaction.
+
+## Authorizing in-process API calls
+
+`Apply`, `Mutate`, `Invoke`, and `View` evaluate permission hooks against the principal stored on the context. An HTTP handler that calls the engine directly is held to the same policy as sync clients, and `CanMutate` receives the same `server.Write` value.
+
+To set the identity, call `server.WithPrincipal` on the context:
 
 ```go
-err := srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error { … })
+ctx = server.WithPrincipal(ctx, principal)
 ```
 
-`Trusted` skips both hooks. Forgetting it fails safe — the call authorizes as
-anonymous and this policy denies it — which is why the bypass is opt-in rather
-than the default. `server.TrustedAs(ctx, name)` is the same bypass with a name
-recorded on the rows it writes.
+A context without a principal authorizes as anonymous.
 
-The principal is also what the engine attributes writes to: every row records
-its last writer, and the [change feed](change-feed.md#who-wrote-it) reports it.
-Attribution is derived from the same ctx the hooks read, so it cannot disagree
-with what was authorized.
+To bypass authorization for internal server operations, specify `server.Trusted(ctx)` explicitly:
 
-Two consequences of what a row stores:
+```go
+err := srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error { ... })
+```
 
-- **Without an `Authenticator` there is no attribution.** A row records the
-  subject alone, so on a server that admits every request as anonymous every
-  push records the zero actor — indistinguishable from unattributed. Echo
-  suppression and "notify everyone except the actor" no-op there. Authenticate
-  if you want the feed to say who wrote something.
-- **An authenticator serving more than one issuer must namespace its
-  subjects.** The issuer is a live input to your policy and is never stored, so
-  two callers whose issuers differ but whose subjects match collapse into one
-  actor on the feed and in field history. Prefix the subject (`google:1234`,
-  `saml:1234`) when you admit principals from several authorities.
+`server.Trusted` skips both `CanAccessWorkspace` and `CanMutate`. Omitting `server.Trusted` fails safe: the engine authorizes the call as anonymous, and the policy rejects it. To record a specific actor name on written rows during a trusted operation, use `server.TrustedAs(ctx, name)`.
 
-`Invoke` authorizes once on the verb (`Write{Custom}`); the rows the mutator
-body writes are not authorized individually, exactly as on the push path.
+The engine uses the principal to attribute writes. Every row records its last writer, which appears in the change feed. For more information, see [Change feed attribution](../reference/server.md#change-feed). Because attribution derives from the context that the hooks read, attribution cannot disagree with authorization.
 
-## Some rules belong in the schema, not the policy
+Note the following behavior regarding stored write attribution:
 
-`(syncplane.v1.entity)` carries three write policies — `create_policy`,
-`update_policy` and `delete_policy` — and the engine enforces them before
-`CanMutate` runs, on every path that authorizes a write. `*_TRUSTED_ONLY`
-refuses that class of write to every caller the server authorizes — sync clients
-and the in-process API alike — leaving it to trusted writes and to custom
-mutators. Two shapes come up constantly: a server-owned entity restricts all
-three, and an append-only one restricts updates and deletes while leaving
-creation open.
+- **Authentication is required for write attribution:** Rows record only the subject. On a server that admits all requests as anonymous, every push records an empty actor. Features such as echo suppression and actor-filtered notifications do not operate without an authenticated subject.
+- **Multi-issuer authenticators must namespace subjects:** The engine stores the subject but not the issuer. If two callers from different issuers share the same subject, they collapse into the same actor in the change feed and field history. Prefix the subject (for example, `google:1234` or `saml:1234`) when accepting principals from multiple identity providers.
 
-Prefer them over the equivalent branch in `CanMutate` for rules that hold for
-every deployment. They state the rule once, next to the entity it protects,
-rather than in each deployment's policy where a forgotten branch fails open.
+`Invoke` authorizes once on the verb (`Write{Custom}`). The mutator body's individual row writes are not authorized separately.
 
-What they cannot say is anything about a specific row: they range over caller
-class, not over rows. "Only edit your own comment" stays in `CanMutate` when
-ownership is derivable from the key, or in a mutator body when it needs the
-stored row — see [Check ownership in a mutator](#check-ownership-in-a-mutator)
-and [Write policies](../reference/proto-options.md#delete-policy).
+## Enforcing write policies in the schema
 
-`(syncplane.v1.field_behavior).write_policy` does the same for a single field of
-an otherwise writable row — a status a workflow owns, a counter an effect
-maintains. A PATCH whose mask reaches such a field is rejected; a PUT keeps the
-stored value and lands the rest. See
-[Protected fields](../reference/proto-options.md#protected-fields).
+`(syncplane.v1.entity)` defines three write policies: `create_policy`, `update_policy`, and `delete_policy`. The engine enforces these policies before `CanMutate` runs on every write path.
+
+Setting a policy to `*_TRUSTED_ONLY` restricts that write operation to trusted server writes and custom mutators, blocking sync clients and direct in-process calls. Common use cases include:
+
+- Server-owned entities: restrict all three operations to `*_TRUSTED_ONLY`.
+- Append-only entities: restrict update and delete operations while permitting creation.
+
+Use schema write policies for rules that apply to all deployments. Defining the rule in the schema ensures it is enforced consistently, rather than relying on policy code in each deployment where a missing check fails open.
+
+Schema write policies apply to caller classes rather than specific rows. To enforce row-level rules such as "only edit your own comment", use `CanMutate` if ownership can be derived from the key, or use a custom mutator if the check requires reading the stored row. For more information, see [Check ownership in a mutator](#check-ownership-in-a-mutator) and [Write policies](../reference/proto-options.md#write-policies).
+
+To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
 
 ## Check ownership in a mutator
 
-Neither a write policy nor `CanMutate` can answer "may this caller edit _this
-row_" when the answer is in the row. A custom mutator can: it is authorized once,
-by name, and its body decides the rest. `EntityTx.GetMeta` hands it the actor the
-engine stamped on the row, so the check does not rest on an author field a client
-filled in.
+When authorization requires inspecting stored row data, implement a custom mutator. Custom mutators are authorized once by name, and the mutator function evaluates access. `EntityTx.GetMeta` returns the actor stamped on the row:
 
 ```go
 server.WithMutator("editComment", &appv1.EditComment{},
@@ -221,28 +172,15 @@ server.WithMutator("editComment", &appv1.EditComment{},
 	})
 ```
 
-Refuse the anonymous caller before comparing subjects, as above. A row written
-with no authenticated caller carries an empty `Actor.Subject`, and so does an
-unauthenticated caller — equality alone would read as a match.
+Check and reject anonymous callers before comparing subjects. Unauthenticated callers and rows written without an authenticated actor both have an empty `Actor.Subject`, which evaluates as a match if unchecked.
 
-`meta.Actor` is the row's **last** writer: a comment its author wrote and a
-moderator then edited reports the moderator. Where the rule is about who created
-a row, the entity has to carry that itself — stamped by the server on create,
-from a mutator like the one above, in a field marked
-`write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY` so no client can move it after.
+`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, store the creator's identity in a field on creation and set `write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY` to prevent subsequent client modifications.
 
-`meta.Version` arrives with it. A mutator holds the workspace write lock, so the
-read-then-write above is already serializable and needs no guard. The same check
-in an `Apply` closure does: its reads come from a snapshot taken before the
-writes apply, so pass the version to `server.WithExpectedVersion` there and the
-edit is refused if the row moved underneath. `ViewTx.GetMeta` is the same read
-inside a read-only `View`.
+`meta.Version` contains the row version. Because a mutator holds the workspace write lock, read-then-write operations within a mutator are serializable. When performing the same check in an `Apply` closure, pass the version to `server.WithExpectedVersion` so the write fails if the row changes concurrently. To read metadata in a read-only transaction, call `ViewTx.GetMeta` inside a `View`.
 
-## Protect a field per caller
+## Protecting fields per caller
 
-A schema mark says a field is nobody's to write. When the answer depends on who
-is asking, implement `FieldPermissions` — an optional extension the engine
-type-asserts on your `Permissions`:
+To restrict field writes based on the identity of the caller, implement `FieldPermissions` on your `Permissions` struct:
 
 ```go
 func (p *policy) ProtectedFields(
@@ -255,44 +193,28 @@ func (p *policy) ProtectedFields(
 }
 ```
 
-The effective set is the schema's marks plus whatever this returns, so the hook
-**widens and never narrows**: it cannot hand a caller a field the schema reserved
-for trusted writes. Both halves are enforced identically once resolved — a PATCH
-reaching a protected field is rejected, a PUT keeps the stored value.
+The effective protected set combines the schema definitions with the fields returned by `ProtectedFields`. This hook widens restrictions and cannot remove protections defined in the schema. Both schema rules and hook returns are enforced identically: a `PATCH` targeting a protected field is rejected, and a `PUT` preserves the stored field value.
 
-Return names of top-level fields, a oneof named by its group. A name matching no
-field, or matching a key field, fails the request rather than protecting nothing:
-a typo in a permission control must not read as "allow".
+Return names of top-level fields or oneof group names. Returning an invalid field name or a key field causes the request to fail rather than silently permitting access.
 
-Like the rest of `Permissions`, it must be fast and free of side effects. The
-engine resolves it at most once per entity per request, before the write
-transaction opens, and reads the memoized answer again while applying — so a
-membership lookup belongs in middleware that stashes its result on `ctx`, not
-here.
+`ProtectedFields` must execute quickly and without side effects. The engine calls `ProtectedFields` at most once per entity per request before opening the write transaction and reuses the result during application. Place expensive lookups, such as membership checks, in middleware that attaches results to the context.
 
-What the two halves differ in is what a client can predict. The TypeScript client
-mirrors the schema's marks and refuses such a write at the call site; a field
-this hook adds is knowable only to the server, so the write enqueues and comes
-back as a rejection ack. Both converge — but the second costs a round trip and
-shows the user an edit that then reverts, so prefer a schema mark for anything
-that holds for every caller.
+Clients handle schema protections and dynamic protections differently:
 
-## What is not gated
+- The TypeScript client checks schema annotations locally and prevents protected writes before sending requests.
+- Protections returned by `ProtectedFields` are evaluated on the server. The client enqueues the write and reverts it when receiving the server rejection.
 
-The change feed and the admin service do not authenticate and do not consult
-`Permissions`; reaching them means you are already inside the process. The admin
-service has its own gate (`RegisterAuthorizer`).
+Prefer schema definitions when a field protection applies to all callers.
 
-## Rooms inherit row permissions
+## Unauthenticated services
 
-A [room](../explanation/rooms.md) anchored to a row admits a caller only if that
-entity's `ReadFilter` would let them read it, so presence on a document is
-governed by the document's own rules and there is no second surface to keep in
-step.
+The change feed and admin service do not authenticate callers or evaluate `Permissions` because they run in-process. The admin service provides its own authorization hook through `RegisterAuthorizer`.
 
-An unanchored room is gated on `CanAccessWorkspace` alone. Implement the
-optional `RoomPermissions` when either is not the whole answer — being able to
-read a row is not the same as being allowed to know who else is looking at it:
+## Authorizing room access
+
+A room anchored to a row admits a caller only if the entity's `ReadFilter` permits reading that row. Presence on an entity follows the entity's existing read permissions. For more information, see [Rooms](../explanation/rooms.md).
+
+Unanchored rooms check `CanAccessWorkspace`. To customize access control for rooms, implement `RoomPermissions`:
 
 ```go
 type policy struct {
@@ -310,26 +232,18 @@ func (policy) CanJoinRoom(
 }
 ```
 
-`DenyRoom` is the settled refusal, as `DenyWorkspace` is for a workspace: it
-drops that one topic permanently and leaves the caller everything else. Any
-other error drops it as retryable, so an outage never reads as a revocation.
+`server.DenyRoom` rejects access to a single topic while preserving access to other topics. Any other error is treated as transient and retried.
 
-Both hooks run at join and `CanJoinRoom` again on the stream's heartbeat, which
-bounds revocation the same way the workspace gate is bounded below.
+Room permission hooks execute upon joining, and `CanJoinRoom` runs again on stream heartbeats to enforce revocations.
 
-## Revocation
+## Handling revocation
 
-A settled denial is permanent and reaches the client as such: it stops syncing
-that workspace and reports it on `status().workspaces[id].access`. The local
-copy is **not** deleted automatically — discarding a user's rows on one server
-verdict is an app decision, made with
-`removeWorkspace(id, { purge: true })`. See [Handle failures](handle-failures.md).
+When a server returns a settled denial (`server.DenyWorkspace`), the client stops syncing the workspace and sets `status().workspaces[id].access`.
 
-Note also that a live stream re-checks _access_, not _credentials_:
-`Authenticate` runs at stream open, so a credential that expires mid-stream
-rides to the end of the stream. Bound stream lifetime if that matters.
+The client does not automatically delete local data upon denial. To remove cached data, call `removeWorkspace(id, { purge: true })`. For more information, see [Handle failures](handle-failures.md).
 
-## Several apps on one host
+**Note:** Active streams verify workspace access on heartbeats, but do not re-evaluate credentials with `Authenticate`. A credential that expires during an open stream remains valid until the stream closes. Configure stream lifetime limits if credentials must be refreshed periodically.
 
-`server.Manager` splits its options along the same line — one shared
-authenticator, per-app permissions. See [Host multiple apps](host-multiple-apps.md#authenticating-a-collection-of-apps).
+## Configuring multiple apps on one host
+
+`server.Manager` supports a shared authenticator with per-app permissions. For more information, see [Host multiple apps](host-multiple-apps.md#steps).

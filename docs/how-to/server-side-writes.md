@@ -1,200 +1,180 @@
-# Write from server-side code
+# Writing from server-side code
 
-`Apply` writes from your own Go code — an HTTP handler, an agent, a cron job —
-through the same storage path clients use. The closure reads from a snapshot and
-records the writes it wants; the engine authorizes them and applies them as one
-atomic mutation.
+This guide shows you how to write data from server-side Go code—such as HTTP
+handlers, agents, or cron jobs—through the storage path used by clients. Use
+this guide when your application needs to apply atomic mutations directly on the
+server.
 
-```go
-err := srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
-    var todo todov1.Todo
-    ok, version, err := tx.Get(&todo, "t1")
-    if err != nil || !ok {
-        return err
-    }
-    todo.Completed = true
-    return tx.Patch(&todo, []string{"completed"}, &version)
-})
+## Prerequisites
 
-err = srv.Invoke(ctx, workspaceID, "complete_all", &todov1.CompleteAllArgs{})
-```
+Before you begin, ensure you have:
 
-All writes in one call share a single workspace sequence (allocated lazily — a
-call that records nothing costs nothing), connected clients are notified on
-commit, and `server.Reject(...)` aborts with a typed error.
-
-Three things to keep in mind:
-
-- There is **no client watermark** involved, so calling `Apply` twice applies
-  twice. If the caller can retry, use `ApplyIdempotent` below.
-- Writes are **authorized against the ctx principal** — see
-  [Acting as a caller](#acting-as-a-caller).
-- Reads come from the snapshot taken **before** the closure ran, so they do not
-  see the closure's own writes. `Get` on a key you have already written returns
-  an error rather than a stale row.
-
-For large entities, page with `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`,
-which returns the last visited key and whether more rows follow.
+- A configured server instance (`srv`).
+- A workspace ID (`workspaceID`).
+- A `context.Context` instance (`ctx`).
 
 ## Acting as a caller
 
-`Apply`, `Mutate`, `Invoke` and `View` run the same permission hooks the sync
-surface does, against the principal on the context. Put the identity you
-authenticated on the ctx and the engine holds your handler to the policy your
-clients are held to:
+`Apply`, `Mutate`, `Invoke`, and `View` run the same permission hooks as the sync
+surface against the principal on the context.
 
-```go
-ctx = server.WithPrincipal(ctx, server.Principal{Subject: userID})
-err := srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error { … })
-```
+To configure caller authorization, choose one of the following methods:
 
-A ctx with no principal authorizes as **anonymous**, which a deny-by-default
-policy refuses — so forgetting to authenticate fails loudly rather than writing
-unchecked.
+1. **Authenticate as a specific user:** Attach the authenticated identity to
+   `ctx` using `server.WithPrincipal`. The engine evaluates your handler
+   against the same policy applied to clients:
 
-Code with no caller to authorize — a connector, a migration, a nightly job —
-says so explicitly:
+   ```go
+   ctx = server.WithPrincipal(ctx, server.Principal{Subject: userID})
+   err := srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error { … })
+   ```
 
-```go
-err := srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error { … })
-```
+   A context with no principal authorizes as anonymous. A deny-by-default policy
+   rejects anonymous requests.
 
-`Trusted` skips both hooks for that one call. Forgetting it is safe: the call
-authorizes as anonymous and a real policy denies it, so a job fails on its first
-pass instead of writing unauthorized.
+2. **Bypass authorization for system tasks:** For operations with no caller
+   identity, such as migrations or nightly jobs, pass `server.Trusted(ctx)`:
 
-`server.TrustedAs(ctx, "connect:markdown")` is the same bypass with a name
-attached. The name is recorded on every row the call writes and shows up on the
-[change feed](change-feed.md#who-wrote-it) as the write's actor, so a consumer
-can skip its own writes instead of reacting to them. Prefer it for anything that
-writes on a schedule or in a loop; nothing verifies the name, and no policy runs
-against it. A bare `Trusted` records the name `"system"`.
+   ```go
+   err := srv.Mutate(server.Trusted(ctx), workspaceID, func(tx *server.EntityTx) error { … })
+   ```
 
-Both bypasses compose with a principal rather than replacing it: a request ctx
-that opts one call out of enforcement records the label **and** the caller whose
-request it ran under, which is what tells a user-triggered restore from a
-scheduled pass.
+   `Trusted` skips permission hooks for that single call. A bare `Trusted`
+   records `"system"` as the actor.
 
-`Invoke` authorizes **once**, on the verb — a `Write{Custom}` carrying the
-mutator name and args. The rows the mutator body writes are not authorized
-individually, exactly as on the client push path, so do not register a mutator
-as a way to launder writes a policy would refuse.
+3. **Bypass authorization with a named actor:** If you write on a schedule or in
+   a loop, call `server.TrustedAs(ctx, name)`. The name is recorded on every
+   written row and appears on the [change feed](../reference/server.md#change-feed) as
+   the write's actor:
 
-## When to use `Mutate` instead
+   ```go
+   ctx = server.TrustedAs(ctx, "connect:markdown")
+   ```
 
-`Mutate` runs its closure inside the write transaction, which means it holds the
-workspace's write lock for everything the closure does — and a storage adapter
-may hold a wider lock than that, as the SQLite one does — and calls `CanMutate`
-from inside the transaction. It also
-**may run the closure more than once** if the storage adapter retries, so keep
-side effects out of it.
+   Consumers can use this actor name to skip their own writes. Both `Trusted` and
+   `TrustedAs` compose with an existing principal.
 
-That cost buys two things `Apply` does not offer:
+**Note:** `Invoke` authorizes once on the verb (`Write{Custom}` carrying the
+mutator name and arguments). The rows written by the mutator body are not
+authorized individually.
 
-- a genuinely **serializable** read-then-write, where nothing can move between
-  the read and the write;
-- writes that **stream** rather than buffer in memory, which is what a bulk
-  import of many thousands of rows needs.
+## Applying mutations
 
-Everything else — and every request handler — should use `Apply`. For a
-read-modify-write under `Apply`, pass the version you read as `Patch`'s
-`expected` argument, which turns a concurrent edit into a `conflict` rejection
-instead of a silent merge.
+Writes are authorized against the principal on the context. For details, see
+[Acting as a caller](#acting-as-a-caller).
 
-## Collaborative text
+To write data using `Apply`:
 
-A collaborative-text field holds a CRDT document, so server-side code sets it
-from a plain string and lets the engine mint the difference. This is how you put
-a string-shaped API — an HTTP handler, an importer, an admin form — in front of a
-text field:
+1. Execute writes within an `Apply` closure:
 
-```go
-srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
-    return tx.Patch(&Issue{Id: key}, nil, nil,
-        server.WithTextString("description", body),
-        server.WithTextPeer("importer:text"))
-})
-```
+   ```go
+   err := srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
+       var todo todov1.Todo
+       ok, version, err := tx.Get(&todo, "t1")
+       if err != nil || !ok {
+           return err
+       }
+       todo.Completed = true
+       return tx.Patch(&todo, []string{"completed"}, &version)
+   })
 
-The string is diffed against the **stored** document — a multi-hunk diff over
-code points, so untouched regions keep their items and the marks attached to
-them — and the difference is applied as edits. Text the row already holds and the
-string does not contain is deleted; edits arriving after the write merge
-normally. An empty string deletes all visible text, and on `Patch` the field is
-added to the mask.
+   err = srv.Invoke(ctx, workspaceID, "complete_all", &todov1.CompleteAllArgs{})
+   ```
 
-`WithTextPeer` is required: the engine invents no writer identity. Two writers
-that can produce diverging documents must never share a peer, and a server-side
-string write is not one of them — it resolves inside the write transaction,
-reading the stored row and observing its version before it allocates counters,
-so one name is safe across calls, across a retried closure, and across processes
-(per-workspace write exclusion is the storage contract). Keep that name away from
-anything that writes outside such a transaction — a client, a connector — and
-prefix it per service.
+   - To read existing rows, call `tx.Get`. Reads come from the snapshot taken
+     before the closure runs. Calling `tx.Get` on a key already written in the
+     closure returns an error.
+   - To record updates, call `tx.Patch` or `tx.Put`. For read-modify-write
+     operations, pass the version returned by `tx.Get` as the `expected`
+     argument of `tx.Patch` to convert concurrent edits into conflicts.
+   - To abort the mutation, return an error or call `server.Reject(...)` with a
+     typed error.
+   - To execute a registered mutator instead of an inline closure, call
+     `srv.Invoke`.
 
-A text field of the written message that already holds a plain-string value
-resolves the same way, which is what makes restoring a field-history record an
-ordinary `Patch`. See [Restore a field](restore-a-field.md).
+2. If you need to page large entities, call `ApplyTx.ScanPage(prototype, afterKey, limit, fn)`.
+   This method returns the last visited key and a boolean value indicating
+   whether more rows follow.
 
-A document inside a keyed list or map element is named by its instance path —
-`WithTextString("comments.<id>.body", s)` — and the written message must carry
-the addressed element; the write does not invent one from its key.
+**Note:** `Apply` does not use client watermarks. Calling `Apply` twice applies
+the mutation twice. If callers can retry, use `ApplyIdempotent`.
 
-## Writes that may be retried
+## Writing collaborative text
 
-`ApplyIdempotent` is the same write guarded by a caller-supplied key, for
-anything that retries: an HTTP handler behind a load balancer, an at-least-once
-change-feed handler writing back, an integration with its own backoff. The first
-call for a key runs the closure and records what it did; every later call with
-that key skips the closure and replays the record — including a result payload,
-so a retried request answers with the first attempt's response instead of an
-opaque "already applied":
+A collaborative-text field holds a conflict-free replicated data type (CRDT)
+document. To update a collaborative-text field from a plain string:
 
-```go
-out, err := srv.ApplyIdempotent(ctx, workspaceID, r.Header.Get("Idempotency-Key"),
-    func(tx *server.ApplyTx) ([]byte, error) {
-        if err := tx.Put(&issue); err != nil {
-            return nil, err
-        }
-        return json.Marshal(response{ID: issue.GetId()})
-    })
-// out.Applied — did this call do the work? out.Seq — the sequence it took.
-w.Write(out.Result)
-```
+1. Call `tx.Patch` inside an `Apply` closure with `server.WithTextString` and
+   `server.WithTextPeer`:
 
-`MutateIdempotent` is the `Mutate` equivalent, and `InvokeIdempotent` does the
-same for a registered mutator (no result payload — mutators have no channel for
-one).
+   ```go
+   srv.Apply(ctx, workspaceID, func(tx *server.ApplyTx) error {
+       return tx.Patch(&Issue{Id: key}, nil, nil,
+           server.WithTextString("description", body),
+           server.WithTextPeer("importer:text"))
+   })
+   ```
 
-### What makes it correct
+   The engine diffs the string against the stored document and applies the
+   difference as edits. Text omitted from the string is deleted. An empty string
+   deletes all visible text. On `tx.Patch`, the engine adds the field to the
+   mask.
 
-The ledger read, the writes and the key claim all commit in **one transaction**
-under the workspace's write exclusion, so a concurrent retry can never see
-"unclaimed" while the first call is mid-write, and no outcome is recorded that
-the store did not keep.
+2. Specify a unique peer name using `server.WithTextPeer`. Prefix the peer name
+   per service. Writers that can produce diverging documents outside
+   transactions must not share a peer name.
 
-That coupling also decides what happens on failure: an error or `Reject` rolls
-the key back with the writes, leaving the operation retryable — only committed
-outcomes replay.
+3. If the document resides inside a keyed list or map element, specify its
+   instance path, such as `WithTextString("comments.<id>.body", s)`. The written
+   message must contain the addressed element.
 
-### Choosing keys
+**Note:** If a text field on the written message already holds a plain-string
+value, it resolves the same way. For more information, see
+[Restore a field](restore-a-field.md).
 
-Keys are **per workspace**, so derive them from something the caller owns and
-prefix per source when several systems write to one workspace.
+## Retrying writes idempotently
 
-Two more things to know: a successful call claims the key even when the closure
-wrote nothing (so "nothing to do" replays too, which means that unlike `Mutate`
-it registers the workspace), and keys expire on `WithIdempotencyRetention`
-(default 24 hours) — **set it above the longest retry window your callers use**.
-This is the one retention where too short is a correctness problem, since a
-retry arriving after its key expired applies again.
+If callers can retry requests (such as HTTP handlers behind load balancers or
+change-feed handlers), use `ApplyIdempotent` with a caller-supplied key.
 
-This is a separate ledger from the client watermarks, deliberately: those are
-contiguity-checked per client and pruned once a client goes idle, neither of
-which an API caller's retry key can satisfy or survive.
+1. Call `srv.ApplyIdempotent` with the idempotency key:
+
+   ```go
+   out, err := srv.ApplyIdempotent(ctx, workspaceID, r.Header.Get("Idempotency-Key"),
+       func(tx *server.ApplyTx) ([]byte, error) {
+           if err := tx.Put(&issue); err != nil {
+               return nil, err
+           }
+           return json.Marshal(response{ID: issue.GetId()})
+       })
+   // out.Applied — did this call do the work? out.Seq — the sequence it took.
+   w.Write(out.Result)
+   ```
+
+   The first call executes the closure and records the result. Subsequent calls
+   with the same key replay the recorded result without re-executing the
+   closure.
+
+2. If you use `Mutate` or `Invoke`, call `MutateIdempotent` or
+   `InvokeIdempotent`. `InvokeIdempotent` does not return a result payload.
+
+## Verifying the write
+
+To verify that the write succeeded:
+
+1. Check the returned error from `srv.Apply`, `srv.Invoke`, or
+   `srv.ApplyIdempotent`. A `nil` error indicates that all writes committed
+   atomically under a single sequence number.
+2. For `srv.ApplyIdempotent`, inspect `out.Applied` to confirm whether the
+   closure executed (`true`) or replayed a prior result (`false`), and inspect
+   `out.Seq` for the assigned sequence number.
+3. Confirm that connected clients received the commit notification dispatched by
+   the engine.
 
 ## Related
 
+- [In-process writes](../reference/server.md#in-process-writes)
+- [Atomic batches](../explanation/convergence-model.md#atomic-batches)
 - [Query from server-side code](server-side-queries.md) — reads inside and
   outside a mutation.
 - [React to changes](react-to-changes.md) — running effects when rows are

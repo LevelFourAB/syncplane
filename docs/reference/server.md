@@ -1,9 +1,10 @@
 # Go server API
 
-Package `github.com/levelfourab/syncplane/engine/server`. This page lists the
-surface; the package docs at the point of code are authoritative for details.
+Package `github.com/levelfourab/syncplane/engine/server` provides the Go server implementation for Syncplane. This page documents the server constructor, configuration options, limits, in-process APIs, and background processes.
 
 ## Construction
+
+Construct a server with `server.New`:
 
 ```go
 store, _ := sqlitestore.Open("app.db")
@@ -32,96 +33,80 @@ defer srv.Close()                              // stops background work (not the
 http.ListenAndServe(addr, srv.HTTPHandler())   // HTTP/1.1 suffices
 ```
 
-`New` installs everything the options declare before it returns, so a whole
-schema costs one error check and nothing starts unless all of it is good. The
-declaration options — `WithEntities`, `WithMutator`, `WithMerger` — are applied
-in dependency order rather than in the order written, so a `WithMerger` may
-name an entity a later `WithEntities` declares.
+`server.New` validates and applies all options before returning. Declaration options (`WithEntities`, `WithMutator`, `WithMerger`) are evaluated in dependency order rather than registration order. A `WithMerger` option can reference an entity defined in a subsequent `WithEntities` declaration.
 
-**Store ownership stays with the caller.** `srv.Close()` stops the engine's
-background work — the GC pass, the index backfill, the text-compaction sweep and
-the notify-coalescing timers, so a shared notifier receives no trailing publish after shutdown. It
-does not close what the caller owns: neither the adapter, which may outlive the
-server (and one adapter backs every app a
-[Manager](../how-to/host-multiple-apps.md) hosts), nor a notifier installed
-with `WithNotifier`. Two defers, in that order.
+The caller retains ownership of the underlying storage adapter. `srv.Close()` stops background maintenance tasks, including garbage collection, index backfills, text compaction sweeps, and notify-coalescing timers. Calling `srv.Close()` does not close the underlying storage adapter (which may back multiple apps in a [Manager](../how-to/host-multiple-apps.md)) or a notifier configured with `WithNotifier`.
 
-`srv.HTTPHandler()` returns the service already mounted at its own path. Use
-`path, handler := srv.Handler()` to mount it on a mux carrying the app's own
-routes — Connect routes by full method path, so the service cannot live at an
-arbitrary root.
+`srv.HTTPHandler()` returns an `http.Handler` mounted at its default path. To mount the service on a custom router alongside other routes, use `path, handler := srv.Handler()`. Connect routes RPCs by full method path and cannot be mounted at an arbitrary root prefix.
 
 ## Options
 
-| Option                                      | Default      | Effect                                                                                                                                                                                                                                                                                                                                        |
-| ------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WithAuthenticator(a)`                      | anonymous    | Turns request headers into a `Principal` before every sync RPC.                                                                                                                                                                                                                                                                               |
-| `WithPermissions(p)`                        | `AllowAll`   | Workspace access, write and per-row read policy.                                                                                                                                                                                                                                                                                              |
-| `WithLimits(l)`                             | see below    | Request bounds; non-positive fields keep their default.                                                                                                                                                                                                                                                                                       |
-| `WithChunkSize(n)`                          | 256          | Bootstrap chunk size in rows.                                                                                                                                                                                                                                                                                                                 |
-| `WithHeartbeat(d)`                          | 30s          | `Subscribe` heartbeat; also how often a live stream re-checks access.                                                                                                                                                                                                                                                                         |
-| `WithNotifyCoalescing(w)`                   | —            | Coalesces commit notifications; 0 disables.                                                                                                                                                                                                                                                                                                   |
-| `WithNotifier(n)`                           | in-process   | Replaces the in-process poke fan-out with one shared across nodes — `pgnotify` ships such an implementation over Postgres `LISTEN`/`NOTIFY`. A replacement should implement `pubsub.Activity` too, or background consumers lose the signal that announces a new workspace and fall back to listing on a timer.                                |
-| `WithCursorStateStore(st)`                  | adapter      | Where the membership tail of issued cursors lives, so the wire carries a reference instead of restating it. Defaults to a store the adapter provides (both shipped adapters do); `nil` disables the indirection and every cursor inlines its sets. See [Cursor state](#cursor-state).                                                         |
-| `WithLeases(l)`                             | adapter      | The `lease.Locker` per-workspace background work dedups through: the GC, index and text-compaction sweeps, and any effects runtime built on the server, skip a workspace whose lease another process holds. Defaults to a locker the adapter provides (both shipped adapters do), falling back to a process-local one. See [Leases](#leases). |
-| `WithGC(retention, interval)`               | —            | Tombstone retention and background pass interval; `interval <= 0` is manual-only.                                                                                                                                                                                                                                                             |
-| `WithTextDeltaRetention(d)`                 | 1h           | How long the collaborative-text delta log is kept.                                                                                                                                                                                                                                                                                            |
-| `WithIdempotencyRetention(d)`               | 24h          | How long claimed `MutateIdempotent` keys are kept.                                                                                                                                                                                                                                                                                            |
-| `WithHistoryRetention(d)`                   | 90d          | How long field-history records are kept; `HistoryForever` disables time-based expiry. See [Field history](#field-history).                                                                                                                                                                                                                    |
-| `WithTextCompaction(minPurged)`             | off          | Opt-in purge of unneeded text tombstones and mark ops, on a sweep of its own. See [Text compaction](#text-compaction).                                                                                                                                                                                                                        |
-| `WithTextCompactionPacing(interval, batch)` | 5m, 200 rows | How often the compaction sweep looks for newly quiet rows, and the most rows one of its transactions considers. `batch` is a ceiling, not a target: a transaction also ends once the rows it has taken exceed a fixed byte budget.                                                                                                            |
-| `WithTextCache(budgetBytes)`                | 8 MiB        | Keeps written text documents decoded between writes; 0 disables.                                                                                                                                                                                                                                                                              |
-| `WithSchemaRevision(rev)`                   | —            | Advertises an app-defined revision on every frame, push, pull, query and bootstrap.                                                                                                                                                                                                                                                           |
-| `WithLogger(l)`                             | —            | An `*slog.Logger`.                                                                                                                                                                                                                                                                                                                            |
-| `WithTracerProvider(tp)`                    | global       | OpenTelemetry tracer provider; the global one is no-op until an SDK is installed. See [Telemetry](telemetry.md).                                                                                                                                                                                                                              |
-| `WithMeterProvider(mp)`                     | global       | OpenTelemetry meter provider; same fallback.                                                                                                                                                                                                                                                                                                  |
-| `WithEntities(msgs...)`                     | —            | Declares syncable entities; repeatable.                                                                                                                                                                                                                                                                                                       |
-| `WithMutator(name, args, fn)`               | —            | Declares a server-authoritative named mutation.                                                                                                                                                                                                                                                                                               |
-| `WithMerger(proto, path, fn)`               | —            | Declares a merge hook for an opaque field.                                                                                                                                                                                                                                                                                                    |
-| `WithHistoryFilter(fn)`                     | —            | Admits, rejects or rewrites every field-history record. See [Field history](#field-history).                                                                                                                                                                                                                                                  |
-| `WithHistorySession(d)`                     | 5m           | How long one row's field-history record stays open to later writes by the same actor; `HistorySessionOff` records every write. See [Field history](#field-history).                                                                                                                                                                           |
-| `WithPresenceBus(b)`                        | in-process   | Fan-out for the ephemeral plane. The default reaches only this process; a multi-node deployment installs a shared one (`engine/presence/pgpresence`). See [Rooms](#rooms).                                                                                                                                                                    |
-| `WithRoomAnnounce(d)`                       | 5s           | How often a node re-announces the presence records it is responsible for, and so how quickly a session that vanished without saying so disappears — three intervals. See [Rooms](#rooms).                                                                                                                                                     |
+The following table lists configuration options for `server.New`:
+
+| Option                                      | Default      | Description                                                                                                                                                                                                              |
+| ------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `WithAuthenticator(a)`                      | anonymous    | Authenticates request headers into a `Principal` before each sync RPC.                                                                                                                                                   |
+| `WithPermissions(p)`                        | `AllowAll`   | Sets workspace access, write permissions, and per-row read filter policies.                                                                                                                                              |
+| `WithLimits(l)`                             | See limits   | Sets request and data size bounds. Non-positive fields retain default values.                                                                                                                                            |
+| `WithChunkSize(n)`                          | 256          | Sets bootstrap chunk size in rows.                                                                                                                                                                                       |
+| `WithHeartbeat(d)`                          | 30s          | Sets `Subscribe` heartbeat interval and access re-verification frequency for active streams.                                                                                                                             |
+| `WithNotifyCoalescing(w)`                   | —            | Coalesces commit notifications across a time window. Setting `0` disables coalescing.                                                                                                                                    |
+| `WithNotifier(n)`                           | in-process   | Replaces the in-process fan-out notifier with a shared cross-node implementation, such as `pgnotify` over PostgreSQL `LISTEN`/`NOTIFY`. Replacements should implement `pubsub.Activity` to announce new workspaces.      |
+| `WithCursorStateStore(st)`                  | adapter      | Sets the storage backend for cursor membership state. Defaults to the adapter's cursor store. Setting `nil` disables indirection and inlines membership sets into every cursor. See [Cursor state](#cursor-state).       |
+| `WithLeases(l)`                             | adapter      | Sets the `lease.Locker` used to deduplicate per-workspace background work (GC, index sweeps, text compaction, effects). Defaults to the adapter's locker, falling back to a process-local locker. See [Leases](#leases). |
+| `WithGC(retention, interval)`               | —            | Sets tombstone retention duration and background sweep interval. Setting `interval <= 0` restricts garbage collection to manual execution.                                                                               |
+| `WithTextDeltaRetention(d)`                 | 1h           | Sets retention duration for the collaborative-text delta log.                                                                                                                                                            |
+| `WithIdempotencyRetention(d)`               | 24h          | Sets retention duration for claimed `MutateIdempotent` keys.                                                                                                                                                             |
+| `WithHistoryRetention(d)`                   | 90d          | Sets retention duration for field-history records. `HistoryForever` disables time-based expiration. See [Field history](#field-history).                                                                                 |
+| `WithTextCompaction(minPurged)`             | off          | Enables background purging of unreferenced text tombstones and mark operations. See [Text compaction](#text-compaction).                                                                                                 |
+| `WithTextCompactionPacing(interval, batch)` | 5m, 200 rows | Sets compaction sweep frequency and the maximum number of rows evaluated per transaction. Transactions also terminate when reaching a fixed byte budget.                                                                 |
+| `WithTextCache(budgetBytes)`                | 8 MiB        | Caches decoded collaborative-text documents between writes. Setting `0` disables caching.                                                                                                                                |
+| `WithSchemaRevision(rev)`                   | —            | Sets an application-defined schema revision string advertised on frames, pushes, pulls, queries, and bootstraps.                                                                                                         |
+| `WithLogger(l)`                             | —            | Sets the `*slog.Logger` instance.                                                                                                                                                                                        |
+| `WithTracerProvider(tp)`                    | global       | Sets the OpenTelemetry tracer provider. The global provider is a no-op until an SDK is registered. See [Telemetry](telemetry.md).                                                                                        |
+| `WithMeterProvider(mp)`                     | global       | Sets the OpenTelemetry meter provider.                                                                                                                                                                                   |
+| `WithEntities(msgs...)`                     | —            | Declares syncable entity message prototypes. Repeatable.                                                                                                                                                                 |
+| `WithMutator(name, args, fn)`               | —            | Declares a named server-authoritative mutation.                                                                                                                                                                          |
+| `WithMerger(proto, path, fn)`               | —            | Declares a custom merge hook for an opaque field.                                                                                                                                                                        |
+| `WithHistoryFilter(fn)`                     | —            | Sets a hook to admit, reject, or rewrite field-history records before commit. See [Field history](#field-history).                                                                                                       |
+| `WithHistorySession(d)`                     | 5m           | Sets the duration a field-history record remains open to consecutive writes by the same actor. `HistorySessionOff` records every write separately. See [Field history](#field-history).                                  |
+| `WithPresenceBus(b)`                        | in-process   | Sets the bus implementation for the ephemeral plane. Multi-node setups require a shared implementation such as `engine/presence/pgpresence`. See [Rooms](#rooms).                                                        |
+| `WithRoomAnnounce(d)`                       | 5s           | Sets the interval for re-announcing active presence records. Sessions disappear after three missed intervals. See [Rooms](#rooms).                                                                                       |
 
 ### Limits
 
-Every field defaults when left non-positive.
+The following table lists request and data bounds in `server.Limits`:
 
-| Field                     | Default | Bounds                                                                                                                                                                                                                                                                                |
-| ------------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MaxRequestBytes`         | 16 MiB  | Decompressed request body, enforced before parsing. The outer wall.                                                                                                                                                                                                                   |
-| `MaxMutationsPerPush`     | 256     | Mutations per `Push`, across all its per-workspace batches.                                                                                                                                                                                                                           |
-| `MaxWorkspacesPerRequest` | 64      | Push batches / `Subscribe` scopes per request.                                                                                                                                                                                                                                        |
-| `MaxValueBytes`           | 1 MiB   | Serialized entity value (`crud.value` / `custom.args`).                                                                                                                                                                                                                               |
-| `MaxFieldMaskPaths`       | 64      | Field-mask paths per PATCH.                                                                                                                                                                                                                                                           |
-| `MaxPullChanges`          | 4096    | Row changes per `Pull` response; larger results paginate via `has_more`.                                                                                                                                                                                                              |
-| `MaxQueryRows`            | 1024    | Rows per `Query` response.                                                                                                                                                                                                                                                            |
-| `MaxQueryOffset`          | 16384   | `Query` offset; beyond it is rejected rather than clamped. Offset is the fallback for jumping to an arbitrary rank — `after`/`before` are the default for sequential paging — and it bounds the in-memory working set a scan retains. Setting it alongside either cursor is rejected. |
-| `MaxQueryCursorBytes`     | 4096    | Length of an `after`/`before` cursor. A cursor's length follows the order-key values it encodes; the cap bounds the work a malformed one can cost, since validating it walks it component by component.                                                                               |
-| `MaxFollowDepth`          | 4       | Rounds a `Subscription.follow` may re-apply its path set.                                                                                                                                                                                                                             |
-| `MaxClosureSize`          | 10000   | Rows in one request's reference-following closure.                                                                                                                                                                                                                                    |
-| `MaxReverseFanOut`        | 1000    | Source rows one reverse-follow hop may match.                                                                                                                                                                                                                                         |
-| `MaxWindowSize`           | 1000    | Rows a single `Subscription.window` may hold. Must stay well under `MaxPullChanges`: a window that swaps wholesale emits up to 2N changes in one page.                                                                                                                                |
-| `MaxIndexEntriesPerRow`   | 1024    | Secondary-index entries one row may occupy across its entity's indexes — the per-write cost of indexing that entity. An index over a repeated field stores one entry per element, so this is also the ceiling on how long an indexed list may get. Exceeding it fails the write.      |
-| `MaxIndexScanCandidates`  | 10000   | Index entries one range scan may walk while a read filter rejects candidates. Overflow falls back to a scan rather than failing.                                                                                                                                                      |
-| `MaxRelConditions`        | 8       | `matches()` conditions one query predicate may carry. Each crosses into another entity and is answered by its own pass over that entity before the query runs, so the count multiplies the price of the request. Conditions selecting the same target rows share one pass.            |
-| `MaxRelKeys`              | 50000   | Target rows one `matches()` may select — the size of the membership test it collapses to. Exceeding it fails the query rather than truncating, since a truncated key set would silently drop rows that match.                                                                         |
-| `MaxRoomsPerStream`       | 64      | Rooms one `Watch` stream may carry, and separately the sessions it may keep alive on other tabs' behalf. Each costs a bus subscription, a join gate, and — when anchored — a row read per re-gate tick.                                                                               |
-| `MaxPresenceStateBytes`   | 4 KiB   | One participant's presence state. Unlike a row it costs per announce interval rather than per write, and it has to fit whatever the presence bus can carry (a Postgres NOTIFY payload caps at 8000 bytes, base64 included).                                                           |
-| `MaxBroadcastBytes`       | 4 KiB   | One broadcast message, under the same bus ceiling.                                                                                                                                                                                                                                    |
-| `MaxPublishItems`         | 32      | Items in one `Publish` request.                                                                                                                                                                                                                                                       |
-| `MaxParticipantsPerRoom`  | 128     | Records a room keeps. Beyond it the room keeps the lowest session ids, reports its snapshot truncated and turns further sessions away — lowest rather than newest so two nodes serving the same over-full room show the same people.                                                  |
+| Field                     | Default | Description                                                                                                                                                      |
+| ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MaxRequestBytes`         | 16 MiB  | Maximum decompressed request body size, enforced before parsing.                                                                                                 |
+| `MaxMutationsPerPush`     | 256     | Maximum mutations per `Push` across all per-workspace batches.                                                                                                   |
+| `MaxWorkspacesPerRequest` | 64      | Maximum push batches or `Subscribe` scopes per request.                                                                                                          |
+| `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                            |
+| `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                  |
+| `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                            |
+| `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                      |
+| `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.    |
+| `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                      |
+| `MaxFollowDepth`          | 4       | Maximum recursive hops a `Subscription.follow` can evaluate.                                                                                                     |
+| `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                              |
+| `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                      |
+| `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                  |
+| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. Exceeding this limit fails the write.                                 |
+| `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates. Exceeding this limit falls back to a table scan.                     |
+| `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                            |
+| `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                            |
+| `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                  |
+| `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                         |
+| `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                          |
+| `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                           |
+| `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions. |
 
-Raising `MaxMutationsPerPush` or `MaxValueBytes` means raising
-`MaxRequestBytes` in tandem.
+Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
 
-Every limit bounds one request or one stream. None bounds request rate or how
-many streams a caller holds — see
-[the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
+Each limit applies to a single request or stream. Limits do not constrain overall request rates or concurrent stream counts. For details, see [the default posture is open](../explanation/limits-and-trade-offs.md#the-default-posture-is-open).
 
-Crossing any of these produces an error naming what was counted, the field it
-crossed with the value in force, and the option that moves it — so the message
-is enough on its own:
+Exceeding a limit returns an error that names the counted value, the violated field, the current limit, and the configuration option:
 
 ```
 push of 300 mutations, over MaxMutationsPerPush (256); raise it with server.WithLimits
@@ -129,104 +114,51 @@ push of 300 mutations, over MaxMutationsPerPush (256); raise it with server.With
 
 ## Error messages
 
-Which audience an error is for decides how it reads, and the prefix is what
-tells them apart.
-
-Errors returned from a **Go call** — `RegisterEntity`, `RegisterMerger`,
-`EntityKey`, the `ViewTx`/`ApplyTx`/`EntityTx` methods, the options `New`
-applies — are prefixed `server:` and may name Go identifiers, because the
-reader is holding this API:
+Errors returned by Go API calls (`RegisterEntity`, `RegisterMerger`, `EntityKey`, transaction methods, and options applied in `New`) are prefixed with `server:` and can reference Go identifiers:
 
 ```
 server: syncplane.example.v1.Todo is not a registered entity; register it first
 with server.WithEntities(&Todo{}) or Server.RegisterEntity
 ```
 
-Errors returned **over the wire** carry no prefix: a Go package name is noise in
-an RPC status, and the reader may not be writing Go at all. They are Connect
-errors, and the machine-readable code rides in metadata rather than the text —
-see [sync status and codes](sync-status-and-codes.md).
+Errors returned over RPC carry no `server:` prefix. Wire errors are Connect errors with machine-readable error codes in metadata; see [sync status and codes](sync-status-and-codes.md).
 
-Either way an error that reports a bound names the knob that moves it, and one
-about an unregistered entity names the call that registers it. Match on codes,
-never on message text: the wording here is documentation, not contract.
+Errors reporting bounds violations state the configuration option to modify. Errors referencing unregistered entities specify the registration call. Handle errors by matching error codes rather than error message text.
 
 ## Garbage collection
 
-One GC pass prunes expired tombstones, idle client watermark rows, the
-collaborative-text delta log, claimed trusted-write idempotency keys and
-field-history records. `srv.CollectGarbage(ctx, workspaceID)` runs it manually.
-Compacting collaborative text is a separate sweep — see
-[Text compaction](#text-compaction).
+`srv.CollectGarbage(ctx, workspaceID)` manually triggers a garbage collection pass.
 
-Keep the tombstone retention comfortably above the longest client offline
-window; a pruned client that returns is re-admitted at whatever mutation id it
-pushes next. The four retentions answer different questions:
+A garbage collection pass prunes:
 
-- **Tombstones** (`WithGC`) — bounded by how long a client may be offline.
-  Too short forces a re-bootstrap.
-- **Text delta log** (`WithTextDeltaRetention`) — an optimization only. Pruning
-  early costs wire size and nothing else.
-- **Idempotency keys** (`WithIdempotencyRetention`) — bounded by callers' retry
-  windows. **Too short is a correctness problem**: a retry arriving after its
-  key expired applies again.
-- **Field history** (`WithHistoryRetention`) — bounded by how far back you want
-  to be able to restore. Unlike the delta log it is not clamped to the tombstone
-  retention: history is app-visible data with its own lifetime, so setting it
-  either side of the tombstone window is fine. A record ages from the last write
-  folded into it rather than from its `recorded_at`, so it outlives what its
-  timestamp says by at most one [session window](#editing-sessions).
+- **Tombstones** (`WithGC`): Pruned based on tombstone retention duration. Tombstone retention must exceed the maximum expected client offline window.
+- **Text delta logs** (`WithTextDeltaRetention`): Prunes collaborative-text delta entries.
+- **Idempotency keys** (`WithIdempotencyRetention`): Prunes keys claimed by `MutateIdempotent`. Retention must cover caller retry windows to prevent duplicate execution.
+- **Field history** (`WithHistoryRetention`): Prunes historical field records. Retention is independent of tombstone retention. A record's age is calculated from its last appended write rather than its initial `recorded_at` timestamp.
+- **Idle client watermark rows**: Pruned during the pass.
 
-History records are **hard-deleted**, leaving no tombstone — nothing syncs them,
-so nothing holds a copy to be told they are gone.
+Field-history records are hard-deleted without creating tombstones.
 
-They are also the one thing the pass collects in **chunks**. Everything else it
-touches is bounded by rows; history is bounded by writes, so the first sweep
-after enabling it — or after raising retention — is the largest delete the engine
-issues. The pass takes a bounded chunk inside its own transaction and drains the
-rest a chunk per transaction, so no single delete holds a write open across the
-whole backlog. An interrupted drain needs no recovery: the sweep keeps no state,
-and the next pass resumes on what is left.
+History records are collected in bounded transactional chunks. The initial pass after enabling history or increasing retention deletes records across multiple transactions to avoid long-running locks. Interrupted sweeps resume from the remaining backlog on the next pass.
 
 ### History that lives as long as its row
 
-`WithHistoryRetention(server.HistoryForever)` turns time-based expiry off. A
-record is then bounded only by its row: **deleting a row purges its history**,
-in every retention mode, in the same transaction as the delete.
+Setting `WithHistoryRetention(server.HistoryForever)` disables time-based history expiration:
 
 ```go
 server.WithGC(30*24*time.Hour, time.Hour),
 server.WithHistoryRetention(server.HistoryForever),
 ```
 
-The cascade runs whatever the retention: nothing can use a deleted row's history
-— a restore is a PATCH, and a PATCH of a tombstoned row is a conflict under
-delete-wins — and keeping it would attach the old row's log to a new row that
-later claims the same key.
+Deleting a row permanently deletes its associated field history within the same transaction, regardless of retention settings.
 
-It also survives an entity **ceasing** to opt in. Registration is additive, so
-dropping `history: {}` in a later deploy leaves everything already captured, and
-the cascade keeps running over it.
+If an entity removes its `history: {}` schema option, existing records remain stored and continue to be deleted when their source rows are deleted. If all entities remove `history: {}`, the history entity is removed from the catalog. Under standard retention, the background GC pass drains remaining uncataloged records; under `HistoryForever`, orphaned records persist until manually deleted.
 
-Drop the **last** `history: {}` and the history entity leaves the catalog
-entirely: the records that remain are no longer readable, and deleting their
-source rows no longer purges them. The expiry sweep still runs — it is not gated
-on the catalog, because records are durable state and catalog membership is not
-— so retention drains what is left on its own. Under `HistoryForever` there is
-no sweep to drain them, so records left behind that way stay until something
-purges them.
-
-The default is a finite 90 days. `HistoryForever` suits entities whose rows are
-edited by people; on rows machinery rewrites in a loop, the log grows without
-bound for as long as the row lives.
+The default retention duration is 90 days.
 
 ## Text compaction
 
-A collaborative-text field accumulates one item per character ever typed, so a
-document edited over months grows without bound.
-`WithTextCompaction(minPurged)` opts a server into reclaiming the tombstones
-nothing can still refer to; `srv.CompactText(ctx, workspaceID)` runs the sweep
-manually and reports how many rows it rewrote.
+Collaborative-text fields accumulate tombstones and mark operations as text is modified. `WithTextCompaction(minPurged)` enables background compaction to reclaim unreferenced items. `srv.CompactText(ctx, workspaceID)` runs compaction manually and returns the number of rewritten rows:
 
 ```go
 server.WithGC(30*24*time.Hour, time.Hour),
@@ -234,50 +166,20 @@ server.WithTextCompaction(64),
 server.WithTextCompactionPacing(5*time.Minute, 200), // optional
 ```
 
-It is a **separate sweep from GC**, on its own interval and its own
-per-workspace lease. The two collect different kinds of thing: GC's collectors
-are deletes over indexed ranges, while compaction scans, decodes and rewrites
-rows. Sharing a transaction would make the cheap half wait behind the expensive
-one, and on an adapter taking a per-workspace lock, so would every writer.
+Text compaction runs as an independent background sweep with its own interval and per-workspace lease. Compaction operates only on quietened rows whose last write sequence is at or below the sequence through which the text delta log has been pruned by garbage collection. If garbage collection is manual-only, background compaction does not run.
 
-Compaction depends on GC even so, and does nothing without it: it only rewrites
-rows the delta prune has already **quietened** — those whose last write is at or
-below the sequence the text delta log has been pruned through, which is where
-the server has already stopped being able to send a catching-up client a cheap
-delta. With GC on manual, no horizon moves and the background sweep does not
-run.
+Compaction sweeps evaluate rows modified between the previous pass position and the current horizon. Sweeps process batches of `batch` rows per transaction.
 
-Each pass sweeps the window between the last pass's position and the current
-horizon, so it reads what has been **edited** rather than what exists: a
-workspace whose documents have gone quiet stops being visited at all. Within a
-window it works in transactions of `batch` rows, resuming from a recorded
-position, so no single transaction holds a workspace's write lock for a full
-entity scan. An interrupted sweep needs no recovery — a rewrite that happens
-twice costs a sequence and nothing else.
+Compaction behavior includes:
 
-Two consequences worth planning for:
+- Rewriting a document assigns a new sequence number, causing connected clients to re-fetch that field once.
+- Text writes based on purged states are rejected with `CodeTextStateStale`, requiring the client to re-apply changes against the current state.
 
-- **A rewrite lands at a fresh sequence**, so every client re-fetches that field
-  once. That is the price of the reclaim. A paced sweep spreads those re-fetches
-  over several sequences rather than one.
-- **It is the one thing in the engine that can refuse a client's text write
-  outright.** A client still holding pre-compaction state keeps working until it
-  writes text anchored to something purged; that push is refused with
-  `CodeTextStateStale` and the client re-applies its edit against fresh state.
-
-`minPurged` is how many items a document must give up before its row is worth
-rewriting. **Lowering it re-sweeps every workspace from the beginning**, since
-rows an earlier pass skipped may clear the lower bar; raising it does not,
-because a row skipped under the old threshold is skipped under the higher one
-too.
-
-Enable it for workspaces whose documents are edited over months. Leave it off if
-documents are short-lived — the reclaim buys nothing and the refusal above is
-pure cost. See [the text explanation](../explanation/collaborative-text.md).
+The `minPurged` argument specifies the minimum number of reclaimable items required to rewrite a row. Lowering `minPurged` causes subsequent sweeps to re-evaluate all workspaces from the beginning. Raising `minPurged` does not trigger a full re-sweep. For details, see [the collaborative text explanation](../explanation/collaborative-text.md).
 
 ## Registration
 
-Schemas known when the binary is built are declared as options:
+Static schemas and handlers are registered at server construction:
 
 ```go
 server.WithEntities(&todov1.Todo{}, &todov1.Note{})
@@ -285,8 +187,7 @@ server.WithMutator(name string, args proto.Message, fn)
 server.WithMerger(prototype proto.Message, fieldPath string, fn)  // opaque fields only; see the caveats
 ```
 
-Schemas that arrive later go to the live server instead, and the catalog swaps
-atomically under in-flight requests:
+Dynamic schemas can be registered on a running server instance:
 
 ```go
 srv.RegisterEntity(&mycorpv1.Thing{})
@@ -294,26 +195,23 @@ srv.RegisterDescriptorSet(set []byte)          // the wire form defineSchema(...
 srv.RegisterDynamicEntities(specs ...server.DynamicEntity)
 ```
 
-Mutators and mergers have no runtime counterpart: they are Go funcs, so unlike
-a schema they cannot be provisioned. That also fixes the mutator table at
-construction, which is what lets the push path read it without a lock.
+Mutators and mergers must be registered at construction time and cannot be registered dynamically at runtime.
 
-A mutator's `args` follows its registration, not its caller: registered with a
-prototype it always receives a non-nil message of that type — zeroed when the
-invocation carried none — and registered with `nil` it always receives `nil`.
-That holds for a client push, `Invoke` and `InvokeIdempotent` alike, so a body
-may type-assert its prototype unconditionally. Passing args to a mutator
-registered without a prototype is an error.
+A mutator receives arguments matching its registered prototype. If registered with a message prototype, the mutator always receives a non-nil message of that type (zeroed if omitted by the caller). If registered with `nil`, the mutator always receives `nil`. Supplying arguments to a mutator registered without a prototype returns an error.
 
-For building runtime schemas in Go: `server.BuildDynamicFile`,
-`server.DynamicEntity` and `server.DynamicField`. See
-[Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
+Dynamic schema construction helpers include `server.DynamicField` (`Message`, `Ref`, `KeyField`/`OrderField`, `MapKey`/`MapValue`) with `server.BuildDynamicFile` and `server.RegisterDynamicEntities`, which builds a set of referencing entities into one file like the TypeScript builder. See [Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
 
-Registration rejects an entity whose name is not an identifier, or whose
-`key_fields` name a kind the client renders differently — see
-[Naming rules](naming.md).
+Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
+
+### Registration guarantees
+
+- **Trust**: `RegisterAuthorizer` defaults to deny (`DenyAll`). The built-in `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant time. A denied call never touches state.
+- **Persistence**: The descriptor set is stored per app and re-registered on boot before serving. A restart leaves every app immediately syncable.
+- **Idempotence and evolution**: Re-registering an identical set is a no-op. New entities and appended fields upsert. The manager rejects conflicting changes without partially applying them. Conflicting changes include removed, renumbered, or retyped fields, references retargeted to different entities, or changed `key_fields`. Each app's schema revision is a stable hash of its canonical descriptor bytes, surfaced to clients as `schema_revision` so that a schema change causes clients to re-bootstrap.
 
 ## In-process writes
+
+The server provides methods for in-process writes:
 
 ```go
 func (s *Server) Apply(ctx, workspaceID string, fn func(tx *ApplyTx) error) error
@@ -326,89 +224,73 @@ func (s *Server) MutateIdempotent(ctx, workspaceID, key string,
 func (s *Server) InvokeIdempotent(...) (WriteOutcome, error)
 ```
 
-`WriteOutcome` reports `Applied` (did this call do the work?), `Seq` and
-`Result`.
+`WriteOutcome` contains `Applied` (boolean), `Seq` (uint64), and `Result` (`[]byte`).
 
-**`Apply` is the default choice.** Its closure reads from a snapshot and records
-writes; the engine then authorizes them and applies them as one atomic mutation.
-Nothing you write runs while the workspace write lock is held, no permission
-hook runs inside a transaction, and the closure runs exactly once — so unlike
-`Mutate` there is no retried-closure contract to observe.
+`ApplyTx` provides `Get`, `GetMeta`, `Query`, `ScanPage`, `Put`, `Patch`, and `Delete`. Reads query the initial snapshot and do not observe uncommitted writes from the same closure. Reading a key already written within the transaction returns an error.
 
-`Mutate` holds the write lock for the whole closure and calls `CanMutate` inside
-the transaction. Reach for it when you need a serializable read-then-write, or
-writes that stream rather than buffer (a bulk import).
+`EntityTx` provides `Get`, `GetMeta`, `Put`, `Patch`, `Delete`, `Scan`, `Query`, `Seq`, and `ScanPage(prototype, afterKey, limit, fn)`.
 
-`ApplyTx` offers `Get`, `GetMeta`, `Query`, `ScanPage`, `Put`, `Patch` and
-`Delete`. Reads come from the snapshot taken before the closure ran: they do not
-see the closure's own recorded writes, and a read of a key you have written is an
-error rather than a stale row. `EntityTx` offers `Get`, `GetMeta`, `Put`,
-`Patch`, `Delete`, `Scan`, `Query`, `Seq` and
-`ScanPage(prototype, afterKey, limit, fn)`. Write options on both:
-`WithTextString(field, value)`, `WithTextPeer(peer)` and
-`WithExpectedVersion(v)`. A text field of the written message holding a
-plain-string value (`text.EncodePlainString`, what a field-history record
-carries) resolves the same way and needs the same `WithTextPeer`; on `Patch` it
-does not widen the mask.
+Write options for `ApplyTx` and `EntityTx`:
 
-`WithExpectedVersion` makes a `Put` a compare-and-swap — the stored row must be
-at that version, an absent or deleted row reading as version 0 — and is how a
-server-side write states create-or-update intent to an entity whose
-[write policies](../reference/proto-options.md#delete-policy) restrict either.
-`Patch` takes its expected version as an argument instead.
+- `WithTextString(field, value)`
+- `WithTextPeer(peer)`
+- `WithExpectedVersion(v)`: Enforces a compare-and-swap check on `Put`. The row must match the expected version, where version 0 represents an absent or deleted row. See [write policies](proto-options.md#write-policies). `Patch` accepts expected version as an explicit parameter.
 
-Neither consults a client watermark. See
-[Write from server-side code](../how-to/server-side-writes.md).
+In-process writes do not update or consult client watermarks. See [Write from server-side code](../how-to/server-side-writes.md).
+
+### Choosing between Apply and Mutate
+
+`Apply` executes its closure against a snapshot, records intended writes, evaluates permissions, and commits all writes in a single atomic mutation. The closure runs once outside the workspace write lock. For a read-modify-write under `Apply`, pass the version you read as `Patch`'s `expected` argument, which turns a concurrent edit into a `conflict` rejection instead of a silent merge. Most operations and request handlers should use `Apply`.
+
+`Mutate` runs its closure inside the write transaction, holding the workspace's write lock for everything the closure does (a storage adapter may hold a wider lock, such as SQLite), and calls `CanMutate` from inside the transaction. `Mutate` may run the closure more than once if the storage adapter retries, so keep side effects out of it.
+
+`Mutate` provides two capabilities that `Apply` does not:
+
+- genuinely serializable read-then-write operations, where nothing can move between the read and the write;
+- streaming writes that do not buffer in memory, suitable for bulk imports of many thousands of rows.
+
+### Choosing idempotency keys
+
+Keys are per workspace. Derive keys from data the caller owns, and prefix keys per source when multiple systems write to the same workspace.
+
+Key considerations:
+
+- A successful call claims the key even when the closure wrote nothing. The empty result replays and registers the workspace.
+- Keys expire according to `WithIdempotencyRetention` (default 24 hours). Set retention above the longest retry window callers use; a retry arriving after its key has expired applies again.
+- Idempotency keys use a separate ledger from client watermarks. Watermarks are contiguity-checked per client and pruned once a client goes idle, which an API caller's retry key cannot satisfy or survive.
 
 ## Reads
+
+Execute read-only transactions with `View`:
 
 ```go
 func (s *Server) View(ctx, workspaceID string, fn func(tx *ViewTx) error) error
 ```
 
-`ViewTx` offers `Get`, `GetMeta`, `Query` and `ScanPage`, each reporting a row's
-`version` alongside the message. The caller's `ReadFilter` applies — a filtered
-row reads as absent — but no engine-imposed limit caps a result. See
-[Query from server-side code](../how-to/server-side-queries.md).
+`ViewTx` provides `Get`, `GetMeta`, `Query`, and `ScanPage`. Each method returns the entity `version` alongside the message. The caller's `ReadFilter` is evaluated for each row; filtered rows return as absent. In-process reads are not constrained by request row limits. See [Query from server-side code](../how-to/server-side-queries.md).
 
-`GetMeta` reports a `RowMeta{Version, Actor}` in place of the bare version:
-`Actor` is the `storage.Actor` the engine recorded for the row's last write, so a
-per-row ownership check reads the engine's attribution rather than a field the
-writer filled in. It is on `EntityTx` and `ApplyTx` too — see
-[Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
+`GetMeta` returns `RowMeta{Version, Actor}`. `Actor` contains the `storage.Actor` recorded during the row's most recent write. `GetMeta` is also available on `ApplyTx` and `EntityTx`. See [Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
 
 ## Permissions on the in-process API
 
-`Apply`, `Mutate`, `Invoke` and `View` authorize against the **ctx principal**,
-with the same hooks and the same `Write` values the sync surface uses — a policy
-cannot tell an in-process write from a client's. A ctx carrying no principal
-authorizes as anonymous, which a deny-by-default policy refuses.
+`Apply`, `Mutate`, `Invoke`, and `View` authenticate against the context principal:
 
 ```go
 srv.Apply(server.WithPrincipal(ctx, p), ws, fn)   // acts as p, policy enforced
 srv.Mutate(server.Trusted(ctx), ws, fn)           // system work, hooks skipped
 ```
 
-`server.Trusted(ctx)` is the marked exit for code with no caller to authorize —
-connectors, migrations, cron jobs, the admin UI. Forgetting it fails safe: the
-call authorizes as anonymous and a real policy denies it. Use
-`server.TrustedAs(ctx, "connect:markdown")` for anything that writes on a
-schedule or in a loop: it does the same thing and additionally names the writer,
-which is what lets a change-feed consumer recognize its own writes.
-`Invoke` authorizes
-**once** on the verb (`Write{Custom}` with the mutator name and args); the rows
-the mutator body writes are not authorized individually, exactly as on the push
-path.
+A context without a principal authenticates as anonymous.
+
+Use `server.Trusted(ctx)` to bypass permission hooks for system operations, migrations, and administrative tasks. Use `server.TrustedAs(ctx, "actor-name")` to bypass permission hooks while setting a specific actor attribution on written rows.
+
+`Invoke` evaluates permission once for the mutator verb (`Write{Custom}` with mutator name and arguments). Rows written inside the mutator body are not individually authorized.
 
 ## Field history
 
-An entity carrying `(syncplane.v1.entity).history` gets an append-only log of
-what its fields held before each write that changed them, captured on the
-server's write path — a write storing what is already there records nothing. The
-schema half — how to opt in, how to narrow it per field, what a record contains
-— is in [Proto options](proto-options.md#field-history); the restore recipe is
-[Restore a field to a previous value](../how-to/restore-a-field.md). Three server
-options tune it.
+Entities configured with `(syncplane.v1.entity).history` generate append-only logs of field values prior to each modifying write. For schema configuration, see [Proto options](proto-options.md#field-history). For restore operations, see [Restore a field to a previous value](../how-to/restore-a-field.md).
+
+Field history is configured with the following options:
 
 ```go
 func WithHistoryFilter(fn HistoryFilterFunc) Option
@@ -421,94 +303,25 @@ type HistoryFilterFunc func(ctx context.Context, rec *syncplanev1.FieldHistory,
 
 ### Editing sessions
 
-`WithHistorySession(d)` sets how long one row's record stays open to later
-writes **by the same actor**. Writes landing inside the window fold into it: the
-record keeps saying what the fields held before the first of them, its mask
-widens to the union of what the run touched, and `through_seq`/`writes` grow
-instead of the log. Default **five minutes**; `server.HistorySessionOff` keeps
-every write.
+`WithHistorySession(d)` defines the maximum duration a row's history record remains open to coalesce subsequent writes by the same actor. Writes within this window widen the field mask and update `through_seq` and `writes` rather than creating new log entries. The default duration is five minutes. `server.HistorySessionOff` creates a separate history record for every write.
 
-The window runs from when the record **opened**, not from its last write, so one
-record never covers more than a window however long the editing runs — a day of
-work stays a timeline rather than one entry.
+The session window starts from when the record was initially opened.
 
-What folding costs is the intermediate states: the log answers "what did the
-field hold before that editing session", not "replay the session". Turn it off
-when each write has to be separately restorable, weighing that against what
-per-write capture costs on an entity carrying a text field — see
-[Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes).
+Sessions are tracked in memory and validated against storage before each write. Process restarts or requests handled by different nodes open new session records.
 
-Off is still not an audit trail. A `DELETE` is uncaptured whatever the window,
-and purges the row's log — see
-[Field history is a restore mechanism, not an audit log](../explanation/limits-and-trade-offs.md#field-history-is-a-restore-mechanism-not-an-audit-log)
-and [Recover a deleted row](../how-to/recover-a-deleted-row.md).
-
-Which record a write folds into is tracked in memory and re-validated against
-storage before every fold, so it is a hint rather than authority. A restart, or a
-sibling node handling the next write in a multi-node deployment, opens a new
-record — a shorter session, never a wrong one.
-
-Across nodes that costs one guarantee: **two records of one row can cover
-overlapping spans**. The node that opened a record still holds the hint, so a
-write it handles later folds in around the record a sibling opened meanwhile.
-Every record is still the state before its own `seq`, so restoring from one is
-unaffected; a timeline that reads `seq`…`through_seq` as a partition of the row's
-writes is not.
+For design trade-offs, see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-records-editing-sessions-not-keystrokes), [Field history is a restore mechanism, not an audit log](../explanation/limits-and-trade-offs.md#field-history-is-a-restore-mechanism-not-an-audit-log), and [Recover a deleted row](../how-to/recover-a-deleted-row.md).
 
 ### Who can read a record
 
-A record is read under **the source row's** read filter, never the history
-entity's own. That is not a knob: `syncplane_field_history` is an entity your app
-never declared, so a `ReadFilter` written against your own entity names never
-matches it and it would fall to the default — allow all. The rule the engine
-applies instead is the one you would write by hand: **you may read the history of
-a row you can currently read**.
+Field-history records are read under the source row's `ReadFilter`. A caller can read the history of a row if they currently have permission to read that row.
 
-"Currently" is load-bearing. The filter is applied to the live source row, not to
-the record's `prior` — `prior` carries only the masked fields, so it cannot answer
-a filter that tests an unrecorded one. A record whose source row is gone, or whose
-source entity has left the catalog, is unreadable rather than open. `Query` is the
-only door a client has to a `server_only` entity, so this is the whole gate;
-trusted in-process reads (`View`, `ViewTx.Query`) are unfiltered as always.
+The filter evaluates the current live source row. If the source row is deleted or its entity is removed from the catalog, its history records cannot be read via `Query`. Trusted in-process reads (`View`, `ViewTx.Query`) are unfiltered.
 
-A filter you do register for `syncplane_field_history` still applies on top of
-this — the two are an AND — but it is not where the rule comes from, and it is
-not needed to get one.
-
-The cost is one `ReadFilter` call per registered entity on a history query — the
-records name entities the request does not — and, for entities that do filter, a
-lookup of the source row per candidate record.
+Any `ReadFilter` registered specifically for `syncplane_field_history` is evaluated in addition to the source row filter.
 
 ### The admission hook
 
-`WithHistoryFilter` runs on every record, inside the write transaction,
-immediately before the record is stored. Return the record and `true` to keep
-it, `false` to drop it, or an error to **fail the write that triggered it** — a
-hook that cannot decide must not let a write land unrecorded.
-
-An error means the hook **could not decide**, so the write stays retryable: the
-batch fails with `internal`, nothing is acked, and the client resends once the
-hook can answer. The error's text is logged, never sent — a hook's wording can
-name dependencies and rows the caller has no business seeing.
-
-To refuse a record **permanently**, return `server.Reject(code, message)`
-instead. That acks the mutation and the client drops it, which is what a hook
-failing on a record's _shape_ wants: resending the identical mutation would fail
-identically. A rejection's code and message are the hook's own and do reach the
-client. The split is [`CanMutate`](#permissions-and-identity)'s — a dependency
-having a bad minute must not cost the caller its write.
-
-A hook may redact, rewrite or drop a record. It may **not** move one: changing
-`source_entity`, `source_key` or `seq` fails the write. Those three are the
-record's identity — what the row key derives from, what same-sequence merging
-folds on, and what the `DELETE` cascade purges by.
-
-Nor may it restate `row_created`, which fails the write the same way. A record
-marking a row's creation absorbs the rest of its session, so a hook that set the
-flag would silence every write folding in behind it; redacting a creation record
-means dropping it. Redacting a mask down to empty is allowed and leaves an
-update — the record still says a change happened, and later writes in the
-session record their own fields.
+`WithHistoryFilter` executes within the write transaction before a record is committed. The hook must be a pure function.
 
 ```go
 server.WithHistoryFilter(func(_ context.Context, rec *syncplanev1.FieldHistory,
@@ -523,19 +336,27 @@ server.WithHistoryFilter(func(_ context.Context, rec *syncplanev1.FieldHistory,
 })
 ```
 
-It must be a **pure function of its arguments**, exactly as
-`Permissions.CanMutate` must and for the same reason: the storage adapter may
-re-run the write closure and re-invoke the hook, so a hook that audit-logs or
-meters double-counts. Redaction, sampling and per-entity policy belong here;
-anything that has to happen once belongs after the write commits.
+Hook return behaviors:
 
-Like `WithMutator` and `WithMerger` it is construction-time only: it is a func,
-so unlike a schema it cannot be provisioned at runtime. Passing `nil` fails
-`New`.
+- `(rec, true, nil)`: Retains the record (optionally modified or redacted).
+- `(nil, false, nil)`: Discards the history record while allowing the underlying write to commit.
+- `(nil, false, err)`: Fails the write transaction with an `internal` error. The error message is logged but not sent to the client. The client can retry the write.
+- `(nil, false, server.Reject(code, message))`: Rejects the write with a permanent application code and message sent to the client.
 
-`WithHistoryRetention` is covered under [Garbage collection](#garbage-collection).
+A hook must not modify `source_entity`, `source_key`, or `seq`. A hook must not set `row_created` on an update record. Modifying these fields fails the write transaction.
+
+`WithHistoryRetention` configuration is documented in [Garbage collection](#garbage-collection).
+
+### Edge cases
+
+- **`rowCreated`**: Indicates that the row did not exist before that write. Its `mask` and `prior` are empty, so restoring from it does nothing. Test the `rowCreated` flag rather than checking for an empty mask, because an admission hook [history filter](#the-admission-hook) that redacts all paths also leaves an empty mask.
+- **Row deletion**: A `DELETE` operation is not captured in field history and purges the row's log. A row created later under the same key starts with a new history. To make deletions recoverable, model deletion as a field change instead. See [Recover a deleted row](../how-to/recover-a-deleted-row.md).
+- **Key fields**: Key fields are never included in the mask, preventing a restore from altering a row's identity. Decoded records retain key fields to identify the row.
+- **Record retention**: History records expire according to the retention policy (default is 90 days, configured via `WithHistoryRetention`). To retain records indefinitely until the row is deleted, configure `server.WithHistoryRetention(server.HistoryForever)`.
 
 ## Change feed
+
+The server provides change feed methods:
 
 ```go
 func (s *Server) Changes(ctx, workspaceID string, after Cursor, limit int,
@@ -545,39 +366,45 @@ func (s *Server) SubscribeActivity() (ids <-chan string, cancel func(), ok bool)
 func (s *Server) CurrentSeq(ctx, workspaceID string) (uint64, error)
 ```
 
-Each `Change` carries `Actor` — the authenticated caller's subject, the label a
-trusted write gave itself, or both (see
-[the change feed](../how-to/change-feed.md#who-wrote-it)).
-Because the feed coalesces by row it reports the row's **last** writer, which is
-enough for echo suppression and "notify everyone except the actor", and is not
-an audit trail.
+The feed outputs all workspace changes, including `syncplane_field_history` records. Effects and handlers dispatching by prototype ignore unhandled entity types; consumers processing all changes directly can filter `syncplane_field_history`. See [effects](../how-to/react-to-changes.md).
 
-If you need "what did this field hold at sequence N", that is what
-[field history](#field-history) is for — the feed cannot answer it.
+`Changes` returns `ErrCursorTooOld` if the cursor is below the tombstone horizon, ahead of the current sequence, or contains a mismatched store epoch (`Cursor.Epoch`). See [Follow committed changes](../how-to/change-feed.md).
 
-The feed narrows by nothing, **field history included**: a consumer reading
-`Changes` directly sees a `syncplane_field_history` change beside each captured
-write, at the same sequence. Anything dispatching on `Change.Entity` — including
-[effects](../how-to/react-to-changes.md), which dispatch per registered prototype — is
-unaffected; a consumer that treats every change alike should skip that entity
-itself.
+`CurrentSeq` returns the current head sequence of the workspace feed.
 
-Returns `ErrCursorTooOld` when the cursor cannot be resumed against this store:
-below the tombstone horizon, above the current sequence, or stamped with another
-store lineage. `Cursor.Epoch` carries that lineage and must survive whatever
-persists the cursor. See [Follow committed changes](../how-to/change-feed.md).
-`CurrentSeq` is the head of the feed; the distance from a consumer's position to
-it is that consumer's lag.
+### Semantics
 
-`SubscribeChanges` needs a workspace id up front, which is the right shape for
-one stream and the wrong one for background work across a whole store.
-`SubscribeActivity` carries **every** workspace that commits a write — including
-ones the caller has never heard of — over one subscription, repeating an id each
-time its workspace is written. `ok` is false when the installed notifier cannot
-report it, which leaves periodic sweeping as the only way to find work. Like
-every notifier signal it is best-effort and, by default, in-process.
+- **At-least-once delivery**: The feed delivers changes at least once when you persist the cursor after processing the page. Deduplicate by `(entity, key, seq)`.
+- **Per-workspace order**: Changes are ordered within a workspace by `(seq, entity, key)`.
+- **Latest state only**: Only the latest state of a row is observable, not every intermediate write.
+- **State feed, not an event log**: The feed reports current state rather than an event history.
+- **Full documents**: Text-bearing rows carry full documents, never delta fragments.
+- **Trusted server-side API**: Permission read filters do not apply to the change feed.
+- **Actor attribution**: Every change carries an actor in `ch.Actor`.
+
+### Actor attribution
+
+`ch.Actor` (a `storage.Actor`) reports the writer in two fields:
+
+- `Subject`: The authenticated caller subject, copied from its [`Principal`](#permissions-and-identity). Empty when no authenticated caller made the write.
+- `System`: The label a write made under [`Trusted`/`TrustedAs`](#permissions-on-the-in-process-api) gave itself (`"system"` for a bare `Trusted`). Empty when an external caller made the write.
+
+When both fields are set, a bypass ran under that caller's request. A zero actor means the write was unattributed.
+
+Attribution limitations:
+
+- **Last writer only**: The feed reports state rather than transitions. Writes that coalesce into one change leave only the final actor. Suppressing based on actor drops triggers if someone else's write coalesced behind your write.
+- **Authentication requirement**: Caller writes are attributed only if you install an `Authenticator`. By default, client pushes record a zero actor with an empty `Subject`. The `client_id` is not recorded or substituted.
+- **System is a label**: `System` is not verified and no policy runs against it. It indicates which pass made the write, not whether the write was permitted.
+
+### Low-latency subscriptions
+
+- `SubscribeChanges`: Exposes the in-process commit wakeup used by the live client stream to reduce latency. It carries no delivery guarantees; consumers must still drain on their own schedule. Requires a workspace ID.
+- `SubscribeActivity`: Reports every workspace that commits a write, including new workspaces. Used by consumers monitoring multiple workspaces. If the configured notifier does not support activity streams, `SubscribeActivity` returns `ok = false`.
 
 ### Effect-consumer state
+
+The server provides methods to track durable consumer state:
 
 ```go
 func (s *Server) ConsumerPosition(ctx, workspaceID, consumer string) (Cursor, bool, error)
@@ -588,105 +415,68 @@ func (s *Server) ResetConsumer(ctx, workspaceID, consumer string) error
 func (s *Server) ConsumerPendingWorkspaces(ctx, consumer, after string, limit int) ([]string, error)
 ```
 
-Durable bookkeeping for feed consumers, kept in the workspace's own store and
-keyed by consumer name. `AdvanceConsumer` commits a new position **together with**
-the shadow writes derived from the page it covers, in one transaction — so a
-crash redelivers a change rather than silently skipping it. Handlers run first;
-this is called after.
+`AdvanceConsumer` commits an updated cursor position and shadow state in a single transaction.
 
-`ConsumerPendingWorkspaces` answers "where is my work" for a whole store in one
-query, paging by workspace id from an exclusive `after` cursor. A workspace the
-consumer has never acted on is pending, so a newly registered consumer finds
-everything it has to catch up on. The answer is optimistic — a listed workspace
-may hold only changes the consumer filters out — but never short.
+`ConsumerPendingWorkspaces` returns workspace IDs with unprocessed changes for a consumer, paginated after an exclusive `after` workspace ID.
 
-`ResetConsumer` drops a consumer's position and shadows, which is both what a
-consumer does after `ErrCursorTooOld` and how you retire one for good. The GC
-pass collects consumers stranded below the tombstone horizon.
-
-Most callers reach these through [the effects runtime](../how-to/react-to-changes.md)
-rather than directly.
+`ResetConsumer` removes stored positions and shadow states for a consumer. Consumers below the tombstone horizon are pruned by garbage collection. See [the effects runtime](../how-to/react-to-changes.md).
 
 ## Permissions and identity
+
+Authentication and permission interfaces:
 
 ```go
 type Authenticator interface {
     Authenticate(ctx context.Context, h http.Header) (Principal, error)
 }
-```
 
-- `server.ErrUnauthenticated` — wrap it to reject as 401; any other error is a
-  500.
-- `server.StaticTokenAuthenticator` — fixed API keys.
-- `server.WithPrincipal(ctx, p)` — inject an identity from your own middleware.
-
-Permission hooks: `CanAccessWorkspace`, `CanMutate`, `ReadFilter`,
-`FilterEpoch` (plus `EpochReadFilters` for delta resync on permission changes,
-and `FieldPermissions` for per-caller field protection). Embed
-`server.AllowAll` to implement a subset.
-
-```go
 type FieldPermissions interface {
     ProtectedFields(ctx context.Context, p Principal, workspaceID, entity string) ([]string, error)
 }
 ```
 
-Optional and type-asserted. It returns the top-level field names this caller may
-not write, on top of the ones the entity's schema marks
-`(syncplane.v1.field_behavior).write_policy` — it widens that set and can never
-narrow it. A PATCH whose mask reaches a protected field is rejected with
-`CodePermissionDenied`; a PUT keeps the field's stored value and applies the
-rest. Resolved at most once per entity per request, before the write transaction
-opens. A returned name matching no field, or matching a key field, fails the
-request.
+Built-in authenticators and helpers:
 
-Error constructors: `server.DenyWorkspace(msg)` (a settled denial) and
-`server.Reject(code, msg)`. Rejection codes stay free-form on the wire so an app
-can invent its own; the engine ships constants for the ones it uses itself:
-`CodePermissionDenied`, `CodeInvalidArgument`, `CodeConflict`,
-`CodeWorkspaceAccessRevoked`, `CodeMutationIDGap`, `CodeInternal`,
-`CodeTextFullStateRequired` and `CodeTextStateStale`.
+- `server.ErrUnauthenticated`: Wrap this error to return an HTTP 401 response. Unwrapped errors return HTTP 500.
+- `server.StaticTokenAuthenticator`: Authenticates requests using fixed API tokens.
+- `server.WithPrincipal(ctx, p)`: Sets the principal on a context.
+- `server.AllowAll`: Default implementation permitting all operations.
+
+Permission interfaces include `CanAccessWorkspace`, `CanMutate`, `ReadFilter`, `FilterEpoch`, `EpochReadFilters`, and `FieldPermissions`.
+
+`FieldPermissions.ProtectedFields` returns top-level field names that the caller cannot modify. Fields declared as protected via schema options `(syncplane.v1.field_behavior).write_policy` remain protected. A `PATCH` touching a protected field is rejected with `CodePermissionDenied`. A `PUT` ignores incoming values for protected fields and preserves stored values. Protected field names matching no known schema field or matching a key field fail the request.
+
+Error constructors and rejection codes:
+
+- `server.DenyWorkspace(msg)`: Settled denial for workspace access.
+- `server.Reject(code, msg)`: Settled denial for a mutation.
+- Built-in error codes: `CodePermissionDenied`, `CodeInvalidArgument`, `CodeConflict`, `CodeWorkspaceAccessRevoked`, `CodeMutationIDGap`, `CodeInternal`, `CodeTextFullStateRequired`, and `CodeTextStateStale`.
 
 See [Authentication and permissions](../how-to/authentication-and-permissions.md).
 
 ## Rooms
 
-The ephemeral plane — presence and broadcast — served by `PresenceService`
-alongside the sync service. It is mounted by `HTTPHandler()` and by
-`Handlers()`, so a deployment that mounts either gets it without asking.
-Nothing it carries is stored: see [Rooms](../explanation/rooms.md).
+The ephemeral presence and broadcast plane is served by `PresenceService` alongside sync endpoints:
 
 ```go
 path, h := srv.PresenceHandler()   // one service
 for path, h := range srv.Handlers() { mux.Handle(path, h) } // all of them
 ```
 
-`Watch` streams a session's rooms; `Publish` writes state, sends broadcasts and
-announces departures. `Publish` is unary, so only receiving needs a stream.
+`Watch` streams room updates. `Publish` sends presence state, broadcast messages, and departure notices. Ephemeral data is not written to durable storage. See [Rooms](../explanation/rooms.md).
 
 ### The join gate
 
-Every topic passes the same admission check at join, again on the stream's
-heartbeat, and on a `Publish` for a topic the caller is not already watching
-here:
+Room admission is evaluated when joining, at each stream heartbeat, and on `Publish` calls for unwatched topics:
 
-1. `CanAccessWorkspace` — the workspace gate, first, so a refused caller
-   performs no storage work.
-2. For an **anchored** topic, the anchor row must exist and pass that entity's
-   `ReadFilter`. Room membership therefore inherits row permissions. An anchor
-   naming an unregistered or server-only entity is refused.
-3. `RoomPermissions.CanJoinRoom`, if the policy implements it.
-4. `RoomPermissions.VisibleParticipants`, resolved once and applied to the
-   snapshot and to every later frame.
+1. `CanAccessWorkspace`: Verifies workspace access.
+2. **Anchor verification**: For anchored topics, the target row must exist and pass `ReadFilter`. Anchors referencing unregistered or `server_only` entities are rejected.
+3. `RoomPermissions.CanJoinRoom`: Evaluates room join permission if implemented.
+4. `RoomPermissions.VisibleParticipants`: Resolves the participant visibility filter for the initial snapshot and subsequent frames.
 
-A settled denial drops the topic as `REASON_ACCESS_REVOKED`; a hook that could
-not decide drops it as `REASON_ERROR`, so an outage never reads as a
-revocation. Other topics on the stream keep running either way.
+Settled denials close the topic with `REASON_ACCESS_REVOKED`. Temporary errors close the topic with `REASON_ERROR`. Other topics on the stream continue uninterrupted.
 
-The anchor row read is memoized across the streams re-gating on it, so a
-document everyone has open costs one read per heartbeat interval rather than one
-per watcher — at the price of a revocation being noticed within two heartbeats
-rather than one.
+Anchor row lookups are memoized across streams sharing the same anchor.
 
 ```go
 type RoomPermissions interface {
@@ -695,18 +485,11 @@ type RoomPermissions interface {
 }
 ```
 
-Optional, and type-asserted: a `Permissions` that does not implement it admits
-every caller who cleared the gate above and shows them everyone. Embed
-`server.AllowAllRooms` to implement one hook and inherit the other. Return
-`server.DenyRoom(msg)` for a settled refusal.
+Implement `RoomPermissions` to enforce room policies. Embed `server.AllowAllRooms` to provide default permit-all behaviors. Use `server.DenyRoom(msg)` for settled refusals.
 
 ### Identity
 
-`Participant.Subject` is stamped from the request principal. Nothing in the
-payload names the publisher, so presence cannot be used to impersonate.
-`session_id` is self-asserted like a client id — the server binds it to the
-principal that opened its stream, and refuses a `Publish` naming a session this
-node holds for somebody else.
+`Participant.Subject` is derived from the authenticated request principal. `session_id` is assigned by the client and bound by the server to the opening principal. A `Publish` request referencing a session ID owned by another principal on that node is rejected.
 
 ### The bus
 
@@ -717,18 +500,13 @@ type Bus interface {
 }
 ```
 
-`WithPresenceBus` installs it; the default is in-process. Delivery is at most
-once, and `Publish` must never block on a watcher that is not reading — see the
-`engine/presence` package doc for the full contract and
-`presencetest.Conformance` for the suite an implementation must pass.
+`WithPresenceBus` sets the presence bus implementation. The default is in-process.
 
-Liveness is the bus's only durability: a node re-announces the records of the
-sessions its streams are responsible for every `WithRoomAnnounce` interval, and
-drops a record nobody re-announced within three of them. `Publish` returns that
-interval, so a publisher holding no stream — which nothing re-announces for —
-can refresh its own records on it.
+Nodes re-announce active sessions every `WithRoomAnnounce` interval. Records not re-announced within three intervals are discarded. `Publish` returns the announcement interval to allow standalone publishers to refresh records.
 
 ## Hosting many apps
+
+Use `server.NewManager` to run multiple applications on a shared root adapter:
 
 ```go
 mgr, _ := server.NewManager(ctx, root,
@@ -741,58 +519,32 @@ mgr.AdminHandler()   // private control plane
 mgr.Close()          // stops every hosted app's *Server (not the root adapter)
 ```
 
-`server.DenyAll` is the `RegisterAuthorizer` default. See [Host multiple apps](../how-to/host-multiple-apps.md).
+The default authorizer is `server.DenyAll`. See [Host multiple apps](../how-to/host-multiple-apps.md).
 
 ## Storage
 
-`sqlitestore.Open(path, sqlitestore.WithNamespace(...))` is the single-process
-default; `pgstore.Open(ctx, dsn)` backs several nodes off one database. Either
-way `root.Namespace(id)` derives one view per app from a single open store. See
-[Storage adapter contract](storage-adapter.md) and
-[Run more than one node](../how-to/run-multiple-nodes.md).
+Single-process deployments use `sqlitestore.Open(path, sqlitestore.WithNamespace(...))`. Multi-node deployments use `pgstore.Open(ctx, dsn)`. `root.Namespace(id)` derives isolated application views from a single storage instance. See [Storage adapter contract](storage-adapter.md) and [Run more than one node](../how-to/run-multiple-nodes.md).
 
 ## Cursor state
 
-A pull cursor's bulk is membership: a windowed or reference-following client's
-cursor names every row it holds, which at the limits is hundreds of kilobytes
-riding on every pull request, every pull page and every persisted checkpoint.
-With a cursor-state store the server writes those sets once and the cursor
-carries a fixed-size reference; the entry is rewritten only when membership
-actually moves.
+A cursor-state store caches membership state for windowed and reference-following subscriptions, allowing pull cursors to carry compact identifiers rather than full row key sets. If a cursor reference expires or is evicted, the client receives a reset and performs a bootstrap.
 
-The store is a cache with licensed eviction, not a system of record: a client
-presenting a reference whose entry is gone is reset onto a fresh bootstrap,
-exactly as one below the tombstone horizon is, and a failed write falls back to
-inlining the sets in the cursor — the indirection is an optimization, never a
-dependency. What an implementation choice buys:
+Available backends:
 
-- **Adapter-provided** (the default; both shipped adapters implement
-  `cursorstate.Provider`) — entries live in the same database as the rows,
-  survive restarts, and on `pgstore` are shared across nodes. Superseded and
-  aged entries are pruned on write; nothing to configure.
-- **`cursorstate.NewMemory(maxBytes)`** — in-process, for tests and
-  single-node deployments that accept the cost: a restart forgets every entry,
-  so every connected client re-bootstraps at once.
-- **Your own `cursorstate.Store`** (Redis, memcached, …) — implement two
-  methods over immutable entries. Entries hold row keys (not values); weigh
-  that before pointing the store at shared infrastructure if keys are
-  sensitive in your domain.
+- **Adapter-provided** (default): Uses the underlying storage adapter (`cursorstate.Provider`). Entries are shared across nodes on `pgstore` and persist across restarts.
+- **`cursorstate.NewMemory(maxBytes)`**: In-memory storage. Restarts clear state and cause connected clients to re-bootstrap.
+- **Custom `cursorstate.Store`**: Custom implementation for external caches (such as Redis or Memcached). Entries store row keys.
 
-`syncplane.cursor_state.misses` is the health signal: every miss is a client
-re-download. See [Telemetry](telemetry.md#cursor-state).
+The metric `syncplane.cursor_state.misses` records cache misses. See [Telemetry](telemetry.md#cursor-state).
 
 ## Leases
 
-`Server.Leases()` exposes the `lease.Locker` the server resolved — installed
-by `WithLeases`, provided by the adapter (`lease.Provider`; on `pgstore` the
-lease space is the shared database, backed by advisory locks), or a
-process-local fallback. Background work takes a per-`(role, workspace)`
-try-lock around each pass and skips when another process holds it; a locker
-error makes the pass run unleased, so a broken lease backend costs duplicated
-work, never stopped maintenance.
+`Server.Leases()` returns the resolved `lease.Locker` configured via `WithLeases` or provided by the storage adapter (`lease.Provider`).
 
-The engine's roles are `gc`, `indexes` and `effects/<consumer>`. An
-application worker leasing its own per-workspace work through
-`Server.Leases()` picks role names outside those; the `lease` package
-documents the contract — advisory deduplication whose loss is silent, so
-leased work stays idempotent.
+Background maintenance acquires a non-blocking lease for each `(role, workspace)` pair:
+
+- `gc`: Garbage collection sweeps.
+- `indexes`: Secondary index backfills.
+- `effects/<consumer>`: Background effect consumers.
+
+If a lease is held by another process, the sweep is skipped. If the lease provider returns an error, the task executes without a lease. Application workers leasing custom work through `Server.Leases()` must use role names outside the engine namespaces.

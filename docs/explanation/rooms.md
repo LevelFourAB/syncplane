@@ -1,170 +1,101 @@
 # Rooms: the ephemeral plane
 
-syncplane converges durable state through a server-linearized, per-workspace
-mutation log — see [the convergence model](convergence-model.md). Rooms are a
-**second plane** alongside it, carrying the state that only matters while
-somebody is connected: cursors, selections, "who is viewing this", typing
-indicators, an agent's in-flight token stream.
+This document explains why syncplane separates ephemeral state from the durable mutation log, how rooms manage transient presence and broadcast messages, and the architectural trade-offs involved. syncplane converges durable state through a server-linearized, per-workspace mutation log (see [the convergence model](convergence-model.md)). Rooms provide a second plane alongside the log for transient state that matters only while users are connected, such as cursors, selections, viewing rosters, typing indicators, and token streams.
 
-Nothing on this plane is stored, replayed or acknowledged. That is the whole
-design, and everything below follows from it.
+Nothing on the ephemeral plane is stored, replayed, or acknowledged. The entire room architecture follows from this design principle.
 
 ## The dividing test
 
+To decide whether state belongs in a table row or in a room, ask one question:
+
 > Would a reader arriving later want this?
 
-If yes, it is a row. A comment, a document title, a completed checkbox — all
-things someone opening the page tomorrow expects to find. They go through
-`mutate` and get every guarantee the log provides.
+If yes, the state belongs in a row. A comment, a document title, and a completed checkbox are all data that a user opening the page later expects to find. These updates go through `mutate` and receive every guarantee the mutation log provides.
 
-If no, it is a room. Where your cursor is right now is worthless to somebody who
-arrives after you left; a "user is typing" indicator that outlives the typing is
-worse than no indicator at all.
+If no, the state belongs in a room. Where your cursor is right now is useless to somebody who arrives after you leave. Similarly, a typing indicator that outlives the typing activity is worse than no indicator at all.
 
 ## Why the mutation log is the wrong home
 
-A cursor position routed through the log is not merely inefficient, it is wrong
-on the log's own terms. Every update would:
+Routing cursor positions and transient updates through the mutation log is inefficient and conflicts with the log's design. In the mutation log, every update would:
 
-- **burn a workspace sequence number**, so a document with five people moving
-  their mice advances the sequence faster than the app is actually written to;
-- **drag every subscriber's cursor forward**, making each of them re-read a
-  position that carries nothing they can use;
-- **be stored until GC**, so retention has to be sized for pointer movements
-  rather than for edits;
-- **serialize against real writes**, because a workspace commits in one write
-  transaction at a time and a cursor update is a write.
+- **Burn a workspace sequence number.** A document with five users moving cursors advances the sequence faster than the application writes durable data.
+- **Drag every subscriber cursor forward.** Every subscriber must re-read a position that carries no lasting value.
+- **Require storage until garbage collection (GC).** Storage retention must be sized for pointer movements rather than durable edits.
+- **Serialize against durable writes.** A workspace commits one write transaction at a time, so cursor updates block real writes.
 
-The ephemeral plane costs none of that: it never opens a write transaction,
-never touches storage, and never advances a sequence.
+The ephemeral plane avoids all of these costs. It never opens a write transaction, never touches storage, and never advances a sequence number.
 
 ## Addressing
 
-A topic is `(workspace_id, name)`, optionally **anchored** to a row:
+A topic is `(workspace_id, name)`, optionally anchored to a row:
 
 ```ts
 ws.room('lobby'); // unanchored
 ws.room(DocumentSchema, 'doc-42', 'cursors'); // anchored to a row
 ```
 
-`workspace_id` is the hard partition key here exactly as it is everywhere else —
-there are no cross-workspace rooms.
+The `workspace_id` is the hard partition key across syncplane. There are no cross-workspace rooms.
 
-The anchor is an authorization mechanism, not a label. An anchored topic admits
-a caller **only if the app's `ReadFilter` would let them read that row**, so a
-cursor room on a document inherits the document's permissions and needs no
-policy of its own. Membership can never be looser than the data it is about,
-which is the property that would otherwise have to be re-established by hand for
-every room an app invents.
+The anchor is an authorization mechanism, not a label. An anchored topic admits a caller only if the application's `ReadFilter` allows them to read that row. A cursor room on a document inherits the document's permissions and requires no separate policy. Membership can never be looser than the data it describes.
 
-An unanchored topic is gated on workspace access, plus the app's own
-`RoomPermissions.CanJoinRoom` if it installs one.
+An unanchored topic requires workspace access, plus the application's own `RoomPermissions.CanJoinRoom` check if configured.
 
 ## Two primitives
 
-**Presence** is soft state: one record per session per room, replaced whole on
-every write, last-writer-wins by a revision the publisher mints. A record is not
-deleted, it **expires**.
+The ephemeral plane provides two primitives:
 
-**Broadcast** is an ephemeral message delivered to whoever is watching at the
-moment it arrives. Not stored, not replayed, not acknowledged.
+- **Presence:** Soft state with one record per session per room. Every write replaces the record entirely using last-writer-wins based on a client-minted revision. A record is not deleted; it expires.
+- **Broadcast:** An ephemeral message delivered only to current watchers when it arrives. It is not stored, replayed, or acknowledged.
 
 ## Expiry instead of deletion
 
-A presence record has no owner that can be relied upon to remove it. A tab is
-closed, a laptop lid comes down, a process is killed — none of those send
-anything. So the plane does not model departure as an event at all:
+A presence record has no reliable owner to remove it. A tab closes, a laptop lid shuts, or a process terminates without sending a disconnect message. The ephemeral plane therefore does not model departure as an event:
 
 - Each record carries a `session_id` and a client-minted, monotonic `revision`.
-- The node holding a session's `Watch` stream **re-announces** its records every
-  announce interval (`WithRoomAnnounce`, default 5s).
-- A record nobody has re-announced within **three announce intervals** is
-  dropped locally and reported to watchers as `left`.
-- Closing a room publishes an explicit departure, so the common case is
-  immediate rather than waiting out the window.
+- The node holding a session's `Watch` stream re-announces its records every announce interval (`WithRoomAnnounce`, default 5 seconds).
+- A record that no node re-announces within three announce intervals is dropped locally and reported to watchers as `left`.
+- Closing a room publishes an explicit departure, making the common case immediate rather than waiting for the timeout window.
 
-A publisher holding no stream anywhere — `presenceEnabled: false`, or a
-non-browser client that only writes — has nobody re-announcing for it, so its
-records would lapse three intervals after its last publish. `Publish` returns
-the announce interval for exactly that reason, and the client re-publishes its
-own state on it. Re-publishing at the _same_ revision is what makes this cheap:
-the server takes an unchanged revision as liveness and fans no frame out.
+A publisher without an open `Watch` stream—such as a client with `presenceEnabled: false` or a non-browser client that only writes—has no node re-announcing for it. Its records lapse three intervals after the last publish. To prevent this, `Publish` returns the announce interval so the client can re-publish its own state on schedule. Re-publishing at the same revision is lightweight: the server treats an unchanged revision as a liveness heartbeat and fans out no frames.
 
-This is what lets the plane run with **no TTL table, no GC horizon and no
-storage-adapter involvement**. It also makes every lossy path in the transport
-self-healing for presence: an event dropped by a full queue, lost to a bus
-reconnect, or discarded by a watcher that was not reading is corrected by the
-next announcement.
+This design allows the plane to run with no time-to-live (TTL) table, no GC horizon, and no storage-adapter involvement. It also makes presence self-healing across lossy transport paths. An event dropped by a full queue, lost during a bus reconnect, or discarded by a slow watcher is corrected by the next announcement.
 
-A browser shares one `Watch` stream across an account's tabs, so the stream
-names the sessions it is responsible for and not only its own — otherwise a
-room would empty out to whichever tab happened to hold the lock. See
-[multi-tab behaviour](multi-tab.md).
+A browser shares one `Watch` stream across all tabs for an account. The stream names all sessions it is responsible for, not just its own. This prevents a room from dropping sessions from other tabs. For details, see [multi-tab behavior](multi-tab.md).
 
-## At most once, and what that costs
+## At-most-once delivery and what it costs
 
-Delivery carries no guarantee. Presence survives that because it is re-announced
-rather than replayed. **Broadcast does not.** A message reaches whoever is
-watching at that moment and nobody else; if the connection was between reconnects,
-it is gone.
+Delivery carries no guarantee. Presence survives dropped messages because it re-announces state periodically. Broadcast does not survive dropped messages. A broadcast message reaches only current watchers; if a connection is reconnecting, the message is lost.
 
-That is the primitive's contract, not a limitation to be worked around. An app
-that cannot lose a message writes a row and lets the log deliver it — and, if it
-wants the message to feel live, publishes a broadcast alongside as a hint.
+This behavior is a deliberate contract, not a limitation to work around. If an application must not lose a message, write a row to the mutation log. If you want the message to appear immediately, publish a broadcast alongside the mutation as a hint.
 
 ## Why presence is not synchronized with the data stream
 
-The two planes are independent streams with independent leadership. Nothing
-orders a room frame against a mutation, in either direction.
+The ephemeral plane and the durable data plane are independent streams with independent leadership. The system does not order a room frame against a mutation in either direction.
 
-That means a peer's cursor can name a row — or a position inside a
-collaborative-text field — that you have not pulled yet. Presence records
-therefore carry the workspace `seq` they were authored against, so a recipient
-can tell "I am behind" from "this state is nonsense" and hold the state until it
-catches up.
+Because streams are independent, a peer's cursor can reference a row or collaborative-text offset that you have not pulled yet. Presence records carry the workspace `seq` they were authored against. A recipient can compare this sequence number to determine whether they are behind or if the state is invalid, holding the state until the data stream catches up.
 
-Positions should travel as [text anchors](collaborative-text.md), not integer
-offsets: an anchor stays attached to the character it was placed at as
-concurrent edits move it, while an offset silently means something else the
-moment anyone types above it.
+Send positions as [text anchors](collaborative-text.md) rather than integer offsets. An anchor stays attached to its character as concurrent edits move it. An integer offset changes meaning as soon as someone edits earlier text.
 
 ## Why `Watch` is a separate stream from `Subscribe`
 
-`Subscribe`'s scope set is fixed for the life of the stream, deliberately: the
-catch-up and the live tail both run under one set, so nothing has to delta-resync
-mid-stream. Room membership, by contrast, changes every time a user opens a
-document.
+The scope set for `Subscribe` is fixed for the life of the stream. Catch-up and the live tail run under a single scope set, avoiding delta re-synchronizations mid-stream. In contrast, room membership changes whenever a user navigates between documents.
 
-Folding rooms into `Subscribe` would therefore force a data-stream reopen — and
-its catch-up — on every navigation. Reopening `Watch` costs nothing comparable:
-there is no cursor, no backlog, and a snapshot is what a joiner wants anyway.
+Combining rooms into `Subscribe` would force a data-stream reconnect and full catch-up on every navigation. Reopening `Watch` is inexpensive: it has no cursor, requires no backlog replay, and immediately returns the current room snapshot.
 
-The cost is one more long-lived connection per account. See
-[limits and trade-offs](limits-and-trade-offs.md#browser-connection-limits).
+The trade-off is one additional long-lived connection per account. For details, see [limits and trade-offs](limits-and-trade-offs.md#browser-connection-limits).
 
 ## What is not guaranteed
 
-- **No ordering across topics**, and none between a room frame and the mutation
-  log.
-- **No history, replay or cursors.** Anything that needs them is a row.
-- **No delivery guarantee**, per the contract above.
-- **A roster is a node's view, not global truth.** A node knows the sessions
-  whose streams it holds plus whatever the bus has told it; a record published
-  elsewhere arrives within one announce interval. Single-node deployments
-  cannot observe the difference.
-- **No rate limiting** beyond the size and count caps in `Limits`. A chatty
-  client is bounded by message size, not by frequency.
+The ephemeral plane does not provide the following guarantees:
 
-## Multi-node
+- **Cross-topic ordering:** No ordering exists across topics or between room frames and the mutation log.
+- **History and replay:** The ephemeral plane retains no history, replay, or cursors. Use table rows for durable state.
+- **Delivery guarantees:** Messages are delivered at most once.
+- **Global roster truth:** A roster represents a single node's view, combining its local session streams with bus updates. A record published elsewhere arrives within one announce interval. Single-node deployments do not observe this difference.
+- **Frequency rate limiting:** Beyond the size and count limits in `Limits`, the plane enforces no message frequency limits. Message sizes remain strictly bounded.
 
-The in-process default (`presence.NewLocal`) reaches only one process, so a
-two-node deployment on the default shows each client the participants its own
-node happens to be serving. `server.WithPresenceBus` replaces it;
-`engine/presence/pgpresence` is one over Postgres `LISTEN`/`NOTIFY`. See
-[run more than one node](../how-to/run-multiple-nodes.md).
+## Multi-node deployments
 
-The bus has three lossy paths — a full publish queue, a reconnect gap, and a
-payload over the NOTIFY ceiling. The first two are silent and heal within one
-announce interval for presence; the third is refused at `Publish` so the caller
-learns its state is too large rather than watching it vanish everywhere but its
-own node.
+The default in-process presence provider (`presence.NewLocal`) reaches only one process. In a multi-node deployment, this default only shows clients the participants connected to their specific node. To share presence across nodes, configure `server.WithPresenceBus`. For example, `engine/presence/pgpresence` provides a bus implementation over PostgreSQL `LISTEN` and `NOTIFY`. For instructions, see [run more than one node](../how-to/run-multiple-nodes.md).
+
+The presence bus has three lossy paths: a full publish queue, a reconnect gap, and a payload exceeding the `NOTIFY` size limit. The first two conditions are transient and self-heal on the next announce interval. The third condition fails immediately at `Publish` so the caller detects that the payload is too large.

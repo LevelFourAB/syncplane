@@ -1,157 +1,107 @@
-# Host multiple apps in one process
+# Hosting multiple apps in one process
 
-Two mechanisms, at two levels. A **namespace** partitions one SQLite file
-between several servers. A **`Manager`** goes further: it hosts many apps whose
-schemas arrive at runtime, routes their sync surfaces, and exposes a trusted
-control plane for registering them.
+This guide shows you how to host multiple applications in one process using storage namespaces and `server.Manager`. Use this approach to partition a single database between multiple sync servers or to dynamically register and route schemas at runtime.
 
-## Namespaces: several apps, one database
+## Prerequisites
 
-A namespace partitions workspaces, rows and client watermarks inside one SQLite
-file. Open the file once and derive a view per app — never open the same file
-twice:
+Before hosting multiple applications, ensure you have:
 
-```go
-root, _ := sqlitestore.Open("apps.db")
-defer root.Close()                       // the root owns the handle
-srvA, err := server.New(root.Namespace("app-a"), server.WithEntities(&appav1.Thing{}))
-srvB, err := server.New(root.Namespace("app-b"), server.WithEntities(&appbv1.Widget{}))
-```
+- A root storage adapter (such as SQLite or PostgreSQL).
+- An admin authentication token if you register schemas at runtime.
 
-`Close` on a derived store is a no-op. `sqlitestore.WithNamespace("app-a")` on
-`Open` does the same for a single-app process.
+## Steps
 
-## A manager: many apps, runtime schemas
+1. **Open the root storage adapter:**
 
-A `server.Manager` maps **one app → one `*Server` over one storage namespace**
-and routes the public sync surface by a leading `/<appID>` path segment. The
-trusted control plane is a separate `AdminService`, mounted on its own (private)
-listener so it never sits on the surface browsers reach:
+   Open the database file once. If you partition a single SQLite file across static servers without dynamic schemas, derive namespaces directly from the root adapter:
 
-```go
-root, _ := sqlitestore.Open("apps.db")
-defer root.Close()
-mgr, _ := server.NewManager(ctx, root,                       // reloads persisted schemas on boot
-	server.WithRegisterAuthorizer(server.TokenAuthorizer(os.Getenv("ADMIN_TOKEN"))))
-defer mgr.Close()                                           // the manager owns its app servers
+   ```go
+   root, _ := sqlitestore.Open("apps.db")
+   defer root.Close()                       // the root owns the handle
+   srvA, err := server.New(root.Namespace("app-a"), server.WithEntities(&appav1.Thing{}))
+   srvB, err := server.New(root.Namespace("app-b"), server.WithEntities(&appbv1.Widget{}))
+   ```
 
-http.ListenAndServe(":8787", mgr.SyncHandler())             // public: /<appID>/syncplane.v1.SyncService/...
-adminPath, adminHandler := mgr.AdminHandler()               // private surface
-adminMux := http.NewServeMux(); adminMux.Handle(adminPath, adminHandler)
-http.ListenAndServe("127.0.0.1:8788", adminMux)
-```
+   Calling `Close` on a derived store is a no-op. Calling `sqlitestore.WithNamespace("app-a")` on `Open` performs the same partitioning for a single-app process.
 
-`cmd/syncplaned` wires all of this up.
+2. **Initialize the manager and configure options:**
 
-Each app's `*Server` runs background work (GC, index backfill, notify
-coalescing), and the manager owns those servers: `mgr.Close()` stops all of
-them and refuses to host further apps. It leaves the root adapter open — that
-handle is still yours, which is why the two defers go in that order.
+   Create a `server.Manager` to route requests by a leading `/<appID>` path segment and host dynamic schemas. Configure shared options for the entire host with `server.WithServerOptions` and per-app options with `server.WithAppOptions`:
 
-### Registering a schema
+   ```go
+   mgr, _ := server.NewManager(ctx, root,
+   	server.WithRegisterAuthorizer(server.TokenAuthorizer(os.Getenv("ADMIN_TOKEN"))),
+   	// Shared: one credential check for the whole host.
+   	server.WithServerOptions(server.WithAuthenticator(oidcAuth)),
+   	// Per app: its own membership policy, bound to its app id.
+   	server.WithAppOptions(func(appID string) []server.Option {
+   		return []server.Option{server.WithPermissions(policy{app: appID, members: directory})}
+   	}),
+   )
+   ```
 
-A backend that owns the schema registers it over the wire (see
-`examples/register`):
+   The authenticator runs on the app's handler after routing, so a request is authenticated once and the resulting `Principal` reaches that app's permission hooks (see [single-app server](authentication-and-permissions.md)).
 
-```ts
-import { registerSchema } from 'syncplane';
-await registerSchema(adminTransport, 'todo', bundle, { token });
-```
+   Bind permission policies to an app ID. Permission hooks receive a principal and a `workspace_id`, not an app ID. Because each app is its own storage namespace, workspace `team` in `docs` and workspace `team` in `billing` are separate partitions.
 
-`bundle` is a serialized `FileDescriptorSet` — see [Define schemas in TypeScript](define-schemas-in-typescript.md) for how to build one, or
-`server.BuildDynamicFile` / `RegisterDynamicEntities` to do it from Go.
+   Per-app options run after shared options and override them. An app with no configured policy inherits `AllowAll`.
 
-A browser client then points at `/<appID>` and syncs full CRUD against a schema
-that exists only as runtime-registered bytes: pass `entities:
-bundle.descMessages()`, or `fetchSchema(transport, appId)` to rebuild the
-descriptors from the server's own copy ("the server ships its schema").
+   If you use PostgreSQL with a shared change notifier and presence bus, configure them with namespaced options per app:
 
-### What registration guarantees
+   ```go
+   link, _ := pglisten.Open(ctx, dsn)
+   notifier, _ := pgnotify.New(ctx, link)
+   bus, _ := pgpresence.New(ctx, link)
 
-- **Trust.** `RegisterAuthorizer` is deny-by-default (`DenyAll`); the built-in
-  `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant
-  time. A denied call never touches state.
-- **Persistence.** The descriptor set is stored per app and re-registered on
-  boot **before serving**, so a restart leaves every app immediately syncable.
-- **Idempotence + evolution.** Re-registering an identical set is a no-op; new
-  entities and appended fields upsert; a conflicting change (a removed,
-  renumbered or retyped field, a reference retargeted to a different entity, or
-  changed `key_fields`) is rejected without partially applying. Each app's schema
-  revision is a stable hash of its canonical descriptor bytes, surfaced to
-  clients as `schema_revision` so a schema change makes them re-bootstrap.
+   server.WithAppOptions(func(appID string) []server.Option {
+   	return []server.Option{
+   		server.WithNotifier(notifier.Namespace(appID)),
+   		server.WithPresenceBus(bus.Namespace(appID)),
+   	}
+   })
+   ```
 
-## Authenticating a collection of apps
+   A namespaced view shares the underlying fan-out, and closing a view is a no-op. The value returned by `Open` or `New` owns the fan-out and must outlive every view. Both fan-outs sit on one `pglisten.Conn`, which owns the connections and must outlive them in turn. `cmd/syncplaned` wires both this way when its data source name (DSN) selects PostgreSQL.
 
-A collection of internal tools normally shares **one** identity provider and
-does **not** share membership: everyone with a login can reach the host, but who
-may open which workspace differs per app. `Manager` splits its options along
-that line — `WithServerOptions` for what every app has in common,
-`WithAppOptions` for what each app decides for itself:
+3. **Start the HTTP servers:**
 
-```go
-mgr, _ := server.NewManager(ctx, root,
-	server.WithRegisterAuthorizer(server.TokenAuthorizer(os.Getenv("ADMIN_TOKEN"))),
-	// Shared: one credential check for the whole host.
-	server.WithServerOptions(server.WithAuthenticator(oidcAuth)),
-	// Per app: its own membership policy, bound to its app id.
-	server.WithAppOptions(func(appID string) []server.Option {
-		return []server.Option{server.WithPermissions(policy{app: appID, members: directory})}
-	}),
-)
-```
+   Mount the public sync handler and private admin handler on separate listeners:
 
-The authenticator runs on the app's handler, after routing, so a request is
-authenticated exactly once and the resulting `Principal` reaches that app's
-permission hooks — the same seams a [single-app server](authentication-and-permissions.md) uses, installed once for the
-collection.
+   ```go
+   root, _ := sqlitestore.Open("apps.db")
+   defer root.Close()
+   mgr, _ := server.NewManager(ctx, root,                       // reloads persisted schemas on boot
+   	server.WithRegisterAuthorizer(server.TokenAuthorizer(os.Getenv("ADMIN_TOKEN"))))
+   defer mgr.Close()                                           // the manager owns its app servers
 
-**Binding the policy to an app id is what makes it correct.** Hooks receive a
-principal and a `workspace_id`, never an app id, and each app is its own storage
-namespace — so workspace `team` in `docs` and workspace `team` in `billing` are
-unrelated partitions that a single shared policy would answer identically.
+   http.ListenAndServe(":8787", mgr.SyncHandler())             // public: /<appID>/syncplane.v1.SyncService/...
+   adminPath, adminHandler := mgr.AdminHandler()               // private surface
+   adminMux := http.NewServeMux(); adminMux.Handle(adminPath, adminHandler)
+   http.ListenAndServe("127.0.0.1:8788", adminMux)
+   ```
 
-Per-app options are applied after the shared ones and override them, so a shared
-default policy plus overrides for the apps that need one also works. An app
-given no policy inherits `AllowAll`, which admits every caller into every
-workspace of that app — the open default, per app.
+   `cmd/syncplaned` wires this configuration.
 
-## Scale envelope
+   Each app `*Server` runs background work, including garbage collection (GC), index backfill, and notify coalescing. The manager owns those servers. Calling `mgr.Close()` stops all hosted servers and refuses further apps. The root adapter remains open, so close it after closing the manager.
 
-One process, one SQLite file (a single writer across every app on the host), and
-an in-process change notifier: apps do not contend for anything but that writer,
-and a workspace's write path is short. That is sized for **internal tools — tens
-of apps, human-paced write rates**.
+4. **Register an application schema:**
 
-It stops fitting when sustained writes saturate the single writer, or when you
-need more than one node. The way out is
-[`pgstore`](../reference/storage-adapter.md#adapters) plus a shared notifier via
-`WithNotifier` (clients on other nodes otherwise converge by polling, correctly
-but with poll latency). Nothing above the storage seam changes when that
-happens — `Manager`, namespaces and the authentication wiring are unaffected.
-See [Run more than one node](run-multiple-nodes.md).
+   Register the schema over the network with the private admin transport (see `examples/register`):
 
-## Fan-out is per app, not per host
+   ```ts
+   import { registerSchema } from 'syncplane';
+   await registerSchema(adminTransport, 'todo', bundle, { token });
+   ```
 
-A shared notifier and a shared presence bus are opened once for the process and
-then **namespaced per app**, for the reason the policy above is bound to an app
-id: workspace ids are namespaced per app, so two apps that both have a workspace
-`team` would otherwise wake each other's clients and serve each other's rooms.
+   `bundle` is a serialized `FileDescriptorSet`. See [Define schemas in TypeScript](define-schemas-in-typescript.md) to build one in TypeScript, or use `server.BuildDynamicFile` and `RegisterDynamicEntities` in Go.
 
-```go
-link, _ := pglisten.Open(ctx, dsn)
-notifier, _ := pgnotify.New(ctx, link)
-bus, _ := pgpresence.New(ctx, link)
+## Verifying the result
 
-server.WithAppOptions(func(appID string) []server.Option {
-	return []server.Option{
-		server.WithNotifier(notifier.Namespace(appID)),
-		server.WithPresenceBus(bus.Namespace(appID)),
-	}
-})
-```
+Point a browser client to `/<appID>` to verify that it can sync create, read, update, and delete (CRUD) operations against the registered schema.
 
-A namespaced view shares the fan-out it came from, and closing one is a no-op —
-the value `Open` or `New` returned owns it and must outlive every view. Both
-fan-outs sit on one `pglisten.Conn`, which owns the connections and must outlive
-them in turn.
-`cmd/syncplaned` wires both this way whenever its DSN selects Postgres.
+Pass `entities: bundle.descMessages()`, or call `fetchSchema(transport, appId)` to rebuild the descriptors from the server.
+
+## Related
+
+- [Registration](../reference/server.md#registration)
+- [Limits and trade-offs](../explanation/limits-and-trade-offs.md)

@@ -1,14 +1,12 @@
-# Observe the engine
+# Observing the engine
 
-Wire OpenTelemetry to the engine so pushes, pulls, storage transactions and
-background work show up in your traces and metrics.
+This guide shows you how to connect OpenTelemetry to the engine so pushes, pulls, storage transactions, and background work appear in your traces and metrics.
 
-For what each instrument means, see [Telemetry](../reference/telemetry.md).
+For descriptions of each instrument, see [Telemetry](../reference/telemetry.md).
 
-## What you need
+## Prerequisites
 
-The engine depends only on the OpenTelemetry **API**. To get anything out of
-it, your `main` supplies the **SDK** and an exporter:
+Before you begin, install the OpenTelemetry Go SDK and exporter packages:
 
 ```sh
 go get go.opentelemetry.io/otel/sdk \
@@ -17,139 +15,106 @@ go get go.opentelemetry.io/otel/sdk \
        go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp
 ```
 
-Nothing else changes if you skip this: the API's no-op implementation is what
-runs, and the engine costs an interface call per instrument.
+The engine depends only on the OpenTelemetry API. If you do not configure an SDK, the engine runs the no-op implementation.
 
-## Set up the providers
+## Setting up telemetry
 
-```go
-import (
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
-	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	"go.opentelemetry.io/otel/sdk/resource"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
-)
+Follow these steps to configure OpenTelemetry in your application:
 
-func setupTelemetry(ctx context.Context) (func(context.Context) error, error) {
-	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
-		semconv.SchemaURL, semconv.ServiceName("my-sync-server")))
-	if err != nil {
-		return nil, err
-	}
+1. Initialize the OpenTelemetry providers and register them as globals:
 
-	traceExp, err := otlptracehttp.New(ctx)   // honours OTEL_EXPORTER_OTLP_ENDPOINT
-	if err != nil {
-		return nil, err
-	}
-	metricExp, err := otlpmetrichttp.New(ctx)
-	if err != nil {
-		return nil, err
-	}
+   ```go
+   import (
+   	"go.opentelemetry.io/otel"
+   	"go.opentelemetry.io/otel/exporters/otlp/otlpmetric/otlpmetrichttp"
+   	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracehttp"
+   	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+   	"go.opentelemetry.io/otel/sdk/resource"
+   	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+   	semconv "go.opentelemetry.io/otel/semconv/v1.27.0"
+   )
 
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithResource(res),
-		sdktrace.WithBatcher(traceExp),
-	)
-	mp := sdkmetric.NewMeterProvider(
-		sdkmetric.WithResource(res),
-		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)),
-	)
+   func setupTelemetry(ctx context.Context) (func(context.Context) error, error) {
+   	res, err := resource.Merge(resource.Default(), resource.NewWithAttributes(
+   		semconv.SchemaURL, semconv.ServiceName("my-sync-server")))
+   	if err != nil {
+   		return nil, err
+   	}
 
-	// Setting the globals means anything that was not handed a provider
-	// explicitly still reports. The engine falls back to these.
-	otel.SetTracerProvider(tp)
-	otel.SetMeterProvider(mp)
+   	traceExp, err := otlptracehttp.New(ctx)   // honours OTEL_EXPORTER_OTLP_ENDPOINT
+   	if err != nil {
+   		return nil, err
+   	}
+   	metricExp, err := otlpmetrichttp.New(ctx)
+   	if err != nil {
+   		return nil, err
+   	}
 
-	return func(ctx context.Context) error {
-		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx))
-	}, nil
-}
-```
+   	tp := sdktrace.NewTracerProvider(
+   		sdktrace.WithResource(res),
+   		sdktrace.WithBatcher(traceExp),
+   	)
+   	mp := sdkmetric.NewMeterProvider(
+   		sdkmetric.WithResource(res),
+   		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(metricExp)),
+   	)
 
-Call `shutdown` before the process exits, or the last batch never leaves.
+   	// Setting the globals means anything that was not handed a provider
+   	// explicitly still reports. The engine falls back to these.
+   	otel.SetTracerProvider(tp)
+   	otel.SetMeterProvider(mp)
 
-## Wire the engine
+   	return func(ctx context.Context) error {
+   		return errors.Join(tp.Shutdown(ctx), mp.Shutdown(ctx))
+   	}, nil
+   }
+   ```
 
-Setting the globals is enough for the server. Two things need more:
+2. Wrap the storage adapter and initialize the server:
 
-```go
-// Storage is instrumented by wrapping the adapter — so any adapter gets it,
-// not just sqlitestore. Wrap ONCE, at the root: a Manager namespaces the root
-// adapter per app and the wrapper carries through, so wrapping per app would
-// double-count.
-store, err := sqlitestore.Open(path)
-if err != nil { ... }
-defer store.Close()
+   Wrap your storage adapter once at the root with `otelstore.Wrap` before passing it to `server.New`. A manager namespaces the root adapter per application and carries the wrapper through, so wrapping per application causes double-counting.
 
-instrumented, err := otelstore.Wrap(store)
-if err != nil { ... }
+   ```go
+   // Storage is instrumented by wrapping the adapter — so any adapter gets it,
+   // not just sqlitestore. Wrap ONCE, at the root: a Manager namespaces the root
+   // adapter per app and the wrapper carries through, so wrapping per app would
+   // double-count.
+   store, err := sqlitestore.Open(path)
+   if err != nil { ... }
+   defer store.Close()
 
-srv, err := server.New(instrumented,
-	server.WithEntities(&todov1.Todo{}),
-	// Optional: pass providers explicitly instead of relying on the globals.
-	server.WithTracerProvider(tp),
-	server.WithMeterProvider(mp),
-)
-```
+   instrumented, err := otelstore.Wrap(store)
+   if err != nil { ... }
 
-Effects and connectors take providers on their config:
+   srv, err := server.New(instrumented,
+   	server.WithEntities(&todov1.Todo{}),
+   	// Optional: pass providers explicitly instead of relying on the globals.
+   	server.WithTracerProvider(tp),
+   	server.WithMeterProvider(mp),
+   )
+   ```
 
-```go
-rt, err := effects.New(effects.Config{
-	Server:         srv,
-	TracerProvider: tp,
-	MeterProvider:  mp,
-})
-```
+3. Configure background workers:
 
-Both default to the globals, so with `otel.Set*Provider` called you can leave
-them out.
+   If you use effects or connectors, pass the providers in their configuration:
 
-## Trace context from clients
+   ```go
+   rt, err := effects.New(effects.Config{
+   	Server:         srv,
+   	TracerProvider: tp,
+   	MeterProvider:  mp,
+   })
+   ```
 
-`otelconnect` extracts W3C trace context from incoming requests, so a client
-that sends `traceparent` produces one trace spanning both sides. Nothing needs
-enabling — if the header arrives, the server's spans are children of the
-client's.
+   Both components fall back to the global providers if you omit these fields.
 
-The TypeScript client does not generate trace context (it takes no
-OpenTelemetry dependency; see [Telemetry](../reference/telemetry.md#the-typescript-client)).
-Attach the header in your own Connect interceptor if you want end-to-end
-traces.
+4. Shut down the providers on exit:
 
-## What to alert on
+   Call the `shutdown` function before the process exits. If you omit shutdown, the final batch of telemetry is not sent.
 
-Four signals cover most of what goes wrong and are invisible without this:
+## Confirming the result
 
-- **`syncplane.push.rejections`** — a rejected mutation is still a `200 OK`, so
-  a client wedged in a rebase loop is invisible in every RPC-level metric.
-- **`syncplane.pull.resets`** with `reset_reason=cursor_below_horizon` — clients
-  are falling behind GC and re-downloading whole workspaces. Raise `WithGC`
-  retention.
-- **`syncplane.effects.lag`** — a consumer that stopped keeping up. Pair it with
-  `syncplane.effects.passes{outcome=error}` to tell "wedged" from "busy".
-- **`syncplane.gc.collected{gc_kind=stranded_consumers}`** — an effect consumer
-  was collected below the horizon. What it missed cannot be recovered.
-
-With a read replica configured (`pgstore.WithReadReplica`), two more:
-
-- **`syncplane.replica.reads{read_route=fallback_error}`** — the replica is
-  unreachable or broken; every read is quietly served by the primary instead.
-- **sustained `syncplane.replica.reads{read_route=fallback_stale}`** —
-  replication lag exceeds the window between a client's push ack and its next
-  pull, so reads are concentrating back on the primary whose pool was sized
-  assuming they would not. Brief bursts after a write spike are normal.
-
-For tuning rather than alerting, compare `syncplane.notify.requested` against
-`syncplane.notify.published`: the gap is what `WithNotifyCoalescing` absorbed.
-
-## Testing your instrumentation
-
-Pass a provider explicitly and collect on demand, rather than reaching for the
-globals — that way parallel tests cannot see each other's measurements:
+To verify your instrumentation in automated tests, pass a manual reader explicitly instead of using global providers. This isolates parallel tests from each other:
 
 ```go
 reader := sdkmetric.NewManualReader()
@@ -162,6 +127,4 @@ var rm metricdata.ResourceMetrics
 err = reader.Collect(ctx, &rm)
 ```
 
-A `ManualReader` can be registered with exactly **one** `MeterProvider`. A
-second registration is refused with a log line rather than an error, leaving a
-meter that silently records nothing — so build a fresh reader per provider.
+**Note:** Register a `ManualReader` with only one `MeterProvider`. A second registration is rejected with a log line rather than an error, leaving a meter that records nothing. Always build a fresh reader per provider.
