@@ -1,7 +1,7 @@
 import { create } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
-import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { generateKeyBetween, newElementId, sortOrderedFields } from '../../src/ordering.js';
 
 describe('generateKeyBetween (ordering)', () => {
@@ -82,5 +82,32 @@ describe('sortOrderedFields', () => {
 		const w = create(WidgetSchema, { id: 'w', tags: [ 'c', 'a', 'b' ] });
 		sortOrderedFields(WidgetSchema, w);
 		expect(w.tags).toEqual([ 'c', 'a', 'b' ]);
+	});
+
+	it('orders every message of a schema it has already seen', () => {
+		for (let i = 0; i < 3; i++) {
+			const w = create(WidgetSchema, {
+				id: `w${i}`,
+				items: [
+					{ id: 'c', pos: 'a2', text: 'C' },
+					{ id: 'a', pos: 'a0', text: 'A' },
+					{ id: 'b', pos: 'a1', text: 'B' },
+				],
+			});
+			sortOrderedFields(WidgetSchema, w);
+			expect(w.items.map((i) => i.text)).toEqual([ 'A', 'B', 'C' ]);
+		}
+	});
+
+	it('leaves a schema with no movable list alone', () => {
+		const issue = create(IssueSchema, {
+			id: 'i1',
+			labels: [ 'c', 'a', 'b' ],
+			blockedBy: [ { id: 'z' }, { id: 'a' } ],
+		});
+		sortOrderedFields(IssueSchema, issue);
+		sortOrderedFields(IssueSchema, issue);
+		expect(issue.labels).toEqual([ 'c', 'a', 'b' ]);
+		expect(issue.blockedBy.map((i) => i.id)).toEqual([ 'z', 'a' ]);
 	});
 });

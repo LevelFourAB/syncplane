@@ -88,6 +88,44 @@ export function orderFieldOf(field: DescField): string | undefined {
 	return order || undefined;
 }
 
+/** Everything the sort needs about one movable list field, resolved from the schema. */
+interface MovableList {
+	/** Property the list is held under on a decoded message. */
+	localName: string;
+	/** Property an element's fractional position is held under. */
+	posLocal: string;
+	/** Identity fields the tie-break encodes (see keyFieldsFor). */
+	keyFields: DescField[];
+}
+
+const movableLists = new WeakMap<DescMessage, readonly MovableList[]>();
+
+/**
+ * The movable list fields a message schema declares, in field order. Empty for
+ * the common schema that declares none.
+ */
+function movableListsOf(schema: DescMessage): readonly MovableList[] {
+	// Cached per descriptor: resolving this reads field options, and protobuf-es
+	// re-parses the option message bytes on every read, which dominated the cost
+	// of decoding a row on scans that sort each one.
+	const cached = movableLists.get(schema);
+	if (cached !== undefined) return cached;
+	const out: MovableList[] = [];
+	for (const field of schema.fields) {
+		const order = orderFieldOf(field);
+		if (!order || field.fieldKind !== 'list' || field.listKind !== 'message') continue;
+		const posField = field.message.fields.find((f) => f.name === order);
+		if (!posField) continue;
+		out.push({
+			localName: field.localName,
+			posLocal: posField.localName,
+			keyFields: keyFieldsFor(field),
+		});
+	}
+	movableLists.set(schema, out);
+	return out;
+}
+
 /**
  * Sorts every movable list field of `msg` in place by its `pos` field (ties
  * broken by element identity). The stored byte order stays canonical
@@ -95,14 +133,8 @@ export function orderFieldOf(field: DescField): string | undefined {
  * re-order for the app.
  */
 export function sortOrderedFields(schema: DescMessage, msg: Message): void {
-	for (const field of schema.fields) {
-		const order = orderFieldOf(field);
-		if (!order || field.fieldKind !== 'list' || field.listKind !== 'message') continue;
-		const posField = field.message.fields.find((f) => f.name === order);
-		if (!posField) continue;
-		const posLocal = posField.localName;
-		const keyFields = keyFieldsFor(field);
-		const list = (msg as unknown as Record<string, unknown>)[field.localName] as
+	for (const { localName, posLocal, keyFields } of movableListsOf(schema)) {
+		const list = (msg as unknown as Record<string, unknown>)[localName] as
 			| Message[]
 			| undefined;
 		if (!list || list.length < 2) continue;
