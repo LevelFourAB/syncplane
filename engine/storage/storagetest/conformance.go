@@ -3001,6 +3001,61 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			It("replaces an overlapping set entry by entry", func() {
+				// The shape an adapter that diffs the set instead of rewriting
+				// it can get wrong: the departed entry has to go, the new one
+				// has to appear, and the ones both sets hold have to survive in
+				// exactly one copy.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x0a), entry("by_tag", 0x0b), entry("by_label", 0x01),
+					})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x0b), entry("by_label", 0x01), entry("by_count", 0x07),
+					})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(Equal([]string{"k1"}), "0x0a departed, 0x0b kept once")
+					Expect(scan(tx, "widget", "by_tag", []byte{0x0a}, []byte{0x0b})).To(BeEmpty())
+					Expect(scan(tx, "widget", "by_label", nil, nil)).To(Equal([]string{"k1"}), "an entry in both sets survives")
+					Expect(scan(tx, "widget", "by_count", nil, nil)).To(Equal([]string{"k1"}), "the new entry appears")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries("widget", "k1", nil)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(BeEmpty())
+					Expect(scan(tx, "widget", "by_label", nil, nil)).To(BeEmpty())
+					Expect(scan(tx, "widget", "by_count", nil, nil)).To(BeEmpty())
+				})
+			})
+
+			It("stores one copy of an entry the caller passed twice", func() {
+				// An indexed list with a repeated element encodes the same
+				// entry twice for one row. The write must not fail on its own
+				// primary key, and the row must not appear twice at that key.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x01), entry("by_tag", 0x01), entry("by_tag", 0x02),
+					})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(scan(tx, "widget", "by_tag", []byte{0x01}, []byte{0x02})).To(Equal([]string{"k1"}))
+					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(Equal([]string{"k1", "k1"}), "one entry per distinct key")
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					// Re-putting a set the row already holds leaves it as it is.
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x01), entry("by_tag", 0x02),
+					})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(Equal([]string{"k1", "k1"}))
+				})
+			})
+
 			It("deletes every entry of one row by key alone", func() {
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{

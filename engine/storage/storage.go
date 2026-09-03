@@ -866,7 +866,9 @@ type WriteTx interface {
 	// Replace-set rather than add/remove because the caller never has the row's
 	// PREVIOUS value in hand — a PATCH merges into stored bytes, and a DELETE
 	// has nothing but a key — so computing a diff would put a read and a decode
-	// on every write path. An adapter needs a by-row lookup to make this cheap.
+	// on every write path. An adapter needs a by-row lookup to make this cheap,
+	// and costs nothing for an entry the row already occupies: replacing a set
+	// that differs in one entry writes one entry, not the whole set.
 	PutIndexEntries(entity, key string, entries []IndexEntry) error
 	// DeleteIndexEntries removes every index entry of one row, by key alone.
 	// Called when the row is deleted: index entries exist only for LIVE rows.

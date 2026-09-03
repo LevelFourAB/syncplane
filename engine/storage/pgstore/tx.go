@@ -771,35 +771,38 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	if err := t.register(); err != nil {
 		return err
 	}
-	// Replace-set: clear first, then insert. index_entries_by_row makes the
-	// delete a range scan of this row's entries rather than of the index.
+	// Replace-set by DIFFERENCE, not by clear-and-reinsert. A row carries an
+	// entry per index and per element of every indexed list, while the PATCH
+	// that triggered the write usually moves one or two of them; re-inserting
+	// the unchanged rest leaves a dead tuple per entry for vacuum and dirties
+	// a page per btree the entry sits in. The new set arrives as two parallel
+	// arrays so each direction stays one statement whatever the fan-out.
+	idxs := make([]string, len(entries))
+	ks := make([][]byte, len(entries))
+	for i, e := range entries {
+		idxs[i], ks[i] = e.Index, notNilBytes(e.Key)
+	}
 	if _, err := t.tx.Exec(t.ctx,
 		`DELETE FROM index_entries
-		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4`,
-		t.ns, t.ws, entity, key,
+		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4
+		   AND (idx, k) NOT IN (SELECT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k))`,
+		t.ns, t.ws, entity, key, idxs, ks,
 	); err != nil {
 		return err
 	}
-
-	var sql strings.Builder
-	sql.WriteString(`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key) VALUES `)
-	args := make([]any, 0, len(entries)*6)
-	for i, e := range entries {
-		if i > 0 {
-			sql.WriteString(", ")
-		}
-		base := i * 6
-		fmt.Fprintf(&sql, "($%d, $%d, $%d, $%d, $%d, $%d)",
-			base+1, base+2, base+3, base+4, base+5, base+6)
-		args = append(args, t.ns, t.ws, entity, e.Index, notNilBytes(e.Key), key)
-	}
-	// DO NOTHING rather than failing: two components of one index can encode to
-	// the same entry for one row only if the caller passed a duplicate, and
-	// failing the whole write on that would turn a harmless caller bug into a
-	// stuck write path. There are no non-key columns, so there is nothing an
-	// update would change.
-	sql.WriteString(` ON CONFLICT DO NOTHING`)
-	_, err := t.tx.Exec(t.ctx, sql.String(), args...)
+	// DO NOTHING rather than failing: it absorbs both the entries that are
+	// already stored and a caller that passed the same entry twice — two
+	// components of one index can encode to the same entry for one row only
+	// that way, and failing the whole write on a harmless caller bug would
+	// stick the write path. There are no non-key columns, so there is nothing
+	// an update would change.
+	_, err := t.tx.Exec(t.ctx,
+		`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
+		 SELECT $1::text, $2::text, $3::text, u.idx, u.k, $4::text
+		   FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)
+		 ON CONFLICT DO NOTHING`,
+		t.ns, t.ws, entity, key, idxs, ks,
+	)
 	return err
 }
 

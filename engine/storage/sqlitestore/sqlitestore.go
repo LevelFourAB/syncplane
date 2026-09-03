@@ -1693,29 +1693,84 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 	if err := t.register(); err != nil {
 		return err
 	}
-	// Replace-set: clear first, then insert. index_entries_by_row makes the
-	// delete a range scan of this row's entries rather than of the index.
-	if _, err := t.tx.Exec(
-		`DELETE FROM index_entries
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, entity, key,
-	); err != nil {
+	// Replace-set by DIFFERENCE, not by clear-and-reinsert. A row carries an
+	// entry per index and per element of every indexed list — a dozen indexes
+	// is some tens of entries — while the PATCH that triggered the write
+	// usually moves one or two of them. Every entry written dirties btree
+	// pages that the savepoint each mutation runs in must copy into SQLite's
+	// statement sub-journal, so the cost of a push tracks entries WRITTEN, not
+	// entries held. Reading the current set first is one range read through
+	// index_entries_by_row and turns the common case into no writes at all.
+	have, err := t.rowIndexEntries(entity, key)
+	if err != nil {
 		return err
 	}
+	want := make(map[rowIndexEntry]struct{}, len(entries))
 	for _, e := range entries {
-		// INSERT OR REPLACE rather than plain INSERT: two components of one
-		// index can legitimately encode to the same entry for one row only if
-		// the caller passed a duplicate, and failing the whole write on that
-		// would turn a harmless caller bug into a stuck write path.
+		// A set, so a caller that passes the same entry twice stores one copy
+		// instead of failing the whole write on a primary-key conflict: two
+		// components of one index can only collide for one row that way, and a
+		// harmless caller bug must not stick the write path.
+		want[rowIndexEntry{idx: e.Index, k: string(e.Key)}] = struct{}{}
+	}
+	for e := range have {
+		if _, keep := want[e]; keep {
+			continue
+		}
 		if _, err := t.tx.Exec(
-			`INSERT OR REPLACE INTO index_entries (namespace, workspace_id, entity, idx, k, key)
+			`DELETE FROM index_entries
+			 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND idx = ? AND k = ? AND key = ?`,
+			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
+		); err != nil {
+			return err
+		}
+	}
+	for e := range want {
+		if _, unchanged := have[e]; unchanged {
+			continue
+		}
+		if _, err := t.tx.Exec(
+			`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
-			t.ns, t.ws, entity, e.Index, e.Key, key,
+			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
 		); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// rowIndexEntry is one stored entry of one row, as a map key: the index it
+// sits in and its sort key held as a string so the pair compares by value.
+type rowIndexEntry struct {
+	idx string
+	k   string
+}
+
+// rowIndexEntries reads every index entry one row currently occupies, as the
+// set PutIndexEntries diffs against.
+func (t *sqliteTx) rowIndexEntries(entity, key string) (map[rowIndexEntry]struct{}, error) {
+	rows, err := t.tx.Query(
+		`SELECT idx, k FROM index_entries
+		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
+		t.ns, t.ws, entity, key,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	have := make(map[rowIndexEntry]struct{})
+	for rows.Next() {
+		var (
+			idx string
+			k   []byte
+		)
+		if err := rows.Scan(&idx, &k); err != nil {
+			return nil, err
+		}
+		have[rowIndexEntry{idx: idx, k: string(k)}] = struct{}{}
+	}
+	return have, rows.Err()
 }
 
 func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
