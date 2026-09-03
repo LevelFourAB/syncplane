@@ -406,10 +406,11 @@ const maxRowBatch = 256
 // O(range), cursor or not. want also sizes the candidate batch, so reading
 // ahead never overshoots the page by more than the rows it still had room for.
 //
-// Both are optimizations over a comparison that stays authoritative: the seek
-// bound deliberately drops the cursor's row-key half (see Order.CursorPrefix),
-// so it can admit rows the cursor excludes, and consider rejects those. The
-// planner has the same relationship with the scan.
+// Both are optimizations over a comparison that stays authoritative: a seek
+// bound only ever narrows, so it can admit rows the cursor excludes — the
+// boundary row, and on an index it could not carry the row key into that row's
+// whole tie group (see seekRange) — and consider rejects those. The planner has
+// the same relationship with the scan.
 func queryByIndex(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -745,23 +746,34 @@ func searchSeed(
 // Ordered, for a plan with several ranges (which have no shared prefix to
 // compose with), and for a page with no cursors.
 //
-// The bound is the plan's equality prefix followed by the cursor's components.
-// Its row-key half is dropped on purpose: an index may carry components past
-// the order keys, and a bound running on into the row key would not be a prefix
-// of any entry in such an index. What that costs is the tie group at the
-// boundary, which the walk reads and consider rejects — the seek narrows, the
-// comparison decides.
+// The bound is the plan's equality prefix followed by as much of the cursor as
+// the chosen index can take:
+//
+//   - Plan.OrderSpansIndex — the whole entry, row-key tiebreak included, which
+//     is a prefix of the boundary row's entry and of nothing else. The after
+//     bound stays INCLUSIVE, so the only position it admits that the page
+//     excludes is the boundary row itself; the before bound is the entry
+//     exactly, which as an exclusive end leaves the boundary row outside. Both
+//     cost one comparison, not one per row of the tie group.
+//   - otherwise, the components alone (Order.CursorPrefix): the index carries
+//     components past the order keys, and a bound running on into the row key
+//     would not be a prefix of any entry in it. What that costs is the tie group
+//     at the boundary, which the walk reads and consider rejects — the seek
+//     narrows, the comparison decides.
 func seekRange(plan *query.Plan, order *query.Order, pg page, r query.Range) (lo, hi []byte, err error) {
 	lo, hi = r.Lo, r.Hi
 	if !plan.Ordered || len(plan.Ranges) != 1 || plan.Prefix == nil || !pg.bounded() {
 		return lo, hi, nil
 	}
 	bound := func(entry []byte) ([]byte, error) {
-		comps, err := order.CursorPrefix(entry)
-		if err != nil {
-			return nil, err
+		if !plan.OrderSpansIndex {
+			comps, err := order.CursorPrefix(entry)
+			if err != nil {
+				return nil, err
+			}
+			entry = comps
 		}
-		return append(append([]byte(nil), plan.Prefix...), comps...), nil
+		return append(append([]byte(nil), plan.Prefix...), entry...), nil
 	}
 	if pg.after != nil {
 		at, err := bound(pg.after)
@@ -769,7 +781,7 @@ func seekRange(plan *query.Plan, order *query.Order, pg page, r query.Range) (lo
 			return nil, nil, err
 		}
 		// Inclusive, because rows tying with the cursor on every order key sit
-		// at exactly this position and some of them sort after it.
+		// at or after this position and some of them sort after it.
 		lo = maxBound(lo, at)
 	}
 	if pg.before != nil {
@@ -777,9 +789,15 @@ func seekRange(plan *query.Plan, order *query.Order, pg page, r query.Range) (lo
 		if err != nil {
 			return nil, nil, err
 		}
-		// UpperBound rather than the position itself, for the mirror reason:
-		// the tie group at the boundary has to stay inside an exclusive end.
-		hi = minBound(hi, query.UpperBound(at))
+		if plan.OrderSpansIndex {
+			// The entry names one row, and an exclusive end is exactly where
+			// that row stops being inside the range.
+			hi = minBound(hi, at)
+		} else {
+			// UpperBound rather than the position itself, for the mirror reason:
+			// the tie group at the boundary has to stay inside an exclusive end.
+			hi = minBound(hi, query.UpperBound(at))
+		}
 	}
 	return lo, hi, nil
 }

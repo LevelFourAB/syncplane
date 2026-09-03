@@ -715,9 +715,9 @@ func (e *IndexEncoder) componentsAt(msg protoreflect.Message, pos position) []by
 // that runs off the end, an unterminated string, bytes left over past the row
 // key — which is what makes it usable on input a client supplied.
 //
-// A query cursor's seek bound is the component half alone: an index may carry
-// components past the ordering's keys, and a bound that ran on into the row key
-// would not be a prefix of any entry in such an index.
+// A query cursor's seek bound is the component half alone whenever the index it
+// is composed with carries components past the ordering's keys: a bound that ran
+// on into the row key would not be a prefix of any entry in such an index.
 func (e *IndexEncoder) SplitEntry(entry []byte) (components, rowKey []byte, err error) {
 	at := 0
 	for i, c := range e.comps {

@@ -270,7 +270,8 @@ func (o *Order) DecodeCursor(entity string, cursor []byte) ([]byte, error) {
 
 // CursorPrefix is the component half of an entry from Cursor or DecodeCursor:
 // the position without the row-key tiebreak. An index seek composes this rather
-// than the whole entry — see IndexEncoder.SplitEntry.
+// than the whole entry when the index carries components past the ordering — see
+// IndexEncoder.SplitEntry.
 func (o *Order) CursorPrefix(entry []byte) ([]byte, error) {
 	comps, _, err := o.cursorEnc.SplitEntry(entry)
 	return comps, err

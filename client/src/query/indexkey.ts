@@ -488,9 +488,10 @@ export class IndexEncoder {
 	 * running off the end, an unterminated string, characters left over past the
 	 * row key — which is what makes it usable on a cursor a caller supplied.
 	 *
-	 * A query cursor's seek bound is the component half alone: an index may carry
-	 * components past the ordering's keys, and a bound running on into the row
-	 * key would not be a prefix of any entry in such an index.
+	 * A query cursor's seek bound is the component half alone whenever the index
+	 * it is composed with carries components past the ordering's keys: a bound
+	 * running on into the row key would not be a prefix of any entry in such an
+	 * index.
 	 */
 	splitEntry(entry: string): { components: string; rowKey: string } {
 		let at = 0;

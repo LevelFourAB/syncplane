@@ -125,12 +125,24 @@ export interface QueryPlan {
 	 * range component is NOT part of it: only the components the range fixes to
 	 * a single value are.
 	 *
-	 * It is what an ordered plan composes a seek bound from — appending a
-	 * cursor's components to it names the position the page resumes at.
-	 * Undefined when the plan produced several ranges, which share no single
-	 * prefix.
+	 * It is what an ordered plan composes a seek bound from — appending a cursor
+	 * to it names the position the page resumes at, and `orderSpansIndex` says
+	 * how much of that cursor the index can take. Undefined when the plan
+	 * produced several ranges, which share no single prefix.
 	 */
 	prefix?: string;
+	/**
+	 * Whether the equality prefix and the order keys together consume EVERY
+	 * component of the index, so that appending a cursor's whole entry —
+	 * row-key tiebreak included — to `prefix` names one existing entry rather
+	 * than something no entry starts with.
+	 *
+	 * It is what lets a seek bound land past the tie group at the boundary
+	 * instead of at the start of it, which is the difference between a deep page
+	 * costing O(page) and O(depth). False for an index carrying components past
+	 * the ordering, and for any plan that is not `ordered`.
+	 */
+	orderSpansIndex: boolean;
 	/**
 	 * Whether, within any ONE of `ranges`, every position belongs to a
 	 * different row. True when each component that fans out sits inside the
@@ -344,6 +356,7 @@ function planUnion(
 		// the full `or` is a correct per-row re-check.
 		...(exact ? {} : { residual: where }),
 		ordered: false,
+		orderSpansIndex: false,
 		distinctPerRange: false,
 		union,
 	};
@@ -574,6 +587,7 @@ function planAgainst(
 			residual: residualOf(terms, used),
 			ordered,
 			...(w.prefixes.length === 1 ? { prefix: w.prefixes[0]! } : {}),
+			orderSpansIndex: ordered && w.pinned + (orderBy?.length ?? 0) === comps.length,
 			distinctPerRange: comps.every((c, ci) => c.fans.length === 0 || ci < w.pinned),
 		},
 		score: w.pinned,

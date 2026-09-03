@@ -94,12 +94,31 @@ export interface PageWindow {
 	 * from `after` — what makes `before` alone mean "the page before this one". */
 	backward: boolean;
 	/**
-	 * Each bound as the encoded position it names, WITHOUT the row-key tiebreak
-	 * — what an index seek composes with the plan's equality prefix. Absent for
-	 * an open end.
+	 * Each bound as the encoded position it names — what an index seek composes
+	 * with the plan's equality prefix. Absent for an open end.
 	 *
-	 * It is only ever a narrowing: `within` stays the definition, because a
-	 * bound that stopped before the row key admits the tie group at the boundary.
+	 * It is only ever a narrowing: `within` stays the definition, because
+	 * `components` admits the whole tie group at the boundary.
 	 */
-	seek: { after?: string; before?: string };
+	seek: { after?: SeekBound; before?: SeekBound };
+}
+
+/**
+ * One cursor bound as the two prefixes an index seek can compose with: how much
+ * of it a bound may carry depends on the index the plan chose.
+ */
+export interface SeekBound {
+	/**
+	 * The position without the row-key tiebreak. It is a prefix of every entry
+	 * in the tie group at the boundary, so it composes with any index — including
+	 * one carrying components past the order keys, whose entries `entry` would
+	 * not be a prefix of.
+	 */
+	components: string;
+	/**
+	 * The whole position, row-key tiebreak included — a prefix of the boundary
+	 * row's entry alone. Only composable with an index the equality prefix and the
+	 * order keys consume entirely; see QueryPlan.orderSpansIndex.
+	 */
+	entry: string;
 }

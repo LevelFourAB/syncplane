@@ -308,7 +308,9 @@ export async function queryByIndex<D extends DescMessage>(
 	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
-	// Flushed rows the page window rejected — the after-boundary tie group.
+	// Flushed rows the page window rejected — the positions at the `after`
+	// boundary its seek could not leave out: the boundary row alone when the
+	// bound carried the row key, its whole tie group otherwise (see seekRange).
 	// The remainder count has to subtract them: they are positions of the
 	// range without being matches of the query.
 	let windowRejected = 0;
@@ -320,13 +322,13 @@ export async function queryByIndex<D extends DescMessage>(
 	// A shadowed row is answered by the overlay instead — survivable only when
 	// countAssist read the positions the count must take back out.
 	//
-	// A forward page window is compatible: its seek admits the tie group at the
-	// AFTER boundary, but those positions sit at the start of the range, and a
-	// settled walk is provably past them — settling takes `budget` flushed rows
-	// that passed `within`, and within one workspace index order agrees with
-	// the comparator, so every position after an accepted one is accepted. A
-	// `before` bound breaks that: the tie group its seek keeps inside the range
-	// sits at the END, in exactly the remainder the count would claim.
+	// A forward page window is compatible: its seek can admit positions at the
+	// AFTER boundary that the page excludes, but those sit at the start of the
+	// range, and a settled walk is provably past them — settling takes `budget`
+	// flushed rows that passed `within`, and within one workspace index order
+	// agrees with the comparator, so every position after an accepted one is
+	// accepted. A `before` bound breaks that: whatever its seek keeps inside the
+	// range sits at the END, in exactly the remainder the count would claim.
 	const countable = plan.residual === undefined
 		&& (window === undefined || window.seek.before === undefined)
 		&& (shadowed.size === 0 || countAssist)
@@ -348,9 +350,10 @@ export async function queryByIndex<D extends DescMessage>(
 			// answering from a row that is not there would be silent and wrong.
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, plan.residual, schema)) continue;
-			// The seek bound deliberately drops the cursor's row-key half, so
-			// the boundary position is inside the range and this is what rejects
-			// it — the seek narrows, the comparison decides.
+			// A seek bound only ever narrows: it leaves the boundary row inside
+			// the range, and on an index it could not carry the row key into,
+			// that row's whole tie group with it. This is what rejects them —
+			// the seek narrows, the comparison decides.
 			if (window && !window.within(entry.row.value, entry.row.key)) {
 				windowRejected++;
 				continue;
@@ -402,8 +405,8 @@ export async function queryByIndex<D extends DescMessage>(
 					// With the total opted out the walk only owes hasMore, and this
 					// position settles it: not seen, not shadowed, no residual left to
 					// reject its row — one distinct live match past the page. A `before`
-					// bound is the exception (its end tie group could still fail
-					// `within`), so that shape keeps walking.
+					// bound is the exception (what its seek keeps at the end could
+					// still fail `within`), so that shape keeps walking.
 					if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
 						beyond = 1;
 						break ranges;
@@ -1126,11 +1129,19 @@ function decline(
  * for a plan with several ranges (which have no shared prefix to compose with),
  * and for a query with no cursors.
  *
- * The bound is the plan's equality prefix followed by the cursor's components,
- * whose row-key half is dropped on purpose: an index may carry components past
- * the order keys, and a bound running on into the row key would not be a prefix
- * of any entry in such an index. The boundary position it therefore admits is
- * rejected by the exact comparison in the walk.
+ * The bound is the plan's equality prefix followed by as much of the cursor as
+ * the chosen index can take:
+ *
+ * - `orderSpansIndex` — the whole entry, row-key tiebreak included, which is a
+ *   prefix of the boundary row's entry and of nothing else. The `after` bound
+ *   stays INCLUSIVE, so the only position it admits that the page excludes is
+ *   the boundary row itself; the `before` bound is the entry exactly, which as
+ *   an exclusive end leaves the boundary row outside. Both cost one comparison,
+ *   not one per row of the tie group.
+ * - otherwise, the components alone: the index carries components past the
+ *   order keys, and a bound running on into the row key would not be a prefix
+ *   of any entry in it. That admits the whole tie group at the boundary, which
+ *   the exact comparison in the walk then rejects.
  */
 function seekRange(plan: QueryPlan, range: IndexRange, window?: PageWindow): IndexRange {
 	if (
@@ -1141,14 +1152,18 @@ function seekRange(plan: QueryPlan, range: IndexRange, window?: PageWindow): Ind
 	let { lo, hi } = range;
 	if (window.seek.after !== undefined) {
 		// Inclusive, because rows tying with the cursor on every order key sit
-		// at exactly this position and some of them sort after it.
-		const at = plan.prefix + window.seek.after;
+		// at or after this position and some of them sort after it.
+		const at = plan.prefix
+			+ (plan.orderSpansIndex ? window.seek.after.entry : window.seek.after.components);
 		if (lo === undefined || lo < at) lo = at;
 	}
 	if (window.seek.before !== undefined) {
-		// upperBound rather than the position itself, for the mirror reason: the
-		// tie group at the boundary has to stay inside an exclusive end.
-		const at = upperBound(plan.prefix + window.seek.before);
+		// upperBound over the components, for the mirror reason: the tie group at
+		// the boundary has to stay inside an exclusive end. The whole entry needs
+		// no such widening — it names one row, and that row is excluded.
+		const at = plan.orderSpansIndex
+			? plan.prefix + window.seek.before.entry
+			: upperBound(plan.prefix + window.seek.before.components);
 		if (at !== undefined && (hi === undefined || hi > at)) hi = at;
 	}
 	return { lo, hi };

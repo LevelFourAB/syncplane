@@ -70,6 +70,29 @@ var _ = Describe("PlanQuery", func() {
 		Expect(p.Ordered).To(BeTrue(), "reading the range in order IS the requested order")
 	})
 
+	It("reports whether the ordering reaches the end of the index", func() {
+		// What a cursor's seek bound may run into: with nothing after the order
+		// keys, a whole cursor entry — row-key tiebreak included — is an entry
+		// of this index, and the bound can skip the tie group at the boundary
+		// instead of starting at the head of it.
+		spanning := query.PlanQuery([]query.Index{byLabelCount},
+			compile(query.Eq("label", "a")), order(query.Desc("count")))
+		Expect(spanning).NotTo(BeNil())
+		Expect(spanning.OrderSpansIndex).To(BeTrue())
+
+		wider := index("by_label_count_id", "label", "-count", "id")
+		p := query.PlanQuery([]query.Index{wider},
+			compile(query.Eq("label", "a")), order(query.Desc("count")))
+		Expect(p).NotTo(BeNil())
+		Expect(p.Ordered).To(BeTrue())
+		Expect(p.OrderSpansIndex).To(BeFalse(),
+			"the trailing component sits between the ordering and the row key")
+
+		unordered := query.PlanQuery([]query.Index{byLabel}, compile(query.Eq("label", "a")), nil)
+		Expect(unordered).NotTo(BeNil())
+		Expect(unordered.OrderSpansIndex).To(BeFalse(), "there is no ordering to span it")
+	})
+
 	It("does not claim an ordering the index sorts the other way", func() {
 		p := query.PlanQuery(
 			[]query.Index{byLabelCount},

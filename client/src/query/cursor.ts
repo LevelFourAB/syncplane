@@ -26,7 +26,7 @@
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import type { CompiledQuery, OrderKey, PageWindow } from './ast.js';
+import type { CompiledQuery, OrderKey, PageWindow, SeekBound } from './ast.js';
 import { matcherOf } from './evaluate.js';
 import {
 	fingerprint,
@@ -129,8 +129,9 @@ export class OrderCursors {
 
 	/**
 	 * The component half of an entry from {@link entryOf} or {@link decode}: the
-	 * position without the row-key tiebreak, which is the bound an index seek
-	 * composes. See IndexEncoder.splitEntry for why the row key is dropped.
+	 * position without the row-key tiebreak. It is the seek bound for an index
+	 * carrying components past the ordering, whose entries the whole entry would
+	 * not be a prefix of; see IndexEncoder.splitEntry.
 	 */
 	prefix(entry: string): string {
 		return this.encoder.splitEntry(entry).components;
@@ -158,8 +159,8 @@ export function pageWindowOf(
 	return {
 		backward: after === undefined && before !== undefined,
 		seek: {
-			...(after === undefined ? {} : { after: cursors.prefix(after) }),
-			...(before === undefined ? {} : { before: cursors.prefix(before) }),
+			...(after === undefined ? {} : { after: seekBound(cursors, after) }),
+			...(before === undefined ? {} : { before: seekBound(cursors, before) }),
 		},
 		within(value, key) {
 			// Both bounds are EXCLUSIVE, so the row a cursor was minted from is
@@ -170,6 +171,11 @@ export function pageWindowOf(
 			return true;
 		},
 	};
+}
+
+/** One decoded cursor entry as the pair of prefixes a seek may compose with. */
+function seekBound(cursors: OrderCursors, entry: string): SeekBound {
+	return { components: cursors.prefix(entry), entry };
 }
 
 /**

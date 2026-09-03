@@ -128,10 +128,21 @@ type Plan struct {
 	// range fixes to a single value are.
 	//
 	// It is what an Ordered plan composes a seek bound from — appending a
-	// cursor's components (Order.CursorPrefix) to it names the position in the
-	// index the page resumes at. Nil when the plan produced several ranges,
+	// cursor to it names the position in the index the page resumes at, and
+	// OrderSpansIndex says how much of that cursor the index can take. Nil when
+	// the plan produced several ranges,
 	// which share no single prefix, and empty when it pinned nothing.
 	Prefix []byte
+	// OrderSpansIndex reports whether the equality prefix and the order keys
+	// together consume EVERY component of the index, so that appending a
+	// cursor's whole entry — row-key tiebreak included — to Prefix names one
+	// existing entry rather than something no entry starts with.
+	//
+	// It is what lets a seek bound land past the tie group at the boundary
+	// instead of at the start of it, which is the difference between a deep page
+	// costing O(page) and O(depth). False for an index carrying components past
+	// the ordering, and for any plan that is not Ordered.
+	OrderSpansIndex bool
 	// Union, when non-empty, is a plan for a top-level `or`: one access path
 	// per branch, each naming its own index, read through Branches. Index,
 	// Ranges and Prefix are unset, Ordered is false, and Residual — nil only
@@ -509,7 +520,18 @@ func planAgainst(idx Index, terms []node, order *Order) (*Plan, int) {
 	if len(w.prefixes) == 1 {
 		prefix = w.prefixes[0]
 	}
-	return &Plan{Index: idx.Name, Ranges: ranges, Residual: residual, Ordered: ordered, Prefix: prefix}, w.pinned
+	spans := false
+	if ordered {
+		spans = w.pinned+len(order.keys) == len(comps)
+	}
+	return &Plan{
+		Index:           idx.Name,
+		Ranges:          ranges,
+		Residual:        residual,
+		Ordered:         ordered,
+		Prefix:          prefix,
+		OrderSpansIndex: spans,
+	}, w.pinned
 }
 
 // maxIndexProbes bounds the fan-out of an `in` over a leading component. Past

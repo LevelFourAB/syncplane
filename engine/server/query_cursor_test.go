@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -439,6 +440,118 @@ var _ = Describe("Query paging by cursor", func() {
 				// the exact comparison to reject.
 				Expect(n).To(BeNumerically("<=", 5), "page %d", i)
 			}
+		})
+	})
+
+	Describe("paging inside one tie group", func() {
+		// Every issue holds the SAME rank, so the ordering is decided by the row
+		// key alone — the half a seek bound leaves out unless the index ends
+		// where the ordering does. A bound that stops before it lands at the
+		// head of the group, and each page re-reads every page before it.
+		const rows = 120
+		const step = 10
+		var counting *indexWalkCountingAdapter
+
+		key := func(i int) string { return fmt.Sprintf("i%03d", i) }
+
+		tied := func(limit uint32, after, before []byte) *syncplanev1.QueryRequest {
+			return &syncplanev1.QueryRequest{
+				Entity: "issue",
+				Predicate: &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+					Path:  []string{"state"},
+					Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+					Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: "open"}},
+				}}},
+				OrderBy: []*syncplanev1.OrderKey{{Path: []string{"rank"}, Dir: syncplanev1.Direction_DIRECTION_DESC}},
+				Limit:   limit,
+				After:   after,
+				Before:  before,
+			}
+		}
+
+		// cursorAt is the cursor of the nth row of the group, taken by offset so
+		// that it cannot come from the path under test.
+		cursorAt := func(n int) []byte {
+			GinkgoHelper()
+			req := tied(1, nil, nil)
+			req.Offset = uint32(n)
+			resp := run(req)
+			Expect(keysOf(resp)).To(Equal([]string{key(n)}))
+			return resp.GetEndCursor()
+		}
+
+		BeforeEach(func() {
+			counting = &indexWalkCountingAdapter{Adapter: newTestStore()}
+			srv := mustNewServer(counting, testEntities())
+			start(srv)
+			muts := make([]*syncplanev1.Mutation, 0, rows)
+			for i := 0; i < rows; i++ {
+				muts = append(muts, putMutation("c1", uint64(i+1), "issue", key(i),
+					&testdatav1.Issue{Id: key(i), State: "open", Rank: 1}))
+			}
+			_, err := client.Push(ctx, connect.NewRequest(pushOf(ws, muts)))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+		})
+
+		It("costs the same walk however deep the page is", func() {
+			var (
+				got   []string
+				walks []int
+				after []byte
+			)
+			for {
+				counting.reset()
+				resp := run(tied(step, after, nil))
+				walks = append(walks, counting.count())
+				got = append(got, keysOf(resp)...)
+				if !resp.GetHasMore() {
+					break
+				}
+				after = resp.GetEndCursor()
+			}
+
+			byOffset := make([]string, 0, rows)
+			for i := 0; i < rows; i++ {
+				byOffset = append(byOffset, key(i))
+			}
+			Expect(got).To(Equal(byOffset), "the walk returns the ordering, ties and all")
+			Expect(walks).To(HaveLen(rows / step))
+			for i, n := range walks {
+				// limit(10), the has_more probe, the entry the walk is stopped
+				// on, and the boundary entry the seek admits for the comparison
+				// to reject — whatever page this is, and whatever else shares
+				// its rank.
+				Expect(n).To(BeNumerically("<=", step+3), "page %d", i)
+			}
+		})
+
+		It("ends a before page at the cursor rather than at the end of the tie group", func() {
+			at := cursorAt(60)
+			counting.reset()
+			resp := run(tied(step, nil, at))
+
+			Expect(keysOf(resp)).To(Equal([]string{
+				key(50), key(51), key(52), key(53), key(54),
+				key(55), key(56), key(57), key(58), key(59),
+			}))
+			Expect(resp.GetHasMore()).To(BeTrue())
+			// A backward walk comes at the range from the before end, so the
+			// bound decides where it STARTS: at the boundary row, rather than
+			// past the rest of its tie group.
+			Expect(counting.count()).To(BeNumerically("<=", step+3))
+		})
+
+		It("reads one entry for a cursor on the last row of the tie group", func() {
+			at := cursorAt(rows - 1)
+			counting.reset()
+			resp := run(tied(step, at, nil))
+
+			Expect(resp.GetRows()).To(BeEmpty())
+			Expect(resp.GetHasMore()).To(BeFalse())
+			// The boundary row itself, which the seek admits and the comparison
+			// rejects. Nothing else is left to read.
+			Expect(counting.count()).To(Equal(1))
 		})
 	})
 })
