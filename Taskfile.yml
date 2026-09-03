@@ -118,10 +118,13 @@ tasks:
       - pnpm exec playwright install {{.BROWSER | default "chromium"}}
 
   bench:browser:
-    desc: 'Browser sync benchmarks against a seeded corpus; TIERS=s,m for a quick pass'
+    # Google Chrome, not the bundled chromium: its IndexedDB writes get slower as
+    # the store grows, which is the whole write side of this suite. See
+    # client/test/perf/README.md.
+    desc: 'Browser sync benchmarks against a seeded corpus (needs Google Chrome); TIERS=s,m for a quick pass'
     dir: client
     cmds:
-      - pnpm exec playwright test --config playwright.bench.config.ts --project={{.BROWSER | default "chromium"}} {{.CLI_ARGS}}
+      - pnpm exec playwright test --config playwright.bench.config.ts --project={{.BROWSER | default "chrome"}} {{.CLI_ARGS}}
 
   demo:server:
     desc: Run the todo demo sync server (http://127.0.0.1:8787)

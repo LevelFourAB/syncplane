@@ -2,8 +2,10 @@ import { fileURLToPath } from 'node:url';
 
 import { RUN_ID_ENV, SERVER_URL_ENV, stopServer } from './global-setup.js';
 import {
+	describeBrowser,
 	formatResults,
 	formatWireProjection,
+	readBrowser,
 	readResults,
 	RESULTS_ENV,
 	writeSummary,
@@ -33,10 +35,14 @@ export default async function globalTeardown(): Promise<void> {
 	}
 	const runId = process.env[RUN_ID_ENV] ?? 'latest';
 	const summary = fileURLToPath(new URL(`./results/${runId}.json`, import.meta.url));
-	writeSummary(summary, results);
+	// The browser comes from the workers, which are the only processes that
+	// launched one — these numbers do not compare across engines.
+	const browser = readBrowser(path);
+	writeSummary(summary, { browser, results });
 	console.log(formatResults(results));
 	console.log(formatWireProjection(results));
-	console.log(`\n[bench] ${results.length} results — ${summary}`);
+	const on = browser === undefined ? '' : ` on ${describeBrowser(browser)}`;
+	console.log(`\n[bench] ${results.length} results${on} — ${summary}`);
 }
 
 /**

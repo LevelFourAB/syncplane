@@ -10,8 +10,14 @@ import { defineConfig, devices } from '@playwright/test';
  * questions. Nothing here asserts a behaviour; a spec that "passes" only means
  * its numbers were taken.
  *
- * Run it with `task bench:browser`. Never part of `task ci`: it needs a
- * downloaded browser, it takes minutes, and its output is a table rather than
+ * Runs on the installed Google Chrome (`chrome`) by default, not on Playwright's
+ * bundled Chromium: that build prices an IndexedDB write by how many records the
+ * store already holds, which swamps every write-side number here. The other
+ * engines stay available for a run pointed at them deliberately —
+ * `task bench:browser BROWSER=firefox`. See test/perf/README.md.
+ *
+ * Run it with `task bench:browser`. Never part of `task ci`: it needs an
+ * installed browser, it takes minutes, and its output is a table rather than
  * a verdict.
  */
 
@@ -40,10 +46,17 @@ export default defineConfig({
 		trace: 'off',
 		video: 'off',
 	},
+	// browserName is spelled out per project rather than left to the device's
+	// defaultBrowserType: global setup reads it back off the selected project to
+	// name the browser in the run header and the results file.
 	projects: [
-		{ name: 'chromium', use: { ...devices['Desktop Chrome'] } },
-		{ name: 'firefox', use: { ...devices['Desktop Firefox'] } },
-		{ name: 'webkit', use: { ...devices['Desktop Safari'] } },
+		{
+			name: 'chrome',
+			use: { ...devices['Desktop Chrome'], browserName: 'chromium', channel: 'chrome' },
+		},
+		{ name: 'chromium', use: { ...devices['Desktop Chrome'], browserName: 'chromium' } },
+		{ name: 'firefox', use: { ...devices['Desktop Firefox'], browserName: 'firefox' } },
+		{ name: 'webkit', use: { ...devices['Desktop Safari'], browserName: 'webkit' } },
 	],
 	webServer: {
 		// The installed binary directly rather than `pnpm exec`: pnpm re-checks

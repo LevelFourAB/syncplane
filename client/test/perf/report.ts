@@ -76,6 +76,31 @@ export interface BenchResult {
 	};
 }
 
+/**
+ * The browser a run's numbers were taken on.
+ *
+ * Recorded because they are only comparable within one engine: an IndexedDB
+ * write costs an order of magnitude more on Playwright's bundled Chromium than
+ * on an installed Chrome, and grows with the store there rather than staying
+ * flat. A table without this is a table nobody can place.
+ */
+export interface BenchBrowser {
+	/** Playwright project the run selected. */
+	project: string;
+	/** Browser type that launched: 'chromium', 'firefox' or 'webkit'. */
+	engine: string;
+	/** Installed-browser channel; absent when the run used the bundled build. */
+	channel?: string;
+	/** `browser.version()`; absent when the tab ran without one, as in a reused page. */
+	version?: string;
+}
+
+/** One run as written to `results/<run>.json`. */
+export interface BenchRun {
+	browser?: BenchBrowser;
+	results: BenchResult[];
+}
+
 function resultsPath(): string {
 	const path = process.env[RESULTS_ENV];
 	if (path === undefined) throw new Error(`${RESULTS_ENV} unset — global setup did not run`);
@@ -87,6 +112,42 @@ export function report(result: BenchResult): void {
 	const path = resultsPath();
 	mkdirSync(dirname(path), { recursive: true });
 	appendFileSync(path, `${JSON.stringify(result)}\n`);
+}
+
+/**
+ * The sidecar carrying the run's browser, beside its JSONL.
+ *
+ * Which browser a run used is only known where one was launched — in a worker,
+ * running the project the command line selected — and workers are separate
+ * processes from the teardown that writes the summary. A file beside the
+ * measurements is the same channel the measurements themselves use.
+ */
+function browserPath(results: string): string {
+	return results.replace(/\.jsonl$/, '.browser.json');
+}
+
+/** Records the browser measuring this run. Last writer wins; they agree. */
+export function reportBrowser(browser: BenchBrowser): void {
+	const path = browserPath(resultsPath());
+	mkdirSync(dirname(path), { recursive: true });
+	writeFileSync(path, `${JSON.stringify(browser)}\n`);
+}
+
+/** The browser a run recorded, or undefined when it opened no tab. */
+export function readBrowser(results: string): BenchBrowser | undefined {
+	try {
+		return JSON.parse(readFileSync(browserPath(results), 'utf8')) as BenchBrowser;
+	} catch {
+		return undefined;
+	}
+}
+
+/** One-line browser identity for a run header, e.g. `chrome (chrome 152.0.7977.66)`. */
+export function describeBrowser(browser: BenchBrowser): string {
+	const build = [ browser.channel ?? browser.engine, browser.version ]
+		.filter((part) => part !== undefined)
+		.join(' ');
+	return `${browser.project} (${build})`;
 }
 
 /**
@@ -266,8 +327,8 @@ function seconds(ms: number): string {
 	return `${(ms / 1000).toFixed(ms < 10_000 ? 1 : 0)}s`;
 }
 
-/** Writes the run's results as one JSON document, for tooling and diffing. */
-export function writeSummary(path: string, results: BenchResult[]): void {
+/** Writes the run as one JSON document, for tooling and diffing. */
+export function writeSummary(path: string, run: BenchRun): void {
 	mkdirSync(dirname(path), { recursive: true });
-	writeFileSync(path, `${JSON.stringify(results, null, '\t')}\n`);
+	writeFileSync(path, `${JSON.stringify(run, null, '\t')}\n`);
 }

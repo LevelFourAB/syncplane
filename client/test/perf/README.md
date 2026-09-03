@@ -4,7 +4,7 @@ What syncing costs in a real browser, against a seeded corpus of up to half a
 million rows.
 
 ```sh
-task bench:browser                 # every tier, chromium
+task bench:browser                 # every tier, installed Google Chrome
 task bench:browser TIERS=s,m       # quick pass while iterating
 task bench:browser BROWSER=firefox -- -g "cold bootstrap"
 ```
@@ -16,6 +16,31 @@ says nothing on another. The assertions that do exist check that the scenario
 measured what it claims to (a warm restart that bootstrapped, a catch-up that
 re-bootstrapped, a windowed client holding more rows than its window) — a
 mislabelled number is worse than a missing one.
+
+## Which browser
+
+The default project is `chrome`: the **installed Google Chrome**, which must be
+present on the machine. Playwright's bundled Chromium prices an IndexedDB `put`
+by how many records the store already holds, so on it write cost grows with the
+store rather than staying flat — 100k plain 420-byte rows, per 10k-row slice:
+
+| Browser                            | first slice | last slice | total |
+| ---------------------------------- | ----------- | ---------- | ----- |
+| bundled Chromium (Playwright 1.62) | 272ms       | 4422ms     | 23.4s |
+| Google Chrome 152                  | 95ms        | 95ms       | 1.0s  |
+
+It carries into every write the suite does: the `l` tier's background index build
+takes 238s on the bundled build against 5.9s on Chrome. Read-side numbers are the
+same on both.
+
+**Numbers taken before the tier moved to Chrome are not comparable with numbers
+taken after** on anything that writes — they measure that build's storage, not
+the client.
+
+Another engine, deliberately: `task bench:browser BROWSER=chromium` (the bundled
+build), `BROWSER=firefox`, `BROWSER=webkit`. Which one produced a run — project,
+engine, channel and version — closes the run's output and is the `browser` field
+of `results/<run>.json`, so two tables can be told apart later.
 
 ## What is measured
 

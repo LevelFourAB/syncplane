@@ -37,7 +37,7 @@
     "test:integration": "vitest run --project integration",
     "test:e2e": "playwright test --project=chromium",
     "test:e2e:install": "playwright install chromium",
-    "bench:browser": "playwright test --config playwright.bench.config.ts --project=chromium"
+    "bench:browser": "playwright test --config playwright.bench.config.ts --project=chrome"
   },
   "dependencies": {
     "@bufbuild/protobuf": "^2.12.0",

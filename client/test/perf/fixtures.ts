@@ -1,4 +1,5 @@
 import type { BrowserContext, Page } from '@playwright/test';
+import { test } from '@playwright/test';
 
 import { SERVER_URL_ENV, TIERS_ENV } from './global-setup.js';
 import type {
@@ -20,7 +21,7 @@ import type {
 	WatchView,
 	WriteBytesView,
 } from './harness-api.js';
-import type { Wire } from './report.js';
+import { reportBrowser, type Wire } from './report.js';
 
 /** Address of the benchserver global setup spawned for this run. */
 export function serverUrl(): string {
@@ -217,6 +218,28 @@ export async function collectGarbage(tierName: string): Promise<void> {
 }
 
 /**
+ * Records which browser is taking this run's numbers, from inside a worker —
+ * the only place that knows, since the project a worker runs is the one the
+ * command line selected while the config lists every project regardless.
+ *
+ * Once per worker process is enough: a run measures one project, and every
+ * worker in it launches the same build.
+ */
+let browserRecorded = false;
+function recordBrowser(context: BrowserContext): void {
+	if (browserRecorded) return;
+	browserRecorded = true;
+	const browser = context.browser();
+	const project = test.info().project;
+	reportBrowser({
+		project: project.name,
+		engine: browser?.browserType().name() ?? project.use.browserName ?? 'chromium',
+		channel: project.use.channel,
+		version: browser?.version(),
+	});
+}
+
+/**
  * A browser tab holding one SyncClient against the bench corpus. Every method
  * is a typed round-trip into the page harness; see harness-api.ts.
  */
@@ -224,6 +247,7 @@ export class BenchTab {
 	private constructor(readonly page: Page) {}
 
 	static async open(context: BrowserContext, opts: OpenOptions): Promise<BenchTab> {
+		recordBrowser(context);
 		const page = await context.newPage();
 		await page.goto(`/?server=${encodeURIComponent(serverUrl())}`);
 		await page.waitForFunction(() => window.benchHarness !== undefined);
