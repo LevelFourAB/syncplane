@@ -8,9 +8,12 @@
 // this pass the only thing that indexes a freshly bootstrapped workspace rather
 // than a backfill for the occasional new declaration.
 //
-// The `meta/ws/<ws>/index/<entity>/<name>@<hash>` marker is what makes that
-// safe: a query uses an index only once its marker exists, and until then it
-// scans. Nothing blocks on a build and nothing is wrong while one runs.
+// The `meta/ws/<ws>/index/<entity>/<name>@<hash>~<layout>` marker is what makes
+// that safe: a query uses an index only once its marker exists, and until then
+// it scans. Nothing blocks on a build and nothing is wrong while one runs. A
+// marker naming a different spec or a different position layout is not the
+// current one, so both changes fall out as a re-walk (see keys.ts
+// metaIndexBuilt).
 //
 // An interrupted walk RESUMES rather than restarting. The position commits with
 // the batch it describes (metaIndexBuildCursor), so the work already done

@@ -37,6 +37,8 @@
  * slashes.
  */
 
+import { fingerprint } from './query/indexkey.js';
+
 /**
  * Encodes a workspace id as a single key segment. Workspace ids are
  * app-supplied strings that may contain `/`, which would otherwise forge extra
@@ -246,32 +248,44 @@ const textLogFieldOf = (segment: string): string =>
 	segment.replaceAll('%2F', '/').replaceAll('%25', '%');
 
 /**
- * A secondary-index POSITION: `i/<entity>/<index>@<hash>/<ws>/<entry>`, where
- * the entry is the encoded sort key (see query/indexkey.ts). Positions are the
- * elements of a confirmed row's INDEX_FIELD array, and the KV store's one
+ * A secondary-index POSITION: `i/<fingerprint>/<entry>`, where the entry is the
+ * encoded sort key (see query/indexkey.ts) and the fingerprint stands for the
+ * (layout, entity, index, spec, workspace) the entry belongs to. Positions are
+ * the elements of a confirmed row's INDEX_FIELD array, and the KV store's one
  * secondary index orders them — so position order within one prefix IS the row
  * order the index serves, and a bounded indexScan over that prefix reads the
  * slice a query names.
  *
- * They are not KV keys and the store never resolves one, but they keep the
- * shape of the keyspace they replaced. What a position has to be is a string
- * that (a) sorts, within one index and workspace, exactly as the rows do, and
- * (b) shares its prefix with no OTHER index, entity or workspace — every
- * declared index of every entity lands in the same store-maintained B-tree, so
- * the prefix is the only thing keeping their ranges apart.
+ * They are not KV keys and the store never resolves one, and nothing anywhere
+ * parses one back into its parts. What a position has to be is a string that
+ * (a) sorts, within one index and workspace, exactly as the rows do, and (b)
+ * shares its prefix with no OTHER index, entity or workspace — every declared
+ * index of every entity lands in the same store-maintained B-tree, so the prefix
+ * is the only thing keeping their ranges apart.
  *
- * `<ws>` sits INSIDE the prefix, before the entry, rather than outside it as in
- * the row keyspaces. A query is normally workspace-scoped, so selectivity
- * matters more there than cross-workspace fan-out, and an ordered range read
- * has to be contiguous within one workspace or it is not a range read at all.
- * A cross-workspace query pays a k-way merge over per-workspace prefixes
- * instead, bounded by the workspaces it actually names.
+ * The prefix is therefore a HASH rather than the parts spelled out, and its
+ * length is the reason. A position rides on every confirmed row that occupies
+ * it and again on the store's index entry over that row, so every character is
+ * paid once per position on every entity scan and once more on every build
+ * write — and the parts spelled out came to 42 characters for a short workspace
+ * id and around 70 for a UUID one, against entries averaging under 30. A prefix
+ * of `i/` plus 16 hex digits of FNV-1a over the parts is 18 characters whatever
+ * the parts are, and two prefixes collide only where their part lists hash to
+ * the same 64 bits.
  *
- * `@<hash>` is the index's spec fingerprint. A spec change therefore ORPHANS
- * the positions written under the old spec rather than corrupting them: they
- * are unreachable under the new prefix, and the new one starts empty and
+ * The workspace sits INSIDE the fingerprint rather than outside it as in the
+ * row keyspaces. A query is normally workspace-scoped, so selectivity matters
+ * more there than cross-workspace fan-out, and an ordered range read has to be
+ * contiguous within one workspace or it is not a range read at all. A
+ * cross-workspace query pays a k-way merge over per-workspace prefixes instead,
+ * bounded by the workspaces it actually names.
+ *
+ * The index's spec fingerprint is one of the hashed parts, so a spec change
+ * ORPHANS the positions written under the old spec rather than corrupting them:
+ * they are unreachable under the new prefix, and the new one starts empty and
  * unbuilt. They are reclaimed by the build, which replaces a row's whole
  * position list rather than adding to it (see index-maintain.ts).
+ * INDEX_POSITION_LAYOUT is hashed in for the same reason, one level up.
  *
  * Only CONFIRMED rows carry positions. The optimistic overlay is bounded by the
  * pending queue, so a query scans all of it and merges — which keeps the answer
@@ -279,34 +293,71 @@ const textLogFieldOf = (segment: string): string =>
  * state, and is also why an `o/` record must never grow an INDEX_FIELD.
  */
 const INDEX_POSITION_ROOT = 'i/';
-/** One index of one entity, in one workspace — the prefix a range read bounds
- * itself with, and the unit that must not collide with another index's. */
+
+/**
+ * Version of the position layout above. Purely client-local — it is not the
+ * index spec hash, which is shared with the server — and bumping it makes every
+ * stored position unreachable and every index-built marker written before the
+ * bump read as unbuilt, so the background build re-walks and rewrites the rows.
+ * Bump it for any change to how a position is composed.
+ */
+const INDEX_POSITION_LAYOUT = 1;
+
+/**
+ * Prefixes already fingerprinted, keyed by the parts they were built from. A
+ * client has one entry per (entity, index, spec, workspace), while the write
+ * path asks for a prefix once per index per row.
+ */
+const positionPrefixes = new Map<string, string>();
+
+/**
+ * One index of one entity, in one workspace — the prefix a range read bounds
+ * itself with, and the unit that must not collide with another index's.
+ *
+ * Cheap to call per row: the fingerprint is computed once per distinct argument
+ * tuple and kept for the life of the process, of which a client has one per
+ * (entity, index, spec, workspace).
+ */
 export const indexPositionPrefix = (
 	entity: string,
 	index: string,
 	specHash: string,
 	workspaceId: string,
-): string => `${INDEX_POSITION_ROOT}${entity}/${index}@${specHash}/${wsSegment(workspaceId)}/`;
-/** One position: the encoded sort key appended to its workspace's prefix. */
-export const indexPosition = (
-	entity: string,
-	index: string,
-	specHash: string,
-	workspaceId: string,
-	entry: string,
-): string => `${indexPositionPrefix(entity, index, specHash, workspaceId)}${entry}`;
+): string => {
+	// Slash-separated, and the workspace id last: entity and index names are
+	// validated identifiers and a workspace id is letters, digits, `_`, `-` and
+	// `:` (see naming.ts), so no part can forge a separator and no two distinct
+	// part lists render to the same string.
+	const parts = `${INDEX_POSITION_LAYOUT}/${entity}/${index}/${specHash}/${workspaceId}`;
+	let prefix = positionPrefixes.get(parts);
+	if (prefix === undefined) {
+		prefix = `${INDEX_POSITION_ROOT}${fingerprint(parts)}/`;
+		positionPrefixes.set(parts, prefix);
+	}
+	return prefix;
+};
 
 /**
- * Marks an index as fully built for one workspace: `meta/ws/<ws>/index/<entity>/<name>@<hash>`.
- * Until it exists, entries cover only the rows written since the index was
- * declared, so every read falls back to scanning the merged rows.
+ * Marks an index as fully built for one workspace:
+ * `meta/ws/<ws>/index/<entity>/<name>@<hash>~<layout>`. Until it exists, entries
+ * cover only the rows written since the index was declared, so every read falls
+ * back to scanning the merged rows.
+ *
+ * The marker is keyed by the position layout as well as the spec, so a marker
+ * written by a client using an older layout is a different key and reads as
+ * unbuilt. Without that a query would trust an index whose positions sit under a
+ * prefix the current layout cannot address and come back empty. The build that
+ * follows rewrites every row's whole position list, which reclaims the
+ * unreachable positions (see index-maintain.ts), and the marker sweep in
+ * index-build.ts deletes the stale marker.
  */
 export const metaIndexBuilt = (
 	workspaceId: string,
 	entity: string,
 	index: string,
 	specHash: string,
-): string => `${metaWsPrefix(workspaceId)}index/${entity}/${index}@${specHash}`;
+): string =>
+	`${metaWsPrefix(workspaceId)}index/${entity}/${index}@${specHash}~${INDEX_POSITION_LAYOUT}`;
 /** Every index-built marker of one workspace, for a wipe. */
 export const metaIndexPrefix = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}index/`;

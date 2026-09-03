@@ -60,7 +60,7 @@
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import { type ConfirmedRecord, indexPosition } from '../keys.js';
+import { type ConfirmedRecord, indexPositionPrefix } from '../keys.js';
 import type { KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import {
@@ -223,9 +223,8 @@ export function rowPositions(
 		const entries = idx.search
 			? searchEntries(idx.search, value, key, schema)
 			: idx.encoder!.encode(value, key, schema);
-		for (const encoded of entries) {
-			positions.push(indexPosition(entity, idx.name, idx.specHash, workspaceId, encoded));
-		}
+		const prefix = indexPositionPrefix(entity, idx.name, idx.specHash, workspaceId);
+		for (const encoded of entries) positions.push(prefix + encoded);
 	}
 	return positions;
 }

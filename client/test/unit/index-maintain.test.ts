@@ -18,6 +18,7 @@ import {
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	type IndexBuildCursor,
+	indexPositionPrefix,
 	metaCursor,
 	metaIndexBuildCursor,
 	metaIndexBuilt,
@@ -433,7 +434,38 @@ describe('client index maintenance', () => {
 			// than merely unread.
 			const got = await entries(kv);
 			expect(got).toHaveLength(2);
-			expect(got.every(([ k ]) => k.includes(`@${newHash}/`))).toBe(true);
+			const newPrefix = indexPositionPrefix('widget', 'by_label', newHash, ws);
+			expect(got.every(([ k ]) => k.startsWith(newPrefix))).toBe(true);
+		});
+
+		it('re-walks an entity whose built marker predates the current position layout', async () => {
+			// A marker written by a client using an older position layout claims
+			// coverage of positions the current layout cannot address, so trusting
+			// it would leave every query over the index reading an empty range and
+			// returning nothing. Spelled out rather than derived from
+			// metaIndexBuilt: what is under test is that the key MOVED.
+			const idx = indexed.for('widget')[0]!;
+			const legacy = `meta/ws/${ws}/index/widget/by_label@${idx.specHash}`;
+			expect(metaIndexBuilt(ws, 'widget', 'by_label', idx.specHash)).not.toBe(legacy);
+
+			// Rows installed unindexed, as a bootstrap swap installs them.
+			await apply(kv, undefined, [ valueChange('w1', 'a', 1n), valueChange('w2', 'b', 2n) ]);
+			const seed = await kv.write();
+			await seed.put(legacy, true);
+			await seed.commit();
+
+			const mutex = new ChainMutex();
+			const built = await buildIndexes(kv, (fn) => mutex.run(fn), indexedRegistry(), indexed, ws);
+
+			expect(built).toEqual({ rows: 2, ready: true });
+			const prefix = indexPositionPrefix('widget', 'by_label', idx.specHash, ws);
+			expect((await entries(kv)).map(([ k ]) => k.startsWith(prefix))).toEqual([ true, true ]);
+			const r = await kv.read();
+			expect(await r.has(metaIndexBuilt(ws, 'widget', 'by_label', idx.specHash))).toBe(true);
+			// The stale marker is swept with every other one the current specs do
+			// not name, so the layout bump costs one build and no residue.
+			expect(await r.has(legacy)).toBe(false);
+			r.release();
 		});
 
 		describe('a build spanning batches', () => {
