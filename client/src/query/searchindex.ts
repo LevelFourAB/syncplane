@@ -103,6 +103,26 @@ export function searchTermRange(t: QueryTerm): { lo: string; hi: string | undefi
 	return { lo, hi: upperBound(lo) };
 }
 
+/**
+ * The tag-and-term head an entry begins with — the part every posting of one
+ * term shares — or undefined for an entry that is not a term posting.
+ *
+ * Two entries carry the same term exactly when this is equal, which is how a
+ * prefix probe tells a range holding one stored term from one holding several:
+ * entries of one term sort by row key, entries of several by term first.
+ */
+export function searchPostingTerm(entry: string): string | undefined {
+	if (entry.charCodeAt(0) !== TERM_TAG) return undefined;
+	for (let i = 1; i < entry.length - 1; i++) {
+		if (entry.charCodeAt(i) !== 0x00) continue;
+		// A doubled NUL terminates the term; a NUL followed by 0xff is a NUL
+		// inside it, and appendIndexString emits no other pair opening with one.
+		if (entry.charCodeAt(i + 1) === 0x00) return entry.slice(0, i + 2);
+		i++;
+	}
+	return undefined;
+}
+
 /** Brackets the overflow markers — the rows whose term sets outgrew their
  * postings. Every term probe unions these rows into its candidates. */
 export function searchOverflowRange(): { lo: string; hi: string } {

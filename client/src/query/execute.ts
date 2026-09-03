@@ -41,7 +41,10 @@ import {
 	indexPositionPrefix,
 	metaIndexBuilt,
 	type OverlayRecord,
+	overlayTextPrefix,
+	overlayTextWsPrefix,
 	overlayWsPrefix,
+	splitOverlayTextSuffix,
 } from '../keys.js';
 import type { KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
@@ -62,7 +65,12 @@ import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
-import { requiredMatchCond, searchOverflowRange, searchTermRange } from './searchindex.js';
+import {
+	requiredMatchCond,
+	searchOverflowRange,
+	searchPostingTerm,
+	searchTermRange,
+} from './searchindex.js';
 
 /**
  * How many ROWS one query may read through an index. An index narrows the
@@ -79,6 +87,23 @@ import { requiredMatchCond, searchOverflowRange, searchTermRange } from './searc
  * ceiling.
  */
 const MAX_INDEX_CANDIDATES = 10000;
+
+/** MAX_INDEX_CANDIDATES, or what a test lowered it to; see
+ * {@link withIndexCandidateBudget}. */
+let indexCandidateBudget = MAX_INDEX_CANDIDATES;
+
+/**
+ * Lowers the candidate budget and returns the call that restores it, so a test
+ * can reach a walk's decline without seeding a budget's worth of rows. Not
+ * exported from the package.
+ */
+export function withIndexCandidateBudget(rows: number): () => void {
+	const previous = indexCandidateBudget;
+	indexCandidateBudget = rows;
+	return () => {
+		indexCandidateBudget = previous;
+	};
+}
 
 /**
  * Candidate rows one getMany reads at a time. Large enough that a typical page
@@ -437,7 +462,7 @@ export async function queryByIndex<D extends DescMessage>(
 					beyond++;
 					continue;
 				}
-				if (++reads > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+				if (++reads > indexCandidateBudget) return decline(report, 'budget', walked);
 				batch.push(key);
 				if (batch.length >= READ_BATCH) await flush();
 			}
@@ -577,7 +602,7 @@ export async function groupByIndex<D extends DescMessage>(
 			: await walkGroup(args, group, from, until, compiled.distinct);
 		if (got === undefined) return decline(report, 'budget', walked);
 		walked += got.walked;
-		if (walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+		if (walked > indexCandidateBudget) return decline(report, 'budget', walked);
 		if (got.value !== undefined) buckets.add(got.value, got.count);
 		if (plan.desc) {
 			hi = prefix + group;
@@ -639,7 +664,7 @@ async function walkGroup<D extends DescMessage>(
 	let walked = 0;
 	for await (const cKey of at.tx.indexScan(lo, hi)) {
 		walked++;
-		if (walked > MAX_INDEX_CANDIDATES) return undefined;
+		if (walked > indexCandidateBudget) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
 		const key = cKey.slice(at.rowPrefix.length);
 		// One row can hold several positions of a group when a component past the
@@ -761,7 +786,7 @@ export async function groupRowsByIndex<D extends DescMessage>(
 		const got = await walkGroupRows(args, compiled, group, from, until);
 		if (got === undefined) return decline(report, 'budget', walked);
 		walked += got.walked;
-		if (walked > MAX_INDEX_CANDIDATES) return decline(report, 'budget', walked);
+		if (walked > indexCandidateBudget) return decline(report, 'budget', walked);
 		if (got.group !== undefined) groups.push(got.group);
 		if (plan.desc) {
 			hi = prefix + group;
@@ -827,7 +852,7 @@ async function walkGroupRows<D extends DescMessage>(
 	};
 	for await (const cKey of at.tx.indexScan(lo, hi)) {
 		walked++;
-		if (walked > MAX_INDEX_CANDIDATES) return undefined;
+		if (walked > indexCandidateBudget) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
 		batch.push(cKey.slice(at.rowPrefix.length));
 		// The walk reads ahead by a batch, and `total` only moves during a flush,
@@ -919,8 +944,9 @@ const minKey = (a: string, b: string | undefined): string | undefined =>
  *
  * Candidates come from the most selective term's postings (a prefix range for
  * a prefix term), narrowed by the other terms where that is cheaper than
- * re-reading rows, unioned with the overflow rows, and minus the rows the
- * overlay shadows; every candidate is re-read and re-checked against the FULL
+ * re-reading rows, unioned with the rows no posting speaks for — those over the
+ * per-row term cap and those carrying unacked text edits — and minus the rows
+ * the overlay shadows; every candidate is re-read and re-checked against the FULL
  * predicate, and overlay rows are evaluated whole — so the result is exactly
  * the scan's. Because candidates are only ever narrowed and never completed,
  * dropping a narrowing pass leaves more rows to re-check rather than fewer
@@ -929,6 +955,10 @@ const minKey = (a: string, b: string | undefined): string | undefined =>
  * No early settling: a relevance ordering is computed per row, so the walk
  * cannot know which candidates the page will keep, and the candidate set is
  * already bounded by the budget it declines over.
+ *
+ * The exception is a single-term query with no ranking, which
+ * {@link querySearchPostings} answers from the postings themselves rather than
+ * from the rows they name.
  */
 async function querySearchIndex<D extends DescMessage>(
 	tx: KVRead,
@@ -969,8 +999,40 @@ async function querySearchIndex<D extends DescMessage>(
 		};
 	});
 
+	// A collaborative-text field is searchable, and an unacked edit to one sits
+	// beside the row in the `ot/` log rather than in the row the index was
+	// built from — so a row's postings can describe a document this read does
+	// not see, in either direction. Both paths below read and evaluate these
+	// rows rather than believing the range about them.
+	const edited = await textEditedRows(tx, registry, def.name, workspaceId);
+
 	const prefix = indexPositionPrefix(def.name, idx.name, idx.specHash, workspaceId);
 	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
+
+	const postings = await querySearchPostings(
+		tx,
+		registry,
+		def,
+		schema,
+		matcher,
+		compiled,
+		workspaceId,
+		prefix,
+		rowPrefix,
+		shadowed,
+		edited,
+		overlayRows,
+		window,
+	);
+	if (postings.kind === 'decline') return decline(report, postings.reason, postings.walked);
+	if (postings.kind === 'page') {
+		if (report) {
+			report.index = idx.name;
+			report.candidates = postings.walked;
+		}
+		return postings.page;
+	}
+
 	let walked = 0;
 	/**
 	 * Reads the rows a posting range names, giving up once it has seen more
@@ -988,7 +1050,7 @@ async function querySearchIndex<D extends DescMessage>(
 		const scanHi = hi === undefined ? successorOf(prefix) : prefix + hi;
 		let seen = 0;
 		for await (const cKey of tx.indexScan(scanLo, scanHi)) {
-			if (++walked > MAX_INDEX_CANDIDATES) return 'budget';
+			if (++walked > indexCandidateBudget) return 'budget';
 			if (++seen > max) return 'wide';
 			if (!cKey.startsWith(rowPrefix)) continue;
 			keep(cKey.slice(rowPrefix.length));
@@ -1011,8 +1073,8 @@ async function querySearchIndex<D extends DescMessage>(
 		// The final round is at the budget — the cap that decides whether the
 		// walk happens at all — so a cap that reaches it adds nothing.
 		const caps = matcher.terms.length === 1
-			? [ MAX_INDEX_CANDIDATES ]
-			: [ ...SEARCH_SEED_CAPS.filter((c) => c < MAX_INDEX_CANDIDATES), MAX_INDEX_CANDIDATES ];
+			? [ indexCandidateBudget ]
+			: [ ...SEARCH_SEED_CAPS.filter((c) => c < indexCandidateBudget), indexCandidateBudget ];
 		for (const max of caps) {
 			for (let at = 0; at < matcher.terms.length; at++) {
 				const { lo, hi } = searchTermRange(matcher.terms[at]!);
@@ -1042,7 +1104,7 @@ async function querySearchIndex<D extends DescMessage>(
 		const outcome = await scanKeys(
 			lo,
 			hi,
-			Math.min(kept.size * SEARCH_NARROW_RATIO, MAX_INDEX_CANDIDATES),
+			Math.min(kept.size * SEARCH_NARROW_RATIO, indexCandidateBudget),
 			(key) => {
 				if (kept.has(key)) next.add(key);
 			},
@@ -1055,10 +1117,13 @@ async function querySearchIndex<D extends DescMessage>(
 	// the terms left — including an empty intersection.
 	const overflow = searchOverflowRange();
 	if (
-		await scanKeys(overflow.lo, overflow.hi, MAX_INDEX_CANDIDATES, (key) => all.add(key)) !== 'ok'
+		await scanKeys(overflow.lo, overflow.hi, indexCandidateBudget, (key) => all.add(key)) !== 'ok'
 	) {
 		return decline(report, 'budget', walked);
 	}
+	// Locally text-edited rows join them, for the same reason: their postings
+	// answer for the confirmed document rather than the one this read folds.
+	for (const key of edited) all.add(key);
 
 	const keys = [ ...all ].filter((k) => !shadowed.has(k)).sort();
 	const confirmed: IndexedRow<MessageShape<D>>[] = [];
@@ -1108,6 +1173,224 @@ async function querySearchIndex<D extends DescMessage>(
 		total,
 		hasMore: end !== undefined && out.length > end,
 	};
+}
+
+/**
+ * What the postings shortcut decided: an answer, a decline to the scan, or
+ * "not this shape", which sends the query on to the candidate walk.
+ */
+type Postings<T> =
+	| { kind: 'page'; page: IndexedPage<T>; walked: number }
+	| { kind: 'decline'; reason: QueryDeclineReason; walked: number }
+	| { kind: 'unfit' };
+
+/**
+ * Answers a single-term search from the postings alone — the page from the
+ * first of them the result can reach, the total from the store's count of the
+ * range — instead of reading every row the term names.
+ *
+ * A posting IS a match. The index stores one entry per distinct analyzed term
+ * per row, produced by the analyzer the matcher itself runs, so every
+ * non-overflow row holding the term has an entry in the term's range and every
+ * entry in it belongs to a row holding the term. With one required term and
+ * nothing else in the predicate, that is the whole question — so the rows only
+ * have to be read to be RETURNED, and a common term costs a page of reads
+ * rather than a posting list of them.
+ *
+ * Rows the postings cannot speak for are answered without them, and merged in
+ * row-key order:
+ *
+ *   - rows past the per-row term cap store the overflow marker and no term
+ *     postings at all, and rows carrying unacked collaborative-text edits have
+ *     postings from the confirmed document rather than the folded one the query
+ *     sees — both are read and evaluated as the scan would;
+ *   - rows the overlay shadows are answered by the overlay rows the caller
+ *     already decoded.
+ *
+ * Whatever positions those rows still hold inside the counted range come back
+ * out of it, and each one that matches is counted from the row instead.
+ *
+ * 'unfit' covers everything the argument above does not: several required
+ * terms, a predicate carrying more than the match, a relevance ordering (whose
+ * rank needs every candidate row), a page window, a prefix probe whose range
+ * spans several stored terms — their postings interleave by term rather than by
+ * row key, so neither the walk order nor one-posting-per-row survives — and
+ * more locally-changed rows than the count subtraction is worth reading.
+ */
+async function querySearchPostings<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	matcher: Matcher,
+	compiled: CompiledQuery,
+	workspaceId: string,
+	prefix: string,
+	rowPrefix: string,
+	shadowed: ReadonlySet<string>,
+	edited: ReadonlySet<string>,
+	overlayRows: readonly IndexedRow<MessageShape<D>>[],
+	window: PageWindow | undefined,
+): Promise<Postings<MessageShape<D>>> {
+	if (compiled.where?.kind !== 'match') return { kind: 'unfit' };
+	if (matcher.terms.length !== 1) return { kind: 'unfit' };
+	if (compiled.orderBy !== undefined && compiled.orderBy.length > 0) return { kind: 'unfit' };
+	if (window !== undefined) return { kind: 'unfit' };
+
+	const term = matcher.terms[0]!;
+	const range = searchTermRange(term);
+	const lo = prefix + range.lo;
+	const hi: string | undefined = range.hi === undefined
+		? successorOf(prefix)
+		: prefix + range.hi;
+	// A prefix probe brackets every stored term the prefix reaches. Two seeks
+	// say whether it found one or several, which costs two index steps against
+	// re-walking the range from the candidate path.
+	if (term.prefix) {
+		const first = await tx.indexSeek(lo, hi, 'asc');
+		if (first !== undefined) {
+			const last = await tx.indexSeek(lo, hi, 'desc');
+			const one = searchPostingTerm(first.position.slice(prefix.length));
+			if (
+				one === undefined || last === undefined
+				|| one !== searchPostingTerm(last.position.slice(prefix.length))
+			) {
+				return { kind: 'unfit' };
+			}
+		}
+	}
+
+	const wantTotal = compiled.total !== false;
+	// Rows whose postings do not answer for them, for either reason.
+	const answered = edited.size === 0 ? shadowed : new Set([ ...shadowed, ...edited ]);
+	if (answered.size > SHADOW_COUNT_CAP) return { kind: 'unfit' };
+
+	let walked = 0;
+	// Rows read whatever the range says: the overflow rows it cannot see, and
+	// the text-edited ones it sees stale. They are disjoint from the postings
+	// walk below — an overflow row stores the marker INSTEAD of its terms, and
+	// an edited row is in `answered` — so nothing is counted twice.
+	const readWhole = new Set<string>();
+	const overflow = searchOverflowRange();
+	for await (const cKey of tx.indexScan(prefix + overflow.lo, prefix + overflow.hi)) {
+		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
+		if (!cKey.startsWith(rowPrefix)) continue;
+		const key = cKey.slice(rowPrefix.length);
+		if (!shadowed.has(key)) readWhole.add(key);
+	}
+	for (const key of edited) if (!shadowed.has(key)) readWhole.add(key);
+
+	// Postings of one term are ordered by row key, which with no orderBy is the
+	// result order — so the rows past the budget are provably past the page,
+	// exactly as an ordered value walk settles (see candidateBudget). Overflow
+	// and overlay rows merge in AHEAD of postings rows, never displace them.
+	const budget = candidateBudget(compiled, overlayRows.length, undefined);
+	const pageKeys: string[] = [];
+	// Whether a match exists past the ones taken — what hasMore rides on when
+	// the total is opted out and the walk therefore stops at the page.
+	let more = false;
+	for await (const cKey of tx.indexScan(lo, hi)) {
+		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
+		if (!cKey.startsWith(rowPrefix)) continue;
+		const key = cKey.slice(rowPrefix.length);
+		if (answered.has(key)) continue;
+		if (budget !== undefined && pageKeys.length >= budget) {
+			more = true;
+			break;
+		}
+		pageKeys.push(key);
+	}
+
+	const readMatching = async (keys: string[]): Promise<IndexedRow<MessageShape<D>>[]> => {
+		const out: IndexedRow<MessageShape<D>>[] = [];
+		for (let at = 0; at < keys.length; at += READ_BATCH) {
+			for (
+				const entry of await readConfirmedMany(
+					tx,
+					registry,
+					def,
+					schema,
+					workspaceId,
+					keys.slice(at, at + READ_BATCH),
+				)
+			) {
+				// For a postings row the predicate is a fence rather than a filter
+				// — the entry already proved it — but an overflow or edited row is
+				// only a candidate, and the same call decides both.
+				if (entry === undefined) continue;
+				if (!matches(entry.row.value, compiled.where, schema)) continue;
+				out.push(entry);
+			}
+		}
+		return out;
+	};
+	const pageRows = await readMatching(pageKeys);
+	const wholeRows = await readMatching([ ...readWhole ]);
+
+	let total: number | undefined;
+	if (wantTotal) {
+		// Each posting in the range is one distinct match, so the store counts
+		// the confirmed half of the total without walking it. Rows answered
+		// elsewhere keep their confirmed postings there — the overlay does not
+		// touch the confirmed record, and a text fragment lives beside it — so
+		// each such position comes back out and the row is counted, if it still
+		// matches, from the rows read above.
+		let answeredInRange = 0;
+		if (answered.size > 0) {
+			const keys = [ ...answered ];
+			const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
+			for (const record of records) {
+				for (const p of (record as ConfirmedRecord | undefined)?.ix ?? []) {
+					if (p >= lo && (hi === undefined || p < hi)) answeredInRange++;
+				}
+			}
+		}
+		total = (await tx.indexCount(lo, hi)) - answeredInRange + wholeRows.length
+			+ overlayRows.length;
+	}
+
+	const out = [ ...pageRows, ...wholeRows, ...overlayRows ];
+	out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
+	const start = compiled.offset ?? 0;
+	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
+	return {
+		kind: 'page',
+		walked,
+		page: {
+			rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+			total,
+			// `out` is the whole match set unless the walk stopped early, and it
+			// only ever stops past the page — so either the merged rows outrun the
+			// page or the postings did.
+			hasMore: end !== undefined && (more || out.length > end),
+		},
+	};
+}
+
+/**
+ * Row keys of one entity and workspace carrying unacked collaborative-text
+ * fragments — the rows whose stored postings describe a document a read no
+ * longer sees.
+ *
+ * Bounded by the pending queue, like the overlay scan beside it. The set is
+ * empty, and costs no scan at all, for an entity with no text fields.
+ */
+async function textEditedRows(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+): Promise<Set<string>> {
+	const out = new Set<string>();
+	if (registry.textPathsOf(entity).length === 0) return out;
+	// Split from the entity prefix rather than the scanned one: an `ot/` key
+	// always carries its workspace segment, and the parser expects it.
+	const entityPrefix = overlayTextPrefix(entity);
+	for await (const [ k ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
+		const parts = splitOverlayTextSuffix(k.slice(entityPrefix.length));
+		if (parts !== undefined) out.add(parts.key);
+	}
+	return out;
 }
 
 /** Records why the index was not used and returns the "scan instead" answer. */
