@@ -41,10 +41,15 @@ import (
 // per interval on a deployment with nothing to do.
 type indexBuildLoop struct {
 	interval time.Duration
-	// batch bounds the rows one write transaction indexes. A build holds the
+	// batch caps the rows one write transaction indexes. A build holds the
 	// workspace's write lock for the length of a transaction, so an unbounded
-	// one would stall every writer for the length of a full entity scan.
-	batch     int
+	// one would stall every writer for the length of a full entity scan. It is
+	// a cap and not the batch size: txBudget ends a transaction earlier
+	// whenever the rows turn out to be expensive.
+	batch int
+	// txBudget bounds the wall time one build transaction spends indexing rows.
+	// Zero means defaultIndexBuildTxBudget; only tests set it.
+	txBudget  time.Duration
 	cancel    context.CancelFunc
 	done      sync.WaitGroup
 	closeOnce sync.Once
@@ -53,10 +58,28 @@ type indexBuildLoop struct {
 const (
 	defaultIndexBuildInterval = time.Minute
 	defaultIndexBuildBatch    = 500
+	// defaultIndexBuildTxBudget bounds how long one build transaction indexes
+	// rows before committing. Every writer of the workspace is blocked for the
+	// length of that transaction, and the row cap alone cannot bound it: a
+	// row's cost varies with how many index entries it occupies and how loaded
+	// the store is, so the same 500 rows are milliseconds on one schema and a
+	// fifth of a second on another. 20ms is short enough to sit inside a
+	// write's own latency budget and long enough that the commit is a minority
+	// of the transaction.
+	defaultIndexBuildTxBudget = 20 * time.Millisecond
+	// indexBuildYield is how long the walk stands down between transactions.
+	indexBuildYield = 2 * time.Millisecond
 )
 
+// errIndexBuildBudget ends a scan whose transaction has spent its time budget.
+// It never reaches a caller: the walk turns it back into a short batch that
+// commits normally and resumes at the last key.
+var errIndexBuildBudget = errors.New("index build: batch time budget spent")
+
 // WithIndexBuild overrides how often the background pass looks for indexes to
-// backfill, and how many rows one of its write transactions covers.
+// backfill, and the most rows one of its write transactions covers. A
+// transaction may cover fewer: it also stops on an internal time budget, so
+// that the write lock it holds is bounded in time rather than in rows.
 //
 // Neither number changes what a read ANSWERS — an unbuilt index is simply not
 // used — so this is purely about how fast a newly declared index starts paying
@@ -65,7 +88,7 @@ const (
 // unready and every read on its scan fallback; that is a legitimate way to
 // turn indexing off without changing a schema, and a trap otherwise.
 //
-// Defaults: one minute, 500 rows per transaction.
+// Defaults: one minute, at most 500 rows per transaction.
 func WithIndexBuild(interval time.Duration, batch int) Option {
 	return func(s *Server) error {
 		s.indexBuild.interval = interval
@@ -181,23 +204,14 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 	cat := s.catalogPtr()
 	allReady := true
 	for _, info := range cat.entities {
-		targets := make([]struct{ name, specHash string }, 0, len(info.indexes)+1)
-		for i := range info.indexes {
-			targets = append(targets, struct{ name, specHash string }{info.indexes[i].name, info.indexes[i].specHash})
+		if ctx.Err() != nil {
+			return ctx.Err()
 		}
-		if info.search != nil {
-			targets = append(targets, struct{ name, specHash string }{info.search.name, info.search.specHash})
+		ready, err := s.buildEntityIndexes(ctx, workspaceID, info)
+		if err != nil {
+			return fmt.Errorf("entity %q: %w", info.name, err)
 		}
-		for _, t := range targets {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			ready, err := s.buildIndex(ctx, workspaceID, info, t.name, t.specHash)
-			if err != nil {
-				return fmt.Errorf("entity %q index %q: %w", info.name, t.name, err)
-			}
-			allReady = allReady && ready
-		}
+		allReady = allReady && ready
 	}
 	if !allReady {
 		return nil
@@ -210,11 +224,25 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 	})
 }
 
-// buildIndex walks one entity and writes one index's entries for every live
-// row, in batched write transactions, then marks the index ready. It reports
-// whether the index ends the call ready under the caller's spec — false when a
-// concurrent re-registration moved the fingerprint out from under the walk, the
-// one case where a successful call leaves the index unusable.
+// buildTarget is one index of an entity as a build pass sees it: the name its
+// state row is keyed by, and the fingerprint the running catalog declares it
+// under.
+type buildTarget struct {
+	name     string
+	specHash string
+}
+
+// buildEntityIndexes walks one entity ONCE and marks every index of it ready.
+// It reports whether all of them end the call ready under the running
+// catalog's specs — false when a concurrent re-registration moved a fingerprint
+// out from under the walk, the one case where a successful call leaves an index
+// unusable.
+//
+// One walk covers every index because a row's entries are written as a set:
+// storage replaces all of them together (see entityInfo.updateRowIndexes), so
+// visiting a row builds its entry in every declared index whether that index
+// needed building or not. A walk per index would rewrite the same set once per
+// index and read the entity once per index for no extra coverage.
 //
 // Two things make the batching sound despite concurrent writers:
 //
@@ -222,73 +250,117 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 //     its entries from the write path, so the build never has to catch up to
 //     a moving target; it only has to visit rows that existed before it
 //     started, and revisiting one is harmless.
-//   - Readiness is claimed last, in its own transaction. A crash mid-build
-//     leaves entries in place and the index unready, so reads keep scanning
-//     and the next pass redoes the walk over rows that mostly already have
-//     their entries.
-func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, name, specHash string) (ready bool, err error) {
+//   - Readiness is claimed last, in its own transaction per index. A crash
+//     mid-build leaves entries in place and the indexes unready, so reads keep
+//     scanning and the next pass redoes the walk over rows that mostly already
+//     have their entries.
+func (s *Server) buildEntityIndexes(ctx context.Context, ws string, info *entityInfo) (allReady bool, err error) {
+	targets := make([]buildTarget, 0, len(info.indexes)+1)
+	for i := range info.indexes {
+		targets = append(targets, buildTarget{info.indexes[i].name, info.indexes[i].specHash})
+	}
+	if info.search != nil {
+		targets = append(targets, buildTarget{info.search.name, info.search.specHash})
+	}
+	if len(targets) == 0 {
+		return true, nil
+	}
+
 	// Until an index is ready, every read that would have used it scans
 	// instead — so how long a build takes and how far it has got are the
 	// explanation for a query latency regression that no query-side metric can
 	// give. Both entity and index names are derived at registration, so they
 	// are bounded by the schema.
 	start := time.Now()
-	buildAttrs := metric.WithAttributes(
-		telemetry.AttrEntity.String(info.name),
-		telemetry.AttrIndex.String(name),
-	)
-	var alreadyReady bool
-	defer func() {
-		// A pass over an index that was already ready did no work and should
-		// not land in the same distribution as one that walked the entity —
-		// most passes are this, and counting them as builds would put the
-		// median build at zero.
-		outcome := telemetry.Classify(err)
-		if err == nil && alreadyReady {
-			outcome = telemetry.OutcomeSkipped
-		}
+	attrsOf := func(name string) metric.MeasurementOption {
+		return metric.WithAttributes(
+			telemetry.AttrEntity.String(info.name),
+			telemetry.AttrIndex.String(name),
+		)
+	}
+	// The walk is shared, so every index the pass walks for is charged the
+	// whole pass. That is what the per-index duration meant when each index had
+	// a walk to itself: the time between "this index is unusable" and "this
+	// index answers queries".
+	record := func(name, outcome string) {
 		s.tel().indexBuildDuration.Record(ctx, time.Since(start).Seconds(), metric.WithAttributes(
 			telemetry.AttrEntity.String(info.name),
 			telemetry.AttrIndex.String(name),
 			telemetry.AttrOutcome.String(outcome),
 		))
-	}()
+	}
 
 	// Any staleness serves: a stale "not ready" only re-runs the write path
 	// below, whose own transactions re-check against the primary.
+	var pending []buildTarget
 	if err := s.readTx(ctx, ws, 0, func(tx storage.ReadTx) error {
-		var err error
-		alreadyReady, err = indexReadyState(tx, info.name, name, specHash)
-		return err
+		pending = pending[:0]
+		for _, t := range targets {
+			ready, err := indexReadyState(tx, info.name, t.name, t.specHash)
+			if err != nil {
+				return err
+			}
+			if !ready {
+				pending = append(pending, t)
+			}
+		}
+		return nil
 	}); err != nil {
+		for _, t := range targets {
+			record(t.name, telemetry.Classify(err))
+		}
 		return false, err
 	}
-	if alreadyReady {
+	// A pass over an index that was already ready did no work and should not
+	// land in the same distribution as one that walked the entity — most passes
+	// are this, and counting them as builds would put the median build at zero.
+	for _, t := range targets {
+		if !containsTarget(pending, t.name) {
+			record(t.name, telemetry.OutcomeSkipped)
+		}
+	}
+	if len(pending) == 0 {
 		return true, nil
 	}
-	// Stamp the spec BEFORE the walk. If the declaration changed, this is what
+	// Every index still waiting on the walk shares its fate, so a failure is
+	// reported once against each of them.
+	failed := func(rest []buildTarget, e error) (bool, error) {
+		for _, t := range rest {
+			record(t.name, telemetry.Classify(e))
+		}
+		return false, e
+	}
+
+	// Stamp the specs BEFORE the walk. If a declaration changed, this is what
 	// stops a reader from trusting entries written under the old one: the
 	// state row now names the new spec and says not ready.
 	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
-		return tx.SetIndexState(info.name, name, specHash, false)
+		for _, t := range pending {
+			if err := tx.SetIndexState(info.name, t.name, t.specHash, false); err != nil {
+				return err
+			}
+		}
+		return nil
 	}); err != nil {
-		return false, err
+		return failed(pending, err)
 	}
 
-	batch := s.indexBuild.batchSize()
+	batch, budget := s.indexBuild.batchSize(), s.indexBuild.txTimeBudget()
 	afterKey := ""
 	for {
 		if ctx.Err() != nil {
-			return false, ctx.Err()
+			return failed(pending, ctx.Err())
 		}
 		var (
 			lastKey string
 			seen    int
+			cut     bool
 		)
 		if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 			// Reset per attempt: WithWriteTx may re-run the closure.
-			lastKey, seen = "", 0
-			return tx.ScanEntityAfter(info.name, afterKey, batch, func(row storage.Row) error {
+			lastKey, seen, cut = "", 0, false
+			deadline := time.Now().Add(budget)
+			err := tx.ScanEntityAfter(info.name, afterKey, batch, func(row storage.Row) error {
 				seen++
 				lastKey = row.Key
 				msg, err := info.decode(row.Value)
@@ -299,44 +371,92 @@ func (s *Server) buildIndex(ctx context.Context, ws string, info *entityInfo, na
 					// one bad row.
 					return nil
 				}
-				return info.updateRowIndexes(tx, s.limits, row.Key, msg)
+				if err := info.updateRowIndexes(tx, s.limits, row.Key, msg); err != nil {
+					return err
+				}
+				// Cut the batch on the clock as well as on the row cap. A row's
+				// cost varies with the entries it occupies and with how loaded
+				// the store is, so the cap bounds work but not the time every
+				// writer of this workspace spends waiting behind this
+				// transaction — which is the number an operator feels.
+				if time.Now().After(deadline) {
+					cut = true
+					return errIndexBuildBudget
+				}
+				return nil
 			})
+			if errors.Is(err, errIndexBuildBudget) {
+				return nil
+			}
+			return err
 		}); err != nil {
-			return false, err
+			return failed(pending, err)
 		}
 		// After the commit, never inside the closure: WithWriteTx may re-run
 		// it, and a counter incremented from a rolled-back attempt would report
-		// progress the index does not have.
-		s.tel().indexBuildRows.Add(ctx, int64(seen), buildAttrs)
-		if seen < batch {
+		// progress the indexes do not have.
+		for _, t := range pending {
+			s.tel().indexBuildRows.Add(ctx, int64(seen), attrsOf(t.name))
+		}
+		if !cut && seen < batch {
 			break
 		}
 		afterKey = lastKey
+		// Nothing hands the store's write connection to whoever has waited
+		// longest — database/sql wakes an arbitrary waiter, and a build that
+		// reopened its transaction immediately would keep taking it back before
+		// a blocked writer is scheduled. Standing down is the whole fairness
+		// mechanism, and a background build is what should pay for it.
+		time.Sleep(indexBuildYield)
 	}
 
-	if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
-		// Re-check the fingerprint at the end: if the schema was re-registered
-		// mid-build, the catalog this goroutine holds is stale and marking
-		// ready would advertise entries built for a spec nobody uses. The
-		// next pass, holding the new catalog, redoes the walk.
-		//
-		// Reset per attempt, as the counters above are: WithWriteTx may re-run
-		// the closure, and a ready carried over from a rolled-back attempt would
-		// let the caller record a build mark for an index that has none.
-		ready = false
-		hash, _, err := tx.IndexState(info.name, name)
-		if err != nil {
-			return err
+	allReady = true
+	for i, t := range pending {
+		var ready bool
+		if err := s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+			// Re-check the fingerprint at the end: if the schema was
+			// re-registered mid-build, the catalog this goroutine holds is
+			// stale and marking ready would advertise entries built for a spec
+			// nobody uses. The next pass, holding the new catalog, redoes the
+			// walk.
+			//
+			// Reset per attempt, as the counters above are: WithWriteTx may
+			// re-run the closure, and a ready carried over from a rolled-back
+			// attempt would let the caller record a build mark for an index
+			// that has none.
+			ready = false
+			hash, _, err := tx.IndexState(info.name, t.name)
+			if err != nil {
+				return err
+			}
+			if hash != t.specHash {
+				return nil
+			}
+			ready = true
+			return tx.SetIndexState(info.name, t.name, t.specHash, true)
+		}); err != nil {
+			return failed(pending[i:], err)
 		}
-		if hash != specHash {
-			return nil
+		// A re-registration that landed mid-walk leaves the index unready, and
+		// the walk it got did no good: the next pass, holding the new catalog,
+		// redoes it. That is a build that did not happen, not a failed one.
+		outcome := telemetry.OutcomeOK
+		if !ready {
+			outcome = telemetry.OutcomeSkipped
 		}
-		ready = true
-		return tx.SetIndexState(info.name, name, specHash, true)
-	}); err != nil {
-		return false, err
+		record(t.name, outcome)
+		allReady = allReady && ready
 	}
-	return ready, nil
+	return allReady, nil
+}
+
+func containsTarget(targets []buildTarget, name string) bool {
+	for _, t := range targets {
+		if t.name == name {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *indexBuildLoop) batchSize() int {
@@ -344,4 +464,11 @@ func (l *indexBuildLoop) batchSize() int {
 		return defaultIndexBuildBatch
 	}
 	return l.batch
+}
+
+func (l *indexBuildLoop) txTimeBudget() time.Duration {
+	if l == nil || l.txBudget <= 0 {
+		return defaultIndexBuildTxBudget
+	}
+	return l.txBudget
 }
