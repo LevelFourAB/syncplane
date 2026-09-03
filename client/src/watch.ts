@@ -477,7 +477,8 @@ interface KeyWatcher {
 
 /**
  * Rows shared by every watcher of one scan scope — a decode cache keyed by row
- * id, pruned after each commit to the union of what those watchers match.
+ * id, held to within a constant factor of the union of what those watchers
+ * match (see pruneScope).
  *
  * A cache in the strict sense: dropping an entry costs a decode and nothing
  * else. What it buys is that ten watchers over one entity decode a changed row
@@ -491,6 +492,13 @@ interface ScopeRows {
 	 * Only input to the rescan heuristic (see RESCAN_MIN_KEYS).
 	 */
 	scanned?: number;
+	/**
+	 * Rows left by the last full prune walk; absent until one happens. What the
+	 * next walk is triggered against (see pruneScope).
+	 */
+	prunedTo?: number;
+	/** Full prune walks this scope has taken; reported by scopeStats. */
+	fullPrunes: number;
 }
 
 /**
@@ -519,6 +527,16 @@ type ScopeDelta =
  */
 const RESCAN_MIN_KEYS = 8;
 const RESCAN_FRACTION = 0.25;
+
+/**
+ * A scan scope's shared rows are walked in full once they hold more than this
+ * many rows AND more than this multiple of what the last full walk left. The
+ * floor keeps a small map on the walk, where it costs less than the bookkeeping
+ * to avoid it; the multiple is what amortizes the walk of a large one over the
+ * commits that grew it (see pruneScope).
+ */
+const PRUNE_MIN_ROWS = 64;
+const PRUNE_GROWTH = 2;
 
 export interface WatcherHubOptions {
 	/**
@@ -618,6 +636,20 @@ export class WatcherHub {
 		this.keyWatchers.clear();
 		this.groupWatchers.clear();
 		this.scopes.clear();
+	}
+
+	/**
+	 * Rows each scan scope's shared decode cache holds, keyed by scope, with the
+	 * number of full prune walks that cache has taken.
+	 *
+	 * @internal Support for the specs that pin the cache bound; not client API.
+	 */
+	scopeStats(): Map<string, { rows: number; fullPrunes: number }> {
+		const out = new Map<string, { rows: number; fullPrunes: number }>();
+		for (const [ scope, scoped ] of this.scopes) {
+			out.set(scope, { rows: scoped.rows.size, fullPrunes: scoped.fullPrunes });
+		}
+		return out;
 	}
 
 	watch<D extends DescMessage>(
@@ -871,11 +903,13 @@ export class WatcherHub {
 	private setRefs(watcher: KeyWatcher, next: Iterable<RowRef>): void {
 		if (!this.keyWatchers.has(watcher)) return;
 		const wanted = refMap(next);
+		const dropped = new Set<string>();
 		for (const id of watcher.refs.keys()) {
 			if (wanted.has(id)) continue;
 			watcher.held.delete(id);
 			watcher.pending.delete(id);
 			watcher.added.delete(id);
+			dropped.add(id);
 		}
 		let grew = false;
 		for (const id of wanted.keys()) {
@@ -884,6 +918,9 @@ export class WatcherHub {
 			grew = true;
 		}
 		watcher.refs = wanted;
+		// Released here rather than at the next commit: a screen swapping one long
+		// ref list for another would otherwise hold both until something is written.
+		if (dropped.size > 0) this.pruneScope(scanScope(watcher), dropped);
 		if (grew) this.scheduleAdds(watcher);
 	}
 
@@ -1107,6 +1144,12 @@ export class WatcherHub {
 					}
 					const delta = await this.readDelta(tx, scope, group, pairs);
 					let scopeRows = delta.rebuild ? delta.rows : undefined;
+					// The rows this pass put in the scope's shared map, so the prune
+					// below can look at those alone. A scan puts the whole entity
+					// there instead, which no such list describes.
+					let added: Set<string> | undefined = delta.rebuild
+						? undefined
+						: new Set(delta.changed.keys());
 					for (const w of group) {
 						let from: number;
 						const moved = movedRel.get(w);
@@ -1121,11 +1164,13 @@ export class WatcherHub {
 						if (delta.rebuild) {
 							from = applyDelta(w, delta);
 						} else if (reached !== undefined) {
+							for (const id of reached.keys()) added?.add(id);
 							from = applyDelta(w, {
 								rebuild: false,
 								changed: mergeChanged(delta.changed, reached),
 							}, reached);
 						} else if (moved !== undefined) {
+							added = undefined;
 							scopeRows ??= await this.scanScope(tx, group[0]!);
 							w.matches = buildMatches(w, scopeRows);
 							w.pending = 'reset';
@@ -1145,15 +1190,16 @@ export class WatcherHub {
 							await this.verifyMatches(tx, w);
 						}
 					}
-					this.pruneScope(scope);
+					this.pruneScope(scope, added);
 				}
 				// After the scans above, so a keyed watcher sharing a scope with a
 				// rebuilt result reuses the rows that rebuild just decoded.
 				for (const w of keyed) {
-					await this.readRefs(tx, w, touchedRefs(w, pairs), false);
+					const refs = touchedRefs(w, pairs);
+					await this.readRefs(tx, w, refs, false);
 					keyedPending.push({ watcher: w, force: touchesInclude(w, pairs) });
 					if (this.verifyTouches) await this.verifyKeys(tx, w);
-					this.pruneScope(scanScope(w));
+					this.pruneScope(scanScope(w), new Set(refs));
 				}
 				// Stamped inside the section: the order the mutex grants reads in
 				// IS the order of the views they saw.
@@ -1247,15 +1293,15 @@ export class WatcherHub {
 	/** Rebuilds a scope's shared rows from a full merged-view scan, in scan order. */
 	private async scanScope(tx: KVRead, watcher: Watcher): Promise<ResultRow[]> {
 		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
-		const scope = scanScope(watcher);
-		const prev = this.scopes.get(scope)?.rows;
+		const scoped = this.scopeRows(scanScope(watcher));
+		const prev = scoped.rows;
 		const rows = new Map<string, ResultRow>();
 		const ordered: ResultRow[] = [];
 		for (const row of merged) {
 			const id = rowId(row.workspaceId, row.key);
 			const built = resultRow(
 				watcher.schema,
-				prev?.get(id),
+				prev.get(id),
 				id,
 				suffixOf(watcher, row.workspaceId, row.key),
 				row,
@@ -1263,7 +1309,10 @@ export class WatcherHub {
 			rows.set(id, built);
 			ordered.push(built);
 		}
-		this.scopes.set(scope, { rows, scanned: ordered.length });
+		// Replaced in place rather than by a fresh ScopeRows, so the prune
+		// bookkeeping survives a rescan of the rows it is about.
+		scoped.rows = rows;
+		scoped.scanned = ordered.length;
 		return ordered;
 	}
 
@@ -1422,7 +1471,7 @@ export class WatcherHub {
 	private scopeRows(scope: string): ScopeRows {
 		let scoped = this.scopes.get(scope);
 		if (scoped === undefined) {
-			scoped = { rows: new Map() };
+			scoped = { rows: new Map(), fullPrunes: 0 };
 			this.scopes.set(scope, scoped);
 		}
 		return scoped;
@@ -1430,22 +1479,31 @@ export class WatcherHub {
 
 	/**
 	 * Drops rows no watcher of a scope holds, and the scope itself with its last
-	 * watcher. This is what keeps the shared rows down to the union of the live
+	 * watcher. This is what keeps the shared rows near the union of the live
 	 * results: a rescan puts the whole entity in the map, and everything the
 	 * queries reject comes back out of it here.
+	 *
+	 * `candidates` names the rows an operation added to the map and confines the
+	 * work to them, so a commit costs what it changed rather than what the
+	 * results hold. Without it — a rescan, a first read, a watcher closing — and
+	 * whenever the map has grown past PRUNE_GROWTH times what the last full walk
+	 * left, every row in the map is examined instead. The map therefore stays
+	 * within max(PRUNE_MIN_ROWS, PRUNE_GROWTH x the union) even where candidates
+	 * missed something, and the walks that hold that bound are amortized over the
+	 * commits that grew the map.
 	 */
-	private pruneScope(scope: string): void {
-		const held = new Set<string>();
+	private pruneScope(scope: string, candidates?: ReadonlySet<string>): void {
+		const holders: ReadonlyMap<string, ResultRow>[] = [];
 		let live = false;
 		for (const w of this.watchers) {
 			if (scanScope(w) !== scope) continue;
 			live = true;
-			if (w.matches) { for (const id of w.matches.byId.keys()) held.add(id); }
+			if (w.matches) holders.push(w.matches.byId);
 		}
 		for (const w of this.keyWatchers) {
 			if (scanScope(w) !== scope) continue;
 			live = true;
-			for (const row of w.held.values()) held.add(row.id);
+			holders.push(w.held);
 		}
 		if (!live) {
 			this.scopes.delete(scope);
@@ -1453,9 +1511,24 @@ export class WatcherHub {
 		}
 		const scoped = this.scopes.get(scope);
 		if (scoped === undefined) return;
+		const ceiling = Math.max(PRUNE_MIN_ROWS, (scoped.prunedTo ?? 0) * PRUNE_GROWTH);
+		if (candidates !== undefined && scoped.rows.size <= ceiling) {
+			// Probed per holder rather than against a union set: building the union
+			// is the O(map) work this path exists to skip.
+			for (const id of candidates) {
+				if (!holders.some((rows) => rows.has(id))) scoped.rows.delete(id);
+			}
+			return;
+		}
+		const held = new Set<string>();
+		for (const rows of holders) {
+			for (const id of rows.keys()) held.add(id);
+		}
 		for (const id of scoped.rows.keys()) {
 			if (!held.has(id)) scoped.rows.delete(id);
 		}
+		scoped.prunedTo = scoped.rows.size;
+		scoped.fullPrunes++;
 	}
 
 	/**
