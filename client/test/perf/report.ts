@@ -46,6 +46,11 @@ export interface Wire {
 	gzipUp: number;
 	wireDown: number;
 	wireUp: number;
+	/**
+	 * Time the server's handlers spent on those calls. The rest of the wall time
+	 * a scenario measured was the client's, or the loopback between them.
+	 */
+	serverMs: number;
 }
 
 /** One scenario's measurement. `metrics` is free-form on purpose. */
@@ -220,6 +225,7 @@ export function formatWireProjection(results: BenchResult[]): string {
 		'upKB',
 		'trips',
 		'localMs',
+		'serverMs',
 		...LINKS.map((l) => l.name),
 	];
 	const body = rows.map((r) => {
@@ -234,6 +240,7 @@ export function formatWireProjection(results: BenchResult[]): string {
 			kb(wire.wireUp),
 			String(wire.roundTrips),
 			format(wire.localMs),
+			format(wire.serverMs),
 			...LINKS.map((l) => seconds(projectOnLink(wire, l))),
 		];
 	});

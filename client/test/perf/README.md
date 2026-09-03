@@ -91,6 +91,11 @@ the tier list, or `SEED` changes. The server always runs on a **copy** — the
 benchmarks write, and a run that mutated the cache would silently change what
 every later run measures.
 
+The cached database has its server-side indexes already built, so a run
+measures the steady state a server reaches a minute after declaring them,
+rather than one whose background backfill is still rewriting the corpus
+underneath the writes being timed.
+
 Seeding is a one-time cost per fingerprint (roughly a second per 10k rows).
 Delete `.corpus/` to force it again.
 

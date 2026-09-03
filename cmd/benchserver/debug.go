@@ -17,8 +17,9 @@ import (
 	"github.com/levelfourab/syncplane/internal/benchapp"
 )
 
-// seedHandler generates a tier's corpus into its workspace. POST JSON:
-// {"tier", "seed"}; responds with the row counts written and how long it took.
+// seedHandler generates a tier's corpus into its workspace and builds its
+// indexes. POST JSON: {"tier", "seed"}; responds with the row counts written
+// and how long both steps took.
 //
 // Seeding the largest tier is minutes of work, which is why it is an endpoint
 // rather than something a benchmark does for itself: the harness seeds once
@@ -60,8 +61,21 @@ func seedHandler(srv *server.Server, logger *slog.Logger) http.Handler {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		logger.Info("seeded", "workspace", ws, "rows", counts.Total, "took", time.Since(started))
+
+		// Seeding leaves every index unready, and the background pass would
+		// rebuild the whole corpus a minute into each run — measuring a server
+		// that is mid-backfill rather than the one a deployment actually runs.
+		// Building here folds the backfill into the cached database, so a run
+		// starts from the steady state.
+		buildStarted := time.Now()
+		if err := srv.BuildIndexes(r.Context(), ws); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		logger.Info("indexes built", "workspace", ws, "took", time.Since(buildStarted))
+
 		elapsed := time.Since(started)
-		logger.Info("seeded", "workspace", ws, "rows", counts.Total, "took", elapsed)
 		writeJSON(w, struct {
 			Workspace string          `json:"workspace"`
 			Counts    benchapp.Counts `json:"counts"`
@@ -372,18 +386,25 @@ type wireStats struct {
 	// the network.
 	wireIn  map[string]int64
 	wireOut map[string]int64
+	// Handler time, from the request reaching the mux to its response
+	// finishing — the server's share of a round trip a client clocks, so a
+	// slow sync can be attributed to one side or the other.
+	serverMs    map[string]float64
+	serverMaxMs map[string]float64
 }
 
 func newWireStats() *wireStats {
 	return &wireStats{
-		total:      map[string]int{},
-		bytesIn:    map[string]int64{},
-		bytesOut:   map[string]int64{},
-		gzipIn:     map[string]int64{},
-		gzipOut:    map[string]int64{},
-		encodedOut: map[string]int{},
-		wireIn:     map[string]int64{},
-		wireOut:    map[string]int64{},
+		total:       map[string]int{},
+		bytesIn:     map[string]int64{},
+		bytesOut:    map[string]int64{},
+		gzipIn:      map[string]int64{},
+		gzipOut:     map[string]int64{},
+		encodedOut:  map[string]int{},
+		wireIn:      map[string]int64{},
+		wireOut:     map[string]int64{},
+		serverMs:    map[string]float64{},
+		serverMaxMs: map[string]float64{},
 	}
 }
 
@@ -393,7 +414,9 @@ func (s *wireStats) wrap(next http.Handler) http.Handler {
 		counting := &countingWriter{ResponseWriter: w, gz: newGzipCounter()}
 		body := &countingReader{ReadCloser: r.Body, gz: newGzipCounter()}
 		r.Body = body
+		started := time.Now()
 		defer func() {
+			elapsed := float64(time.Since(started)) / float64(time.Millisecond)
 			// Closed here rather than as the bodies drain: gzip only knows its
 			// final size once its last block is flushed, and for a streaming
 			// method that is when the stream ends.
@@ -426,6 +449,8 @@ func (s *wireStats) wrap(next http.Handler) http.Handler {
 			} else {
 				s.wireIn[method] += in
 			}
+			s.serverMs[method] += elapsed
+			s.serverMaxMs[method] = max(s.serverMaxMs[method], elapsed)
 			s.mu.Unlock()
 		}()
 		next.ServeHTTP(counting, r)
@@ -443,15 +468,20 @@ func (s *wireStats) ServeHTTP(w http.ResponseWriter, _ *http.Request) {
 		EncodedOut map[string]int   `json:"encodedOut"`
 		WireIn     map[string]int64 `json:"wireIn"`
 		WireOut    map[string]int64 `json:"wireOut"`
+		// Handler time in milliseconds, summed and the single slowest call.
+		ServerMs    map[string]float64 `json:"serverMs"`
+		ServerMaxMs map[string]float64 `json:"serverMaxMs"`
 	}{
-		Total:      maps.Clone(s.total),
-		BytesIn:    maps.Clone(s.bytesIn),
-		BytesOut:   maps.Clone(s.bytesOut),
-		GzipIn:     maps.Clone(s.gzipIn),
-		GzipOut:    maps.Clone(s.gzipOut),
-		EncodedOut: maps.Clone(s.encodedOut),
-		WireIn:     maps.Clone(s.wireIn),
-		WireOut:    maps.Clone(s.wireOut),
+		Total:       maps.Clone(s.total),
+		BytesIn:     maps.Clone(s.bytesIn),
+		BytesOut:    maps.Clone(s.bytesOut),
+		GzipIn:      maps.Clone(s.gzipIn),
+		GzipOut:     maps.Clone(s.gzipOut),
+		EncodedOut:  maps.Clone(s.encodedOut),
+		WireIn:      maps.Clone(s.wireIn),
+		WireOut:     maps.Clone(s.wireOut),
+		ServerMs:    maps.Clone(s.serverMs),
+		ServerMaxMs: maps.Clone(s.serverMaxMs),
 	}
 	s.mu.Unlock()
 	writeJSON(w, snapshot)

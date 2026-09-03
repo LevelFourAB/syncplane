@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"net/http/pprof"
 	"os"
 	"path/filepath"
 	"time"
@@ -91,6 +92,12 @@ func main() {
 	mux.Handle("/debug/seed", seedHandler(srv, logger))
 	mux.Handle("/debug/write", writeHandler(srv))
 	mux.Handle("/debug/gc", gcHandler(srv))
+	// Go's profiler, for attributing a server-side number the stats endpoint
+	// can only size: `go tool pprof <url>/debug/pprof/profile?seconds=30`
+	// while a scenario runs.
+	mux.HandleFunc("/debug/pprof/", pprof.Index)
+	mux.HandleFunc("/debug/pprof/profile", pprof.Profile)
+	mux.HandleFunc("/debug/pprof/trace", pprof.Trace)
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {

@@ -126,6 +126,8 @@ export interface WireStats {
 	encodedOut: Record<string, number>;
 	wireIn: Record<string, number>;
 	wireOut: Record<string, number>;
+	serverMs: Record<string, number>;
+	serverMaxMs: Record<string, number>;
 }
 
 /** The server's view of what crossed the wire (benchserver's /debug/stats). */
@@ -157,6 +159,7 @@ export function wireDelta(before: WireStats, after: WireStats): Wire {
 		gzipDown: sum(after.gzipOut) - sum(before.gzipOut),
 		wireUp: sum(after.wireIn) - sum(before.wireIn),
 		wireDown: sum(after.wireOut) - sum(before.wireOut),
+		serverMs: sum(after.serverMs) - sum(before.serverMs),
 	};
 }
 
