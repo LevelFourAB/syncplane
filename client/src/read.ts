@@ -276,36 +276,15 @@ export interface MergedRow {
 }
 
 /**
- * Resolves a single row overlay-first, also returning its confirmed base
- * version — the workspace sequence the row was last server-acked at, or 0n
- * when the row exists only optimistically (a local create not yet acked).
- * The version reflects the confirmed base even when an optimistic overlay
- * shadows it, which is exactly the base an expectedVersion CAS guard wants.
- */
-export async function readMergedRowWithVersion(
-	tx: KVRead,
-	registry: EntityRegistry,
-	entity: string,
-	workspaceId: string,
-	key: string,
-): Promise<MergedRow | undefined> {
-	const overlay = (await tx.get(overlayKey(entity, workspaceId, key))) as OverlayRecord | undefined;
-	const confirmed = (await tx.get(confirmedKey(entity, workspaceId, key))) as
-		| ConfirmedRecord
-		| undefined;
-	const version = confirmed ? BigInt(confirmed.ver) : 0n;
-	const base = overlay !== undefined
-		? (overlay.del ? undefined : overlay.v)
-		: confirmed?.v;
-	if (base === undefined) return undefined;
-	return { v: await foldTextLog(tx, registry, entity, workspaceId, key, base), version };
-}
-
-/**
- * Resolves many rows of one entity overlay-first, like readMergedRowWithVersion
- * row by row, in one getMany for all the overlay and confirmed records
- * together. The result is parallel to `keys`; a missing row is undefined in
- * its slot.
+ * Resolves rows of one entity overlay-first, in one getMany for all the overlay
+ * and confirmed records together. The result is parallel to `keys`; a row that
+ * is absent or locally deleted is undefined in its slot.
+ *
+ * Each row carries its confirmed base version — the workspace sequence it was
+ * last server-acked at, or 0n when it exists only optimistically (a local
+ * create not yet acked). The version reflects the confirmed base even when an
+ * optimistic overlay shadows it, which is the base an expectedVersion CAS guard
+ * wants.
  */
 export async function readMergedRowsWithVersion(
 	tx: KVRead,

@@ -154,7 +154,7 @@ import {
 import {
 	type NamedWorkspaces,
 	readMergedRow,
-	readMergedRowWithVersion,
+	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
 	scanDecoded,
@@ -2263,7 +2263,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 */
 	private refClient(): RefClient {
 		return {
-			getRow: (schema, workspaceId, key) => this.getRowIn(workspaceId, schema, key),
+			getRows: (schema, workspaceId, keys) => this.getRowsIn(workspaceId, schema, keys),
 			query: (schema, workspaceId, q) => this.queryIn(workspaceId, schema, q),
 			queryAll: (schema, q) => this.queryIn(undefined, schema, q),
 		};
@@ -4278,23 +4278,40 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		key: string,
 	): Promise<Row<MessageShape<D>> | undefined> {
+		return (await this.getRowsIn(workspaceId, schema, [ key ]))[0];
+	}
+
+	/**
+	 * Reads rows of one entity from one workspace in a single transaction. The
+	 * result is parallel to `keys`; an absent or locally-deleted row leaves its
+	 * slot undefined. An empty `keys` reads nothing.
+	 *
+	 * @internal
+	 */
+	async getRowsIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		keys: readonly string[],
+	): Promise<(Row<MessageShape<D>> | undefined)[]> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
+		if (keys.length === 0) return [];
 		const kv = await this.kv();
 		return this.kvMutex.runShared(async () => {
 			const tx = await kv.read();
 			try {
-				const row = await readMergedRowWithVersion(
+				const rows = await readMergedRowsWithVersion(
 					tx,
 					this.entityRegistry,
 					def.name,
-					workspaceId,
-					key,
+					keys.map((key) => ({ workspaceId, key })),
 				);
-				if (row === undefined) return undefined;
-				const value = fromBinary(schema, row.v);
-				sortOrderedFields(schema, value);
-				return { key, value, workspaceId, version: row.version };
+				return rows.map((row, i) => {
+					if (row === undefined) return undefined;
+					const value = fromBinary(schema, row.v);
+					sortOrderedFields(schema, value);
+					return { key: keys[i]!, value, workspaceId, version: row.version };
+				});
 			} finally {
 				tx.release();
 			}

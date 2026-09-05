@@ -834,7 +834,7 @@ Hydration rules:
 - Keys prefixed with `$` represent options applied to relations that resolve to lists.
 - `$where`, `$orderBy`, `$limit`, and `$offset` apply per holder row.
 - Providing `$` options on a to-one reference or at the root of the `include` tree throws an error.
-- Forward references batch into point lookups. Reverse relations execute one query per workspace.
+- Forward references cost one batched read per relation and target workspace, deduplicated across the whole hydration. Reverse relations execute one query per workspace.
 
 ### Explicit reference accessors
 

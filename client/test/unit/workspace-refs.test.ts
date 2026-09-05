@@ -273,12 +273,19 @@ describe('workspace-qualified forward resolution', () => {
 		await seed(client);
 		const rows = await client.ws(PROJ).db.task.query(
 			{ orderBy: (t) => [ t.id.asc() ] },
-			{ include: { assignee: true } },
+			{ include: { assignee: true, watchers: true } },
 		);
-		const names = (rows as unknown as HydratedRow<Task>[]).map((r) =>
-			(r.refs.assignee as Row<User> | undefined)?.value.name
-		);
+		const hydrated = rows as unknown as HydratedRow<Task>[];
+		const names = hydrated.map((r) => (r.refs.assignee as Row<User> | undefined)?.value.name);
 		expect(names).toEqual([ 'Org Maya', 'Proj Maya', undefined ]);
+		// t1 and t2 name the same key in different workspaces: a batch grouped by
+		// key alone hands one of them the other's row.
+		expect(hydrated.map((r) => (r.refs.assignee as Row<User> | undefined)?.workspaceId))
+			.toEqual([ ORG, PROJ, undefined ]);
+		// t3's list spans both workspaces, so element order and per-element
+		// workspace both have to survive the batch.
+		expect(hydrated.map((r) => (r.refs.watchers as Row<User>[]).map((u) => u.value.name)))
+			.toEqual([ [], [], [ 'Org Maya', 'Proj Noor' ] ]);
 		await client.close();
 	});
 });

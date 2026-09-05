@@ -32,7 +32,16 @@ import type { Row } from './read.js';
 
 /** The slice of SyncClient the resolvers need; lets them be tested in isolation. */
 export interface RefClient {
-	getRow(schema: DescMessage, workspaceId: string, key: string): Promise<Row<Message> | undefined>;
+	/**
+	 * Rows of one entity from one workspace, read together. The result is
+	 * parallel to `keys`, with undefined in the slot of every key that resolves
+	 * to no row; duplicate keys each get their own slot.
+	 */
+	getRows(
+		schema: DescMessage,
+		workspaceId: string,
+		keys: readonly string[],
+	): Promise<(Row<Message> | undefined)[]>;
 	query(schema: DescMessage, workspaceId: string, q: Query<Message>): Promise<Row<Message>[]>;
 	/** A read across every workspace the client holds; what a workspace-qualified reverse relation walks. */
 	queryAll(schema: DescMessage, q: Query<Message>): Promise<Row<Message>[]>;
@@ -122,14 +131,15 @@ export async function loadForward(
 	if (!ref) throw new Error(`entity "${sourceEntity}" has no reference field "${fieldLocalName}"`);
 	const targetDef = registry.get(ref.targetEntity)!;
 	const rec = holder as unknown as Rec;
-	const resolve = (value: Message): Promise<Row<Message> | undefined> => {
+	const resolve = async (value: Message): Promise<Row<Message> | undefined> => {
 		const stub = refStub(ref.shape, value);
-		if (stub === undefined) return Promise.resolve(undefined);
-		return client.getRow(
+		if (stub === undefined) return undefined;
+		const rows = await client.getRows(
 			ref.targetSchema,
 			refWorkspaceOf(ref.shape, value, workspaceId),
-			keyOf(targetDef, stub),
+			[ keyOf(targetDef, stub) ],
 		);
+		return rows[0];
 	};
 	if (ref.repeated) {
 		const values = (rec[fieldLocalName] as Message[] | undefined) ?? [];
@@ -229,9 +239,9 @@ function refPointsAt(
 
 /**
  * Hydrates rows against an include tree, attaching resolved references under
- * each row's `refs`. Forward relations resolve by point lookup, deduplicated
- * across the whole call; a reverse relation costs one query per workspace the
- * rows span, never one per row. Each stub resolves in the workspace it points
+ * each row's `refs`. A forward relation costs one batched read per workspace
+ * its stubs point into, a reverse relation one query per workspace the rows
+ * span — neither one per row. Each stub resolves in the workspace it points
  * into — the holder's own unless a workspace-qualified reference names another
  * — so hydrating a cross-workspace result set stays correct row by row.
  *
@@ -258,25 +268,36 @@ export async function hydrate(
 }
 
 /**
- * A RefClient whose getRow answers repeats — and concurrent duplicates, by
- * sharing the promise — from a cache. Queries pass through: batching leaves at
- * most one reverse query per (relation, workspace), nothing left to memoize.
+ * A RefClient whose getRows asks only for the keys no earlier call has asked
+ * for, and answers the rest — including the duplicates of a call still in
+ * flight — from a cache of per-key promises. A batch the cache covers entirely
+ * reads nothing. Queries pass through: batching leaves at most one reverse
+ * query per (relation, workspace), nothing left to memoize.
  */
 function memoized(client: RefClient): RefClient {
 	const cache = new Map<string, Promise<Row<Message> | undefined>>();
 	return {
-		getRow: (schema, workspaceId, key) => {
-			const at = `${schema.typeName}\u0000${workspaceId}\u0000${key}`;
-			let row = cache.get(at);
-			if (row === undefined) {
-				row = client.getRow(schema, workspaceId, key);
-				cache.set(at, row);
+		getRows: (schema, workspaceId, keys) => {
+			const at = (key: string) => `${schema.typeName}\u0000${workspaceId}\u0000${key}`;
+			const missing = [ ...new Set(keys.filter((key) => !cache.has(at(key)))) ];
+			if (missing.length > 0) {
+				const batch = client.getRows(schema, workspaceId, missing);
+				// Cached before the batch is awaited, so a key repeated later in this
+				// call — or by the next relation of this level — finds the promise
+				// rather than issuing a second read.
+				missing.forEach((key, i) => cache.set(at(key), batch.then((rows) => rows[i])));
 			}
-			return row;
+			return Promise.all(keys.map((key) => cache.get(at(key))!));
 		},
 		query: (schema, workspaceId, q) => client.query(schema, workspaceId, q),
 		queryAll: (schema, q) => client.queryAll(schema, q),
 	};
+}
+
+/** A stored stub reduced to what reads it back: its target's workspace and key. */
+interface Want {
+	workspaceId: string;
+	key: string;
 }
 
 /** One include node, split into its options and the nested tree beneath them. */
@@ -352,11 +373,11 @@ async function attachRelations(
 }
 
 /**
- * Resolves a forward relation for all holders. Stub keys go through the
- * memoized point reads, so a target shared between holders is read once, and
- * `shared` hands every holder the same hydrated object. Options are evaluated
- * in memory over the resolved rows — the targets are point reads, so there is
- * no query to push them into.
+ * Resolves a forward relation for all holders in one batched read per workspace
+ * its stubs point into, whatever the holder count. A target named by several
+ * holders — or twice by one repeated ref — is read once and `shared` hands every
+ * holder the same hydrated object. Options are evaluated in memory over the
+ * resolved rows: a batched read is not a query to push them into.
  */
 async function attachForward(
 	client: RefClient,
@@ -375,29 +396,62 @@ async function attachForward(
 	const targetDef = registry.get(fwd.targetEntity)!;
 	const opts = node.hasOptions ? prepareNodeOptions(fwd.targetSchema, node) : undefined;
 	const shared: SharedRows = new Map();
-	await Promise.all(holders.map(async (holder) => {
+
+	// Every stub of every holder, in holder order and — for a repeated ref — in
+	// element order, so the resolved rows scatter back positionally. An unset
+	// stub keeps its slot rather than collapsing the list it sits in.
+	const wanted: (Want | undefined)[][] = holders.map((holder) => {
 		const rec = holder.value as unknown as Rec;
-		const resolve = (value: Message): Promise<Row<Message> | undefined> => {
+		const want = (value: Message): Want | undefined => {
 			const stub = refStub(fwd.shape, value);
-			if (stub === undefined) return Promise.resolve(undefined);
-			return client.getRow(
-				fwd.targetSchema,
-				refWorkspaceOf(fwd.shape, value, holder.workspaceId),
-				keyOf(targetDef, stub),
-			);
+			if (stub === undefined) return undefined;
+			return {
+				workspaceId: refWorkspaceOf(fwd.shape, value, holder.workspaceId),
+				key: keyOf(targetDef, stub),
+			};
 		};
+		if (fwd.repeated) return ((rec[relation] as Message[] | undefined) ?? []).map(want);
+		const value = rec[relation] as Message | undefined;
+		return [ value === undefined ? undefined : want(value) ];
+	});
+
+	// One read per workspace the stubs name — the holder's own for an
+	// entity-typed stub, another for every workspace a qualified reference
+	// points into.
+	const keysByWs = new Map<string, string[]>();
+	const slots = new Map<string, Map<string, number>>();
+	for (const list of wanted) {
+		for (const w of list) {
+			if (w === undefined) continue;
+			let keys = keysByWs.get(w.workspaceId);
+			if (keys === undefined) {
+				keysByWs.set(w.workspaceId, keys = []);
+				slots.set(w.workspaceId, new Map());
+			}
+			const index = slots.get(w.workspaceId)!;
+			if (!index.has(w.key)) index.set(w.key, keys.push(w.key) - 1);
+		}
+	}
+	const rowsByWs = new Map<string, (Row<Message> | undefined)[]>();
+	await Promise.all([ ...keysByWs.entries() ].map(async ([ workspaceId, keys ]) => {
+		rowsByWs.set(workspaceId, await client.getRows(fwd.targetSchema, workspaceId, keys));
+	}));
+	const resolved = (w: Want | undefined): Row<Message> | undefined => {
+		if (w === undefined) return undefined;
+		return rowsByWs.get(w.workspaceId)![slots.get(w.workspaceId)!.get(w.key)!];
+	};
+
+	holders.forEach((holder, i) => {
+		const list = wanted[i]!;
 		if (fwd.repeated) {
-			const values = (rec[relation] as Message[] | undefined) ?? [];
-			const resolved = await Promise.all(values.map(resolve));
-			let rows = resolved.filter((r): r is Row<Message> => r !== undefined);
+			let rows = list.map(resolved).filter((r): r is Row<Message> => r !== undefined);
 			if (opts) rows = applyOptions(rows, opts, fwd.targetSchema);
 			holder.refs[relation] = rows.map((row) => sharedHydrated(shared, row));
 		} else {
-			const value = rec[relation] as Message | undefined;
-			const row = value === undefined ? undefined : await resolve(value);
+			const row = resolved(list[0]);
 			holder.refs[relation] = row === undefined ? undefined : sharedHydrated(shared, row);
 		}
-	}));
+	});
 	if (node.nested) {
 		await attachRelations(client, registry, fwd.targetEntity, sharedValues(shared), node.nested);
 	}

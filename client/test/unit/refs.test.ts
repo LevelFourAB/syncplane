@@ -12,6 +12,7 @@ import {
 	UserSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import type { KVRead, KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import type { Row } from '../../src/read.js';
 import type { HydratedRow } from '../../src/refs.js';
@@ -476,7 +477,112 @@ describe('batched include hydration', () => {
 		expect((project.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
 		await client.close();
 	});
+
+	/** Seeds `rows` issues, each with its own project, assignee and reporter. */
+	async function seedFan(client: ReturnType<typeof newClient>, rows: number): Promise<void> {
+		for (let i = 0; i < rows; i++) {
+			await client.db.project.mutate.put({ id: `p${i}`, name: `P${i}` });
+			await client.db.user.mutate.put({ id: `u${i}`, name: `U${i}` });
+			await client.db.user.mutate.put({ id: `r${i}`, name: `R${i}` });
+			await client.db.issue.mutate.put({
+				id: `i${i}`,
+				title: 't',
+				project: { id: `p${i}` },
+				assignee: { id: `u${i}` },
+				reporter: { id: `r${i}` },
+			});
+		}
+	}
+
+	/** Read transactions one hydrated query opens over a page of `rows` issues. */
+	async function readsFor(
+		rows: number,
+		include: Record<string, true>,
+	): Promise<number> {
+		const counting = countingReads(new MemoryKVStore());
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: counting,
+			entities: [ IssueSchema, ProjectSchema, UserSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		try {
+			await seedFan(client, rows);
+			counting.reads = 0;
+			const hydrated = await client.db.issue.query(
+				{ orderBy: (i) => [ i.id.asc() ] },
+				{ include },
+			) as unknown as HydratedRow[];
+			expect(hydrated).toHaveLength(rows);
+			expect(hydrated.every((r) => r.refs.project !== undefined)).toBe(true);
+			return counting.reads;
+		} finally {
+			await client.close();
+		}
+	}
+
+	it('costs the same reads for a forward include however wide the page is', async () => {
+		// The whole point of the batch: the transaction count follows the include
+		// tree, not the row count. Three references over twelve rows is thirty-six
+		// stubs, and they cost what three stubs do.
+		const wide = await readsFor(12, { project: true, assignee: true, reporter: true });
+		const narrow = await readsFor(3, { project: true, assignee: true, reporter: true });
+		expect(wide).toBe(narrow);
+		// One for the page and one per relation, with nothing else in between.
+		expect(wide).toBeLessThanOrEqual(4);
+	});
+
+	it('reads a target once when two relations of one level share it', async () => {
+		const reads = async (include: Record<string, true>): Promise<number> => {
+			const counting = countingReads(new MemoryKVStore());
+			const client = new SyncClient({
+				workspaceId: 'ws1',
+				kvStore: counting,
+				entities: [ IssueSchema, ProjectSchema, UserSchema ],
+				streamEnabled: false,
+				pollIntervalMs: 0,
+			});
+			try {
+				for (let i = 0; i < 6; i++) {
+					await client.db.user.mutate.put({ id: `u${i}`, name: `U${i}` });
+					await client.db.issue.mutate.put({
+						id: `i${i}`,
+						title: 't',
+						assignee: { id: `u${i}` },
+						reporter: { id: `u${i}` },
+					});
+				}
+				counting.reads = 0;
+				await client.db.issue.query({}, { include });
+				return counting.reads;
+			} finally {
+				await client.close();
+			}
+		};
+		// Every reporter is its row's assignee, so the second relation adds keys
+		// the first already resolved and must add no read.
+		expect(await reads({ assignee: true, reporter: true })).toBe(await reads({ assignee: true }));
+	});
 });
+
+/**
+ * A store that tallies the read transactions opened against it — the cost
+ * batching is there to remove, and the one an in-memory store still charges
+ * for at the same rate IndexedDB does.
+ */
+function countingReads(inner: KVStore): KVStore & { reads: number } {
+	const store = {
+		reads: 0,
+		read: (): Promise<KVRead> => {
+			store.reads++;
+			return inner.read();
+		},
+		write: () => inner.write(),
+		close: () => inner.close(),
+	};
+	return store;
+}
 
 describe('include relation options', () => {
 	it('narrows, orders and pages a reverse relation', async () => {

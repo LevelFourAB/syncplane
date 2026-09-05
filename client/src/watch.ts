@@ -534,10 +534,11 @@ type ScopeDelta =
 
 /**
  * Past this many touched rows, AND this fraction of the scope's last known
- * size, one prefix scan beats the point reads: each touched key costs two
- * `tx.get`s (readMergedRowWithVersion), while a scan amortizes the cursor over
- * the whole entity. The absolute floor keeps a small commit on the incremental
- * path even when the entity itself is tiny.
+ * size, one prefix scan beats the point reads: each touched key costs an
+ * overlay and a confirmed record in the getMany readMergedRowsWithVersion
+ * issues, while a scan amortizes the cursor over the whole entity. The absolute
+ * floor keeps a small commit on the incremental path even when the entity
+ * itself is tiny.
  *
  * A scope no scan has ever visited — one an index has served throughout — has
  * no size to compare against and stays on the point reads, which is the right
