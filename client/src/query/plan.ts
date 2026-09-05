@@ -178,10 +178,14 @@ export interface PlannableIndex {
 }
 
 /**
- * Bounds the fan-out of an `in` over a leading component. Past it the probes
- * cost more than the scan they replace, and the plan is declined.
+ * The largest number of index probes a plan may issue. An `in` over a leading
+ * component costs one probe per value and a union plan one set of ranges per
+ * branch; planQuery declines a predicate that would fan out past this.
+ *
+ * A membership test wider than this is still plannable in slices of at most
+ * this many values.
  */
-const MAX_INDEX_PROBES = 64;
+export const MAX_INDEX_PROBES = 64;
 
 /**
  * The term this component is restricted to, or -1 for no restriction. Only a

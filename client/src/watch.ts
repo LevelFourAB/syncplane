@@ -32,6 +32,7 @@ import {
 	diffRelKeys,
 	evalCond,
 	type Group,
+	MAX_INDEX_PROBES,
 	type RelCond,
 	type RelKeys,
 	type RelKeysDelta,
@@ -1783,9 +1784,13 @@ export class WatcherHub {
 	 * held. Under a negation both implications reverse and this would miss rows,
 	 * which is why such a query declines to the re-derivation.
 	 *
-	 * It declines rather than scans. A scan of the base entity is what the
-	 * re-derivation already does, and doing it here would be the same cost with
-	 * a splice script on top.
+	 * A move of any size is examined: the entrants are queried in batches of at
+	 * most MAX_INDEX_PROBES keys, so the width of the move does not by itself
+	 * decide the path. It declines when a batch has no index plan, when the
+	 * query or the reference shape puts it outside the assumptions above, or
+	 * when the watcher spans every workspace. It declines rather than scans — a
+	 * scan of the base entity is what the re-derivation already does, and doing
+	 * it here would be the same cost with a splice script on top.
 	 */
 	private async relReached(
 		tx: KVRead,
@@ -1843,37 +1848,49 @@ export class WatcherHub {
 				if (entered === undefined || entered.length === 0) continue;
 				const base = watcher.predicates?.get(ws) ?? watcher.query?.where;
 				if (base === undefined) return undefined;
-				const replacements = new Map<RelCond, Cond>();
-				for (const other of rel.nodes) {
-					const keys = other === node
-						? entered
-						: [ ...(rel.keys.get(other)?.get(ws)?.values() ?? []) ];
-					replacements.set(other.cond, relReplacement(other, keys));
-				}
-				const found = await queryByIndex(
-					tx,
-					this.registry,
-					def,
-					watcher.schema,
-					indexes(watcher.entity),
-					{ where: rewriteRels(base, replacements), total: false },
-					ws,
-				);
-				if (found === undefined) return undefined;
-				for (const entry of found.rows as IndexedRow<unknown>[]) {
-					const id = rowId(entry.row.workspaceId, entry.row.key);
-					const prev = scoped.rows.get(id);
-					const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
-							&& prev.row.version === entry.row.version
-						? prev
-						: {
-							id,
-							suffix: suffixOf(watcher, entry.row.workspaceId, entry.row.key),
-							bytes: entry.bytes,
-							row: entry.row as Row<unknown>,
-						};
-					scoped.rows.set(id, row);
-					out.set(id, row);
+				// The entrants are split into batches the planner will still probe
+				// for: an `in` wider than MAX_INDEX_PROBES has no plan, and one
+				// query per batch is what keeps a wide move off the scan. The
+				// batches partition the entrants, and the query carries only a
+				// where — no ordering, no limit, no offset — so their union is
+				// exactly what the single query would have returned. A paged query
+				// could not be split this way.
+				for (let at = 0; at < entered.length; at += MAX_INDEX_PROBES) {
+					const batch = entered.slice(at, at + MAX_INDEX_PROBES);
+					const replacements = new Map<RelCond, Cond>();
+					for (const other of rel.nodes) {
+						const keys = other === node
+							? batch
+							: [ ...(rel.keys.get(other)?.get(ws)?.values() ?? []) ];
+						replacements.set(other.cond, relReplacement(other, keys));
+					}
+					const found = await queryByIndex(
+						tx,
+						this.registry,
+						def,
+						watcher.schema,
+						indexes(watcher.entity),
+						{ where: rewriteRels(base, replacements), total: false },
+						ws,
+					);
+					// A batch can still decline — the other nodes' memberships are
+					// rewritten into the same query and may themselves be wide.
+					if (found === undefined) return undefined;
+					for (const entry of found.rows as IndexedRow<unknown>[]) {
+						const id = rowId(entry.row.workspaceId, entry.row.key);
+						const prev = scoped.rows.get(id);
+						const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
+								&& prev.row.version === entry.row.version
+							? prev
+							: {
+								id,
+								suffix: suffixOf(watcher, entry.row.workspaceId, entry.row.key),
+								bytes: entry.bytes,
+								row: entry.row as Row<unknown>,
+							};
+						scoped.rows.set(id, row);
+						out.set(id, row);
+					}
 				}
 			}
 		}

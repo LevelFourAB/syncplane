@@ -37,7 +37,7 @@ export { compareGroupValues, GroupBuckets, groupValuesOf } from './group.js';
 export type { IndexComponent, IndexKind } from './indexkey.js';
 export { compileIndexComponent, IndexEncoder, specHash, upperBound } from './indexkey.js';
 export type { GroupPlan, IndexRange, PlannableIndex, QueryPlan } from './plan.js';
-export { planGroup, planGroupRows, planQuery } from './plan.js';
+export { MAX_INDEX_PROBES, planGroup, planGroupRows, planQuery } from './plan.js';
 export {
 	and,
 	compileByWorkspace,

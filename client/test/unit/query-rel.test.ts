@@ -26,7 +26,7 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import type { Cond } from '../../src/query/ast.js';
-import { and, collectRels, computeRelKeys, not } from '../../src/query/index.js';
+import { and, collectRels, computeRelKeys, MAX_INDEX_PROBES, not } from '../../src/query/index.js';
 import { compileQuery, rootRef } from '../../src/query/proxy.js';
 import type { MsgRef, QueryRef } from '../../src/query/types.js';
 import { prepareQuery } from '../../src/query/wire.js';
@@ -592,7 +592,15 @@ const TICKETS = [
 const OWNED_BY_CORE = { where: (t: QueryRef<Ticket>) => t.owner.matches((a) => a.team.eq('core')) };
 
 /** Plants both entities as CONFIRMED state in each workspace — what an index covers. */
-async function seedRel(kv: KVStore, indexes: IndexCache, workspaces: string[]): Promise<void> {
+async function seedRel(
+	kv: KVStore,
+	indexes: IndexCache,
+	workspaces: string[],
+	rows: { accounts: readonly { id: string }[]; tickets: readonly { id: string }[] } = {
+		accounts: ACCOUNTS,
+		tickets: TICKETS,
+	},
+): Promise<void> {
 	const tx = await kv.write();
 	const changes = (
 		entityName: string,
@@ -614,8 +622,8 @@ async function seedRel(kv: KVStore, indexes: IndexCache, workspaces: string[]): 
 			relRegistry,
 			ws,
 			[
-				...changes('account', AccountSchema, ACCOUNTS),
-				...changes('ticket', TicketSchema, TICKETS),
+				...changes('account', AccountSchema, rows.accounts),
+				...changes('ticket', TicketSchema, rows.tickets),
 			],
 			new TouchSet(),
 			indexes,
@@ -848,6 +856,68 @@ describe('matches queries over an indexed target', () => {
 			await flush();
 			expect(seen.at(-1)).toEqual([ 't1', 't3' ]);
 			expect(deltas.at(-1)).toBe('splice');
+			expect(counting.scans).toBe(0);
+			handle.close();
+		} finally {
+			await client.close();
+		}
+	});
+
+	it('splices a membership move wider than one probe batch', async () => {
+		// The planner caps the fan-out of an `in`, so a move of more targets than
+		// MAX_INDEX_PROBES only stays off the scan path if the entrants are
+		// examined a batch at a time.
+		const moving = MAX_INDEX_PROBES * 2 + 1;
+		const held = 10;
+		const accounts = Array.from({ length: held + moving }, (_, i) => ({
+			id: `a${String(i).padStart(3, '0')}`,
+			team: i < held ? 'core' : 'ops',
+		}));
+		const tickets = accounts.map((a) => ({
+			id: `t${a.id.slice(1)}`,
+			title: a.id,
+			owner: { id: a.id },
+		}));
+		const ticketIds = tickets.map((t) => t.id);
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(relRegistry);
+		await seedRel(kv, indexes, [ 'ws1' ], { accounts, tickets });
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), relRegistry, indexes, 'ws1');
+		const counting = countingReads(kv, confirmedPrefix('ticket'));
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: counting,
+			entities: [ AccountSchema, TicketSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		}) as unknown as SyncClient<never>;
+		try {
+			const seen: string[][] = [];
+			const handle = client.watchQuery(
+				TicketSchema,
+				OWNED_BY_CORE as never,
+				(rows: readonly { key: string }[]) => seen.push(keysOf(rows)),
+			);
+			await flush();
+			expect(seen.at(-1)).toEqual(ticketIds.slice(0, held));
+			const moveTeam = (team: string) =>
+				client.transact(async (tx) => {
+					for (const a of accounts.slice(held)) {
+						await tx.mutate.put(AccountSchema, { ...a, team } as never);
+					}
+				});
+			counting.scans = 0;
+			await moveTeam('core');
+			await flush();
+			expect(seen.at(-1)).toEqual(ticketIds);
+			expect(counting.scans).toBe(0);
+			// The mirror: the same width leaving, which is read off the rows already
+			// held and so never asks the index anything.
+			counting.scans = 0;
+			await moveTeam('ops');
+			await flush();
+			expect(seen.at(-1)).toEqual(ticketIds.slice(0, held));
 			expect(counting.scans).toBe(0);
 			handle.close();
 		} finally {

@@ -192,7 +192,10 @@ When evaluating affected rows, the engine inspects only the reach of the change:
 
 - Rows that stopped matching are identified from the existing watch results.
 - Rows that started matching are evaluated through the watch query using the
-  new entrant keys.
+  new entrant keys. A planner bounds how many keys one index probe set may
+  carry, so a wide move is evaluated as several queries over slices of the
+  entrant keys. The number of targets that moved does not decide whether the
+  targeted evaluation applies.
 
 This targeted evaluation requires two conditions:
 
