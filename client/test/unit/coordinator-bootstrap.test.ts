@@ -3,7 +3,7 @@ import { createRouterTransport, type Transport } from '@connectrpc/connect';
 import { describe, expect, it } from 'vitest';
 
 import { CoverageResolver } from '../../src/coverage.js';
-import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
+import { type Todo, TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { BootstrapResponseSchema, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
@@ -11,6 +11,7 @@ import {
 	confirmedKey,
 	confirmedWsPrefix,
 	metaBootstrapGen,
+	metaBootstrapResume,
 	metaCursor,
 	metaIndexBuilt,
 	metaLastMutationId,
@@ -25,6 +26,9 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { enqueuePending } from '../../src/optimistic/queue.js';
 import { applyMutationLocally } from '../../src/optimistic/rebase.js';
+import { queryByIndex } from '../../src/query/execute.js';
+import { compileQuery } from '../../src/query/index.js';
+import { prepareQuery } from '../../src/query/wire.js';
 import { scanMergedRows } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
@@ -138,6 +142,60 @@ function gatedTransport(
 }
 
 /**
+ * A server that honours a resume request: Begin says `resumed`, so what follows
+ * continues the snapshot the client already holds part of rather than replacing
+ * it. Parks before End like gatedTransport.
+ */
+function resumingTransport(
+	rows: ReturnType<typeof serverRowBody>[],
+): { transport: Transport; gates: Gates } {
+	let signalParked!: () => void;
+	const parked = new Promise<void>((r) => (signalParked = r));
+	let releaseEnd!: () => void;
+	const endGate = new Promise<void>((r) => (releaseEnd = r));
+
+	const transport = createRouterTransport(({ service }) => {
+		service(SyncService, {
+			async *bootstrap() {
+				yield create(BootstrapResponseSchema, {
+					body: {
+						case: 'begin',
+						value: {
+							cursor: new Uint8Array([ 9 ]),
+							lastAckedMutationId: 0n,
+							seq: 7n,
+							resumed: true,
+						},
+					},
+				});
+				yield create(BootstrapResponseSchema, { body: { case: 'chunk', value: { rows } } });
+				signalParked();
+				await endGate;
+				yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+			},
+			push(req) {
+				return pushResults(req, []);
+			},
+			pull() {
+				return {
+					patch: { changes: [], dropEntities: [] },
+					nextCursor: new Uint8Array([ 9 ]),
+					lastAckedMutationId: 0n,
+					reset: false,
+					hasMore: false,
+					seq: 7n,
+				};
+			},
+			query() {
+				return { rows: [] };
+			},
+		});
+	});
+
+	return { transport, gates: { parked, releaseEnd } };
+}
+
+/**
  * Two chunks with the park BETWEEN them — the window in which another tab can
  * take the workspace away from a bootstrap that is already writing rows.
  */
@@ -192,6 +250,28 @@ function indexedRegistry(): EntityRegistry {
 
 function indexedTodo(): IndexCache {
 	return new IndexCache(indexedRegistry());
+}
+
+/**
+ * Whether the planner answers a title query from the index rather than
+ * declining to a scan — the reader-visible half of "the markers are claimed".
+ */
+async function servedByIndex(kv: MemoryKVStore, indexes: IndexCache): Promise<boolean> {
+	const tx = await kv.read();
+	try {
+		const page = await queryByIndex(
+			tx,
+			registry,
+			registry.get('todo')!,
+			TodoSchema,
+			indexes.for('todo'),
+			prepareQuery(TodoSchema, compileQuery<Todo>({ where: (t) => t.title.eq('a') })),
+			WS,
+		);
+		return page !== undefined;
+	} finally {
+		tx.release();
+	}
 }
 
 /**
@@ -308,25 +388,27 @@ describe('streaming bootstrap', () => {
 		await coord.stop();
 	});
 
-	it('leaves the indexes unbuilt and asks for a rebuild', async () => {
-		// The snapshot is promoted WITHOUT index positions — computing them means
-		// decoding every row of the snapshot inside the one transaction the swap
-		// has to commit before anything is readable. So the swap must leave the
+	it('leaves a re-bootstrap unindexed and asks for a rebuild', async () => {
+		// The staged path promotes its snapshot WITHOUT index positions:
+		// computing them means decoding every row inside the one transaction the
+		// swap has to commit before anything is readable. So the swap leaves the
 		// workspace in the state a query already handles (no positions, no marker
-		// claiming there are) and hand the rebuild to someone who can do it off
+		// claiming there are) and hands the rebuild to someone who can do it off
 		// the critical path. Unindexed rows under a surviving marker would be the
 		// one combination that silently returns wrong answers.
 		const kv = new MemoryKVStore();
 		const kvMutex = createKvMutex('bootstrap-test-3');
-		const { transport, gates } = gatedTransport([ serverRowBody('t1', 'a', 1n) ]);
+		const { transport, gates } = gatedTransport([ serverRowBody('t1', 'a', 1n) ], true);
 		const indexes = indexedTodo();
 		const marker = metaIndexBuilt(WS, 'todo', 'by_title', indexes.for('todo')[0]!.specHash);
 		const stale: string[] = [];
 		const coord = newCoordinator(kv, kvMutex, transport, indexes, (ws) => stale.push(ws));
 
-		// The state an earlier build left behind. It described rows this swap is
-		// about to replace, so keeping it would be a lie.
+		// A cursor is what makes this a re-bootstrap rather than a cold one, and
+		// the marker is the state an earlier build left behind. It described rows
+		// this swap is about to replace, so keeping it would be a lie.
 		const seed = await kv.write();
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
 		await seed.put(marker, true);
 		await seed.commit();
 
@@ -351,7 +433,7 @@ describe('streaming bootstrap', () => {
 		await coord.stop();
 	});
 
-	it('builds the indexes the swap left unbuilt', async () => {
+	it('builds the indexes a re-bootstrap left unbuilt', async () => {
 		// The other half of the contract above: once the build pass runs, the
 		// entity is indexed and the marker is back. Together these two say the
 		// deferral costs a delay and not the index.
@@ -360,10 +442,14 @@ describe('streaming bootstrap', () => {
 		const { transport, gates } = gatedTransport([
 			serverRowBody('t1', 'b', 1n),
 			serverRowBody('t2', 'a', 1n),
-		]);
+		], true);
 		const indexes = indexedTodo();
 		const marker = metaIndexBuilt(WS, 'todo', 'by_title', indexes.for('todo')[0]!.specHash);
 		const coord = newCoordinator(kv, kvMutex, transport, indexes);
+
+		const seed = await kv.write();
+		await seed.put(metaCursor(WS), new Uint8Array([ 1 ]));
+		await seed.commit();
 
 		const syncP = coord.syncNow();
 		await gates.parked;
@@ -553,6 +639,120 @@ describe('cold bootstrap', () => {
 			tx.release();
 		}
 		expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2' ]);
+
+		await coord.stop();
+	});
+
+	it('writes the snapshot indexed and claims the markers at the swap', async () => {
+		// The cold path already decodes nothing and writes each chunk outside the
+		// store mutex, so it can afford the decode that a swap transaction cannot:
+		// every row lands carrying its positions, and the install claims the
+		// markers over rows it wrote itself. A query issued right after the swap
+		// is therefore served by the index, with no build pass in between.
+		const kv = new MemoryKVStore();
+		const kvMutex = createKvMutex('cold-test-5');
+		const { transport, gates } = gatedTransport([
+			serverRowBody('t1', 'b', 1n),
+			serverRowBody('t2', 'a', 2n),
+		]);
+		const indexes = indexedTodo();
+		const marker = metaIndexBuilt(WS, 'todo', 'by_title', indexes.for('todo')[0]!.specHash);
+		const stale: string[] = [];
+		const coord = newCoordinator(kv, kvMutex, transport, indexes, (ws) => stale.push(ws));
+
+		const syncP = coord.syncNow();
+		await gates.parked;
+
+		// Mid-stream the rows are indexed but the marker is not there yet: the
+		// snapshot is still arriving, so nothing may claim to cover it.
+		await until(async () => (await keysOf(kv)).length === 2, 'the chunk to land in c/');
+		const mid = await kv.read();
+		try {
+			expect(await indexed(mid)).toEqual([ 't2', 't1' ]);
+			expect(await mid.has(marker)).toBe(false);
+		} finally {
+			mid.release();
+		}
+
+		gates.releaseEnd();
+		await syncP;
+
+		const tx = await kv.read();
+		try {
+			expect(await tx.has(marker)).toBe(true);
+			// Index order is the indexed value's, not the row key's: 'a' before
+			// 'b' means the positions really encode the title.
+			expect(await indexed(tx)).toEqual([ 't2', 't1' ]);
+			expect(await tx.get(metaSnapshotGen(WS))).toBe(1);
+		} finally {
+			tx.release();
+		}
+		expect(await servedByIndex(kv, indexes)).toBe(true);
+		// The build pass still runs. It walks nothing and claims nothing new, and
+		// it is what emits the `indexing` event readers wait on.
+		expect(stale).toEqual([ WS ]);
+		expect(await buildIndexes(kv, (fn) => kvMutex.run(fn), indexedRegistry(), indexes, WS))
+			.toEqual({ rows: 0, ready: true });
+
+		await coord.stop();
+	});
+
+	it('leaves the markers unclaimed when it resumes an earlier attempt', async () => {
+		// An adopted snapshot's earlier rows were written by an attempt this one
+		// cannot vouch for, so the install has no basis to claim coverage of them.
+		// It leaves the markers alone and lets the build pass walk instead.
+		const kv = new MemoryKVStore();
+		const kvMutex = createKvMutex('cold-test-6');
+		const indexes = indexedTodo();
+		const marker = metaIndexBuilt(WS, 'todo', 'by_title', indexes.for('todo')[0]!.specHash);
+		const stale: string[] = [];
+		const { transport, gates } = resumingTransport([ serverRowBody('t2', 'b', 2n) ]);
+		const coord = newCoordinator(kv, kvMutex, transport, indexes, (ws) => stale.push(ws));
+
+		// What the interrupted attempt left: a row in c/ with no positions, and
+		// the resume record naming the generation still standing on the workspace.
+		const seed = await kv.write();
+		await seed.put(
+			confirmedKey('todo', WS, 't1'),
+			{ v: toBinary(TodoSchema, create(TodoSchema, { id: 't1', title: 'a' })), ver: '1' },
+		);
+		await seed.put(metaBootstrapResume(WS), {
+			gen: 0,
+			snapshotGen: 0,
+			direct: true,
+			cursor: new Uint8Array([ 9 ]),
+			token: new Uint8Array([ 4 ]),
+		});
+		await seed.commit();
+
+		const syncP = coord.syncNow();
+		await gates.parked;
+		gates.releaseEnd();
+		await syncP;
+
+		const tx = await kv.read();
+		try {
+			// The adopted row survived, which is what adoption is for — and it is
+			// exactly the row no marker may claim to cover.
+			expect(await tx.has(confirmedKey('todo', WS, 't1'))).toBe(true);
+			expect(await tx.has(marker)).toBe(false);
+			expect(await indexed(tx)).toEqual([ 't2' ]);
+		} finally {
+			tx.release();
+		}
+		expect(stale).toEqual([ WS ]);
+
+		// The build pass is what finishes the job, and only then does a query take
+		// the index.
+		expect(await servedByIndex(kv, indexes)).toBe(false);
+		await buildIndexes(kv, (fn) => kvMutex.run(fn), indexedRegistry(), indexes, WS);
+		expect(await servedByIndex(kv, indexes)).toBe(true);
+		const after = await kv.read();
+		try {
+			expect(await indexed(after)).toEqual([ 't1', 't2' ]);
+		} finally {
+			after.release();
+		}
 
 		await coord.stop();
 	});

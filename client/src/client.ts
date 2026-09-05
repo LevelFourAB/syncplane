@@ -2398,8 +2398,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * failure is reported and dropped for the same reason — an unbuilt index is
 	 * a performance state, not a broken one.
 	 *
-	 * Runs for every held workspace at start(), and for one workspace whenever a
-	 * bootstrap swap leaves its indexes unbuilt.
+	 * Runs for every held workspace at start(), and for one workspace after every
+	 * bootstrap swap — including one that installed its rows indexed and claimed
+	 * the markers itself, where the pass walks nothing and reports the workspace
+	 * as ready.
 	 */
 	private startIndexBuild(workspaceId?: string): void {
 		if (this.indexes.empty) return;
@@ -2415,11 +2417,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 *
 	 * A build in flight is not cancelled and restarted — it may be most of the
 	 * way through a large entity — but it also cannot be trusted to finish the
-	 * job, since the swap that asked for a rebuild replaced the rows it was
-	 * walking. So the request is remembered and the walk simply repeated; the
-	 * first pass abandons its markers on the generation check (see
-	 * index-build.ts) and the repeat claims them, while an unchanged workspace
-	 * costs one key lookup per index.
+	 * job, since the bootstrap that asked for the rebuild replaced the rows it
+	 * was walking. So the request is remembered and the walk repeated; the first
+	 * pass abandons its markers on the generation check (see index-build.ts) and
+	 * the repeat claims them, while a workspace whose markers already stand costs
+	 * one key lookup per index.
 	 */
 	private buildWorkspaceIndexes(workspaceId: string): void {
 		const inflight = this.indexBuilds.get(workspaceId);

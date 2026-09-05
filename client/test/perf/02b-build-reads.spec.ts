@@ -4,22 +4,22 @@ import { BenchTab, freshAccount, tiers } from './fixtures.js';
 import { report } from './report.js';
 
 /**
- * What reads cost while the background index build is still running.
+ * What reads cost while the cold bootstrap is still streaming.
  *
- * 02-reads deliberately waits the build out, so the state it measures is the
- * one an app reaches eventually. This spec measures the state a user actually
- * sees on first launch: the bootstrap has installed its snapshot unindexed,
- * every indexed query falls back to a scan, and the build competes with those
- * reads for the store. Both sides of that contention are reported — what the
- * scan fallback costs a read, and what concurrent reads cost the build
- * (against the uncontended `index build` number 02 reports for the same tier).
+ * 02-reads deliberately waits the snapshot out, so the state it measures is the
+ * one an app reaches. This spec measures the state a user actually sees on first
+ * launch: rows are arriving into confirmed state chunk by chunk, no index-built
+ * marker exists yet, and every indexed query falls back to a scan over whatever
+ * has landed so far. Both sides of that are reported — what the scan fallback
+ * costs a read against a store that is filling, and how long it takes before a
+ * read is answered by an index at all.
  *
  * Read-only, like every spec numbered below 05.
  */
 
 const LIMIT = 50;
 
-test.describe('reads during index build', () => {
+test.describe('reads during bootstrap', () => {
 	for (const t of tiers()) {
 		test(`full store — tier ${t.name} (${t.total} rows)`, async ({ context }) => {
 			test.skip(t.name === 'xl', 'a full local store at 500k rows is not a state 02 prices either');
@@ -29,39 +29,53 @@ test.describe('reads during index build', () => {
 				scope: 'full',
 			});
 			try {
-				await tab.start();
-				// Hammer the board shape until the build claims its indexes. Every
-				// read before that prices the scan fallback plus whatever lock
-				// contention the build inflicts; the loop stops the moment a read
-				// was answered by an index, so nothing indexed pollutes the
-				// during-build numbers.
+				// Not awaited: the reads below have to overlap the snapshot, which is
+				// the whole scenario. `settled` is what keeps the loop from spinning
+				// forever on a bootstrap that failed — the install is what claims the
+				// markers, so once start() is over one more read decides it.
+				let settled = false;
+				const starting = tab.start().finally(() => {
+					settled = true;
+				});
+				// Hammer the board shape until an index answers one. Every read before
+				// that prices the scan fallback plus whatever lock contention the
+				// incoming chunks inflict; the loop stops the moment a read was
+				// answered by an index, so nothing indexed pollutes the during-
+				// bootstrap numbers.
 				const projectId = 'project-00000000';
 				const scanMs: number[] = [];
 				let firstIndexedMs: number | undefined;
 				for (;;) {
+					const done = settled;
 					const read = await tab.read({ kind: 'board', projectId, limit: LIMIT });
 					if (read.path !== undefined && !read.path.startsWith('scan:')) {
 						firstIndexedMs = read.ms;
 						break;
 					}
 					scanMs.push(read.ms);
+					if (done) break;
 				}
+				await starting;
 				const build = await tab.waitForIndexes();
 				expect(firstIndexedMs).toBeDefined();
 				scanMs.sort((a, b) => a - b);
 				const at = (q: number) =>
 					scanMs[Math.min(scanMs.length - 1, Math.floor(q * scanMs.length))] ?? 0;
 				report({
-					scenario: 'reads during build',
+					scenario: 'reads during bootstrap',
 					tier: t.name,
 					scope: 'full',
 					metrics: {
 						scanReads: scanMs.length,
 						scanP50Ms: at(0.5),
 						scanMaxMs: at(1),
+						// The first read an index answered, which on the cold path is the
+						// first one issued after the install: the markers are claimed by
+						// the transaction that writes the cursor.
 						firstIndexedMs: firstIndexedMs ?? 0,
-						// The build under read contention; 02's `index build` row for
-						// the same tier is the uncontended baseline.
+						// What the build pass then found to do. Zero rows is the cold
+						// path having already indexed them; 02's `index build` row for
+						// the same tier is the same number without the read contention.
 						buildMs: build.buildMs,
 						rows: build.rows,
 					},

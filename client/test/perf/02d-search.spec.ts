@@ -44,9 +44,9 @@ import { report } from './report.js';
  * ten thousand ranked rows.
  *
  * Read-only, like every spec numbered below 05. Reads are taken after the
- * background index build, which the spec waits for and reports: until it
- * finishes every search scans, which is a real state but a different
- * measurement. The `path` column is the receipt.
+ * background index build pass, which the spec waits for and reports: a search
+ * issued before it reports may still be scanning, which is a real state but a
+ * different measurement. The `path` column is the receipt.
  */
 
 const LIMIT = 50;

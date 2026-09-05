@@ -448,7 +448,7 @@ describe('client index maintenance', () => {
 			const legacy = `meta/ws/${ws}/index/widget/by_label@${idx.specHash}`;
 			expect(metaIndexBuilt(ws, 'widget', 'by_label', idx.specHash)).not.toBe(legacy);
 
-			// Rows installed unindexed, as a bootstrap swap installs them.
+			// Rows installed unindexed, as a staged bootstrap swap installs them.
 			await apply(kv, undefined, [ valueChange('w1', 'a', 1n), valueChange('w2', 'b', 2n) ]);
 			const seed = await kv.write();
 			await seed.put(legacy, true);
@@ -571,10 +571,11 @@ describe('client index maintenance', () => {
 				await buildStoppingAfter(1);
 				expect((await cursor())?.k).toBe(keyAt(BUILD_BATCH - 1));
 
-				// A bootstrap swap installs a new snapshot: the generation moves and
-				// the rows the cursor counted as done are replaced — unindexed, as a
-				// swap writes them. A resume that trusted the stale position would
-				// skip exactly those rows and then claim the index covers them.
+				// A staged bootstrap swap installs a new snapshot: the generation
+				// moves and the rows the cursor counted as done are replaced —
+				// unindexed, as that swap writes them. A resume that trusted the
+				// stale position would skip exactly those rows and then claim the
+				// index covers them.
 				const swap = await kv.write();
 				await swap.put(metaSnapshotGen(ws), 7);
 				await swap.commit();

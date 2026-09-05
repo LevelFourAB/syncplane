@@ -596,11 +596,12 @@ export async function applyServerChanges(
  * stageServerChanges and applyBootstrapRows for which is used when.
  *
  * A snapshot carries only value rows; a stray tombstone is tolerated as an
- * absence. Nothing here decodes a row, so a chunk costs one put per row and no
- * schema work at all — and the rows it writes therefore carry NO index
- * positions, since computing them means decoding. Both destinations want that
- * for their own reason (see promoteStaged and applyBootstrapRows), and
- * Coordinator.doBootstrap is what asks for the build that fills them in.
+ * absence.
+ *
+ * `index` decides whether the rows carry their secondary-index positions, which
+ * costs a decode per row of an indexed entity; without it a chunk costs one put
+ * per row and no schema work at all. The two destinations differ here — see
+ * promoteStaged and applyBootstrapRows.
  *
  * A bootstrap defines the client's state rather than advancing it, so there is
  * nothing for delta state to be relative to; a server that sent some is
@@ -615,6 +616,7 @@ async function writeSnapshotRows(
 	changes: RowChange[],
 	keyFor: (entity: string, key: string) => string,
 	onEntity?: (entity: string) => void,
+	index?: { indexes: IndexCache; workspaceId: string },
 ): Promise<void> {
 	const syncable = await syncableEntities(tx, registry);
 	for (const change of changes) {
@@ -631,10 +633,21 @@ async function writeSnapshotRows(
 		if (change.body.case === 'tombstone') {
 			await tx.del(k);
 		} else if (change.body.case === 'value') {
-			const record: ConfirmedRecord = {
-				v: detached(change.body.value),
-				ver: change.version.toString(),
-			};
+			const value = detached(change.body.value);
+			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+			const compiled = index?.indexes.for(change.entity) ?? [];
+			if (compiled.length > 0) {
+				const def = registry.get(change.entity)!;
+				record = indexedRecord(
+					record,
+					compiled,
+					change.entity,
+					index!.workspaceId,
+					change.key,
+					fromBinary(def.schema, value),
+					def.schema,
+				);
+			}
 			await tx.put(k, record);
 		}
 		onEntity?.(change.entity);
@@ -650,6 +663,10 @@ async function writeSnapshotRows(
  * This is the RE-bootstrap path, where the workspace already holds a snapshot
  * that must stay whole until the new one is complete. A cold bootstrap has no
  * such state and writes through applyBootstrapRows instead.
+ *
+ * Staged rows carry no index positions. The store's index spans every record it
+ * holds, so a `b/` row with positions would be answering queries out of a
+ * snapshot that is not installed yet.
  */
 export async function stageServerChanges(
 	tx: KVWrite,
@@ -679,6 +696,14 @@ export async function stageServerChanges(
  * Coordinator.doBootstrap for the conditions and for how two tabs are kept from
  * both writing here.
  *
+ * Rows of an entity `indexes` compiles an index for are written carrying their
+ * positions, which costs a decode per row and is what lets the install claim the
+ * index-built markers instead of leaving the workspace to a background walk (see
+ * Coordinator.doBootstrap and index-build.ts). Chunks commit one transaction
+ * each and outside the store mutex, so the decode is off the swap's critical
+ * path. Omitting `indexes`, or an entity that compiles none, keeps the row at one
+ * put and no schema work.
+ *
  * Reports whole entities rather than rows: a snapshot replaces the entity
  * outright, so a watcher has to re-scan it either way, and a keyed TouchSet
  * would carry one token per bootstrapped row for nothing.
@@ -689,6 +714,7 @@ export async function applyBootstrapRows(
 	workspaceId: string,
 	changes: RowChange[],
 	touched: TouchSet,
+	indexes?: IndexCache,
 ): Promise<void> {
 	await writeSnapshotRows(
 		tx,
@@ -696,6 +722,7 @@ export async function applyBootstrapRows(
 		changes,
 		(entity, key) => confirmedKey(entity, workspaceId, key),
 		(entity) => touched.entity(workspaceId, entity),
+		indexes === undefined ? undefined : { indexes, workspaceId },
 	);
 }
 
@@ -707,16 +734,12 @@ export async function applyBootstrapRows(
  *
  * The staged record moves across VERBATIM, which is what keeps promotion at one
  * put and one delete per row with no schema work at all — and it is why the
- * promoted rows carry no index positions: a staged row has none (writeSnapshotRows
- * never decoded it), and giving it some here would mean decoding every row of
- * the snapshot inside the one transaction the swap must commit before anything
- * is readable. The caller leaves the indexes unbuilt instead — the state a query
- * already handles by scanning — and asks for a background build. See
- * Coordinator.doBootstrap and index-build.ts.
- *
- * A staged row must not carry positions for a second reason: the store's index
- * spans every record it holds, so a `b/` row with an `ix` field would be
- * answering queries out of a snapshot that is not installed yet.
+ * promoted rows carry no index positions: a staged row has none, and giving it
+ * some here would mean decoding every row of the snapshot inside the one
+ * transaction the swap must commit before anything is readable. The caller
+ * leaves the indexes unbuilt instead — the state a query already handles by
+ * scanning — and asks for a background build. See Coordinator.doBootstrap and
+ * index-build.ts.
  */
 export async function promoteStaged(
 	tx: KVWrite,

@@ -552,10 +552,10 @@ export interface ConfirmedRecord {
 	 * together, so it cannot be renamed here alone.
 	 *
 	 * Absent means the row occupies none, which is a legitimate state rather
-	 * than a broken one: a bootstrap installs rows unindexed and the build pass
-	 * fills them in, and an entity that declares no index never has any. It also
-	 * means a writer that rewrites a row without recomputing this UNINDEXES it —
-	 * there is no separate keyspace left to hold a stale entry.
+	 * than a broken one: an entity that declares no index never has any, and a
+	 * staged bootstrap swap promotes rows without them for the build pass to fill
+	 * in. It also means a writer that rewrites a row without recomputing this
+	 * UNINDEXES it — there is no separate keyspace left to hold a stale entry.
 	 *
 	 * A staged (`b/`) record must never carry it. The store's index spans every
 	 * record it holds, so positions on a staged row would be answering queries

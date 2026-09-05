@@ -25,12 +25,13 @@ import { report } from './report.js';
  *     separates decode cost that is the row's shape from decode cost that is the
  *     row's size.
  *
- * Reads are taken AFTER the background index build has finished (which the
- * spec waits for, and reports as its own scenario): a bootstrap promotes its
- * snapshot unindexed, so until the build claims the markers every one of these
- * queries scans — a real state, but a different measurement. The `path` column
- * is the receipt: it names the index that served each read, or `scan:<reason>`
- * when one did not.
+ * Reads are taken AFTER the background index build pass has reported (which the
+ * spec waits for, and reports as its own scenario). A cold bootstrap installs
+ * its snapshot indexed, so the pass walks nothing and the wait is short — but
+ * until it reports, a read here could still be racing the swap that claims the
+ * markers, which is a different measurement. The `path` column is the receipt:
+ * it names the index that served each read, or `scan:<reason>` when one did
+ * not.
  *
  * Read-only, like every spec numbered below 05.
  */
@@ -40,9 +41,9 @@ const LIMIT = 50;
 /**
  * One cell naming how the store answered: the serving index, or `scan:<reason>`
  * for a fallback (see ReadResult.path). The cold and warm reads can legitimately
- * differ — the background index build claims an index between them — and a cell
- * like `scan:not-built>by_project_updated` is that moment caught in the act:
- * the cold number priced the fallback, the warm one the index.
+ * differ — an index build claims an index between them — and a cell like
+ * `scan:not-built>by_project_updated` is that moment caught in the act: the cold
+ * number priced the fallback, the warm one the index.
  */
 function pathLabel(cold?: string, warm?: string): string {
 	if (cold === warm) return warm ?? '';

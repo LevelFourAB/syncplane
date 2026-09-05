@@ -242,10 +242,10 @@ export interface ResequenceEvent extends EventBase {
  * Fires on the tab that ran the build, once per build. A build overtaken by a
  * bootstrap — which replaces the rows being indexed — starts over and still
  * reports once, at the end. A build that found everything already indexed
- * reports `rows: 0`, the normal shape at every start() after the first, so
- * "indexes are ready" is the first event per workspace rather than the first
- * with rows. A client that closes mid-build, or has never synced the
- * workspace, reports nothing.
+ * reports `rows: 0`, which is the normal shape at every start() after the first
+ * and after a cold bootstrap (whose rows go in indexed), so "indexes are ready"
+ * is the first event per workspace rather than the first with rows. A client
+ * that closes mid-build, or has never synced the workspace, reports nothing.
  */
 export interface IndexBuildEvent extends EventBase {
 	type: 'indexing';

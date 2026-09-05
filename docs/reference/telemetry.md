@@ -383,8 +383,11 @@ any covered workspace's index is still building, the read falls back to a scan
 with `declined: 'not-built'`.
 
 The `indexing` event fires once per workspace when all declared indexes finish
-building, reporting `rows` indexed and `durationMs`. For query optimization
-guidance, see [Making a query cheap](proto-options.md#secondary-indexes).
+building, reporting `rows` indexed and `durationMs`. A first (cold) bootstrap
+writes its rows already indexed, so its event reports `rows: 0`; a re-bootstrap
+of a workspace that already held a snapshot reports the whole snapshot. For query
+optimization guidance, see
+[Making a query cheap](proto-options.md#secondary-indexes).
 
 On the index path, `candidates` measures visited index positions. `durationMs`
 measures elapsed time from invocation to completion. `waitMs` measures time

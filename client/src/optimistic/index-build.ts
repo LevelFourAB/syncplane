@@ -3,10 +3,12 @@
 // Maintenance (index-maintain.ts) keeps an index correct from the moment it is
 // declared, but only for rows written AFTER that. Everything already in the
 // store has no entries, so a fresh index — or one whose declaration changed —
-// covers part of the entity and is useless until something walks the rest. A
-// bootstrap swap promotes its snapshot unindexed for cost reasons, which makes
-// this pass the only thing that indexes a freshly bootstrapped workspace rather
-// than a backfill for the occasional new declaration.
+// covers part of the entity and is useless until something walks the rest.
+// Two more states arrive here the same way: a staged bootstrap swap promotes
+// its snapshot without positions (a decode per row inside the one transaction
+// that must commit before anything is readable is what it is avoiding), and a
+// cold bootstrap that RESUMED an earlier attempt installs rows it cannot vouch
+// for. Both leave their markers unclaimed and ask for a pass.
 //
 // The `meta/ws/<ws>/index/<entity>/<name>@<hash>~<layout>` marker is what makes
 // that safe: a query uses an index only once its marker exists, and until then
@@ -106,15 +108,17 @@ export async function buildIndexes(
  * Claims every current index of every registered entity as built for one
  * workspace, walking nothing.
  *
- * Only a caller that has just made that claim TRUE may use it, which in
- * practice means a caller that has just emptied the entity: an index over no
- * rows is complete, and the changes that refill it are indexed as they land.
- * Dropping an entity is the one such path (see dropConfirmedEntities), and
- * without this the markers it deleted would never come back.
+ * Only a caller that has just made that claim TRUE may use it. Two do:
  *
- * The bootstrap swap is NOT one, though it used to be. It promotes its snapshot
- * unindexed, so on commit the claim is false for every row it wrote; it asks
- * for a walk instead.
+ * - Dropping an entity (dropConfirmedEntities). An index over no rows is
+ *   complete, and the changes that refill it are indexed as they land; without
+ *   this the markers it deleted would never come back.
+ * - A cold bootstrap's install (Coordinator.doBootstrap), which wrote every c/
+ *   row of the workspace itself and wrote them carrying their positions.
+ *
+ * A staged swap is NOT one — it promotes its snapshot without positions — and
+ * neither is a cold bootstrap that resumed an earlier attempt, whose adopted
+ * rows it did not write. Both ask for a walk instead.
  */
 export async function markIndexesBuilt(
 	tx: KVWrite,
@@ -138,8 +142,8 @@ export async function markIndexesBuilt(
  * A cursor is what makes the rows a snapshot rather than a fragment of one. A
  * workspace without one is either empty or mid-bootstrap — a cold bootstrap
  * writes its rows straight into c/ (Coordinator.doBootstrap) — and neither is
- * something an index can claim coverage of, since rows keep arriving unindexed
- * behind a walk that has already passed their keys.
+ * something an index can claim coverage of, since rows keep arriving behind a
+ * walk that has already passed their keys.
  */
 async function readInstalledSnapshot(
 	kv: KVStore,

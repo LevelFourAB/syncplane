@@ -47,9 +47,11 @@
 // confirmed record without recomputing them UNINDEXES the row rather than
 // leaving a stale entry behind. Two consequences worth stating outright:
 //
-// - A bootstrap installs rows carrying no positions (it does not decode them),
-//   which is why the index-built markers are not claimed at a swap and why the
-//   background build exists (index-build.ts).
+// - A staged bootstrap swap promotes rows carrying no positions, since giving
+//   them any means decoding the whole snapshot inside the transaction that
+//   installs it. It claims no index-built marker and asks for a background
+//   build (index-build.ts). A cold bootstrap, whose chunks each hold a
+//   transaction of their own, does decode and does claim.
 // - A build that does not DECLARE an index does not preserve it. Where the
 //   `i/` keyspace let one tab leave another build's entries alone, a position
 //   list is replaced by whoever writes the row, so two tabs declaring different

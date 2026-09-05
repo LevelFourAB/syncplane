@@ -48,7 +48,7 @@ of `results/<run>.json`, so two tables can be told apart later.
 | ------------------- | ------------------------------------------------------------- |
 | `01-bootstrap`      | Cold start, full vs windowed vs one project vs one thread     |
 | `02-reads`          | Local query cost once the data is there                       |
-| `02b-build-reads`   | Read cost while the index build is still running              |
+| `02b-build-reads`   | Read cost while the cold bootstrap is still streaming         |
 | `02c-pagination`    | Deep pages by cursor vs offset, and what a total costs        |
 | `02d-search`        | Full-text search, by how many rows carry the query's terms    |
 | `03-restart`        | Opening an app that has synced before                         |
@@ -77,12 +77,24 @@ index still bounds the walk (it should not move with the corpus), `common` for
 the ceiling where nothing can be narrowed, and `common+rare` for whether a
 second word is answered from the cheaper of the two terms.
 
-`02-reads` waits for the background index build before measuring — a bootstrap
-installs its snapshot unindexed, and reads taken while the build runs price the
-scan fallback plus lock contention rather than the store. The wait itself is
-reported (`index build`: how long the walk took and the rows it rewrote), and
-each read's `path` column names the index that served it or `scan:<reason>`
-when one did not — the receipt that a number measured the plan it claims to.
+A cold bootstrap writes its rows carrying their index positions and claims the
+index-built markers in the transaction that installs the snapshot, so a workspace
+is indexed the moment it is complete. The background build pass still runs behind
+it; over a workspace whose markers are already claimed it walks nothing and
+reports zero rows.
+
+`02-reads` waits for that pass before measuring, so a read cannot land in the
+window where the swap has yet to claim the markers and every query scans. The
+wait itself is reported (`index build`: how long the pass took and the rows it
+rewrote — zero after a cold bootstrap, the whole snapshot after a staged
+re-bootstrap), and each read's `path` column names the index that served it or
+`scan:<reason>` when one did not — the receipt that a number measured the plan it
+claims to.
+
+`02b-build-reads` measures the other side: reads issued WHILE the bootstrap is
+still streaming, which is what first launch actually looks like. No marker exists
+yet, so each one prices a scan over a store that is filling, and `firstIndexedMs`
+is the first read the install let an index answer.
 
 The two numbers to read first are `firstReadMs` and `completeMs` from
 `01-bootstrap`: when the app could paint, and when the local store provably held

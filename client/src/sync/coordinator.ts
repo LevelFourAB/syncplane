@@ -42,6 +42,7 @@ import { CountingWrite, type KVRead, type KVStore } from '../kv/store.js';
 import { type EntityRegistry, setTextFieldBytes, textFieldBytes } from '../mutations.js';
 import type { Mutex } from '../mutex.js';
 import { compactPending } from '../optimistic/compact.js';
+import { markIndexesBuilt } from '../optimistic/index-build.js';
 import type { IndexCache } from '../optimistic/index-maintain.js';
 import {
 	enqueuePending,
@@ -213,10 +214,12 @@ export interface CoordinatorOptions {
 	 */
 	indexes?: IndexCache;
 	/**
-	 * Called after a bootstrap swap commits, naming the workspace whose indexes
-	 * it left unbuilt. The snapshot's rows go in carrying no index positions, so
-	 * this is the only thing that gets them back; a client that leaves it unset
-	 * gets correct answers from the scan fallback and never the index.
+	 * Called after every bootstrap swap commits, naming the workspace to run a
+	 * build pass over. A swap that installed its rows unindexed needs the walk to
+	 * get them back; one that installed them indexed needs the pass anyway, both
+	 * to check the markers it claimed and to report the workspace as indexed. A
+	 * client that leaves this unset gets correct answers from the scan fallback
+	 * and never the index over a re-bootstrapped workspace.
 	 *
 	 * Fire-and-forget by contract — the caller must not make the sync cycle wait
 	 * on a walk of the whole store.
@@ -2212,7 +2215,10 @@ export class Coordinator {
 	 *   slowest, most visible case there is. The wipe moves to the claim
 	 *   instead: rows without a cursor are the residue of an interrupted
 	 *   attempt, never a snapshot, and mixing two snapshots under one cursor
-	 *   would be silent divergence rather than a slow start.
+	 *   would be silent divergence rather than a slow start. Each chunk is a
+	 *   transaction of its own outside the mutex, so these rows can afford to be
+	 *   written INDEXED, and the install claims the index-built markers over a
+	 *   snapshot it wrote entirely itself.
 	 *
 	 * Only this workspace's rows are touched either way; the other workspaces in
 	 * the store are untouched throughout.
@@ -2297,8 +2303,9 @@ export class Coordinator {
 						// entries and built markers of an interrupted earlier attempt —
 						// all of which describe a snapshot that was never installed — so
 						// what streams in now cannot inherit a row the server has since
-						// deleted, and no marker claims coverage of rows about to be
-						// written unindexed.
+						// deleted, and no marker outlives the rows it described. It is
+						// also what leaves every c/ row of this workspace one this
+						// attempt wrote, which the marker claim at the install rests on.
 						if (direct) await wipeConfirmedState(tx, this.opts.registry, workspaceId, touched);
 						await clearStaging(tx, stagingWsRoot(workspaceId));
 						await tx.del(metaBootstrapResume(workspaceId));
@@ -2399,12 +2406,18 @@ export class Coordinator {
 								tx.release();
 							} else {
 								if (direct) {
+									// Indexed as they land. The chunk holds a transaction of
+									// its own and no store mutex, so the decode this costs is
+									// off the swap's critical path — which is what lets the
+									// install claim the markers rather than leaving the
+									// workspace scanning until a background walk finishes.
 									await applyBootstrapRows(
 										tx,
 										this.opts.registry,
 										workspaceId,
 										msg.body.value.rows,
 										touched,
+										this.opts.indexes,
 									);
 								} else {
 									await stageServerChanges(
@@ -2491,6 +2504,13 @@ export class Coordinator {
 		//    was claimed meanwhile, discard ours and let it win.
 		let pendingCount = 0;
 		let swapWrites = 0;
+		// Whether the install may claim the index-built markers, which is only true
+		// when this attempt wrote every row of the snapshot itself under the current
+		// specs. A RESUMED snapshot fails that: the rows the adopted attempt left
+		// are part of what installs here, and this one cannot say what specs — or
+		// what client build — wrote them. It leaves the markers to the build pass,
+		// which walks the whole entity and earns them.
+		const claimIndexes = direct && this.opts.indexes !== undefined && !resuming;
 		// From before the mutex, not from inside it: a swap queued behind another
 		// tab's write is time this bootstrap spent, and hiding it would report a
 		// contended store as a fast one.
@@ -2521,16 +2541,30 @@ export class Coordinator {
 					}
 					if (!direct) {
 						await wipeConfirmedState(tx, this.opts.registry, workspaceId, touched);
-						// Rows only: the snapshot is NOT indexed inside this transaction.
-						// Maintaining an index here costs several extra KV entries per
-						// row, and they land in indexed-value order rather than row order
-						// — which on a full snapshot dominated everything else the swap
-						// did, by roughly six to one. The wipe already took the built
-						// markers, so leaving the entries unwritten is a state the readers
-						// already handle: every query scans until a marker reappears.
-						// onIndexesStale below is what makes one reappear. The cold path
-						// writes its rows unindexed for the same reason, chunk by chunk.
+						// Rows only: the staged snapshot is NOT indexed inside this
+						// transaction. A staged record carries no positions, so giving it
+						// some means decoding every row of the snapshot here, in the one
+						// transaction that must commit before anything is readable. The
+						// wipe already took the built markers, so promoting them
+						// positionless is a state readers already handle: every query
+						// scans until a marker reappears, and onIndexesStale below is
+						// what makes one reappear.
 						await promoteStaged(tx, workspaceId, snapshotGen, touched);
+					} else if (claimIndexes) {
+						// Every c/ row of this workspace was written by THIS attempt,
+						// carrying the positions its current specs encode to: the claim
+						// at the top wiped what was there, the chunk loop stops the
+						// moment another generation takes the workspace, and nothing else
+						// writes c/ during a cold bootstrap (pulls need a cursor, local
+						// writes go to the overlay). That makes the markers true here,
+						// which spares the workspace a walk of its whole snapshot before
+						// its first indexed query.
+						await markIndexesBuilt(
+							tx,
+							this.opts.indexes!,
+							workspaceId,
+							this.opts.registry.names(),
+						);
 					}
 					// The generation this snapshot installs, for the build pass to
 					// guard its walk against (see keys.metaSnapshotGen). Written even
@@ -2603,11 +2637,14 @@ export class Coordinator {
 		this.hydration.finish(workspaceId);
 		this.publishHydration(workspaceId);
 		await this.opts.notify(touched);
-		// The snapshot went in unindexed, so every index of this workspace is now
-		// unbuilt and every query on it scans. Asking for a build is what ends
-		// that, and it has to happen here rather than only at start(): a
-		// mid-session re-bootstrap would otherwise leave the workspace scanning
-		// for the rest of the session.
+		// Asked for unconditionally, including after an install that claimed the
+		// markers itself. Over a claimed workspace the pass walks nothing — one key
+		// lookup per index — and it is also what verifies the claim and emits the
+		// `indexing` event readers wait on. Where the markers were NOT claimed
+		// (a staged swap, a resumed snapshot) it is the walk that ends the
+		// scanning, and it has to happen here rather than only at start(): a
+		// mid-session re-bootstrap would otherwise leave the workspace scanning for
+		// the rest of the session.
 		this.opts.onIndexesStale?.(workspaceId);
 		return true;
 	}

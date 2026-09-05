@@ -14,8 +14,8 @@ import { report } from './report.js';
  * plan allows, which is exactly the optimization nothing else would notice
  * regressing: the answer stays right, just slow.
  *
- * Read-only, like every spec numbered below 05. Runs after the index build so
- * every number prices the index, not the scan standing in for it; `path` is
+ * Read-only, like every spec numbered below 05. Runs after the index build pass
+ * so every number prices the index, not the scan standing in for it; `path` is
  * the receipt.
  */
 
