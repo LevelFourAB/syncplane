@@ -262,14 +262,14 @@ export interface IndexBuildEvent extends EventBase {
  * A decline is never a wrong answer: an index that cannot reproduce the scan's
  * result exactly declines, and the scan is the definition.
  *
- * - `cross-workspace` — the read spans every workspace, whose combined ordering
- *   no single workspace's index reproduces.
  * - `no-query` — a `watch()` with no query, which is the whole entity by
  *   definition.
  * - `no-index` — the entity declares no index.
  * - `not-built` — an index is declared but not built for this workspace yet.
  *   Builds run in the background, so a burst of these after a bootstrap or a
- *   schema change ends on its own.
+ *   schema change ends on its own. A read spanning workspaces walks one index
+ *   per workspace and declines whole when any one of them does, so it reports
+ *   this until every workspace it covers is built.
  * - `no-plan` — no declared index matches this query's filter and ordering.
  * - `budget` — the walk had to READ more rows than its ceiling allows and fell
  *   back. A filter the index range could not express spends that budget, as
@@ -277,7 +277,6 @@ export interface IndexBuildEvent extends EventBase {
  *   order; positions an ordered plan merely counts toward `total` do not.
  */
 export type QueryDeclineReason =
-	| 'cross-workspace'
 	| 'no-query'
 	| 'no-index'
 	| 'not-built'

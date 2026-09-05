@@ -175,7 +175,8 @@ Read behaviors:
 
 - `queryAll` scans all workspaces held by the client unless `workspaces` specifies an explicit list.
   An empty `workspaces` array returns no rows.
-- When `workspaces` contains a single workspace, the read uses that workspace's prefix and secondary indexes.
+- Cross-workspace reads use secondary indexes for any number of workspaces, with or without the `workspaces` option.
+  Without the option, the read covers every workspace holding rows of the entity in the local store.
 - In place of `where`, a cross-workspace query can provide `byWorkspace: (workspaceId) => where | undefined` to assign distinct predicates per workspace.
   Returning `undefined` excludes that workspace.
   `orderBy`, `limit`, `offset`, and `total` remain shared across all workspaces.
@@ -1431,11 +1432,12 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
 
   `opts.workspaces` narrows the read to workspaces you name, which is what makes
   a subset view exact rather than read-everything-then-filter: only those
-  prefixes are scanned, and `total` counts only them. It joins the subscription
+  workspaces are read, and `total` counts only them. It joins the subscription
   identity as a **set**, so a fresh array literal per render is fine and only a
-  changed set resubscribes. Naming one workspace also puts the read back on the
-  [secondary indexes](proto-options.md#secondary-indexes) that
-  nothing spanning workspaces can use.
+  changed set resubscribes. Cross-workspace reads use
+  [secondary indexes](proto-options.md#secondary-indexes) for any number of
+  workspaces, with or without the `workspaces` option. Without the option, the
+  read covers every workspace holding rows of the entity in the local store.
 
   ```tsx
   const followed = db.todo.useQueryAll(

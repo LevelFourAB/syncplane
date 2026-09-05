@@ -71,9 +71,9 @@ const followed = db.todo.useQueryAll({ where: (t) => t.completed.eq(false) }, {
 });
 ```
 
-The read scans only the specified workspace prefixes, and `followed.total` counts only rows within those workspaces.
+The read covers only the specified workspaces, and `followed.total` counts only rows within those workspaces. An empty array reads nothing and is not shorthand for all workspaces.
 
-If you specify a single workspace, the query runs as a single-workspace query and can use a [secondary index](../reference/proto-options.md#secondary-indexes). Queries spanning multiple workspaces cannot use secondary indexes. An empty array reads nothing and is not shorthand for all workspaces.
+Reads across workspaces use [secondary indexes](../reference/proto-options.md#secondary-indexes) like any other query. This holds for any number of workspaces, with or without the `workspaces` option. You do not need to limit a read to a single workspace to keep it fast.
 
 You can also pass `workspaces` to one-shot queries:
 

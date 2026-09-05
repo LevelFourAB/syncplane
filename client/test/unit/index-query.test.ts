@@ -260,15 +260,6 @@ function same(name: string, q: Query<Issue>, want: string[], overlay?: SeedIssue
  * with a planner that never chose anything.
  */
 async function served(built: boolean, q: Query<Issue>): Promise<boolean> {
-	return await servedIn(WS, q, built);
-}
-
-/** served(), for a named workspace or for the cross-workspace read. */
-async function servedIn(
-	workspaceId: string | undefined,
-	q: Query<Issue>,
-	built = true,
-): Promise<boolean> {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
 	await seedConfirmed(kv, indexes);
@@ -285,7 +276,7 @@ async function servedIn(
 			IssueSchema,
 			indexes.for('issue'),
 			prepareQuery(IssueSchema, compileQuery(q)),
-			workspaceId,
+			WS,
 		);
 		return out !== undefined;
 	} finally {
@@ -371,13 +362,6 @@ describe('the index path is actually taken', () => {
 	it('serves presence against a component that can hold the missing rank', async () => {
 		expect(await served(true, { where: (i) => i.meta.due.isNotSet() })).toBe(true);
 		expect(await served(true, { where: (i) => i.meta.due.isSet() })).toBe(true);
-	});
-
-	it('declines a cross-workspace query', async () => {
-		// The index nests the workspace inside its prefix, and its tie-break
-		// across workspaces differs from the scan path's; see execute.ts.
-		expect(await servedIn(undefined, { where: (i) => i.state.eq('open') })).toBe(false);
-		expect(await servedIn(WS, { where: (i) => i.state.eq('open') })).toBe(true);
 	});
 });
 

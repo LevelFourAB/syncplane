@@ -22,11 +22,14 @@
 //
 //   - Within ONE workspace the index order IS `compareRows` order, because the
 //     entry encoding was built to reproduce it and every entry ends with the
-//     row key. Across workspaces it is not: `compareRows` breaks a final tie on
-//     the row key alone, while the scan path feeds it rows ordered by
-//     `<workspace>/<key>`, so two rows in different workspaces that tie on
-//     every order key AND share a row key would resolve differently. Rather
-//     than reproduce that, a cross-workspace query declines.
+//     row key. Positions are keyed per workspace, so everything here reads one
+//     workspace; a read spanning several runs one such walk per workspace and
+//     merges (see SyncClient.pageByIndexLegs). The merged tie-break is
+//     (order keys, row key, workspace): `compareRows` ends on the row key
+//     alone, and a stable sort over legs concatenated in key-segment order
+//     resolves what remains the way the scan's `<workspace>/<key>` input order
+//     does. A cursor encodes only the first two, which is why a read spanning
+//     workspaces mints none.
 //   - The result is re-sorted even when the plan is ordered, because the
 //     overlay rows have to be merged in. The sort is over the RESULT, not the
 //     entity, which is the whole point.
@@ -207,13 +210,10 @@ export async function queryByIndex<D extends DescMessage>(
 	schema: D,
 	indexes: CompiledIndex[],
 	compiled: CompiledQuery,
-	workspaceId: string | undefined,
+	workspaceId: string,
 	window?: PageWindow,
 	report?: IndexReport,
 ): Promise<IndexedPage<MessageShape<D>> | undefined> {
-	// A cross-workspace query would need a k-way merge whose tie-break differs
-	// from the scan path's; see the header.
-	if (workspaceId === undefined) return decline(report, 'cross-workspace');
 	if (indexes.length === 0) return decline(report, 'no-index');
 
 	const built = (await Promise.all(
@@ -530,12 +530,9 @@ export async function groupByIndex<D extends DescMessage>(
 	indexes: CompiledIndex[],
 	compiled: CompiledGroupQuery,
 	multi: boolean,
-	workspaceId: string | undefined,
+	workspaceId: string,
 	report?: IndexReport,
 ): Promise<{ groups: Group[]; hasMore: boolean } | undefined> {
-	// Positions are keyed per workspace, so a cross-workspace read would have to
-	// merge one walk per workspace; the scan does that for free.
-	if (workspaceId === undefined) return decline(report, 'cross-workspace');
 	if (indexes.length === 0) return decline(report, 'no-index');
 	const built = (await Promise.all(
 		indexes.map(async (idx) =>
@@ -722,10 +719,9 @@ export async function groupRowsByIndex<D extends DescMessage>(
 	indexes: CompiledIndex[],
 	compiled: CompiledGroupRowsQuery,
 	multi: boolean,
-	workspaceId: string | undefined,
+	workspaceId: string,
 	report?: IndexReport,
 ): Promise<{ groups: RowGroupPage<MessageShape<D>>[]; hasMore: boolean } | undefined> {
-	if (workspaceId === undefined) return decline(report, 'cross-workspace');
 	if (indexes.length === 0) return decline(report, 'no-index');
 	const built = (await Promise.all(
 		indexes.map(async (idx) =>

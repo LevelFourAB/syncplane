@@ -71,7 +71,7 @@ Holding rows beyond the active page allows a deletion in a full page to pull in 
 
 A top-level `or` condition is served as an index union: each branch is planned independently and results are deduplicated by row key, provided that every branch has an index. If any branch lacks an index, the entire query falls back to a scan, because scanning for a single branch in a union adds overhead without benefit. An index union returns unordered results, so an ordered `or` query sorts its matches in memory rather than reading in index order.
 
-Cross-workspace queries do not use indexes. An index nests the workspace identifier inside its prefix, and reproducing scan tie-breaks across workspaces during a merge introduces divergence risks.
+To serve a cross-workspace query, the client runs one index walk per workspace and merges the results in memory. A single index range cannot cover several workspaces because the index prefix nests the workspace identifier. The merge orders results by the ordering keys, then by row key, then by workspace, which matches a full scan. Each workspace walk reads all its matching rows because `limit` applies to the merged result. A read that names no workspaces first finds the workspaces holding rows with one key lookup each. If even one workspace is still building its index, the whole read falls back to a scan.
 
 Two server-side traversal paths do not use query planning:
 

@@ -367,21 +367,20 @@ The `query` event reports execution metrics for local store reads:
 The `path` field indicates the execution strategy: `index` or `scan`. When
 `path` is `scan`, `declined` contains the reason:
 
-| Value             | Meaning                                                                 |
-| ----------------- | ----------------------------------------------------------------------- |
-| `cross-workspace` | `queryAll` or `watchQueryAll` executed across all workspaces.           |
-| `no-query`        | A `watch()` call executed without a query filter (reads entire entity). |
-| `no-index`        | The entity declares no index matching the query.                        |
-| `not-built`       | An index is declared but still building for this workspace.             |
-| `no-plan`         | No declared index matches the query filter and ordering.                |
-| `budget`          | Index traversal exceeded the row ceiling and fell back to a table scan. |
+| Value       | Meaning                                                                                                                                                |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `no-query`  | A `watch()` call executed without a query filter (reads entire entity).                                                                                |
+| `no-index`  | The entity declares no index matching the query.                                                                                                       |
+| `not-built` | An index is declared but still building for this workspace. A cross-workspace read reports this while any covered workspace's index is still building. |
+| `no-plan`   | No declared index matches the query filter and ordering.                                                                                               |
+| `budget`    | Index traversal exceeded the row ceiling and fell back to a table scan.                                                                                |
 
-Reads scoped to explicit workspace sets (`opts.workspaces`) traverse one index
-per workspace and report `path: 'index'`. The `index` field contains the joined
-index names (for example, `index1+index2`). `workspaceId` is set when only one
-workspace is queried. `candidates` reports the sum of scanned positions across
-all target workspaces. If any target workspace declines index usage, the entire
-read falls back to a scan with that workspace's decline reason.
+A cross-workspace read reports `path: 'index'`. The `index` field contains the
+index names joined with `+` (for example, `index1+index2`). The `workspaceId`
+field is set only when exactly one workspace was read. The `candidates` field
+reports the sum of index positions visited across all covered workspaces. While
+any covered workspace's index is still building, the read falls back to a scan
+with `declined: 'not-built'`.
 
 The `indexing` event fires once per workspace when all declared indexes finish
 building, reporting `rows` indexed and `durationMs`. For query optimization

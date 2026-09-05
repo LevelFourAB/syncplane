@@ -186,6 +186,10 @@ class MeteredWrite implements KVWrite {
 		return this.inner.indexSeek(lo, hi, direction);
 	}
 
+	seek(lo?: string, hi?: string): Promise<string | undefined> {
+		return this.inner.seek(lo, hi);
+	}
+
 	async put(key: string, value: unknown): Promise<void> {
 		this.deletes.delete(key);
 		this.puts.set(key, value);

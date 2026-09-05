@@ -15,6 +15,7 @@ import {
 	overlayWsPrefix,
 	splitOverlayTextSuffix,
 	splitWsKey,
+	wsFromSegment,
 } from './keys.js';
 import type { KVRead } from './kv/store.js';
 import {
@@ -442,6 +443,41 @@ export async function scanMergedRows(
 	return [ ...rows.entries() ]
 		.sort(([ a ], [ b ]) => (a < b ? -1 : a > b ? 1 : 0))
 		.map(([ , row ]) => row);
+}
+
+/**
+ * The workspaces holding rows of an entity — confirmed or overlay — in
+ * key-segment order, which is the order an unscoped scanMergedRows visits them
+ * in. A workspace the client holds but has no rows for is absent, and one it
+ * no longer holds is present while its rows remain.
+ *
+ * Costs one seek per workspace found plus one per keyspace, never a walk of
+ * the rows: it is what lets a read spanning every workspace be served as one
+ * index leg per workspace (see NamedWorkspaces) and still cover exactly the
+ * rows the scan would.
+ */
+export async function workspacesWithRows(tx: KVRead, entity: string): Promise<string[]> {
+	const segments = new Set<string>();
+	for (const prefix of [ confirmedPrefix(entity), overlayPrefix(entity) ]) {
+		// Every key under the prefix is `<prefix><segment>/<key>`. A segment holds
+		// no slash, and `0` is the code unit after `/`, so `<prefix><segment>0`
+		// bounds the workspace's keys from above and resuming there lands on the
+		// first key of the next one. The prefix ends in `/` too, which makes the
+		// same step its own upper bound.
+		const hi = `${prefix.slice(0, -1)}0`;
+		let lo = prefix;
+		for (;;) {
+			const key = await tx.seek(lo, hi);
+			if (key === undefined) break;
+			// A key with no slash after the prefix is not a row key; taking its whole
+			// tail as the segment still steps past it rather than seeking it again.
+			const end = key.indexOf('/', prefix.length);
+			const segment = end === -1 ? key.slice(prefix.length) : key.slice(prefix.length, end);
+			segments.add(segment);
+			lo = `${prefix}${segment}0`;
+		}
+	}
+	return [ ...segments ].map(wsFromSegment).sort(compareWorkspaces);
 }
 
 /**

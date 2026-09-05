@@ -57,6 +57,7 @@ import {
 	scanMergedRows,
 	type ScopedRow,
 	type WorkspaceScope,
+	workspacesWithRows,
 } from './read.js';
 import { hydrate, type Include, type RefClient } from './refs.js';
 import { reportError, safeInvoke } from './report.js';
@@ -1325,11 +1326,11 @@ export class WatcherHub {
 	 * commit would put a read back on the commit path, which is the cost this
 	 * class exists to remove.
 	 *
-	 * A watcher over a named set walks one index per workspace and concatenates:
-	 * each leg is a single-workspace query, so none of them meets the decline
-	 * that stops a read spanning every workspace. One leg declining declines the
-	 * whole seed — the scan that then serves it is the definition, and half a
-	 * result from an index is not a result.
+	 * A watcher spanning workspaces — a named set, or every one holding rows —
+	 * walks one index per workspace and concatenates: each leg is a
+	 * single-workspace query, which is the only read an index serves. One leg
+	 * declining declines the whole seed — the scan that then serves it is the
+	 * definition, and half a result from an index is not a result.
 	 */
 	private async seedFromIndex(
 		tx: KVRead,
@@ -1338,16 +1339,18 @@ export class WatcherHub {
 	): Promise<MatchSet | undefined> {
 		const indexes = this.opts.indexes;
 		if (watcher.query === undefined) return declined(report, 'no-query');
-		const workspaces = watcher.workspaceId !== undefined
-			? [ watcher.workspaceId ]
-			: watcher.workspaces;
-		if (workspaces === undefined) return declined(report, 'cross-workspace');
-		// A hub built without the client's index cache has none to consult, an
-		// entity outside the registry has none either, and a set naming no
-		// workspace has none to consult in.
-		if (indexes === undefined || workspaces.length === 0) return declined(report, 'no-index');
+		// A hub built without the client's index cache has none to consult, and
+		// an entity outside the registry has none either.
+		if (indexes === undefined) return declined(report, 'no-index');
 		const def = this.registry.get(watcher.entity);
 		if (def === undefined) return declined(report, 'no-index');
+		// A watcher spanning every workspace names none, so its legs are the
+		// workspaces holding rows — the prefixes the scan it stands in for visits.
+		const workspaces = watcher.workspaceId !== undefined
+			? [ watcher.workspaceId ]
+			: watcher.workspaces ?? await workspacesWithRows(tx, watcher.entity);
+		// A set naming no workspace has none to consult in.
+		if (workspaces.length === 0) return declined(report, 'no-index');
 		const legs: IndexedRow<unknown>[] = [];
 		const names = new Set<string>();
 		for (const ws of workspaces) {
@@ -1767,8 +1770,9 @@ export class WatcherHub {
 		const workspaces = watcher.workspaceId !== undefined
 			? [ watcher.workspaceId ]
 			: watcher.workspaces;
-		// A read spanning every workspace has no leg an index walk can serve,
-		// the same decline the seed makes.
+		// A watcher spanning every workspace re-derives from a scan instead:
+		// enumerating the store's workspaces for a walk per leg is the seed's
+		// cost again, on a path a membership move takes rarely.
 		if (workspaces === undefined || workspaces.length === 0) return undefined;
 		for (const ws of workspaces) {
 			if (!relsArePositive(watcher.predicates?.get(ws) ?? watcher.query?.where)) return undefined;

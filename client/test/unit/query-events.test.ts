@@ -209,15 +209,16 @@ describe('query events', () => {
 			await client.query(NoteSchema, {} as never);
 			// Indexed entity, but no index covers a filter on `title`.
 			await run(client, { where: (i) => i.title.eq('one') });
-			// Every workspace at once, whose combined ordering no index reproduces.
+			// Every workspace at once: one index walk per workspace, and the read
+			// names no single workspace.
 			await client.queryAll(IssueSchema, q({ where: (i) => i.state.eq('open') }));
 		} finally {
 			await client.close();
 		}
-		expect(queries().map((e) => [ e.entity, e.declined ])).toEqual([
-			[ 'note', 'no-index' ],
-			[ 'issue', 'no-plan' ],
-			[ 'issue', 'cross-workspace' ],
+		expect(queries().map((e) => [ e.entity, e.path, e.declined ])).toEqual([
+			[ 'note', 'scan', 'no-index' ],
+			[ 'issue', 'scan', 'no-plan' ],
+			[ 'issue', 'index', undefined ],
 		]);
 		expect(queries()[2]!.workspaceId).toBeUndefined();
 	});

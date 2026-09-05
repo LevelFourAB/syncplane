@@ -119,6 +119,16 @@ class MemoryRead implements KVRead {
 		return n;
 	}
 
+	async seek(lo?: string, hi?: string): Promise<string | undefined> {
+		let least: string | undefined;
+		for (const k of this.snapshot.keys()) {
+			if (lo !== undefined && k < lo) continue;
+			if (hi !== undefined && k >= hi) continue;
+			if (least === undefined || k < least) least = k;
+		}
+		return least;
+	}
+
 	release(): void {
 		// snapshot is garbage-collected
 	}

@@ -352,6 +352,14 @@ class IDBRead implements KVRead {
 		return requestDone(range === null ? index.count() : index.count(range));
 	}
 
+	async seek(lo?: string, hi?: string): Promise<string | undefined> {
+		if (emptyRange(lo, hi)) return undefined;
+		// A key cursor rather than getKey: getKey refuses an open range, and one
+		// cursor step reads exactly one key either way.
+		const cursor = await requestDone(this.store().openKeyCursor(boundRange(lo, hi)));
+		return cursor === null ? undefined : cursor.key as string;
+	}
+
 	release(): void {
 		// short-lived transactions; nothing held
 	}
@@ -438,6 +446,34 @@ class IDBWrite extends IDBRead implements KVWrite {
 		const pairs = await this.indexPairs(lo, hi);
 		const at = direction === 'desc' ? pairs[pairs.length - 1] : pairs[0];
 		return at === undefined ? undefined : { position: at[0], key: at[1] };
+	}
+
+	/**
+	 * The store's least key that this transaction has not deleted, against the
+	 * least key it has buffered — whichever is lower. Stepping past a deleted
+	 * key resumes at its successor, so a run of deletes costs one lookup each.
+	 */
+	override async seek(lo?: string, hi?: string): Promise<string | undefined> {
+		let buffered: string | undefined;
+		for (const k of this.pending.keys()) {
+			if (lo !== undefined && k < lo) continue;
+			if (hi !== undefined && k >= hi) continue;
+			if (buffered === undefined || k < buffered) buffered = k;
+		}
+		let from = lo;
+		let stored: string | undefined;
+		for (;;) {
+			stored = await super.seek(from, hi);
+			if (stored === undefined || !this.deleted.has(stored)) break;
+			from = successor(stored);
+			if (from === undefined) {
+				stored = undefined;
+				break;
+			}
+		}
+		if (buffered === undefined) return stored;
+		if (stored === undefined) return buffered;
+		return buffered < stored ? buffered : stored;
 	}
 
 	/** The (position, record key) pairs of a range, in position order, with this

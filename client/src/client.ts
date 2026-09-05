@@ -157,6 +157,7 @@ import {
 	type ReadScope,
 	type Row,
 	scanDecoded,
+	workspacesWithRows,
 } from './read.js';
 import {
 	hydrate,
@@ -1447,9 +1448,9 @@ export interface WorkspacesOption {
 	 * nothing; it is not shorthand for "all". A workspace the client does not hold
 	 * contributes no rows.
 	 *
-	 * Cost falls to the named workspaces rather than the entity across all of
-	 * them, and a set naming exactly one is served by that workspace's secondary
-	 * indexes, which no read spanning workspaces can use.
+	 * Cost falls to the named workspaces rather than every workspace holding
+	 * rows. Secondary indexes serve the read at any set size, one walk per
+	 * workspace, as they do a read naming none.
 	 */
 	workspaces?: readonly string[];
 }
@@ -3646,9 +3647,30 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// match, so a decline here is not a fallback in the apologetic
 				// sense — the scan above IS the definition, and the index has to
 				// reproduce it exactly or decline.
-				const found = effNamed === undefined
+				//
+				// A read spanning every workspace names none, so its legs are the
+				// workspaces holding rows — the prefixes the scan above visits, in
+				// the order it visits them — each under the predicate the scan
+				// would test that workspace's rows against.
+				const everyWorkspace = async (): Promise<NamedWorkspaces> => {
+					const workspaces = await workspacesWithRows(tx, def.name);
+					return relWhere === undefined ? { workspaces } : {
+						workspaces,
+						predicates: new Map(
+							workspaces.map((ws): [string, Cond] => [ ws, relWhere(ws)! ]),
+						),
+					};
+				};
+				const found = workspaceId !== undefined && effNamed === undefined
 					? await this.pageByIndex(tx, def, schema, effective, workspaceId, window, report)
-					: await this.pageByIndexLegs(tx, def, schema, effective, effNamed, report);
+					: await this.pageByIndexLegs(
+						tx,
+						def,
+						schema,
+						effective,
+						effNamed ?? await everyWorkspace(),
+						report,
+					);
 				if (found === undefined) return await scan();
 				// Under SYNC_DEBUG_VERIFY_TOUCHES both paths run and must agree.
 				// This is the same net the watch hub uses for its maintained
@@ -3908,13 +3930,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		}));
 	}
 
-	/** One workspace's — or the whole store's — matching page, from an index. */
+	/** One workspace's matching page, from an index. */
 	private async pageByIndex<D extends DescMessage>(
 		tx: KVRead,
 		def: EntityDef,
 		schema: D,
 		compiled: CompiledQuery,
-		workspaceId: string | undefined,
+		workspaceId: string,
 		window: PageWindow | undefined,
 		report: IndexReport,
 	): Promise<QueryPage<MessageShape<D>> | undefined> {
@@ -3937,14 +3959,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * A named set's matching page, from one index walk per workspace.
+	 * A set's matching page — the workspaces the caller named, or every one
+	 * holding rows — from one index walk per workspace.
 	 *
-	 * Each leg is a single-workspace query, so none of them meets the decline
-	 * that stops a read spanning every workspace; the page is cut from the merged
-	 * matches afterwards, which is what makes `limit` the merged result's rather
-	 * than each leg's. One leg declining declines the whole read — the scan that
-	 * then serves it is the definition, and half a result from an index is not a
-	 * result.
+	 * Each leg is a single-workspace query, which is the only read an index
+	 * serves; the page is cut from the merged matches afterwards, which is what
+	 * makes `limit` the merged result's rather than each leg's. One leg declining
+	 * declines the whole read — the scan that then serves it is the definition,
+	 * and half a result from an index is not a result.
 	 */
 	private async pageByIndexLegs<D extends DescMessage>(
 		tx: KVRead,

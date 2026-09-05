@@ -68,8 +68,12 @@ const SEED: Record<string, Issue[]> = {
 	],
 };
 
-async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
-	for (const [ workspaceId, rows ] of Object.entries(SEED)) {
+async function seedConfirmed(
+	kv: KVStore,
+	indexes: IndexCache,
+	seed: Record<string, Issue[]> = SEED,
+): Promise<void> {
+	for (const [ workspaceId, rows ] of Object.entries(seed)) {
 		const tx = await kv.write();
 		// A build walks only a workspace whose rows are a whole installed
 		// snapshot, and the cursor is what says so.
@@ -96,15 +100,20 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
 /**
  * A two-workspace client over the seed, with its indexes built or not. `built`
  * is the only difference between the arms, which is what makes a divergence a
- * bug rather than a difference in setup.
+ * bug rather than a difference in setup. It may also name the workspaces to
+ * build, leaving the rest of the seed unbuilt.
  */
-async function clientWith(built: boolean, onEvent?: (event: SyncEvent) => void) {
+async function clientWith(
+	built: boolean | string[],
+	onEvent?: (event: SyncEvent) => void,
+	seed: Record<string, Issue[]> = SEED,
+) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
-	await seedConfirmed(kv, indexes);
-	if (built) {
+	await seedConfirmed(kv, indexes, seed);
+	if (built !== false) {
 		const mutex = new ChainMutex();
-		for (const workspaceId of [ A, B ]) {
+		for (const workspaceId of built === true ? Object.keys(seed) : built) {
 			await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, workspaceId);
 		}
 	}
@@ -209,16 +218,79 @@ describe('queryAll over a named workspace set', () => {
 		await same((c) => readAll(c, openByRank, [ B, 'ws-none' ]), [ `${B}/shared`, `${B}/b1` ]);
 	});
 
-	it('serves a named set from one index walk per workspace', async () => {
+	// The unbounded read covers every workspace holding rows in the STORE — a
+	// workspace removed without a purge, or synced by another tab — which is
+	// not the list the client was configured with. Its index legs have to find
+	// those workspaces by their rows, and decline for one whose index is not
+	// built rather than leave its rows out.
+	describe('over every workspace holding rows', () => {
+		const C = 'ws-c';
+		const WITH_C: Record<string, Issue[]> = {
+			...SEED,
+			[C]: [ { id: 'c1', title: 'c-one', state: 'open', rank: 8 } ],
+		};
+		const ALL_OPEN_WITH_C = [ ALL_OPEN[0]!, `${C}/c1`, ...ALL_OPEN.slice(1) ];
+
+		it('reads a workspace the client does not hold, from its index', async () => {
+			const events: SyncEvent[] = [];
+			const client = await clientWith(true, (e) => events.push(e), WITH_C);
+			try {
+				expect(at(await readAll(client, openByRank))).toEqual(ALL_OPEN_WITH_C);
+				expect(at(await readAll(client, openByRank, [ A, B ]))).toEqual(ALL_OPEN);
+			} finally {
+				await client.close();
+			}
+			const queries = events.filter((e): e is QueryEvent => e.type === 'query');
+			expect(queries.map((e) => [ e.path, e.index ?? e.declined ])).toEqual([
+				[ 'index', 'by_state_rank' ],
+				[ 'index', 'by_state_rank' ],
+			]);
+		});
+
+		it('declines whole while one workspace holding rows is unbuilt', async () => {
+			const events: SyncEvent[] = [];
+			const client = await clientWith([ A, B ], (e) => events.push(e), WITH_C);
+			try {
+				expect(at(await readAll(client, openByRank))).toEqual(ALL_OPEN_WITH_C);
+			} finally {
+				await client.close();
+			}
+			const queries = events.filter((e): e is QueryEvent => e.type === 'query');
+			expect(queries.map((e) => [ e.path, e.declined ])).toEqual([ [ 'scan', 'not-built' ] ]);
+		});
+
+		it('reads a workspace whose only rows are pending', async () => {
+			// A local create in a workspace with no confirmed rows sits in the
+			// overlay alone, and the overlay is the second keyspace the
+			// enumeration has to look in. B has a snapshot (an empty one, so its
+			// index counts as built) and no confirmed rows.
+			const events: SyncEvent[] = [];
+			const client = await clientWith(true, (e) => events.push(e), { [A]: SEED[A]!, [B]: [] });
+			try {
+				await put(client, B, { id: 'b-new', title: 'b-new', state: 'open', rank: 6 });
+				expect(at(await readAll(client, openByRank))).toEqual([
+					`${A}/i2`,
+					`${A}/shared`,
+					`${B}/b-new`,
+					`${A}/i1`,
+				]);
+			} finally {
+				await client.close();
+			}
+			const queries = events.filter((e): e is QueryEvent => e.type === 'query');
+			expect(queries.map((e) => [ e.path, e.index ?? e.declined ])).toEqual([
+				[ 'index', 'by_state_rank' ],
+			]);
+		});
+	});
+
+	it('serves a set of any size from one index walk per workspace', async () => {
 		const events: SyncEvent[] = [];
 		const client = await clientWith(true, (e) => events.push(e));
 		try {
 			await readAll(client, openByRank, [ A, B ]);
-			// A set of one, the case that used to decline purely for having no
-			// single workspace to index in.
 			await readAll(client, openByRank, [ A ]);
-			// And the unbounded read, which still has no index that spans
-			// workspaces and so still says so.
+			// The unbounded read: the workspaces holding rows are its set.
 			await readAll(client, openByRank);
 		} finally {
 			await client.close();
@@ -227,11 +299,12 @@ describe('queryAll over a named workspace set', () => {
 		expect(queries.map((e) => [ e.path, e.index ?? e.declined ])).toEqual([
 			[ 'index', 'by_state_rank' ],
 			[ 'index', 'by_state_rank' ],
-			[ 'scan', 'cross-workspace' ],
+			[ 'index', 'by_state_rank' ],
 		]);
 		// A set of one names the workspace it read; a wider one has none to name.
 		expect(queries[0]!.workspaceId).toBeUndefined();
 		expect(queries[1]!.workspaceId).toBe(A);
+		expect(queries[2]!.workspaceId).toBeUndefined();
 	});
 
 	it('refuses a cursor, at any set size', async () => {
@@ -319,6 +392,20 @@ describe('watchQueryAll over a named workspace set', () => {
 				await client.close();
 			}
 		}
+	});
+
+	it('seeds a watcher spanning every workspace from one index walk per workspace', async () => {
+		const events: SyncEvent[] = [];
+		const client = await clientWith(true, (e) => events.push(e));
+		try {
+			expect((await firstEmit(client, openByRank)).rows).toEqual(ALL_OPEN);
+		} finally {
+			await client.close();
+		}
+		const seeds = events.filter((e): e is QueryEvent => e.type === 'query' && e.origin === 'watch');
+		expect(seeds.map((e) => [ e.path, e.index ?? e.declined, e.workspaceId ])).toEqual([
+			[ 'index', 'by_state_rank', undefined ],
+		]);
 	});
 
 	it('maintains a per-workspace predicate across commits', async () => {

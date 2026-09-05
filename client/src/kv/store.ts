@@ -141,6 +141,17 @@ export interface KVRead {
 		hi?: string,
 		direction?: 'asc' | 'desc',
 	): Promise<{ position: string; key: string } | undefined>;
+	/**
+	 * The least key in [lo, hi), or undefined when the range holds none. An
+	 * undefined bound is open on that end.
+	 *
+	 * The primary-keyspace counterpart of indexSeek, and the primitive a
+	 * skip-scan over KEYS is built from: read one key, derive the prefix its
+	 * group shares, resume past that prefix. It costs one lookup rather than a
+	 * chunk of entries, which is what a caller that wants the first key of many
+	 * ranges — one per workspace of an entity, say — needs a scan cannot give.
+	 */
+	seek(lo?: string, hi?: string): Promise<string | undefined>;
 	release(): void;
 }
 
@@ -203,6 +214,10 @@ export class CountingWrite implements KVWrite {
 
 	indexCount(lo?: string, hi?: string): Promise<number> {
 		return this.inner.indexCount(lo, hi);
+	}
+
+	seek(lo?: string, hi?: string): Promise<string | undefined> {
+		return this.inner.seek(lo, hi);
 	}
 
 	async put(key: string, value: unknown): Promise<void> {

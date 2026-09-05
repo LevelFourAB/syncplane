@@ -128,6 +128,46 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 		r.release();
 	});
 
+	it('seeks the least key of a half-open range, both bounds optional', async () => {
+		store = await open();
+		const w = await store.write();
+		for (const k of [ 'a', 'b', 'c', 'd' ]) await w.put(k, k);
+		await w.commit();
+
+		const r = await store.read();
+		expect(await r.seek('b', 'd')).toBe('b');
+		expect(await r.seek('bb', 'd')).toBe('c');
+		expect(await r.seek('b')).toBe('b');
+		expect(await r.seek(undefined, 'c')).toBe('a');
+		expect(await r.seek()).toBe('a');
+		expect(await r.seek('e')).toBeUndefined();
+		expect(await r.seek('c', 'c')).toBeUndefined();
+		expect(await r.seek('d', 'b')).toBeUndefined();
+		r.release();
+	});
+
+	it('a write transaction’s seek sees its own buffered writes', async () => {
+		store = await open();
+		const setup = await store.write();
+		for (const k of [ 'b', 'c', 'd' ]) await setup.put(k, k);
+		await setup.commit();
+
+		const w = await store.write();
+		// A buffered put below every stored key, and a run of buffered deletes
+		// the stored answer has to step past.
+		await w.put('a', 'a');
+		expect(await w.seek()).toBe('a');
+		expect(await w.seek('b')).toBe('b');
+		await w.del('b');
+		await w.del('c');
+		expect(await w.seek('b')).toBe('d');
+		await w.del('d');
+		expect(await w.seek('b')).toBeUndefined();
+		await w.put('bb', 'bb');
+		expect(await w.seek('b')).toBe('bb');
+		w.release();
+	});
+
 	it('scans keys containing U+FFFF', async () => {
 		store = await open();
 		const w = await store.write();
