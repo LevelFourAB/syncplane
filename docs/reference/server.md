@@ -85,6 +85,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                            |
 | `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                  |
 | `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                            |
+| `MaxResyncScan`           | 65536   | Maximum live rows examined per `Pull` while delta-resyncing a subscription or permission change. Values below `MaxPullChanges` are raised to it.                 |
 | `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                      |
 | `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.    |
 | `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                      |

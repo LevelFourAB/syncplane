@@ -125,7 +125,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
 		return err
 	}
-	next, done, err := runResync(tx, oldEm, newEm, cur.seq, pos, limit, s.limits.MaxPullChanges, resp.Patch)
+	next, done, err := runResync(tx, oldEm, newEm, cur.seq, pos, limit, s.limits.MaxResyncScan, resp.Patch)
 	if err != nil {
 		return err
 	}
@@ -175,14 +175,23 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	return nil
 }
 
+// resyncScanBatch is the number of rows one storage scan call in a resync
+// returns at a time. It caps how many rows are held at once, independently of
+// how many a pull may examine in total (Limits.MaxResyncScan).
+const resyncScanBatch = 4096
+
 // runResync scans live rows of the new-subscribed entities in (entity, key)
 // order, classifies each under both scopes, and appends only the differences
 // to patch. Rows with Version > seq are skipped (catch-up pull territory).
 //
-// emitLimit bounds appended changes (the client's page size) and scanLimit
-// bounds rows considered, so a low-delta resync over a large workspace still
-// does bounded work per pull. Returns where the next page must resume, or
-// done=true when the scan is complete.
+// emitLimit bounds the changes appended — the client's page size — and
+// scanLimit the rows examined, Limits.MaxResyncScan. The second is much the
+// larger of the two: rows visible under both scopes emit nothing, so a scan
+// budget at the page size would end most pages having found no difference at
+// all and charge the client a round trip for it. Sized well above the page,
+// the resync pages by changes emitted and scanLimit is what still bounds the
+// work of one pull. Returns where the next page must resume, or done=true when
+// the scan is complete.
 func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resyncPos, emitLimit, scanLimit int, patch *syncplanev1.Patch) (next resyncPos, done bool, err error) {
 	scanned, emitted := 0, 0
 	for _, entity := range newEm.entities() {
@@ -197,7 +206,11 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 			if emitted >= emitLimit || scanned >= scanLimit {
 				return resyncPos{entity: entity, afterKey: afterKey}, false, nil
 			}
-			budget := scanLimit - scanned
+			// The whole batch is buffered before it is classified, so the
+			// batch size — not the pull's scan budget, which is far larger —
+			// is what decides peak memory here. Row values are unbounded up to
+			// Limits.MaxValueBytes.
+			budget := min(scanLimit-scanned, resyncScanBatch)
 			var page []storage.Row
 			if err := tx.ScanEntityAfter(entity, afterKey, budget, func(row storage.Row) error {
 				page = append(page, row)

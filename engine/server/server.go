@@ -324,6 +324,17 @@ type Limits struct {
 	// Maximum row changes per Pull response; larger results paginate via
 	// has_more. Also clamps client-requested limits. Default 4096.
 	MaxPullChanges int
+	// Maximum live rows one Pull examines while delta-resyncing a scope change
+	// before it returns a partial page. A scope change compares the workspace's
+	// live rows under the old and the new visibility, and rows visible under
+	// both emit nothing, so this budget rather than MaxPullChanges decides how
+	// many round trips a small difference costs: a larger value settles a
+	// widened window over a large workspace in one or two pulls, a smaller one
+	// bounds how long a single Pull holds its read transaction.
+	//
+	// Values below MaxPullChanges are raised to it; a scan that stops before
+	// the page is full only adds round trips. Default 65536.
+	MaxResyncScan int
 	// Maximum rows per Query response. Also clamps client-requested limits.
 	// Default 1024.
 	MaxQueryRows int
@@ -497,6 +508,10 @@ func (l Limits) withDefaults() Limits {
 	if l.MaxPullChanges <= 0 {
 		l.MaxPullChanges = 4096
 	}
+	if l.MaxResyncScan <= 0 {
+		l.MaxResyncScan = 65536
+	}
+	l.MaxResyncScan = max(l.MaxResyncScan, l.MaxPullChanges)
 	if l.MaxQueryRows <= 0 {
 		l.MaxQueryRows = 1024
 	}

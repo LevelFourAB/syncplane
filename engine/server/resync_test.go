@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -406,6 +407,88 @@ var _ = Describe("Delta resync", func() {
 			perms.forgotten = true
 			resp := pull(cursor, 0)
 			Expect(resp.GetReset_()).To(BeTrue())
+		})
+	})
+
+	Describe("scan budget", func() {
+		const liveRows = 1000
+
+		// seedWidgets fills the workspace with liveRows widgets whose counts
+		// run 1..liveRows, so a predicate on count selects a known suffix.
+		seedWidgets := func() {
+			GinkgoHelper()
+			var batch []*syncplanev1.Mutation
+			for i := 1; i <= liveRows; i++ {
+				batch = append(batch, putWidget(uint64(i), fmt.Sprintf("w%04d", i), int32(i)))
+				if len(batch) == 100 {
+					push(batch...)
+					batch = nil
+				}
+			}
+			if len(batch) > 0 {
+				push(batch...)
+			}
+		}
+
+		// widen switches from a predicate matching nothing to one matching the
+		// top five rows and drains the resync, returning how many pulls that
+		// took and which widgets arrived.
+		widen := func() (pulls int, keys []string) {
+			GinkgoHelper()
+			cursor, rows := bootstrap(widgetSub(countGte(liveRows + 1)))
+			Expect(rows).To(BeEmpty())
+
+			wide := widgetSub(countGte(liveRows - 4))
+			for range 200 {
+				resp := pull(cursor, 0, wide)
+				pulls++
+				Expect(resp.GetReset_()).To(BeFalse())
+				keys = append(keys, valueKeys(resp.GetPatch().GetChanges(), "widget")...)
+				cursor = resp.GetNextCursor()
+				if !resp.GetHasMore() {
+					return pulls, keys
+				}
+			}
+			Fail("pull never drained")
+			return 0, nil
+		}
+
+		wantKeys := func() []string {
+			var out []string
+			for i := liveRows - 4; i <= liveRows; i++ {
+				out = append(out, fmt.Sprintf("w%04d", i))
+			}
+			return out
+		}
+
+		BeforeEach(func() {
+			ctx = context.Background()
+		})
+
+		It("finishes a low-delta resync over many rows in one page", func() {
+			start(newTestServer(server.WithLimits(server.Limits{MaxPullChanges: 64})))
+			seedWidgets()
+
+			pulls, keys := widen()
+			Expect(keys).To(ConsistOf(wantKeys()))
+			// One page carries the whole diff and the completion cursor; the
+			// second is the catch-up pull that always follows a resync. The
+			// scan budget, not the page size, decides this: bounding the scan
+			// by MaxPullChanges would cost liveRows/64 pages instead.
+			Expect(pulls).To(Equal(2))
+		})
+
+		It("pages the scan when MaxResyncScan is lowered", func() {
+			start(newTestServer(server.WithLimits(server.Limits{
+				MaxPullChanges: 64,
+				MaxResyncScan:  64,
+			})))
+			seedWidgets()
+
+			pulls, keys := widen()
+			Expect(keys).To(ConsistOf(wantKeys()))
+			Expect(pulls).To(BeNumerically(">=", liveRows/64),
+				"a 64-row scan budget must page the scan even though the diff fits one page")
 		})
 	})
 })

@@ -23,6 +23,8 @@ This diff includes a row that sank below the rank boundary when no predicate cha
 
 Changing subscriptions delta-resyncs the visible-set difference rather than forcing a full re-bootstrap. The same applies to permission changes when the policy implements `EpochReadFilters`. `FilterEpoch` versions the inputs behind `ReadFilter`, so a revoked label or a changed membership syncs as a diff.
 
+The resync pages by the differences it emits rather than by the rows it examines. Each `Pull` compares up to `MaxResyncScan` live rows against both the old and the new visibility and returns at most `MaxPullChanges` differences. Rows visible under both scopes emit nothing, so a scope change over a large workspace costs round trips in proportion to the size of the difference rather than the size of the workspace. Lowering `MaxResyncScan` shortens the read transaction each `Pull` holds and adds round trips.
+
 A pull whose cursor already sits at the head of the workspace skips recomputation entirely. Because nothing was written, memberships cannot move, and the server carries the cursor key set forward as issued. Polling a quiet workspace costs nothing to return an empty update.
 
 ## The cursor references its membership instead of restating it
