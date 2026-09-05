@@ -1121,9 +1121,31 @@ type closureMaint struct {
 	windowTargetsBuilt map[string]bool
 }
 
-// run makes the pass: what changed is re-decided and re-walked, what the window
-// moved is re-walked, and the forward targets that could have lost their last
+// seedWalk is one seed this pass must re-walk, and how it moved. A seed that
+// both changed and moved with its window is ONE walk: the two ways of moving
+// select different reverse hops but the same forward ones, so walking it twice
+// would read and follow it twice for one answer.
+type seedWalk struct {
+	ck closureKey
+	// row is the seed's row where one is in hand — a change set carries it, and
+	// so does a window membership that resolved it. read says a lookup has
+	// already been made and found nothing, so the zero row is the answer.
+	row  storage.Row
+	read bool
+	// changed says the seed's own row is in the change set; windowMoved that
+	// its window's membership moved it without one.
+	changed     bool
+	windowMoved bool
+}
+
+// run makes the pass: what changed is re-decided, every moved seed is re-walked
+// in both directions, and the forward targets that could have lost their last
 // holder are re-decided last, once every addition is in.
+//
+// The walks are collected before any of them runs so that the forward half can
+// resolve all of their targets together. That is the difference between a query
+// per moved seed and a query per batch of targets, and on a pull where a whole
+// window moved it is the pass's whole cost.
 func (m *closureMaint) run(changes []storage.Row, seedsMoved []closureKey) error {
 	for _, row := range changes {
 		m.written[row.Entity] = true
@@ -1131,18 +1153,40 @@ func (m *closureMaint) run(changes []storage.Row, seedsMoved []closureKey) error
 	for _, seed := range seedsMoved {
 		m.windowMoved[seed.entity] = true
 	}
+	walks := make([]seedWalk, 0, len(changes)+len(seedsMoved))
+	at := make(map[closureKey]int, len(changes)+len(seedsMoved))
 	for _, row := range changes {
 		if err := m.reconsider(row); err != nil {
 			return err
 		}
-		if err := m.rewalkSeed(closureKey{row.Entity, row.Key}, false); err != nil {
+		ck := closureKey{row.Entity, row.Key}
+		if i, ok := at[ck]; ok {
+			walks[i].row, walks[i].changed = row, true
+			continue
+		}
+		at[ck] = len(walks)
+		walks = append(walks, seedWalk{ck: ck, row: row, changed: true})
+	}
+	for _, seed := range seedsMoved {
+		if i, ok := at[seed]; ok {
+			walks[i].windowMoved = true
+			continue
+		}
+		at[seed] = len(walks)
+		// A member the window still holds may already have its row; one that
+		// left the window is a key alone until readSeedRows resolves it.
+		walks = append(walks, seedWalk{ck: seed, row: m.e.windowMembers[seed], windowMoved: true})
+	}
+	if err := m.readSeedRows(walks); err != nil {
+		return err
+	}
+	for i := range walks {
+		if err := m.rewalkReverse(&walks[i]); err != nil {
 			return err
 		}
 	}
-	for _, seed := range seedsMoved {
-		if err := m.rewalkSeed(seed, true); err != nil {
-			return err
-		}
+	if err := m.followSeeds(walks); err != nil {
+		return err
 	}
 	return m.recheckForwardTargets()
 }
@@ -1516,34 +1560,202 @@ func (m *closureMaint) seedRow(hop *forwardHop, row storage.Row, msg proto.Messa
 	return hop.seedPred == nil || hop.seedPred.Eval(msg.ProtoReflect()), nil
 }
 
-// followTargets adds the rows one seed points at. This is where a forward hop
-// GAINS members, and it costs no probe: the ref stubs name their targets
-// outright, so the walk is the point reads followForward batches.
-func (m *closureMaint) followTargets(hop *forwardHop, row storage.Row) error {
-	if row.Deleted {
+// readSeedRows resolves the rows of the seeds named by key alone — the members
+// a window gained or lost, which no change set carried — one batch per entity
+// rather than a point read each.
+//
+// Only the entities a WINDOWED hop is seeded by are read: a seed that moved
+// with its window and reaches no such hop is never asked for its row, and a
+// seed whose own row changed already has one.
+func (m *closureMaint) readSeedRows(walks []seedWalk) error {
+	seeded := map[string]bool{}
+	for i := range m.hops.reverse {
+		if hop := &m.hops.reverse[i]; hop.windowed {
+			seeded[hop.seedInfo.name] = true
+		}
+	}
+	for i := range m.hops.forward {
+		if hop := &m.hops.forward[i]; hop.windowed {
+			seeded[hop.seedInfo.name] = true
+		}
+	}
+	pending := map[string][]int{}
+	for i := range walks {
+		w := &walks[i]
+		if w.read || w.row.Entity != "" || !seeded[w.ck.entity] {
+			continue
+		}
+		pending[w.ck.entity] = append(pending[w.ck.entity], i)
+	}
+	entities := make([]string, 0, len(pending))
+	for entity := range pending {
+		entities = append(entities, entity)
+	}
+	sort.Strings(entities)
+	for _, entity := range entities {
+		byKey := make(map[string]int, len(pending[entity]))
+		keys := make([]string, 0, len(pending[entity]))
+		for _, i := range pending[entity] {
+			// A key the batch finds no row for keeps the zero row, which read
+			// then makes the settled answer.
+			walks[i].read = true
+			byKey[walks[i].ck.key] = i
+			keys = append(keys, walks[i].ck.key)
+		}
+		// Row-key order, so two runs of the same pull read in the same order.
+		sort.Strings(keys)
+		batch := &rowBatch{tx: m.tx, entity: entity, size: maxRowBatch, emit: func(row storage.Row) error {
+			i, ok := byKey[row.Key]
+			if !ok {
+				return nil // a key the batch never asked for settles nothing
+			}
+			walks[i].row = row
+			// Cache the read on the membership, so a later reader of the same
+			// member (see resolveSeed, buildWindowTargets) does not read it
+			// again.
+			if m.e.windowMembers.has(entity, row.Key) {
+				m.e.windowMembers[closureKey{entity, row.Key}] = row
+			}
+			return nil
+		}}
+		for _, key := range keys {
+			if err := batch.add(key); err != nil {
+				return err
+			}
+		}
+		if err := batch.flush(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// seedRowOf resolves one walk's seed row, reading it only where nothing has
+// already put one in hand.
+func (m *closureMaint) seedRowOf(w *seedWalk) (storage.Row, bool, error) {
+	if w.read || w.row.Entity != "" {
+		return w.row, w.row.Entity != "", nil
+	}
+	w.read = true
+	row, err := m.tx.GetRow(w.ck.entity, w.ck.key)
+	switch {
+	case errors.Is(err, storage.ErrNotFound):
+	case err != nil:
+		return storage.Row{}, false, err
+	default:
+		w.row = row
+	}
+	return w.row, w.row.Entity != "", nil
+}
+
+// followSeeds adds the rows the moved seeds point at. This is where a forward
+// hop GAINS members, and it costs no probe: a ref names its target outright.
+//
+// So the pass is point reads, and they are spent on the TARGETS rather than on
+// the seeds: every seed's target key is collected first and the whole set is
+// resolved one batch per hop. Two seeds naming the same row cost one read
+// between them, and a window that moved wholesale costs a query per 256 targets
+// instead of one per member.
+func (m *closureMaint) followSeeds(walks []seedWalk) error {
+	if len(m.hops.forward) == 0 {
 		return nil
 	}
-	msg, ok := m.e.decodeRow(hop.seedInfo, row)
-	if !ok {
-		return nil // quarantined: its ref cannot be read, so it points nowhere
+	// Target keys per hop, in seed order, so two runs of the same pull read in
+	// the same order.
+	targets := make([][]string, len(m.hops.forward))
+	var applies []int
+	for i := range walks {
+		w := &walks[i]
+		applies = applies[:0]
+		for h := range m.hops.forward {
+			hop := &m.hops.forward[h]
+			// A seed that moved with its window re-points nothing a
+			// predicate-scoped hop follows: being one of ITS seeds is decided by
+			// the row's own fields, which only a write can change.
+			if hop.seedInfo.name == w.ck.entity && (w.changed || hop.windowed) {
+				applies = append(applies, h)
+			}
+		}
+		if len(applies) == 0 {
+			continue
+		}
+		row, ok, err := m.seedRowOf(w)
+		if err != nil {
+			return err
+		}
+		if !ok || row.Deleted {
+			continue
+		}
+		// Decoded once for every hop this row seeds: the hops share an entity,
+		// so they share the decode.
+		msg, decoded := m.e.decodeRow(m.hops.forward[applies[0]].seedInfo, row)
+		if !decoded {
+			continue // quarantined: its refs cannot be read, so it points nowhere
+		}
+		holder := msg.ProtoReflect()
+		for _, h := range applies {
+			hop := &m.hops.forward[h]
+			seed, err := m.seedRow(hop, row, msg)
+			if err != nil {
+				return err
+			}
+			if !seed {
+				continue
+			}
+			if key, ok := forwardTargetKey(holder, hop.fr, hop.targetInfo, m.e.ws); ok {
+				targets[h] = append(targets[h], key)
+			}
+		}
 	}
-	seed, err := m.seedRow(hop, row, msg)
-	if err != nil || !seed {
-		return err
+	for h := range m.hops.forward {
+		if err := m.addForwardTargets(&m.hops.forward[h], targets[h]); err != nil {
+			return err
+		}
 	}
-	targets, err := m.e.followForward(m.tx,
-		frontierRow{entity: hop.seedInfo.name, key: row.Key, msg: msg.ProtoReflect()}, hop.fr)
+	return nil
+}
+
+// addForwardTargets resolves one hop's collected target keys and records the
+// live, readable ones as members. It applies followForward's per-target rule —
+// an orphan, a tombstone, a quarantined row and a read-filtered one each
+// contribute nothing — to every seed's targets at once.
+func (m *closureMaint) addForwardTargets(hop *forwardHop, keys []string) error {
+	if len(keys) == 0 {
+		return nil
+	}
+	filter, err := m.e.filterOf(hop.targetInfo.name)
 	if err != nil {
 		return err
 	}
-	for _, target := range targets {
-		// followForward resolved these against this snapshot and read-filtered
-		// them, so they are members and the recheck below can skip them.
-		ck := closureKey{target.row.Entity, target.row.Key}
-		m.cr[ck] = target.row
+	batch := &rowBatch{tx: m.tx, entity: hop.targetInfo.name, size: maxRowBatch, emit: func(row storage.Row) error {
+		if row.Deleted {
+			return nil
+		}
+		msg, ok := m.e.decodeRow(hop.targetInfo, row)
+		if !ok {
+			return nil // quarantined: followForward drops it too
+		}
+		if filter != nil && !filter(row.Key, msg) {
+			return nil // permission prune — and we cannot follow through it
+		}
+		// Resolved against this snapshot and read-filtered, so these are
+		// members and recheckForwardTargets can skip them.
+		ck := closureKey{row.Entity, row.Key}
+		m.cr[ck] = row
 		m.decided[ck] = true
+		return nil
+	}}
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		if err := batch.add(key); err != nil {
+			return err
+		}
 	}
-	return nil
+	return batch.flush()
 }
 
 // recheckForwardTargets re-decides the prior members a forward hop could have
@@ -1591,58 +1803,34 @@ func (m *closureMaint) recheckForwardTargets() error {
 	return nil
 }
 
-// rewalkSeed re-walks the closure around one row of a subscription's own entity
-// — a seed — after something moved it. Both directions start from the same read
-// of that row:
+// rewalkReverse re-decides the rows that point AT one moved seed. They cannot
+// be named without asking, and asking is a single index probe per hop (a scan of
+// the source entity where the index cannot serve it, which is also what a
+// deleted seed gets — there is no message left to probe with).
 //
-//   - reverse: the rows pointing back cannot be named without asking, and asking
-//     is a single index probe per hop (a scan of the source entity where the
-//     index cannot serve it, which is also what a deleted seed gets — there is
-//     no message left to probe with).
-//   - forward: the rows it points at are named by its own ref field, so they
-//     cost the point reads followForward batches, and nothing at all once it is
-//     no longer a seed. What it STOPPED pointing at is not knowable from here;
-//     recheckForwardTargets covers that.
+// Which hops care follows from how the seed moved. A windowed subscription's
+// seeds ARE its window's members, so they move when the window does; a
+// predicate-scoped one's move only when their own row changes, since being a
+// seed is decided by the row's own fields. Either way an edit that leaves a row
+// where it was leaves the rows pointing at it alone.
 //
-// windowed says which of the two ways the seed moved, and the hops that care
-// differ by direction. A windowed subscription's seeds ARE its window's
-// members, so they move when the window does; a predicate-scoped one's move
-// only when their own row changes, since being a seed is decided by the row's
-// own fields. For a reverse hop that is the whole rule — an edit leaving a row
-// in its window leaves the rows pointing at it alone. A forward hop takes both:
-// an edit leaving a seed in its window can still re-point it.
-func (m *closureMaint) rewalkSeed(seed closureKey, windowed bool) error {
-	var (
-		cached storage.Row
-		exists bool
-		read   bool
-	)
-	rowOf := func() (storage.Row, bool, error) {
-		if read {
-			return cached, exists, nil
-		}
-		read = true
-		row, err := m.tx.GetRow(seed.entity, seed.key)
-		switch {
-		case errors.Is(err, storage.ErrNotFound):
-		case err != nil:
-			return storage.Row{}, false, err
-		default:
-			cached, exists = row, true
-		}
-		return cached, exists, nil
-	}
-
+// The forward direction is not walked here: its targets are named by the seed's
+// own ref field, so every moved seed's are resolved together instead (see
+// followSeeds).
+func (m *closureMaint) rewalkReverse(w *seedWalk) error {
 	for i := range m.hops.reverse {
 		hop := &m.hops.reverse[i]
-		if hop.seedInfo.name != seed.entity || hop.windowed != windowed {
+		if hop.seedInfo.name != w.ck.entity {
 			continue
 		}
-		row, ok, err := rowOf()
+		if hop.windowed && !w.windowMoved || !hop.windowed && !w.changed {
+			continue
+		}
+		row, ok, err := m.seedRowOf(w)
 		if err != nil {
 			return err
 		}
-		holder := frontierRow{entity: seed.entity, key: seed.key}
+		holder := frontierRow{entity: w.ck.entity, key: w.ck.key}
 		if ok && !row.Deleted {
 			if msg, decoded := m.e.decodeRow(hop.seedInfo, row); decoded {
 				holder.msg = msg.ProtoReflect()
@@ -1656,23 +1844,6 @@ func (m *closureMaint) rewalkSeed(seed closureKey, windowed bool) error {
 			if err := m.reconsider(match.row); err != nil {
 				return err
 			}
-		}
-	}
-
-	for i := range m.hops.forward {
-		hop := &m.hops.forward[i]
-		if hop.seedInfo.name != seed.entity || (windowed && !hop.windowed) {
-			continue
-		}
-		row, ok, err := rowOf()
-		if err != nil {
-			return err
-		}
-		if !ok {
-			continue
-		}
-		if err := m.followTargets(hop, row); err != nil {
-			return err
 		}
 	}
 	return nil

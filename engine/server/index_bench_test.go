@@ -10,6 +10,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/query"
@@ -269,17 +270,24 @@ func BenchmarkFollowSeeds(b *testing.B) {
 // — so a probe asking "does any window member still point at this project"
 // meets the members LAST, after nearly the whole fan-in. The answer instead
 // comes from the window itself, which is bounded by MaxWindowSize whatever the
-// entity's size, so the column below has to stay FLAT in the number of issues.
+// entity's size, so the columns below have to stay FLAT in the number of issues.
+//
+// The second dimension is how much changed since the cursor, which is what says
+// whether the pass costs anything PER MOVED SEED. It must not: the seeds name
+// their targets outright, so a change set five hundred times larger resolves
+// them in the same handful of batched reads.
 //
 // The shape to expect (Apple M5 Pro, 8 projects, window of 500):
 //
-//	issues   maintain      alloc
-//	 10000   0.60 ms      460 KB
-//	 50000   0.72 ms      462 KB
+//	issues   1 changed          500 changed
+//	 10000   1.28 ms  1.12 MB   1.10 ms  1.87 MB
+//	 50000   1.29 ms  1.13 MB   1.12 ms  1.87 MB
 //
-// A regression looks like the column sloping with the corpus: that is the probe
+// Two regressions this catches. A column sloping with the CORPUS is the probe
 // per target coming back, and with it a cost proportional to the fan-in of every
-// project the client holds.
+// project the client holds. A row sloping with the CHANGE SET is a read per
+// moved seed coming back, which is what a store re-preparing every statement
+// charges most for.
 func BenchmarkPullWindowedFollowMaintain(b *testing.B) {
 	const projects = 8
 	const window = 500
@@ -306,8 +314,15 @@ func BenchmarkPullWindowedFollowMaintain(b *testing.B) {
 				b.Fatal(err)
 			}
 			b.Cleanup(func() { _ = store.Close() })
+			// An in-memory cursor-state store rather than the adapter's own: the
+			// loop below replays ONE cursor thousands of times, and every replay
+			// writes a fresh generation under its lineage. The persistent store
+			// keeps only the last few of those, so the cursor being measured
+			// would be pruned mid-run and the pull would start measuring the
+			// reset instead.
 			srv, err := server.New(store,
-				server.WithEntities(&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{}))
+				server.WithEntities(&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{}),
+				server.WithCursorStateStore(cursorstate.NewMemory(0)))
 			if err != nil {
 				b.Fatal(err)
 			}
@@ -366,24 +381,59 @@ func BenchmarkPullWindowedFollowMaintain(b *testing.B) {
 					break
 				}
 			}
-			// ONE issue edited past the caught-up cursor: the minimum that makes
-			// a pull maintain anything, and the case the fixed cost shows up in
-			// most plainly. It is an old row, so it enters the window and pushes
-			// the weakest member out — every iteration replays the same page.
-			if err := srv.Mutate(server.Trusted(ctx), benchWS, func(tx *server.EntityTx) error {
-				return tx.Put(&testdatav1.Issue{
-					Id: "i0000000", Title: "edited",
-					Project: &testdatav1.Project{Id: "p0"},
-				})
-			}); err != nil {
-				b.Fatal(err)
+			// The two ends of the range a change set spans, written cumulatively
+			// so both measure the same cursor falling further behind. Every
+			// iteration replays one page from that fixed cursor.
+			type variant struct {
+				changed int
+				rows    []int
 			}
-			b.ReportAllocs()
-			b.ResetTimer()
-			for i := 0; i < b.N; i++ {
-				if _, err := srv.Pull(ctx, sub(cursor)); err != nil {
+			// ONE OLD row rewritten: the minimum that makes a pull maintain
+			// anything, and the case the fixed cost shows up in most plainly.
+			// It enters the window and pushes the weakest member out.
+			variants := []variant{{changed: 1, rows: []int{0}}}
+			// A change set the size of the window, which is what a busy
+			// workspace hands a pull and where a cost paid per changed SEED
+			// shows. These are the window's own members, so membership does not
+			// move and the whole page belongs to the closure.
+			members := make([]int, 0, window-1)
+			for i := n - window + 1; i < n; i++ {
+				members = append(members, i)
+			}
+			variants = append(variants, variant{changed: window, rows: members})
+
+			for _, v := range variants {
+				if err := srv.Mutate(server.Trusted(ctx), benchWS, func(tx *server.EntityTx) error {
+					for _, i := range v.rows {
+						if err := tx.Put(&testdatav1.Issue{
+							Id:      fmt.Sprintf("i%07d", i),
+							Title:   "edited",
+							Project: &testdatav1.Project{Id: fmt.Sprintf("p%d", i%projects)},
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}); err != nil {
 					b.Fatal(err)
 				}
+				// A reset page is not the work being measured, and it is cheap
+				// enough to pass for a win.
+				resp, err := srv.Pull(ctx, sub(cursor))
+				if err != nil {
+					b.Fatal(err)
+				}
+				if resp.Msg.GetReset_() {
+					b.Fatalf("cursor reset with %d rows changed", v.changed)
+				}
+				b.Run(fmt.Sprintf("changed=%d", v.changed), func(b *testing.B) {
+					b.ReportAllocs()
+					for i := 0; i < b.N; i++ {
+						if _, err := srv.Pull(ctx, sub(cursor)); err != nil {
+							b.Fatal(err)
+						}
+					}
+				})
 			}
 		})
 	}

@@ -650,6 +650,68 @@ var _ = Describe("Membership maintenance", func() {
 			Expect(counter.count("batchkeys")).To(BeNumerically("<=", projects*perProject+projects+1))
 		})
 
+		It("resolves the targets of every changed seed in one batch", func() {
+			// Half a window re-points at once, each seed at a project no other
+			// seed names. Resolving a seed at a time would cost a read per seed
+			// however few rows the answer touches, which is the shape this pins
+			// against: the queries a page costs must follow the number of
+			// TARGETS (a batch each) and not the number of seeds.
+			const rows = 100
+			maintained, counter := startCountingReplica()
+			var mut uint64
+			var muts []*syncplanev1.Mutation
+			for i := 0; i < rows; i++ {
+				id := fmt.Sprintf("p%03d", i)
+				mut++
+				muts = append(muts, putMutation("c1", mut, "project", id, &testdatav1.Project{Id: id, Name: id}))
+			}
+			for i := 0; i < rows; i++ {
+				key := fmt.Sprintf("i%03d", i)
+				mut++
+				muts = append(muts, putMutation("c1", mut, "issue", key,
+					&testdatav1.Issue{Id: key, Project: &testdatav1.Project{Id: fmt.Sprintf("p%03d", i)}}))
+			}
+			maintained.push(ctx, muts)
+
+			subs := []*syncplanev1.Subscription{{
+				Entity: "issue",
+				Window: &syncplanev1.Window{ByRecency: true, Limit: rows},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+			}}
+			maintained.buildIndexes(ctx)
+			maintained.pull(ctx, subs, 0) // settle: the first pull has no state to maintain from
+
+			// The lower half of the window moves onto the upper half's
+			// projects, so every project the lower half named loses its last
+			// holder and every seed's new target is a row the closure already
+			// holds.
+			var edits []*syncplanev1.Mutation
+			for i := 0; i < rows/2; i++ {
+				key := fmt.Sprintf("i%03d", i)
+				mut++
+				edits = append(edits, putMutation("c1", mut, "issue", key,
+					&testdatav1.Issue{Id: key, Project: &testdatav1.Project{Id: fmt.Sprintf("p%03d", i+rows/2)}}))
+			}
+			maintained.push(ctx, edits)
+			counter.reset()
+			page := maintained.pull(ctx, subs, 0)
+
+			var dropped []string
+			for i := 0; i < rows/2; i++ {
+				dropped = append(dropped, fmt.Sprintf("-project/p%03d", i))
+			}
+			Expect(changeKeys(page.GetPatch())).To(ContainElements(dropped))
+			Expect(counter.count("probe")).To(BeZero())
+			Expect(counter.count("scan")).To(BeZero())
+			// One batch for the seeds' targets, one for the prior members being
+			// re-decided and one for the window that answers them — plus room
+			// for a second chunk of any of the three. A read per seed would be
+			// fifty on its own.
+			Expect(counter.count("get")+counter.count("batch")).To(BeNumerically("<=", 6),
+				"get=%d batch=%d batchkeys=%d",
+				counter.count("get"), counter.count("batch"), counter.count("batchkeys"))
+		})
+
 		It("costs the whole window and its targets when it has to rebuild", func() {
 			rebuilt, counter := startCountingReplica(
 				server.WithLimits(server.Limits{DisableMembershipMaintenance: true}))
