@@ -19,7 +19,7 @@ import {
 	stagingWsRoot,
 } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import type { KVRead } from '../../src/kv/store.js';
+import type { KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex, type Mutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
@@ -32,6 +32,7 @@ import { prepareQuery } from '../../src/query/wire.js';
 import { scanMergedRows } from '../../src/read.js';
 import { DEFAULT_STORAGE_PREFIX, storageNames } from '../../src/storagenames.js';
 import { Coordinator } from '../../src/sync/coordinator.js';
+import type { BootstrapEvent, SyncEvent } from '../../src/sync/events.js';
 import { StatusTracker } from '../../src/sync/status.js';
 import { TouchSet } from '../../src/touch.js';
 import { WatcherHub } from '../../src/watch.js';
@@ -207,11 +208,12 @@ function twoChunkTransport(
 }
 
 function newCoordinator(
-	kv: MemoryKVStore,
+	kv: KVStore,
 	kvMutex: Mutex,
 	transport: Transport,
 	indexes?: IndexCache,
 	onIndexesStale?: (workspaceId: string) => void,
+	onSyncEvent?: (event: SyncEvent) => void,
 ): Coordinator {
 	const hub = new WatcherHub(kv, registry, kvMutex);
 	return new Coordinator({
@@ -224,6 +226,7 @@ function newCoordinator(
 		registry,
 		indexes,
 		onIndexesStale,
+		onSyncEvent,
 		mirrors: {},
 		notify: (touched) => hub.notify(touched),
 		status: new StatusTracker(),
@@ -289,7 +292,68 @@ async function until(probe: () => Promise<boolean>, what: string): Promise<void>
 	throw new Error(`timed out waiting for ${what}`);
 }
 
-async function stagedKeys(kv: MemoryKVStore): Promise<string[]> {
+/**
+ * A store whose commits land as they always did but report back only when the
+ * test lets them — the shape a browser store has, where a transaction is handed
+ * over well before the promise waiting on it resolves. A memory store reports
+ * back at once, which would hide whether the bootstrap ever runs ahead of its
+ * commits at all.
+ */
+class GatedCommitStore implements KVStore {
+	/** Commits issued so far, held or not. */
+	issued = 0;
+	/** Commits from this one on (1-based, in issue order) wait for release. */
+	holdFrom = Number.POSITIVE_INFINITY;
+	/** The commit at this position (1-based) fails instead, writing nothing. */
+	failAt = Number.POSITIVE_INFINITY;
+	private readonly held: (() => void)[] = [];
+
+	constructor(private readonly inner: MemoryKVStore) {}
+
+	/** Commits issued and not yet reported back. */
+	get outstanding(): number {
+		return this.held.length;
+	}
+
+	/** Reports back every held commit, and stops holding the ones still to come. */
+	releaseAll(): void {
+		this.holdFrom = Number.POSITIVE_INFINITY;
+		for (const release of this.held.splice(0)) release();
+	}
+
+	read(): Promise<KVRead> {
+		return this.inner.read();
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+
+	async write(): Promise<KVWrite> {
+		const tx = await this.inner.write();
+		const store = this;
+		return new Proxy(tx, {
+			get(target, prop) {
+				if (prop === 'commit') {
+					return async () => {
+						const at = ++store.issued;
+						if (at === store.failAt) {
+							target.release();
+							throw new Error('commit failed');
+						}
+						await target.commit();
+						if (at < store.holdFrom) return;
+						await new Promise<void>((resolve) => store.held.push(resolve));
+					};
+				}
+				const value = Reflect.get(target, prop) as unknown;
+				return typeof value === 'function' ? (value as () => unknown).bind(target) : value;
+			},
+		});
+	}
+}
+
+async function stagedKeys(kv: KVStore): Promise<string[]> {
 	const tx = await kv.read();
 	try {
 		const out: string[] = [];
@@ -300,7 +364,7 @@ async function stagedKeys(kv: MemoryKVStore): Promise<string[]> {
 	}
 }
 
-async function keysOf(kv: MemoryKVStore): Promise<string[]> {
+async function keysOf(kv: KVStore): Promise<string[]> {
 	const tx = await kv.read();
 	try {
 		return (await scanMergedRows(tx, registry, 'todo', WS)).map((r) => r.key);
@@ -858,6 +922,165 @@ describe('cold bootstrap', () => {
 			tx.release();
 		}
 		expect(await keysOf(kv)).toEqual([]);
+
+		await coord.stop();
+	});
+
+	it('keeps the chunks that ran before the workspace was taken', async () => {
+		// The other side of the check above: only the chunk that saw the bumped
+		// generation is dropped. A cold bootstrap cannot take back rows it has
+		// already made visible, so what it wrote before then stays where it is and
+		// the winner's claim is what clears it.
+		const kv = new MemoryKVStore();
+		const kvMutex = createKvMutex('cold-test-8');
+		const { transport, gates } = streamingTransport([
+			[ serverRowBody('first', 'a', 1n) ],
+			[ serverRowBody('second', 'b', 2n) ],
+			[ serverRowBody('third', 'c', 3n) ],
+		], 1);
+		const coord = newCoordinator(kv, kvMutex, transport);
+
+		const syncP = coord.syncNow();
+		await gates.parked; // chunks one and two are in; the third is not sent
+		await until(async () => (await keysOf(kv)).length === 2, 'the first two chunks to land');
+
+		// Another tab claims the workspace, leaving the rows alone — what becomes
+		// of them is its business now.
+		const claim = await kv.write();
+		await claim.put(metaBootstrapGen(WS), 99);
+		await claim.commit();
+
+		gates.releaseEnd();
+		await syncP;
+
+		const tx = await kv.read();
+		try {
+			expect(await tx.has(confirmedKey('todo', WS, 'third'))).toBe(false);
+			expect(await tx.has(metaCursor(WS))).toBe(false);
+		} finally {
+			tx.release();
+		}
+		expect((await keysOf(kv)).sort()).toEqual([ 'first', 'second' ]);
+
+		await coord.stop();
+	});
+});
+
+// Chunks are written while the ones before them are still committing: the loop
+// hands a transaction to the store and decodes the next chunk instead of
+// waiting, which is what keeps a large snapshot from spending most of its time
+// with nothing to do. These specs pin what that must not cost — the row count,
+// the failure, and the order.
+describe('pipelined bootstrap chunks', () => {
+	it('stages the next chunk while the last one is still committing', async () => {
+		const kv = new GatedCommitStore(new MemoryKVStore());
+		const kvMutex = createKvMutex('pipeline-test-1');
+		const { transport } = streamingTransport([
+			[ serverRowBody('t1', 'a', 1n) ],
+			[ serverRowBody('t2', 'b', 2n) ],
+			[ serverRowBody('t3', 'c', 3n) ],
+		], -1);
+		const events: SyncEvent[] = [];
+		const coord = newCoordinator(
+			kv,
+			kvMutex,
+			transport,
+			undefined,
+			undefined,
+			(event) => void events.push(event),
+		);
+
+		// Everything the bootstrap commits after claiming its generation waits for
+		// the test.
+		kv.holdFrom = 2;
+		const syncP = coord.syncNow();
+
+		// Two chunk transactions with the store and neither reported back: the
+		// second was decoded and written while the first was still committing.
+		await until(async () => kv.outstanding === 2, 'two chunk commits to be outstanding');
+		expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2' ]);
+		// And no further. The queue bounds how far ahead of the store the loop may
+		// run, so the third chunk waits for the first commit instead of piling on.
+		await new Promise((r) => setTimeout(r, 20));
+		expect(kv.outstanding).toBe(2);
+
+		kv.releaseAll();
+		await syncP;
+
+		// The snapshot installs exactly as it does when every commit is awaited in
+		// turn: all three chunks, one cursor, one event counting every row.
+		expect((await keysOf(kv)).sort()).toEqual([ 't1', 't2', 't3' ]);
+		const tx = await kv.read();
+		try {
+			expect(await tx.get(metaCursor(WS))).toEqual(new Uint8Array([ 9 ]));
+		} finally {
+			tx.release();
+		}
+		const boot = events.find((e): e is BootstrapEvent => e.type === 'bootstrap');
+		expect(boot?.rows).toBe(3);
+		expect(boot?.outcome).toBe('ok');
+
+		await coord.stop();
+	});
+
+	it('fails the bootstrap when a chunk transaction does', async () => {
+		// A commit is reported some way behind the chunk that issued it, so its
+		// failure has to travel back to the bootstrap rather than being lost in the
+		// gap — and nothing may be left waiting on a transaction nobody is
+		// listening to.
+		const kv = new GatedCommitStore(new MemoryKVStore());
+		const kvMutex = createKvMutex('pipeline-test-2');
+		const { transport } = streamingTransport([
+			[ serverRowBody('t1', 'a', 1n) ],
+			[ serverRowBody('t2', 'b', 2n) ],
+		], -1);
+		const notified: string[][] = [];
+		const coord = new Coordinator({
+			transport,
+			kv,
+			kvMutex,
+			storageNames: storageNames(DEFAULT_STORAGE_PREFIX, 'acct'),
+			scopes: new Map([ [ WS, [] ] ]),
+			clientId: 'c1',
+			registry,
+			mirrors: {},
+			notify: (touched) => {
+				notified.push([ ...touched.pairs() ].map((p) => p.entity).sort());
+				return Promise.resolve();
+			},
+			status: new StatusTracker(),
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+
+		const unhandled: unknown[] = [];
+		const onUnhandled = (err: unknown): void => void unhandled.push(err);
+		process.on('unhandledRejection', onUnhandled);
+		try {
+			// The first chunk's transaction, the generation claim being the first
+			// commit of the bootstrap.
+			kv.failAt = 2;
+			await expect(coord.syncNow()).rejects.toThrow('commit failed');
+			// Long enough for a rejection nobody handled to be reported.
+			await new Promise((r) => setTimeout(r, 20));
+			expect(unhandled).toEqual([]);
+		} finally {
+			process.off('unhandledRejection', onUnhandled);
+		}
+
+		// The cold path tells watchers about the snapshot it abandoned, exactly as
+		// it does when the stream itself fails.
+		expect(notified.some((entities) => entities.includes('todo'))).toBe(true);
+		// The failed transaction wrote nothing; the chunk behind it, already with
+		// the store, did. No cursor installed means the workspace bootstraps again
+		// rather than trusting either of them.
+		expect(await keysOf(kv)).toEqual([ 't2' ]);
+		const tx = await kv.read();
+		try {
+			expect(await tx.has(metaCursor(WS))).toBe(false);
+		} finally {
+			tx.release();
+		}
 
 		await coord.stop();
 	});

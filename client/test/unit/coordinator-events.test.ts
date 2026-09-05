@@ -218,10 +218,12 @@ describe('coordinator sync events', () => {
 		const boot = events.find((e): e is BootstrapEvent => e.type === 'bootstrap');
 		expect(boot).toBeDefined();
 		expect(boot!.rows).toBe(1);
-		// The phases are the point: each is a real span, and together they are the
-		// total up to the bookkeeping between them. A phase stuck at zero would
-		// mean the clock was never taken, which is exactly the regression that
-		// makes the split useless.
+		// The split is the point: each part is a real span, and together they are
+		// the total up to the bookkeeping between them — stream and stage divide
+		// the download (the loop is either waiting for a frame or working on one),
+		// and the swap follows it. A part stuck at zero would mean the clock was
+		// never taken, which is exactly the regression that makes the split
+		// useless.
 		expect(boot!.streamMs).toBeGreaterThan(0);
 		expect(boot!.stageMs).toBeGreaterThan(0);
 		expect(boot!.swapMs).toBeGreaterThan(0);

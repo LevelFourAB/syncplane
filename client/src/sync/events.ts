@@ -107,18 +107,20 @@ export interface PullEvent extends EventBase {
 /**
  * A full bootstrap of one workspace finished.
  *
- * `durationMs` is the whole thing; `streamMs`, `stageMs` and `swapMs` are the
- * three phases it is made of, and they are reported separately because their
- * costs move independently. A bootstrap that is slow because the snapshot took
- * a long time to arrive and one that is slow because the store took a long time
- * to write it are the same number and different problems — "the download was
- * fast and the store was slow" is a different support conversation from the
- * reverse — and with one number a change that halves one phase while doubling
- * another looks like no change at all.
+ * `durationMs` is the whole thing. `streamMs` and `stageMs` divide the download
+ * between waiting for the server and working on what it sent — the loop is doing
+ * one or the other at every moment — and `swapMs` is the transaction that
+ * installs the result. They are reported apart because their costs move
+ * independently: a bootstrap that is slow because the snapshot took a long time
+ * to arrive and one that is slow because the store took a long time to write it
+ * are the same number and different problems — "the download was fast and the
+ * store was slow" is a different support conversation from the reverse — and
+ * with one number a change that halves one of them while doubling another looks
+ * like no change at all.
  *
  * The three very nearly account for `durationMs`; the remainder is bookkeeping
  * between them, so treat a gap of a few milliseconds as noise rather than a
- * missing phase.
+ * missing number.
  */
 export interface BootstrapEvent extends EventBase {
 	type: 'bootstrap';
@@ -135,16 +137,19 @@ export interface BootstrapEvent extends EventBase {
 	/** Wall time of the whole bootstrap: stream, staging and swap together. */
 	durationMs: number;
 	/**
-	 * Waiting on the server's snapshot stream — everything in the stream phase
-	 * that was not staging, so it also covers decoding each frame. This is the
-	 * part a slower link makes worse and a faster store does not.
+	 * Waiting for the next frame of the server's snapshot stream, summed over the
+	 * whole download. This is the part a slower link makes worse and a faster
+	 * store does not.
 	 */
 	streamMs: number;
 	/**
-	 * Writing the arriving chunks into the store, summed over every chunk — into
-	 * the staging keyspace when the workspace already holds a snapshot, straight
-	 * into confirmed state when it does not. Local reads and writes run
-	 * throughout, so this is store throughput rather than a stall.
+	 * The rest of the download: decoding each arriving chunk into a transaction —
+	 * into the staging keyspace when the workspace already holds a snapshot,
+	 * straight into confirmed state when it does not — plus the waits taken when
+	 * the client has run as far ahead of the store as it may. Chunks are written
+	 * while earlier ones are still committing, so a store that keeps up with the
+	 * decoding costs nothing here beyond the decoding itself. Local reads and
+	 * writes run throughout.
 	 */
 	stageMs: number;
 	/**

@@ -100,10 +100,15 @@ The two numbers to read first are `firstReadMs` and `completeMs` from
 `01-bootstrap`: when the app could paint, and when the local store provably held
 the whole scope. The gap between them is what grows as a corpus does.
 
-`bootstrapMs` is split into the phases it is made of — `streamMs` waiting on the
-server's snapshot, `stageMs` writing the chunks it delivered, `swapMs` in the
-transaction that installs them — because they move independently, and a change
-that shifts time from one to another nets out to nothing in the total.
+`bootstrapMs` is split into what it is made of — `streamMs` waiting for the next
+frame of the server's snapshot, `stageMs` on everything else the download does
+(decoding the chunks into transactions, plus the waits taken when the client has
+run as far ahead of the store as it may), `swapMs` in the transaction that
+installs them — because they move independently, and a change that shifts time
+from one to another nets out to nothing in the total. Chunks are written while
+earlier ones are still committing, so `stageMs` is store time only where the
+store cannot keep up with the decoding.
+
 `swapWrites` (and `swapWritesPerRow`) is what that transaction cost the store in
 KV entries: row count alone hides write amplification, and a regression there is
 otherwise invisible until it surfaces as `swapMs`.

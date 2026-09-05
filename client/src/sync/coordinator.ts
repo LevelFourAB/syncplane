@@ -13,7 +13,7 @@ import {
 	type RejectionCode,
 	type SyncErrorCode,
 } from '../codes.js';
-import { opaqueEntities } from '../entities.js';
+import { opaqueEntities, syncableEntities } from '../entities.js';
 import {
 	CrudMutationSchema,
 	CrudOp,
@@ -399,6 +399,36 @@ interface BootstrapResumeRecord {
 	/** Scan position within it, from the last chunk stored (opaque). */
 	token: Uint8Array;
 }
+
+/**
+ * One bootstrap chunk whose rows are written and whose transaction the store has
+ * yet to report on. The stream loop decodes the next chunk while these commit,
+ * so what a chunk counts and completes lands only once ITS own commit came back
+ * — in commit order, which is the order the transactions were handed over.
+ */
+interface BootstrapChunkCommit {
+	/**
+	 * Settles with the transaction's failure, or undefined once it committed.
+	 * Never rejects: it is awaited some way behind the loop that made it, and a
+	 * bare rejection would be an unhandled one until then.
+	 */
+	settled: Promise<{ err: unknown } | undefined>;
+	/** Rows the chunk wrote. */
+	rows: number;
+	/** Entities the chunk carried rows for, for the hydration coverage. */
+	entities: string[];
+}
+
+/**
+ * Bootstrap chunks whose commit may be outstanding while the loop stages the
+ * next one.
+ *
+ * A store commits its write transactions one at a time, so depth here buys the
+ * overlap of one chunk's decoding with one commit and no more; the second slot
+ * is what keeps the loop from stalling on the bookkeeping of a chunk that has
+ * already committed.
+ */
+const MAX_INFLIGHT_BOOTSTRAP_COMMITS = 2;
 
 /**
  * Drives background sync for every workspace the client holds: drains their
@@ -2274,7 +2304,7 @@ export class Coordinator {
 		//    lineage" from "someone else bootstrapped in between". Two tabs cannot
 		//    adopt the same record and both install: adoption bumps the marker
 		//    inside this transaction, and every install is gated on it.
-		const { gen, snapshotGen: claimedSnapshotGen, direct, resume } = await this.opts.kvMutex.run(
+		const claim = await this.opts.kvMutex.run(
 			async () => {
 				const tx = await this.opts.kv.write();
 				try {
@@ -2287,6 +2317,15 @@ export class Coordinator {
 					// both answer "cold" and both start writing: the loser's next chunk
 					// sees the generation this one bumped.
 					const direct = !(await tx.has(metaCursor(workspaceId)));
+					// The entity set every chunk of this snapshot is filtered against,
+					// fixed here instead of re-read per chunk: a chunk that read it from
+					// its own transaction could not decode a row until the PREVIOUS
+					// chunk's commit had finished, which is exactly the serialization
+					// the loop below is shaped to avoid. Reading it once loses nothing a
+					// per-chunk read would keep — an entity registered mid-snapshot is
+					// already missing from the chunks that arrived before it, and that
+					// registration invalidates this workspace's cursor either way.
+					const syncable = await syncableEntities(tx, this.opts.registry);
 					const record = (await tx.get(metaBootstrapResume(workspaceId))) as
 						| BootstrapResumeRecord
 						| undefined;
@@ -2315,6 +2354,7 @@ export class Coordinator {
 						gen: next,
 						snapshotGen: adopt ? record.snapshotGen : next,
 						direct,
+						syncable,
 						resume: adopt ? { cursor: record.cursor, token: record.token } : undefined,
 					};
 				} catch (err) {
@@ -2323,6 +2363,7 @@ export class Coordinator {
 				}
 			},
 		);
+		const { gen, snapshotGen: claimedSnapshotGen, direct, resume, syncable } = claim;
 		// The generation whose staging prefix holds this snapshot. It trails `gen`
 		// on an adopted snapshot — the staged rows keep the prefix they were
 		// written under, since moving them would cost the copy the adoption exists
@@ -2336,10 +2377,13 @@ export class Coordinator {
 		if (direct) this.beginHydration(workspaceId, subs);
 
 		// 2. Stream the snapshot in outside the mutex, one transaction per chunk.
-		//    On the staged path the cursor and confirmed state stay untouched, so a
-		//    crash here just leaves stale staging the next claim garbage-collects;
-		//    on the cold path it leaves rows with no cursor, which is the state
-		//    that asks for a bootstrap in the first place.
+		//    A chunk's transaction is handed to the store and the NEXT chunk is
+		//    decoded while it commits, so the two halves of the work — this
+		//    thread's decoding and the store's writing — overlap instead of taking
+		//    turns. On the staged path the cursor and confirmed state stay
+		//    untouched, so a crash here just leaves stale staging the next claim
+		//    garbage-collects; on the cold path it leaves rows with no cursor,
+		//    which is the state that asks for a bootstrap in the first place.
 		let cursor: Uint8Array | undefined;
 		let lastAcked = 0n;
 		let snapshotSeq = 0n;
@@ -2353,7 +2397,44 @@ export class Coordinator {
 		// only split apart do they say which one it was.
 		const bootStarted = performance.now();
 		let rows = 0;
-		let stageMs = 0;
+		// Time the loop spent waiting for the server's next frame; what it spent on
+		// the frames instead is taken by subtraction once the stream is done.
+		let streamMs = 0;
+		// Chunks handed to the store, oldest first.
+		const inflight: BootstrapChunkCommit[] = [];
+		// Applies what the oldest chunks carried — their rows and the entities they
+		// completed — until at most `keep` are still outstanding, waiting for each
+		// commit in turn. Every one of them is awaited even after one has failed,
+		// since leaving a transaction unheard-of would strand its result; the first
+		// failure is the one reported.
+		const settleChunks = async (keep: number): Promise<void> => {
+			let failure: { err: unknown } | undefined;
+			while (inflight.length > keep) {
+				const chunk = inflight.shift()!;
+				const failed = await chunk.settled;
+				if (failed !== undefined) {
+					failure ??= failed;
+					continue;
+				}
+				if (failure !== undefined) continue;
+				rows += chunk.rows;
+				// Committed, so whatever this chunk finished is now readable.
+				if (direct) {
+					try {
+						await this.completeHydrated(workspaceId, chunk.entities);
+					} catch (err) {
+						failure = { err };
+					}
+				}
+			}
+			if (failure !== undefined) throw failure.err;
+		};
+		// Waits out every transaction still in flight without letting any of them
+		// speak: this runs on the way out with a failure already in hand.
+		const abandonChunks = async (): Promise<void> => {
+			await Promise.all(inflight.splice(0).map((chunk) => chunk.settled));
+		};
+		let frameStarted = performance.now();
 		try {
 			for await (
 				const msg of this.rpc.bootstrap(
@@ -2367,6 +2448,7 @@ export class Coordinator {
 					{ signal: this.abort.signal },
 				)
 			) {
+				streamMs += performance.now() - frameStarted;
 				switch (msg.body.case) {
 					case 'begin':
 						cursor = msg.body.value.cursor;
@@ -2392,72 +2474,85 @@ export class Coordinator {
 						break;
 					case 'chunk': {
 						if (cursor === undefined) throw new Error('bootstrap chunk before Begin');
-						const stageStarted = performance.now();
 						const tx = await this.opts.kv.write();
 						try {
 							// The generation check the staged path can leave to the swap:
 							// these rows are visible the moment they commit, so a
 							// superseded cold bootstrap has to stop writing rather than
-							// discard afterwards. Read inside the transaction that writes,
+							// discard afterwards. Read from the transaction that writes,
 							// which is what makes the two orderings against the winner's
-							// claim exhaustive (see the contract above).
-							superseded = direct && !(await this.stillCurrent(tx, workspaceId, gen));
+							// claim exhaustive (see the contract above) — and asked for
+							// here, before the rows below are decoded, rather than awaited
+							// here: the store answers it behind the previous chunk's
+							// commit, so a check that waited for its answer first would
+							// serialize this chunk's decoding against that commit. The
+							// verdict still gates every write, since the transaction is
+							// handed over only after it comes back.
+							const current = direct ? this.stillCurrent(tx, workspaceId, gen) : undefined;
+							// Awaited below, which is where a failure is reported. This
+							// only keeps one that never gets there — the staging under it
+							// threw first — from surfacing as an unhandled rejection.
+							void current?.catch(() => {});
+							if (direct) {
+								// Indexed as they land. The chunk holds a transaction of
+								// its own and no store mutex, so the decode this costs is
+								// off the swap's critical path — which is what lets the
+								// install claim the markers rather than leaving the
+								// workspace scanning until a background walk finishes.
+								await applyBootstrapRows(
+									tx,
+									this.opts.registry,
+									workspaceId,
+									msg.body.value.rows,
+									touched,
+									this.opts.indexes,
+									syncable,
+								);
+							} else {
+								await stageServerChanges(
+									tx,
+									this.opts.registry,
+									workspaceId,
+									snapshotGen,
+									msg.body.value.rows,
+									syncable,
+								);
+							}
+							// Durable in the same transaction as the rows it accounts
+							// for, so the record can never claim more than the store
+							// holds. An empty token is a server that cannot resume:
+							// nothing is recorded and the next attempt starts over.
+							if (msg.body.value.resumeToken.length > 0) {
+								await tx.put(
+									metaBootstrapResume(workspaceId),
+									{
+										gen,
+										snapshotGen,
+										direct,
+										cursor,
+										token: msg.body.value.resumeToken,
+									} satisfies BootstrapResumeRecord,
+								);
+							}
+							superseded = current !== undefined && !(await current);
 							if (superseded) {
 								tx.release();
 							} else {
-								if (direct) {
-									// Indexed as they land. The chunk holds a transaction of
-									// its own and no store mutex, so the decode this costs is
-									// off the swap's critical path — which is what lets the
-									// install claim the markers rather than leaving the
-									// workspace scanning until a background walk finishes.
-									await applyBootstrapRows(
-										tx,
-										this.opts.registry,
-										workspaceId,
-										msg.body.value.rows,
-										touched,
-										this.opts.indexes,
-									);
-								} else {
-									await stageServerChanges(
-										tx,
-										this.opts.registry,
-										workspaceId,
-										snapshotGen,
-										msg.body.value.rows,
-									);
-								}
-								// Durable in the same transaction as the rows it accounts
-								// for, so the record can never claim more than the store
-								// holds. An empty token is a server that cannot resume:
-								// nothing is recorded and the next attempt starts over.
-								if (msg.body.value.resumeToken.length > 0) {
-									await tx.put(
-										metaBootstrapResume(workspaceId),
-										{
-											gen,
-											snapshotGen,
-											direct,
-											cursor,
-											token: msg.body.value.resumeToken,
-										} satisfies BootstrapResumeRecord,
-									);
-								}
-								await tx.commit();
-								rows += msg.body.value.rows.length;
+								// Room for this one first: the queue is what bounds how far
+								// ahead of the store the loop may run.
+								await settleChunks(MAX_INFLIGHT_BOOTSTRAP_COMMITS - 1);
+								inflight.push({
+									settled: tx.commit().then(
+										() => undefined,
+										(err: unknown) => ({ err }),
+									),
+									rows: msg.body.value.rows.length,
+									entities: msg.body.value.rows.map((r) => r.entity),
+								});
 							}
-							stageMs += performance.now() - stageStarted;
 						} catch (err) {
 							tx.release();
 							throw err;
-						}
-						// Committed, so whatever this chunk finished is now readable.
-						if (direct && !superseded) {
-							await this.completeHydrated(
-								workspaceId,
-								msg.body.value.rows.map((r) => r.entity),
-							);
 						}
 						break;
 					}
@@ -2465,11 +2560,21 @@ export class Coordinator {
 						ended = true;
 						break;
 				}
+				frameStarted = performance.now();
 				// Leaving the loop closes the stream: there is nothing left to write,
 				// and the rows already downloaded belong to a snapshot that lost.
 				if (superseded) break;
 			}
+			streamMs += performance.now() - frameStarted;
+			// Nothing may still be in flight past here: the install below has to
+			// observe every row this snapshot wrote.
+			await settleChunks(0);
 		} catch (err) {
+			// Whatever is still with the store is left to finish on its own — the
+			// failure being reported is the one that got here first, and an
+			// abandoned transaction would otherwise report a second time with
+			// nobody listening.
+			await abandonChunks();
 			// A cold bootstrap has already made rows visible and wiped what was
 			// there before, so watchers have to hear about it even though the
 			// snapshot never completed. The store is consistent either way — rows
@@ -2488,10 +2593,12 @@ export class Coordinator {
 		// The check above is what makes this defined for every bootstrap that gets
 		// as far as installing; a const copy is what carries that into the closure.
 		const snapshotCursor = cursor;
-		// Whatever the stream loop spent NOT writing: waiting on frames, plus
-		// decoding them. Taking it by subtraction rather than by timing each await
-		// keeps one clock reading per chunk instead of two per message.
-		const streamMs = performance.now() - bootStarted - stageMs;
+		// Whatever the stream loop spent NOT waiting for the server: decoding the
+		// frames into transactions, and blocking on a commit when it had run as far
+		// ahead of the store as it may. Chunks are written while the ones before
+		// them are still committing, so this is not a phase that follows streamMs —
+		// the two split the loop's wall time between them.
+		const stageMs = performance.now() - bootStarted - streamMs;
 
 		// 3. Install. One transaction under the mutex: on the staged path wipe this
 		//    workspace's confirmed rows + cursor and promote the staged snapshot;

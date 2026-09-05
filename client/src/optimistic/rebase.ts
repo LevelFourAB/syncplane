@@ -610,7 +610,8 @@ export async function applyServerChanges(
  * malfunctioning, and the resulting rows would be missing their documents.
  *
  * Rows for an entity the store does not sync are skipped, exactly as they are on
- * the pull path (see applyServerChanges).
+ * the pull path (see applyServerChanges). `entities` is the set that decides
+ * that; omitted, it is read from `tx`.
  */
 async function writeSnapshotRows(
 	tx: KVWrite,
@@ -619,8 +620,9 @@ async function writeSnapshotRows(
 	keyFor: (entity: string, key: string) => string,
 	onEntity?: (entity: string) => void,
 	index?: { indexes: IndexCache; workspaceId: string },
+	entities?: ReadonlySet<string>,
 ): Promise<void> {
-	const syncable = await syncableEntities(tx, registry);
+	const syncable = entities ?? await syncableEntities(tx, registry);
 	for (const change of changes) {
 		if (!syncable.has(change.entity)) continue;
 		if (change.textDeltas.length > 0) {
@@ -669,6 +671,9 @@ async function writeSnapshotRows(
  * Staged rows carry no index positions. The store's index spans every record it
  * holds, so a `b/` row with positions would be answering queries out of a
  * snapshot that is not installed yet.
+ *
+ * `entities` is the syncable set the rows are filtered against (see
+ * syncableEntities); omitted, every call reads it back from `tx`.
  */
 export async function stageServerChanges(
 	tx: KVWrite,
@@ -676,12 +681,16 @@ export async function stageServerChanges(
 	workspaceId: string,
 	gen: number,
 	changes: RowChange[],
+	entities?: ReadonlySet<string>,
 ): Promise<void> {
 	await writeSnapshotRows(
 		tx,
 		registry,
 		changes,
 		(entity, key) => stagingKey(workspaceId, gen, entity, key),
+		undefined,
+		undefined,
+		entities,
 	);
 }
 
@@ -709,6 +718,9 @@ export async function stageServerChanges(
  * Reports whole entities rather than rows: a snapshot replaces the entity
  * outright, so a watcher has to re-scan it either way, and a keyed TouchSet
  * would carry one token per bootstrapped row for nothing.
+ *
+ * `entities` is the syncable set the rows are filtered against (see
+ * syncableEntities); omitted, every call reads it back from `tx`.
  */
 export async function applyBootstrapRows(
 	tx: KVWrite,
@@ -717,6 +729,7 @@ export async function applyBootstrapRows(
 	changes: RowChange[],
 	touched: TouchSet,
 	indexes?: IndexCache,
+	entities?: ReadonlySet<string>,
 ): Promise<void> {
 	await writeSnapshotRows(
 		tx,
@@ -725,6 +738,7 @@ export async function applyBootstrapRows(
 		(entity, key) => confirmedKey(entity, workspaceId, key),
 		(entity) => touched.entity(workspaceId, entity),
 		indexes === undefined ? undefined : { indexes, workspaceId },
+		entities,
 	);
 }
 
