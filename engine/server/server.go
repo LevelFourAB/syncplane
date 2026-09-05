@@ -332,8 +332,12 @@ type Limits struct {
 	// widened window over a large workspace in one or two pulls, a smaller one
 	// bounds how long a single Pull holds its read transaction.
 	//
-	// Values below MaxPullChanges are raised to it; a scan that stops before
-	// the page is full only adds round trips. Default 65536.
+	// It also bounds how many rows a scope change may name through secondary
+	// indexes before it compares the entity row by row instead: a scope
+	// selecting more of an entity than this is no cheaper to reach by index.
+	//
+	// Values below MaxPullChanges are raised to it; a page that stops before
+	// it is full only adds round trips. Default 65536.
 	MaxResyncScan int
 	// Maximum rows per Query response. Also clamps client-requested limits.
 	// Default 1024.

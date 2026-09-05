@@ -491,4 +491,198 @@ var _ = Describe("Delta resync", func() {
 				"a 64-row scan budget must page the scan even though the diff fits one page")
 		})
 	})
+
+	// A scope change only has to look at rows whose visibility can differ
+	// between the two scopes. Where an index can name those rows the resync
+	// reads them and nothing else; every other shape falls back to the scan.
+	// The result is identical either way, which is why each spec here pins
+	// both the patch and what it cost.
+	Describe("candidate narrowing", func() {
+		// outcome is one drained scope change: what the client was told to
+		// apply, and how many times the resync walked the entity to work it
+		// out.
+		type outcome struct {
+			values     []string
+			tombstones []string
+			scans      int
+		}
+
+		var counter *readCountingAdapter
+
+		// startCounting serves a fresh workspace over a store that counts its
+		// reads, and reports whether the entities' indexes were built.
+		startCounting := func(buildIndexes bool, opts ...server.Option) {
+			GinkgoHelper()
+			counter = &readCountingAdapter{Adapter: newTestStore(), counts: map[string]int{}}
+			srv := mustNewServer(counter, append([]server.Option{testEntities()}, opts...)...)
+			if buildIndexes {
+				Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			}
+			start(srv)
+		}
+
+		stateEq := func(state string) *syncplanev1.Condition {
+			return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+				Path:  []string{"state"},
+				Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+				Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: state}},
+			}}}
+		}
+
+		titleEq := func(title string) *syncplanev1.Condition {
+			return &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+				Path:  []string{"title"},
+				Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+				Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: title}},
+			}}}
+		}
+
+		issueSub := func(pred *syncplanev1.Condition) *syncplanev1.Subscription {
+			return &syncplanev1.Subscription{Entity: "issue", Predicate: pred}
+		}
+
+		// seedIssues writes three issues per state, titled after their state so
+		// a predicate on the unindexed title selects the same rows a predicate
+		// on the indexed state does.
+		seedIssues := func(states ...string) {
+			GinkgoHelper()
+			var muts []*syncplanev1.Mutation
+			id := uint64(0)
+			for _, state := range states {
+				for i := 1; i <= 3; i++ {
+					id++
+					key := fmt.Sprintf("i-%s-%d", state, i)
+					muts = append(muts, putMutation("c1", id, "issue", key,
+						&testdatav1.Issue{Id: key, State: state, Title: state}))
+				}
+			}
+			push(muts...)
+		}
+
+		issueKeys := func(state string) []string {
+			var out []string
+			for i := 1; i <= 3; i++ {
+				out = append(out, fmt.Sprintf("i-%s-%d", state, i))
+			}
+			return out
+		}
+
+		// switchScope bootstraps under from, drains the resync to to, and
+		// reports the patch together with the entity walks it took.
+		switchScope := func(entity string, from, to *syncplanev1.Subscription) outcome {
+			GinkgoHelper()
+			cursor, _ := bootstrap(from)
+			counter.reset()
+			changes, drops, _ := drain(cursor, to)
+			Expect(drops).To(BeEmpty())
+			return outcome{
+				values:     valueKeys(changes, entity),
+				tombstones: tombstoneKeys(changes),
+				scans:      counter.count("scanafter:" + entity),
+			}
+		}
+
+		BeforeEach(func() { ctx = context.Background() })
+
+		It("switches an indexed predicate without walking the entity", func() {
+			startCounting(true)
+			seedIssues("open", "closed", "done")
+			indexed := switchScope("issue", issueSub(stateEq("open")), issueSub(stateEq("closed")))
+
+			// The same switch over the same rows, with the indexes unbuilt.
+			startCounting(false)
+			seedIssues("open", "closed", "done")
+			scanned := switchScope("issue", issueSub(stateEq("open")), issueSub(stateEq("closed")))
+
+			Expect(indexed.values).To(Equal(issueKeys("closed")), "rows entering scope arrive as values")
+			Expect(indexed.tombstones).To(Equal(issueKeys("open")), "rows leaving scope are tombstoned")
+			Expect(indexed.values).To(Equal(scanned.values), "both paths must produce the same patch")
+			Expect(indexed.tombstones).To(Equal(scanned.tombstones), "both paths must produce the same patch")
+			Expect(indexed.scans).To(BeZero(), "an indexed predicate must not walk the entity")
+			Expect(scanned.scans).To(BeNumerically(">", 0), "without a built index the resync walks the entity")
+		})
+
+		It("leaves rows written after the cursor to the catch-up pull", func() {
+			startCounting(true)
+			seedIssues("open", "closed")
+			cursor, _ := bootstrap(issueSub(stateEq("open")))
+			// Written past the cursor's seq: the resync must not decide its
+			// visibility, and the catch-up pull that follows delivers it.
+			push(putMutation("c1", 7, "issue", "i-late",
+				&testdatav1.Issue{Id: "i-late", State: "closed", Title: "closed"}))
+			counter.reset()
+
+			resp := pull(cursor, 0, issueSub(stateEq("closed")))
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(valueKeys(resp.GetPatch().GetChanges(), "issue")).To(Equal(issueKeys("closed")))
+			Expect(counter.count("scanafter:issue")).To(BeZero())
+
+			changes, _, _ := drain(resp.GetNextCursor(), issueSub(stateEq("closed")))
+			Expect(valueKeys(changes, "issue")).To(Equal([]string{"i-late"}))
+		})
+
+		It("widens a recency window without walking the entity", func() {
+			startCounting(true)
+			// One push each, so the rows have distinct versions and the
+			// recency ordering is the write order rather than a key tiebreak.
+			for i := 1; i <= 8; i++ {
+				push(putWidget(uint64(i), fmt.Sprintf("w%d", i), int32(i)))
+			}
+
+			out := switchScope("widget", recencySub(2), recencySub(4))
+			Expect(out.values).To(ConsistOf("w5", "w6"), "the rows the widened window admits")
+			Expect(out.tombstones).To(BeEmpty())
+			Expect(out.scans).To(BeZero(), "a window-only scope resolves from its two membership sets")
+		})
+
+		It("walks the entity for a predicate no index serves", func() {
+			startCounting(true)
+			seedIssues("open", "closed", "done")
+			out := switchScope("issue", issueSub(titleEq("open")), issueSub(titleEq("closed")))
+
+			Expect(out.values).To(Equal(issueKeys("closed")))
+			Expect(out.tombstones).To(Equal(issueKeys("open")))
+			Expect(out.scans).To(BeNumerically(">", 0), "an unindexed predicate has only the scan")
+		})
+
+		It("pages an indexed switch under the pull limit without repeating a row", func() {
+			startCounting(true)
+			seedIssues("open", "closed")
+			cursor, _ := bootstrap(issueSub(stateEq("open")))
+
+			var values, tombs []string
+			pages := 0
+			for range 100 {
+				resp := pull(cursor, 1, issueSub(stateEq("closed")))
+				Expect(resp.GetReset_()).To(BeFalse())
+				Expect(len(resp.GetPatch().GetChanges())).To(BeNumerically("<=", 1))
+				values = append(values, valueKeys(resp.GetPatch().GetChanges(), "issue")...)
+				tombs = append(tombs, tombstoneKeys(resp.GetPatch().GetChanges())...)
+				pages++
+				cursor = resp.GetNextCursor()
+				if !resp.GetHasMore() {
+					break
+				}
+			}
+			Expect(pages).To(BeNumerically(">", 1), "a limit of 1 must force several pages")
+			Expect(values).To(Equal(issueKeys("closed")), "each row exactly once, in key order")
+			Expect(tombs).To(Equal(issueKeys("open")), "each row exactly once, in key order")
+		})
+
+		It("falls back to the scan when the candidates outgrow MaxResyncScan", func() {
+			startCounting(true, server.WithLimits(server.Limits{
+				// Six candidates (three leaving, three entering) against a
+				// budget of two: an index that names most of the entity is no
+				// cheaper than walking it.
+				MaxPullChanges: 2,
+				MaxResyncScan:  2,
+			}))
+			seedIssues("open", "closed", "done")
+			out := switchScope("issue", issueSub(stateEq("open")), issueSub(stateEq("closed")))
+
+			Expect(out.values).To(Equal(issueKeys("closed")))
+			Expect(out.tombstones).To(Equal(issueKeys("open")))
+			Expect(out.scans).To(BeNumerically(">", 0), "an over-budget candidate set falls back to the scan")
+		})
+	})
 })

@@ -82,6 +82,15 @@ func (t *readCountingTx) ScanEntity(entity string, fn func(storage.Row) error) e
 	return t.ReadTx.ScanEntity(entity, fn)
 }
 
+// ScanEntityAfter counts under a per-entity kind as well as the shared one:
+// the delta resync's specs ask whether ONE entity was walked, which a total
+// over the workspace cannot answer.
+func (t *readCountingTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(storage.Row) error) error {
+	t.owner.bump("scanafter")
+	t.owner.bump("scanafter:" + entity)
+	return t.ReadTx.ScanEntityAfter(entity, afterKey, limit, fn)
+}
+
 func (t *readCountingTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage.Row) error) error {
 	t.owner.bump("recency")
 	return t.ReadTx.ScanEntityByVersionDesc(entity, limit, fn)

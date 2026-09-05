@@ -25,6 +25,8 @@ Changing subscriptions delta-resyncs the visible-set difference rather than forc
 
 The resync pages by the differences it emits rather than by the rows it examines. Each `Pull` compares up to `MaxResyncScan` live rows against both the old and the new visibility and returns at most `MaxPullChanges` differences. Rows visible under both scopes emit nothing, so a scope change over a large workspace costs round trips in proportion to the size of the difference rather than the size of the workspace. Lowering `MaxResyncScan` shortens the read transaction each `Pull` holds and adds round trips.
 
+What the entity's own scope is made of decides how many rows the comparison has to read. Where both the old and the new scope select rows by predicates a secondary index serves, or by window membership alone, the only rows that can change visibility are the ones those predicates and windows name, so the resync reads them and leaves the rest of the entity untouched. Every other shape — a scope covering a whole entity, an entity reached by following references, a predicate no index serves, or a candidate set larger than `MaxResyncScan` — compares every live row of the entity instead. Both produce the same difference; indexing the fields a subscription filters on is what makes a scope change cost the size of the scope rather than the size of the entity.
+
 A pull whose cursor already sits at the head of the workspace skips recomputation entirely. Because nothing was written, memberships cannot move, and the server carries the cursor key set forward as issued. Polling a quiet workspace costs nothing to return an empty update.
 
 ## The cursor references its membership instead of restating it
