@@ -167,6 +167,13 @@ const DEFAULT_PUSH_DEBOUNCE_MS = 50;
 const DEFAULT_PUSH_MAX_DELAY_MS = 250;
 
 /**
+ * How many extra snapshot-and-ship rounds one push cycle may run beyond its
+ * first, to carry writes that landed while its earlier requests were in flight.
+ * Bounded so a client under an unbroken run of writes still reaches its pull.
+ */
+const MAX_EXTRA_PUSH_ROUNDS = 2;
+
+/**
  * Default per-push mutation cap. Matches the engine's default
  * Limits.MaxMutationsPerPush so a long offline burst is shipped in several
  * within-limit RPCs instead of one oversized push the server rejects. The
@@ -1130,6 +1137,9 @@ export class Coordinator {
 	 * transaction, so a client holding many workspaces spends one round trip
 	 * rather than N. The engine counts its mutation limit ACROSS the batches of a
 	 * request, so the packing below budgets across workspaces.
+	 *
+	 * Runs up to MAX_EXTRA_PUSH_ROUNDS rounds beyond the first so writes that land
+	 * mid-push still go out before the cycle pulls; see the loop.
 	 */
 	private async doPush(workspaceIds: string[]): Promise<void> {
 		// Read-only mode: the server's schema revision is one this client cannot
@@ -1142,6 +1152,51 @@ export class Coordinator {
 		// below: absent parses as 0, and compaction against 0 would renumber an
 		// inherited queue the server may already have applied.
 		await this.initPushedThrough(workspaceIds.filter((ws) => this.unseeded.has(ws)));
+
+		/** Highest id this cycle has already handed to the server, per workspace. */
+		const sent = new Map<string, bigint>();
+		// A round only ever ships what was queued when it snapshotted, so writes
+		// landing while its requests are in flight fall outside it. Rather than
+		// leave that tail to the next cycle — which would have this cycle's rebase
+		// replay every one of those mutations over the page, only for the next
+		// cycle to push them and the one after to ack them away — keep shipping
+		// while the queues have grown. The pull that follows then acks everything
+		// and replays nothing.
+		//
+		// Bounded because a client writing continuously always has a fresh tail,
+		// and an unbounded loop would never let the cycle pull. What the last round
+		// leaves behind is not stranded: a write landing mid-cycle arms a fresh
+		// coalescing window (see syncNow), and the cycle that window schedules
+		// ships it — or finds an empty queue, which costs one read.
+		for (let round = 0; round <= MAX_EXTRA_PUSH_ROUNDS; round++) {
+			// A workspace whose round ended refused for a mutation-id gap, or
+			// revoked, must not be re-shipped in the same cycle: only the pull can
+			// settle the first, and the second can never succeed.
+			const eligible = round === 0 ? workspaceIds : workspaceIds.filter((ws) => {
+				const state = this.workspaces.get(ws);
+				return state !== undefined && !state.revoked && !state.gapped;
+			});
+			if (eligible.length === 0) return;
+			if (!await this.pushRound(eligible, sent, round === 0)) return;
+		}
+	}
+
+	/**
+	 * One snapshot-and-ship round of a push cycle, skipping the ids `sent` records
+	 * as already gone out this cycle and adding what it ships to them. `atHead`
+	 * says whether the slices this round sends start at the real queue head, which
+	 * only the cycle's first round does.
+	 *
+	 * Returns whether the cycle may run another round: false once the queues hold
+	 * nothing new, or once the round ended in something only the pull can settle —
+	 * an isolated poison head, a dead-lettered head, or a slice the server refused
+	 * behind a prefix it applied.
+	 */
+	private async pushRound(
+		workspaceIds: string[],
+		sent: Map<string, bigint>,
+		atHead: boolean,
+	): Promise<boolean> {
 		// Squash the never-pushed tails first: shrinks both this push and the
 		// rebase the following pull will run. Skipped for a workspace isolating a
 		// poison head — there we are deliberately draining one mutation at a time.
@@ -1150,7 +1205,7 @@ export class Coordinator {
 		}
 
 		// Snapshot the queues AND raise the durable, cross-tab pushed-through
-		// watermarks to cover what this cycle will ship — atomically, under the kv
+		// watermarks to cover what this round will ship — atomically, under the kv
 		// mutex, BEFORE any RPC leaves. From here those ids are off-limits to
 		// compaction (this tab's or any peer's), so a lost push response or a
 		// concurrent tab cannot leave compaction renumbering/folding a mutation the
@@ -1159,12 +1214,22 @@ export class Coordinator {
 		// of those ids, never correctness.
 		// Every lookup below tolerates a missing state: removeWorkspace can land
 		// during any of this method's awaits.
-		const queues = await this.markPushThrough(workspaceIds);
+		const marked = await this.markPushThrough(workspaceIds);
 		for (const ws of workspaceIds) {
 			const state = this.workspaces.get(ws);
-			if (state && !queues.has(ws)) state.poison = undefined;
+			if (state && !marked.has(ws)) state.poison = undefined;
 		}
-		if (queues.size === 0) return;
+		// An acked mutation only leaves the queue during the pull's rebase, so an
+		// earlier round's ids are still sitting in front of the tail this one is
+		// here for. Re-sending them would be answered ALREADY_APPLIED and cost a
+		// round trip's worth of payload per round.
+		const queues = new Map<string, Mutation[]>();
+		for (const [ ws, pending ] of marked) {
+			const through = sent.get(ws);
+			const fresh = through === undefined ? pending : pending.filter((m) => m.mutationId > through);
+			if (fresh.length > 0) queues.set(ws, fresh);
+		}
+		if (queues.size === 0) return false;
 
 		// Normalize text PATCHes to the delta state that goes on the wire, on
 		// copies: what ships is cut against the confirmed row rather than against
@@ -1178,13 +1243,15 @@ export class Coordinator {
 		// isolation runs at most poisonThreshold times.
 		for (const [ ws, pending ] of wire) {
 			if (this.workspaces.get(ws)?.poison?.id === pending[0]!.mutationId) {
-				await this.pushRequests(new Map([ [ ws, [ pending[0]! ] ] ]), 1);
-				return;
+				sent.set(ws, pending[0]!.mutationId);
+				await this.pushRequests(new Map([ [ ws, [ pending[0]! ] ] ]), 1, atHead);
+				return false;
 			}
 		}
-		await this.pushRequests(wire, this.splitPush ? 1 : this.maxWorkspacesPerRequest);
+		for (const [ ws, pending ] of wire) sent.set(ws, pending[pending.length - 1]!.mutationId);
 		// Acked/rejected mutations leave the queues during each pull's rebase via
 		// last_acked_mutation_id.
+		return this.pushRequests(wire, this.splitPush ? 1 : this.maxWorkspacesPerRequest, atHead);
 	}
 
 	/**
@@ -1241,15 +1308,27 @@ export class Coordinator {
 	 * A workspace's mutations must reach the server in id order and gap-free, so a
 	 * workspace whose batch failed (or whose prefix was refused) is dropped from
 	 * the remaining rounds rather than having its next slice sent past the gap.
+	 *
+	 * `queuesAtHead` says whether the first slice of each queue is that
+	 * workspace's real queue head — what makes a deterministic failure
+	 * attributable to a head mutation. It is false for a queue that is only the
+	 * tail left over from an earlier round of the same cycle.
+	 *
+	 * Returns false when it stopped before working through the queues it was
+	 * given — a dead-lettered head, or a slice the server refused behind a prefix
+	 * it applied — which means nothing more may be pushed until a pull has run.
 	 */
 	private async pushRequests(
 		queues: Map<string, Mutation[]>,
 		maxWorkspaces: number,
-	): Promise<void> {
+		queuesAtHead = true,
+	): Promise<boolean> {
 		/** What is left to ship per workspace, and whether its next slice is the queue head. */
 		const remaining = new Map<string, { pending: Mutation[]; atHead: boolean }>();
-		for (const [ ws, pending ] of queues) remaining.set(ws, { pending, atHead: true });
+		for (const [ ws, pending ] of queues) remaining.set(ws, { pending, atHead: queuesAtHead });
 		const rejections: RejectionInfo[] = [];
+		/** Set by an outcome only the pull can settle, which ends the push cycle. */
+		let settled = false;
 		try {
 			while (remaining.size > 0) {
 				const batches: { workspaceId: string; mutations: Mutation[] }[] = [];
@@ -1299,7 +1378,7 @@ export class Coordinator {
 								&& this.countHeadFailure(state, head, `rpc ${err.code}`, lone.count === 1)
 							) {
 								await this.deadLetter(lone.workspaceId, head, err.rawMessage);
-								return;
+								return false;
 							}
 							throw err; // retry; the next cycle isolates the head.
 						}
@@ -1313,7 +1392,7 @@ export class Coordinator {
 						// A later slice is malformed but the good prefix already applied.
 						// Stop pushing and let the pull ack that prefix, which moves the bad
 						// mutation toward the head where isolation can dead-letter it.
-						return;
+						return false;
 					}
 					// The batch may well have committed — a response can be lost after
 					// the write — so these mutations must be re-pushed to learn what
@@ -1407,6 +1486,10 @@ export class Coordinator {
 							)
 						) {
 							await this.deadLetter(sent.workspaceId, head, failure);
+							// The drop renumbered whatever was queued behind it; the pull
+							// settles that queue against the server's watermark before any of
+							// it is pushed again.
+							settled = true;
 							continue;
 						}
 						throw new Error(`push failed for workspace ${sent.workspaceId}: ${failure}`);
@@ -1491,6 +1574,7 @@ export class Coordinator {
 				}
 			}
 		}
+		return !settled;
 	}
 
 	/**
