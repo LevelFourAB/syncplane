@@ -44,22 +44,22 @@ of `results/<run>.json`, so two tables can be told apart later.
 
 ## What is measured
 
-| Spec                | Question                                                      |
-| ------------------- | ------------------------------------------------------------- |
-| `01-bootstrap`      | Cold start, full vs windowed vs one project vs one thread     |
-| `02-reads`          | Local query cost once the data is there                       |
-| `02b-build-reads`   | Read cost while the cold bootstrap is still streaming         |
-| `02c-pagination`    | Deep pages by cursor vs offset, and what a total costs        |
-| `02d-search`        | Full-text search, by how many rows carry the query's terms    |
-| `03-restart`        | Opening an app that has synced before                         |
-| `04-scope`          | Widening, narrowing and switching what you are subscribed to  |
-| `04b-overlay-reads` | The same reads through 100 and 1000 pending mutations         |
-| `05-incremental`    | Catching up, realtime latency, rebase over pending writes     |
-| `05b-live-queries`  | Catch-up cost at 0/10/50 open watches, watch-observed latency |
-| `05c-writes`        | Per-write local latency: patch, put, patch with watches open  |
-| `05d-rel-watches`   | Watches whose query crosses a reference, over target commits  |
-| `06-resilience`     | Falling behind the GC horizon, and what a second tab costs    |
-| `07-deletion-churn` | Applying 2000 deletions, and the store they leave behind      |
+| Spec                | Question                                                                        |
+| ------------------- | ------------------------------------------------------------------------------- |
+| `01-bootstrap`      | Cold start, full vs windowed vs one project vs one thread                       |
+| `02-reads`          | Local query cost once the data is there                                         |
+| `02b-build-reads`   | Read cost while the cold bootstrap is still streaming                           |
+| `02c-pagination`    | Deep pages by cursor vs offset, and what a total costs                          |
+| `02d-search`        | Full-text search, by how many rows carry the query's terms                      |
+| `03-restart`        | Opening an app that has synced before                                           |
+| `04-scope`          | Widening, narrowing and switching what you are subscribed to                    |
+| `04b-overlay-reads` | The same reads through 100 and 1000 pending mutations                           |
+| `05-incremental`    | Catching up, realtime latency, rebase over pending writes                       |
+| `05b-live-queries`  | Catch-up cost at 0/10/50 open watches, watch-observed latency                   |
+| `05c-writes`        | Per-write local latency offline, and what a rebase costs 20 open watches online |
+| `05d-rel-watches`   | Watches whose query crosses a reference, over target commits                    |
+| `06-resilience`     | Falling behind the GC horizon, and what a second tab costs                      |
+| `07-deletion-churn` | Applying 2000 deletions, and the store they leave behind                        |
 
 The file numbers are the run order, and they matter: everything below `05` only
 reads the corpus, so it measures it in exactly the state the seeder left it

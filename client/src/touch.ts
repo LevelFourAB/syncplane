@@ -37,10 +37,11 @@ export class TouchSet {
 	}
 
 	/**
-	 * Records that an entity changed without saying which rows — a wholesale
-	 * overlay clear, a confirmed-state wipe, a workspace purge. Honest rather
-	 * than a fallback: those paths have no cheap key list, and a wildcard is
-	 * exactly the statement "re-scan this one".
+	 * Records that an entity changed without saying which rows — a
+	 * confirmed-state wipe, a bootstrap swap, a workspace purge. Honest rather
+	 * than a fallback: those paths replace or discard the whole entity and have
+	 * no cheap key list, and a wildcard is exactly the statement "re-scan this
+	 * one".
 	 */
 	entity(workspaceId: string, entity: string): void {
 		const pair = touchKey(workspaceId, entity);

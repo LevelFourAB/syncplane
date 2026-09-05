@@ -256,6 +256,66 @@ describe('optimistic text log', () => {
 		tx.release();
 	});
 
+	it('names the row a cleared fragment belongs to, slashes in the key and all', async () => {
+		const kv = new MemoryKVStore();
+		const tx = await kv.write();
+		const key = 'nested/w1';
+		const base = (() => {
+			const d = new TextDoc('p1');
+			d.insert(0, 'a');
+			return encodeTextDoc(d);
+		})();
+		const seeded: ConfirmedRecord = {
+			v: toBinary(WidgetSchema, create(WidgetSchema, { id: key, body: base })),
+			ver: '1',
+		};
+		await tx.put(confirmedKey('widget', WS, key), seeded);
+
+		const patch = (id: bigint, body: Uint8Array): Mutation =>
+			create(MutationSchema, {
+				clientId: 'c1',
+				mutationId: id,
+				payload: {
+					case: 'crud',
+					value: {
+						entity: 'widget',
+						key,
+						op: CrudOp.PATCH,
+						fieldMask: create(FieldMaskSchema, { paths: [ 'body' ] }),
+						value: toBinary(WidgetSchema, create(WidgetSchema, { id: key, body })),
+					},
+				},
+			});
+
+		// Two keystrokes, so the row carries two fragments: the clear has to name
+		// the ROW they belong to, and name it once.
+		const first = typeInto(base, 'p1', 1, 'b');
+		await applyMutationLocally(
+			tx,
+			registry,
+			noMirrors,
+			WS,
+			patch(1n, first.fragment),
+			new TouchSet(),
+		);
+		const second = typeInto(first.state, 'p1', 2, 'c');
+		await applyMutationLocally(
+			tx,
+			registry,
+			noMirrors,
+			WS,
+			patch(2n, second.fragment),
+			new TouchSet(),
+		);
+
+		const touched = new TouchSet();
+		await clearOverlayAndReplay(tx, registry, noMirrors, WS, [], touched);
+		expect([ ...touched.pairs() ]).toEqual([
+			{ workspaceId: WS, entity: 'widget', keys: new Set([ key ]) },
+		]);
+		tx.release();
+	});
+
 	it('survives the renumbering a compaction does', async () => {
 		const kv = new MemoryKVStore();
 		let state = (() => {

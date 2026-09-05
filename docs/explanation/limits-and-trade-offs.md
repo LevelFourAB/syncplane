@@ -62,7 +62,7 @@ Every query result reports `total`, representing the number of matches. On an in
 
 Two situations require scanning the entire entity:
 
-- A commit that reports an entity without specifying its rows (such as a bootstrap swap or a wholesale overlay clear) forces a full rescan.
+- A commit that reports an entity without specifying its rows (such as a bootstrap swap or a confirmed-state wipe) forces a full rescan. A rebase names the rows it clears and replays, so an ordinary pull costs each watcher only the rows that moved.
 - Memory usage scales with the total match set. A query without a predicate holds an entry for every row in the entity, creating a large working set. A `limit` bounds the delivered results, not the rows held in memory.
 
 Holding rows beyond the active page allows a deletion in a full page to pull in the next row without a storage read, makes `total` free on subsequent updates, and makes `setWindow` an in-memory slice. This lets virtualized lists scroll large result sets without accessing the store, at the cost of keeping the result set in memory.

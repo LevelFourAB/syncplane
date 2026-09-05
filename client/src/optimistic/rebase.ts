@@ -29,10 +29,12 @@ import {
 	overlayKey,
 	type OverlayRecord,
 	overlayTextKey,
+	overlayTextPrefix,
 	overlayTextRowPrefix,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
 	pendingKey,
+	splitOverlayTextSuffix,
 	stagingKey,
 	stagingPrefix,
 } from '../keys.js';
@@ -827,6 +829,10 @@ export interface FinalizeInput {
  * and reported over console.error, and no failure to replay one reaches the
  * caller's transaction. See replayCrud for why a shared queue makes such an entry
  * ordinary, and what retires it.
+ *
+ * Reports ROWS: every overlay row it clears and every row the replay writes,
+ * each by key, so a rebase costs a watcher the rows that moved rather than a
+ * scan of the entity (see TouchSet).
  */
 export async function clearOverlayAndReplay(
 	tx: KVWrite,
@@ -837,16 +843,27 @@ export async function clearOverlayAndReplay(
 	touched: TouchSet,
 ): Promise<void> {
 	for (const entity of registry.names()) {
-		for await (const [ k ] of tx.scan(overlayWsPrefix(entity, workspaceId))) {
+		// The scan has each cleared row's key in hand, so this reports rows rather
+		// than the entity: a wildcard here would put every watcher of the entity
+		// back on a full scan of its scope, once per rebase (see WatcherHub).
+		const rows = overlayWsPrefix(entity, workspaceId);
+		for await (const [ k ] of tx.scan(rows)) {
 			await tx.del(k);
-			touched.entity(workspaceId, entity);
+			touched.row(workspaceId, entity, k.slice(rows.length));
 		}
 		// The text log is overlay state under a different key, so it clears with
 		// the overlay; the replay below rebuilds it from the same queue entries the
 		// fragments came from in the first place.
+		const log = overlayTextPrefix(entity);
 		for await (const [ k ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
 			await tx.del(k);
-			touched.entity(workspaceId, entity);
+			// The ROW the fragment belongs to: one row logs a fragment per edit per
+			// field, and TouchSet folds the repeats. The fallback is a fence, not a
+			// path — an unnamed row stays stale in every maintained result, so a key
+			// that will not split gives up the whole entity instead.
+			const parts = splitOverlayTextSuffix(k.slice(log.length));
+			if (parts === undefined) touched.entity(workspaceId, entity);
+			else touched.row(workspaceId, entity, parts.key);
 		}
 	}
 	for (const mutation of remaining) {

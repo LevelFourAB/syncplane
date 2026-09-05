@@ -14,6 +14,7 @@ import {
 	applyMutationLocally,
 	applyServerChanges,
 	type MirrorMap,
+	rebase,
 	wipeConfirmedState,
 } from '../../src/optimistic/rebase.js';
 import { compileQuery } from '../../src/query/index.js';
@@ -269,6 +270,77 @@ describe('WatcherHub incremental notification', () => {
 
 		expect(scans()).toBeGreaterThan(afterInitial);
 		expect(snapshots.at(-1)?.every((r) => r.value.count === 99)).toBe(true);
+		unsub.close();
+	});
+
+	it('patches the snapshot through a rebase without rescanning', async () => {
+		const { kv, scans } = countingStore();
+		const seed: RowChange[] = [];
+		for (let i = 0; i < 12; i++) {
+			seed.push(serverRow(`w${i}`, BigInt(i + 1), { id: `w${i}`, count: i }));
+		}
+		await applyServer(kv, seed);
+		// One optimistic row over the confirmed twelve — the overlay a rebase
+		// clears and rebuilds.
+		const local = putMutation(1n, { id: 'w3', count: 999 });
+		const tx = await kv.write();
+		await enqueuePending(tx, WS, local);
+		await applyMutationLocally(tx, registry, noMirrors, WS, local, new TouchSet());
+		await tx.commit();
+
+		const hub = countingHub(kv);
+		const { snapshots, unsub } = await watched(kv, hub);
+		expect(snapshots.at(-1)?.find((r) => r.key === 'w3')?.value.count).toBe(999);
+		const afterInitial = scans();
+
+		// The server acks the mutation and ships its row: the overlay clear, the
+		// drop and the server change all name w3 and nothing else.
+		const { touched } = await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('w3', 20n, { id: 'w3', count: 42 }) ],
+			nextCursor: new Uint8Array([ 1 ]),
+			lastAckedMutationId: 1n,
+		});
+		await hub.notify(touched);
+
+		expect(snapshots.at(-1)?.find((r) => r.key === 'w3')?.value.count).toBe(42);
+		expect(scans()).toBe(afterInitial);
+		unsub.close();
+	});
+
+	it('rescans a rebase that clears more of the overlay than a scan costs', async () => {
+		const { kv, scans } = countingStore();
+		const seed: RowChange[] = [];
+		for (let i = 0; i < 12; i++) {
+			seed.push(serverRow(`w${i}`, BigInt(i + 1), { id: `w${i}`, count: i }));
+		}
+		await applyServer(kv, seed);
+		const tx = await kv.write();
+		for (let i = 0; i < 12; i++) {
+			const m = putMutation(BigInt(i + 1), { id: `w${i}`, count: 900 + i });
+			await enqueuePending(tx, WS, m);
+			await applyMutationLocally(tx, registry, noMirrors, WS, m, new TouchSet());
+		}
+		await tx.commit();
+
+		const hub = countingHub(kv);
+		const { snapshots, unsub } = await watched(kv, hub);
+		const afterInitial = scans();
+
+		// Every mutation acked, so the clear names all twelve rows and the replay
+		// names none. Past both the floor and the fraction: naming rows does not
+		// mean reading them one at a time.
+		const { touched } = await rebase(kv, registry, noMirrors, WS, {
+			changes: [],
+			nextCursor: new Uint8Array([ 1 ]),
+			lastAckedMutationId: 12n,
+		});
+		await hub.notify(touched);
+
+		expect(scans()).toBeGreaterThan(afterInitial);
+		// Every optimistic count is gone: what is left is the confirmed row, whose
+		// count is its own index.
+		expect(snapshots.at(-1)).toHaveLength(12);
+		expect(snapshots.at(-1)?.every((r) => r.value.count === Number(r.key.slice(1)))).toBe(true);
 		unsub.close();
 	});
 

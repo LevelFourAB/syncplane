@@ -607,9 +607,8 @@ export interface WatcherHubOptions {
  * rows the query neither held nor now admits, costs nothing at all.
  *
  * Two things still cost the whole entity, both uncommon: a commit that reports
- * an entity without its rows (a wholesale overlay clear, a bootstrap swap)
- * forces a rescan, and a first read falls back to one when no index covers the
- * query.
+ * an entity without its rows (a bootstrap swap, a confirmed-state wipe) forces
+ * a rescan, and a first read falls back to one when no index covers the query.
  *
  * Decoded values and Row wrappers are shared between the watchers of a scope
  * AND reused across commits, so callbacks must not mutate the rows they

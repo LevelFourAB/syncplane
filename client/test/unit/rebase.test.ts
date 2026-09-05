@@ -329,6 +329,28 @@ describe('rebase', () => {
 		expect([ ...(await mergedTodos(kv)).keys() ]).toEqual([ 't3' ]);
 	});
 
+	it('names the overlay rows it cleared rather than the whole entity', async () => {
+		const kv = new MemoryKVStore();
+		await enqueueLocally(
+			kv,
+			putMutation(1n, { id: 't1', title: 'one' }),
+			putMutation(2n, { id: 'nested/t2', title: 'two' }),
+		);
+
+		// #1 is acked and its confirmed row arrives; #2 replays onto the cleared
+		// overlay. Both rows sat in the overlay, so both are named — a wildcard
+		// here would put every watcher of the entity back on a full scan.
+		const { touched } = await rebase(kv, registry, noMirrors, WS, {
+			changes: [ serverRow('t1', 1n, { id: 't1', title: 'one' }) ],
+			nextCursor: cursor(1),
+			lastAckedMutationId: 1n,
+		});
+
+		expect([ ...touched.pairs() ]).toEqual([
+			{ workspaceId: WS, entity: 'todo', keys: new Set([ 't1', 'nested/t2' ]) },
+		]);
+	});
+
 	it('reports the surviving pending count', async () => {
 		const kv = new MemoryKVStore();
 		await enqueueLocally(
