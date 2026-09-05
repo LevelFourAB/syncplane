@@ -47,7 +47,7 @@ const (
 // whole entity), or if a windowed subscription's membership holds it.
 type entityScope struct {
 	whole bool
-	preds []*query.Compiled
+	preds []scopePred
 	// windowed is set by at least one Subscription.window on this entity. Such
 	// a subscription contributes NO predicate here — its predicate selects
 	// candidates for the window, and admitting every candidate would defeat the
@@ -55,12 +55,21 @@ type entityScope struct {
 	windowed bool
 }
 
+// scopePred is one subscription's predicate, kept in both the forms the server
+// reads it in: the compiled form every row is evaluated against, and the
+// condition it compiled from, which candidate narrowing inspects to recognise
+// an equality pinning the entity's key fields (see keyRowCandidate).
+type scopePred struct {
+	compiled *query.Compiled
+	cond     *syncplanev1.Condition
+}
+
 func (sc *entityScope) matches(msg protoreflect.Message) bool {
 	if sc.whole {
 		return true
 	}
 	for _, p := range sc.preds {
-		if p.Eval(msg) {
+		if p.compiled.Eval(msg) {
 			return true
 		}
 	}
@@ -185,7 +194,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 			return nil, connect.NewError(connect.CodeInvalidArgument,
 				fmt.Errorf("subscription for %q: %w", info.name, err))
 		}
-		sc.preds = append(sc.preds, compiled)
+		sc.preds = append(sc.preds, scopePred{compiled: compiled, cond: sub.GetPredicate()})
 	}
 	// Resolve the static follow-reachable entity set so they count as
 	// subscribed even without a base scope of their own.

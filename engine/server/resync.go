@@ -29,12 +29,10 @@ package server
 import (
 	"context"
 	"errors"
-	"math"
 	"sort"
 
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
-	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -378,72 +376,12 @@ func resyncCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, entity string
 	if !registered {
 		return nil, false, nil
 	}
-
-	found := make(map[string]struct{})
-	// Past the cap the narrowing has stopped paying: a predicate matching most
-	// of an entity costs more through an index than through the scan, and the
-	// point of MaxResyncScan is to bound what one pull holds and examines.
-	over := false
-	add := func(key string) {
-		if _, dup := found[key]; dup {
-			return
-		}
-		if len(found) >= maxCandidates {
-			over = true
-			return
-		}
-		found[key] = struct{}{}
-	}
-
-	for _, scope := range [2]*entityScope{oldScope, newScope} {
-		if scope == nil {
-			continue
-		}
-		for _, pred := range scope.preds {
-			// An unbounded page and a want() that never stops: this walk needs
-			// every candidate the index names, not a page of them. What it
-			// offers is a superset of the predicate's matches, which is all
-			// the diff needs — the residual is re-checked by classify, against
-			// the right scope and the right filter.
-			served, err := queryByIndex(tx, info, pred, nil, pageFor(nil, nil, 0, 0), limits,
-				func(row storage.Row, _ *query.Compiled) error {
-					add(row.Key)
-					return nil
-				},
-				func() int { return math.MaxInt },
-				// Nothing to hand back: a decline abandons the whole candidate
-				// set, and the caller scans the entity instead.
-				func() {},
-			)
-			if err != nil {
-				return nil, false, err
-			}
-			if !served || over {
-				return nil, false, nil
-			}
-		}
-	}
 	// A window's membership is the scope, so its members are candidates
 	// whatever the predicates say — and the window-only case is nothing else.
-	for _, em := range [2]*rowEmitter{oldEm, newEm} {
-		for ck := range em.windowMembers {
-			if ck.entity == entity {
-				add(ck.key)
-			}
-		}
-	}
-	if over {
-		return nil, false, nil
-	}
-
-	keys = make([]string, 0, len(found))
-	for key := range found {
-		keys = append(keys, key)
-	}
-	// Key order is what makes the resume position mean the same thing here as
-	// it does on the scan path.
-	sort.Strings(keys)
-	return keys, true, nil
+	return candidateKeys(tx, info,
+		[]*entityScope{oldScope, newScope},
+		[]closureRows{oldEm.windowMembers, newEm.windowMembers},
+		maxCandidates, limits)
 }
 
 // resyncNarrowable reports this entity's base scope under one side of a resync

@@ -332,9 +332,12 @@ type Limits struct {
 	// widened window over a large workspace in one or two pulls, a smaller one
 	// bounds how long a single Pull holds its read transaction.
 	//
-	// It also bounds how many rows a scope change may name through secondary
-	// indexes before it compares the entity row by row instead: a scope
-	// selecting more of an entity than this is no cheaper to reach by index.
+	// It also bounds candidate narrowing, in a resync and in a bootstrap
+	// alike: how many rows either may name through secondary indexes and
+	// membership sets before it visits the entity row by row instead. A scope
+	// selecting more of an entity than this is no cheaper to reach by index,
+	// so lowering the limit trades snapshot and resync speed on large scopes
+	// for a smaller working set — never a different set of rows.
 	//
 	// Values below MaxPullChanges are raised to it; a page that stops before
 	// it is full only adds round trips. Default 65536.
