@@ -49,7 +49,9 @@
 // statistics are refreshed; see maintain). The rest is fixed: synchronous is
 // NORMAL, the WAL default, which trades the last commits before a power loss
 // or kernel panic — not a process crash — for not paying an fsync per
-// transaction.
+// transaction. Each connection also holds a prepared statement per distinct SQL
+// text the store has run on it — a bounded set, but one that counts against the
+// same per-connection budget as the page cache.
 package sqlitestore
 
 import (
@@ -322,8 +324,13 @@ var migrations = []string{
 type Store struct {
 	read  *sql.DB
 	write *sql.DB
-	ns    string
-	owner bool
+	// Prepared statements per pool, shared by every derived namespace because
+	// the pools are. readStmts and writeStmts are the same cache exactly when
+	// read and write are the same handle.
+	readStmts  *stmtCache
+	writeStmts *stmtCache
+	ns         string
+	owner      bool
 	// leases backs the lease.Provider implementation (see leases.go), shared
 	// by every derived namespace so they lease out of one space.
 	leases *lease.Local
@@ -497,7 +504,16 @@ func Open(path string, opts ...Option) (*Store, error) {
 		}
 		read.SetConnMaxIdleTime(readIdleTimeout)
 	}
-	s := &Store{read: read, write: write, ns: cfg.ns, owner: true, leases: lease.NewLocal()}
+	writeStmts := newStmtCache(write)
+	readStmts := writeStmts
+	if read != write {
+		readStmts = newStmtCache(read)
+	}
+	s := &Store{
+		read: read, write: write,
+		readStmts: readStmts, writeStmts: writeStmts,
+		ns: cfg.ns, owner: true, leases: lease.NewLocal(),
+	}
 	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
 	// gets before Close.
@@ -599,7 +615,11 @@ func isMemory(path string) bool {
 // no-op — the Store returned by Open owns the handle and must outlive every
 // derived store. The server-global schema catalog is shared across namespaces.
 func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{read: s.read, write: s.write, ns: ns, leases: s.leases}
+	return &Store{
+		read: s.read, write: s.write,
+		readStmts: s.readStmts, writeStmts: s.writeStmts,
+		ns: ns, leases: s.leases,
+	}
 }
 
 // migrate brings a database up to baselineVersion+len(migrations), creating the
@@ -718,7 +738,12 @@ func (s *Store) Close() error {
 	// A parting pass, so a process that never lived long enough to tick still
 	// leaves statistics behind for the next one that opens this file.
 	s.optimize()
-	err := s.write.Close()
+	// Statements go before the pools they were prepared on.
+	err := s.writeStmts.close()
+	if s.readStmts != s.writeStmts {
+		err = errors.Join(err, s.readStmts.close())
+	}
+	err = errors.Join(err, s.write.Close())
 	if s.read != s.write {
 		err = errors.Join(err, s.read.Close())
 	}
@@ -736,6 +761,9 @@ type readOnlyTx struct {
 }
 
 func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
+	// Before BeginTx, because preparing needs a connection of its own and this
+	// goroutine is about to hold one (the only one, for an in-memory store).
+	s.readStmts.warm(ctx)
 	// ReadOnly keeps modernc on a plain deferred BEGIN; without it the writer
 	// DSN's _txlock=immediate would make every read take the write lock (and
 	// an in-memory store, whose reads run on the writer pool, serialize).
@@ -744,10 +772,13 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer tx.Rollback()
-	return fn(readOnlyTx{&sqliteTx{tx: tx, ns: s.ns, ws: workspaceID}})
+	return fn(readOnlyTx{&sqliteTx{tx: tx, stmts: s.readStmts, ns: s.ns, ws: workspaceID}})
 }
 
 func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
+	// Before BeginTx: the writer pool has one connection, so preparing from
+	// inside the transaction would wait on the connection the transaction holds.
+	s.writeStmts.warm(ctx)
 	tx, err := s.write.BeginTx(ctx, nil)
 	if err != nil {
 		return err
@@ -757,7 +788,7 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	st := &sqliteTx{tx: tx, ns: s.ns, ws: workspaceID}
+	st := &sqliteTx{tx: tx, stmts: s.writeStmts, ns: s.ns, ws: workspaceID}
 	if err := fn(st); err != nil {
 		return err
 	}
@@ -1023,8 +1054,16 @@ func (s *Store) DeleteAppSchema(ctx context.Context, appID string) error {
 
 type sqliteTx struct {
 	tx *sql.Tx
-	ns string
-	ws string
+	// stmts is the cache for the pool tx runs on; see exec, query and queryRow.
+	stmts *stmtCache
+	// txStmts memoizes this transaction's handles on the pool's statements, by
+	// SQL text; the transaction closes them when it ends.
+	txStmts map[string]*sql.Stmt
+	// scanning holds the SQL texts whose result set a scanRows call still has
+	// open, so a nested statement does not step a machine mid-scan.
+	scanning map[string]struct{}
+	ns       string
+	ws       string
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
 	// registered memoizes register's INSERT so a write burst does not repeat
@@ -1045,7 +1084,7 @@ func (t *sqliteTx) register() error {
 	if t.registered {
 		return nil
 	}
-	if _, err := t.tx.Exec(
+	if _, err := t.exec(
 		`INSERT INTO workspaces (namespace, workspace_id, store_epoch) VALUES (?, ?, random()) ON CONFLICT DO NOTHING`,
 		t.ns, t.ws,
 	); err != nil {
@@ -1057,7 +1096,7 @@ func (t *sqliteTx) register() error {
 
 func (t *sqliteTx) CurrentSeq() (uint64, error) {
 	var seq uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT last_seq FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1070,7 +1109,7 @@ func (t *sqliteTx) StoreEpoch() (uint64, error) {
 	// Stored as a signed INTEGER (random() is signed); reinterpret the bits as
 	// the unsigned epoch. The value is opaque — only equality matters.
 	var epoch int64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT store_epoch FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1081,7 +1120,7 @@ func (t *sqliteTx) StoreEpoch() (uint64, error) {
 
 func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
 	var h uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT tombstone_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&h)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1093,7 +1132,7 @@ func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
 func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
 	var deleted int
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT value, version, created_version, deleted, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, entity, key,
@@ -1162,7 +1201,7 @@ func (t *sqliteTx) readRowsByKey(entity string, keys []string) (map[string]stora
 	}
 	sb.WriteByte(')')
 
-	rows, err := t.tx.Query(sb.String(), args...)
+	rows, err := t.query(sb.String(), args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1189,27 +1228,19 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 	if limit <= 0 {
 		limit = -1 // SQLite: negative LIMIT means unlimited
 	}
-	rows, err := t.tx.Query(
+	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
 		 ORDER BY key LIMIT ?`,
-		t.ns, t.ws, entity, afterKey, limit,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		r := storage.Row{Entity: entity}
-		if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
-			&r.Actor.Subject, &r.Actor.System); err != nil {
-			return err
-		}
-		if err := fn(r); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+		[]any{t.ns, t.ws, entity, afterKey, limit},
+		func(rows *sql.Rows) error {
+			r := storage.Row{Entity: entity}
+			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
+				&r.Actor.Subject, &r.Actor.System); err != nil {
+				return err
+			}
+			return fn(r)
+		})
 }
 
 func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage.Row) error) error {
@@ -1219,27 +1250,19 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	// ORDER BY matches rows_by_entity_version exactly (version DESC, key ASC,
 	// partial on deleted = 0), so this reads the index prefix and stops at
 	// LIMIT instead of sorting the entity.
-	rows, err := t.tx.Query(
+	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0
 		 ORDER BY version DESC, key LIMIT ?`,
-		t.ns, t.ws, entity, limit,
-	)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		r := storage.Row{Entity: entity}
-		if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
-			&r.Actor.Subject, &r.Actor.System); err != nil {
-			return err
-		}
-		if err := fn(r); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+		[]any{t.ns, t.ws, entity, limit},
+		func(rows *sql.Rows) error {
+			r := storage.Row{Entity: entity}
+			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
+				&r.Actor.Subject, &r.Actor.System); err != nil {
+				return err
+			}
+			return fn(r)
+		})
 }
 
 func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit int, fn func(storage.Row) error) error {
@@ -1250,37 +1273,29 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 	// same-version group and every resume page agree on row order; the cursor
 	// records the last (entity, key) within a split version to resume past it.
 	var (
-		rows *sql.Rows
-		err  error
+		text string
+		args []any
 	)
 	if afterEntity == "" {
 		// Clean version boundary: everything strictly past afterSeq.
-		rows, err = t.tx.Query(
-			`SELECT entity, key, value, version, created_version, deleted,
+		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND version > ?
-			 ORDER BY version, entity, key LIMIT ?`,
-			t.ns, t.ws, afterSeq, limit,
-		)
+			 ORDER BY version, entity, key LIMIT ?`
+		args = []any{t.ns, t.ws, afterSeq, limit}
 	} else {
 		// Resume inside a same-version group: past afterSeq, plus the rest of
 		// the split group whose (entity, key) sorts after (afterEntity, afterKey).
-		rows, err = t.tx.Query(
-			`SELECT entity, key, value, version, created_version, deleted,
+		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
 			 WHERE namespace = ? AND workspace_id = ? AND (
 			   version > ?
 			   OR (version = ? AND (entity > ? OR (entity = ? AND key > ?)))
 			 )
-			 ORDER BY version, entity, key LIMIT ?`,
-			t.ns, t.ws, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit,
-		)
+			 ORDER BY version, entity, key LIMIT ?`
+		args = []any{t.ns, t.ws, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit}
 	}
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
+	return t.scanRows(text, args, func(rows *sql.Rows) error {
 		var r storage.Row
 		var deleted int
 		if err := rows.Scan(&r.Entity, &r.Key, &r.Value, &r.Version, &r.CreatedVersion, &deleted,
@@ -1291,16 +1306,13 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		if r.Deleted {
 			r.Value = nil
 		}
-		if err := fn(r); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+		return fn(r)
+	})
 }
 
 func (t *sqliteTx) ClientLastMutationID(clientID string) (uint64, error) {
 	var id uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT last_mutation_id FROM clients WHERE namespace = ? AND workspace_id = ? AND client_id = ?`,
 		t.ns, t.ws, clientID,
 	).Scan(&id)
@@ -1312,7 +1324,7 @@ func (t *sqliteTx) ClientLastMutationID(clientID string) (uint64, error) {
 
 func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection, error) {
 	var blob []byte
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT rejections FROM clients WHERE namespace = ? AND workspace_id = ? AND client_id = ?`,
 		t.ns, t.ws, clientID,
 	).Scan(&blob)
@@ -1331,7 +1343,7 @@ func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection,
 
 func (t *sqliteTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
 	var rec storage.IdempotencyRecord
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT seq, result FROM idempotency WHERE namespace = ? AND workspace_id = ? AND key = ?`,
 		t.ns, t.ws, key,
 	).Scan(&rec.Seq, &rec.Result)
@@ -1357,7 +1369,7 @@ func (t *sqliteTx) PutIdempotencyRecord(key string, rec storage.IdempotencyRecor
 	if result == nil {
 		result = []byte{}
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO idempotency (namespace, workspace_id, key, seq, result, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, key)
@@ -1368,7 +1380,7 @@ func (t *sqliteTx) PutIdempotencyRecord(key string, rec storage.IdempotencyRecor
 }
 
 func (t *sqliteTx) CollectIdempotencyKeys(cutoff time.Time) (int, error) {
-	res, err := t.tx.Exec(
+	res, err := t.exec(
 		`DELETE FROM idempotency WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
 		t.ns, t.ws, cutoff.UnixMilli(),
 	)
@@ -1382,7 +1394,7 @@ func (t *sqliteTx) CollectIdempotencyKeys(cutoff time.Time) (int, error) {
 func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, bool, error) {
 	pos := storage.ConsumerPosition{Consumer: consumer}
 	var updated int64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT seq, entity, key, updated_at FROM consumer_positions
 		 WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
 		t.ns, t.ws, consumer,
@@ -1398,7 +1410,7 @@ func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, 
 }
 
 func (t *sqliteTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
-	rows, err := t.tx.Query(
+	rows, err := t.query(
 		`SELECT consumer, seq, entity, key, updated_at FROM consumer_positions
 		 WHERE namespace = ? AND workspace_id = ? ORDER BY consumer`,
 		t.ns, t.ws,
@@ -1426,7 +1438,7 @@ func (t *sqliteTx) SetConsumerPosition(consumer string, p storage.ConsumerPositi
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO consumer_positions (namespace, workspace_id, consumer, seq, entity, key, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, consumer)
@@ -1439,7 +1451,7 @@ func (t *sqliteTx) SetConsumerPosition(consumer string, p storage.ConsumerPositi
 
 func (t *sqliteTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
 	var snapshot []byte
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT snapshot FROM consumer_shadows
 		 WHERE namespace = ? AND workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, consumer, entity, key,
@@ -1462,7 +1474,7 @@ func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []by
 	if snapshot == nil {
 		snapshot = []byte{}
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO consumer_shadows (namespace, workspace_id, consumer, entity, key, snapshot)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, consumer, entity, key)
@@ -1473,7 +1485,7 @@ func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []by
 }
 
 func (t *sqliteTx) DeleteConsumerShadow(consumer, entity, key string) error {
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`DELETE FROM consumer_shadows
 		 WHERE namespace = ? AND workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, consumer, entity, key,
@@ -1482,13 +1494,13 @@ func (t *sqliteTx) DeleteConsumerShadow(consumer, entity, key string) error {
 }
 
 func (t *sqliteTx) DeleteConsumer(consumer string) error {
-	if _, err := t.tx.Exec(
+	if _, err := t.exec(
 		`DELETE FROM consumer_shadows WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
 		t.ns, t.ws, consumer,
 	); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`DELETE FROM consumer_positions WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
 		t.ns, t.ws, consumer,
 	)
@@ -1499,7 +1511,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	// Shadows first, while the positions that name their consumers still exist:
 	// the reverse order would leave every collected consumer's shadows behind
 	// with nothing left to identify them by.
-	if _, err := t.tx.Exec(
+	if _, err := t.exec(
 		`DELETE FROM consumer_shadows
 		 WHERE namespace = ? AND workspace_id = ? AND consumer IN (
 		     SELECT consumer FROM consumer_positions
@@ -1509,7 +1521,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	); err != nil {
 		return 0, err
 	}
-	res, err := t.tx.Exec(
+	res, err := t.exec(
 		`DELETE FROM consumer_positions
 		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ? AND seq < ?`,
 		t.ns, t.ws, cutoff.UnixMilli(), belowSeq,
@@ -1523,7 +1535,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 
 func (t *sqliteTx) FieldDeltaHorizon() (uint64, error) {
 	var horizon uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&horizon)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1542,7 +1554,7 @@ func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]
 	if afterSeq < horizon {
 		return nil, false, nil
 	}
-	rows, err := t.tx.Query(
+	rows, err := t.query(
 		`SELECT frag FROM field_deltas
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ? AND seq > ?
 		 ORDER BY seq`,
@@ -1571,7 +1583,7 @@ func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]
 
 func (t *sqliteTx) TextFloor(entity, key, field string) ([]byte, error) {
 	var vv []byte
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT vv FROM text_floors
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
 		t.ns, t.ws, entity, key, field,
@@ -1587,14 +1599,14 @@ func (t *sqliteTx) PutTextFloor(entity, key, field string, vv []byte) error {
 		return err
 	}
 	if len(vv) == 0 {
-		_, err := t.tx.Exec(
+		_, err := t.exec(
 			`DELETE FROM text_floors
 			 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
 			t.ns, t.ws, entity, key, field,
 		)
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO text_floors (namespace, workspace_id, entity, key, field, vv)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key, field)
@@ -1637,25 +1649,19 @@ func (t *sqliteTx) ScanIndex(
 	if order == storage.ScanDesc {
 		orderBy = `k DESC, key DESC`
 	}
-	rows, err := t.tx.Query(
-		`SELECT k, key FROM index_entries WHERE `+where+` ORDER BY `+orderBy+` LIMIT ?`, args...)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var (
-			entry  []byte
-			rowKey string
-		)
-		if err := rows.Scan(&entry, &rowKey); err != nil {
-			return err
-		}
-		if err := fn(entry, rowKey); err != nil {
-			return err
-		}
-	}
-	return rows.Err()
+	return t.scanRows(
+		`SELECT k, key FROM index_entries WHERE `+where+` ORDER BY `+orderBy+` LIMIT ?`,
+		args,
+		func(rows *sql.Rows) error {
+			var (
+				entry  []byte
+				rowKey string
+			)
+			if err := rows.Scan(&entry, &rowKey); err != nil {
+				return err
+			}
+			return fn(entry, rowKey)
+		})
 }
 
 func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
@@ -1663,7 +1669,7 @@ func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
 		specHash string
 		ready    int
 	)
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT spec_hash, ready FROM index_state
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND idx = ?`,
 		t.ns, t.ws, entity, index,
@@ -1680,7 +1686,7 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO index_state (namespace, workspace_id, entity, idx, spec_hash, ready)
 		 VALUES (?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, idx)
@@ -1696,7 +1702,7 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 // BuildIndexes call on an arbitrary id mint a workspace every later pass
 // iterates.
 func (t *sqliteTx) SetIndexBuildMark(mark string) error {
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`UPDATE workspaces SET index_build_mark = ? WHERE namespace = ? AND workspace_id = ?`,
 		mark, t.ns, t.ws,
 	)
@@ -1707,7 +1713,7 @@ func (t *sqliteTx) SetIndexBuildMark(mark string) error {
 // SetIndexBuildMark's reason: a workspace holding no rows has no text to
 // compact, and a sweep must not mint one.
 func (t *sqliteTx) SetTextCompactMark(mark storage.TextCompactMark) error {
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`UPDATE workspaces
 		    SET text_compact_seq = ?, text_compact_entity = ?, text_compact_key = ?,
 		        text_compact_min_purged = ?
@@ -1720,7 +1726,7 @@ func (t *sqliteTx) SetTextCompactMark(mark storage.TextCompactMark) error {
 func (t *sqliteTx) TextCompactMark() (storage.TextCompactMark, error) {
 	var m storage.TextCompactMark
 	var seq int64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT text_compact_seq, text_compact_entity, text_compact_key, text_compact_min_purged
 		   FROM workspaces WHERE namespace = ? AND workspace_id = ?`,
 		t.ns, t.ws,
@@ -1768,7 +1774,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		if _, keep := want[e]; keep {
 			continue
 		}
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`DELETE FROM index_entries
 			 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND idx = ? AND k = ? AND key = ?`,
 			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
@@ -1780,7 +1786,7 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		if _, unchanged := have[e]; unchanged {
 			continue
 		}
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
 			 VALUES (?, ?, ?, ?, ?, ?)`,
 			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
@@ -1801,7 +1807,7 @@ type rowIndexEntry struct {
 // rowIndexEntries reads every index entry one row currently occupies, as the
 // set PutIndexEntries diffs against.
 func (t *sqliteTx) rowIndexEntries(entity, key string) (map[rowIndexEntry]struct{}, error) {
-	rows, err := t.tx.Query(
+	rows, err := t.query(
 		`SELECT idx, k FROM index_entries
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, entity, key,
@@ -1828,7 +1834,7 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 	// No register(): removing entries a row never had must leave no trace, the
 	// same reason a write closure that writes nothing does not create a
 	// workspace.
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`DELETE FROM index_entries
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
 		t.ns, t.ws, entity, key,
@@ -1845,7 +1851,7 @@ func (t *sqliteTx) PutFieldDelta(entity, key, field string, seq uint64, frag []b
 		// NOT NULL and the read path distinguishes empty from present.
 		frag = []byte{}
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO field_deltas (namespace, workspace_id, entity, key, field, seq, frag, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, entity, key, field, seq)
@@ -1858,7 +1864,7 @@ func (t *sqliteTx) PutFieldDelta(entity, key, field string, seq uint64, frag []b
 func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 	cutoffMillis := cutoff.UnixMilli()
 	var maxPruned uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
 		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
 		t.ns, t.ws, cutoffMillis,
@@ -1867,7 +1873,7 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		return 0, err
 	}
 	if maxPruned > 0 {
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`DELETE FROM field_deltas WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
 			t.ns, t.ws, cutoffMillis,
 		); err != nil {
@@ -1875,7 +1881,7 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		}
 		// MAX() keeps the horizon monotonic even if an older cutoff runs after a
 		// newer one, exactly as CollectTombstones does.
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`UPDATE workspaces SET field_delta_horizon = MAX(field_delta_horizon, ?)
 			 WHERE namespace = ? AND workspace_id = ?`,
 			maxPruned, t.ns, t.ws,
@@ -1884,7 +1890,7 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		}
 	}
 	var horizon uint64
-	err = t.tx.QueryRow(
+	err = t.queryRow(
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
 	).Scan(&horizon)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1899,7 +1905,7 @@ func (t *sqliteTx) NextSeq() (uint64, error) {
 	}
 	// UPDATE ... RETURNING ports directly to Postgres (with row locking).
 	var seq uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`UPDATE workspaces SET last_seq = last_seq + 1
 		 WHERE namespace = ? AND workspace_id = ? RETURNING last_seq`,
 		t.ns, t.ws,
@@ -1913,7 +1919,7 @@ func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, acto
 	}
 	// created_version stays out of the conflict SET: the stored value is the
 	// key's original creation, which every overwrite keeps (see storage.Row).
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
@@ -1932,7 +1938,7 @@ func (t *sqliteTx) DeleteRow(entity, key string, version uint64, actor storage.A
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
@@ -1959,7 +1965,7 @@ func (t *sqliteTx) SetClientLastMutationID(clientID string, mutationID uint64) e
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO clients (namespace, workspace_id, client_id, last_mutation_id, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, client_id)
@@ -1980,7 +1986,7 @@ func (t *sqliteTx) SetClientRejections(clientID string, recs []storage.ClientRej
 			return fmt.Errorf("sqlitestore: encode rejections for client %q: %w", clientID, err)
 		}
 	}
-	_, err := t.tx.Exec(
+	_, err := t.exec(
 		`INSERT INTO clients (namespace, workspace_id, client_id, rejections, updated_at)
 		 VALUES (?, ?, ?, ?, ?)
 		 ON CONFLICT (namespace, workspace_id, client_id)
@@ -1994,7 +2000,7 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 	t.spDepth++
 	name := fmt.Sprintf("sp%d", t.spDepth)
 	defer func() { t.spDepth-- }()
-	if _, err := t.tx.Exec(`SAVEPOINT ` + name); err != nil {
+	if _, err := t.exec(`SAVEPOINT ` + name); err != nil {
 		return err
 	}
 	if err := fn(); err != nil {
@@ -2005,15 +2011,15 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 		t.registered = false
 		// ROLLBACK TO rewinds the writes but keeps the savepoint open;
 		// RELEASE discards it.
-		if _, rbErr := t.tx.Exec(`ROLLBACK TO ` + name); rbErr != nil {
+		if _, rbErr := t.exec(`ROLLBACK TO ` + name); rbErr != nil {
 			return errors.Join(err, fmt.Errorf("sqlitestore: rollback savepoint: %w", rbErr))
 		}
-		if _, rbErr := t.tx.Exec(`RELEASE ` + name); rbErr != nil {
+		if _, rbErr := t.exec(`RELEASE ` + name); rbErr != nil {
 			return errors.Join(err, fmt.Errorf("sqlitestore: release savepoint: %w", rbErr))
 		}
 		return err
 	}
-	if _, err := t.tx.Exec(`RELEASE ` + name); err != nil {
+	if _, err := t.exec(`RELEASE ` + name); err != nil {
 		return fmt.Errorf("sqlitestore: release savepoint: %w", err)
 	}
 	return nil
@@ -2022,7 +2028,7 @@ func (t *sqliteTx) InSavepoint(fn func() error) error {
 func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 	cutoffMillis := cutoff.UnixMilli()
 	var maxDeleted uint64
-	err := t.tx.QueryRow(
+	err := t.queryRow(
 		`SELECT COALESCE(MAX(version), 0) FROM rows
 		 WHERE namespace = ? AND workspace_id = ? AND deleted = 1 AND updated_at < ?`,
 		t.ns, t.ws, cutoffMillis,
@@ -2031,7 +2037,7 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		return 0, err
 	}
 	if maxDeleted > 0 {
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`DELETE FROM rows WHERE namespace = ? AND workspace_id = ? AND deleted = 1 AND updated_at < ?`,
 			t.ns, t.ws, cutoffMillis,
 		); err != nil {
@@ -2039,7 +2045,7 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		}
 		// MAX() keeps the horizon monotonic even if an older cutoff runs
 		// after a newer one.
-		if _, err := t.tx.Exec(
+		if _, err := t.exec(
 			`UPDATE workspaces SET tombstone_horizon = MAX(tombstone_horizon, ?)
 			 WHERE namespace = ? AND workspace_id = ?`,
 			maxDeleted, t.ns, t.ws,
@@ -2081,7 +2087,7 @@ func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, l
 		   SELECT key FROM rows WHERE ` + selected + `)`
 		rowsArgs = append([]any{t.ns, t.ws, entity}, args...)
 	}
-	if _, err := t.tx.Exec(
+	if _, err := t.exec(
 		`DELETE FROM index_entries
 		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key IN (
 		   SELECT key FROM rows WHERE `+selected+`
@@ -2090,7 +2096,7 @@ func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, l
 	); err != nil {
 		return 0, false, err
 	}
-	res, err := t.tx.Exec(`DELETE FROM rows WHERE `+rowsWhere, rowsArgs...)
+	res, err := t.exec(`DELETE FROM rows WHERE `+rowsWhere, rowsArgs...)
 	if err != nil {
 		return 0, false, err
 	}
@@ -2141,7 +2147,7 @@ func prefixUpperBound(prefix string) (string, bool) {
 }
 
 func (t *sqliteTx) CollectIdleClients(cutoff time.Time) (int, error) {
-	res, err := t.tx.Exec(
+	res, err := t.exec(
 		`DELETE FROM clients WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
 		t.ns, t.ws, cutoff.UnixMilli(),
 	)
