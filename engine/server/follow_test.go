@@ -406,15 +406,17 @@ var _ = Describe("Reference-following subscriptions", func() {
 			cclient syncplanev1connect.SyncServiceClient
 		)
 
-		startCounting := func() {
+		startCounting := func(opts ...server.Option) *server.Server {
+			GinkgoHelper()
 			counter = &scanCountingAdapter{Adapter: newTestStore(), scans: map[string]int{}}
-			srv := mustNewServer(counter, testEntities())
+			srv := mustNewServer(counter, append([]server.Option{testEntities()}, opts...)...)
 			path, handler := srv.Handler()
 			mux := http.NewServeMux()
 			mux.Handle(path, handler)
 			ts := httptest.NewServer(mux)
 			DeferCleanup(ts.Close)
 			cclient = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+			return srv
 		}
 		cpush := func(mutations ...*syncplanev1.Mutation) {
 			GinkgoHelper()
@@ -486,6 +488,102 @@ var _ = Describe("Reference-following subscriptions", func() {
 			// produced rather than walking the entity a second time to find rows
 			// it already holds.
 			Expect(counter.count("issue")).To(Equal(1))
+		})
+
+		// A predicate that names its own rows is the shape a "one issue and
+		// everything around it" subscription has, and the seed set is the whole
+		// reason such a pull would otherwise read the entity end to end.
+		It("seeds a key-equality follow without scanning the entity", func() {
+			// No indexes built, and `id` carries none of its own: the equality
+			// names the row outright.
+			startCounting()
+			cpush(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "issue", "i1", issue("i1", "first", "A")),
+				putMutation("c1", 3, "issue", "i2", issue("i2", "second", "A")),
+			)
+			counter.reset()
+
+			r := cpull(nil, &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: idEq("i1"),
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				},
+			})
+			Expect(values(r.GetPatch())).To(ConsistOf("issue/i1", "project/A"))
+			Expect(counter.count("issue")).To(BeZero(), "the pinned key names the seed")
+		})
+
+		It("seeds an indexed predicate without scanning the entity", func() {
+			srv := startCounting()
+			Expect(srv.BuildIndexes(ctx, ws)).To(Succeed())
+			cpush(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "issue", "i1", &testdatav1.Issue{
+					Id: "i1", Title: "first", State: "open",
+					Project: &testdatav1.Project{Id: "A"},
+				}),
+				putMutation("c1", 3, "issue", "i2", &testdatav1.Issue{
+					Id: "i2", Title: "second", State: "closed",
+					Project: &testdatav1.Project{Id: "A"},
+				}),
+			)
+			counter.reset()
+
+			r := cpull(nil, &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: stringIs("state", "open"),
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				},
+			})
+			Expect(values(r.GetPatch())).To(ConsistOf("issue/i1", "project/A"))
+			Expect(counter.count("issue")).To(BeZero(), "the index names the seeds")
+		})
+
+		It("scans for seeds a predicate no index reaches", func() {
+			// `title` carries no index, so nothing can name the matching rows
+			// short of visiting them — and the answer must still be exact.
+			startCounting()
+			cpush(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "issue", "i1", issue("i1", "first", "A")),
+				putMutation("c1", 3, "issue", "i2", issue("i2", "second", "A")),
+			)
+			counter.reset()
+
+			r := cpull(nil, &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: titleIs("first"),
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				},
+			})
+			Expect(values(r.GetPatch())).To(ConsistOf("issue/i1", "project/A"))
+			Expect(counter.count("issue")).To(BeNumerically(">", 0))
+		})
+
+		It("drops a read-filtered seed, closure and all", func() {
+			// The candidates a predicate names are a superset of the seeds: the
+			// read filter is what cuts them down, and a seed it hides follows
+			// nothing.
+			startCounting(server.WithPermissions(hidingPermissions{}))
+			cpush(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "issue", "i1", issue("i1", "t0", "A")),
+			)
+			counter.reset()
+
+			r := cpull(nil, &syncplanev1.Subscription{
+				Entity:    "issue",
+				Predicate: idEq("i1"),
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				},
+			})
+			Expect(values(r.GetPatch())).To(BeEmpty())
+			Expect(counter.count("issue")).To(BeZero())
 		})
 	})
 

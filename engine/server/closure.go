@@ -27,7 +27,6 @@ package server
 import (
 	"errors"
 	"fmt"
-	"math"
 	"sort"
 
 	"connectrpc.com/connect"
@@ -444,7 +443,7 @@ func (e *rowEmitter) buildClosure(tx storage.ReadTx, subs []*syncplanev1.Subscri
 // many of them as the base scope has rows and each one is walked. Two things
 // keep that from being a full scan and decode of the entity every time: a
 // windowed subscription seeds from rows already in hand, and a predicated one
-// can narrow through an index.
+// asks the shared candidate source to name its anchors.
 func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscription) ([]frontierRow, error) {
 	info, ok := e.srv.catalogPtr().entities[sub.GetEntity()]
 	if !ok {
@@ -489,28 +488,39 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 		seeds = append(seeds, frontierRow{entity: info.name, key: row.Key, msg: m})
 		return nil
 	}
-	// The subscription's predicate is a predicate like any other, so an index
-	// can narrow the seed set exactly as it narrows a query's — a following
-	// subscription anchored on a small slice of a large entity stops paying for
-	// the whole entity to find its anchors. With no predicate there is nothing
-	// to narrow by and the seeds ARE the entity, so the scan is the answer
-	// rather than a fallback, and asking the planner would only cost a
-	// readiness read per index to be told so.
+	// The subscription's predicate is a predicate like any other, so the source
+	// that names a snapshot's or a resync's rows names the seeds too: a
+	// secondary index over the predicate, or the single key an equality on every
+	// key field pins. That second one is what serves "the issue with id X and
+	// everything around it" — an anchor on the key fields, which carry no index
+	// of their own.
 	//
-	// Honoring the discard contract matters less here than it does for a query
-	// (buildClosure's visited set would absorb a duplicated seed), but resting
-	// on that would make this the one caller whose correctness depends on a
-	// de-dupe somewhere else.
+	// With no predicate there is nothing to narrow by and the seeds ARE the
+	// entity, so the scan is the answer rather than a fallback, and asking the
+	// planner would only cost a readiness read per index to be told so.
+	//
+	// The candidates are a superset — an index entry can outlive its row, and
+	// neither the residual nor the read filter narrows them — so each candidate
+	// row goes through the same classification the scan applies. Key order is
+	// what keeps the seeds in the order the scan would produce them in.
 	if pred != nil {
-		discard := func() { seeds = nil }
-		served, err := queryByIndex(tx, info, pred, nil, page{}, e.srv.limits, consider,
-			// No page to fill: every seed is wanted, so the walk runs the whole
-			// range and its candidate batches are sized by the cap alone.
-			func() int { return math.MaxInt }, discard)
+		keys, narrowed, err := candidateKeys(tx, info,
+			[]*entityScope{{preds: []scopePred{{compiled: pred, cond: sub.GetPredicate()}}}},
+			nil, e.srv.limits.MaxResyncScan, e.srv.limits)
 		if err != nil {
 			return nil, err
 		}
-		if served {
+		if narrowed {
+			batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch,
+				emit: func(row storage.Row) error { return consider(row, pred) }}
+			for _, key := range keys {
+				if err := batch.add(key); err != nil {
+					return nil, err
+				}
+			}
+			if err := batch.flush(); err != nil {
+				return nil, err
+			}
 			return seeds, nil
 		}
 	}
