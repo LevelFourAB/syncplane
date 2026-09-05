@@ -1,14 +1,12 @@
 package server
 
 import (
-	"math"
 	"sort"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
-	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -83,21 +81,17 @@ func candidateKeys(
 				}
 				continue
 			}
-			// An unbounded page and a want() that never stops: this walk needs
-			// every candidate the index names, not a page of them. What it
-			// offers is a superset of the predicate's matches, which is all a
-			// caller needs — the residual is re-checked when the row is
-			// classified, against the right scope and the right filter.
-			served, err := queryByIndex(tx, info, pred.compiled, nil, pageFor(nil, nil, 0, 0), limits,
-				func(row storage.Row, _ *query.Compiled) error {
-					add(row.Key)
+			// Keys, not rows: what the index names is a superset of the
+			// predicate's matches, which is all a caller needs — the residual
+			// is re-checked when the row is classified, against the right scope
+			// and the right filter, and a key whose row is a tombstone or gone
+			// is dropped there too. Reading the rows here would read every one
+			// of them twice.
+			served, err := candidateKeysByIndex(tx, info, pred.compiled, limits,
+				func(rowKey string) error {
+					add(rowKey)
 					return nil
-				},
-				func() int { return math.MaxInt },
-				// Nothing to hand back: a decline abandons the whole candidate
-				// set, and the caller scans the entity instead.
-				func() {},
-			)
+				})
 			if err != nil {
 				return nil, false, err
 			}

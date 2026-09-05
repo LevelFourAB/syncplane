@@ -173,6 +173,18 @@ var _ = Describe("Bootstrap candidate narrowing", func() {
 			"without a built index the snapshot walks the entity")
 	})
 
+	It("reads each candidate row once, not once to name it and once to ship it", func() {
+		startCounting(true)
+		seedIssues("open", "closed", "done")
+		counter.reset()
+
+		out := bootstrap(issueSub(stateEq("open")))
+		Expect(keysOf(out.rows, "issue")).To(Equal(issueKeys("open")))
+		Expect(counter.count("batchkeys")).To(Equal(3),
+			"naming the candidates costs no row read; only shipping them does")
+		Expect(counter.count("get")).To(BeZero())
+	})
+
 	It("ships a predicate pinning the key without walking the entity", func() {
 		// No indexes built, and the key field carries none of its own: the
 		// equality names the row outright.

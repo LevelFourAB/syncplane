@@ -1109,25 +1109,76 @@ func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	return row, nil
 }
 
-// GetRows loops over GetRow rather than issuing one statement with an IN list.
-// The batch read exists to save round trips, and there are none here — the
-// database is in the process — so a variadic statement would buy nothing and
-// cost a query plan that changes with the batch size. Looping also leaves no
-// result set open across fn, which the contract lets fn read through.
+// getRowsChunk is how many keys one batch statement carries. A statement per
+// key costs a prepare, a driver round trip and a goroutine wake-up each, which
+// dominates a batch of thousands even with the database in the process; a chunk
+// pays that once. The number stays far below SQLITE_MAX_VARIABLE_NUMBER (999 by
+// default) so the three bound values ahead of the key list always fit.
+const getRowsChunk = 256
+
+// GetRows resolves the keys with one statement per chunk of getRowsChunk.
+//
+// Rows are yielded in the order of keys, once per occurrence of a repeated key;
+// a key with no row is skipped, and a tombstone is yielded with Deleted set,
+// exactly as GetRow returns one. A chunk's rows are read and its result set
+// closed before the first callback for that chunk, so fn may read through the
+// same transaction.
 func (t *sqliteTx) GetRows(entity string, keys []string, fn func(storage.Row) error) error {
-	for _, key := range keys {
-		row, err := t.GetRow(entity, key)
-		if errors.Is(err, storage.ErrNotFound) {
-			continue
-		}
+	for start := 0; start < len(keys); start += getRowsChunk {
+		chunk := keys[start:min(start+getRowsChunk, len(keys))]
+		byKey, err := t.readRowsByKey(entity, chunk)
 		if err != nil {
 			return err
 		}
-		if err := fn(row); err != nil {
-			return err
+		for _, key := range chunk {
+			row, ok := byKey[key]
+			if !ok {
+				continue // no row: the batch form of ErrNotFound
+			}
+			if err := fn(row); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
+}
+
+// readRowsByKey reads one chunk of keys into a map, draining and closing the
+// result set before returning. It selects the same columns GetRow does, so a
+// batched read round-trips the actor and creation version the same way.
+func (t *sqliteTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
+	var sb strings.Builder
+	sb.WriteString(
+		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system FROM rows
+		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key IN (`)
+	args := make([]any, 0, len(keys)+3)
+	args = append(args, t.ns, t.ws, entity)
+	for i, key := range keys {
+		if i > 0 {
+			sb.WriteByte(',')
+		}
+		sb.WriteByte('?')
+		args = append(args, key)
+	}
+	sb.WriteByte(')')
+
+	rows, err := t.tx.Query(sb.String(), args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byKey := make(map[string]storage.Row, len(keys))
+	for rows.Next() {
+		r := storage.Row{Entity: entity}
+		var deleted int
+		if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion, &deleted,
+			&r.Actor.Subject, &r.Actor.System); err != nil {
+			return nil, err
+		}
+		r.Deleted = deleted != 0
+		byKey[r.Key] = r
+	}
+	return byKey, rows.Err()
 }
 
 func (t *sqliteTx) ScanEntity(entity string, fn func(storage.Row) error) error {

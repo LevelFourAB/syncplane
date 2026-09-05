@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -318,6 +319,31 @@ func indexReadyState(tx storage.ReadTx, entity, name, specHash string) (bool, er
 	return ready && hash == specHash, nil
 }
 
+// candidateSink takes the row keys an index walk names, in the order it names
+// them. A walk answering a query sinks them into a rowBatch, which resolves the
+// rows; a walk enumerating candidates (candidateKeysByIndex) sinks them into a
+// keySink, which reads nothing.
+type candidateSink interface {
+	// add takes one key. A sink may buffer it, so a key added is not delivered
+	// until flush returns.
+	add(rowKey string) error
+	// flush delivers whatever add buffered. It must run once after the last
+	// add, or those keys are never delivered.
+	flush() error
+	// hold caps how many keys the sink buffers before delivering them. An
+	// ordered walk lowers it to the room its page has left, so reading ahead
+	// never resolves rows the page cannot take.
+	hold(n int)
+}
+
+// keySink is the candidateSink of a walk that needs no rows: it buffers
+// nothing and passes each key on as the walk names it.
+type keySink func(rowKey string) error
+
+func (k keySink) add(rowKey string) error { return k(rowKey) }
+func (k keySink) flush() error            { return nil }
+func (k keySink) hold(int)                {}
+
 // rowBatch resolves row keys to rows a batch at a time, so that a walk over k
 // candidates costs k/size reads instead of k. That is a rounding error on
 // sqlitestore and the dominant cost on any adapter whose point read is a
@@ -366,6 +392,10 @@ func (b *rowBatch) flush() error {
 	return err
 }
 
+// hold lowers the count add resolves at, for a walk that has learnt it needs
+// fewer rows than a full batch.
+func (b *rowBatch) hold(n int) { b.size = n }
+
 // maxRowBatch caps how many rows one batch holds. It bounds the memory a walk
 // over a large range needs at once; past it, more keys per read stop buying
 // anything a caller notices.
@@ -374,7 +404,7 @@ const maxRowBatch = 256
 // queryByIndex answers a query from a secondary index when one serves it,
 // reporting whether it did. A false return is not "no rows" — it is "the
 // caller must scan", which is always a legal thing to do and is what every
-// decline path here means.
+// decline in indexWalk means.
 //
 // The rows it offers are exactly the rows a scan would offer, in whatever
 // order the caller's heap and sort then impose. That equivalence is the
@@ -383,35 +413,9 @@ const maxRowBatch = 256
 // An entry names a row key; the row itself is re-read, because the entry says
 // where a row pointed when it was written and this snapshot decides whether it
 // still exists. Those re-reads go through a rowBatch, so the walk costs reads
-// proportional to candidates/batch rather than one per candidate.
-//
-// Two decline paths deserve naming. An index whose build has not finished
-// covers part of the entity, so using it would silently drop rows. And a walk
-// whose residual rejects candidate after candidate has become a scan with
-// extra reads, so past MaxIndexScanCandidates it gives up and lets the caller
-// do the honest thing.
-//
-// That second path is the one with a contract attached: it can only be reached
-// AFTER consider has been called, and the scan that follows offers those same
-// rows again, so what consider accumulated has to go before it does. That is
-// what discard is for, and why this function calls it rather than trusting
-// each caller to remember — a false return always leaves the caller exactly
-// where it started, whichever decline it was.
-//
-// # Ordered plans
-//
-// A plan the planner reports Ordered yields rows already in the query's order,
-// which buys two things nothing else can. The walk SEEKS to pg's cursor instead
-// of starting at the range's own bound, and it STOPS as soon as want reports
-// the page can take no more — so an ordered query costs O(limit) rather than
-// O(range), cursor or not. want also sizes the candidate batch, so reading
-// ahead never overshoots the page by more than the rows it still had room for.
-//
-// Both are optimizations over a comparison that stays authoritative: a seek
-// bound only ever narrows, so it can admit rows the cursor excludes — the
-// boundary row, and on an index it could not carry the row key into that row's
-// whole tie group (see seekRange) — and consider rejects those. The planner has
-// the same relationship with the scan.
+// proportional to candidates/batch rather than one per candidate. consider
+// receives each live row together with the predicate it still has to satisfy —
+// the part of the query the index range did not already decide.
 func queryByIndex(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -423,9 +427,108 @@ func queryByIndex(
 	want func() int,
 	discard func(),
 ) (bool, error) {
-	// Declining before consider ever ran discards nothing, so applying the rule
-	// unconditionally costs a no-op and removes the question of which decline
-	// this was.
+	return indexWalk(tx, info, predicate, order, pg, limits, want, discard,
+		func(residual *query.Compiled) candidateSink {
+			return &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
+				if row.Deleted {
+					// Entries are cleared on delete, so this means an entry
+					// outlived its row. Skipping keeps the answer identical to
+					// the scan's; a rebuild drops the entry.
+					return nil
+				}
+				return consider(row, residual)
+			}}
+		})
+}
+
+// candidateKeysByIndex reports every row key a predicate's index walk names,
+// reading no row at all, and reports whether an index served the predicate —
+// false meaning the caller must scan the entity, exactly as it means for
+// queryByIndex.
+//
+// The keys are a SUPERSET of the predicate's matches: nothing re-checks the
+// residual, because that needs the row. They also include keys whose row is a
+// tombstone or gone, because an index entry can outlive the row it names. A
+// caller therefore has to decide each row for itself once it reads it — which
+// is what makes this cheap, and what candidateKeys relies on.
+//
+// Keys arrive in index-walk order, deduplicated by row key within the walk: one
+// row appearing at several positions of a repeated-field index, or in several
+// ranges of one plan, is reported once.
+//
+// A decline can come after emit has taken keys — the budget is spent mid-walk —
+// so the caller must drop everything it collected: the scan it falls back to
+// names those rows again.
+func candidateKeysByIndex(
+	tx storage.ReadTx,
+	info *entityInfo,
+	predicate *query.Compiled,
+	limits Limits,
+	emit func(rowKey string) error,
+) (bool, error) {
+	// No order, so no plan is Ordered and nothing consults want or the page:
+	// this walk wants every candidate the index names, not a page of them.
+	return indexWalk(tx, info, predicate, nil, page{}, limits,
+		func() int { return math.MaxInt },
+		// Nothing to hand back: a caller of this abandons the whole key set on
+		// a decline and scans instead.
+		func() {},
+		func(*query.Compiled) candidateSink { return keySink(emit) })
+}
+
+// indexWalk plans predicate against the entity's ready indexes and sinks the
+// row key of every candidate the plan names, reporting whether a plan served it
+// at all.
+//
+// One row can be named several times — across the ranges of a plan, which the
+// planner does not guarantee disjoint, and within one range, because an index
+// over a repeated field holds one entry per element. The sink sees each row key
+// once, because a scan visits each row once and the two must agree.
+//
+// sinkFor is called with the residual predicate once the plan is known, and at
+// most once per walk.
+//
+// Two decline paths deserve naming. An index whose build has not finished
+// covers part of the entity, so using it would silently drop rows. And a walk
+// whose residual rejects candidate after candidate has become a scan with
+// extra reads, so past MaxIndexScanCandidates it gives up and lets the caller
+// do the honest thing.
+//
+// That second path is the one with a contract attached: it can only be reached
+// AFTER the sink has delivered something, and the scan that follows offers
+// those same rows again, so what the caller accumulated has to go before it
+// does. That is what discard is for, and why this function calls it rather than
+// trusting each caller to remember — a false return always leaves the caller
+// exactly where it started, whichever decline it was.
+//
+// # Ordered plans
+//
+// A plan the planner reports Ordered yields rows already in the query's order,
+// which buys two things nothing else can. The walk SEEKS to pg's cursor instead
+// of starting at the range's own bound, and it STOPS as soon as want reports
+// the page can take no more — so an ordered query costs O(limit) rather than
+// O(range), cursor or not. want also sizes what the sink holds, so reading
+// ahead never overshoots the page by more than the rows it still had room for.
+//
+// Both are optimizations over a comparison that stays authoritative: a seek
+// bound only ever narrows, so it can admit rows the cursor excludes — the
+// boundary row, and on an index it could not carry the row key into that row's
+// whole tie group (see seekRange) — and the caller rejects those. The planner
+// has the same relationship with the scan.
+func indexWalk(
+	tx storage.ReadTx,
+	info *entityInfo,
+	predicate *query.Compiled,
+	order *query.Order,
+	pg page,
+	limits Limits,
+	want func() int,
+	discard func(),
+	sinkFor func(residual *query.Compiled) candidateSink,
+) (bool, error) {
+	// Declining before the sink delivered anything discards nothing, so applying
+	// the rule unconditionally costs a no-op and removes the question of which
+	// decline this was.
 	decline := func() (bool, error) {
 		discard()
 		return false, nil
@@ -437,7 +540,7 @@ func queryByIndex(
 	// postings walk goes first. Its declines never offered a row (the
 	// budget is spent before any candidate is resolved), so falling through to
 	// the planner — and from there to the scan — needs nothing undone.
-	if served, err := queryBySearch(tx, info, predicate, limits, consider); err != nil || served {
+	if served, err := queryBySearch(tx, info, predicate, limits, sinkFor); err != nil || served {
 		return served, err
 	}
 	if len(info.indexes) == 0 {
@@ -469,11 +572,9 @@ func queryByIndex(
 		residual = &query.Compiled{}
 	}
 
-	// One row can appear several times: across ranges (an `in` over a component
-	// whose values overlap nothing else is disjoint, but the planner does not
-	// guarantee disjointness), and within one range, because an index over a
-	// repeated field holds one entry per element. Dedupe by row key — a scan
-	// visits each row once and the two must agree.
+	// An `in` over a component whose values overlap nothing else is disjoint,
+	// but the planner does not guarantee disjointness, and an index over a
+	// repeated field holds one entry per element — so dedupe by row key.
 	seenRows := make(map[string]struct{})
 	seen := 0
 	budget := limits.maxIndexScanCandidates()
@@ -484,25 +585,17 @@ func queryByIndex(
 	if plan.Ordered && pg.backward {
 		scanOrder = storage.ScanDesc
 	}
-	batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
-		if row.Deleted {
-			// Entries are cleared on delete, so this means an entry outlived
-			// its row. Skipping keeps the answer identical to the scan's; a
-			// rebuild drops the entry.
-			return nil
-		}
-		return consider(row, residual)
-	}}
+	sink := sinkFor(residual)
 	// A union plan reads one set of ranges per branch, each from its own
 	// index; a single plan is one branch of itself. The row-key dedupe above
 	// spans branches, so a row two branches yield is offered once.
 	for _, br := range plan.Branches() {
 		for _, r := range br.Ranges {
-			// The batch carries across ranges, so the fill check at a boundary
+			// The sink carries across ranges, so the fill check at a boundary
 			// has to see what the previous range buffered — keys still buffered
 			// were never offered, and want would be answering for the page
 			// before them.
-			if err := batch.flush(); err != nil {
+			if err := sink.flush(); err != nil {
 				return false, err
 			}
 			if plan.Ordered && want() == 0 {
@@ -515,16 +608,16 @@ func queryByIndex(
 			err = tx.ScanIndex(info.name, br.Index, lo, hi, 0, scanOrder, func(_ []byte, rowKey string) error {
 				if plan.Ordered {
 					// want only moves during a flush, and a flush empties the
-					// batch, so this is reached with nothing buffered — which is
+					// sink, so this is reached with nothing buffered — which is
 					// what makes stopping here drop no row the page still wanted.
-					// Sizing the batch to what is left is the other half: the walk
+					// Holding no more than what is left is the other half: the walk
 					// reads ahead by a batch, so a batch larger than the page's
 					// remaining room would resolve rows it must then throw away.
 					room := want()
 					if room == 0 {
 						return errPageFilled
 					}
-					batch.size = min(room, maxRowBatch)
+					sink.hold(min(room, maxRowBatch))
 				}
 				seen++
 				if seen > budget {
@@ -534,7 +627,7 @@ func queryByIndex(
 					return nil
 				}
 				seenRows[rowKey] = struct{}{}
-				return batch.add(rowKey)
+				return sink.add(rowKey)
 			})
 			if errors.Is(err, errPageFilled) {
 				return true, nil
@@ -550,7 +643,7 @@ func queryByIndex(
 			}
 		}
 	}
-	if err := batch.flush(); err != nil {
+	if err := sink.flush(); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -560,11 +653,11 @@ func queryByIndex(
 // REQUIRED match condition narrows it, reporting whether it did. Candidates
 // come from the most selective query term's postings, narrowed by the other
 // terms where that is cheaper than re-reading rows, and unioned with the
-// overflow rows, whose term sets outgrew their postings; every candidate is
-// then re-read and re-checked against the FULL predicate, so the index changes
-// which rows are considered, never which match. A relevance ordering needs
-// nothing from the walk: the caller's heap and sort rank whatever is offered,
-// exactly as they rank a scan's rows.
+// overflow rows, whose term sets outgrew their postings; the sink receives them
+// with the FULL predicate as their residual, so the index changes which rows
+// are considered, never which match. A relevance ordering needs nothing from
+// the walk: the caller's heap and sort rank whatever is offered, exactly as
+// they rank a scan's rows.
 //
 // Because the candidates are only ever narrowed and never completed, dropping
 // a narrowing pass is always safe: it leaves more rows to re-check, not fewer
@@ -580,7 +673,7 @@ func queryBySearch(
 	info *entityInfo,
 	predicate *query.Compiled,
 	limits Limits,
-	consider func(storage.Row, *query.Compiled) error,
+	sinkFor func(residual *query.Compiled) candidateSink,
 ) (bool, error) {
 	si := info.search
 	if si == nil || predicate == nil {
@@ -660,20 +753,13 @@ func queryBySearch(
 		keys = append(keys, k)
 	}
 	sort.Strings(keys)
-	batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
-		if row.Deleted {
-			// An entry that outlived its row; skipping keeps the answer
-			// identical to the scan's, and a rebuild drops the entry.
-			return nil
-		}
-		return consider(row, predicate)
-	}}
+	sink := sinkFor(predicate)
 	for _, k := range keys {
-		if err := batch.add(k); err != nil {
+		if err := sink.add(k); err != nil {
 			return false, err
 		}
 	}
-	if err := batch.flush(); err != nil {
+	if err := sink.flush(); err != nil {
 		return false, err
 	}
 	return true, nil

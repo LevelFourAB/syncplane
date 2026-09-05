@@ -602,6 +602,19 @@ var _ = Describe("Delta resync", func() {
 			Expect(scanned.scans).To(BeNumerically(">", 0), "without a built index the resync walks the entity")
 		})
 
+		It("names the candidates of both sides without reading their rows", func() {
+			startCounting(true)
+			seedIssues("open", "closed", "done")
+			out := switchScope("issue", issueSub(stateEq("open")), issueSub(stateEq("closed")))
+
+			Expect(out.values).To(Equal(issueKeys("closed")))
+			Expect(out.tombstones).To(Equal(issueKeys("open")))
+			// Six candidates — three leaving, three entering — and one read of
+			// each: naming them costs no row read.
+			Expect(counter.count("batchkeys")).To(Equal(6))
+			Expect(counter.count("get")).To(BeZero())
+		})
+
 		It("leaves rows written after the cursor to the catch-up pull", func() {
 			startCounting(true)
 			seedIssues("open", "closed")

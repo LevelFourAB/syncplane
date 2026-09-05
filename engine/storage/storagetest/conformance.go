@@ -475,6 +475,41 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			// An adapter is free to answer a batch in several reads, and both
+			// shipped ones do above a few hundred keys. Nothing about the
+			// contract may change at that seam, so this asks for a batch wide
+			// enough to cross it and puts a miss and a tombstone on both sides.
+			It("keeps order, misses and tombstones across a batch of any width", func() {
+				const n = 600
+				write("ws1", func(tx storage.WriteTx) {
+					for i := range n {
+						Expect(tx.PutRow("wide", fmt.Sprintf("k%03d", i), []byte("v"), uint64(i+1), storage.Actor{})).To(Succeed())
+					}
+					Expect(tx.DeleteRow("wide", "k100", n+1, storage.Actor{System: "gc"})).To(Succeed())
+					Expect(tx.DeleteRow("wide", "k500", n+2, storage.Actor{System: "gc"})).To(Succeed())
+				})
+
+				// Descending, so storage order cannot pass for the asked-for
+				// order, with a key that has no row every hundred keys.
+				var keys, want []string
+				for i := n - 1; i >= 0; i-- {
+					if i%100 == 0 {
+						keys = append(keys, fmt.Sprintf("ghost%03d", i))
+					}
+					key := fmt.Sprintf("k%03d", i)
+					keys = append(keys, key)
+					want = append(want, key)
+				}
+				read("ws1", func(tx storage.ReadTx) {
+					rows := collect(tx, "wide", keys...)
+					Expect(keysOf(rows)).To(Equal(want))
+					for _, r := range rows {
+						Expect(r.Deleted).To(Equal(r.Key == "k100" || r.Key == "k500"),
+							"a tombstone is yielded wherever in the batch it falls")
+					}
+				})
+			})
+
 			It("scopes keys to the entity and the workspace", func() {
 				read("ws1", func(tx storage.ReadTx) {
 					rows := collect(tx, "todo", "a")
@@ -483,6 +518,24 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 				read("ws2", func(tx storage.ReadTx) {
 					Expect(collect(tx, "widget", "a", "b")).To(BeEmpty())
+				})
+			})
+
+			It("lets fn read the transaction it is being called from", func() {
+				read("ws1", func(tx storage.ReadTx) {
+					var seen []string
+					Expect(tx.GetRows("widget", []string{"a", "b"}, func(r storage.Row) error {
+						// The engine resolves a forward ref from inside this
+						// callback, so a batch may not hold anything — an open
+						// result set, a claimed connection — that a read from
+						// the same transaction would block on.
+						other, err := tx.GetRow("widget", "c")
+						Expect(err).NotTo(HaveOccurred())
+						Expect(other.Deleted).To(BeTrue())
+						seen = append(seen, r.Key)
+						return nil
+					})).To(Succeed())
+					Expect(seen).To(Equal([]string{"a", "b"}))
 				})
 			})
 
