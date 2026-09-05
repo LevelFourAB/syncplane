@@ -621,7 +621,7 @@ var _ = Describe("Membership maintenance", func() {
 			Expect(counter.count("batch")).To(BeZero())
 		})
 
-		It("asks once per target it holds when a forward seed re-points", func() {
+		It("reads the window once when a forward seed re-points", func() {
 			maintained, counter := startCountingReplica()
 			mut := seed(maintained)
 			subs := followingIssues()
@@ -636,13 +636,18 @@ var _ = Describe("Membership maintenance", func() {
 			counter.reset()
 			maintained.pull(ctx, subs, 0)
 
-			// One probe per member it still holds — the one the seed moved TO
-			// was settled by following the seed, so it is not asked again —
-			// against the 100 seed reads the rebuild makes to find the same 20
-			// targets.
-			Expect(counter.count("probe")).To(BeNumerically("~", projects, 1))
+			// A windowed hop's seeds ARE the window's members, so what they
+			// point at is read once and every target in doubt is answered from
+			// that set. Nothing asks the holders' ref index, whose entries are
+			// ordered by row key and would be walked past the whole of a
+			// project's fan-in before meeting a member of a window holding the
+			// newest rows.
+			Expect(counter.count("probe")).To(BeZero())
 			Expect(counter.count("scan")).To(BeZero())
-			Expect(counter.count("batchkeys")).To(BeNumerically("<=", projects+1))
+			// The window's members plus the prior members being re-decided,
+			// each read once: bounded by MaxWindowSize and by the closure,
+			// where a probe per target is bounded only by its fan-in.
+			Expect(counter.count("batchkeys")).To(BeNumerically("<=", projects*perProject+projects+1))
 		})
 
 		It("costs the whole window and its targets when it has to rebuild", func() {
@@ -689,6 +694,123 @@ var _ = Describe("Membership maintenance", func() {
 			// off a list the cursor already carries. Nothing is read to know it.
 			Expect(counter.count("recency")).To(BeZero())
 			Expect(counter.count("scan")).To(BeZero())
+		})
+	})
+
+	// The worst shape a forward hop's ref index has: entries are ordered by row
+	// key, so asking "does any window member still point at this project"
+	// through the index walks the whole of the project's fan-in before it meets
+	// a window holding the rows that sort LAST — which is what a window over the
+	// newest rows holds, since keys and age move together as an entity grows.
+	//
+	// Project pA carries 3000 issues here and exactly one of them — the one
+	// that sorts LAST — is in the window, so a decision that walked the fan-in
+	// would say so in the probe count.
+	Describe("a windowed forward hop over a wide fan-in", func() {
+		const fanIn = 3000
+
+		// The two newest issues, with the projects they name. Recency rather
+		// than an ordering, so that the reads these specs count belong to the
+		// closure: nothing about the window itself touches the issue entity.
+		subs := []*syncplanev1.Subscription{{
+			Entity: "issue",
+			Window: &syncplanev1.Window{ByRecency: true, Limit: 2},
+			Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}}},
+		}}
+
+		var (
+			maintained *replica
+			counter    *readCountingAdapter
+			nextMut    uint64
+		)
+
+		// The corpus, oldest first: 3000 fillers on pA, then y0 on pC, z1 on pB
+		// and z0 on pA. So the window holds {z0, z1} and z0 — pA's only member —
+		// sorts behind every filler in pA's ref index ("z" > "i"), which is the
+		// far end of the walk a probe would make.
+		//
+		// A transaction each for the last three, because rows sharing one
+		// workspace sequence are ordered by key ASCENDING inside a recency
+		// window: written together, the fillers would take the window.
+		BeforeEach(func() {
+			maintained, counter = startCountingReplica()
+			maintained.buildIndexes(ctx)
+			write := func(fn func(tx *server.EntityTx) error) {
+				GinkgoHelper()
+				Expect(maintained.srv.Mutate(server.Trusted(ctx), ws, fn)).To(Succeed())
+			}
+			write(func(tx *server.EntityTx) error {
+				for _, p := range []string{"pA", "pB", "pC"} {
+					if err := tx.Put(&testdatav1.Project{Id: p, Name: p}); err != nil {
+						return err
+					}
+				}
+				for i := 0; i < fanIn; i++ {
+					if err := tx.Put(&testdatav1.Issue{
+						Id: fmt.Sprintf("i%04d", i), Title: "filler",
+						Project: &testdatav1.Project{Id: "pA"},
+					}); err != nil {
+						return err
+					}
+				}
+				return nil
+			})
+			for _, next := range []*testdatav1.Issue{
+				{Id: "y0", Title: "third", Project: &testdatav1.Project{Id: "pC"}},
+				{Id: "z1", Title: "second", Project: &testdatav1.Project{Id: "pB"}},
+				{Id: "z0", Title: "newest", Project: &testdatav1.Project{Id: "pA"}},
+			} {
+				write(func(tx *server.EntityTx) error { return tx.Put(next) })
+			}
+			nextMut = 0
+			// Settle: the first pull has no state to maintain from.
+			Expect(changeKeys(maintained.pull(ctx, subs, 0).GetPatch())).To(ConsistOf(
+				"+issue/z0", "+issue/z1", "+project/pA", "+project/pB"))
+		})
+
+		// pull runs one push and the page that follows it, with the reads that
+		// page made counted from a clean slate.
+		pull := func(muts ...*syncplanev1.Mutation) *syncplanev1.PullResponse {
+			GinkgoHelper()
+			nextMut++
+			maintained.push(ctx, muts)
+			counter.reset()
+			return maintained.pull(ctx, subs, 0)
+		}
+
+		// Whatever moved, the closure is decided from the window's members and
+		// never from the fan-in of a target — which is the whole claim, and
+		// invisible in the pages the specs below assert.
+		AfterEach(func() {
+			Expect(counter.count("probe")).To(BeZero())
+			Expect(counter.count("scan")).To(BeZero())
+		})
+
+		It("keeps the targets when a window member is edited in place", func() {
+			page := pull(putMutation("c1", nextMut+1, "issue", "z0",
+				&testdatav1.Issue{Id: "z0", Title: "edited", Project: &testdatav1.Project{Id: "pA"}}))
+			// pA is settled by following the member that moved; pB is decided
+			// from the member that did not, which the window carried over
+			// unread and this reads once.
+			Expect(changeKeys(page.GetPatch())).To(ConsistOf("+issue/z0"))
+			Expect(counter.count("batchkeys")).To(BeNumerically("<=", 3))
+		})
+
+		It("drops the target its only window member stopped pointing at", func() {
+			page := pull(putMutation("c1", nextMut+1, "issue", "z0",
+				&testdatav1.Issue{Id: "z0", Title: "newest", Project: &testdatav1.Project{Id: "pB"}}))
+			// Nothing in the window points at pA any more. The 3000 issues that
+			// still do are not follow roots, and none of them is read to say so.
+			Expect(changeKeys(page.GetPatch())).To(ConsistOf("+issue/z0", "-project/pA"))
+		})
+
+		It("follows the window's refill to the target the new member names", func() {
+			page := pull(deleteMutation("c1", nextMut+1, "issue", "z0"))
+			// The deleted member is replaced by the next newest issue, which
+			// names a third project: the closure moves with the window even
+			// though the row that entered it was never written.
+			Expect(changeKeys(page.GetPatch())).To(ConsistOf(
+				"-issue/z0", "+issue/y0", "+project/pC", "-project/pA"))
 		})
 	})
 

@@ -260,6 +260,135 @@ func BenchmarkFollowSeeds(b *testing.B) {
 	}
 }
 
+// What a windowed forward follow costs to MAINTAIN, which is the pull a client
+// holding "the newest N issues, with their projects" makes every time anything
+// at all changes.
+//
+// The shape that makes this its own benchmark: a window holds the NEWEST rows,
+// row keys ascend with age, and a ref index is ordered by (target key, row key)
+// — so a probe asking "does any window member still point at this project"
+// meets the members LAST, after nearly the whole fan-in. The answer instead
+// comes from the window itself, which is bounded by MaxWindowSize whatever the
+// entity's size, so the column below has to stay FLAT in the number of issues.
+//
+// The shape to expect (Apple M5 Pro, 8 projects, window of 500):
+//
+//	issues   maintain      alloc
+//	 10000   0.60 ms      460 KB
+//	 50000   0.72 ms      462 KB
+//
+// A regression looks like the column sloping with the corpus: that is the probe
+// per target coming back, and with it a cost proportional to the fan-in of every
+// project the client holds.
+func BenchmarkPullWindowedFollowMaintain(b *testing.B) {
+	const projects = 8
+	const window = 500
+
+	sub := func(cursor []byte) *connect.Request[syncplanev1.PullRequest] {
+		return connect.NewRequest(&syncplanev1.PullRequest{
+			WorkspaceId: benchWS,
+			Cursor:      cursor,
+			Subscriptions: []*syncplanev1.Subscription{{
+				Entity: "issue",
+				Window: &syncplanev1.Window{ByRecency: true, Limit: window},
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				},
+			}},
+		})
+	}
+
+	for _, n := range []int{10000, 50000} {
+		b.Run(fmt.Sprintf("rows=%d", n), func(b *testing.B) {
+			ctx := context.Background()
+			store, err := sqlitestore.Open(filepath.Join(b.TempDir(), "bench.db"))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = store.Close() })
+			srv, err := server.New(store,
+				server.WithEntities(&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{}))
+			if err != nil {
+				b.Fatal(err)
+			}
+			b.Cleanup(func() { _ = srv.Close() })
+
+			// Issues are spread over the projects round robin, so every project
+			// carries an equal share of the fan-in and every one of them is in
+			// the closure the window's newest rows reach.
+			//
+			// A transaction per chunk rather than one for the lot: every row a
+			// single transaction writes shares one workspace sequence, and a
+			// recency window breaks that tie by key ASCENDING — which would put
+			// the OLDEST keys in the window and stand the shape being measured
+			// on its head. Written in chunks, age tracks the key, so the window
+			// holds the highest keys and sits at the far end of every project's
+			// ref index.
+			if err := srv.Mutate(server.Trusted(ctx), benchWS, func(tx *server.EntityTx) error {
+				for p := 0; p < projects; p++ {
+					id := fmt.Sprintf("p%d", p)
+					if err := tx.Put(&testdatav1.Project{Id: id, Name: id}); err != nil {
+						return err
+					}
+				}
+				return nil
+			}); err != nil {
+				b.Fatal(err)
+			}
+			for lo := 0; lo < n; lo += window {
+				if err := srv.Mutate(server.Trusted(ctx), benchWS, func(tx *server.EntityTx) error {
+					for i := lo; i < lo+window && i < n; i++ {
+						if err := tx.Put(&testdatav1.Issue{
+							Id:      fmt.Sprintf("i%07d", i),
+							Title:   "issue",
+							Project: &testdatav1.Project{Id: fmt.Sprintf("p%d", i%projects)},
+						}); err != nil {
+							return err
+						}
+					}
+					return nil
+				}); err != nil {
+					b.Fatal(err)
+				}
+			}
+			if err := srv.BuildIndexes(ctx, benchWS); err != nil {
+				b.Fatal(err)
+			}
+
+			var cursor []byte
+			for {
+				resp, err := srv.Pull(ctx, sub(cursor))
+				if err != nil {
+					b.Fatal(err)
+				}
+				cursor = resp.Msg.GetNextCursor()
+				if !resp.Msg.GetHasMore() {
+					break
+				}
+			}
+			// ONE issue edited past the caught-up cursor: the minimum that makes
+			// a pull maintain anything, and the case the fixed cost shows up in
+			// most plainly. It is an old row, so it enters the window and pushes
+			// the weakest member out — every iteration replays the same page.
+			if err := srv.Mutate(server.Trusted(ctx), benchWS, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Issue{
+					Id: "i0000000", Title: "edited",
+					Project: &testdatav1.Project{Id: "p0"},
+				})
+			}); err != nil {
+				b.Fatal(err)
+			}
+			b.ReportAllocs()
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				if _, err := srv.Pull(ctx, sub(cursor)); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}
+
 // drainPull pulls until has_more clears and returns the caught-up cursor.
 func drainPull(b *testing.B, srv *server.Server) []byte {
 	b.Helper()
