@@ -200,6 +200,47 @@ enum FieldWritePolicy {
 	FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
 }
 
+// ReferenceOptions declares a message as a REFERENCE MESSAGE: the stored shape
+// of a typed reference that may point into another workspace.
+//
+// A field whose message type is an entity is already a reference, and it
+// resolves inside the holder's workspace because a stored stub carries only the
+// target's key fields. A reference message wraps that stub together with the
+// workspace it lives in:
+//
+//	message PersonRef {
+//	  option (syncplane.v1.reference) = {};
+//	  string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+//	  Person person = 2;
+//	}
+//	message Task {
+//	  PersonRef assignee = 2;
+//	  repeated PersonRef watchers = 3;
+//	}
+//
+// A field of a reference message type is a reference like any other: it gets
+// the forward accessor, the reverse relation on the target, the follow segment
+// and the derived index, and its target is the entity the embedded field
+// names. The message must carry exactly one singular entity-typed field and at
+// most one string field marked (syncplane.v1.field_behavior).workspace, and
+// nothing else; whether the holder field is repeated says whether the
+// reference is to-many. An empty or absent workspace value means the holder's
+// own workspace, so a reference message without the workspace field is a
+// same-workspace reference with an explicit stored shape.
+//
+// A reference message is replaced whole on every write: a PATCH mask that
+// names one names the whole message, so the workspace and the key never
+// split. A repeated reference message list has no per-element identity and is
+// replaced whole as well, unlike a repeated entity-typed reference, which
+// merges per target key; a list that must merge per element wraps each
+// reference in a keyed list element of its own.
+//
+// Reading is client-local: a client resolves each stub in the workspace it
+// names, from the workspaces it holds. The server evaluates `matches()`,
+// `include` and `follow` inside the request's workspace only, so a stub that
+// names another workspace resolves to nothing there.
+message ReferenceOptions {}
+
 // SearchField is one field full-text search reads.
 message SearchField {
 	// Dotted proto field path (e.g. "title", "details.summary") to a singular
@@ -335,11 +376,18 @@ message FieldBehavior {
 	// a PATCH can never move one and a PUT that changed one would address a
 	// different row — and is rejected at registration.
 	FieldWritePolicy write_policy = 8;
+	// Inside a reference message (see ReferenceOptions), the string field that
+	// names the workspace the referenced row lives in. Empty means the holder's
+	// own workspace. Valid on a singular string field of a message carrying
+	// (syncplane.v1.reference), at most once per message; rejected anywhere
+	// else at registration.
+	bool workspace = 9;
 }
 
 extend google.protobuf.MessageOptions {
-	// Field numbers 50100/50101 are unregistered; fine for internal use.
+	// Field numbers 50100/50101/50102 are unregistered; fine for internal use.
 	EntityOptions entity = 50100;
+	ReferenceOptions reference = 50102;
 }
 
 extend google.protobuf.FieldOptions {

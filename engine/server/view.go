@@ -49,7 +49,7 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 		return err
 	}
 	return s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
-		return fn(&ViewTx{srv: s, tx: tx, visible: visible})
+		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible})
 	})
 }
 
@@ -59,6 +59,9 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 type ViewTx struct {
 	srv *Server
 	tx  storage.ReadTx
+	// ws is the workspace the snapshot reads; a query crossing a reference
+	// resolves its stubs against it.
+	ws string
 	// visible gates each row against the caller's read filter, or is nil for a
 	// Trusted read (everything live is visible). Resolved before the snapshot
 	// opened; see Server.readGate.
@@ -162,7 +165,7 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(v.srv, v.tx, info, spec, v.visible)
+	rows, err := runQuerySpec(v.srv, v.tx, v.ws, info, spec, v.visible)
 	if err != nil {
 		return err
 	}
@@ -182,7 +185,7 @@ func (v *ViewTx) Query(prototype proto.Message, spec query.Spec, fn func(msg pro
 // visible is nil for a trusted read, in which case everything live matches.
 // Because it is applied inside queryRows, the page counts only rows the caller
 // may actually see — a filtered row consumes no page budget.
-func runQuerySpec(srv *Server, tx storage.ReadTx, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error)) ([]qrow, error) {
+func runQuerySpec(srv *Server, tx storage.ReadTx, ws string, info *entityInfo, spec query.Spec, visible func(storage.Row) (bool, error)) ([]qrow, error) {
 	limits := srv.limits
 	desc := info.msgType.Descriptor()
 	where := spec.Where
@@ -195,7 +198,7 @@ func runQuerySpec(srv *Server, tx storage.ReadTx, info *entityInfo, spec query.S
 		return nil, fmt.Errorf("server: query %s: %w", info.name, err)
 	}
 	if len(rels) > 0 {
-		replacements, err := srv.resolveRels(tx, rels, visible, nil)
+		replacements, err := srv.resolveRels(tx, ws, rels, visible, nil)
 		if err != nil {
 			return nil, fmt.Errorf("server: query %s: %w", info.name, err)
 		}

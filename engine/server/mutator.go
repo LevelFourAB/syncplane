@@ -372,6 +372,12 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 			}
 		}
 	}
+	// A reference stores only its target's key fields, and the workspace a
+	// reference message names has to be one a client can hold — the same
+	// projection the push path runs.
+	if err := info.projectRefs(msg.ProtoReflect()); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(msg)
 	if err != nil {
 		return err
@@ -537,7 +543,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	// Project refs on the MERGED result so a fat stub in the patch value cannot
 	// smuggle extra fields past the per-item merge.
-	info.projectRefs(base.ProtoReflect())
+	if err := info.projectRefs(base.ProtoReflect()); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(base)
 	if err != nil {
 		return err
@@ -649,7 +657,7 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(e.srv, e.tx, info, spec, nil)
+	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, nil)
 	if err != nil {
 		return err
 	}

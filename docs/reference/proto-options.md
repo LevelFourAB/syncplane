@@ -1,6 +1,6 @@
 # Proto options
 
-Syncplane provides two custom Protobuf options in `syncplane/v1/options.proto` (published in the Buf module `buf.build/levelfourab/syncplane`) to declare how messages and fields participate in synchronization. For instructions on adding this file to code generation, see [Define entities in your own module](../how-to/define-entities.md).
+Syncplane provides three custom Protobuf options in `syncplane/v1/options.proto` (published in the Buf module `buf.build/levelfourab/syncplane`) to declare how messages and fields participate in synchronization. For instructions on adding this file to code generation, see [Define entities in your own module](../how-to/define-entities.md).
 
 ## `(syncplane.v1.entity)` — on a message
 
@@ -27,7 +27,7 @@ message Todo {
 
 The `name` field must be a valid identifier. Each entry in `key_fields` must reference a singular string, integer, boolean, or enum field. For complete syntax and constraints, see [Naming rules](naming.md).
 
-A message configured with `(syncplane.v1.entity)` is an **entity**. Message-typed fields that reference this message type automatically become entity references without additional annotations.
+A message configured with `(syncplane.v1.entity)` is an **entity**. Message-typed fields that reference this message type automatically become entity references without additional annotations. See [References](#references) for what a reference stores and how it resolves.
 
 <a id="delete-policy"></a>
 
@@ -192,6 +192,74 @@ repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] o
 | `indexed`      | `bool`     | Maintains a single-component secondary index on this field. On a repeated scalar field, produces one index entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                                                      |
 | `history`      | `bool`     | Records this field in entity history. Capture is explicit: only marked fields are recorded, and registration fails if an entity enables history without marking any fields. Marking any member of a oneof records the entire oneof group. Ignored if the entity does not enable `history`. See [Field history](#field-history).                                 |
 | `write_policy` | `enum`     | Set to `FIELD_WRITE_POLICY_TRUSTED_ONLY` to restrict field modification to trusted callers while leaving the rest of the row writable. Allowed on top-level fields only. Protects a oneof as a group. Cannot be applied to key fields. See [Protected fields](#protected-fields).                                                                               |
+| `workspace`    | `bool`     | Inside a reference message, marks the string field that names the workspace the referenced row lives in. Empty means the holder's own workspace. Valid on one singular `string` field of a message carrying `(syncplane.v1.reference)`. See [References](#references).                                                                                          |
+
+## References
+
+A message-typed field whose (element) message is an entity is a **reference**. The stored row keeps only the target's key fields; the live target row resolves on read. A reference resolves inside the workspace of the row that holds it: a stub carries key fields alone, which identify a row within one partition only.
+
+```proto
+message Issue {
+	option (syncplane.v1.entity) = { name: "issue" key_fields: [ "id" ] };
+	string id = 1;
+	Project project = 2; // stores project.id, resolves in the issue's workspace
+	repeated Issue blocked_by = 3; // to-many; each element stores an id
+}
+```
+
+Rules for every reference:
+
+- The target must be a registered entity whose key fields sit outside any oneof.
+- A reference field cannot be a member of a oneof.
+- A query path may descend through a reference into its key fields only. A comparison on the reference itself compares its key (single-key targets only); `matches()` crosses to the live target row.
+- The engine maintains one secondary index per reference field, named `__ref_<field>`, over the stored target key.
+
+### `(syncplane.v1.reference)` — workspace-qualified references
+
+A **reference message** is the stored shape of a reference that may point into another workspace. It declares `(syncplane.v1.reference)` and wraps an entity-typed field together with an optional workspace field:
+
+```proto
+message PersonRef {
+	option (syncplane.v1.reference) = {};
+	string workspace_id = 1 [(syncplane.v1.field_behavior) = { workspace: true }];
+	Person person = 2;
+}
+
+message Task {
+	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
+	string id = 1;
+	PersonRef assignee = 2;
+	repeated PersonRef watchers = 3;
+}
+```
+
+A field of a reference message type is a reference like any other: it gets the forward accessor, the reverse relation on the target, the follow segment, and the derived index. Its target is the entity the embedded field names.
+
+| Rule            | Detail                                                                                                                                                                                                                                                                                                                       |
+| --------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Shape           | Exactly one singular entity-typed field, at most one singular `string` field marked `workspace`, and no other fields. The message is not itself an entity, and no field sits in a oneof. Registration rejects anything else.                                                                                                 |
+| Cardinality     | The holder field decides: `PersonRef assignee` is to-one, `repeated PersonRef watchers` is to-many. Each element names its own workspace.                                                                                                                                                                                    |
+| Workspace value | An empty or absent workspace means the holder's own workspace, so a reference message without the workspace field is a same-workspace reference with an explicit stored shape. Existing schemas keep their meaning. A value that fails the [workspace-id rule](naming.md#workspace-ids) is refused as `invalid_argument`.    |
+| Stored value    | The workspace field as written, and the embedded stub projected down to the target's key fields.                                                                                                                                                                                                                             |
+| Query paths     | `assignee.person.id` compares the key, `assignee.workspace_id` the workspace; `assignee` as a comparison operand extends to `assignee.person.id`. Any other field below `person` is rejected. `matches()` names `assignee`, never `assignee.person`, which would drop the workspace test.                                    |
+| Merge           | Replaced whole on every write. A `PATCH` mask that names one, or a sub-path into one, replaces the whole message, so the workspace and the key never split. A repeated reference message list has no per-element identity and is also replaced whole, unlike a repeated entity-typed reference, which merges per target key. |
+| Client reads    | Forward accessors, `include`, reverse relations, and `matches()` resolve each stub in the workspace it names, from the workspaces the client holds. A target the client does not hold reads as absent.                                                                                                                       |
+| Server reads    | `matches()`, `include`, and `follow` resolve inside the request's workspace only. A stub that names another workspace resolves to nothing there, and never to a same-key row in the request's workspace.                                                                                                                     |
+
+A list that must merge per element wraps each reference in a keyed list element of its own:
+
+```proto
+message Watcher {
+	string id = 1;
+	PersonRef person = 2;
+}
+message Task {
+	// …
+	repeated Watcher watchers = 3 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] }];
+}
+```
+
+The TypeScript schema builder declares the same shape with `schema.workspaceRef(() => person)` and `schema.workspaceRefList(() => person)`; see the [TypeScript client reference](typescript-client.md#workspace-qualified-references).
 
 ## Protected fields
 
@@ -338,14 +406,15 @@ Declaring search configures an inverted term index maintained on write and backf
 
 ## Merge behavior by field kind
 
-| Field kind      | On `PATCH` with field in mask               | On `PUT`                                        |
-| --------------- | ------------------------------------------- | ----------------------------------------------- |
-| Scalar, message | Last-writer-wins for the field              | Replaced                                        |
-| Map             | Merged by map key (mask can target one key) | Replaced                                        |
-| Keyed list      | Merged by element key                       | Replaced                                        |
-| `opaque`        | Replaced as a whole or via custom merger    | Replaced                                        |
-| `text`          | Unioned with stored document                | **Unioned** with stored document (not replaced) |
-| `oneof`         | Entire group replaced (mask targets group)  | Replaced                                        |
+| Field kind        | On `PATCH` with field in mask                                       | On `PUT`                                        |
+| ----------------- | ------------------------------------------------------------------- | ----------------------------------------------- |
+| Scalar, message   | Last-writer-wins for the field                                      | Replaced                                        |
+| Map               | Merged by map key (mask can target one key)                         | Replaced                                        |
+| Keyed list        | Merged by element key                                               | Replaced                                        |
+| `opaque`          | Replaced as a whole or via custom merger                            | Replaced                                        |
+| `text`            | Unioned with stored document                                        | **Unioned** with stored document (not replaced) |
+| `oneof`           | Entire group replaced (mask targets group)                          | Replaced                                        |
+| Reference message | Replaced as a whole (a sub-path into it replaces the whole message) | Replaced                                        |
 
 Collaborative-text fields (`text: true`) are the only exception to whole-row replacement on `PUT`. See [Limits and trade-offs](../explanation/limits-and-trade-offs.md#put-replaces-the-whole-row).
 
@@ -500,7 +569,7 @@ For collaborative text, use `text: true` instead of a custom merger; its built-i
 
 ## Option field numbers
 
-The custom option field numbers (`50100` and `50101`) reside in the Protobuf extension range reserved for internal organization use. If two imported Protobuf libraries claim the same extension number, `protobuf-go` panics at initialization with:
+The custom option field numbers (`50100` for `entity`, `50101` for `field_behavior`, and `50102` for `reference`) reside in the Protobuf extension range reserved for internal organization use. If two imported Protobuf libraries claim the same extension number, `protobuf-go` panics at initialization with:
 
 ```
 extension number 50100 is already registered on message google.protobuf.MessageOptions

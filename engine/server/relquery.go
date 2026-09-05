@@ -41,8 +41,9 @@ func (s *Server) checkRelLimit(rels []*query.RelNode) error {
 
 // resolveRels runs the pre-pass of the two-phase rel rewrite: for each rel
 // node, evaluate its inner condition over the target entity's live rows in
-// this workspace and collapse the node to a membership test on the matching
-// target keys (query.RelReplacement).
+// workspace — the one tx reads — and collapse the node to a membership test on
+// the matching target keys (query.RelReplacement). A stub that names another
+// workspace resolves to nothing here; the replacement says so.
 //
 // visible gates each TARGET row exactly as a direct read of that entity would
 // — the rule follow already states: crossing a reference is never a
@@ -51,6 +52,7 @@ func (s *Server) checkRelLimit(rels []*query.RelNode) error {
 // Server.Query); a trusted read passes the all-visible gate.
 func (s *Server) resolveRels(
 	tx storage.ReadTx,
+	workspace string,
 	rels []*query.RelNode,
 	visible func(storage.Row) (bool, error),
 	emitter *rowEmitter,
@@ -78,7 +80,7 @@ func (s *Server) resolveRels(
 			}
 			shared[shape] = targets
 		}
-		out[node.Cond] = query.RelReplacement(node, targets)
+		out[node.Cond] = query.RelReplacement(node, targets, workspace)
 	}
 	return out, nil
 }

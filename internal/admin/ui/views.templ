@@ -524,7 +524,11 @@ templ refChip(c RefControl, item RefItem) {
 			}
 		} else {
 			for _, k := range c.Keys {
-				<input type="hidden" name={ item.Name + "." + k } value={ item.Values[k] } data-ref-key={ k }/>
+				if k == c.Workspace {
+					<input type="hidden" name={ item.Name + "." + k } value={ item.Values[k] } data-ref-workspace/>
+				} else {
+					<input type="hidden" name={ item.Name + "." + k } value={ item.Values[k] } data-ref-key={ k }/>
+				}
 			}
 		}
 		if !c.ReadOnly {

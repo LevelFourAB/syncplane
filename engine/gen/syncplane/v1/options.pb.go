@@ -518,6 +518,81 @@ func (*HistoryOptions) Descriptor() ([]byte, []int) {
 	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{1}
 }
 
+// ReferenceOptions declares a message as a REFERENCE MESSAGE: the stored shape
+// of a typed reference that may point into another workspace.
+//
+// A field whose message type is an entity is already a reference, and it
+// resolves inside the holder's workspace because a stored stub carries only the
+// target's key fields. A reference message wraps that stub together with the
+// workspace it lives in:
+//
+//	message PersonRef {
+//	  option (syncplane.v1.reference) = {};
+//	  string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+//	  Person person = 2;
+//	}
+//	message Task {
+//	  PersonRef assignee = 2;
+//	  repeated PersonRef watchers = 3;
+//	}
+//
+// A field of a reference message type is a reference like any other: it gets
+// the forward accessor, the reverse relation on the target, the follow segment
+// and the derived index, and its target is the entity the embedded field
+// names. The message must carry exactly one singular entity-typed field and at
+// most one string field marked (syncplane.v1.field_behavior).workspace, and
+// nothing else; whether the holder field is repeated says whether the
+// reference is to-many. An empty or absent workspace value means the holder's
+// own workspace, so a reference message without the workspace field is a
+// same-workspace reference with an explicit stored shape.
+//
+// A reference message is replaced whole on every write: a PATCH mask that
+// names one names the whole message, so the workspace and the key never
+// split. A repeated reference message list has no per-element identity and is
+// replaced whole as well, unlike a repeated entity-typed reference, which
+// merges per target key; a list that must merge per element wraps each
+// reference in a keyed list element of its own.
+//
+// Reading is client-local: a client resolves each stub in the workspace it
+// names, from the workspaces it holds. The server evaluates `matches()`,
+// `include` and `follow` inside the request's workspace only, so a stub that
+// names another workspace resolves to nothing there.
+type ReferenceOptions struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ReferenceOptions) Reset() {
+	*x = ReferenceOptions{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ReferenceOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ReferenceOptions) ProtoMessage() {}
+
+func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ReferenceOptions.ProtoReflect.Descriptor instead.
+func (*ReferenceOptions) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+}
+
 // SearchField is one field full-text search reads.
 type SearchField struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
@@ -531,7 +606,7 @@ type SearchField struct {
 
 func (x *SearchField) Reset() {
 	*x = SearchField{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -543,7 +618,7 @@ func (x *SearchField) String() string {
 func (*SearchField) ProtoMessage() {}
 
 func (x *SearchField) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[2]
+	mi := &file_syncplane_v1_options_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -556,7 +631,7 @@ func (x *SearchField) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchField.ProtoReflect.Descriptor instead.
 func (*SearchField) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *SearchField) GetPath() string {
@@ -597,7 +672,7 @@ type SearchSpec struct {
 
 func (x *SearchSpec) Reset() {
 	*x = SearchSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -609,7 +684,7 @@ func (x *SearchSpec) String() string {
 func (*SearchSpec) ProtoMessage() {}
 
 func (x *SearchSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[3]
+	mi := &file_syncplane_v1_options_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -622,7 +697,7 @@ func (x *SearchSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchSpec.ProtoReflect.Descriptor instead.
 func (*SearchSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *SearchSpec) GetField() []*SearchField {
@@ -656,7 +731,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -668,7 +743,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[4]
+	mi := &file_syncplane_v1_options_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -681,7 +756,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -715,7 +790,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[5]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -727,7 +802,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[5]
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -740,7 +815,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -778,6 +853,12 @@ type FieldBehavior struct {
 	// anchors. Requires a singular bytes field; implies opaque; the engine
 	// auto-installs the text merger so concurrent PATCHes merge without
 	// interleaving. Incompatible with key_field/order_field.
+	//
+	// The field's path may cross keyed message lists and message-valued maps,
+	// in which case each element holds its own document, addressed by its
+	// instance path ("notes.<key>.body"). Refused inside a oneof or an unkeyed
+	// repeated element: those units are replaced whole, so the merger could
+	// never run.
 	Text bool `protobuf:"varint,4,opt,name=text,proto3" json:"text,omitempty"`
 	// Maintain a single-component secondary index over this field, so filtering
 	// or ordering by it costs O(result) instead of a scan of the entity.
@@ -828,14 +909,20 @@ type FieldBehavior struct {
 	// marking any member marks the whole oneof. A key field may not be marked —
 	// a PATCH can never move one and a PUT that changed one would address a
 	// different row — and is rejected at registration.
-	WritePolicy   FieldWritePolicy `protobuf:"varint,8,opt,name=write_policy,json=writePolicy,proto3,enum=syncplane.v1.FieldWritePolicy" json:"write_policy,omitempty"`
+	WritePolicy FieldWritePolicy `protobuf:"varint,8,opt,name=write_policy,json=writePolicy,proto3,enum=syncplane.v1.FieldWritePolicy" json:"write_policy,omitempty"`
+	// Inside a reference message (see ReferenceOptions), the string field that
+	// names the workspace the referenced row lives in. Empty means the holder's
+	// own workspace. Valid on a singular string field of a message carrying
+	// (syncplane.v1.reference), at most once per message; rejected anywhere
+	// else at registration.
+	Workspace     bool `protobuf:"varint,9,opt,name=workspace,proto3" json:"workspace,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -847,7 +934,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -860,7 +947,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -919,6 +1006,13 @@ func (x *FieldBehavior) GetWritePolicy() FieldWritePolicy {
 	return FieldWritePolicy_FIELD_WRITE_POLICY_UNSPECIFIED
 }
 
+func (x *FieldBehavior) GetWorkspace() bool {
+	if x != nil {
+		return x.Workspace
+	}
+	return false
+}
+
 var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	{
 		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
@@ -926,6 +1020,14 @@ var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 		Field:         50100,
 		Name:          "syncplane.v1.entity",
 		Tag:           "bytes,50100,opt,name=entity",
+		Filename:      "syncplane/v1/options.proto",
+	},
+	{
+		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
+		ExtensionType: (*ReferenceOptions)(nil),
+		Field:         50102,
+		Name:          "syncplane.v1.reference",
+		Tag:           "bytes,50102,opt,name=reference",
 		Filename:      "syncplane/v1/options.proto",
 	},
 	{
@@ -940,16 +1042,18 @@ var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 
 // Extension fields to descriptorpb.MessageOptions.
 var (
-	// Field numbers 50100/50101 are unregistered; fine for internal use.
+	// Field numbers 50100/50101/50102 are unregistered; fine for internal use.
 	//
 	// optional syncplane.v1.EntityOptions entity = 50100;
 	E_Entity = &file_syncplane_v1_options_proto_extTypes[0]
+	// optional syncplane.v1.ReferenceOptions reference = 50102;
+	E_Reference = &file_syncplane_v1_options_proto_extTypes[1]
 )
 
 // Extension fields to descriptorpb.FieldOptions.
 var (
 	// optional syncplane.v1.FieldBehavior field_behavior = 50101;
-	E_FieldBehavior = &file_syncplane_v1_options_proto_extTypes[1]
+	E_FieldBehavior = &file_syncplane_v1_options_proto_extTypes[2]
 )
 
 var File_syncplane_v1_options_proto protoreflect.FileDescriptor
@@ -969,7 +1073,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\rcreate_policy\x18\a \x01(\x0e2\x1a.syncplane.v1.CreatePolicyR\fcreatePolicy\x12?\n" +
 	"\rupdate_policy\x18\b \x01(\x0e2\x1a.syncplane.v1.UpdatePolicyR\fupdatePolicy\x120\n" +
 	"\x06search\x18\t \x01(\v2\x18.syncplane.v1.SearchSpecR\x06search\"\x10\n" +
-	"\x0eHistoryOptions\"!\n" +
+	"\x0eHistoryOptions\"\x12\n" +
+	"\x10ReferenceOptions\"!\n" +
 	"\vSearchField\x12\x12\n" +
 	"\x04path\x18\x01 \x01(\tR\x04path\"f\n" +
 	"\n" +
@@ -981,7 +1086,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\x90\x02\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xae\x02\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -993,7 +1098,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
 	"searchable\x18\a \x01(\bR\n" +
 	"searchable\x12A\n" +
-	"\fwrite_policy\x18\b \x01(\x0e2\x1e.syncplane.v1.FieldWritePolicyR\vwritePolicy*f\n" +
+	"\fwrite_policy\x18\b \x01(\x0e2\x1e.syncplane.v1.FieldWritePolicyR\vwritePolicy\x12\x1c\n" +
+	"\tworkspace\x18\t \x01(\bR\tworkspace*f\n" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +
@@ -1010,7 +1116,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x1eFIELD_WRITE_POLICY_UNSPECIFIED\x10\x00\x12\x1c\n" +
 	"\x18FIELD_WRITE_POLICY_ALLOW\x10\x01\x12#\n" +
 	"\x1fFIELD_WRITE_POLICY_TRUSTED_ONLY\x10\x02:V\n" +
-	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:c\n" +
+	"\x06entity\x12\x1f.google.protobuf.MessageOptions\x18\xb4\x87\x03 \x01(\v2\x1b.syncplane.v1.EntityOptionsR\x06entity:_\n" +
+	"\treference\x12\x1f.google.protobuf.MessageOptions\x18\xb6\x87\x03 \x01(\v2\x1e.syncplane.v1.ReferenceOptionsR\treference:c\n" +
 	"\x0efield_behavior\x12\x1d.google.protobuf.FieldOptions\x18\xb5\x87\x03 \x01(\v2\x1b.syncplane.v1.FieldBehaviorR\rfieldBehaviorBFZDgithub.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1b\x06proto3"
 
 var (
@@ -1026,7 +1133,7 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(DeletePolicy)(0),                   // 0: syncplane.v1.DeletePolicy
 	(CreatePolicy)(0),                   // 1: syncplane.v1.CreatePolicy
@@ -1034,32 +1141,35 @@ var file_syncplane_v1_options_proto_goTypes = []any{
 	(FieldWritePolicy)(0),               // 3: syncplane.v1.FieldWritePolicy
 	(*EntityOptions)(nil),               // 4: syncplane.v1.EntityOptions
 	(*HistoryOptions)(nil),              // 5: syncplane.v1.HistoryOptions
-	(*SearchField)(nil),                 // 6: syncplane.v1.SearchField
-	(*SearchSpec)(nil),                  // 7: syncplane.v1.SearchSpec
-	(*IndexKey)(nil),                    // 8: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 9: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 10: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 11: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 12: google.protobuf.FieldOptions
+	(*ReferenceOptions)(nil),            // 6: syncplane.v1.ReferenceOptions
+	(*SearchField)(nil),                 // 7: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 8: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 9: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 10: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 11: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 12: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 13: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	9,  // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	10, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
 	0,  // 1: syncplane.v1.EntityOptions.delete_policy:type_name -> syncplane.v1.DeletePolicy
 	5,  // 2: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
 	1,  // 3: syncplane.v1.EntityOptions.create_policy:type_name -> syncplane.v1.CreatePolicy
 	2,  // 4: syncplane.v1.EntityOptions.update_policy:type_name -> syncplane.v1.UpdatePolicy
-	7,  // 5: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
-	6,  // 6: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	8,  // 7: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	8,  // 5: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	7,  // 6: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	9,  // 7: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
 	3,  // 8: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
-	11, // 9: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	12, // 10: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	4,  // 11: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	10, // 12: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	13, // [13:13] is the sub-list for method output_type
-	13, // [13:13] is the sub-list for method input_type
-	11, // [11:13] is the sub-list for extension type_name
-	9,  // [9:11] is the sub-list for extension extendee
+	12, // 9: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	12, // 10: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
+	13, // 11: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	4,  // 12: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	6,  // 13: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
+	11, // 14: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	15, // [15:15] is the sub-list for method output_type
+	15, // [15:15] is the sub-list for method input_type
+	12, // [12:15] is the sub-list for extension type_name
+	9,  // [9:12] is the sub-list for extension extendee
 	0,  // [0:9] is the sub-list for field type_name
 }
 
@@ -1074,8 +1184,8 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      4,
-			NumMessages:   7,
-			NumExtensions: 2,
+			NumMessages:   8,
+			NumExtensions: 3,
 			NumServices:   0,
 		},
 		GoTypes:           file_syncplane_v1_options_proto_goTypes,

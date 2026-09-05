@@ -345,12 +345,23 @@
 		results.appendChild(note);
 	}
 
+	// pointsElsewhere reports whether a chip names another workspace. Picker
+	// rows always come from this workspace, so such a chip matches none of them
+	// whatever its key says.
+	function pointsElsewhere(chip) {
+		const ws = chip.querySelector('input[data-ref-workspace]');
+		return ws !== null && ws.value !== '';
+	}
+
 	// selectedKeySets returns the key-field maps of every chip already in the
-	// field, for matching against picker options.
+	// field that a picker option could match.
 	function selectedKeySets(fs) {
 		const items = fs.querySelector('[data-ref-items]');
 		if (!items) return [];
-		return Array.prototype.map.call(items.querySelectorAll('[data-ref-chip]'), function(chip) {
+		const chips = Array.prototype.filter.call(items.querySelectorAll('[data-ref-chip]'), function(chip) {
+			return !pointsElsewhere(chip);
+		});
+		return chips.map(function(chip) {
 			const obj = {};
 			chip.querySelectorAll('input[data-ref-key]').forEach(function(el) {
 				obj[el.getAttribute('data-ref-key')] = el.value;
@@ -394,6 +405,7 @@
 	// values, so a repeated reference is not selected twice.
 	function hasSameRef(items, keys) {
 		return Array.prototype.some.call(items.querySelectorAll('[data-ref-chip]'), function(chip) {
+			if (pointsElsewhere(chip)) return false;
 			const inputs = chip.querySelectorAll('input[data-ref-key]');
 			if (inputs.length === 0) return false;
 			return Array.prototype.every.call(inputs, function(el) {

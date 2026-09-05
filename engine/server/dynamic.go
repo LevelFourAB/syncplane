@@ -128,6 +128,11 @@ type DynamicField struct {
 	// Ref names another entity (by DynamicEntity.Name) in the same registration;
 	// the field becomes a typed reference to it.
 	Ref string
+	// RefWorkspace stores a Ref as a reference message — `workspace_id` beside a
+	// `value` of the target type, the shape (syncplane.v1.reference) declares —
+	// so a stored value may name the workspace its target lives in. Ignored
+	// without Ref.
+	RefWorkspace bool
 	// KeyField names the identity field(s) of a keyed message list (composite
 	// allowed). OrderField names the element's fractional position field,
 	// promoting it to a movable list. Both lower to (syncplane.v1.field_behavior).
@@ -395,8 +400,17 @@ func dynamicFieldProto(
 			return nil, nil, fmt.Errorf("server: dynamic entity %q field %q references unknown entity %q", ctx, f.Name, f.Ref)
 		}
 		fdp.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+		if f.RefWorkspace {
+			// A workspace-qualified reference is stored as a reference message
+			// synthesized per field, nested beside the map entries and embedded
+			// messages of the same parent.
+			simple := camelCase(f.Name) + "Ref"
+			fdp.TypeName = proto.String("." + parentFullName + "." + simple)
+			return fdp, []*descriptorpb.DescriptorProto{referenceMessageProto(simple, "."+pkg+"."+targetMsg)}, nil
+		}
 		fdp.TypeName = proto.String("." + pkg + "." + targetMsg)
-		// No (syncplane.v1.field_behavior): reference detection is annotation-free.
+		// No (syncplane.v1.field_behavior): entity-typed reference detection is
+		// annotation-free.
 		return fdp, nil, nil
 
 	case f.isMessage():
@@ -460,6 +474,36 @@ func setDynamicBehavior(fdp *descriptorpb.FieldDescriptorProto, f DynamicField, 
 	proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, behavior)
 	fdp.Options = fopts
 	return nil
+}
+
+// referenceMessageProto synthesizes the reference message a RefWorkspace field
+// stores: `workspace_id` marked (syncplane.v1.field_behavior).workspace beside
+// a `value` of the target type, with (syncplane.v1.reference) on the message.
+func referenceMessageProto(simpleName, targetTypeName string) *descriptorpb.DescriptorProto {
+	wsOpts := &descriptorpb.FieldOptions{}
+	proto.SetExtension(wsOpts, syncplanev1.E_FieldBehavior, &syncplanev1.FieldBehavior{Workspace: true})
+	msgOpts := &descriptorpb.MessageOptions{}
+	proto.SetExtension(msgOpts, syncplanev1.E_Reference, &syncplanev1.ReferenceOptions{})
+	return &descriptorpb.DescriptorProto{
+		Name:    proto.String(simpleName),
+		Options: msgOpts,
+		Field: []*descriptorpb.FieldDescriptorProto{
+			{
+				Name:    proto.String("workspace_id"),
+				Number:  proto.Int32(1),
+				Label:   descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:    descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+				Options: wsOpts,
+			},
+			{
+				Name:     proto.String("value"),
+				Number:   proto.Int32(2),
+				Label:    descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:     descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum(),
+				TypeName: proto.String(targetTypeName),
+			},
+		},
+	}
 }
 
 // mapEntryProto synthesizes a map's entry message: a map_entry nested type with

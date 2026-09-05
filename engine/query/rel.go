@@ -47,6 +47,9 @@ type RelNode struct {
 	Target protoreflect.MessageDescriptor
 	// KeyFields are the target's key fields, the values a stored stub carries.
 	KeyFields []protoreflect.FieldDescriptor
+	// Ref is the reference's stored shape: where the key and, for a reference
+	// message, the workspace sit inside the stored value.
+	Ref *lww.Ref
 }
 
 // Repeated reports whether the ref is to-many.
@@ -107,10 +110,18 @@ func resolveRel(desc protoreflect.MessageDescriptor, c *syncplanev1.RelCond) (*R
 		return nil, err
 	}
 	leaf := pathLeaf(fields)
-	refKeys := lww.RefKeyFields(leaf)
-	if len(refKeys) == 0 {
+	ref := lww.RefOf(leaf)
+	if ref == nil {
 		return nil, fmt.Errorf("path %v: matches needs a reference field, got %s",
 			c.GetPath(), describeLeaf(fields[len(fields)-1]))
+	}
+	// The entity field inside a reference message is itself entity-typed, so
+	// it resolves as a plain reference — one that knows nothing of the
+	// workspace stored beside it. Only the enclosing field carries the whole
+	// stored shape.
+	if n := len(fields); n > 1 && lww.RefOf(fields[n-2].fd) != nil {
+		return nil, fmt.Errorf("path %v: matches names the reference field itself; %q is the entity field inside reference %q",
+			c.GetPath(), leaf.Name(), fields[n-2].fd.Name())
 	}
 	if c.GetCond() == nil {
 		return nil, fmt.Errorf("path %v: matches needs a condition over the target entity", c.GetPath())
@@ -118,10 +129,10 @@ func resolveRel(desc protoreflect.MessageDescriptor, c *syncplanev1.RelCond) (*R
 	if hasRel(c.GetCond()) {
 		return nil, fmt.Errorf("path %v: matches cannot nest inside matches; the semi-join is one hop", c.GetPath())
 	}
-	if _, err := Compile(leaf.Message(), c.GetCond()); err != nil {
+	if _, err := Compile(ref.Target, c.GetCond()); err != nil {
 		return nil, fmt.Errorf("path %v: %w", c.GetPath(), err)
 	}
-	return &RelNode{Cond: c, Field: leaf, Target: leaf.Message(), KeyFields: refKeys}, nil
+	return &RelNode{Cond: c, Field: leaf, Target: ref.Target, KeyFields: ref.KeyFields, Ref: ref}, nil
 }
 
 // hasRel reports whether any rel condition appears anywhere in the tree,
@@ -165,47 +176,60 @@ func hasRel(cond *syncplanev1.Condition) bool {
 // push-down produces, so the per-ref-field index serves it. A composite-key
 // ref becomes a disjunction of key-tuple equalities: comparing whole tuples is
 // what keeps a matching id under the wrong ns from matching.
-func RelReplacement(node *RelNode, targets [][]*syncplanev1.QueryValue) *syncplanev1.Condition {
+//
+// workspace is the one the pre-pass ran in. A reference message carrying a
+// workspace field adds the test that the stub resolves there — it names that
+// workspace, or names none — because the targets were read from it alone: a
+// stub pointing into another workspace matches nothing here (see
+// ReferenceOptions).
+func RelReplacement(node *RelNode, targets [][]*syncplanev1.QueryValue, workspace string) *syncplanev1.Condition {
 	path := node.Cond.GetPath()
+	// Inside an exists the element is the scope, so a stub-relative path stands
+	// on its own; for a singular ref it hangs off the field path.
+	at := func(sub []string) []string {
+		if node.Repeated() {
+			return sub
+		}
+		return append(append([]string{}, path...), sub...)
+	}
+	var member *syncplanev1.Condition
 	if len(node.KeyFields) == 1 {
 		values := make([]*syncplanev1.QueryValue, len(targets))
 		for i, t := range targets {
 			values[i] = t[0]
 		}
-		keyName := string(node.KeyFields[0].Name())
-		if node.Repeated() {
-			return existsAt(path, &syncplanev1.Condition{
-				Kind: &syncplanev1.Condition_In{In: &syncplanev1.InCond{
-					Path:   []string{keyName},
-					Values: values,
-				}},
-			})
-		}
-		return &syncplanev1.Condition{Kind: &syncplanev1.Condition_In{In: &syncplanev1.InCond{
-			Path:   append(append([]string{}, path...), keyName),
+		member = &syncplanev1.Condition{Kind: &syncplanev1.Condition_In{In: &syncplanev1.InCond{
+			Path:   at(node.Ref.KeyPathNames(node.KeyFields[0])),
 			Values: values,
 		}}}
-	}
-	conds := make([]*syncplanev1.Condition, len(targets))
-	for i, t := range targets {
-		eqs := make([]*syncplanev1.Condition, len(node.KeyFields))
-		for j, kf := range node.KeyFields {
-			keyPath := []string{string(kf.Name())}
-			if !node.Repeated() {
-				keyPath = append(append([]string{}, path...), string(kf.Name()))
+	} else {
+		conds := make([]*syncplanev1.Condition, len(targets))
+		for i, t := range targets {
+			eqs := make([]*syncplanev1.Condition, len(node.KeyFields))
+			for j, kf := range node.KeyFields {
+				eqs[j] = &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+					Path:  at(node.Ref.KeyPathNames(kf)),
+					Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+					Value: t[j],
+				}}}
 			}
-			eqs[j] = &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
-				Path:  keyPath,
-				Op:    syncplanev1.CmpOp_CMP_OP_EQ,
-				Value: t[j],
-			}}}
+			conds[i] = And(eqs...)
 		}
-		conds[i] = And(eqs...)
+		member = Or(conds...)
+	}
+	if node.Ref.Qualified() {
+		member = And(member, &syncplanev1.Condition{Kind: &syncplanev1.Condition_In{In: &syncplanev1.InCond{
+			Path: at([]string{string(node.Ref.Workspace.Name())}),
+			Values: []*syncplanev1.QueryValue{
+				{Kind: &syncplanev1.QueryValue_StringValue{StringValue: ""}},
+				{Kind: &syncplanev1.QueryValue_StringValue{StringValue: workspace}},
+			},
+		}}})
 	}
 	if node.Repeated() {
-		return existsAt(path, Or(conds...))
+		return existsAt(path, member)
 	}
-	return Or(conds...)
+	return member
 }
 
 // existsAt is Any over an already-split path — the rel path arrives as wire

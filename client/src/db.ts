@@ -26,6 +26,7 @@ import type {
 	Scalar,
 	TotalOf,
 } from './query/index.js';
+import type { RefTargetOf } from './query/types.js';
 import type { Row } from './read.js';
 import type { Include } from './refs.js';
 import type { TextHandle } from './text/handle.js';
@@ -71,10 +72,13 @@ type MessageFieldKeys<M> = {
 		: never;
 }[Exclude<keyof M, '$typeName' | '$unknown'>];
 
-/** A to-one ref resolves to one row (or none); a to-many ref to a list. */
+/**
+ * A to-one ref resolves to one row (or none); a to-many ref to a list. A
+ * reference message resolves to the entity it wraps — see RefTargetOf.
+ */
 type TypedForwardRef<V, H> = [NonNullable<V>] extends [ReadonlyArray<infer E>]
-	? { load(holder: H): Promise<Row<E>[]> }
-	: { load(holder: H): Promise<Row<NonNullable<V>> | undefined> };
+	? { load(holder: H): Promise<Row<RefTargetOf<E>>[]> }
+	: { load(holder: H): Promise<Row<RefTargetOf<NonNullable<V>>> | undefined> };
 
 export type EntityRefs<D extends DescMessage = DescMessage> =
 	& {

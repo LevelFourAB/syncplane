@@ -29,7 +29,7 @@ func rewriteFor(cond *syncplanev1.Condition, targets map[string][]proto.Message)
 				matched = append(matched, query.TargetKeyValues(node, msg.ProtoReflect()))
 			}
 		}
-		replacements[node.Cond] = query.RelReplacement(node, matched)
+		replacements[node.Cond] = query.RelReplacement(node, matched, "ws")
 	}
 	compiled, err := query.Compile(issueDesc, query.RewriteRels(cond, replacements))
 	Expect(err).NotTo(HaveOccurred())
@@ -100,6 +100,15 @@ var _ = Describe("Rel", func() {
 		It("rejects a path that is not a reference field", func() {
 			_, err := query.ExtractRels(issueDesc, query.Rel("title", query.Eq("name", "x")))
 			Expect(err).To(MatchError(ContainSubstring("matches needs a reference field")))
+		})
+
+		It("rejects a path into the entity field of a reference message", func() {
+			// assignee.user is the stub inside a workspace-qualified reference.
+			// Resolving it as a plain reference would drop the workspace test.
+			taskDesc := (&testdatav1.Task{}).ProtoReflect().Descriptor()
+			_, err := query.ExtractRels(taskDesc, query.Rel("assignee.user", query.Eq("name", "x")))
+			Expect(err).To(MatchError(ContainSubstring(`matches names the reference field itself`)))
+			Expect(err).To(MatchError(ContainSubstring(`"assignee"`)))
 		})
 
 		It("rejects a missing inner condition", func() {

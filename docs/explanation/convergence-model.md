@@ -233,9 +233,13 @@ manage multiple workspaces simultaneously, sharing a local store, change
 stream, and push transport while maintaining independent cursors, pending
 queues, and mutation ID counters for each workspace.
 
-Writes, `transact()` batches, undo operations, entity references, and
-`queryServer` calls cannot cross workspace boundaries. Reads can query across
-workspaces when explicitly requested.
+Writes, `transact()` batches, undo operations, and `queryServer` calls cannot
+cross workspace boundaries. Reads can query across workspaces when explicitly
+requested. An entity reference resolves in its holder's workspace, unless the
+schema declares it as a
+[workspace-qualified reference](../reference/proto-options.md#syncplanev1reference--workspace-qualified-references),
+whose stored value names the workspace its target lives in; the client resolves
+those across the workspaces it holds, the server inside one.
 
 Clients self-assert `workspace_id`. The server enforces access boundaries
 through `CanAccessWorkspace`; the default authorization policy allows all

@@ -42,6 +42,13 @@ export interface RelCoverageRef {
 	 * which no follow path can name — only complete target coverage covers it.
 	 */
 	refLocalName?: string;
+	/**
+	 * Set for a workspace-qualified reference (see (syncplane.v1.reference)):
+	 * its stubs may point into any workspace the client holds, so the target
+	 * entity must be complete in every one of them, and a follow spec — which
+	 * the server resolves inside one workspace — covers nothing.
+	 */
+	crossWorkspace?: boolean;
 }
 
 /** What the local store provably holds for one entity. */
@@ -301,15 +308,37 @@ export class CoverageResolver {
 	 * own bounds already say why.
 	 */
 	private relationCovered(entity: string, workspaceId: string, rel: RelCoverageRef): boolean {
+		// A workspace-qualified reference points wherever its stubs say, so its
+		// targets have to be complete in every workspace the client holds.
+		if (rel.crossWorkspace) {
+			return [ ...this.scopes().keys() ].every((ws) => this.targetComplete(ws, rel.targetEntity));
+		}
+		if (!this.targetComplete(workspaceId, rel.targetEntity)) {
+			// A follow spec covers the targets of locally-held holders — unless
+			// the target is still downloading, when nothing does yet.
+			if (this.hydration?.(workspaceId)?.has(rel.targetEntity)) return false;
+			const subs = this.scopes().get(workspaceId);
+			if (subs === undefined || rel.refLocalName === undefined) return false;
+			const own = subs.filter((s) => s.entity === entity);
+			return own.every((s) =>
+				s.follow?.paths.some((p) => p.segments[0] === rel.refLocalName) ?? false
+			);
+		}
+		return true;
+	}
+
+	/**
+	 * Whether one workspace provably holds every row of a target entity: not
+	 * still downloading it, and either unsubscribed altogether — a workspace
+	 * with no scope holds everything — or covering the entity completely.
+	 */
+	private targetComplete(workspaceId: string, target: string): boolean {
 		// Targets still downloading answer stubs with rows that are not here
 		// yet, whatever the scope promises.
-		if (this.hydration?.(workspaceId)?.has(rel.targetEntity)) return false;
+		if (this.hydration?.(workspaceId)?.has(target)) return false;
 		const subs = this.scopes().get(workspaceId);
 		if (subs === undefined) return true;
-		if (coverageOfEntity(subs, rel.targetEntity).complete) return true;
-		if (rel.refLocalName === undefined) return false;
-		const own = subs.filter((s) => s.entity === entity);
-		return own.every((s) => s.follow?.paths.some((p) => p.segments[0] === rel.refLocalName) ?? false);
+		return coverageOfEntity(subs, target).complete;
 	}
 }
 

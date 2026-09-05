@@ -447,6 +447,33 @@ message Issue {
 	map<string, string> tags_map = 12;
 }
 
+// Workspace-qualified reference fixtures. UserRef is a reference message: it
+// wraps a User stub together with the workspace that user lives in, so a Task
+// may name a user held in another workspace. Task exercises the to-one
+// (assignee) and to-many (watchers) shapes; the reverse relations land on User
+// as tasksByAssignee / tasksByWatchers.
+message UserRef {
+	option (syncplane.v1.reference) = {
+	};
+
+	string workspace_id = 1
+		[(syncplane.v1.field_behavior) = { workspace: true }];
+	User user = 2;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	string title = 2;
+	UserRef assignee = 3;
+	repeated UserRef watchers = 4;
+	string state = 5;
+}
+
 message Settings {
 	string color = 1;
 	int32 size = 2;

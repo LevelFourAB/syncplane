@@ -1941,6 +1941,139 @@ func (x *Issue) GetTagsMap() map[string]string {
 	return nil
 }
 
+// Workspace-qualified reference fixtures. UserRef is a reference message: it
+// wraps a User stub together with the workspace that user lives in, so a Task
+// may name a user held in another workspace. Task exercises the to-one
+// (assignee) and to-many (watchers) shapes; the reverse relations land on User
+// as tasksByAssignee / tasksByWatchers.
+type UserRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	User          *User                  `protobuf:"bytes,2,opt,name=user,proto3" json:"user,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *UserRef) Reset() {
+	*x = UserRef{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *UserRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*UserRef) ProtoMessage() {}
+
+func (x *UserRef) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use UserRef.ProtoReflect.Descriptor instead.
+func (*UserRef) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *UserRef) GetWorkspaceId() string {
+	if x != nil {
+		return x.WorkspaceId
+	}
+	return ""
+}
+
+func (x *UserRef) GetUser() *User {
+	if x != nil {
+		return x.User
+	}
+	return nil
+}
+
+type Task struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Title         string                 `protobuf:"bytes,2,opt,name=title,proto3" json:"title,omitempty"`
+	Assignee      *UserRef               `protobuf:"bytes,3,opt,name=assignee,proto3" json:"assignee,omitempty"`
+	Watchers      []*UserRef             `protobuf:"bytes,4,rep,name=watchers,proto3" json:"watchers,omitempty"`
+	State         string                 `protobuf:"bytes,5,opt,name=state,proto3" json:"state,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Task) Reset() {
+	*x = Task{}
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Task) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Task) ProtoMessage() {}
+
+func (x *Task) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Task.ProtoReflect.Descriptor instead.
+func (*Task) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *Task) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Task) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Task) GetAssignee() *UserRef {
+	if x != nil {
+		return x.Assignee
+	}
+	return nil
+}
+
+func (x *Task) GetWatchers() []*UserRef {
+	if x != nil {
+		return x.Watchers
+	}
+	return nil
+}
+
+func (x *Task) GetState() string {
+	if x != nil {
+		return x.State
+	}
+	return ""
+}
+
 type Settings struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Color string                 `protobuf:"bytes,1,opt,name=color,proto3" json:"color,omitempty"`
@@ -1957,7 +2090,7 @@ type Settings struct {
 
 func (x *Settings) Reset() {
 	*x = Settings{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1969,7 +2102,7 @@ func (x *Settings) String() string {
 func (*Settings) ProtoMessage() {}
 
 func (x *Settings) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1982,7 +2115,7 @@ func (x *Settings) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Settings.ProtoReflect.Descriptor instead.
 func (*Settings) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{22}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Settings) GetColor() string {
@@ -2024,7 +2157,7 @@ type Blob struct {
 
 func (x *Blob) Reset() {
 	*x = Blob{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2036,7 +2169,7 @@ func (x *Blob) String() string {
 func (*Blob) ProtoMessage() {}
 
 func (x *Blob) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2049,7 +2182,7 @@ func (x *Blob) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Blob.ProtoReflect.Descriptor instead.
 func (*Blob) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{23}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Blob) GetData() []byte {
@@ -2085,7 +2218,7 @@ type Article struct {
 
 func (x *Article) Reset() {
 	*x = Article{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2097,7 +2230,7 @@ func (x *Article) String() string {
 func (*Article) ProtoMessage() {}
 
 func (x *Article) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[24]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2110,7 +2243,7 @@ func (x *Article) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Article.ProtoReflect.Descriptor instead.
 func (*Article) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{24}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Article) GetId() string {
@@ -2165,7 +2298,7 @@ type ArticleMeta struct {
 
 func (x *ArticleMeta) Reset() {
 	*x = ArticleMeta{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2177,7 +2310,7 @@ func (x *ArticleMeta) String() string {
 func (*ArticleMeta) ProtoMessage() {}
 
 func (x *ArticleMeta) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[25]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2190,7 +2323,7 @@ func (x *ArticleMeta) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ArticleMeta.ProtoReflect.Descriptor instead.
 func (*ArticleMeta) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{25}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *ArticleMeta) GetAuthor() string {
@@ -2220,7 +2353,7 @@ type Glossary struct {
 
 func (x *Glossary) Reset() {
 	*x = Glossary{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2232,7 +2365,7 @@ func (x *Glossary) String() string {
 func (*Glossary) ProtoMessage() {}
 
 func (x *Glossary) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[26]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2245,7 +2378,7 @@ func (x *Glossary) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Glossary.ProtoReflect.Descriptor instead.
 func (*Glossary) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{26}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Glossary) GetId() string {
@@ -2280,7 +2413,7 @@ type SearchRepeatedEntity struct {
 
 func (x *SearchRepeatedEntity) Reset() {
 	*x = SearchRepeatedEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2292,7 +2425,7 @@ func (x *SearchRepeatedEntity) String() string {
 func (*SearchRepeatedEntity) ProtoMessage() {}
 
 func (x *SearchRepeatedEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[27]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2305,7 +2438,7 @@ func (x *SearchRepeatedEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchRepeatedEntity.ProtoReflect.Descriptor instead.
 func (*SearchRepeatedEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{27}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SearchRepeatedEntity) GetId() string {
@@ -2333,7 +2466,7 @@ type SearchNumberEntity struct {
 
 func (x *SearchNumberEntity) Reset() {
 	*x = SearchNumberEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2345,7 +2478,7 @@ func (x *SearchNumberEntity) String() string {
 func (*SearchNumberEntity) ProtoMessage() {}
 
 func (x *SearchNumberEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2358,7 +2491,7 @@ func (x *SearchNumberEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchNumberEntity.ProtoReflect.Descriptor instead.
 func (*SearchNumberEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{28}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *SearchNumberEntity) GetId() string {
@@ -2386,7 +2519,7 @@ type SearchEmptyEntity struct {
 
 func (x *SearchEmptyEntity) Reset() {
 	*x = SearchEmptyEntity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2398,7 +2531,7 @@ func (x *SearchEmptyEntity) String() string {
 func (*SearchEmptyEntity) ProtoMessage() {}
 
 func (x *SearchEmptyEntity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2411,7 +2544,7 @@ func (x *SearchEmptyEntity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchEmptyEntity.ProtoReflect.Descriptor instead.
 func (*SearchEmptyEntity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{29}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SearchEmptyEntity) GetId() string {
@@ -2441,7 +2574,7 @@ type Ledger struct {
 
 func (x *Ledger) Reset() {
 	*x = Ledger{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2453,7 +2586,7 @@ func (x *Ledger) String() string {
 func (*Ledger) ProtoMessage() {}
 
 func (x *Ledger) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2466,7 +2599,7 @@ func (x *Ledger) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ledger.ProtoReflect.Descriptor instead.
 func (*Ledger) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{30}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Ledger) GetId() string {
@@ -2496,7 +2629,7 @@ type Activity struct {
 
 func (x *Activity) Reset() {
 	*x = Activity{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2508,7 +2641,7 @@ func (x *Activity) String() string {
 func (*Activity) ProtoMessage() {}
 
 func (x *Activity) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2521,7 +2654,7 @@ func (x *Activity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Activity.ProtoReflect.Descriptor instead.
 func (*Activity) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{31}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Activity) GetId() string {
@@ -2551,7 +2684,7 @@ type Comment struct {
 
 func (x *Comment) Reset() {
 	*x = Comment{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2563,7 +2696,7 @@ func (x *Comment) String() string {
 func (*Comment) ProtoMessage() {}
 
 func (x *Comment) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2576,7 +2709,7 @@ func (x *Comment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Comment.ProtoReflect.Descriptor instead.
 func (*Comment) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{32}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *Comment) GetId() string {
@@ -2610,7 +2743,7 @@ type Historied struct {
 
 func (x *Historied) Reset() {
 	*x = Historied{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[33]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2622,7 +2755,7 @@ func (x *Historied) String() string {
 func (*Historied) ProtoMessage() {}
 
 func (x *Historied) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[33]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2635,7 +2768,7 @@ func (x *Historied) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Historied.ProtoReflect.Descriptor instead.
 func (*Historied) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{33}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *Historied) GetId() string {
@@ -2679,7 +2812,7 @@ type HistoriedKeyedText struct {
 
 func (x *HistoriedKeyedText) Reset() {
 	*x = HistoriedKeyedText{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[34]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2691,7 +2824,7 @@ func (x *HistoriedKeyedText) String() string {
 func (*HistoriedKeyedText) ProtoMessage() {}
 
 func (x *HistoriedKeyedText) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[34]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2704,7 +2837,7 @@ func (x *HistoriedKeyedText) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedKeyedText.ProtoReflect.Descriptor instead.
 func (*HistoriedKeyedText) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{34}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *HistoriedKeyedText) GetId() string {
@@ -2735,7 +2868,7 @@ type HistoriedAll struct {
 
 func (x *HistoriedAll) Reset() {
 	*x = HistoriedAll{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[35]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2747,7 +2880,7 @@ func (x *HistoriedAll) String() string {
 func (*HistoriedAll) ProtoMessage() {}
 
 func (x *HistoriedAll) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[35]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2760,7 +2893,7 @@ func (x *HistoriedAll) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedAll.ProtoReflect.Descriptor instead.
 func (*HistoriedAll) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{35}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *HistoriedAll) GetId() string {
@@ -2803,7 +2936,7 @@ type HistoriedOneof struct {
 
 func (x *HistoriedOneof) Reset() {
 	*x = HistoriedOneof{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[36]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2815,7 +2948,7 @@ func (x *HistoriedOneof) String() string {
 func (*HistoriedOneof) ProtoMessage() {}
 
 func (x *HistoriedOneof) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[36]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2828,7 +2961,7 @@ func (x *HistoriedOneof) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedOneof.ProtoReflect.Descriptor instead.
 func (*HistoriedOneof) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{36}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *HistoriedOneof) GetId() string {
@@ -2900,7 +3033,7 @@ type HistoriedNested struct {
 
 func (x *HistoriedNested) Reset() {
 	*x = HistoriedNested{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[37]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2912,7 +3045,7 @@ func (x *HistoriedNested) String() string {
 func (*HistoriedNested) ProtoMessage() {}
 
 func (x *HistoriedNested) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[37]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2925,7 +3058,7 @@ func (x *HistoriedNested) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedNested.ProtoReflect.Descriptor instead.
 func (*HistoriedNested) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{37}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *HistoriedNested) GetId() string {
@@ -2955,7 +3088,7 @@ type HistoriedUnmarked struct {
 
 func (x *HistoriedUnmarked) Reset() {
 	*x = HistoriedUnmarked{}
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[38]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2967,7 +3100,7 @@ func (x *HistoriedUnmarked) String() string {
 func (*HistoriedUnmarked) ProtoMessage() {}
 
 func (x *HistoriedUnmarked) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[38]
+	mi := &file_syncplane_testdata_v1_testdata_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2980,7 +3113,7 @@ func (x *HistoriedUnmarked) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoriedUnmarked.ProtoReflect.Descriptor instead.
 func (*HistoriedUnmarked) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{38}
+	return file_syncplane_testdata_v1_testdata_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *HistoriedUnmarked) GetId() string {
@@ -3203,7 +3336,18 @@ const file_syncplane_testdata_v1_testdata_proto_rawDesc = "" +
 	"\x1ccustom.*.value.labels.values\x1a4\n" +
 	"\ftag_by_value\x12\x12\n" +
 	"\x10tags_map.*.value\x12\x10\n" +
-	"\x0etags_map.*.key\"\x85\x01\n" +
+	"\x0etags_map.*.key\"k\n" +
+	"\aUserRef\x12)\n" +
+	"\fworkspace_id\x18\x01 \x01(\tB\x06\xaa\xbb\x18\x02H\x01R\vworkspaceId\x12/\n" +
+	"\x04user\x18\x02 \x01(\v2\x1b.syncplane.testdata.v1.UserR\x04user:\x04\xb2\xbb\x18\x00\"\xca\x01\n" +
+	"\x04Task\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x14\n" +
+	"\x05title\x18\x02 \x01(\tR\x05title\x12:\n" +
+	"\bassignee\x18\x03 \x01(\v2\x1e.syncplane.testdata.v1.UserRefR\bassignee\x12:\n" +
+	"\bwatchers\x18\x04 \x03(\v2\x1e.syncplane.testdata.v1.UserRefR\bwatchers\x12\x14\n" +
+	"\x05state\x18\x05 \x01(\tR\x05state:\x0e\xa2\xbb\x18\n" +
+	"\n" +
+	"\x04task\x12\x02id\"\x85\x01\n" +
 	"\bSettings\x12\x14\n" +
 	"\x05color\x18\x01 \x01(\tR\x05color\x12\x12\n" +
 	"\x04size\x18\x02 \x01(\x05R\x04size\x129\n" +
@@ -3312,7 +3456,7 @@ func file_syncplane_testdata_v1_testdata_proto_rawDescGZIP() []byte {
 	return file_syncplane_testdata_v1_testdata_proto_rawDescData
 }
 
-var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_syncplane_testdata_v1_testdata_proto_msgTypes = make([]protoimpl.MessageInfo, 48)
 var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Widget)(nil),                  // 0: syncplane.testdata.v1.Widget
 	(*FieldValue)(nil),              // 1: syncplane.testdata.v1.FieldValue
@@ -3336,50 +3480,52 @@ var file_syncplane_testdata_v1_testdata_proto_goTypes = []any{
 	(*Project)(nil),                 // 19: syncplane.testdata.v1.Project
 	(*User)(nil),                    // 20: syncplane.testdata.v1.User
 	(*Issue)(nil),                   // 21: syncplane.testdata.v1.Issue
-	(*Settings)(nil),                // 22: syncplane.testdata.v1.Settings
-	(*Blob)(nil),                    // 23: syncplane.testdata.v1.Blob
-	(*Article)(nil),                 // 24: syncplane.testdata.v1.Article
-	(*ArticleMeta)(nil),             // 25: syncplane.testdata.v1.ArticleMeta
-	(*Glossary)(nil),                // 26: syncplane.testdata.v1.Glossary
-	(*SearchRepeatedEntity)(nil),    // 27: syncplane.testdata.v1.SearchRepeatedEntity
-	(*SearchNumberEntity)(nil),      // 28: syncplane.testdata.v1.SearchNumberEntity
-	(*SearchEmptyEntity)(nil),       // 29: syncplane.testdata.v1.SearchEmptyEntity
-	(*Ledger)(nil),                  // 30: syncplane.testdata.v1.Ledger
-	(*Activity)(nil),                // 31: syncplane.testdata.v1.Activity
-	(*Comment)(nil),                 // 32: syncplane.testdata.v1.Comment
-	(*Historied)(nil),               // 33: syncplane.testdata.v1.Historied
-	(*HistoriedKeyedText)(nil),      // 34: syncplane.testdata.v1.HistoriedKeyedText
-	(*HistoriedAll)(nil),            // 35: syncplane.testdata.v1.HistoriedAll
-	(*HistoriedOneof)(nil),          // 36: syncplane.testdata.v1.HistoriedOneof
-	(*HistoriedNested)(nil),         // 37: syncplane.testdata.v1.HistoriedNested
-	(*HistoriedUnmarked)(nil),       // 38: syncplane.testdata.v1.HistoriedUnmarked
-	nil,                             // 39: syncplane.testdata.v1.Widget.AttrsEntry
-	nil,                             // 40: syncplane.testdata.v1.Widget.ByIdEntry
-	nil,                             // 41: syncplane.testdata.v1.Widget.CustomEntry
-	nil,                             // 42: syncplane.testdata.v1.MapTextEntity.NotesEntry
-	nil,                             // 43: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
-	nil,                             // 44: syncplane.testdata.v1.Issue.CustomEntry
-	nil,                             // 45: syncplane.testdata.v1.Issue.TagsMapEntry
+	(*UserRef)(nil),                 // 22: syncplane.testdata.v1.UserRef
+	(*Task)(nil),                    // 23: syncplane.testdata.v1.Task
+	(*Settings)(nil),                // 24: syncplane.testdata.v1.Settings
+	(*Blob)(nil),                    // 25: syncplane.testdata.v1.Blob
+	(*Article)(nil),                 // 26: syncplane.testdata.v1.Article
+	(*ArticleMeta)(nil),             // 27: syncplane.testdata.v1.ArticleMeta
+	(*Glossary)(nil),                // 28: syncplane.testdata.v1.Glossary
+	(*SearchRepeatedEntity)(nil),    // 29: syncplane.testdata.v1.SearchRepeatedEntity
+	(*SearchNumberEntity)(nil),      // 30: syncplane.testdata.v1.SearchNumberEntity
+	(*SearchEmptyEntity)(nil),       // 31: syncplane.testdata.v1.SearchEmptyEntity
+	(*Ledger)(nil),                  // 32: syncplane.testdata.v1.Ledger
+	(*Activity)(nil),                // 33: syncplane.testdata.v1.Activity
+	(*Comment)(nil),                 // 34: syncplane.testdata.v1.Comment
+	(*Historied)(nil),               // 35: syncplane.testdata.v1.Historied
+	(*HistoriedKeyedText)(nil),      // 36: syncplane.testdata.v1.HistoriedKeyedText
+	(*HistoriedAll)(nil),            // 37: syncplane.testdata.v1.HistoriedAll
+	(*HistoriedOneof)(nil),          // 38: syncplane.testdata.v1.HistoriedOneof
+	(*HistoriedNested)(nil),         // 39: syncplane.testdata.v1.HistoriedNested
+	(*HistoriedUnmarked)(nil),       // 40: syncplane.testdata.v1.HistoriedUnmarked
+	nil,                             // 41: syncplane.testdata.v1.Widget.AttrsEntry
+	nil,                             // 42: syncplane.testdata.v1.Widget.ByIdEntry
+	nil,                             // 43: syncplane.testdata.v1.Widget.CustomEntry
+	nil,                             // 44: syncplane.testdata.v1.MapTextEntity.NotesEntry
+	nil,                             // 45: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
+	nil,                             // 46: syncplane.testdata.v1.Issue.CustomEntry
+	nil,                             // 47: syncplane.testdata.v1.Issue.TagsMapEntry
 }
 var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
-	22, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
-	23, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
-	39, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
-	40, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
-	41, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
+	24, // 0: syncplane.testdata.v1.Widget.settings:type_name -> syncplane.testdata.v1.Settings
+	25, // 1: syncplane.testdata.v1.Widget.doc:type_name -> syncplane.testdata.v1.Blob
+	41, // 2: syncplane.testdata.v1.Widget.attrs:type_name -> syncplane.testdata.v1.Widget.AttrsEntry
+	42, // 3: syncplane.testdata.v1.Widget.by_id:type_name -> syncplane.testdata.v1.Widget.ByIdEntry
+	43, // 4: syncplane.testdata.v1.Widget.custom:type_name -> syncplane.testdata.v1.Widget.CustomEntry
 	16, // 5: syncplane.testdata.v1.Widget.members:type_name -> syncplane.testdata.v1.Member
 	18, // 6: syncplane.testdata.v1.Widget.refs:type_name -> syncplane.testdata.v1.Pair
 	17, // 7: syncplane.testdata.v1.Widget.items:type_name -> syncplane.testdata.v1.Item
-	22, // 8: syncplane.testdata.v1.Widget.choice_settings:type_name -> syncplane.testdata.v1.Settings
+	24, // 8: syncplane.testdata.v1.Widget.choice_settings:type_name -> syncplane.testdata.v1.Settings
 	2,  // 9: syncplane.testdata.v1.FieldValue.labels:type_name -> syncplane.testdata.v1.StringList
-	23, // 10: syncplane.testdata.v1.FieldValue.attachment:type_name -> syncplane.testdata.v1.Blob
-	22, // 11: syncplane.testdata.v1.Guarded.audit:type_name -> syncplane.testdata.v1.Settings
-	22, // 12: syncplane.testdata.v1.Guarded.settings:type_name -> syncplane.testdata.v1.Settings
+	25, // 10: syncplane.testdata.v1.FieldValue.attachment:type_name -> syncplane.testdata.v1.Blob
+	24, // 11: syncplane.testdata.v1.Guarded.audit:type_name -> syncplane.testdata.v1.Settings
+	24, // 12: syncplane.testdata.v1.Guarded.settings:type_name -> syncplane.testdata.v1.Settings
 	8,  // 13: syncplane.testdata.v1.OneofNestedTextEntity.holder:type_name -> syncplane.testdata.v1.TextHolder
 	8,  // 14: syncplane.testdata.v1.ListTextEntity.notes:type_name -> syncplane.testdata.v1.TextHolder
-	42, // 15: syncplane.testdata.v1.MapTextEntity.notes:type_name -> syncplane.testdata.v1.MapTextEntity.NotesEntry
+	44, // 15: syncplane.testdata.v1.MapTextEntity.notes:type_name -> syncplane.testdata.v1.MapTextEntity.NotesEntry
 	12, // 16: syncplane.testdata.v1.KeyedTextEntity.notes:type_name -> syncplane.testdata.v1.KeyedNote
-	43, // 17: syncplane.testdata.v1.KeyedTextEntity.sections:type_name -> syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
+	45, // 17: syncplane.testdata.v1.KeyedTextEntity.sections:type_name -> syncplane.testdata.v1.KeyedTextEntity.SectionsEntry
 	8,  // 18: syncplane.testdata.v1.KeyedNote.deep:type_name -> syncplane.testdata.v1.TextHolder
 	14, // 19: syncplane.testdata.v1.OneofListIdentityEntity.entries:type_name -> syncplane.testdata.v1.VariantElement
 	19, // 20: syncplane.testdata.v1.OneofRefEntity.project:type_name -> syncplane.testdata.v1.Project
@@ -3389,21 +3535,24 @@ var file_syncplane_testdata_v1_testdata_proto_depIdxs = []int32{
 	20, // 24: syncplane.testdata.v1.Issue.assignee:type_name -> syncplane.testdata.v1.User
 	20, // 25: syncplane.testdata.v1.Issue.reporter:type_name -> syncplane.testdata.v1.User
 	18, // 26: syncplane.testdata.v1.Issue.pair:type_name -> syncplane.testdata.v1.Pair
-	44, // 27: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
-	45, // 28: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
-	23, // 29: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
-	25, // 30: syncplane.testdata.v1.Article.meta:type_name -> syncplane.testdata.v1.ArticleMeta
-	12, // 31: syncplane.testdata.v1.HistoriedKeyedText.notes:type_name -> syncplane.testdata.v1.KeyedNote
-	22, // 32: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
-	1,  // 33: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	8,  // 34: syncplane.testdata.v1.MapTextEntity.NotesEntry.value:type_name -> syncplane.testdata.v1.TextHolder
-	8,  // 35: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry.value:type_name -> syncplane.testdata.v1.TextHolder
-	1,  // 36: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
-	37, // [37:37] is the sub-list for method output_type
-	37, // [37:37] is the sub-list for method input_type
-	37, // [37:37] is the sub-list for extension type_name
-	37, // [37:37] is the sub-list for extension extendee
-	0,  // [0:37] is the sub-list for field type_name
+	46, // 27: syncplane.testdata.v1.Issue.custom:type_name -> syncplane.testdata.v1.Issue.CustomEntry
+	47, // 28: syncplane.testdata.v1.Issue.tags_map:type_name -> syncplane.testdata.v1.Issue.TagsMapEntry
+	20, // 29: syncplane.testdata.v1.UserRef.user:type_name -> syncplane.testdata.v1.User
+	22, // 30: syncplane.testdata.v1.Task.assignee:type_name -> syncplane.testdata.v1.UserRef
+	22, // 31: syncplane.testdata.v1.Task.watchers:type_name -> syncplane.testdata.v1.UserRef
+	25, // 32: syncplane.testdata.v1.Settings.inner:type_name -> syncplane.testdata.v1.Blob
+	27, // 33: syncplane.testdata.v1.Article.meta:type_name -> syncplane.testdata.v1.ArticleMeta
+	12, // 34: syncplane.testdata.v1.HistoriedKeyedText.notes:type_name -> syncplane.testdata.v1.KeyedNote
+	24, // 35: syncplane.testdata.v1.HistoriedNested.settings:type_name -> syncplane.testdata.v1.Settings
+	1,  // 36: syncplane.testdata.v1.Widget.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	8,  // 37: syncplane.testdata.v1.MapTextEntity.NotesEntry.value:type_name -> syncplane.testdata.v1.TextHolder
+	8,  // 38: syncplane.testdata.v1.KeyedTextEntity.SectionsEntry.value:type_name -> syncplane.testdata.v1.TextHolder
+	1,  // 39: syncplane.testdata.v1.Issue.CustomEntry.value:type_name -> syncplane.testdata.v1.FieldValue
+	40, // [40:40] is the sub-list for method output_type
+	40, // [40:40] is the sub-list for method input_type
+	40, // [40:40] is the sub-list for extension type_name
+	40, // [40:40] is the sub-list for extension extendee
+	0,  // [0:40] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_v1_testdata_proto_init() }
@@ -3447,7 +3596,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 		(*OneofRefEntity_Project)(nil),
 		(*OneofRefEntity_User)(nil),
 	}
-	file_syncplane_testdata_v1_testdata_proto_msgTypes[36].OneofWrappers = []any{
+	file_syncplane_testdata_v1_testdata_proto_msgTypes[38].OneofWrappers = []any{
 		(*HistoriedOneof_ChoiceText)(nil),
 		(*HistoriedOneof_ChoiceNumber)(nil),
 	}
@@ -3457,7 +3606,7 @@ func file_syncplane_testdata_v1_testdata_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_v1_testdata_proto_rawDesc), len(file_syncplane_testdata_v1_testdata_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   46,
+			NumMessages:   48,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

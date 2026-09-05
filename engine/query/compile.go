@@ -264,8 +264,8 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		// becomes an exists over that key field, the same rule that points a
 		// comparison on a singular reference at its key. Anything else needs
 		// comparable elements outright.
-		if refKeys := lww.RefKeyFields(leaf); len(refKeys) == 1 {
-			return refMembershipNode(fields, refKeys[0], c.GetOp(), values)
+		if r := lww.RefOf(leaf); r != nil && len(r.KeyFields) == 1 {
+			return refMembershipNode(fields, r.KeyPath(r.KeyFields[0]), c.GetOp(), values)
 		}
 		if !comparableKind(singularKind(leaf)) {
 			return nil, fmt.Errorf("path %v: has/hasAny/hasAll need a repeated field with comparable elements, got %s; %s",
@@ -363,8 +363,8 @@ func compileExists(desc protoreflect.MessageDescriptor, c *syncplanev1.ExistsCon
 	// A reference element stores only the target's key fields, so the same rule
 	// that stops a path descending through a reference stops a sub-condition
 	// reaching past one: those fields are simply not there to match.
-	if refKeys := lww.RefKeyFields(leaf); refKeys != nil {
-		if err := requireRefKeyPaths(c.GetPath(), refKeys, c.GetCond()); err != nil {
+	if r := lww.RefOf(leaf); r != nil {
+		if err := requireRefKeyPaths(c.GetPath(), r, c.GetCond()); err != nil {
 			return nil, err
 		}
 	}
@@ -408,14 +408,42 @@ func requireEntryPaths(
 // requireRefKeyPaths rejects a sub-condition that addresses anything but the
 // reference's key fields. Without it such a condition compiles and then matches
 // nothing, since a stored reference element carries the key fields alone.
-func requireRefKeyPaths(path []string, keyFields []protoreflect.FieldDescriptor, cond *syncplanev1.Condition) error {
+func requireRefKeyPaths(path []string, ref *lww.Ref, cond *syncplanev1.Condition) error {
 	return walkSubPaths(cond, func(sub []string) error {
-		if len(sub) == 1 && isKeyField(keyFields, sub[0]) {
+		if len(sub) == 1 && ref.Addressable(sub[0]) {
 			return nil
 		}
-		return fmt.Errorf("path %v: an element of a reference list holds only its key fields, so any() cannot ask about %q",
-			path, strings.Join(sub, "."))
+		// A reference message keeps the key one level down, under its entity field.
+		if ref.Value != nil && len(sub) == 2 && sub[0] == string(ref.Value.Name()) && isKeyField(ref.KeyFields, sub[1]) {
+			return nil
+		}
+		return fmt.Errorf("path %v: an element of a reference list holds only %s, so any() cannot ask about %q",
+			path, refHolds(ref), strings.Join(sub, "."))
 	})
+}
+
+// refAddressable names the fields a path may descend into through a reference,
+// as the predicate of "only … addressable".
+func refAddressable(ref *lww.Ref) string {
+	if ref.Value == nil {
+		return "its key fields are"
+	}
+	if ref.Workspace == nil {
+		return fmt.Sprintf("its entity field %q is", ref.Value.Name())
+	}
+	return fmt.Sprintf("its entity field %q and workspace field %q are", ref.Value.Name(), ref.Workspace.Name())
+}
+
+// refHolds names what a stored reference value carries, for the errors that
+// refuse a path reaching past it.
+func refHolds(ref *lww.Ref) string {
+	if ref.Value == nil {
+		return "its key fields"
+	}
+	if ref.Workspace == nil {
+		return fmt.Sprintf("its entity field %q", ref.Value.Name())
+	}
+	return fmt.Sprintf("its entity field %q and workspace field %q", ref.Value.Name(), ref.Workspace.Name())
 }
 
 // walkSubPaths applies check to every ROW PATH a condition tree addresses,
@@ -469,11 +497,14 @@ func walkSubPaths(cond *syncplanev1.Condition, check func([]string) error) error
 // no single element satisfies more than one.
 func refMembershipNode(
 	fields []pathStep,
-	keyField protoreflect.FieldDescriptor,
+	keyPath []protoreflect.FieldDescriptor,
 	op syncplanev1.RepOp,
 	values []condValue,
 ) (node, error) {
-	key := []pathStep{{fd: keyField}}
+	key := make([]pathStep, len(keyPath))
+	for i, fd := range keyPath {
+		key[i] = pathStep{fd: fd}
+	}
 	switch op {
 	case syncplanev1.RepOp_REP_OP_HAS:
 		return &existsNode{fields: fields, cond: &cmpNode{
@@ -646,13 +677,14 @@ func resolveFields(desc protoreflect.MessageDescriptor, path []string) ([]pathSt
 			}
 			continue
 		}
-		// A reference stores only its target's key fields, so only those are
+		// A reference stores only its target's key fields — under its entity
+		// field, plus a workspace, for a reference message — so only those are
 		// addressable: a path that descends through a ref into any other field
 		// can never match and is rejected. A path that ENDS at a ref is allowed
 		// (presence checks; scalar compares are incomparable, like any message).
 		if i < len(path)-1 {
-			if refKeys := lww.RefKeyFields(fd); refKeys != nil && !isKeyField(refKeys, path[i+1]) {
-				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only its key fields are addressable", path, seg, path[i+1])
+			if r := lww.RefOf(fd); r != nil && !r.Addressable(path[i+1]) {
+				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only %s addressable", path, seg, path[i+1], refAddressable(r))
 			}
 		}
 		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() {
@@ -754,9 +786,9 @@ func comparableHint(path []string, st pathStep) string {
 		}
 		return "use has/hasAny/hasAll/isEmpty"
 	case fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind:
-		if refKeys := lww.RefKeyFields(fd); len(refKeys) == 1 {
+		if r := lww.RefOf(fd); r != nil && len(r.KeyFields) == 1 {
 			return fmt.Sprintf("use isSet/isNotSet, or compare its key field %s.%s",
-				strings.Join(path, "."), refKeys[0].Name())
+				strings.Join(path, "."), strings.Join(r.KeyPathNames(r.KeyFields[0]), "."))
 		}
 		if len(lww.RefKeyFields(fd)) > 1 {
 			return "use isSet/isNotSet; a composite-key reference has no single comparable value"

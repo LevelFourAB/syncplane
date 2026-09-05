@@ -451,7 +451,8 @@ class IDBWrite extends IDBRead implements KVWrite {
 	/**
 	 * The store's least key that this transaction has not deleted, against the
 	 * least key it has buffered — whichever is lower. Stepping past a deleted
-	 * key resumes at its successor, so a run of deletes costs one lookup each.
+	 * key resumes at the next key above it, so a run of deletes costs one
+	 * lookup each.
 	 */
 	override async seek(lo?: string, hi?: string): Promise<string | undefined> {
 		let buffered: string | undefined;
@@ -465,11 +466,10 @@ class IDBWrite extends IDBRead implements KVWrite {
 		for (;;) {
 			stored = await super.seek(from, hi);
 			if (stored === undefined || !this.deleted.has(stored)) break;
-			from = successor(stored);
-			if (from === undefined) {
-				stored = undefined;
-				break;
-			}
+			// `stored + '\u0000'` is the least string above `stored`, so keys
+			// that extend the deleted one ('a/b' → 'a/b0') stay in range; the
+			// prefix successor would step over them.
+			from = stored + '\u0000';
 		}
 		if (buffered === undefined) return stored;
 		if (stored === undefined) return buffered;

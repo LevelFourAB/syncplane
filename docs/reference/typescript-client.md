@@ -608,8 +608,9 @@ await client.db.task.query({
 Behavior rules:
 
 - Unset references, dangling stubs, and deleted targets evaluate to `false`.
-- Reference joins do not cross workspace boundaries.
+- A stub resolves in the holder's workspace, unless it is a [workspace-qualified reference](#workspace-qualified-references) naming another one.
 - Nested `matches` calls, `matches` inside `any()`, `matches` in subscription predicates, and `matches` on non-reference message fields throw an error at query compilation.
+- `matches` names the reference field itself. On a workspace-qualified reference, `t.assignee.user.matches(...)` throws: the entity field inside the wrapper knows nothing of the workspace stored beside it.
 - Reverse relations do not support `matches`.
 - See [what a live matches costs](../explanation/relational-queries.md#what-a-live-matches-costs).
 
@@ -851,6 +852,50 @@ client.resolveReverseRef(targetSchema, relationName, target, q?)
 ```
 
 Exported types: `EntityRefs<D>`, `ForwardRefAccessor`, `ReverseRelAccessor`.
+
+### Workspace-qualified references
+
+A reference resolves in the workspace of the row that holds it. A **reference message** stores the target's workspace beside its key, so a row in one workspace can name a row in another. In a hand-written `.proto`, declare the message with `(syncplane.v1.reference)` (see [proto options](proto-options.md#syncplanev1reference--workspace-qualified-references)). The schema builder synthesizes it:
+
+```ts
+const person = schema.entity('person', {
+	id: schema.text().key(),
+	name: schema.text(),
+});
+const task = schema.entity('task', {
+	id: schema.text().key(),
+	assignee: schema.workspaceRef(() => person),
+	watchers: schema.workspaceRefList(() => person),
+});
+
+interface WorkspaceRef<T> {
+	workspaceId: string; // empty means the holder's own workspace
+	value?: T;
+}
+```
+
+Write the stub with the workspace it points into. A hand-written reference message uses its own field names:
+
+```ts
+await client.ws('proj-1').db.task.mutate.create({
+	id: 't1',
+	assignee: { workspaceId: 'acme-org', value: { id: 'u1' } },
+});
+```
+
+A workspace that fails the [workspace-id rule](naming.md#workspace-ids) is refused when the mutation is built, and by the server.
+
+The types cannot see proto options, so `matches()` callbacks and `refs.<name>.load()` recognize a hand-written reference message by its shape: one message field, alone or beside a string field named `workspace_id` (`workspaceId` in TypeScript). A workspace field with another name leaves those typed as the wrapper, while they still resolve to the target at runtime.
+
+Resolution rules:
+
+- Forward accessors, `include`, and `resolveRef` resolve each stub in the workspace it names, from the workspaces the client holds. A target the client does not hold resolves to `undefined`, like any orphan.
+- Reverse relations from a target read the source entity across every held workspace and match the workspace as well as the key. A row with the same key in another workspace is a different row.
+- `matches()` evaluates the target in the workspace the stub names. Its coverage `relation` bound clears only when the target entity is complete in every held workspace; a `follow` spec does not cover it.
+- `t.assignee.eq(id)` compares the key; `t.assignee.workspaceId.eq(ws)` compares the workspace. Any other field of the stub is rejected at query time.
+- Watchers that hydrate or cross such a reference re-fire on a commit to the target entity in any workspace.
+- `queryServer`, server-side `include`, and `follow` resolve inside one workspace: a stub naming another workspace matches nothing there.
+- A reference message is replaced whole on every write, and a `workspaceRefList` has no per-element merge. Wrap each reference in a `keyedList` element when concurrent adds must merge.
 
 ## Undo and redo
 
@@ -1112,21 +1157,23 @@ const client = new SyncClient({ entities: bundle.descMessages() });
 
 The `schema` builder provides the following field types:
 
-| Constructor                            | Return type          | Description                                                            |
-| -------------------------------------- | -------------------- | ---------------------------------------------------------------------- |
-| `schema.text()`                        | `Field<string>`      | String scalar field.                                                   |
-| `schema.bool()`                        | `Field<boolean>`     | Boolean scalar field.                                                  |
-| `schema.int32()`                       | `Field<number>`      | 32-bit signed integer.                                                 |
-| `schema.int64()`                       | `Field<bigint>`      | 64-bit signed integer.                                                 |
-| `schema.uint64()`                      | `Field<bigint>`      | 64-bit unsigned integer.                                               |
-| `schema.double()`                      | `Field<number>`      | 64-bit floating point number.                                          |
-| `schema.bytes()`                       | `Field<Uint8Array>`  | Raw byte array. Call `.opaque()` for atomic replacement.               |
-| `schema.list(inner)`                   | `Field<T[]>`         | Repeated scalar array.                                                 |
-| `schema.message(fields)`               | `Field<RowOf<F>>`    | Nested sub-message with per-field last-writer-wins resolution.         |
-| `schema.ref(() => target)`             | `Field<Infer<E>>`    | Strongly-typed to-one reference.                                       |
-| `schema.refList(() => target)`         | `Field<Infer<E>[]>`  | Strongly-typed to-many reference list.                                 |
-| `schema.keyedList(elem, ...keyFields)` | `KeyedListField`     | Repeated message list merged by item key. Supports `.order(posField)`. |
-| `schema.map(keyType, value)`           | `Field<Record<...>>` | Key-value map.                                                         |
+| Constructor                             | Return type                       | Description                                                                                                                    |
+| --------------------------------------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
+| `schema.text()`                         | `Field<string>`                   | String scalar field.                                                                                                           |
+| `schema.bool()`                         | `Field<boolean>`                  | Boolean scalar field.                                                                                                          |
+| `schema.int32()`                        | `Field<number>`                   | 32-bit signed integer.                                                                                                         |
+| `schema.int64()`                        | `Field<bigint>`                   | 64-bit signed integer.                                                                                                         |
+| `schema.uint64()`                       | `Field<bigint>`                   | 64-bit unsigned integer.                                                                                                       |
+| `schema.double()`                       | `Field<number>`                   | 64-bit floating point number.                                                                                                  |
+| `schema.bytes()`                        | `Field<Uint8Array>`               | Raw byte array. Call `.opaque()` for atomic replacement.                                                                       |
+| `schema.list(inner)`                    | `Field<T[]>`                      | Repeated scalar array.                                                                                                         |
+| `schema.message(fields)`                | `Field<RowOf<F>>`                 | Nested sub-message with per-field last-writer-wins resolution.                                                                 |
+| `schema.ref(() => target)`              | `Field<Infer<E>>`                 | Strongly-typed to-one reference.                                                                                               |
+| `schema.refList(() => target)`          | `Field<Infer<E>[]>`               | Strongly-typed to-many reference list.                                                                                         |
+| `schema.workspaceRef(() => target)`     | `Field<WorkspaceRef<Infer<E>>>`   | To-one reference that may point into another workspace. See [Workspace-qualified references](#workspace-qualified-references). |
+| `schema.workspaceRefList(() => target)` | `Field<WorkspaceRef<Infer<E>>[]>` | To-many form of `workspaceRef`. The list is replaced whole on write.                                                           |
+| `schema.keyedList(elem, ...keyFields)`  | `KeyedListField`                  | Repeated message list merged by item key. Supports `.order(posField)`.                                                         |
+| `schema.map(keyType, value)`            | `Field<Record<...>>`              | Key-value map.                                                                                                                 |
 
 Field modifiers:
 

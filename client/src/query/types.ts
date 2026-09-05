@@ -79,7 +79,7 @@ export interface RepeatedMessageOps<E> {
 	 * for the contract; on a repeated field that is not a reference it throws
 	 * at query time, like `any()` on a non-list.
 	 */
-	matches(cond: (target: MsgRef<E>) => Cond): Cond;
+	matches(cond: (target: MsgRef<RefTargetOf<E>>) => Cond): Cond;
 }
 
 /**
@@ -238,9 +238,49 @@ export type FieldOps<V> = [NonNullable<V>] extends [string] ? StringOps
 	// TS schema builder drillable too: its inferred row shape is a plain object,
 	// with no generated brand to key off. RelOps rides on every message field
 	// because reference-ness lives in a proto option the TS types cannot see;
-	// matches() on a non-reference throws at query time.
-	: [NonNullable<V>] extends [object] ? MsgRef<NonNullable<V>> & PresenceOps & RelOps<NonNullable<V>>
+	// matches() on a non-reference throws at query time. Its callback sees the
+	// TARGET row, which for a reference message is the entity it wraps.
+	: [NonNullable<V>] extends [object]
+		? MsgRef<NonNullable<V>> & PresenceOps & RelOps<RefTargetOf<NonNullable<V>>>
 	: never; // scalars no branch above claimed: unsupported for now
+
+/**
+ * The target shape a stored reference value resolves to. An entity-typed stub
+ * is the target itself. A reference message — the wrapper
+ * (syncplane.v1.reference) declares — resolves to the entity it wraps.
+ * Reference-ness lives in a proto option the types cannot see, so the wrapper
+ * is recognized by its shape: exactly one message-typed field, alone or beside
+ * a string field named `workspaceId` — the name the schema builder emits and a
+ * `workspace_id` proto field generates. An entity is never that shape, since it
+ * carries at least a key field beside any message. A hand-written reference
+ * message whose workspace field has another name is typed as the wrapper
+ * itself here, while resolving to the target at runtime; name the field
+ * `workspace_id` to get the target's type.
+ */
+export type RefTargetOf<V> = MessageKeys<V> extends infer K ? [K] extends [never] ? V
+	: IsSingleKey<K> extends true ? WrapperTarget<V, K & keyof V>
+	: V
+	: V;
+
+/** V's inner type when the fields beside its one message field K are nothing or a string `workspaceId`. */
+type WrapperTarget<V, K extends keyof V> = [Exclude<keyof V, K | '$typeName' | '$unknown'>] extends
+	[never] ? NonNullable<V[K]>
+	: [Exclude<keyof V, K | '$typeName' | '$unknown'>] extends ['workspaceId']
+		? [NonNullable<V['workspaceId' & keyof V]>] extends [string] ? NonNullable<V[K]> : V
+	: V;
+
+/** Keys of V whose value type is a singular message. */
+type MessageKeys<V> = {
+	[K in Exclude<keyof V, '$typeName' | '$unknown'>]: [NonNullable<V[K]>] extends
+		[{ $typeName: string }] ? K
+		: never;
+}[Exclude<keyof V, '$typeName' | '$unknown'>];
+
+/** Whether a union of keys has exactly one member. */
+type IsSingleKey<K> = [K] extends [never] ? false
+	: (K extends unknown ? (x: K) => void : never) extends (x: infer I) => void
+		? [I] extends [K] ? true : false
+	: false;
 
 /**
  * Operator surface of a oneof group: one entry per case, each carrying the

@@ -85,6 +85,7 @@ import {
 	type MergerSpec,
 	type PatchInit,
 	protectedFieldOf,
+	refQualified,
 	takeTextStrings,
 	textFieldBytes,
 	textFieldInit,
@@ -2264,6 +2265,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return {
 			getRow: (schema, workspaceId, key) => this.getRowIn(workspaceId, schema, key),
 			query: (schema, workspaceId, q) => this.queryIn(workspaceId, schema, q),
+			queryAll: (schema, q) => this.queryIn(undefined, schema, q),
 		};
 	}
 
@@ -5024,6 +5026,7 @@ function relCoverageRefs(
 	return nodes.map((node) => ({
 		targetEntity: registry.bySchema(node.targetSchema).name,
 		...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+		...(refQualified(node.shape) ? { crossWorkspace: true } : {}),
 	}));
 }
 

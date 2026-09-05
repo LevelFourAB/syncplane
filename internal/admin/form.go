@@ -140,28 +140,36 @@ func (b formBuilder) subFields(md protoreflect.MessageDescriptor, prefix string,
 }
 
 func (b formBuilder) ref(fd protoreflect.FieldDescriptor, name string, msg protoreflect.Message, readOnly bool) ui.FieldView {
-	keyFields := server.RefKeyFields(fd)
-	keyNames := make([]string, len(keyFields))
-	for i, kf := range keyFields {
-		keyNames[i] = string(kf.Name())
+	ref := server.RefOf(fd)
+	keyNames := make([]string, 0, len(ref.KeyFields)+1)
+	for _, kf := range ref.KeyFields {
+		keyNames = append(keyNames, string(kf.Name()))
 	}
-	target := entityName(fd.Message())
+	// The workspace rides along as one more hidden input per chip. A picked
+	// row carries no value for it, so a fresh chip names the current
+	// workspace, while a chip the row already held keeps where it pointed.
+	var workspace string
+	if ref.Workspace != nil {
+		workspace = string(ref.Workspace.Name())
+		keyNames = append(keyNames, workspace)
+	}
+	target := entityName(ref.Target)
 	fv := ui.FieldView{
 		Label: humanLabel(fd.Name()), TypeLabel: typeLabel(fd), Name: name, Kind: ui.KindRef, ReadOnly: readOnly,
 		Ref: ui.RefControl{
 			Name: name, Entity: target, Keys: keyNames, PickerURL: b.pickerURL(target),
-			Multi: fd.IsList(), ReadOnly: readOnly,
+			Workspace: workspace, Multi: fd.IsList(), ReadOnly: readOnly,
 		},
 	}
 	if fd.IsList() {
 		list := msg.Get(fd).List()
 		for i := 0; i < list.Len(); i++ {
-			fv.Ref.Items = append(fv.Ref.Items, b.refItemOf(fmt.Sprintf("%s[%d]", name, i), target, keyFields, list.Get(i).Message()))
+			fv.Ref.Items = append(fv.Ref.Items, b.refItemOf(fmt.Sprintf("%s[%d]", name, i), target, ref, list.Get(i).Message()))
 		}
 		return fv
 	}
 	if msg.Has(fd) {
-		fv.Ref.Items = append(fv.Ref.Items, b.refItemOf(name, target, keyFields, msg.Get(fd).Message()))
+		fv.Ref.Items = append(fv.Ref.Items, b.refItemOf(name, target, ref, msg.Get(fd).Message()))
 	}
 	return fv
 }
@@ -172,14 +180,28 @@ func (b formBuilder) pickerURL(target string) string {
 	return refContext{appID: b.appID, ws: b.ws}.pickerURL(target)
 }
 
-func (b formBuilder) refItemOf(name, target string, keyFields []protoreflect.FieldDescriptor, m protoreflect.Message) ui.RefItem {
+func (b formBuilder) refItemOf(name, target string, ref *server.Reference, value protoreflect.Message) ui.RefItem {
 	it := ui.RefItem{Name: name, Values: map[string]string{}}
-	for _, kf := range keyFields {
-		it.Values[string(kf.Name())] = scalarString(kf, m.Get(kf))
+	stub, ok := ref.Stub(value)
+	if !ok {
+		it.Label = "—"
+		return it
 	}
-	it.Label = joinKeyText(keyFields, m)
-	if b.label != nil {
-		if l := b.label(target, m); l != "" {
+	for _, kf := range ref.KeyFields {
+		it.Values[string(kf.Name())] = scalarString(kf, stub.Get(kf))
+	}
+	it.Label = joinKeyText(ref.KeyFields, stub)
+	ws := ref.WorkspaceOf(value)
+	if ref.Workspace != nil {
+		it.Values[string(ref.Workspace.Name())] = ws
+	}
+	// A value naming another workspace resolves there; this form reads one
+	// workspace, so it shows the key and where it points rather than a
+	// same-key row from here.
+	if ws != "" {
+		it.Label += " @ " + ws
+	} else if b.label != nil {
+		if l := b.label(target, stub); l != "" {
 			it.Label = l
 		}
 	}
@@ -304,20 +326,34 @@ func setField(m protoreflect.Message, fd protoreflect.FieldDescriptor, name stri
 }
 
 func setRef(m protoreflect.Message, fd protoreflect.FieldDescriptor, name string, vals url.Values) error {
-	keyFields := server.RefKeyFields(fd)
+	ref := server.RefOf(fd)
+	// build fills one stored reference value from the inputs under base,
+	// reporting whether any key was supplied. The workspace input is the one
+	// the form carried along (see formBuilder.ref); empty means this workspace.
+	build := func(value protoreflect.Message, base string) bool {
+		if !setKeys(ref.MutableStub(value), ref.KeyFields, base, vals) {
+			return false
+		}
+		if ref.Workspace != nil {
+			if s := vals.Get(base + "." + string(ref.Workspace.Name())); s != "" {
+				value.Set(ref.Workspace, protoreflect.ValueOfString(s))
+			}
+		}
+		return true
+	}
 	if fd.IsList() {
 		list := m.Mutable(fd).List()
 		for _, idx := range indicesFor(vals, name) {
 			base := fmt.Sprintf("%s[%d]", name, idx)
 			elem := list.NewElement()
-			if setKeys(elem.Message(), keyFields, base, vals) {
+			if build(elem.Message(), base) {
 				list.Append(elem)
 			}
 		}
 		return nil
 	}
 	val := m.NewField(fd)
-	if setKeys(val.Message(), keyFields, name, vals) {
+	if build(val.Message(), name) {
 		m.Set(fd, val)
 	}
 	return nil
@@ -769,7 +805,7 @@ func typeLabel(fd protoreflect.FieldDescriptor) string {
 	case fd.IsMap():
 		return fmt.Sprintf("map<%s, %s>", fd.MapKey().Kind(), fd.MapValue().Kind())
 	case server.RefKeyFields(fd) != nil:
-		base = titleCase(entityName(fd.Message()))
+		base = titleCase(entityName(server.RefOf(fd).Target))
 	case fd.Kind() == protoreflect.EnumKind:
 		base = "enum " + string(fd.Enum().Name())
 	case fd.Kind() == protoreflect.MessageKind || fd.Kind() == protoreflect.GroupKind:

@@ -21,9 +21,10 @@ partial sync interacts with relational queries.
 
 The semantics are defined at the scan level, like every other query construct.
 For each row and each stored stub, derive the target's key, look up the target
-in the same workspace, and evaluate the inner condition against it. The
-condition evaluates to true if any target matches. An unset reference, an
-orphaned stub, and a deleted target all contribute nothing.
+in the workspace the stub resolves in — the holder's own, unless a
+workspace-qualified reference names another — and evaluate the inner condition
+against it. The condition evaluates to true if any target matches. An unset
+reference, an orphaned stub, and a deleted target all contribute nothing.
 
 This definition is evaluable over decoded rows on both client and server. Shared
 conformance vectors in `testdata/queryeval` and `relatedCases` pin both
@@ -100,6 +101,36 @@ Subscription predicates remain row-local. Membership is decided as rows change,
 whereas a semi-join membership set has no single point in time for evaluation.
 The system pairs a row-local base scope with `follow` to sync the primary row
 and pull its neighborhood along.
+
+## Workspace-qualified references
+
+A [reference message](../reference/proto-options.md#syncplanev1reference--workspace-qualified-references)
+stores the target's workspace beside its key, so a stub can point into another
+workspace. The two-phase rewrite keeps working because the pre-pass already
+groups its key set per workspace; only the membership test changes shape.
+
+On the client, the pre-pass for such a node reads the target entity in every
+workspace the client holds, whatever scope the query itself has. The rewritten
+condition then pairs each workspace's key set with the stubs that name that
+workspace: one leg per workspace with matches, where naming no workspace means
+the holder's own. A stub pointing at a workspace the client does not hold
+matches nothing, which is the same outcome as an unsynced target and reports
+through the `relation` coverage bound. That bound clears only when the target
+entity is complete in every held workspace: a `follow` spec cannot cover it,
+because the server resolves follow inside one workspace.
+
+The incremental paths decline for these nodes. A commit that names target rows
+inside the query's scope says nothing about targets elsewhere, and the
+entrant-and-leaver splice keys stubs by their target key alone, so both fall
+back to the pass over the target entity and the re-derivation of the match set.
+
+On the server, the pre-pass reads the request's workspace alone, and the
+replacement adds the test that the stub resolves there: it names that workspace
+or names none. A stub naming another workspace therefore matches nothing on the
+server, and never a same-key row in the request's workspace. The same rule
+holds for `include` and `follow`. A server-side pre-pass across workspaces would
+have to gate each target workspace through `CanAccessWorkspace` per request,
+which is why the server stays inside one for now.
 
 ## On the server
 

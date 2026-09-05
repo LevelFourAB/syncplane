@@ -11,7 +11,7 @@ import {
 import { debugVerifyTouchesEnv } from './env.js';
 import { compareWorkspaces, wsSegment } from './keys.js';
 import type { KVRead, KVStore } from './kv/store.js';
-import type { EntityRegistry } from './mutations.js';
+import { type EntityRegistry, refQualified } from './mutations.js';
 import type { Mutex } from './mutex.js';
 import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
@@ -352,6 +352,12 @@ interface Watcher {
 	 * watcher, so a change to an included target re-emits.
 	 */
 	reaches: ReadonlySet<string>;
+	/**
+	 * Entities among `reaches` a commit in ANY workspace wakes this watcher
+	 * for: those reached through a workspace-qualified reference, whose rows
+	 * may sit outside the watcher's own scope.
+	 */
+	anywhere?: ReadonlySet<string>;
 	/** The total order `matches.ordered` is in; see comparatorFor. */
 	compare: (a: ResultRow, b: ResultRow) => number;
 	/**
@@ -421,6 +427,12 @@ interface RelWatchState {
 	/** Wire names of the target entities, for reach tests. Includes the
 	 * watcher's own entity for a self-reference. */
 	targets: ReadonlySet<string>;
+	/**
+	 * The targets of workspace-qualified references among `targets`: their
+	 * rows may sit in any workspace the client holds, so a commit to one
+	 * reaches the watcher whatever workspace it lands in.
+	 */
+	anywhere: ReadonlySet<string>;
 	/** The crossed refs in the form the coverage rule consumes. */
 	coverage: readonly RelCoverageRef[];
 	/** Matching target keys from the last pre-pass; unset before the first. */
@@ -470,6 +482,12 @@ interface KeyWatcher {
 	include?: Include;
 	/** Entities this watcher's hydration reaches; see Watcher.reaches. */
 	reaches: ReadonlySet<string>;
+	/**
+	 * Entities among `reaches` a commit in ANY workspace wakes this watcher
+	 * for: those reached through a workspace-qualified reference, whose rows
+	 * may sit outside the watcher's own scope.
+	 */
+	anywhere?: ReadonlySet<string>;
 	/** Coverage of the last emit; see Watcher.lastCoverage. */
 	lastCoverage?: Coverage;
 	/** Read stamp of the newest view dispatched; see Watcher.emittedAt. */
@@ -665,7 +683,7 @@ export class WatcherHub {
 		const def = this.registry.bySchema(schema);
 		const named = typeof scope === 'object' ? scope : undefined;
 		const rel = this.relStateOf(schema, query, named?.predicates);
-		const reaches = this.reachableEntities(def.name, include, rel);
+		const reach = this.reachableEntities(def.name, include, rel);
 		const workspaces = named === undefined
 			? undefined
 			: [ ...new Set(named.workspaces) ].sort(compareWorkspaces);
@@ -698,7 +716,8 @@ export class WatcherHub {
 			bounds: query === undefined ? undefined : pageWindowOf(schema, def.name, query),
 			cursors,
 			include,
-			reaches,
+			reaches: reach.entities,
+			anywhere: reach.anywhere,
 			compare: comparatorFor(schema, query),
 			window: window ?? { offset: query?.offset, limit: query?.limit },
 			pending: 'reset',
@@ -886,7 +905,7 @@ export class WatcherHub {
 			pending: new Map(),
 			cb: cb as ScopedKeyedWatchCallback<unknown>,
 			include,
-			reaches: this.reachableEntities(def.name, include),
+			...reachOf(this.reachableEntities(def.name, include)),
 			emittedAt: 0,
 		};
 		this.keyWatchers.add(watcher);
@@ -1641,22 +1660,30 @@ export class WatcherHub {
 	 * walking the include tree (forward target / reverse source) at each level,
 	 * plus the target of every reference its query crosses.
 	 */
-	private reachableEntities(entity: string, include?: Include, rel?: RelWatchState): Set<string> {
-		const out = new Set<string>([ entity ]);
-		const walk = (from: string, spec?: Include): void => {
+	private reachableEntities(entity: string, include?: Include, rel?: RelWatchState): Reachable {
+		const entities = new Set<string>([ entity ]);
+		const anywhere = new Set<string>();
+		// `fromAnywhere` says the holders themselves may sit in any workspace,
+		// so everything they reach may too.
+		const walk = (from: string, spec: Include | undefined, fromAnywhere: boolean): void => {
 			if (!spec) return;
 			for (const [ relation, nested ] of Object.entries(spec)) {
 				if (relation.startsWith('$')) continue;
 				const fwd = this.registry.forwardRef(from, relation);
-				const next = fwd ? fwd.targetEntity : this.registry.reverseRef(from, relation)?.sourceEntity;
+				const rev = fwd ? undefined : this.registry.reverseRef(from, relation);
+				const next = fwd?.targetEntity ?? rev?.sourceEntity;
 				if (next === undefined) continue;
-				out.add(next);
-				if (typeof nested === 'object' && nested !== null) walk(next, nested);
+				entities.add(next);
+				const shape = fwd?.shape ?? rev?.shape;
+				const nextAnywhere = fromAnywhere || (shape !== undefined && refQualified(shape));
+				if (nextAnywhere) anywhere.add(next);
+				if (typeof nested === 'object' && nested !== null) walk(next, nested, nextAnywhere);
 			}
 		};
-		walk(entity, include);
-		for (const target of rel?.targets ?? []) out.add(target);
-		return out;
+		walk(entity, include, false);
+		for (const target of rel?.targets ?? []) entities.add(target);
+		for (const target of rel?.anywhere ?? []) anywhere.add(target);
+		return { entities, anywhere };
 	}
 
 	/**
@@ -1675,16 +1702,20 @@ export class WatcherHub {
 		];
 		if (nodes.length === 0) return undefined;
 		const targets = new Set<string>();
+		const anywhere = new Set<string>();
 		const coverage: RelCoverageRef[] = [];
 		for (const node of nodes) {
 			const target = this.registry.bySchema(node.targetSchema).name;
 			targets.add(target);
+			const qualified = refQualified(node.shape);
+			if (qualified) anywhere.add(target);
 			coverage.push({
 				targetEntity: target,
 				...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+				...(qualified ? { crossWorkspace: true } : {}),
 			});
 		}
-		return { nodes, targets, coverage, whereByWs: new Map() };
+		return { nodes, targets, anywhere, coverage, whereByWs: new Map() };
 	}
 
 	/**
@@ -1767,6 +1798,10 @@ export class WatcherHub {
 		const indexes = this.opts.indexes;
 		if (moved === 'moved' || rel?.keys === undefined || matches === undefined) return undefined;
 		if (indexes === undefined) return undefined;
+		// A workspace-qualified reference decides a stub by the workspace it
+		// names as well as its key, which neither the leavers' canonical keys nor
+		// the entrants' membership test below carry; re-derive instead.
+		if (rel.nodes.some((node) => refQualified(node.shape))) return undefined;
 		const workspaces = watcher.workspaceId !== undefined
 			? [ watcher.workspaceId ]
 			: watcher.workspaces;
@@ -1890,6 +1925,19 @@ interface TouchedPair {
 	keys?: ReadonlySet<string>;
 }
 
+/** What a watcher's hydration and relations reach; see Watcher.reaches and Watcher.anywhere. */
+interface Reachable {
+	entities: Set<string>;
+	anywhere: Set<string>;
+}
+
+/** A Reachable as the two watcher fields it fills. */
+function reachOf(
+	reach: Reachable,
+): { reaches: ReadonlySet<string>; anywhere: ReadonlySet<string> } {
+	return { reaches: reach.entities, anywhere: reach.anywhere };
+}
+
 /**
  * What deciding "does this commit reach you" needs of a watcher, satisfied by
  * both kinds.
@@ -1900,6 +1948,12 @@ interface Reach {
 	workspaces?: readonly string[];
 	include?: Include;
 	reaches: ReadonlySet<string>;
+	/**
+	 * Entities among `reaches` a commit in ANY workspace wakes this watcher
+	 * for: those reached through a workspace-qualified reference, whose rows
+	 * may sit outside the watcher's own scope.
+	 */
+	anywhere?: ReadonlySet<string>;
 }
 
 /** Indexes refs by row id, which is also what deduplicates a repeated ref. */
@@ -2145,15 +2199,24 @@ function plannedKeys(
 
 /**
  * Whether a commit reached a watcher through something other than its own
- * entity — a target it hydrates against through `include`. Such a change moves
+ * rows — a target it hydrates against through `include`. Such a change moves
  * the hydrated result while leaving the base rows alone, so nothing the match
  * set can report would notice it and the emit has to be forced.
+ *
+ * The watcher's own entity counts only outside its scope: inside it the
+ * commit names base rows the match set reports on its own, while a
+ * self-reference reached through a workspace-qualified include may point at
+ * a row of the same entity in another workspace.
  */
 function touchesInclude(watcher: Reach, pairs: readonly TouchedPair[]): boolean {
 	if (watcher.include === undefined) return false;
 	for (const t of pairs) {
-		if (t.entity === watcher.entity || !watcher.reaches.has(t.entity)) continue;
-		if (inScope(watcher, t.workspaceId)) return true;
+		if (!watcher.reaches.has(t.entity)) continue;
+		if (t.entity === watcher.entity) {
+			if (!inScope(watcher, t.workspaceId) && watcher.anywhere?.has(t.entity)) return true;
+			continue;
+		}
+		if (watcher.anywhere?.has(t.entity) || inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
 }
@@ -2189,7 +2252,7 @@ function touchesRel(watcher: Watcher, pairs: readonly TouchedPair[]): boolean {
 	if (rel === undefined) return false;
 	for (const t of pairs) {
 		if (!rel.targets.has(t.entity)) continue;
-		if (inScope(watcher, t.workspaceId)) return true;
+		if (rel.anywhere.has(t.entity) || inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
 }
@@ -2391,10 +2454,11 @@ function rowId(workspaceId: string, key: string): string {
 function reaches(watcher: Reach, touched: readonly TouchedPair[]): boolean {
 	for (const t of touched) {
 		if (!watcher.reaches.has(t.entity)) continue;
-		// A reference followed by `include` may point at a row in the same
-		// workspace only (references never cross the partition), so a scoped
-		// watcher matches only the workspaces it named.
-		if (inScope(watcher, t.workspaceId)) return true;
+		// A reference followed by `include` points into the holder's own
+		// workspace unless it is workspace-qualified, so a scoped watcher matches
+		// only the workspaces it named — except for the entities such a
+		// reference reaches, whose rows may sit in any workspace.
+		if (watcher.anywhere?.has(t.entity) || inScope(watcher, t.workspaceId)) return true;
 	}
 	return false;
 }

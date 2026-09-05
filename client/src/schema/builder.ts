@@ -65,6 +65,8 @@ import {
 	file_syncplane_v1_options,
 	IndexKeySchema,
 	IndexSpecSchema,
+	reference as referenceExt,
+	ReferenceOptionsSchema,
 	SearchFieldSchema,
 	SearchSpecSchema,
 	UpdatePolicy,
@@ -142,6 +144,11 @@ interface FieldSpec {
 	message?: Fields;
 	/** kind 'ref' — the target entity, deferred so self/forward refs resolve. */
 	ref?: () => EntitySchema;
+	/**
+	 * kind 'ref' — store the reference as a reference message carrying the
+	 * target's workspace beside the stub (see workspaceRef).
+	 */
+	refWorkspace?: boolean;
 	/** kind 'map' — the key kind. */
 	mapKey?: MapKeyKind;
 	/** kind 'map' — the scalar value kind, when the value is a scalar. */
@@ -403,6 +410,66 @@ export const ref = <E extends EntitySchema>(target: () => E): Field<Infer<E>> =>
 /** A to-many typed reference (repeated `ref`). */
 export const refList = <E extends EntitySchema>(target: () => E): Field<Infer<E>[]> =>
 	new Field<Infer<E>[]>({ kind: 'ref', ref: target, repeated: true, key: false, opaque: false });
+
+/**
+ * The stored shape of a workspace-qualified reference: the target stub under
+ * `value`, and the workspace it lives in under `workspaceId`. An empty
+ * `workspaceId` means the holder's own workspace.
+ */
+export interface WorkspaceRef<T> {
+	workspaceId: string;
+	value?: T;
+}
+
+/**
+ * A singular typed reference that may point into another workspace. Stored as
+ * a reference message (see (syncplane.v1.reference)): the target's key fields
+ * under `value` and the workspace they resolve in under `workspaceId`, both
+ * replaced together on every write. Reading resolves the stub in the workspace
+ * it names, from the workspaces the client holds; the server's `matches()`,
+ * `include` and `follow` stay inside one workspace.
+ *
+ * @example
+ * ```ts
+ * const task = schema.entity('task', {
+ *   id: schema.text().key(),
+ *   assignee: schema.workspaceRef(() => person),
+ * });
+ * await client.ws('proj-1').db.task.mutate.create({
+ *   id: 't1',
+ *   assignee: { workspaceId: 'acme-org', value: { id: 'u1' } },
+ * });
+ * ```
+ */
+export const workspaceRef = <E extends EntitySchema>(
+	target: () => E,
+): Field<WorkspaceRef<Infer<E>>> =>
+	new Field<WorkspaceRef<Infer<E>>>({
+		kind: 'ref',
+		ref: target,
+		refWorkspace: true,
+		repeated: false,
+		key: false,
+		opaque: false,
+	});
+
+/**
+ * A to-many workspace-qualified reference (repeated `workspaceRef`). Each
+ * element names its own workspace. The list is replaced whole on every write:
+ * a reference message has no per-element identity, unlike a `refList`, which
+ * merges per target key.
+ */
+export const workspaceRefList = <E extends EntitySchema>(
+	target: () => E,
+): Field<WorkspaceRef<Infer<E>>[]> =>
+	new Field<WorkspaceRef<Infer<E>>[]>({
+		kind: 'ref',
+		ref: target,
+		refWorkspace: true,
+		repeated: true,
+		key: false,
+		opaque: false,
+	});
 
 /**
  * A keyed message list: a repeated embedded message merged per item by
@@ -942,9 +1009,19 @@ function fieldProtoOf(
 		case 'ref': {
 			const target = spec.ref!();
 			field.type = FieldDescriptorProto_Type.MESSAGE;
-			field.typeName = `.${target.typeName}`;
-			// Reference detection is annotation-free, so the only mark a ref
-			// carries is one that says who may write it.
+			if (spec.refWorkspace) {
+				// A workspace-qualified reference is stored as a reference message
+				// synthesized per field: `workspace_id` beside a `value` of the
+				// target type, the shape (syncplane.v1.reference) declares.
+				const simple = `${pascalCase(name)}Ref`;
+				const full = `${parentFullName}.${simple}`;
+				nestedTypes.push(referenceMessageOf(simple, target.typeName));
+				field.typeName = `.${full}`;
+			} else {
+				field.typeName = `.${target.typeName}`;
+			}
+			// Entity-typed reference detection is annotation-free, so the only
+			// mark the field itself carries is one that says who may write it.
 			setWritePolicy(field, spec);
 			break;
 		}
@@ -1006,6 +1083,38 @@ function mapEntryOf(
 			}),
 			value,
 		],
+	});
+}
+
+/**
+ * The reference message a workspaceRef field stores: `workspace_id` marked
+ * (syncplane.v1.field_behavior).workspace beside a `value` of the target type,
+ * with (syncplane.v1.reference) on the message.
+ */
+function referenceMessageOf(simpleName: string, targetTypeName: string): DescriptorProto {
+	const workspaceOptions = create(FieldOptionsSchema);
+	setExtension(workspaceOptions, fieldBehaviorExt, create(FieldBehaviorSchema, { workspace: true }));
+	const options = create(MessageOptionsSchema);
+	setExtension(options, referenceExt, create(ReferenceOptionsSchema));
+	return create(DescriptorProtoSchema, {
+		name: simpleName,
+		field: [
+			create(FieldDescriptorProtoSchema, {
+				name: 'workspace_id',
+				number: 1,
+				label: FieldDescriptorProto_Label.OPTIONAL,
+				type: FieldDescriptorProto_Type.STRING,
+				options: workspaceOptions,
+			}),
+			create(FieldDescriptorProtoSchema, {
+				name: 'value',
+				number: 2,
+				label: FieldDescriptorProto_Label.OPTIONAL,
+				type: FieldDescriptorProto_Type.MESSAGE,
+				typeName: `.${targetTypeName}`,
+			}),
+		],
+		options,
 	});
 }
 

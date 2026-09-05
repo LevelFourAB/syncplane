@@ -141,6 +141,39 @@ var _ = Describe("form rendering", func() {
 		Expect(renderField(fv)).NotTo(ContainSubstring("data-repeat-remove"))
 	})
 
+	It("marks a chip's workspace input apart from its key inputs", func() {
+		// The picker matches chips against rows by key fields alone; a
+		// workspace input tagged as a key would never match a picked row.
+		person := server.DynamicEntity{
+			Name: "person", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{{Name: "id", Number: 1, Kind: protoreflect.StringKind}},
+		}
+		job := server.DynamicEntity{
+			Name: "job", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{
+				{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+				{Name: "helpers", Number: 2, Ref: "person", RefWorkspace: true, Repeated: true},
+			},
+		}
+		fd, err := server.BuildDynamicFile(person, job)
+		Expect(err).NotTo(HaveOccurred())
+		jobDesc := fd.Messages().ByName("Job")
+		msg := dynamicpb.NewMessage(jobDesc)
+		helpers := msg.Mutable(field(jobDesc, "helpers")).List()
+		helper := helpers.NewElement()
+		ref := server.RefOf(field(jobDesc, "helpers"))
+		ref.MutableStub(helper.Message()).Set(ref.KeyFields[0], protoreflect.ValueOfString("p1"))
+		helper.Message().Set(ref.Workspace, protoreflect.ValueOfString("elsewhere"))
+		helpers.Append(helper)
+
+		fv := formBuilder{}.field(field(jobDesc, "helpers"), "helpers", msg, false)
+		Expect(fv.Ref.Workspace).To(Equal("workspace_id"))
+		html := renderField(fv)
+		Expect(html).To(ContainSubstring(`name="helpers[0].id" value="p1" data-ref-key="id"`))
+		Expect(html).To(ContainSubstring(`name="helpers[0].workspace_id" value="elsewhere" data-ref-workspace`))
+		Expect(html).NotTo(ContainSubstring(`data-ref-key="workspace_id"`))
+	})
+
 	It("renders key fields read-only on edit only", func() {
 		empty := dynamicpb.NewMessage(md)
 		create := buildForm(md, empty.ProtoReflect(), keyFieldsOf(md), false)

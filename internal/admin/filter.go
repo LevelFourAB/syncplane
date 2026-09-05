@@ -85,9 +85,11 @@ type filterField struct {
 
 	// refEntity and refKeys describe a typed reference, singular or repeated.
 	// A row stores only the target's key fields, so a comparison runs against
-	// the key rather than against the reference itself (refKeyPath).
+	// the key rather than against the reference itself (refKeyPath). ref says
+	// where inside the stored value that key sits.
 	refEntity string
 	refKeys   []protoreflect.FieldDescriptor
+	ref       *server.Reference
 }
 
 // classOf maps a leaf to the literal class it compares against, mirroring the
@@ -124,8 +126,9 @@ func classify(fd protoreflect.FieldDescriptor) (filterField, bool) {
 	if fd.IsMap() || isOpaque(fd) {
 		return filterField{}, false
 	}
-	if keys := server.RefKeyFields(fd); keys != nil {
-		f.refKeys, f.refEntity = keys, entityName(fd.Message())
+	if ref := server.RefOf(fd); ref != nil {
+		keys := ref.KeyFields
+		f.ref, f.refKeys, f.refEntity = ref, keys, entityName(ref.Target)
 		f.repeated, f.message = fd.IsList(), !fd.IsList()
 		// Only a single-key reference has one comparable value per element —
 		// the target key the row stores — so only that one can be compared
@@ -169,7 +172,7 @@ func (f filterField) refKeyPath() string {
 	if f.repeated {
 		return f.path
 	}
-	return f.path + "." + string(f.refKeys[0].Name())
+	return strings.Join(append([]string{f.path}, f.ref.KeyPath(f.refKeys[0])...), ".")
 }
 
 // filterFields lists every path of md the filter bar knows, in proto order:
@@ -204,7 +207,7 @@ func filterFields(md protoreflect.MessageDescriptor) []filterField {
 				if !ok {
 					continue
 				}
-				s.path = f.path + "." + string(kf.Name())
+				s.path = strings.Join(append([]string{f.path}, f.ref.KeyPath(kf)...), ".")
 				s.label = f.label + " · " + humanLabel(kf.Name())
 				s.hidden = true
 				out = append(out, s)
@@ -248,14 +251,14 @@ func nestedFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 // an element's own repeated message lists are left out rather than growing a
 // group inside a group.
 func elemFields(fd protoreflect.FieldDescriptor) []filterField {
-	if keys := server.RefKeyFields(fd); keys != nil {
-		out := make([]filterField, 0, len(keys))
-		for _, kf := range keys {
+	if ref := server.RefOf(fd); ref != nil {
+		out := make([]filterField, 0, len(ref.KeyFields))
+		for _, kf := range ref.KeyFields {
 			f, ok := classify(kf)
 			if !ok {
 				continue
 			}
-			f.path, f.label = string(kf.Name()), humanLabel(kf.Name())
+			f.path, f.label = strings.Join(ref.KeyPath(kf), "."), humanLabel(kf.Name())
 			out = append(out, f)
 		}
 		return out

@@ -1,5 +1,6 @@
-// Package protoopts reads the sync custom options — (syncplane.v1.entity) and
-// (syncplane.v1.field_behavior) — off proto descriptors.
+// Package protoopts reads the sync custom options — (syncplane.v1.entity),
+// (syncplane.v1.reference) and (syncplane.v1.field_behavior) — off proto
+// descriptors.
 //
 // Reading them with proto.GetExtension alone ties the result to the Go type
 // identity of the extension: it resolves only when the descriptor's options
@@ -38,7 +39,7 @@ import (
 // point is to bypass whichever copy of the extension won global registration.
 var localTypes = func() *protoregistry.Types {
 	types := &protoregistry.Types{}
-	for _, xt := range []protoreflect.ExtensionType{syncplanev1.E_Entity, syncplanev1.E_FieldBehavior} {
+	for _, xt := range []protoreflect.ExtensionType{syncplanev1.E_Entity, syncplanev1.E_FieldBehavior, syncplanev1.E_Reference} {
 		if err := types.RegisterExtension(xt); err != nil {
 			panic("protoopts: " + err.Error())
 		}
@@ -74,6 +75,26 @@ func Entity(md protoreflect.MessageDescriptor) *syncplanev1.EntityOptions {
 	}
 	eo, _ := proto.GetExtension(&recovered, syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
 	return eo
+}
+
+// Reference returns the (syncplane.v1.reference) options declared on md, or nil
+// when md is not a reference message. The options carry no fields; a non-nil
+// result is the declaration itself.
+func Reference(md protoreflect.MessageDescriptor) *syncplanev1.ReferenceOptions {
+	opts, ok := md.Options().(*descriptorpb.MessageOptions)
+	if !ok || opts == nil {
+		return nil
+	}
+	if proto.HasExtension(opts, syncplanev1.E_Reference) {
+		ro, _ := proto.GetExtension(opts, syncplanev1.E_Reference).(*syncplanev1.ReferenceOptions)
+		return ro
+	}
+	var recovered descriptorpb.MessageOptions
+	if !reparseUninterpreted(opts, &recovered) || !proto.HasExtension(&recovered, syncplanev1.E_Reference) {
+		return nil
+	}
+	ro, _ := proto.GetExtension(&recovered, syncplanev1.E_Reference).(*syncplanev1.ReferenceOptions)
+	return ro
 }
 
 // FieldBehavior returns the (syncplane.v1.field_behavior) options declared on fd, or

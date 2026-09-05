@@ -6,14 +6,25 @@
 // (deleted, never synced, or out of scope) resolves to undefined/empty, never
 // an error — a missing row is indistinguishable from "not synced here".
 //
-// References never cross a workspace: the workspace is the hard partition key
-// and a stored ref carries only key fields, which are unique within one
-// partition. Every resolver therefore takes the holder's workspace and resolves
-// inside it.
+// A stored reference resolves in the workspace it names: the holder's own for
+// an entity-typed stub, which carries key fields alone and so can only address
+// its own partition, and the workspace a reference message records when it
+// records one (see (syncplane.v1.reference)). Every resolver therefore takes
+// the holder's workspace and resolves each stub in the workspace it points
+// into, from whatever this client holds.
 
 import type { DescMessage, Message } from '@bufbuild/protobuf';
 
-import { type EntityRegistry, type ForwardRef, keyOf, type ReverseRef } from './mutations.js';
+import {
+	type EntityRegistry,
+	type ForwardRef,
+	keyOf,
+	refQualified,
+	type RefShape,
+	refStub,
+	refWorkspaceOf,
+	type ReverseRef,
+} from './mutations.js';
 import type { Cond, OrderKey } from './query/ast.js';
 import { and, compareRows, compileQuery, evalCond, hasRel, type Query } from './query/index.js';
 import { prepareQuery } from './query/wire.js';
@@ -23,6 +34,8 @@ import type { Row } from './read.js';
 export interface RefClient {
 	getRow(schema: DescMessage, workspaceId: string, key: string): Promise<Row<Message> | undefined>;
 	query(schema: DescMessage, workspaceId: string, q: Query<Message>): Promise<Row<Message>[]>;
+	/** A read across every workspace the client holds; what a workspace-qualified reverse relation walks. */
+	queryAll(schema: DescMessage, q: Query<Message>): Promise<Row<Message>[]>;
 }
 
 /**
@@ -109,16 +122,23 @@ export async function loadForward(
 	if (!ref) throw new Error(`entity "${sourceEntity}" has no reference field "${fieldLocalName}"`);
 	const targetDef = registry.get(ref.targetEntity)!;
 	const rec = holder as unknown as Rec;
-	if (ref.repeated) {
-		const stubs = (rec[fieldLocalName] as Message[] | undefined) ?? [];
-		const resolved = await Promise.all(
-			stubs.map((stub) => client.getRow(ref.targetSchema, workspaceId, keyOf(targetDef, stub))),
+	const resolve = (value: Message): Promise<Row<Message> | undefined> => {
+		const stub = refStub(ref.shape, value);
+		if (stub === undefined) return Promise.resolve(undefined);
+		return client.getRow(
+			ref.targetSchema,
+			refWorkspaceOf(ref.shape, value, workspaceId),
+			keyOf(targetDef, stub),
 		);
+	};
+	if (ref.repeated) {
+		const values = (rec[fieldLocalName] as Message[] | undefined) ?? [];
+		const resolved = await Promise.all(values.map(resolve));
 		return resolved.filter((r): r is Row<Message> => r !== undefined);
 	}
-	const stub = rec[fieldLocalName] as Message | undefined;
-	if (stub === undefined) return undefined;
-	return client.getRow(ref.targetSchema, workspaceId, keyOf(targetDef, stub));
+	const value = rec[fieldLocalName] as Message | undefined;
+	if (value === undefined) return undefined;
+	return resolve(value);
 }
 
 /**
@@ -135,6 +155,12 @@ export async function loadForward(
  * (`refPointsAt` in engine/server/closure.go; there is no secondary index on
  * either side). Comparing whole derived keys is also what makes composite
  * targets correct: a matching `id` under a different `ns` is a different row.
+ *
+ * A workspace-qualified reference is held by rows in any workspace the client
+ * holds, so its sources are read across all of them and each stub is checked
+ * for the workspace it resolves in as well as its key. The key equality is
+ * still pushed down where the shape allows; the workspace test runs over the
+ * rows it returns.
  */
 export async function resolveReverse(
 	client: RefClient,
@@ -149,20 +175,24 @@ export async function resolveReverse(
 	if (!rev) throw new Error(`entity "${targetEntity}" has no reverse relation "${relationName}"`);
 	const targetDef = registry.get(targetEntity)!;
 	const viaLocal = rev.viaField;
+	const qualified = refQualified(rev.shape);
+	const run = (query: Query<Message>) =>
+		qualified
+			? client.queryAll(rev.sourceSchema, query)
+			: client.query(rev.sourceSchema, workspaceId, query);
 
-	if (!rev.repeated && targetDef.keyFields.length === 1) {
+	const pushKey = !rev.repeated && targetDef.keyFields.length === 1;
+	let where = q?.where;
+	if (pushKey) {
 		const keyFieldLocal = targetDef.keyFields[0]!.localName;
 		const keyValue = (target as unknown as Rec)[keyFieldLocal];
-		const where = (s: Record<string, { eq(v: unknown): ReturnType<typeof and> }>) => {
+		where = ((s: Record<string, { eq(v: unknown): ReturnType<typeof and> }>) => {
 			const pred = s[viaLocal]!.eq(keyValue);
 			return q?.where ? and(pred, q.where(s as never)) : pred;
-		};
-		return client.query(rev.sourceSchema, workspaceId, {
-			where: where as never,
-			orderBy: q?.orderBy,
-			limit: q?.limit,
-			offset: q?.offset,
-		});
+		}) as never;
+	}
+	if (pushKey && !qualified) {
+		return run({ where, orderBy: q?.orderBy, limit: q?.limit, offset: q?.offset });
 	}
 
 	// Scan-and-filter fallback. limit/offset are applied AFTER the relation
@@ -170,44 +200,40 @@ export async function resolveReverse(
 	// would have paged. orderBy still runs in the query, and filtering
 	// preserves relative order, so the page is ordered either way.
 	const holderKey = keyOf(targetDef, target);
-	const candidates = await client.query(rev.sourceSchema, workspaceId, {
-		where: q?.where,
-		orderBy: q?.orderBy,
-	});
+	const candidates = await run({ where, orderBy: q?.orderBy });
 	const matched = candidates.filter((row) =>
-		refPointsAt(row.value, viaLocal, targetDef, holderKey, rev.repeated)
+		refPointsAt(row.value, viaLocal, rev.shape, targetDef, holderKey, workspaceId, row.workspaceId)
 	);
 	const offset = q?.offset ?? 0;
 	return q?.limit === undefined ? matched.slice(offset) : matched.slice(offset, offset + q.limit);
 }
 
 /**
- * Whether a source row's ref field references holderKey, by re-deriving each
- * stub's key with the TARGET entity's key derivation. Mirrors the server's
+ * Whether a source row's ref field references holderKey in targetWorkspace, by
+ * re-deriving each stub's key with the TARGET entity's key derivation and the
+ * workspace it resolves in from the holder's. Mirrors the server's
  * `refPointsAt` so both sides agree on what a reverse hop matches.
  */
 function refPointsAt(
 	source: Message,
 	viaLocal: string,
+	shape: RefShape,
 	targetDef: Parameters<typeof keyOf>[0],
 	holderKey: string,
-	repeated: boolean,
+	targetWorkspace: string,
+	holderWorkspace: string,
 ): boolean {
-	const value = (source as unknown as Rec)[viaLocal];
-	if (value === undefined || value === null) return false;
-	if (repeated) {
-		return (value as Message[]).some((stub) => keyOf(targetDef, stub) === holderKey);
-	}
-	return keyOf(targetDef, value as Message) === holderKey;
+	return pointedKeys(source, viaLocal, shape, targetDef, targetWorkspace, holderWorkspace)
+		.includes(holderKey);
 }
 
 /**
  * Hydrates rows against an include tree, attaching resolved references under
  * each row's `refs`. Forward relations resolve by point lookup, deduplicated
  * across the whole call; a reverse relation costs one query per workspace the
- * rows span, never one per row. Each row's references resolve inside that
- * row's own workspace, so hydrating a cross-workspace result set stays correct
- * row by row.
+ * rows span, never one per row. Each stub resolves in the workspace it points
+ * into — the holder's own unless a workspace-qualified reference names another
+ * — so hydrating a cross-workspace result set stays correct row by row.
  *
  * Rows referencing one target through the same relation get the SAME hydrated
  * object, and its nested relations resolve once — safe because delivered rows
@@ -249,6 +275,7 @@ function memoized(client: RefClient): RefClient {
 			return row;
 		},
 		query: (schema, workspaceId, q) => client.query(schema, workspaceId, q),
+		queryAll: (schema, q) => client.queryAll(schema, q),
 	};
 }
 
@@ -350,21 +377,24 @@ async function attachForward(
 	const shared: SharedRows = new Map();
 	await Promise.all(holders.map(async (holder) => {
 		const rec = holder.value as unknown as Rec;
-		if (fwd.repeated) {
-			const stubs = (rec[relation] as Message[] | undefined) ?? [];
-			const resolved = await Promise.all(
-				stubs.map((stub) =>
-					client.getRow(fwd.targetSchema, holder.workspaceId, keyOf(targetDef, stub))
-				),
+		const resolve = (value: Message): Promise<Row<Message> | undefined> => {
+			const stub = refStub(fwd.shape, value);
+			if (stub === undefined) return Promise.resolve(undefined);
+			return client.getRow(
+				fwd.targetSchema,
+				refWorkspaceOf(fwd.shape, value, holder.workspaceId),
+				keyOf(targetDef, stub),
 			);
+		};
+		if (fwd.repeated) {
+			const values = (rec[relation] as Message[] | undefined) ?? [];
+			const resolved = await Promise.all(values.map(resolve));
 			let rows = resolved.filter((r): r is Row<Message> => r !== undefined);
 			if (opts) rows = applyOptions(rows, opts, fwd.targetSchema);
 			holder.refs[relation] = rows.map((row) => sharedHydrated(shared, row));
 		} else {
-			const stub = rec[relation] as Message | undefined;
-			const row = stub === undefined
-				? undefined
-				: await client.getRow(fwd.targetSchema, holder.workspaceId, keyOf(targetDef, stub));
+			const value = rec[relation] as Message | undefined;
+			const row = value === undefined ? undefined : await resolve(value);
 			holder.refs[relation] = row === undefined ? undefined : sharedHydrated(shared, row);
 		}
 	}));
@@ -405,6 +435,10 @@ async function attachReverse(
 		group.push(holder);
 	}
 
+	// A workspace-qualified reference is held by rows in any workspace the
+	// client holds, so each group's sources are read across all of them; the
+	// workspace a stub resolves in is then checked alongside its key.
+	const qualified = refQualified(rev.shape);
 	await Promise.all([ ...byWs.entries() ].map(async ([ workspaceId, group ]) => {
 		const wanted = new Map<string, HydratedRow[]>();
 		for (const holder of group) {
@@ -421,31 +455,31 @@ async function attachReverse(
 			if (list === undefined) matched.set(k, list = []);
 			list.push(row);
 		};
+		const run = (query: Query<Message>) =>
+			qualified
+				? client.queryAll(rev.sourceSchema, query)
+				: client.query(rev.sourceSchema, workspaceId, query);
 
+		let where = node.where;
 		if (!rev.repeated && targetDef.keyFields.length === 1) {
 			const keyFieldLocal = targetDef.keyFields[0]!.localName;
 			const values = [ ...new Set(group.map((h) => (h.value as unknown as Rec)[keyFieldLocal])) ];
-			const where = (s: Record<string, { in(v: unknown[]): Cond }>) => {
+			where = (s: Record<string, { in(v: unknown[]): Cond }>) => {
 				const pred = s[viaLocal]!.in(values);
 				return node.where ? and(pred, node.where(s)) : pred;
 			};
-			const rows = await client.query(rev.sourceSchema, workspaceId, {
-				where: where as never,
-				orderBy: node.orderBy,
-			});
-			for (const row of rows) {
-				const stub = (row.value as unknown as Rec)[viaLocal] as Message | undefined;
-				if (stub === undefined || stub === null) continue;
-				add(keyOf(targetDef, stub), row);
-			}
-		} else {
-			const rows = await client.query(rev.sourceSchema, workspaceId, {
-				where: node.where,
-				orderBy: node.orderBy,
-			});
-			for (const row of rows) {
-				for (const k of pointedKeys(row.value, viaLocal, targetDef, rev.repeated)) add(k, row);
-			}
+		}
+		const rows = await run({ where: where as never, orderBy: node.orderBy });
+		for (const row of rows) {
+			const keys = pointedKeys(
+				row.value,
+				viaLocal,
+				rev.shape,
+				targetDef,
+				workspaceId,
+				row.workspaceId,
+			);
+			for (const k of keys) add(k, row);
 		}
 
 		for (const [ k, hs ] of wanted) {
@@ -461,20 +495,31 @@ async function attachReverse(
 }
 
 /**
- * Derived keys of every target a source row's ref field points at,
- * deduplicated — a repeated ref naming one target twice matches it once, as
- * refPointsAt's `some` does. Same key derivation as refPointsAt, in bulk.
+ * Derived keys of every target in targetWorkspace that a source row's ref field
+ * points at, deduplicated — a repeated ref naming one target twice matches it
+ * once. A stub resolving in another workspace points at a different row
+ * however its key reads, so it is left out; a stub names no workspace resolves
+ * in the holder's.
  */
 function pointedKeys(
 	source: Message,
 	viaLocal: string,
+	shape: RefShape,
 	targetDef: Parameters<typeof keyOf>[0],
-	repeated: boolean,
+	targetWorkspace: string,
+	holderWorkspace: string,
 ): string[] {
-	const value = (source as unknown as Rec)[viaLocal];
-	if (value === undefined || value === null) return [];
-	if (!repeated) return [ keyOf(targetDef, value as Message) ];
-	return [ ...new Set((value as Message[]).map((stub) => keyOf(targetDef, stub))) ];
+	const field = (source as unknown as Rec)[viaLocal];
+	if (field === undefined || field === null) return [];
+	const values = Array.isArray(field) ? field as Message[] : [ field as Message ];
+	const out = new Set<string>();
+	for (const value of values) {
+		const stub = refStub(shape, value);
+		if (stub === undefined) continue;
+		if (refWorkspaceOf(shape, value, holderWorkspace) !== targetWorkspace) continue;
+		out.add(keyOf(targetDef, stub));
+	}
+	return [ ...out ];
 }
 
 /** Node options resolved against the relation's target schema. */

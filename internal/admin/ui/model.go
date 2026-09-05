@@ -172,8 +172,13 @@ type EnumOption struct {
 type RefControl struct {
 	Name      string   // input-name base the selection binds to
 	Entity    string   // target entity wire name (picker route, aria labels)
-	Keys      []string // target key field names
+	Keys      []string // target key field names, plus Workspace when set
 	PickerURL string   // picker endpoint listing target rows in this workspace
+	// Workspace names the reference message's workspace field, carried as one
+	// more hidden input per chip; empty for a same-workspace reference. The
+	// picker matches chips against rows by the key fields alone, so the
+	// input is tagged apart from them.
+	Workspace string
 	Items     []RefItem
 	// Multi allows several targets to be selected: the chips accumulate and
 	// the popover stays open, rather than one selection replacing the last.

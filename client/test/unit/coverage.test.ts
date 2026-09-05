@@ -151,6 +151,26 @@ describe('CoverageResolver', () => {
 		});
 	});
 
+	it('keeps a followed relation uncovered while its target hydrates', () => {
+		const rel = { targetEntity: 'project', refLocalName: 'project' };
+		const followed = create(SubscriptionSchema, {
+			entity: 'issue',
+			follow: { paths: [ { segments: [ 'project' ] } ] },
+		});
+		const settled = new CoverageResolver(() => new Map([ [ 'a', [ followed ] ] ]));
+		expect(settled.coverageOf('issue', 'a', [ rel ])).toEqual({ complete: true, bounds: [] });
+		// The follow closure promises the targets will arrive; until they have,
+		// a holder's stub still resolves against a row that is not here.
+		const hydrating = new CoverageResolver(
+			() => new Map([ [ 'a', [ followed ] ] ]),
+			() => new Set([ 'project' ]),
+		);
+		expect(hydrating.coverageOf('issue', 'a', [ rel ])).toEqual({
+			complete: false,
+			bounds: [ 'relation' ],
+		});
+	});
+
 	it('unions hydration across workspaces', () => {
 		const r = new CoverageResolver(
 			() =>

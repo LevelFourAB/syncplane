@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXkiwQEKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5KmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLUAQoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
 
 /**
  * EntityOptions declares a message as a syncable entity.
@@ -177,6 +177,59 @@ export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
 
 /**
+ * ReferenceOptions declares a message as a REFERENCE MESSAGE: the stored shape
+ * of a typed reference that may point into another workspace.
+ *
+ * A field whose message type is an entity is already a reference, and it
+ * resolves inside the holder's workspace because a stored stub carries only the
+ * target's key fields. A reference message wraps that stub together with the
+ * workspace it lives in:
+ *
+ * 	message PersonRef {
+ * 	  option (syncplane.v1.reference) = {};
+ * 	  string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+ * 	  Person person = 2;
+ * 	}
+ * 	message Task {
+ * 	  PersonRef assignee = 2;
+ * 	  repeated PersonRef watchers = 3;
+ * 	}
+ *
+ * A field of a reference message type is a reference like any other: it gets
+ * the forward accessor, the reverse relation on the target, the follow segment
+ * and the derived index, and its target is the entity the embedded field
+ * names. The message must carry exactly one singular entity-typed field and at
+ * most one string field marked (syncplane.v1.field_behavior).workspace, and
+ * nothing else; whether the holder field is repeated says whether the
+ * reference is to-many. An empty or absent workspace value means the holder's
+ * own workspace, so a reference message without the workspace field is a
+ * same-workspace reference with an explicit stored shape.
+ *
+ * A reference message is replaced whole on every write: a PATCH mask that
+ * names one names the whole message, so the workspace and the key never
+ * split. A repeated reference message list has no per-element identity and is
+ * replaced whole as well, unlike a repeated entity-typed reference, which
+ * merges per target key; a list that must merge per element wraps each
+ * reference in a keyed list element of its own.
+ *
+ * Reading is client-local: a client resolves each stub in the workspace it
+ * names, from the workspaces it holds. The server evaluates `matches()`,
+ * `include` and `follow` inside the request's workspace only, so a stub that
+ * names another workspace resolves to nothing there.
+ *
+ * @generated from message syncplane.v1.ReferenceOptions
+ */
+export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
+};
+
+/**
+ * Describes the message syncplane.v1.ReferenceOptions.
+ * Use `create(ReferenceOptionsSchema)` to create a new message.
+ */
+export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 2);
+
+/**
  * SearchField is one field full-text search reads.
  *
  * @generated from message syncplane.v1.SearchField
@@ -197,7 +250,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 3);
 
 /**
  * SearchSpec declares full-text search over an entity: which fields a match
@@ -243,7 +296,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * IndexKey is one component of an index, in the order it sorts.
@@ -275,7 +328,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * IndexSpec is one declared secondary index: a name unique within the entity,
@@ -307,7 +360,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 5);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * FieldBehavior tunes how a field participates in merges and queries.
@@ -349,6 +402,12 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * anchors. Requires a singular bytes field; implies opaque; the engine
    * auto-installs the text merger so concurrent PATCHes merge without
    * interleaving. Incompatible with key_field/order_field.
+   *
+   * The field's path may cross keyed message lists and message-valued maps,
+   * in which case each element holds its own document, addressed by its
+   * instance path ("notes.<key>.body"). Refused inside a oneof or an unkeyed
+   * repeated element: those units are replaced whole, so the merger could
+   * never run.
    *
    * @generated from field: bool text = 4;
    */
@@ -423,6 +482,17 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * @generated from field: syncplane.v1.FieldWritePolicy write_policy = 8;
    */
   writePolicy: FieldWritePolicy;
+
+  /**
+   * Inside a reference message (see ReferenceOptions), the string field that
+   * names the workspace the referenced row lives in. Empty means the holder's
+   * own workspace. Valid on a singular string field of a message carrying
+   * (syncplane.v1.reference), at most once per message; rejected anywhere
+   * else at registration.
+   *
+   * @generated from field: bool workspace = 9;
+   */
+  workspace: boolean;
 };
 
 /**
@@ -430,7 +500,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * DeletePolicy says which callers may DELETE rows of an entity. The engine
@@ -628,7 +698,7 @@ export const FieldWritePolicySchema: GenEnum<FieldWritePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 3);
 
 /**
- * Field numbers 50100/50101 are unregistered; fine for internal use.
+ * Field numbers 50100/50101/50102 are unregistered; fine for internal use.
  *
  * @generated from extension: syncplane.v1.EntityOptions entity = 50100;
  */
@@ -636,8 +706,14 @@ export const entity: GenExtension<MessageOptions, EntityOptions> = /*@__PURE__*/
   extDesc(file_syncplane_v1_options, 0);
 
 /**
+ * @generated from extension: syncplane.v1.ReferenceOptions reference = 50102;
+ */
+export const reference: GenExtension<MessageOptions, ReferenceOptions> = /*@__PURE__*/
+  extDesc(file_syncplane_v1_options, 1);
+
+/**
  * @generated from extension: syncplane.v1.FieldBehavior field_behavior = 50101;
  */
 export const field_behavior: GenExtension<FieldOptions, FieldBehavior> = /*@__PURE__*/
-  extDesc(file_syncplane_v1_options, 1);
+  extDesc(file_syncplane_v1_options, 2);
 

@@ -842,7 +842,9 @@ func (s *Server) applyCrud(
 		}
 		// A reference stores only its target's key fields; strip any extra fields
 		// a fat stub carried before persisting.
-		info.projectRefs(msg.ProtoReflect())
+		if err := info.projectRefs(msg.ProtoReflect()); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(msg)
 		if err != nil {
 			return err
@@ -953,7 +955,9 @@ func (s *Server) applyCrud(
 		}
 		// Project refs on the MERGED result, so a fat stub in the PATCH value
 		// cannot smuggle extra fields past the per-item merge.
-		info.projectRefs(base.ProtoReflect())
+		if err := info.projectRefs(base.ProtoReflect()); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(base)
 		if err != nil {
 			return err

@@ -15,9 +15,12 @@ export const file_syncplane_v1_patch: GenFile = /*@__PURE__*/
   fileDesc("ChhzeW5jcGxhbmUvdjEvcGF0Y2gucHJvdG8SDHN5bmNwbGFuZS52MSItCgpGaWVsZERlbHRhEg0KBWZpZWxkGAEgASgJEhAKCGZyYWdtZW50GAIgASgMIpYBCglSb3dDaGFuZ2USDgoGZW50aXR5GAEgASgJEgsKA2tleRgCIAEoCRIPCgd2ZXJzaW9uGAMgASgEEg8KBXZhbHVlGAQgASgMSAASEwoJdG9tYnN0b25lGAUgASgISAASLQoLdGV4dF9kZWx0YXMYBiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGREZWx0YUIGCgRib2R5IkgKBVBhdGNoEigKB2NoYW5nZXMYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhUKDWRyb3BfZW50aXRpZXMYAiADKAkimgEKDFN1YnNjcmlwdGlvbhIOCgZlbnRpdHkYASABKAkSKgoJcHJlZGljYXRlGAIgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCgZmb2xsb3cYAyABKAsyGC5zeW5jcGxhbmUudjEuRm9sbG93U3BlYxIkCgZ3aW5kb3cYBCABKAsyFC5zeW5jcGxhbmUudjEuV2luZG93IlUKBldpbmRvdxIoCghvcmRlcl9ieRgBIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgCIAEoDRISCgpieV9yZWNlbmN5GAMgASgIIhsKB1JlZlBhdGgSEAoIc2VnbWVudHMYASADKAkiQQoKRm9sbG93U3BlYxIkCgVwYXRocxgBIAMoCzIVLnN5bmNwbGFuZS52MS5SZWZQYXRoEg0KBWRlcHRoGAIgASgNQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_query]);
 
 /**
- * FieldDelta carries one collaborative-text field of a RowChange as delta
- * state instead of as part of the row snapshot. `field` is the field's dotted
- * proto path.
+ * FieldDelta carries one collaborative-text document of a RowChange as delta
+ * state instead of as part of the row snapshot. `field` is the document's
+ * dotted path: the proto path for a field on a singular chain, with the
+ * element key inserted where the path crosses a keyed message list or map
+ * ("notes.<key>.body") — the same form a PATCH field mask addresses the
+ * document by, one entry per element.
  *
  * `fragment` is a text delta-state fragment (format version 0x02) to apply to
  * the field's CONFIRMED bytes; empty means the field did not change over the

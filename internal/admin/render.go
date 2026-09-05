@@ -296,11 +296,21 @@ func pillFor(fd protoreflect.FieldDescriptor, v protoreflect.Value) ui.Pill {
 // labelCache memoizes resolved reference labels by "entity\x00key".
 type labelCache map[string]string
 
-// refLabel resolves a reference value (a message holding the target's key
-// fields) to the target row's display label, loading the row through tx. Falls
-// back to the key, then to the raw key-field text.
-func (h *handler) refLabel(tx *server.ViewTx, srv *server.Server, fd protoreflect.FieldDescriptor, ref protoreflect.Message, cache labelCache) string {
-	return h.refLabelByTarget(tx, srv, entityName(fd.Message()), ref, cache)
+// refLabel resolves a stored reference value to the target row's display
+// label, loading the row through tx. Falls back to the key, then to the raw
+// key-field text. A value that names another workspace resolves there, and
+// this page reads one workspace, so it shows the key and where it points
+// rather than a same-key row from here.
+func (h *handler) refLabel(tx *server.ViewTx, srv *server.Server, fd protoreflect.FieldDescriptor, value protoreflect.Message, cache labelCache) string {
+	ref := server.RefOf(fd)
+	stub, ok := ref.Stub(value)
+	if !ok {
+		return ""
+	}
+	if ws := ref.WorkspaceOf(value); ws != "" {
+		return joinKeyText(ref.KeyFields, stub) + " @ " + ws
+	}
+	return h.refLabelByTarget(tx, srv, entityName(ref.Target), stub, cache)
 }
 
 // refLabelByTarget resolves a reference to the named target entity to its
@@ -341,12 +351,6 @@ func (h *handler) refLabelByKey(tx *server.ViewTx, srv *server.Server, target, k
 	}
 	cache[target+"\x00"+key] = label
 	return label
-}
-
-// refKeyText joins a reference's key-field values, for when the target row can't
-// be resolved.
-func refKeyText(fd protoreflect.FieldDescriptor, ref protoreflect.Message) string {
-	return joinKeyText(server.RefKeyFields(fd), ref)
 }
 
 // joinKeyText joins the given key-field values of m with "/".

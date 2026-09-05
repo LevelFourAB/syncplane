@@ -21,9 +21,12 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
-// FieldDelta carries one collaborative-text field of a RowChange as delta
-// state instead of as part of the row snapshot. `field` is the field's dotted
-// proto path.
+// FieldDelta carries one collaborative-text document of a RowChange as delta
+// state instead of as part of the row snapshot. `field` is the document's
+// dotted path: the proto path for a field on a singular chain, with the
+// element key inserted where the path crosses a keyed message list or map
+// ("notes.<key>.body") — the same form a PATCH field mask addresses the
+// document by, one entry per element.
 //
 // `fragment` is a text delta-state fragment (format version 0x02) to apply to
 // the field's CONFIRMED bytes; empty means the field did not change over the

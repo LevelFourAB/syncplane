@@ -1,6 +1,13 @@
 import { type DescField, type DescMessage, type DescOneof, ScalarType } from '@bufbuild/protobuf';
 
-import { isTextField, refKeyFields, refTarget } from '../mutations.js';
+import {
+	isTextField,
+	refKeyFields,
+	refKeyPath,
+	type RefShape,
+	refShape,
+	refTarget,
+} from '../mutations.js';
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
 import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
 import { searchDeclOf } from './match.js';
@@ -346,8 +353,10 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 			// points a comparison on a singular reference at its key. The typed
 			// DSL never emits this shape (it offers any() on message lists, which
 			// the type layer can check), but a Go client or a hand-built AST can.
-			const refKeys = refKeyFields(leaf.field);
-			if (refKeys.length === 1) return refMembershipCond(leaf.path, refKeys[0]!.localName, cond);
+			const shape = refShape(leaf.field);
+			if (shape && shape.keyFields.length === 1) {
+				return refMembershipCond(leaf.path, refKeyPath(shape, shape.keyFields[0]!), cond);
+			}
 			if (!isComparable(elementKind(leaf.field))) {
 				throw new Error(
 					`query path ${
@@ -376,13 +385,12 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 				// only do one path at a time.
 				requireEntryPaths(cond.path, element.map, cond.cond);
 			} else {
-				// A reference element stores only the target's key fields, so the
-				// same rule that stops a path descending through a reference stops
-				// a sub-condition reaching past one: those fields are not there.
-				const refKeys = refKeyFields(leaf.field);
-				if (refKeys.length > 0) {
-					requireRefKeyPaths(cond.path, refKeys.map((f) => f.localName), cond.cond);
-				}
+				// A reference element stores only the target's key fields — under
+				// its entity field, plus a workspace, for a reference message — so
+				// the same rule that stops a path descending through a reference
+				// stops a sub-condition reaching past one: those fields are not there.
+				const shape = refShape(leaf.field);
+				if (shape) requireRefKeyPaths(cond.path, shape, cond.cond);
 			}
 			return { kind: 'exists', path: leaf.path, cond: prepareCond(element, cond.cond) };
 		}
@@ -407,6 +415,20 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 						describeLeaf(leaf)
 					}; a message field is only a reference when its target declares (syncplane.v1.entity)`,
 				);
+			}
+			// The entity field inside a reference message is itself entity-typed,
+			// so it resolves as a plain reference — one that knows nothing of the
+			// workspace stored beside it. Only the enclosing field carries the
+			// whole stored shape.
+			if (cond.path.length > 1) {
+				const parent = resolveInScope(scope, cond.path.slice(0, -1), false);
+				if (!parent.keyed && !parent.entryKey && refTarget(parent.field)) {
+					throw new Error(
+						`query path ${cond.path.join('.')}: matches() names the reference field itself; "${
+							cond.path.at(-1)
+						}" is the entity field inside reference "${cond.path.at(-2)}"`,
+					);
+				}
 			}
 			return {
 				kind: 'rel',
@@ -574,10 +596,9 @@ function entryPathError(path: Path, map: MapField, sub: Path): Error {
  */
 function refMembershipCond(
 	path: Path,
-	keyName: string,
+	key: Path,
 	cond: Extract<Cond, { kind: 'rep' }>,
 ): Cond {
-	const key = [ keyName ];
 	switch (cond.op) {
 		case 'has':
 			return { kind: 'exists', path, cond: { kind: 'cmp', path: key, op: 'eq', value: cond.value } };
@@ -599,19 +620,49 @@ function refMembershipCond(
 }
 
 /**
+ * Whether a path may continue from a reference field into the field named: a
+ * key field of an entity-typed stub, or the entity and workspace fields of a
+ * reference message (the key fields then sit under the entity field, which is
+ * itself an entity-typed reference).
+ */
+function refAddressable(shape: RefShape, name: string): boolean {
+	if (shape.valueField) {
+		return name === shape.valueField.localName || name === shape.workspaceField?.localName;
+	}
+	return shape.keyFields.some((kf) => kf.localName === name);
+}
+
+/** Names what a stored reference value carries, for the errors that refuse a path reaching past it. */
+function refHolds(shape: RefShape): string {
+	if (!shape.valueField) return 'its key fields';
+	if (!shape.workspaceField) return `its entity field "${shape.valueField.localName}"`;
+	return `its entity field "${shape.valueField.localName}" and workspace field "${shape.workspaceField.localName}"`;
+}
+
+/** The predicate of "only … addressable" for a path descending through a reference. */
+function refAddressableHint(shape: RefShape): string {
+	if (!shape.valueField) return 'its key fields are';
+	if (!shape.workspaceField) return `its entity field "${shape.valueField.localName}" is`;
+	return `its entity field "${shape.valueField.localName}" and workspace field "${shape.workspaceField.localName}" are`;
+}
+
+/**
  * Rejects an any() sub-condition that addresses anything but the reference's
  * key fields. Without it such a condition prepares cleanly and then matches
  * nothing, since a stored reference element carries the key fields alone.
  */
-function requireRefKeyPaths(path: Path, keyNames: string[], cond: Cond): void {
+function requireRefKeyPaths(path: Path, shape: RefShape, cond: Cond): void {
 	const check = (sub: Path): void => {
-		if (sub.length === 1 && keyNames.includes(sub[0]!)) return;
+		if (sub.length === 1 && refAddressable(shape, sub[0]!)) return;
+		// A reference message keeps the key one level down, under its entity field.
+		if (
+			shape.valueField && sub.length === 2 && sub[0] === shape.valueField.localName
+			&& shape.keyFields.some((kf) => kf.localName === sub[1])
+		) return;
 		throw new Error(
-			`query path ${
-				path.join('.')
-			}: an element of a reference list holds only its key fields, so any() cannot ask about "${
-				sub.join('.')
-			}"`,
+			`query path ${path.join('.')}: an element of a reference list holds only ${
+				refHolds(shape)
+			}, so any() cannot ask about "${sub.join('.')}"`,
 		);
 	};
 	switch (cond.kind) {
@@ -625,10 +676,10 @@ function requireRefKeyPaths(path: Path, keyNames: string[], cond: Cond): void {
 			return;
 		case 'and':
 		case 'or':
-			for (const c of cond.conds) requireRefKeyPaths(path, keyNames, c);
+			for (const c of cond.conds) requireRefKeyPaths(path, shape, c);
 			return;
 		case 'not':
-			requireRefKeyPaths(path, keyNames, cond.cond);
+			requireRefKeyPaths(path, shape, cond.cond);
 	}
 }
 
@@ -776,9 +827,12 @@ function comparableHint(path: Path, leaf: LeafRef): string {
 		return 'use has/hasAny/hasAll/isEmpty';
 	}
 	if (field.fieldKind === 'message') {
-		const refKeys = refKeyFields(field);
-		if (refKeys.length === 1) {
-			return `use isSet/isNotSet, or compare its key field ${path.join('.')}.${refKeys[0]!.localName}`;
+		const shape = refShape(field);
+		const refKeys = shape?.keyFields ?? [];
+		if (shape && refKeys.length === 1) {
+			return `use isSet/isNotSet, or compare its key field ${path.join('.')}.${
+				refKeyPath(shape, refKeys[0]!).join('.')
+			}`;
 		}
 		if (refKeys.length > 1) {
 			return 'use isSet/isNotSet; a composite-key reference has no single comparable value';
@@ -1052,15 +1106,18 @@ export function resolveLeafRef(
 				continue;
 			}
 		}
-		const refKeys = refKeyFields(field);
+		const shape = refShape(field);
+		const refKeys = shape?.keyFields ?? [];
 		const isLast = i === path.length - 1;
-		if (!isLast && refKeys.length > 0) {
-			const next = path[i + 1];
-			if (!refKeys.some((kf) => kf.localName === next)) {
+		if (!isLast && shape) {
+			const next = path[i + 1]!;
+			if (!refAddressable(shape, next)) {
 				throw new Error(
 					`query path ${
 						path.join('.')
-					}: cannot descend through reference "${seg}" into "${next}"; only its key fields are addressable`,
+					}: cannot descend through reference "${seg}" into "${next}"; only ${
+						refAddressableHint(shape)
+					} addressable`,
 				);
 			}
 		}
@@ -1077,7 +1134,7 @@ export function resolveLeafRef(
 			}
 			fans.push({ at: out.length - 1, isMap: false });
 		}
-		if (isLast && appendKey && refKeys.length > 0) {
+		if (isLast && appendKey && shape) {
 			if (field.fieldKind !== 'message' && !(field.fieldKind === 'list' && throughLists)) {
 				throw new Error(`query path ${path.join('.')}: repeated reference "${seg}" is not comparable`);
 			}
@@ -1087,6 +1144,12 @@ export function resolveLeafRef(
 						path.join('.')
 					}: reference "${seg}" has a composite key; only isSet/isNotSet is supported`,
 				);
+			}
+			// A reference message keeps the key under its entity field, so the
+			// extension is two steps there and one on an entity-typed stub.
+			if (shape.valueField) {
+				out.push(shape.valueField.localName);
+				protoOut.push(shape.valueField.name);
 			}
 			out.push(refKeys[0]!.localName);
 			protoOut.push(refKeys[0]!.name);

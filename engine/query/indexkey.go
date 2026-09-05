@@ -310,8 +310,10 @@ func CompileIndexComponent(
 	// as a comparison on the reference does, so an index and a query on the same
 	// reference agree on what they are keyed by. For a to-many reference that
 	// makes the component fan out over the stored target keys.
-	if refKeys := lww.RefKeyFields(pathLeaf(fields)); len(refKeys) == 1 {
-		fields = append(fields, pathStep{fd: refKeys[0]})
+	if r := lww.RefOf(pathLeaf(fields)); r != nil && len(r.KeyFields) == 1 {
+		for _, fd := range r.KeyPath(r.KeyFields[0]) {
+			fields = append(fields, pathStep{fd: fd})
+		}
 	}
 	c := IndexComponent{fields: fields, desc: descending}
 	leaf := c.leafField()
@@ -348,8 +350,8 @@ func indexListHint(path []string, leaf protoreflect.FieldDescriptor) string {
 	if leaf.Kind() != protoreflect.MessageKind {
 		return "its elements are not comparable"
 	}
-	if refKeys := lww.RefKeyFields(leaf); len(refKeys) == 1 {
-		return fmt.Sprintf("index its key field instead, %s.%s", strings.Join(path, "."), refKeys[0].Name())
+	if r := lww.RefOf(leaf); r != nil && len(r.KeyFields) == 1 {
+		return fmt.Sprintf("index its key field instead, %s.%s", strings.Join(path, "."), strings.Join(r.KeyPathNames(r.KeyFields[0]), "."))
 	}
 	return fmt.Sprintf("index a scalar field of the elements instead, e.g. %s.<field>", strings.Join(path, "."))
 }
@@ -393,8 +395,8 @@ func resolveIndexFields(desc protoreflect.MessageDescriptor, path []string) ([]p
 			continue
 		}
 		if i < len(path)-1 {
-			if refKeys := lww.RefKeyFields(fd); refKeys != nil && !isKeyField(refKeys, path[i+1]) {
-				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only its key fields are addressable", path, seg, path[i+1])
+			if r := lww.RefOf(fd); r != nil && !r.Addressable(path[i+1]) {
+				return nil, fmt.Errorf("path %v: cannot descend through reference %q into %q; only %s addressable", path, seg, path[i+1], refAddressable(r))
 			}
 		}
 		st := pathStep{fd: fd}

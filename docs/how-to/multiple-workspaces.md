@@ -36,7 +36,7 @@ Before you begin, ensure you have:
 
    The client-level API binds to the default workspace. To target a different workspace, call `client.ws(id)`.
 
-   **Note:** The server sequences partition operations individually. Operations such as writes, `transact()` batches, undo steps, references, `queryServer`, and bootstraps do not cross workspaces.
+   **Note:** The server sequences partition operations individually. Operations such as writes, `transact()` batches, undo steps, `queryServer`, and bootstraps do not cross workspaces. A reference resolves in its holder's workspace unless it is declared as a [workspace-qualified reference](#referencing-a-row-in-another-workspace).
 
 ## Reading across workspaces
 
@@ -112,6 +112,55 @@ const tasks = db.todo.useRowsAll([
 ```
 
 Mutation hooks bind to a single workspace. To write back to the source workspace of a row from a component, call `useSyncClient()` and use `client.ws(row.workspaceId).db.todo.mutate`.
+
+## Referencing a row in another workspace
+
+A reference resolves in the workspace of the row that holds it. To let a row name a row elsewhere, such as a task in a project workspace naming a person in the organization workspace, declare the reference as a **workspace-qualified reference**. Its stored value carries the target's workspace beside its key.
+
+1. Declare the reference. In a hand-written `.proto`, wrap the target in a message carrying `(syncplane.v1.reference)`:
+
+   ```proto
+   message PersonRef {
+   	option (syncplane.v1.reference) = {};
+   	string workspace_id = 1 [(syncplane.v1.field_behavior) = { workspace: true }];
+   	Person person = 2;
+   }
+
+   message Task {
+   	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
+   	string id = 1;
+   	PersonRef assignee = 2;
+   }
+   ```
+
+   With the schema builder, use `schema.workspaceRef(() => person)`. It synthesizes the same shape with the fields `workspaceId` and `value`.
+
+2. Write the stub with the workspace it points into. An empty workspace means the holder's own:
+
+   ```ts
+   await client.ws('proj-1').db.task.mutate.create({
+   	id: 't1',
+   	assignee: { workspaceId: 'acme-org', person: { id: 'u1' } },
+   });
+   ```
+
+3. Read it like any other reference. The client resolves the stub in the workspace it names, from the workspaces it holds:
+
+   ```ts
+   const task = await client.ws('proj-1').db.task.get('t1');
+   const person = await client.ws('proj-1').db.task.refs.assignee.load(task!); // the row in 'acme-org'
+   const tasks = await client.ws('acme-org').db.person.refs.tasksByAssignee(
+   	person!.value,
+   ); // across held workspaces
+   const rows = await client.ws('proj-1').db.task.query(
+   	{ where: (t) => t.assignee.matches((p) => p.name.eq('Maya')) },
+   	{ include: { assignee: true } },
+   );
+   ```
+
+   A target in a workspace the client does not hold resolves to `undefined`, like any orphan.
+
+The server resolves `matches()`, `include`, and `follow` inside the request's workspace only, so `queryServer` and a `follow` spec never see a stub that names another workspace. Use local reads for those. For the full rules, see [References](../reference/proto-options.md#references).
 
 ## Adding and removing
 

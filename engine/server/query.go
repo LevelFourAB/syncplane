@@ -54,7 +54,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		if _, err := s.relTargetInfo(node); err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		stubbed[node.Cond] = query.RelReplacement(node, nil)
+		stubbed[node.Cond] = query.RelReplacement(node, nil, msg.GetWorkspaceId())
 	}
 	predicate, err := query.Compile(desc, query.RewriteRels(msg.GetPredicate(), stubbed))
 	if err != nil {
@@ -174,7 +174,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 			// The pre-pass runs inside the same snapshot as the base scan, so
 			// the membership sets and the rows they are tested against are one
 			// consistent view.
-			replacements, err := s.resolveRels(tx, rels, visible, emitter)
+			replacements, err := s.resolveRels(tx, msg.GetWorkspaceId(), rels, visible, emitter)
 			if err != nil {
 				return err
 			}

@@ -279,6 +279,9 @@ func (tf textField) walkInstances(cur protoreflect.Message, from int, prefix str
 type refField struct {
 	fd        protoreflect.FieldDescriptor
 	keyFields []protoreflect.FieldDescriptor
+	// ref is the reference's stored shape — where the key and, for a
+	// reference message, the workspace sit inside the field value.
+	ref *lww.Ref
 }
 
 // Limits bounds request payloads and response sizes. It bounds what one
@@ -1255,16 +1258,29 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		}
 		info.keyFields = append(info.keyFields, fd)
 	}
+	// A malformed reference message anywhere in the entity's shape is a schema
+	// error, not an ordinary sub-message; report it before the field walk
+	// below would silently read it as one.
+	if err := checkReferenceMessages(desc); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
 	// Precompute reference fields: any field whose (element) message is itself
-	// a registered entity. Detection and the target's key fields come from the
-	// target message's own (syncplane.v1.entity) options, so registration order does
-	// not matter (the option is on the type, not on the catalog).
+	// a registered entity, or a reference message wrapping one. Detection and
+	// the target's key fields come from the target message's own
+	// (syncplane.v1.entity) options, so registration order does not matter (the
+	// option is on the type, not on the catalog).
 	fields := desc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		kf := lww.RefKeyFields(fd)
-		if kf == nil {
+		ref := lww.RefOf(fd)
+		if ref == nil {
 			continue
+		}
+		kf := ref.KeyFields
+		if ref.Value != nil {
+			if b := protoopts.FieldBehavior(fd); len(b.GetKeyField()) > 0 || b.GetOrderField() != "" {
+				return nil, fmt.Errorf("server: entity %q reference field %q: a reference message list has no per-element identity, so key_field and order_field do not apply", info.name, fd.Name())
+			}
 		}
 		// Polymorphic targets ("oneof target { Project p = 1; User u = 2; }")
 		// are a reasonable thing to want, but the reference graph addresses a
@@ -1276,7 +1292,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			return nil, fmt.Errorf("server: entity %q reference field %q is a member of oneof %q; "+
 				"references inside a oneof are not supported", info.name, fd.Name(), od.Name())
 		}
-		info.refFields = append(info.refFields, refField{fd: fd, keyFields: kf})
+		info.refFields = append(info.refFields, refField{fd: fd, keyFields: kf, ref: ref})
 	}
 	if err := validateListIdentities(desc, info.name); err != nil {
 		return nil, err
@@ -1776,11 +1792,118 @@ func entityMeta(info *entityInfo) EntityMeta {
 
 // RefKeyFields classifies a field as a typed reference: it returns the target
 // entity's key fields when fd is a reference (a message field whose target
-// message carries (syncplane.v1.entity)), else nil. It is a thin re-export of
-// lww.RefKeyFields so the admin form renderer can distinguish scalar /
-// sub-message / reference fields without importing engine/internal/lww.
+// message carries (syncplane.v1.entity), or a reference message wrapping one),
+// else nil. The fields are the target's own; on a reference message they sit
+// under Reference.Value rather than on the stored value — see RefOf. It is a
+// thin re-export of lww.RefKeyFields so the admin form renderer can
+// distinguish scalar / sub-message / reference fields without importing
+// engine/internal/lww.
 func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
 	return lww.RefKeyFields(fd)
+}
+
+// Reference is the stored shape of one typed reference field, for callers
+// outside the engine that read or build stored reference values. See
+// (syncplane.v1.reference) for the two shapes it describes.
+type Reference struct {
+	// Target is the referenced entity's message descriptor.
+	Target protoreflect.MessageDescriptor
+	// KeyFields are the target's key fields, declared on Target.
+	KeyFields []protoreflect.FieldDescriptor
+	// Value is the entity-typed field of a reference message holding the
+	// target stub; nil when the field's type is the target entity itself.
+	Value protoreflect.FieldDescriptor
+	// Workspace is a reference message's workspace field, or nil when every
+	// stored value resolves in the holder's own workspace.
+	Workspace protoreflect.FieldDescriptor
+}
+
+// RefOf describes fd as a typed reference, or returns nil when it is not one.
+func RefOf(fd protoreflect.FieldDescriptor) *Reference {
+	r := lww.RefOf(fd)
+	if r == nil {
+		return nil
+	}
+	return &Reference{Target: r.Target, KeyFields: r.KeyFields, Value: r.Value, Workspace: r.Workspace}
+}
+
+// Stub returns the target stub inside one stored reference value: the value
+// itself, or the entity message a reference message embeds. Reports false for
+// a reference message holding no stub.
+func (r *Reference) Stub(value protoreflect.Message) (protoreflect.Message, bool) {
+	if r.Value == nil {
+		return value, true
+	}
+	if !value.Has(r.Value) {
+		return nil, false
+	}
+	return value.Get(r.Value).Message(), true
+}
+
+// MutableStub returns the target stub inside a stored reference value being
+// built, creating the embedded message of a reference message when absent.
+func (r *Reference) MutableStub(value protoreflect.Message) protoreflect.Message {
+	if r.Value == nil {
+		return value
+	}
+	return value.Mutable(r.Value).Message()
+}
+
+// WorkspaceOf returns the workspace a stored reference value names, or "" when
+// it names none or the reference has no workspace field.
+func (r *Reference) WorkspaceOf(value protoreflect.Message) string {
+	if r.Workspace == nil {
+		return ""
+	}
+	return value.Get(r.Workspace).String()
+}
+
+// KeyPath returns the proto field names from a stored reference value to one
+// key field of the target — [key] on an entity-typed reference, [value, key]
+// on a reference message — the segments a query path spells the key in.
+func (r *Reference) KeyPath(kf protoreflect.FieldDescriptor) []string {
+	if r.Value == nil {
+		return []string{string(kf.Name())}
+	}
+	return []string{string(r.Value.Name()), string(kf.Name())}
+}
+
+// checkReferenceMessages walks every message type reachable from desc and
+// reports the first reference message that breaks its shape rules. Recursive
+// types are visited once.
+func checkReferenceMessages(desc protoreflect.MessageDescriptor) error {
+	seen := map[protoreflect.FullName]bool{}
+	var walk func(md protoreflect.MessageDescriptor) error
+	walk = func(md protoreflect.MessageDescriptor) error {
+		if seen[md.FullName()] {
+			return nil
+		}
+		seen[md.FullName()] = true
+		if err := lww.CheckReferenceMessage(md); err != nil {
+			return err
+		}
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			var sub protoreflect.MessageDescriptor
+			switch {
+			case fd.IsMap():
+				if fd.MapValue().Kind() == protoreflect.MessageKind {
+					sub = fd.MapValue().Message()
+				}
+			case fd.Kind() == protoreflect.MessageKind:
+				sub = fd.Message()
+			}
+			if sub == nil {
+				continue
+			}
+			if err := walk(sub); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(desc)
 }
 
 // entityNames returns registered entity names in stable order.
@@ -1840,20 +1963,42 @@ func (info *entityInfo) checkKey(key string) error {
 // touched — a self-referential ref element is a distinct embedded message, so
 // clearing its non-key fields is safe. Idempotent: re-projecting an
 // already-projected row is a no-op.
-func (info *entityInfo) projectRefs(msg protoreflect.Message) {
+//
+// A reference message naming a workspace is checked against the workspace-id
+// rule and refused as an invalid_argument rejection when it fails: no client
+// could ever hold such a workspace, so the reference could never resolve.
+func (info *entityInfo) projectRefs(msg protoreflect.Message) error {
 	for _, rf := range info.refFields {
 		if !msg.Has(rf.fd) {
 			continue
 		}
+		// A reference message keeps its workspace and its entity field; the
+		// projection reaches through to the stub inside it.
+		project := func(value protoreflect.Message) error {
+			if ws := rf.ref.WorkspaceOf(value); ws != "" {
+				if err := naming.ValidateWorkspaceID(ws); err != nil {
+					return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q: reference %q: %v", info.name, rf.fd.Name(), err))
+				}
+			}
+			if stub, ok := rf.ref.Stub(value); ok {
+				projectStub(stub, rf.keyFields)
+			}
+			return nil
+		}
 		if rf.fd.IsList() {
 			list := msg.Mutable(rf.fd).List()
 			for i := 0; i < list.Len(); i++ {
-				projectStub(list.Get(i).Message(), rf.keyFields)
+				if err := project(list.Get(i).Message()); err != nil {
+					return err
+				}
 			}
 			continue
 		}
-		projectStub(msg.Mutable(rf.fd).Message(), rf.keyFields)
+		if err := project(msg.Mutable(rf.fd).Message()); err != nil {
+			return err
+		}
 	}
+	return nil
 }
 
 // projectStub clears every field of a ref stub except its target key fields.

@@ -12,10 +12,18 @@
 // matches. The shared vectors in testdata/queryeval pin the two against each
 // other.
 
-import { type DescField, type DescMessage, fromBinary } from '@bufbuild/protobuf';
+import { type DescField, type DescMessage, fromBinary, type Message } from '@bufbuild/protobuf';
 
 import type { KVRead } from '../kv/store.js';
-import { type EntityDef, type EntityRegistry, refKeyFields, refTarget } from '../mutations.js';
+import {
+	type EntityDef,
+	type EntityRegistry,
+	refKeyPath,
+	refQualified,
+	type RefShape,
+	refShape,
+	refStub,
+} from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
 import {
@@ -53,6 +61,8 @@ export interface RelNode {
 	keyFields: DescField[];
 	/** To-many (repeated ref) when true. */
 	repeated: boolean;
+	/** Where the key and, for a reference message, the workspace sit inside a stored value. */
+	shape: RefShape;
 }
 
 /** Whether any rel condition appears anywhere in the tree. */
@@ -85,9 +95,8 @@ export function collectRels(schema: DescMessage, cond: Cond | undefined): RelNod
 		switch (c.kind) {
 			case 'rel': {
 				const leaf = resolveLeafRef(schema, c.path, false);
-				const targetSchema = refTarget(leaf.field);
-				const keyFields = refKeyFields(leaf.field);
-				if (!targetSchema || keyFields.length === 0) {
+				const shape = refShape(leaf.field);
+				if (!shape) {
 					throw new Error(
 						`query path ${c.path.join('.')}: matches() needs a reference field`,
 					);
@@ -95,9 +104,10 @@ export function collectRels(schema: DescMessage, cond: Cond | undefined): RelNod
 				out.push({
 					cond: c,
 					field: leaf.field,
-					targetSchema,
-					keyFields,
+					targetSchema: shape.targetSchema,
+					keyFields: shape.keyFields,
 					repeated: leaf.field.fieldKind === 'list',
+					shape,
 				});
 				return;
 			}
@@ -130,32 +140,79 @@ export function collectRels(schema: DescMessage, cond: Cond | undefined): RelNod
  * what keeps a matching id under the wrong ns from matching.
  */
 export function relReplacement(node: RelNode, targets: readonly Scalar[][]): Cond {
-	const path = node.cond.path;
+	return wrapStub(node, membershipOf(node, targets));
+}
+
+/**
+ * The membership test over one node's stubs, before the exists a repeated ref
+ * wraps it in: stub-relative for a repeated ref (the element is the scope),
+ * hung off the field path for a singular one.
+ */
+function membershipOf(node: RelNode, targets: readonly Scalar[][]): Cond {
+	const at = stubPathOf(node);
 	if (node.keyFields.length === 1) {
-		const key = node.keyFields[0]!.localName;
-		const values = targets.map((t) => t[0]!);
-		if (node.repeated) {
-			return { kind: 'exists', path, cond: { kind: 'in', path: [ key ], values } };
-		}
-		return { kind: 'in', path: [ ...path, key ], values };
-	}
-	const tupleEq = (tuple: readonly Scalar[], prefix: Path): Cond => ({
-		kind: 'and',
-		conds: node.keyFields.map((kf, i): Cond => ({
-			kind: 'cmp',
-			path: [ ...prefix, kf.localName ],
-			op: 'eq',
-			value: tuple[i]!,
-		})),
-	});
-	if (node.repeated) {
 		return {
-			kind: 'exists',
-			path,
-			cond: { kind: 'or', conds: targets.map((t) => tupleEq(t, [])) },
+			kind: 'in',
+			path: at(refKeyPath(node.shape, node.keyFields[0]!)),
+			values: targets.map((t) => t[0]!),
 		};
 	}
-	return { kind: 'or', conds: targets.map((t) => tupleEq(t, path)) };
+	return {
+		kind: 'or',
+		conds: targets.map((tuple): Cond => ({
+			kind: 'and',
+			conds: node.keyFields.map((kf, i): Cond => ({
+				kind: 'cmp',
+				path: at(refKeyPath(node.shape, kf)),
+				op: 'eq',
+				value: tuple[i]!,
+			})),
+		})),
+	};
+}
+
+/** Prefixes a stub-relative path for the node's arity; see membershipOf. */
+function stubPathOf(node: RelNode): (sub: Path) => Path {
+	return (sub) => node.repeated ? sub : [ ...node.cond.path, ...sub ];
+}
+
+/** Wraps a stub-relative condition in the exists a repeated ref needs. */
+function wrapStub(node: RelNode, cond: Cond): Cond {
+	return node.repeated ? { kind: 'exists', path: node.cond.path, cond } : cond;
+}
+
+/**
+ * The row-local condition one node collapses to for rows of `workspaceId`,
+ * from the pre-pass result grouped per workspace.
+ *
+ * A reference that resolves in the holder's workspace tests the stubs against
+ * that workspace's set alone. A workspace-qualified reference (see
+ * ReferenceOptions) tests each stub against the set of the workspace it names:
+ * one leg per workspace with matches, each pairing that workspace's membership
+ * with the stub naming it — where naming none means the holder's own. No
+ * matching target anywhere collapses to the empty membership test.
+ */
+export function relReplacementIn(
+	node: RelNode,
+	perWs: ReadonlyMap<string, RelWorkspaceKeys> | undefined,
+	workspaceId: string,
+): Cond {
+	if (!refQualified(node.shape)) {
+		const keyed = perWs?.get(workspaceId);
+		return relReplacement(node, keyed ? [ ...keyed.values() ] : []);
+	}
+	const at = stubPathOf(node);
+	const wsPath = at([ node.shape.workspaceField!.localName ]);
+	const legs: Cond[] = [];
+	for (const [ ws, keyed ] of perWs ?? []) {
+		if (keyed.size === 0) continue;
+		const names: Cond = ws === workspaceId
+			? { kind: 'in', path: wsPath, values: [ '', ws ] }
+			: { kind: 'cmp', path: wsPath, op: 'eq', value: ws };
+		legs.push({ kind: 'and', conds: [ membershipOf(node, [ ...keyed.values() ]), names ] });
+	}
+	if (legs.length === 0) return relReplacement(node, []);
+	return wrapStub(node, legs.length === 1 ? legs[0]! : { kind: 'or', conds: legs });
 }
 
 /**
@@ -243,13 +300,17 @@ export async function computeRelKeys(
 	const out = new Map<RelNode, ReadonlyMap<string, RelWorkspaceKeys>>();
 	for (const node of nodes) {
 		const def = registry.bySchema(node.targetSchema);
-		const shape = passKey(scope, def.name, node);
+		// A workspace-qualified reference points wherever its stubs say, so its
+		// pass reads the target entity in every workspace the store holds,
+		// whatever the query's own scope is.
+		const nodeScope = refQualified(node.shape) ? undefined : scope;
+		const shape = passKey(nodeScope, def.name, node);
 		const done = shared.get(shape);
 		if (done !== undefined) {
 			out.set(node, done);
 			continue;
 		}
-		const rows = await relTargets(tx, registry, def, node, scope, indexes);
+		const rows = await relTargets(tx, registry, def, node, nodeScope, indexes);
 		const perWs = new Map<string, Map<string, Scalar[]>>();
 		for (const row of rows) {
 			let keyed = perWs.get(row.workspaceId);
@@ -295,6 +356,10 @@ export async function updateRelKeys(
 ): Promise<RelKeys | undefined> {
 	const out = new Map<RelNode, ReadonlyMap<string, RelWorkspaceKeys>>();
 	for (const node of nodes) {
+		// A workspace-qualified reference's pass reads every workspace, and the
+		// caller only names the rows a commit touched inside the query's scope;
+		// the pass serves rather than an update from too few rows.
+		if (refQualified(node.shape)) return undefined;
 		const def = registry.bySchema(node.targetSchema);
 		const before = prev.get(node);
 		if (before === undefined) return undefined;
@@ -414,10 +479,16 @@ export function stubKeyTuples(node: RelNode, row: unknown): Scalar[][] {
 		at = (at as Record<string, unknown>)[segment];
 	}
 	if (at === undefined || at === null) return [];
-	const stubs = node.repeated ? at as unknown[] : [ at ];
-	return stubs.map((stub) =>
-		node.keyFields.map((kf) => (stub as Record<string, unknown>)[kf.localName] as Scalar)
-	);
+	const values = node.repeated ? at as unknown[] : [ at ];
+	const out: Scalar[][] = [];
+	for (const value of values) {
+		const stub = refStub(node.shape, value as Message);
+		if (stub === undefined) continue;
+		out.push(
+			node.keyFields.map((kf) => (stub as unknown as Record<string, unknown>)[kf.localName] as Scalar),
+		);
+	}
+	return out;
 }
 
 /**
@@ -558,8 +629,7 @@ function scopeKey(scope: WorkspaceScope | undefined): string {
 export function rewriteWithKeys(cond: Cond, keys: RelKeys, workspaceId: string): Cond {
 	const replacements = new Map<RelCond, Cond>();
 	for (const [ node, perWs ] of keys) {
-		const keyed = perWs.get(workspaceId);
-		replacements.set(node.cond, relReplacement(node, keyed ? [ ...keyed.values() ] : []));
+		replacements.set(node.cond, relReplacementIn(node, perWs, workspaceId));
 	}
 	return rewriteRels(cond, replacements);
 }

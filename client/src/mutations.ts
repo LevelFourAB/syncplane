@@ -32,6 +32,7 @@ import {
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
 	FieldWritePolicy,
+	reference as referenceExt,
 	UpdatePolicy,
 } from './gen/syncplane/v1/options_pb.js';
 import {
@@ -40,6 +41,7 @@ import {
 	validateEntityName,
 	validateKeyField,
 	validateRowKey,
+	validateWorkspaceId,
 } from './naming.js';
 import { RESERVED_QUERY_NAMES } from './query/proxy.js';
 import type { DeletedSegment, InsertedRange } from './text/doc.js';
@@ -306,42 +308,254 @@ function indexesOf(
 }
 
 /**
- * Key fields of the entity targeted by a reference field, or [] when the field
- * is not a reference. Mirror of lww.go RefKeyFields: a singular or repeated
- * message field whose (element) message carries (syncplane.v1.entity). Detection is
- * the target message simply being an entity — no annotation. Maps are excluded.
+ * The stored shape of one typed reference field: the entity it points at and
+ * where inside the stored value the target's key and workspace sit. Mirror of
+ * lww.Ref in the engine.
+ *
+ * Two shapes make a reference. An ENTITY-TYPED field — a singular or repeated
+ * message field whose (element) message carries (syncplane.v1.entity) — stores a
+ * stub of the target itself, projected down to its key fields; `valueField` is
+ * undefined and the stub is the field value. A REFERENCE MESSAGE field — one
+ * whose (element) message carries (syncplane.v1.reference) — stores a wrapper
+ * holding the entity stub under `valueField` and, when declared, the target's
+ * workspace under `workspaceField`. Consumers address the key through
+ * {@link refKeyPath} and the stub through {@link refStub}, so the two shapes
+ * differ in nothing else.
  */
-export function refKeyFields(field: DescField): DescField[] {
+export interface RefShape {
+	/** The referenced entity's message schema. */
+	targetSchema: DescMessage;
+	/** The target's key fields, declared on the target. */
+	keyFields: DescField[];
+	/** The reference message's own schema; undefined for an entity-typed reference. */
+	refSchema?: DescMessage;
+	/** The entity-typed field of a reference message; undefined for an entity-typed reference. */
+	valueField?: DescField;
+	/** A reference message's workspace field; undefined when every value resolves in the holder's workspace. */
+	workspaceField?: DescField;
+}
+
+/**
+ * Classifies a field as a typed reference, or returns undefined when it is not
+ * one: a scalar, a map, or a message that is neither an entity nor a
+ * well-formed reference message. A malformed reference message is not a
+ * reference either — registration reports it, and everything else sees an
+ * ordinary sub-message.
+ */
+export function refShape(field: DescField): RefShape | undefined {
 	const elem = field.fieldKind === 'message'
 		? field.message
 		: field.fieldKind === 'list' && field.listKind === 'message'
 		? field.message
 		: undefined;
-	if (!elem || !hasOption(elem, entityExt)) return [];
-	const names = getOption(elem, entityExt).keyFields;
-	if (names.length === 0) return [];
+	if (!elem) return undefined;
+	// The reference declaration wins over an entity declaration on the same
+	// message: such a message is refused at registration, and until then it
+	// must not pass for an entity-typed stub. Mirrors lww.RefOf.
+	if (!hasOption(elem, referenceExt)) {
+		const keyFields = entityKeyFields(elem);
+		return keyFields ? { targetSchema: elem, keyFields } : undefined;
+	}
+	const parsed = parseReferenceMessage(elem);
+	if (typeof parsed === 'string') return undefined;
+	return parsed;
+}
+
+/**
+ * Key fields of the entity targeted by a reference field, or [] when the field
+ * is not a reference. The fields are the TARGET's: on a reference message they
+ * sit under the entity field, not on the stored value — address them through
+ * {@link refKeyPath}.
+ */
+export function refKeyFields(field: DescField): DescField[] {
+	return refShape(field)?.keyFields ?? [];
+}
+
+/** Whether a field is a first-class typed reference (see refShape). */
+export function isRef(field: DescField): boolean {
+	return refShape(field) !== undefined;
+}
+
+/**
+ * Whether a field is a reference whose stored shape is a reference message —
+ * the shape that is replaced whole on every write.
+ */
+export function isRefMessageField(field: DescField): boolean {
+	return refShape(field)?.valueField !== undefined;
+}
+
+/** The target entity's message schema of a reference field, or undefined. */
+export function refTarget(field: DescField): DescMessage | undefined {
+	return refShape(field)?.targetSchema;
+}
+
+/**
+ * Whether a reference's stored values may name a workspace other than the
+ * holder's: the reference message declares a workspace field.
+ */
+export function refQualified(shape: RefShape): boolean {
+	return shape.workspaceField !== undefined;
+}
+
+/**
+ * The accessor names from a stored reference value to one key field of the
+ * target: `[key]` for an entity-typed reference, `[value, key]` for a
+ * reference message.
+ */
+export function refKeyPath(shape: RefShape, keyField: DescField): string[] {
+	return shape.valueField === undefined
+		? [ keyField.localName ]
+		: [ shape.valueField.localName, keyField.localName ];
+}
+
+/**
+ * The target stub inside one stored reference value: the value itself for an
+ * entity-typed reference, the embedded entity message for a reference
+ * message. Undefined for a reference message holding no stub, which points at
+ * nothing.
+ */
+export function refStub(shape: RefShape, value: Message): Message | undefined {
+	if (shape.valueField === undefined) return value;
+	const inner = (value as unknown as Rec)[shape.valueField.localName];
+	return inner === undefined || inner === null ? undefined : inner as Message;
+}
+
+/**
+ * The workspace one stored reference value names, or undefined when it names
+ * none or the reference has no workspace field — both mean the holder's own
+ * workspace.
+ */
+export function refStubWorkspace(shape: RefShape, value: Message): string | undefined {
+	if (shape.workspaceField === undefined) return undefined;
+	const ws = (value as unknown as Rec)[shape.workspaceField.localName];
+	return typeof ws === 'string' && ws !== '' ? ws : undefined;
+}
+
+/**
+ * The workspace a stored reference value resolves in, given the holder's:
+ * the one it names, else the holder's own.
+ */
+export function refWorkspaceOf(shape: RefShape, value: Message, holderWorkspace: string): string {
+	return refStubWorkspace(shape, value) ?? holderWorkspace;
+}
+
+/**
+ * Whether a message declares (syncplane.v1.reference), well-formed or not.
+ */
+export function isReferenceMessage(desc: DescMessage): boolean {
+	return hasOption(desc, referenceExt);
+}
+
+/**
+ * Reads a reference message's two fields, or returns the reason it breaks the
+ * rules: not itself an entity, exactly one singular entity-typed field, at most
+ * one singular string field marked workspace, no other fields, nothing inside
+ * a oneof. Mirrors the engine's registration check.
+ */
+function parseReferenceMessage(desc: DescMessage): RefShape | string {
+	if (hasOption(desc, entityExt)) {
+		return `reference message ${desc.typeName} is also an entity; a reference message wraps an entity, it is not one`;
+	}
+	let valueField: DescField | undefined;
+	let targetSchema: DescMessage | undefined;
+	let keyFields: DescField[] | undefined;
+	let workspaceField: DescField | undefined;
+	for (const field of desc.fields) {
+		if (field.oneof) {
+			return `reference message ${desc.typeName}: field "${field.name}" is a member of oneof "${field.oneof.name}"; a reference message is replaced whole and has no cases`;
+		}
+		const behavior = hasOption(field, fieldBehaviorExt)
+			? getOption(field, fieldBehaviorExt)
+			: undefined;
+		if (behavior?.workspace) {
+			if (field.fieldKind !== 'scalar' || field.scalar !== ScalarType.STRING) {
+				return `reference message ${desc.typeName}: workspace field "${field.name}" must be a singular string`;
+			}
+			if (workspaceField) {
+				return `reference message ${desc.typeName}: fields "${workspaceField.name}" and "${field.name}" are both marked workspace; a reference names one workspace`;
+			}
+			workspaceField = field;
+			continue;
+		}
+		if (field.fieldKind === 'message') {
+			const kf = entityKeyFields(field.message);
+			if (kf) {
+				if (valueField) {
+					return `reference message ${desc.typeName}: fields "${valueField.name}" and "${field.name}" are both entity-typed; a reference names one target`;
+				}
+				valueField = field;
+				targetSchema = field.message;
+				keyFields = kf;
+				continue;
+			}
+		}
+		return `reference message ${desc.typeName}: field "${field.name}" is neither the entity field nor a workspace field; a reference message holds exactly those`;
+	}
+	if (!valueField || !targetSchema || !keyFields) {
+		return `reference message ${desc.typeName} has no entity-typed field to name its target`;
+	}
+	return { targetSchema, keyFields, refSchema: desc, valueField, workspaceField };
+}
+
+/**
+ * Registration-time guard: every message type reachable from an entity that
+ * declares (syncplane.v1.reference) must be well-formed, and a field marked
+ * workspace may sit nowhere else. Recursive types are visited once. Mirrors
+ * the engine's registration check.
+ */
+function validateReferenceMessages(schema: DescMessage): void {
+	const seen = new Set<string>();
+	const walk = (desc: DescMessage): void => {
+		if (seen.has(desc.typeName)) return;
+		seen.add(desc.typeName);
+		if (isReferenceMessage(desc)) {
+			const parsed = parseReferenceMessage(desc);
+			if (typeof parsed === 'string') throw new Error(parsed);
+		} else {
+			for (const field of desc.fields) {
+				const behavior = hasOption(field, fieldBehaviorExt)
+					? getOption(field, fieldBehaviorExt)
+					: undefined;
+				if (behavior?.workspace) {
+					throw new Error(
+						`field "${field.name}" is marked workspace, but ${desc.typeName} is not a reference message; the flag belongs inside a message declaring (syncplane.v1.reference)`,
+					);
+				}
+			}
+		}
+		for (const field of desc.fields) {
+			const sub = field.fieldKind === 'message'
+				? field.message
+				: field.fieldKind === 'list' && field.listKind === 'message'
+				? field.message
+				: field.fieldKind === 'map' && field.mapKind === 'message'
+				? field.message
+				: undefined;
+			if (sub) walk(sub);
+		}
+	};
+	walk(schema);
+}
+
+/**
+ * An entity's key fields when its key can identify a stub, else undefined.
+ * This is the detection rule for an entity-typed reference: no annotation on
+ * the field, the target message being an entity makes it one.
+ */
+function entityKeyFields(desc: DescMessage): DescField[] | undefined {
+	if (!hasOption(desc, entityExt)) return undefined;
+	const names = getOption(desc, entityExt).keyFields;
+	if (names.length === 0) return undefined;
 	const out: DescField[] = [];
 	for (const n of names) {
-		const f = elem.fields.find((ff) => ff.name === n);
+		const f = desc.fields.find((ff) => ff.name === n);
 		// A target whose key sits inside a oneof cannot be registered at all, and
 		// a stub projected onto a field that is only sometimes there would not
 		// identify a row. Not a ref, then.
-		if (!f || f.oneof) return [];
+		if (!f || f.oneof) return undefined;
 		out.push(f);
 	}
 	return out;
-}
-
-/** Whether a field is a first-class typed reference (see refKeyFields). */
-export function isRef(field: DescField): boolean {
-	return refKeyFields(field).length > 0;
-}
-
-/** The target (element) message of a reference field, or undefined. */
-export function refTarget(field: DescField): DescMessage | undefined {
-	if (field.fieldKind === 'message') return field.message;
-	if (field.fieldKind === 'list' && field.listKind === 'message') return field.message;
-	return undefined;
 }
 
 /** A forward reference: a ref field of one entity pointing at another. */
@@ -356,6 +570,8 @@ export interface ForwardRef {
 	repeated: boolean;
 	/** Number of key fields in the target (1 = single key, >1 = composite). */
 	keyArity: number;
+	/** Where the key and workspace sit inside a stored value. */
+	shape: RefShape;
 }
 
 /**
@@ -372,6 +588,8 @@ export interface ReverseRef {
 	/** The forward ref field this reverses (proto name). */
 	viaFieldName: string;
 	repeated: boolean;
+	/** The forward reference's stored shape. */
+	shape: RefShape;
 }
 
 /**
@@ -379,33 +597,58 @@ export interface ReverseRef {
  * fields, mirroring the server's projectRefs exactly. Returns the input
  * unchanged when the entity has no ref fields; otherwise a projected clone (the
  * caller's value is never mutated). Idempotent.
+ *
+ * Throws when a reference message names a workspace that fails the
+ * workspace-id rule: no client could hold such a workspace, so the reference
+ * could never resolve, and the server refuses the same write.
  */
 export function projectRefs<D extends DescMessage>(
 	schema: D,
 	value: MessageShape<D>,
 ): MessageShape<D> {
-	const refs = schema.fields.filter(isRef);
+	const refs: [DescField, RefShape][] = [];
+	for (const field of schema.fields) {
+		const shape = refShape(field);
+		if (shape) refs.push([ field, shape ]);
+	}
 	if (refs.length === 0) return value;
 	const out = clone(schema, value);
 	const rec = out as unknown as Rec;
-	for (const field of refs) {
-		const kf = refKeyFields(field);
-		// isRef guarantees a (element) message type, but narrow for the compiler.
-		const target = field.fieldKind === 'message'
-			? field.message
-			: field.fieldKind === 'list' && field.listKind === 'message'
-			? field.message
-			: undefined;
-		if (!target) continue;
+	for (const [ field, shape ] of refs) {
 		if (field.fieldKind === 'list') {
 			const list = rec[field.localName] as Message[] | undefined;
-			if (list) rec[field.localName] = list.map((e) => projectStub(target, e, kf));
+			if (list) rec[field.localName] = list.map((e) => projectValue(shape, e));
 		} else {
 			const stub = rec[field.localName] as Message | undefined;
-			if (stub !== undefined) rec[field.localName] = projectStub(target, stub, kf);
+			if (stub !== undefined) rec[field.localName] = projectValue(shape, stub);
 		}
 	}
 	return out;
+}
+
+/**
+ * One stored reference value projected down: the target stub keeps only its
+ * key fields, and a reference message keeps its workspace around the projected
+ * stub.
+ */
+function projectValue(shape: RefShape, value: Message): Message {
+	if (shape.valueField === undefined || shape.refSchema === undefined) {
+		return projectStub(shape.targetSchema, value, shape.keyFields);
+	}
+	const fresh = create(shape.refSchema) as unknown as Rec;
+	const rec = value as unknown as Rec;
+	if (shape.workspaceField) {
+		const ws = rec[shape.workspaceField.localName];
+		if (typeof ws === 'string' && ws !== '') {
+			validateWorkspaceId(ws);
+			fresh[shape.workspaceField.localName] = ws;
+		}
+	}
+	const inner = rec[shape.valueField.localName] as Message | undefined;
+	if (inner !== undefined && inner !== null) {
+		fresh[shape.valueField.localName] = projectStub(shape.targetSchema, inner, shape.keyFields);
+	}
+	return fresh as unknown as Message;
 }
 
 /** A fresh stub of the target type carrying only its key fields. */
@@ -453,6 +696,7 @@ export class EntityRegistry {
 				throw new Error(`entity "${def.name}" registered twice`);
 			}
 			validateOneofs(schema);
+			validateReferenceMessages(schema);
 			validateOrderFields(schema);
 			warnShadowedQueryFields(schema);
 			this.installTextMergers(def);
@@ -548,10 +792,9 @@ export class EntityRegistry {
 			const fields = [ ...def.schema.fields ].sort((a, b) => (a.name < b.name ? -1 : 1));
 			const fwd: ForwardRef[] = [];
 			for (const field of fields) {
-				const kf = refKeyFields(field);
-				if (kf.length === 0) continue;
-				const targetSchema = refTarget(field)!;
-				const targetDef = this.byType.get(targetSchema.typeName);
+				const shape = refShape(field);
+				if (!shape) continue;
+				const targetDef = this.byType.get(shape.targetSchema.typeName);
 				// A ref whose target entity is not registered in this client cannot
 				// be resolved or followed locally, so it is omitted from the graph
 				// (it is not exposed as an accessor). Projection still applies — that
@@ -561,9 +804,10 @@ export class EntityRegistry {
 					fieldName: field.name,
 					localName: field.localName,
 					targetEntity: targetDef.name,
-					targetSchema,
+					targetSchema: shape.targetSchema,
 					repeated: field.fieldKind === 'list',
-					keyArity: kf.length,
+					keyArity: shape.keyFields.length,
+					shape,
 				});
 			}
 			this.forwardRefs.set(name, fwd);
@@ -605,6 +849,7 @@ export class EntityRegistry {
 						viaField: r.localName,
 						viaFieldName: r.fieldName,
 						repeated: r.repeated,
+						shape: r.shape,
 					});
 					this.reverseRefs.set(target, list);
 				}
@@ -785,9 +1030,11 @@ function mergePath(
 	}
 
 	const opaque = isOpaque(field);
-	// Whole-replace cases: a bare path, or an opaque field (the escape hatch —
-	// replaced/merged whole even when the mask names a sub-path into it).
-	if (rest === '' || opaque) {
+	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
+	// replaced/merged whole even when the mask names a sub-path into it), or a
+	// reference message, whose workspace and key must never split across a
+	// masked write. Mirrors lww.go.
+	if (rest === '' || opaque || isRefMessageField(field)) {
 		const merge = mergers?.get(prefix + seg);
 		if (merge && opaque && applyMerger(dst, src, field, merge)) {
 			return;

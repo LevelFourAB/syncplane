@@ -66,7 +66,8 @@ func buildRefIndexes(info *entityInfo) error {
 		}
 		comps := make([]query.IndexComponent, 0, len(rf.keyFields))
 		for _, kf := range rf.keyFields {
-			c, err := query.CompileIndexComponent(desc, []string{string(rf.fd.Name()), string(kf.Name())}, false)
+			path := append([]string{string(rf.fd.Name())}, rf.ref.KeyPathNames(kf)...)
+			c, err := query.CompileIndexComponent(desc, path, false)
 			if err != nil {
 				return fmt.Errorf("reference field %q: %w", rf.fd.Name(), err)
 			}

@@ -114,9 +114,11 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 	}
 
 	opaque := isOpaque(fd)
-	// Whole-replace cases: a bare path, or an opaque field (the escape hatch —
-	// replaced/merged whole even when the mask names a sub-path into it).
-	if rest == "" || opaque {
+	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
+	// replaced/merged whole even when the mask names a sub-path into it), or a
+	// reference message, whose workspace and key must never split across a
+	// masked write.
+	if rest == "" || opaque || IsRefMessageField(fd) {
 		mg, hasMerger := m[prefix+seg]
 		if hasMerger && opaque && src.Has(fd) && (dst.Has(fd) || mg.MergeAbsentBase) {
 			fn := mg.Fn
@@ -474,25 +476,262 @@ func keyFieldsFor(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 	return fields
 }
 
-// RefKeyFields returns the key fields of the entity targeted by a reference
-// field — a singular or repeated message field whose (element) message carries
-// (syncplane.v1.entity) — resolved against that message's own descriptor. Returns
-// nil when fd is not a reference (non-message, map, or a message that is not a
-// registered entity). This is the single detection rule for a typed reference:
-// no annotation, the target message simply being an entity makes the field a
-// ref.
-func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
-	if fd.Kind() != protoreflect.MessageKind || fd.IsMap() {
+// Ref describes one typed reference field: the entity it points at, and where
+// inside the stored value the target's key and workspace sit.
+//
+// Two stored shapes make a reference. An ENTITY-TYPED field — a singular or
+// repeated message field whose (element) message carries
+// (syncplane.v1.entity) — stores a stub of the target itself, projected down
+// to its key fields; Value is nil and the stub is the field value. A REFERENCE
+// MESSAGE field — one whose (element) message carries (syncplane.v1.reference)
+// — stores a wrapper holding the entity stub in Value and, when the message
+// declares one, the target's workspace in Workspace. Consumers address the key
+// through KeyPath and the stub through Stub, so the two shapes differ in
+// nothing else.
+type Ref struct {
+	// Field is the reference field itself, singular or repeated.
+	Field protoreflect.FieldDescriptor
+	// Target is the referenced entity's message descriptor.
+	Target protoreflect.MessageDescriptor
+	// KeyFields are the target's key fields, declared on Target.
+	KeyFields []protoreflect.FieldDescriptor
+	// Value is the entity-typed field of a reference message that holds the
+	// target stub; nil for an entity-typed reference.
+	Value protoreflect.FieldDescriptor
+	// Workspace is the reference message's workspace field, or nil when every
+	// stored value resolves in the holder's own workspace.
+	Workspace protoreflect.FieldDescriptor
+}
+
+// RefOf classifies fd as a typed reference, or returns nil when it is not one:
+// a non-message field, a map, or a message that is neither an entity nor a
+// well-formed reference message. A reference message that breaks its rules
+// (see CheckReferenceMessage) is not a reference either — registration reports
+// it, and everything else sees an ordinary sub-message.
+func RefOf(fd protoreflect.FieldDescriptor) *Ref {
+	if fd == nil || fd.Kind() != protoreflect.MessageKind || fd.IsMap() {
 		return nil
 	}
 	elem := fd.Message()
-	eo := entityOptions(elem)
+	// The reference declaration wins over an entity declaration on the same
+	// message: such a message is refused at registration, and until then it
+	// must not pass for an entity-typed stub.
+	if referenceOptions(elem) == nil {
+		if kf := entityKeyFields(elem); kf != nil {
+			return &Ref{Field: fd, Target: elem, KeyFields: kf}
+		}
+		return nil
+	}
+	shape, err := referenceShapeOf(elem)
+	if err != nil {
+		return nil
+	}
+	return &Ref{
+		Field:     fd,
+		Target:    shape.value.Message(),
+		KeyFields: shape.keyFields,
+		Value:     shape.value,
+		Workspace: shape.workspace,
+	}
+}
+
+// Qualified reports whether stored values may name a workspace other than the
+// holder's: the reference message declares a workspace field.
+func (r *Ref) Qualified() bool { return r.Workspace != nil }
+
+// KeyPath returns the field steps from a stored reference value to one key
+// field of the target: [kf] for an entity-typed reference, [Value, kf] for a
+// reference message.
+func (r *Ref) KeyPath(kf protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
+	if r.Value == nil {
+		return []protoreflect.FieldDescriptor{kf}
+	}
+	return []protoreflect.FieldDescriptor{r.Value, kf}
+}
+
+// KeyPathNames is KeyPath as proto field names — the segments a query or index
+// path spells the key in.
+func (r *Ref) KeyPathNames(kf protoreflect.FieldDescriptor) []string {
+	steps := r.KeyPath(kf)
+	out := make([]string, len(steps))
+	for i, s := range steps {
+		out[i] = string(s.Name())
+	}
+	return out
+}
+
+// Stub returns the target stub inside one stored reference value: the value
+// itself for an entity-typed reference, the embedded entity message for a
+// reference message. Reports false for a reference message that holds no
+// stub, which points at nothing.
+func (r *Ref) Stub(value protoreflect.Message) (protoreflect.Message, bool) {
+	if r.Value == nil {
+		return value, true
+	}
+	if !value.Has(r.Value) {
+		return nil, false
+	}
+	return value.Get(r.Value).Message(), true
+}
+
+// WorkspaceOf returns the workspace one stored reference value names, or ""
+// when the reference has no workspace field or the value leaves it empty —
+// both mean the holder's own workspace.
+func (r *Ref) WorkspaceOf(value protoreflect.Message) string {
+	if r.Workspace == nil {
+		return ""
+	}
+	return value.Get(r.Workspace).String()
+}
+
+// ResolvesIn reports whether a stored reference value points into workspace,
+// the holder's own: it names that workspace, or names none.
+func (r *Ref) ResolvesIn(value protoreflect.Message, workspace string) bool {
+	ws := r.WorkspaceOf(value)
+	return ws == "" || ws == workspace
+}
+
+// Addressable reports whether a path may continue from the reference field
+// into the field named: a key field of an entity-typed stub, or the value and
+// workspace fields of a reference message — the key fields then sit under
+// Value, which is itself an entity-typed reference.
+func (r *Ref) Addressable(name string) bool {
+	if r.Value != nil {
+		return name == string(r.Value.Name()) ||
+			(r.Workspace != nil && name == string(r.Workspace.Name()))
+	}
+	for _, kf := range r.KeyFields {
+		if string(kf.Name()) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// AddressableNames lists the fields Addressable admits, for error messages.
+func (r *Ref) AddressableNames() []string {
+	if r.Value != nil {
+		out := []string{string(r.Value.Name())}
+		if r.Workspace != nil {
+			out = append(out, string(r.Workspace.Name()))
+		}
+		return out
+	}
+	out := make([]string, len(r.KeyFields))
+	for i, kf := range r.KeyFields {
+		out[i] = string(kf.Name())
+	}
+	return out
+}
+
+// RefKeyFields returns the key fields of the entity a reference field targets
+// (see RefOf), or nil when fd is not a reference. The fields are the TARGET's:
+// on a reference message they sit under Ref.Value, not on the stored value
+// itself — address them through Ref.KeyPath.
+func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
+	if r := RefOf(fd); r != nil {
+		return r.KeyFields
+	}
+	return nil
+}
+
+// IsRef reports whether fd is a first-class typed reference (see RefOf).
+func IsRef(fd protoreflect.FieldDescriptor) bool {
+	return RefOf(fd) != nil
+}
+
+// IsRefMessageField reports whether fd is a reference whose stored shape is a
+// reference message — the shape that is replaced whole on every write.
+func IsRefMessageField(fd protoreflect.FieldDescriptor) bool {
+	r := RefOf(fd)
+	return r != nil && r.Value != nil
+}
+
+// IsReferenceMessage reports whether md declares (syncplane.v1.reference),
+// well-formed or not.
+func IsReferenceMessage(md protoreflect.MessageDescriptor) bool {
+	return referenceOptions(md) != nil
+}
+
+// CheckReferenceMessage validates the shape of a message declaring
+// (syncplane.v1.reference): not itself an entity, exactly one singular
+// entity-typed field, at most one singular string field marked
+// (syncplane.v1.field_behavior).workspace, and no other fields. A message
+// that declares nothing passes unless one of its fields is marked workspace,
+// which only a reference message may carry.
+func CheckReferenceMessage(md protoreflect.MessageDescriptor) error {
+	if referenceOptions(md) == nil {
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			if fd := fields.Get(i); fieldBehavior(fd).GetWorkspace() {
+				return fmt.Errorf("field %q is marked workspace, but %s is not a reference message; the flag belongs inside a message declaring (syncplane.v1.reference)", fd.Name(), md.FullName())
+			}
+		}
+		return nil
+	}
+	_, err := referenceShapeOf(md)
+	return err
+}
+
+// referenceShape is the parsed form of a reference message.
+type referenceShape struct {
+	value     protoreflect.FieldDescriptor
+	workspace protoreflect.FieldDescriptor
+	keyFields []protoreflect.FieldDescriptor
+}
+
+// referenceShapeOf reads a reference message's two fields, or reports how the
+// message breaks the rules CheckReferenceMessage states.
+func referenceShapeOf(md protoreflect.MessageDescriptor) (referenceShape, error) {
+	var shape referenceShape
+	if entityOptions(md) != nil {
+		return shape, fmt.Errorf("reference message %s is also an entity; a reference message wraps an entity, it is not one", md.FullName())
+	}
+	fields := md.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if od := OneofOf(fd); od != nil {
+			return shape, fmt.Errorf("reference message %s: field %q is a member of oneof %q; a reference message is replaced whole and has no cases", md.FullName(), fd.Name(), od.Name())
+		}
+		if fieldBehavior(fd).GetWorkspace() {
+			if fd.Kind() != protoreflect.StringKind || fd.IsList() {
+				return shape, fmt.Errorf("reference message %s: workspace field %q must be a singular string", md.FullName(), fd.Name())
+			}
+			if shape.workspace != nil {
+				return shape, fmt.Errorf("reference message %s: fields %q and %q are both marked workspace; a reference names one workspace", md.FullName(), shape.workspace.Name(), fd.Name())
+			}
+			shape.workspace = fd
+			continue
+		}
+		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() {
+			if kf := entityKeyFields(fd.Message()); kf != nil {
+				if shape.value != nil {
+					return shape, fmt.Errorf("reference message %s: fields %q and %q are both entity-typed; a reference names one target", md.FullName(), shape.value.Name(), fd.Name())
+				}
+				shape.value, shape.keyFields = fd, kf
+				continue
+			}
+		}
+		return shape, fmt.Errorf("reference message %s: field %q is neither the entity field nor a workspace field; a reference message holds exactly those", md.FullName(), fd.Name())
+	}
+	if shape.value == nil {
+		return shape, fmt.Errorf("reference message %s has no entity-typed field to name its target", md.FullName())
+	}
+	return shape, nil
+}
+
+// entityKeyFields returns md's key fields when md is an entity whose key can
+// identify a stub, else nil. This is the detection rule for an entity-typed
+// reference: no annotation on the field, the target message being an entity
+// makes it one.
+func entityKeyFields(md protoreflect.MessageDescriptor) []protoreflect.FieldDescriptor {
+	eo := entityOptions(md)
 	if eo == nil || len(eo.GetKeyFields()) == 0 {
 		return nil
 	}
 	fields := make([]protoreflect.FieldDescriptor, 0, len(eo.GetKeyFields()))
 	for _, n := range eo.GetKeyFields() {
-		f := elem.Fields().ByName(protoreflect.Name(n))
+		f := md.Fields().ByName(protoreflect.Name(n))
 		// A target whose key is inside a oneof cannot be registered at all
 		// (see engine/server), and a stub projected down to a field that is only
 		// sometimes there would not identify a row. Not a ref, then.
@@ -502,11 +741,6 @@ func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 		fields = append(fields, f)
 	}
 	return fields
-}
-
-// IsRef reports whether fd is a first-class typed reference (see RefKeyFields).
-func IsRef(fd protoreflect.FieldDescriptor) bool {
-	return RefKeyFields(fd) != nil
 }
 
 // EncodeItemKey renders a keyed-list element's identity as the mask segment a
@@ -780,4 +1014,8 @@ func fieldBehavior(fd protoreflect.FieldDescriptor) *syncplanev1.FieldBehavior {
 // entityOptions reads the (syncplane.v1.entity) extension off a message, or nil.
 func entityOptions(md protoreflect.MessageDescriptor) *syncplanev1.EntityOptions {
 	return protoopts.Entity(md)
+}
+
+func referenceOptions(md protoreflect.MessageDescriptor) *syncplanev1.ReferenceOptions {
+	return protoopts.Reference(md)
 }

@@ -132,6 +132,9 @@ type forwardRefRel struct {
 	fd           protoreflect.FieldDescriptor
 	targetEntity string
 	keyFields    []protoreflect.FieldDescriptor // target entity's key fields
+	// ref is the stored shape: where the stub and, for a reference message,
+	// the workspace sit inside the field value.
+	ref *lww.Ref
 }
 
 // reverseRefRel is the inverse, surfaced on the target entity, auto-named
@@ -140,6 +143,8 @@ type reverseRefRel struct {
 	name         string
 	sourceEntity string
 	viaField     protoreflect.FieldDescriptor
+	// via is the forward reference this reverses, with its stored shape.
+	via *lww.Ref
 }
 
 type refGraph struct {
@@ -175,11 +180,11 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		}
 		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name() < ordered[j].Name() })
 		for _, fd := range ordered {
-			kf := lww.RefKeyFields(fd)
-			if kf == nil {
+			ref := lww.RefOf(fd)
+			if ref == nil {
 				continue
 			}
-			target := c.byType[fd.Message().FullName()]
+			target := c.byType[ref.Target.FullName()]
 			if target == nil {
 				continue // target entity not registered here; not followable
 			}
@@ -187,7 +192,8 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 				localName:    fd.JSONName(),
 				fd:           fd,
 				targetEntity: target.name,
-				keyFields:    kf,
+				keyFields:    ref.KeyFields,
+				ref:          ref,
 			}
 		}
 		g.forward[name] = fwd
@@ -232,6 +238,7 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 					name:         relName,
 					sourceEntity: source,
 					viaField:     r.fd,
+					via:          r.ref,
 				}
 			}
 		}
@@ -640,17 +647,23 @@ func (e *rowEmitter) followForward(tx storage.ReadTx, holder frontierRow, fr *fo
 		out = append(out, resolved{row: row, front: frontierRow{entity: fr.targetEntity, key: row.Key, msg: msg.ProtoReflect()}})
 		return nil
 	}}
-	addStub := func(stub protoreflect.Message) error {
+	// A stored value naming another workspace resolves there, not in this
+	// one (see ReferenceOptions), so it contributes nothing to this closure.
+	addValue := func(value protoreflect.Message) error {
+		stub, ok := fr.ref.Stub(value)
+		if !ok || !fr.ref.ResolvesIn(value, e.ws) {
+			return nil
+		}
 		return batch.add(targetInfo.keyOf(stub))
 	}
 	if fr.fd.IsList() {
 		list := holder.msg.Get(fr.fd).List()
 		for i := 0; i < list.Len(); i++ {
-			if err := addStub(list.Get(i).Message()); err != nil {
+			if err := addValue(list.Get(i).Message()); err != nil {
 				return nil, err
 			}
 		}
-	} else if err := addStub(holder.msg.Get(fr.fd).Message()); err != nil {
+	} else if err := addValue(holder.msg.Get(fr.fd).Message()); err != nil {
 		return nil, err
 	}
 	if err := batch.flush(); err != nil {
@@ -718,7 +731,7 @@ func (e *rowEmitter) followReverse(tx storage.ReadTx, holder frontierRow, rr *re
 			return nil // quarantined: its ref cannot be read, so it points nowhere
 		}
 		m := msg.ProtoReflect()
-		if !refPointsAt(m, rr.viaField, holderInfo, holder.key) {
+		if !refPointsAt(m, rr.via, holderInfo, holder.key, e.ws) {
 			return nil
 		}
 		return collect(row, m, msg)
@@ -805,6 +818,12 @@ func (e *rowEmitter) followReverseIndexed(
 		msg, ok := e.decodeRow(sourceInfo, row)
 		if !ok {
 			return nil // quarantined: its ref cannot be read, so it points nowhere
+		}
+		// The index is keyed on the target key alone. A reference message may
+		// name another workspace under the same key, and such a row points
+		// there rather than here, so the hit is re-checked against the value.
+		if rr.via.Qualified() && !refPointsAt(msg.ProtoReflect(), rr.via, holderInfo, holder.key, e.ws) {
+			return nil
 		}
 		return collect(row, msg.ProtoReflect(), msg)
 	}}
@@ -928,6 +947,12 @@ func (e *rowEmitter) resolveHops(subs []*syncplanev1.Subscription) (closureHops,
 				return closureHops{}, false, nil
 			}
 			if rr := g.reverseBy(sub.GetEntity(), segs[0]); rr != nil {
+				// A workspace-qualified ref is decided by its value's workspace
+				// as well as its key, which the ref index the probes below read
+				// does not carry. Rebuild instead.
+				if rr.via.Qualified() {
+					return closureHops{}, false, nil
+				}
 				hops.reverse = append(hops.reverse, reverseHop{
 					rr:         rr,
 					seedInfo:   seedInfo,
@@ -945,8 +970,10 @@ func (e *rowEmitter) resolveHops(subs []*syncplanev1.Subscription) (closureHops,
 				return closureHops{}, false, nil
 			}
 			// A to-many ref stores several target keys in one row, and the
-			// probe reads one entry per row (see followReverseIndexed).
-			if fr.fd.IsList() {
+			// probe reads one entry per row (see followReverseIndexed). A
+			// workspace-qualified ref is decided by its value's workspace too,
+			// which the index does not carry.
+			if fr.fd.IsList() || fr.ref.Qualified() {
 				return closureHops{}, false, nil
 			}
 			targetInfo, ok := e.srv.catalogPtr().entities[fr.targetEntity]
@@ -1158,24 +1185,16 @@ func (m *closureMaint) holds(row storage.Row, hop *reverseHop) (bool, error) {
 	if !ok {
 		return false, nil // quarantined: its ref cannot be read, so it points nowhere
 	}
-	ref := msg.ProtoReflect()
-	if !ref.Has(hop.rr.viaField) {
-		return false, nil
-	}
-	if hop.rr.viaField.IsList() {
-		list := ref.Get(hop.rr.viaField).List()
-		for i := 0; i < list.Len(); i++ {
-			seed, err := m.isSeed(hop, hop.seedInfo.keyOf(list.Get(i).Message()))
-			if err != nil {
-				return false, err
-			}
-			if seed {
-				return true, nil
-			}
+	for _, stub := range refStubsIn(msg.ProtoReflect(), hop.rr.via, m.e.ws) {
+		seed, err := m.isSeed(hop, hop.seedInfo.keyOf(stub))
+		if err != nil {
+			return false, err
 		}
-		return false, nil
+		if seed {
+			return true, nil
+		}
 	}
-	return m.isSeed(hop, hop.seedInfo.keyOf(ref.Get(hop.rr.viaField).Message()))
+	return false, nil
 }
 
 // isSeed answers whether one row of the subscription's own entity is a follow
@@ -1623,20 +1642,40 @@ func (e *rowEmitter) emitMembershipDiff(tx storage.ReadTx, oldSet map[closureKey
 }
 
 // refPointsAt reports whether a source row's ref field (singular or repeated)
-// references holderKey, by re-deriving each stub's key with the holder
-// entity's key derivation (the same f → f.<key> resolution P1 uses).
-func refPointsAt(m protoreflect.Message, viaField protoreflect.FieldDescriptor, holderInfo *entityInfo, holderKey string) bool {
-	if !m.Has(viaField) {
-		return false
-	}
-	if viaField.IsList() {
-		list := m.Get(viaField).List()
-		for i := 0; i < list.Len(); i++ {
-			if holderInfo.keyOf(list.Get(i).Message()) == holderKey {
-				return true
-			}
+// references holderKey in workspace ws, by re-deriving each stub's key with
+// the holder entity's key derivation (the same f → f.<key> resolution P1 uses).
+// A stored value naming another workspace points at a different row however
+// its key reads.
+func refPointsAt(m protoreflect.Message, via *lww.Ref, holderInfo *entityInfo, holderKey, ws string) bool {
+	for _, stub := range refStubsIn(m, via, ws) {
+		if holderInfo.keyOf(stub) == holderKey {
+			return true
 		}
-		return false
 	}
-	return holderInfo.keyOf(m.Get(viaField).Message()) == holderKey
+	return false
+}
+
+// refStubsIn returns the target stubs a source row's ref field holds that
+// resolve in workspace ws — one for a singular ref, one per element for a
+// repeated one, none for an unset field. Values naming another workspace, and
+// reference messages holding no stub, are left out.
+func refStubsIn(m protoreflect.Message, via *lww.Ref, ws string) []protoreflect.Message {
+	if !m.Has(via.Field) {
+		return nil
+	}
+	var out []protoreflect.Message
+	add := func(value protoreflect.Message) {
+		if stub, ok := via.Stub(value); ok && via.ResolvesIn(value, ws) {
+			out = append(out, stub)
+		}
+	}
+	if via.Field.IsList() {
+		list := m.Get(via.Field).List()
+		for i := 0; i < list.Len(); i++ {
+			add(list.Get(i).Message())
+		}
+		return out
+	}
+	add(m.Get(via.Field).Message())
+	return out
 }

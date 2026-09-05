@@ -82,6 +82,10 @@ func main() {
 			// projection and reference-following subscriptions (issue→project,
 			// project→issues).
 			&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{},
+			// Task holds workspace-qualified references (UserRef): integration
+			// tests verify a stub naming another workspace round-trips, and
+			// that the server's follow and matches() stay inside one workspace.
+			&testdatav1.Task{},
 			// Historied opts into field history (and carries a collaborative
 			// text field), which also brings the engine's server-only history
 			// entity into the catalog: integration tests read it back through

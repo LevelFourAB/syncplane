@@ -245,7 +245,7 @@ var _ = Describe("Conformance vectors", func() {
 							matched = append(matched, query.TargetKeyValues(node, target.ProtoReflect()))
 						}
 					}
-					replacements[node.Cond] = query.RelReplacement(node, matched)
+					replacements[node.Cond] = query.RelReplacement(node, matched, "ws")
 				}
 				rewritten, err := query.Compile(desc, query.RewriteRels(cond, replacements))
 				Expect(err).NotTo(HaveOccurred())
