@@ -1,0 +1,204 @@
+syntax = "proto3";
+
+package syncplane.auth.v1;
+
+import "google/protobuf/timestamp.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/auth/v1;authv1";
+
+// AuthService is the sign-in surface of a standalone syncplaned host: the
+// accounts, sessions and workspace memberships it manages when no embedding
+// application supplies them. It is host-wide, mounted at the root of the
+// public listener rather than under an app prefix, and is absent from a
+// server that embeds the engine with its own identity.
+//
+// Sign-in returns a short-lived access token and a refresh token. The access
+// token is the bearer credential for every sync RPC and for the calls here
+// marked as requiring one; the refresh token obtains the next pair and is
+// rotated on every use. A refresh token presented after it was rotated away
+// revokes the whole session, so a client persists the new token before using
+// it and never refreshes from two places at once.
+//
+// Errors use the standard Connect codes: unauthenticated for credentials that
+// do not verify (including a refresh token that names no live session, after
+// which the client signs in again), permission_denied for a caller who is
+// signed in but may not do this, invalid_argument for malformed input,
+// already_exists, not_found, failed_precondition and resource_exhausted for
+// sign-in attempts over the limit.
+service AuthService {
+	// SignIn verifies an e-mail address and password and opens a session.
+	rpc SignIn(SignInRequest) returns (SignInResponse);
+	// SignUp creates an account and opens its first session. It fails with
+	// failed_precondition on a host where sign-up is closed, where accounts are
+	// created by an administrator instead. A new account belongs to no
+	// workspace.
+	rpc SignUp(SignUpRequest) returns (SignUpResponse);
+	// Refresh exchanges a refresh token for a new token pair, retiring the one
+	// presented.
+	rpc Refresh(RefreshRequest) returns (RefreshResponse);
+	// SignOut ends the session a refresh token belongs to. It succeeds whether
+	// or not the token still named a live session. Access tokens already issued
+	// stay valid until they expire.
+	rpc SignOut(SignOutRequest) returns (SignOutResponse);
+	// GetCurrentUser returns the account the bearer token belongs to. Requires
+	// a bearer token.
+	rpc GetCurrentUser(GetCurrentUserRequest) returns (GetCurrentUserResponse);
+	// ChangePassword replaces the caller's password after verifying the current
+	// one, and ends every other session of the account. Requires a bearer
+	// token.
+	rpc ChangePassword(ChangePasswordRequest) returns (ChangePasswordResponse);
+	// ListWorkspaces returns the workspaces the caller may sync, across apps.
+	// An administrator sees every workspace, listed as its owner. Requires a
+	// bearer token.
+	rpc ListWorkspaces(ListWorkspacesRequest) returns (ListWorkspacesResponse);
+	// ListMembers returns a workspace's members. Any member of the workspace
+	// may call it. Requires a bearer token.
+	rpc ListMembers(ListMembersRequest) returns (ListMembersResponse);
+	// SetMember adds an account to a workspace by e-mail address, or changes
+	// the role of one already in it. Owners and administrators may call it.
+	// Requires a bearer token.
+	rpc SetMember(SetMemberRequest) returns (SetMemberResponse);
+	// RemoveMember takes an account out of a workspace. Owners and
+	// administrators may call it; the last owner cannot be removed. Requires a
+	// bearer token.
+	rpc RemoveMember(RemoveMemberRequest) returns (RemoveMemberResponse);
+}
+
+// User is an account as the caller may see it.
+message User {
+	// Stable account id. The principal subject is "user:" followed by it.
+	string id = 1;
+	string email = 2;
+	string name = 3;
+	// Host-wide administrator: may enter every workspace and manage accounts.
+	bool admin = 4;
+}
+
+// Tokens is a session's credential pair.
+message Tokens {
+	// Bearer credential for sync RPCs and the calls here that require one.
+	string access_token = 1;
+	google.protobuf.Timestamp access_expires_at = 2;
+	// Credential for Refresh and SignOut. Opaque; rotated on every Refresh.
+	string refresh_token = 3;
+	// When the session ends unless refreshed before then.
+	google.protobuf.Timestamp refresh_expires_at = 4;
+}
+
+// Role is what a member may do in a workspace.
+enum Role {
+	ROLE_UNSPECIFIED = 0;
+	// Reads only. Mutations are rejected.
+	ROLE_READER = 1;
+	// Reads and writes.
+	ROLE_WRITER = 2;
+	// Reads, writes and manages the member list.
+	ROLE_OWNER = 3;
+}
+
+// Workspace is a workspace the caller may sync, with the caller's role in it.
+message Workspace {
+	// The app the workspace belongs to; the leading path segment of the sync
+	// URL.
+	string app_id = 1;
+	// The workspace_id every sync RPC carries.
+	string workspace_id = 2;
+	// Label for people; no other meaning.
+	string name = 3;
+	Role role = 4;
+}
+
+// Member is one account's role in a workspace.
+message Member {
+	string user_id = 1;
+	string email = 2;
+	string name = 3;
+	Role role = 4;
+	google.protobuf.Timestamp added_at = 5;
+}
+
+message SignInRequest {
+	string email = 1;
+	string password = 2;
+}
+
+message SignInResponse {
+	User user = 1;
+	Tokens tokens = 2;
+}
+
+message SignUpRequest {
+	string email = 1;
+	string password = 2;
+	string name = 3;
+}
+
+message SignUpResponse {
+	User user = 1;
+	Tokens tokens = 2;
+}
+
+message RefreshRequest {
+	string refresh_token = 1;
+}
+
+message RefreshResponse {
+	Tokens tokens = 1;
+}
+
+message SignOutRequest {
+	string refresh_token = 1;
+}
+
+message SignOutResponse {}
+
+message GetCurrentUserRequest {}
+
+message GetCurrentUserResponse {
+	User user = 1;
+}
+
+message ChangePasswordRequest {
+	string current_password = 1;
+	string new_password = 2;
+}
+
+message ChangePasswordResponse {}
+
+message ListWorkspacesRequest {}
+
+message ListWorkspacesResponse {
+	// Ordered by app_id, then workspace_id.
+	repeated Workspace workspaces = 1;
+}
+
+message ListMembersRequest {
+	string app_id = 1;
+	string workspace_id = 2;
+}
+
+message ListMembersResponse {
+	// Ordered by e-mail address.
+	repeated Member members = 1;
+}
+
+message SetMemberRequest {
+	string app_id = 1;
+	string workspace_id = 2;
+	// The account to add or change, by e-mail address. It must already exist:
+	// not_found otherwise.
+	string email = 3;
+	Role role = 4;
+}
+
+message SetMemberResponse {
+	Member member = 1;
+}
+
+message RemoveMemberRequest {
+	string app_id = 1;
+	string workspace_id = 2;
+	string user_id = 3;
+}
+
+message RemoveMemberResponse {}

@@ -350,6 +350,17 @@ func (s *Sessions) RevokeAll(ctx context.Context, userID string) error {
 	return nil
 }
 
+// RevokeOthers ends every live session of a user except the one named, for a
+// password change made from a device that should stay signed in.
+func (s *Sessions) RevokeOthers(ctx context.Context, userID, keepSessionID string) error {
+	if _, err := s.store.b.exec(ctx, `UPDATE auth_sessions SET revoked_at = ?
+		WHERE user_id = ? AND id <> ? AND revoked_at IS NULL`,
+		s.now().UnixMilli(), userID, keepSessionID); err != nil {
+		return fmt.Errorf("auth: revoke other sessions: %w", err)
+	}
+	return nil
+}
+
 // ListSessions returns a user's live sessions, newest first.
 func (s *Sessions) ListSessions(ctx context.Context, userID string) ([]Session, error) {
 	r, err := s.store.b.query(ctx, `SELECT id, user_id, created_at, last_used_at, expires_at FROM auth_sessions
