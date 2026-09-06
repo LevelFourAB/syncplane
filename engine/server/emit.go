@@ -96,19 +96,20 @@ type rowEmitter struct {
 	// the scan covers them and the resync diff can carry them, even when they
 	// have no base scope of their own. Empty when nothing follows.
 	followEntities map[string]bool
-	// closure is the reference-following closure for THIS request, populated
-	// only on the normal pull/bootstrap path (never during a resync diff, where
-	// it must stay empty so followed rows are not spuriously tombstoned). A
-	// member is visible regardless of base scope; membership was already read-
-	// filtered at build time.
+	// closure is the reference-following closure for THIS request. The normal
+	// pull/bootstrap path resolves it under the request's scope; a resync diff
+	// gives both of its emitters the set the cursor carries instead, so a row
+	// the client holds through follow is visible on both sides and is never
+	// tombstoned for leaving base scope. A member is visible regardless of base
+	// scope; membership was already read-filtered at build time.
 	closure closureRows
 	// windows are the compiled Subscription.window specs, one per windowed
 	// subscription; empty when nothing is windowed.
 	windows []*compiledWindow
 	// windowMembers is the union of every window's membership for THIS
-	// request. Unlike the closure it is populated on the resync path too: a
-	// resync classifies rows under both the old and the new scope, and a
-	// window is part of the scope it has to resolve.
+	// request. Unlike the closure it is resolved under the request's scope on
+	// the resync path too: a resync classifies rows under both the old and the
+	// new scope, and a window is part of the scope it has to resolve.
 	windowMembers closureRows
 	// includeServerOnly lets rows of a server_only entity through classify. It
 	// is the difference between the two kinds of consumer this type serves:

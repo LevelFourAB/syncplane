@@ -170,6 +170,49 @@ var _ = Describe("Delta resync", func() {
 		return putMutation("c1", id, "todo", key, &todov1.Todo{Id: key, Title: title})
 	}
 
+	// applyPatch plays one patch onto a simulated client state keyed by
+	// "entity/key", in the order the client applies it: entity drops first,
+	// then row changes.
+	applyPatch := func(state map[string]bool, patch *syncplanev1.Patch) {
+		for _, entity := range patch.GetDropEntities() {
+			for k := range state {
+				if strings.HasPrefix(k, entity+"/") {
+					delete(state, k)
+				}
+			}
+		}
+		for _, rc := range patch.GetChanges() {
+			k := rc.GetEntity() + "/" + rc.GetKey()
+			if rc.GetTombstone() {
+				delete(state, k)
+			} else {
+				state[k] = true
+			}
+		}
+	}
+
+	// heldAfter simulates a client that bootstrapped rows and then applied
+	// every patch drain returned, and reports the rows it holds.
+	heldAfter := func(rows []*syncplanev1.RowChange, changes []*syncplanev1.RowChange, drops []string) map[string]bool {
+		state := map[string]bool{}
+		applyPatch(state, &syncplanev1.Patch{Changes: rows})
+		applyPatch(state, &syncplanev1.Patch{DropEntities: drops, Changes: changes})
+		return state
+	}
+
+	// followProject subscribes to all issues and follows issue→project, so
+	// projects arrive through the closure whether or not they have a base
+	// scope of their own.
+	followProject := func() *syncplanev1.Subscription {
+		return &syncplanev1.Subscription{
+			Entity: "issue",
+			Follow: &syncplanev1.FollowSpec{
+				Paths: []*syncplanev1.RefPath{{Segments: []string{"project"}}},
+				Depth: 1,
+			},
+		}
+	}
+
 	Describe("subscription changes", func() {
 		BeforeEach(func() {
 			ctx = context.Background()
@@ -205,6 +248,50 @@ var _ = Describe("Delta resync", func() {
 			changes, drops, _ := drain(cursor, todoSub)
 			Expect(drops).To(Equal([]string{"widget"}))
 			Expect(changes).To(BeEmpty())
+		})
+
+		It("keeps a row that leaves base scope but stays follow-reachable", func() {
+			push(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "project", "B", &testdatav1.Project{Id: "B", Name: "beta"}),
+				putMutation("c1", 3, "issue", "i1", &testdatav1.Issue{Id: "i1", Title: "one", Project: &testdatav1.Project{Id: "A"}}),
+			)
+			// project is in base scope AND reachable through the follow; the
+			// closure the cursor carries already names project/A.
+			cursor, rows := bootstrap(&syncplanev1.Subscription{Entity: "project"}, followProject())
+			Expect(valueKeys(rows, "project")).To(Equal([]string{"A", "B"}))
+
+			// project leaves base scope: A stays held through i1, B must go.
+			changes, drops, next := drain(cursor, followProject())
+			Expect(drops).To(BeEmpty())
+			Expect(tombstoneKeys(changes)).To(Equal([]string{"B"}), "a row the closure holds must not be tombstoned")
+			Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"issue/i1": true, "project/A": true}))
+
+			// An idle pull has nothing left to repair.
+			resp := pull(next, 0, followProject())
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
+		})
+
+		It("delivers the closure of a follow spec the scope change introduced", func() {
+			push(
+				putMutation("c1", 1, "project", "A", &testdatav1.Project{Id: "A", Name: "alpha"}),
+				putMutation("c1", 2, "project", "B", &testdatav1.Project{Id: "B", Name: "beta"}),
+				putMutation("c1", 3, "issue", "i1", &testdatav1.Issue{Id: "i1", Title: "one", Project: &testdatav1.Project{Id: "A"}}),
+			)
+			// No follow yet, so the cursor carries no closure at all.
+			cursor, rows := bootstrap(&syncplanev1.Subscription{Entity: "project"})
+			Expect(valueKeys(rows, "project")).To(Equal([]string{"A", "B"}))
+
+			// The follow is new: its closure must be walked from the new seeds,
+			// not maintained from the (empty) set the cursor carried.
+			changes, drops, next := drain(cursor, followProject())
+			Expect(drops).To(BeEmpty())
+			Expect(heldAfter(rows, changes, drops)).To(Equal(map[string]bool{"issue/i1": true, "project/A": true}))
+
+			resp := pull(next, 0, followProject())
+			Expect(resp.GetReset_()).To(BeFalse())
+			Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
 		})
 
 		It("an entity joining the set arrives as values", func() {
@@ -282,23 +369,7 @@ var _ = Describe("Delta resync", func() {
 
 			// Simulate the client's confirmed state.
 			state := map[string]bool{}
-			apply := func(resp *syncplanev1.PullResponse) {
-				for _, entity := range resp.GetPatch().GetDropEntities() {
-					for k := range state {
-						if strings.HasPrefix(k, entity+"/") {
-							delete(state, k)
-						}
-					}
-				}
-				for _, rc := range resp.GetPatch().GetChanges() {
-					k := rc.GetEntity() + "/" + rc.GetKey()
-					if rc.GetTombstone() {
-						delete(state, k)
-					} else {
-						state[k] = true
-					}
-				}
-			}
+			apply := func(resp *syncplanev1.PullResponse) { applyPatch(state, resp.GetPatch()) }
 
 			wide := widgetSub(countGte(1))
 			resp := pull(cursor, 1, wide) // first resync page: w1 only

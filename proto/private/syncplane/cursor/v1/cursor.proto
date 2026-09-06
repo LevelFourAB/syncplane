@@ -88,6 +88,16 @@ message Cursor {
 	// without a store, and entries too small to be worth a store round trip,
 	// keep inlining instead.
 	StateRef sets_ref = 12;
+	// Set when `closure` was produced under a subscription set other than
+	// `subscriptions`: a delta resync carries the old scope's closure onto the
+	// cursor it completes with, because the resync reconciles base scope only
+	// and leaves the closure to the pull that follows. The set still names
+	// exactly the rows the client holds via `follow`, so the diff against it
+	// stays exact, but it cannot be maintained from what changed since seq —
+	// the seeds and paths it was walked from are the old scope's. The next
+	// following pull walks the closure again from the new scope's seeds, and
+	// clears this once it stores the rebuilt set at a clean version boundary.
+	bool closure_rebuild = 13;
 }
 
 // StateRef names one immutable entry in the cursor-state store. The pair is

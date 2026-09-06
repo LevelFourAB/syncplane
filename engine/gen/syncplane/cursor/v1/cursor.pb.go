@@ -105,9 +105,19 @@ type Cursor struct {
 	// as a cursor below the tombstone horizon does — which is why servers
 	// without a store, and entries too small to be worth a store round trip,
 	// keep inlining instead.
-	SetsRef       *StateRef `protobuf:"bytes,12,opt,name=sets_ref,json=setsRef,proto3" json:"sets_ref,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	SetsRef *StateRef `protobuf:"bytes,12,opt,name=sets_ref,json=setsRef,proto3" json:"sets_ref,omitempty"`
+	// Set when `closure` was produced under a subscription set other than
+	// `subscriptions`: a delta resync carries the old scope's closure onto the
+	// cursor it completes with, because the resync reconciles base scope only
+	// and leaves the closure to the pull that follows. The set still names
+	// exactly the rows the client holds via `follow`, so the diff against it
+	// stays exact, but it cannot be maintained from what changed since seq —
+	// the seeds and paths it was walked from are the old scope's. The next
+	// following pull walks the closure again from the new scope's seeds, and
+	// clears this once it stores the rebuilt set at a clean version boundary.
+	ClosureRebuild bool `protobuf:"varint,13,opt,name=closure_rebuild,json=closureRebuild,proto3" json:"closure_rebuild,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *Cursor) Reset() {
@@ -222,6 +232,13 @@ func (x *Cursor) GetSetsRef() *StateRef {
 		return x.SetsRef
 	}
 	return nil
+}
+
+func (x *Cursor) GetClosureRebuild() bool {
+	if x != nil {
+		return x.ClosureRebuild
+	}
+	return false
 }
 
 // StateRef names one immutable entry in the cursor-state store. The pair is
@@ -694,7 +711,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xa7\x04\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xd0\x04\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -710,7 +727,8 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\x06window\x18\n" +
 	" \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\x12:\n" +
 	"\awindows\x18\v \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x128\n" +
-	"\bsets_ref\x18\f \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\asetsRef\",\n" +
+	"\bsets_ref\x18\f \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\asetsRef\x12'\n" +
+	"\x0fclosure_rebuild\x18\r \x01(\bR\x0eclosureRebuild\",\n" +
 	"\bStateRef\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x10\n" +
 	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\xfe\x01\n" +

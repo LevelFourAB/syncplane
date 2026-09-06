@@ -53,6 +53,12 @@ type cursorState struct {
 	// walking it again where it cannot — and diffs the result against this set.
 	// nil on legacy cursors and non-following subscriptions ⇒ empty.
 	closure *syncplanecursorv1.ClosureSet
+	// closureRebuild marks a closure that was walked under a different
+	// subscription set than subs (Cursor.closure_rebuild): a completed delta
+	// resync carries the old scope's closure forward. It still names what the
+	// client holds, so it diffs exactly, but it cannot be maintained; the next
+	// following pull walks it again and clears this at a clean boundary.
+	closureRebuild bool
 	// window is the windowed membership as ONE set (Cursor.window), which is
 	// what cursors issued before windows were maintained per window carry.
 	// Populated only from such a cursor; this server issues windows instead.
@@ -138,17 +144,18 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (curso
 		return cursorState{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bad cursor: %w", err))
 	}
 	st := cursorState{
-		seq:           c.GetSeq(),
-		subHash:       c.GetSubHash(),
-		epoch:         c.GetFilterEpoch(),
-		storeEpoch:    c.GetStoreEpoch(),
-		partialEntity: c.GetPartialEntity(),
-		partialKey:    c.GetPartialKey(),
-		subs:          c.GetSubscriptions(),
-		resync:        c.GetResync(),
-		closure:       c.GetClosure(),
-		window:        c.GetWindow(),
-		windows:       c.GetWindows(),
+		seq:            c.GetSeq(),
+		subHash:        c.GetSubHash(),
+		epoch:          c.GetFilterEpoch(),
+		storeEpoch:     c.GetStoreEpoch(),
+		partialEntity:  c.GetPartialEntity(),
+		partialKey:     c.GetPartialKey(),
+		subs:           c.GetSubscriptions(),
+		resync:         c.GetResync(),
+		closure:        c.GetClosure(),
+		closureRebuild: c.GetClosureRebuild(),
+		window:         c.GetWindow(),
+		windows:        c.GetWindows(),
 	}
 	ref := c.GetSetsRef()
 	if ref.GetId() == 0 {
@@ -200,13 +207,14 @@ const cursorStateInlineLimit = 1024
 // is an optimization, never a dependency.
 func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) []byte {
 	c := &syncplanecursorv1.Cursor{
-		Seq:           st.seq,
-		SubHash:       st.subHash,
-		FilterEpoch:   st.epoch,
-		StoreEpoch:    st.storeEpoch,
-		PartialEntity: st.partialEntity,
-		PartialKey:    st.partialKey,
-		Resync:        st.resync,
+		Seq:            st.seq,
+		SubHash:        st.subHash,
+		FilterEpoch:    st.epoch,
+		StoreEpoch:     st.storeEpoch,
+		PartialEntity:  st.partialEntity,
+		PartialKey:     st.partialKey,
+		Resync:         st.resync,
+		ClosureRebuild: st.closureRebuild,
 	}
 	if !s.storeSets(ctx, ws, st, c) {
 		c.Subscriptions = st.subs
@@ -691,7 +699,10 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	//     a cursor at the head can arrive carrying a DIFFERENT spec, which only
 	//     the closure diff can reconcile. Everything else about the subscription
 	//     set is already settled — an unequal sub_hash resyncs before pullPage.
-	if cur.seq == current && cur.partialEntity == "" && sameFollowSpecs(cur.subs, subs) {
+	//   - A closure a completed resync carried over from the old scope. It is
+	//     what the client holds, but not what the new scope's seeds produce,
+	//     and only the closure diff below brings the two together.
+	if cur.seq == current && cur.partialEntity == "" && sameFollowSpecs(cur.subs, subs) && !cur.closureRebuild {
 		// Carried forward as issued, restamped with what this request resolved:
 		// a legacy cursor picks up the store epoch and its subscription set here
 		// exactly as it would on the normal path below.
@@ -737,11 +748,17 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	}
 	// Reference-following: bring the closure up to date against current rows
 	// BEFORE the scan so classify is closure-aware (a changed follow-target must
-	// not be tombstoned). The closure is populated only on this normal path
-	// — never during resync, where it stays empty. See closure.go.
+	// not be tombstoned). This is the only path that resolves the closure under
+	// the request's scope; a resync classifies with the set the cursor carries
+	// and leaves the reconciliation to the pull that follows it. See closure.go.
+	//
+	// A closure the cursor carried over from another scope is what the client
+	// holds, so it still diffs exactly below, but it was walked from that
+	// scope's seeds and paths: maintaining it from what changed since seq would
+	// keep every member the new scope never reaches and miss every one it does.
 	if emitter.followEntities != nil {
 		maintained := false
-		if maintain {
+		if maintain && !cur.closureRebuild {
 			emitter.closure, maintained, err = emitter.maintainClosure(
 				tx, cur.closure, subs, changes, windowSeedsMoved(oldWindow, emitter.windowMembers))
 			if err != nil {
@@ -837,11 +854,13 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// sharing this version instead of skipping it. The closure work is
 		// deferred to a clean boundary, so carry the prior closure forward
 		// unchanged (the incremental scan already covered version>seq
-		// members above).
+		// members above) — and with it the mark that says it cannot be
+		// maintained, since the next page resolves the closure again.
 		next.seq = lastScanned.Version
 		next.partialEntity = lastScanned.Entity
 		next.partialKey = lastScanned.Key
 		next.closure = cur.closure
+		next.closureRebuild = cur.closureRebuild
 		next.window = cur.window
 		next.windows = cur.windows
 	} else {

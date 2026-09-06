@@ -122,6 +122,17 @@ func closureSetMembership(cs *syncplanecursorv1.ClosureSet) map[closureKey]bool 
 	return out
 }
 
+// closureSetRows decodes a wire ClosureSet into a membership set whose rows
+// are all unread (the zero Row): what a caller needs to answer has, and what
+// maintenance starts from before it re-reads the members that moved.
+func closureSetRows(cs *syncplanecursorv1.ClosureSet) closureRows {
+	cr := closureRows{}
+	for ck := range closureSetMembership(cs) {
+		cr[ck] = storage.Row{}
+	}
+	return cr
+}
+
 // ---- reference graph (server mirror of EntityRegistry.buildRefGraph) ----
 
 // forwardRefRel is a forward reference relation surfaced on the source entity,
@@ -1069,10 +1080,7 @@ func (e *rowEmitter) maintainClosure(tx storage.ReadTx, prev *syncplanecursorv1.
 		return nil, false, err
 	}
 	members := closureSetMembership(prev)
-	cr := closureRows{}
-	for ck := range members {
-		cr[ck] = storage.Row{}
-	}
+	cr := closureSetRows(prev)
 
 	m := &closureMaint{
 		e: e, tx: tx, hops: hops, cr: cr, prev: members,

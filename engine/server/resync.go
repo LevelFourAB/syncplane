@@ -117,6 +117,17 @@ type resyncPos struct {
 // version > cur.seq and belong to the catch-up pull, and a re-emitted row
 // applies idempotently. The price is resolving both emitters' windows once per
 // page of a scope change, which is a rare event.
+//
+// The follow closure is NOT rebuilt here. Both emitters classify with the set
+// the cursor carries — the rows the client holds through follow — so a member
+// is visible on both sides and the diff never touches it, whatever base scope
+// says about it on either side. The catch-up pull walks the closure under the
+// new scope and reconciles it against that same set, which is exact because
+// the set is still what the client holds. Rebuilding the new closure here
+// instead would put a set walked against CURRENT rows on a cursor whose seq is
+// the original one: a member whose holder moved after seq but before the
+// rebuild would then be in the stored set without the client ever having
+// received it, and the catch-up pull would skip it as already held.
 func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, pos resyncPos, limit int, resp *syncplanev1.PullResponse) error {
 	var err error
 	if oldEm.windowMembers, err = oldEm.buildWindows(tx); err != nil {
@@ -125,6 +136,8 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
 		return err
 	}
+	oldEm.closure = closureSetRows(cur.closure)
+	newEm.closure = oldEm.closure
 	next, done, err := runResync(tx, oldEm, newEm, cur.seq, pos, limit, s.limits, resp.Patch)
 	if err != nil {
 		return err
@@ -143,10 +156,13 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			partialEntity: cur.partialEntity,
 			partialKey:    cur.partialKey,
 			subs:          subs,
-			// Carry the prior closure through unchanged: the resync diffs only
-			// base scope (closure stays empty here), and the catch-up pull that
-			// follows rebuilds and reconciles the closure under the new scope.
-			closure: cur.closure,
+			// Carry the prior closure through unchanged: the resync left every
+			// member alone, so the set is still exactly what the client holds
+			// through follow, and the catch-up pull reconciles it against the
+			// closure of the new scope. It cannot MAINTAIN it from there — the
+			// set was walked from the old scope's seeds — so the cursor says so.
+			closure:        cur.closure,
+			closureRebuild: true,
 			// The window, by contrast, is REPLACED: the resync just emitted the
 			// difference between the old windows and the new ones, so the client
 			// now holds the new membership and the cursor must say so. Carrying
@@ -342,9 +358,10 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 // either scope and is in neither scope's window membership, and walk classify
 // with it under each emitter in turn. The entity is registered and not
 // server-only (entities() yields no others). The row is not a tombstone — the
-// caller skips those. It is not a closure member: a resync diff leaves closure
-// empty, which is what stops followed rows being spuriously tombstoned, and
-// resyncNarrowable declines an entity any follow spec can reach. It is not a
+// caller skips those. It is not a closure member: both sides of a resync
+// classify with the closure the cursor carries, whose members are rows of
+// entities the OLD scope's follow specs reach, and resyncNarrowable declines an
+// entity any follow spec can reach on either side. It is not a
 // window member, by assumption. What is left is the base scope, which
 // resyncNarrowable has pinned to one of two shapes on each side: the side does
 // not subscribe to the entity, so classify answers rowUnsubscribed; or it has
@@ -396,12 +413,9 @@ func resyncNarrowable(e *rowEmitter, entity string) (*entityScope, bool) {
 	}
 	if e.followEntities[entity] {
 		// Reached through a follow spec, so visibility is closure membership,
-		// which no predicate describes.
-		return nil, false
-	}
-	if len(e.closure) > 0 {
-		// A resync diff runs with an empty closure; anything else is a
-		// visibility rule this narrowing does not model.
+		// which no predicate describes. This also keeps every closure member
+		// out of the narrowed entities: the cursor's closure holds only rows
+		// of entities the old scope follows, and the old side is asked first.
 		return nil, false
 	}
 	scope := e.scopes[entity]
