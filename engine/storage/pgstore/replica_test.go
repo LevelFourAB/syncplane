@@ -8,9 +8,9 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/pgstore"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 // These specs run against a FAKE lagging replica: pgstore judges freshness

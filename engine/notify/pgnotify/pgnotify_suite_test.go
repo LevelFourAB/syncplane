@@ -11,11 +11,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
 	"github.com/levelfourab/syncplane/engine/internal/pubsub/pubsubtest"
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
 	"github.com/levelfourab/syncplane/engine/pglisten"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 func TestPgnotify(t *testing.T) {

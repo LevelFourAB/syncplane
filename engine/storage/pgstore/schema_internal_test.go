@@ -10,7 +10,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 // These specs reach inside the package for the two things no caller can see:

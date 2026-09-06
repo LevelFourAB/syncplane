@@ -8,10 +8,10 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/storage/storagetest"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 // The whole contract again, on the other physical layout. Modulus 2 rather

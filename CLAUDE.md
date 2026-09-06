@@ -58,7 +58,7 @@ broadcast, none of it durable; `pgpresence/` is the multi-node bus and
 `presencetest/` the suite one must pass), `pglisten/` (the `LISTEN`/`NOTIFY`
 transport `pgnotify` and `pgpresence` are both built on, and share one of when a
 node runs both), `internal/` (`lww` field-mask merge semantics, `naming`,
-`pubsub`, `pgtest` — all engine-only).
+`pubsub` — all engine-only).
 `engine/client/` is reserved for a future Go client; not built yet.
 
 `cmd/`: every binary the repo produces. `syncplaned/` (the product: multi-app

@@ -9,12 +9,12 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/notify/pgnotify"
 	"github.com/levelfourab/syncplane/engine/pglisten"
 	"github.com/levelfourab/syncplane/engine/presence"
 	"github.com/levelfourab/syncplane/engine/presence/pgpresence"
 	"github.com/levelfourab/syncplane/engine/presence/presencetest"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 func TestPgpresence(t *testing.T) {

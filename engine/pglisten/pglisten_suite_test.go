@@ -12,8 +12,8 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
-	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/pglisten"
+	"github.com/levelfourab/syncplane/internal/pgtest"
 )
 
 func TestPglisten(t *testing.T) {
