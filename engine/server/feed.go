@@ -68,11 +68,13 @@ type Change struct {
 
 // ErrCursorTooOld reports a feed cursor that cannot be resumed against this
 // store: it sits below the workspace's tombstone horizon, above its current
-// sequence, or names a different store lineage (see Cursor.Epoch). Deletions
-// the consumer never saw may have been garbage-collected, and rows above the
-// cursor may belong to a history it never observed, so only a full resync
-// against current state recovers. After resyncing, resume from the cursor
-// Changes returned alongside this error.
+// sequence, or names a different store lineage (see Cursor.Epoch). A cursor
+// AT the horizon that carries a sub-position (Entity/Key set) counts as below
+// it: the rows of that sequence after the sub-position were never delivered.
+// Deletions the consumer never saw may have been garbage-collected, and rows
+// above the cursor may belong to a history it never observed, so only a full
+// resync against current state recovers. After resyncing, resume from the
+// cursor Changes returned alongside this error.
 var ErrCursorTooOld = errors.New("server: feed cursor cannot be resumed against this store")
 
 // Changes drains committed row changes after the cursor, in (seq, entity,
@@ -132,7 +134,7 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		}
 		// A cursor older than the tombstone horizon may have missed
 		// garbage-collected deletions; only a full resync recovers those.
-		if after.Seq < horizon {
+		if belowHorizon(after.Seq, after.Entity, horizon) {
 			next = Cursor{Seq: current, Epoch: epoch}
 			return ErrCursorTooOld
 		}

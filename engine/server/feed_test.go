@@ -171,6 +171,40 @@ var _ = Describe("Server.Changes", func() {
 			Expect(got[0].Key).To(Equal("t2"))
 		})
 
+		It("returns ErrCursorTooOld for a cursor split inside the version group the horizon reached", func() {
+			// A page that splits a same-seq group leaves the cursor AT that
+			// seq with a sub-position; the rows after it are undelivered. GC
+			// collecting a tombstone of that seq puts the horizon exactly on
+			// the cursor, and resuming would skip the tombstone for good.
+			srv = newTestServer(server.WithGC(-time.Second, 0))
+			push(putMutation("c1", 1, "todo", "gone", &todov1.Todo{Id: "gone"}))
+			// (todo, a) sorts before (todo, gone): a page of one stops
+			// between them.
+			push(batchMutation("c1", 2,
+				crudPut("todo", "a", &todov1.Todo{Id: "a"}),
+				crudDelete("todo", "gone"),
+			))
+			page, cur, more := drain(server.Cursor{Seq: 1}, 1)
+			Expect(more).To(BeTrue())
+			Expect(page).To(HaveLen(1))
+			Expect(page[0].Key).To(Equal("a"))
+			Expect(cur.Seq).To(BeEquivalentTo(2))
+			Expect(cur.Entity).To(Equal("todo"))
+
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+			var calls int
+			next, more, err := srv.Changes(ctx, ws, cur, 0, func(server.Change) error {
+				calls++
+				return nil
+			})
+			Expect(err).To(MatchError(server.ErrCursorTooOld))
+			Expect(calls).To(BeZero(), "no changes delivered alongside the error")
+			Expect(more).To(BeFalse())
+			Expect(next.Seq).To(BeEquivalentTo(2), "resume cursor sits at the current seq")
+			Expect(next.Entity).To(BeEmpty())
+		})
+
 		It("returns ErrCursorTooOld for a cursor ahead of the store (recreated/restored store)", func() {
 			// A cursor from a previous, larger incarnation of the store at this
 			// position: seq sits above the current sequence, which a

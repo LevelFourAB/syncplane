@@ -12,6 +12,7 @@ import (
 	. "github.com/onsi/gomega"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
@@ -128,6 +129,51 @@ var _ = Describe("Garbage collection", func() {
 		resp := pull(nil)
 		Expect(resp.GetReset_()).To(BeTrue(), "horizon advanced: even a stateless client must bootstrap")
 		Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
+	})
+
+	It("resets a cursor split inside the version group the horizon reached", func() {
+		// A page that splits a same-version group leaves the cursor AT that
+		// version with a sub-position; the rows of the group after it are not
+		// delivered yet. When GC collects a tombstone of that version the
+		// horizon lands on the cursor's seq, and only a reset keeps the client
+		// from resuming past the tombstone it never saw.
+		srv := newTestServer(server.WithGC(-time.Second, 0))
+		DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+		start(srv)
+
+		pullLim := func(cursor []byte, limit uint32) *syncplanev1.PullResponse {
+			GinkgoHelper()
+			resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+				WorkspaceId: ws,
+				ClientId:    "c1",
+				Cursor:      cursor,
+				Limit:       limit,
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			return resp.Msg
+		}
+
+		push(putMutation("c1", 1, "widget", "gone", &testdatav1.Widget{Id: "gone"}))
+		first := pullLim(nil, 0)
+		Expect(first.GetPatch().GetChanges()).To(HaveLen(1), "the client holds widget/gone")
+
+		// One batch at seq 2: (widget, a) sorts before (widget, gone), so a
+		// page of one delivers a and stops inside the group.
+		push(batchMutation("c1", 2,
+			crudPut("widget", "a", &testdatav1.Widget{Id: "a"}),
+			crudDelete("widget", "gone"),
+		))
+		page := pullLim(first.GetNextCursor(), 1)
+		Expect(page.GetReset_()).To(BeFalse())
+		Expect(page.GetHasMore()).To(BeTrue())
+		Expect(page.GetPatch().GetChanges()).To(HaveLen(1))
+		Expect(page.GetPatch().GetChanges()[0].GetKey()).To(Equal("a"))
+
+		Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+
+		rest := pullLim(page.GetNextCursor(), 0)
+		Expect(rest.GetReset_()).To(BeTrue(), "the collected tombstone sat after the sub-position")
+		Expect(rest.GetPatch().GetChanges()).To(BeEmpty())
 	})
 
 	It("keeps tombstones younger than the retention", func() {

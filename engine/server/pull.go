@@ -469,6 +469,17 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	return connect.NewResponse(resp), nil
 }
 
+// belowHorizon reports whether a change-feed position may have missed a
+// collected tombstone. The horizon is the highest version GC has collected a
+// tombstone at, so a cursor strictly below it is stale. A cursor AT the horizon
+// is stale too when it carries a sub-position: the page that issued it split
+// the version group, and the rows of that group after (partialEntity, key)
+// were never delivered — a tombstone among them is gone now. Only a cursor at
+// the horizon on a clean version boundary has seen every row of that version.
+func belowHorizon(seq uint64, partialEntity string, horizon uint64) bool {
+	return seq < horizon || (seq == horizon && partialEntity != "")
+}
+
 // pullPreamble reads the workspace position, stamps last_acked onto resp, and
 // runs the horizon + store-epoch reset checks shared by every pull path. reset
 // is true when the cursor cannot be served incrementally and the caller must
@@ -507,7 +518,7 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, clientID strin
 	// far GC advanced mid-replay. Bootstrap is the entry point for a client
 	// with no state; replay-from-0 is a convenience for young and GC-less
 	// workspaces (and for tests), not a substitute for it.
-	if cur.seq < horizon {
+	if belowHorizon(cur.seq, cur.partialEntity, horizon) {
 		return current, storeEpoch, resetHorizon, nil
 	}
 	// Cursor provenance: a non-empty cursor that this store could not have

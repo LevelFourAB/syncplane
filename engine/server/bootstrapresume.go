@@ -87,7 +87,7 @@ func (r *bootstrapResume) acceptable(wantHash, epoch uint64) bool {
 // snapshot could not be completed, so the client is better served by a fresh
 // one it can finish.
 func (r *bootstrapResume) servable(horizon, current, storeEpoch uint64) bool {
-	if r.cur.seq < horizon || r.cur.seq > current {
+	if belowHorizon(r.cur.seq, r.cur.partialEntity, horizon) || r.cur.seq > current {
 		return false
 	}
 	// The membership sets the snapshot was taken under are gone from the
