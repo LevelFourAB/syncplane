@@ -116,8 +116,14 @@ type Cursor struct {
 	// following pull walks the closure again from the new scope's seeds, and
 	// clears this once it stores the rebuilt set at a clean version boundary.
 	ClosureRebuild bool `protobuf:"varint,13,opt,name=closure_rebuild,json=closureRebuild,proto3" json:"closure_rebuild,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// Set on the cursor a delta resync completes with, and cleared by the pull
+	// that follows it. The resync reconciles the client's rows as of seq only,
+	// so a row an added entity gained past seq reaches the client for the first
+	// time on that catch-up page — which therefore ships every row as full
+	// state, since delta state presumes the client holds the row as of seq.
+	Resynced      bool `protobuf:"varint,14,opt,name=resynced,proto3" json:"resynced,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *Cursor) Reset() {
@@ -237,6 +243,13 @@ func (x *Cursor) GetSetsRef() *StateRef {
 func (x *Cursor) GetClosureRebuild() bool {
 	if x != nil {
 		return x.ClosureRebuild
+	}
+	return false
+}
+
+func (x *Cursor) GetResynced() bool {
+	if x != nil {
+		return x.Resynced
 	}
 	return false
 }
@@ -711,7 +724,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xd0\x04\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xec\x04\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -728,7 +741,8 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	" \x01(\v2\x1f.syncplane.cursor.v1.ClosureSetR\x06window\x12:\n" +
 	"\awindows\x18\v \x03(\v2 .syncplane.cursor.v1.WindowStateR\awindows\x128\n" +
 	"\bsets_ref\x18\f \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\asetsRef\x12'\n" +
-	"\x0fclosure_rebuild\x18\r \x01(\bR\x0eclosureRebuild\",\n" +
+	"\x0fclosure_rebuild\x18\r \x01(\bR\x0eclosureRebuild\x12\x1a\n" +
+	"\bresynced\x18\x0e \x01(\bR\bresynced\",\n" +
 	"\bStateRef\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\x06R\x02id\x12\x10\n" +
 	"\x03gen\x18\x02 \x01(\x06R\x03gen\"\xfe\x01\n" +

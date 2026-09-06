@@ -163,6 +163,10 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 			// set was walked from the old scope's seeds — so the cursor says so.
 			closure:        cur.closure,
 			closureRebuild: true,
+			// The rows this resync delivered stop at seq. Rows of an added
+			// entity written past seq are still unknown to the client, and the
+			// catch-up pull must ship them whole rather than as text delta state.
+			resynced: true,
 			// The window, by contrast, is REPLACED: the resync just emitted the
 			// difference between the old windows and the new ones, so the client
 			// now holds the new membership and the cursor must say so. Carrying

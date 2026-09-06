@@ -59,6 +59,11 @@ type cursorState struct {
 	// client holds, so it diffs exactly, but it cannot be maintained; the next
 	// following pull walks it again and clears this at a clean boundary.
 	closureRebuild bool
+	// resynced marks the cursor a delta resync completed with
+	// (Cursor.resynced). The client holds the new scope as of seq only, so the
+	// catch-up pull that consumes it ships every row as full state; the cursor
+	// that pull issues clears it.
+	resynced bool
 	// window is the windowed membership as ONE set (Cursor.window), which is
 	// what cursors issued before windows were maintained per window carry.
 	// Populated only from such a cursor; this server issues windows instead.
@@ -154,6 +159,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (curso
 		resync:         c.GetResync(),
 		closure:        c.GetClosure(),
 		closureRebuild: c.GetClosureRebuild(),
+		resynced:       c.GetResynced(),
 		window:         c.GetWindow(),
 		windows:        c.GetWindows(),
 	}
@@ -215,6 +221,7 @@ func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) [
 		PartialKey:     st.partialKey,
 		Resync:         st.resync,
 		ClosureRebuild: st.closureRebuild,
+		Resynced:       st.resynced,
 	}
 	if !s.storeSets(ctx, ws, st, c) {
 		c.Subscriptions = st.subs
@@ -776,7 +783,13 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// per page, because a Subscribe stream reuses one emitter across pages at
 	// different cursors, and cleared after the scan so the membership diffs
 	// below — which emit rows AT or BELOW the cursor — stay full-state.
-	emitter.deltas = true
+	//
+	// The page after a delta resync is the exception: the resync delivered an
+	// added entity's rows as of seq only, so one written past seq is the
+	// client's first sight of it and no fragment can be folded into anything.
+	// The client holds the whole scope as of the cursor this page issues, so
+	// the mark stops here.
+	emitter.deltas = !cur.resynced
 	emitter.deltaAfter = cur.seq
 	// What the cursor proves the client holds, for the hidden branches below:
 	// the exact membership sets it carried (window and closure), and — for

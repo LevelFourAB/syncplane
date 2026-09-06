@@ -251,6 +251,44 @@ var _ = Describe("Downstream text delta state", func() {
 			Expect(rc.GetValue()).To(Equal(storedRow("w1")))
 		})
 
+		It("ships the document on the catch-up pull after a subscription change", func() {
+			base := bodyDoc("seed", "a document long enough that re-sending it would be a waste of everyone's bytes")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base, Count: 1}))
+			// The reader subscribes to todos only, so it never receives w1.
+			first := pull(nil, &syncplanev1.Subscription{Entity: "todo"})
+			Expect(first.GetPatch().GetChanges()).To(BeEmpty())
+
+			push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Count: 7}, "count"))
+
+			// Adding the whole entity resyncs its rows as of the cursor and leaves
+			// the row patched after it to the catch-up pull that follows.
+			subs := []*syncplanev1.Subscription{{Entity: "widget"}}
+			resync := pull(first.GetNextCursor(), subs...)
+			Expect(resync.GetReset_()).To(BeFalse())
+			Expect(resync.GetHasMore()).To(BeTrue())
+			for _, rc := range resync.GetPatch().GetChanges() {
+				Expect(rc.GetKey()).NotTo(Equal("w1"), "a row written past the cursor is not the resync's to deliver")
+			}
+
+			catchUp := pull(resync.GetNextCursor(), subs...)
+			rc := changeFor(catchUp, "w1")
+			Expect(rc.GetTextDeltas()).To(BeEmpty(),
+				"the reader never held this row, so there is nothing to fold a fragment into")
+			Expect(rc.GetValue()).To(Equal(storedRow("w1")))
+			held := rc.GetValue()
+
+			// From here on the reader holds the entity in full, and the edits
+			// that follow ship as fragments again.
+			edited := editBody(base, "alice", func(d *text.Doc) {
+				Expect(d.SetString("a document long enough that re-sending it would be a waste of everyone's time")).To(Succeed())
+			})
+			push(patchMutation("c2", 2, "widget", "w1", &testdatav1.Widget{Body: edited}, "body"))
+			rc = changeFor(pull(catchUp.GetNextCursor(), subs...), "w1")
+			Expect(rc.GetTextDeltas()).To(HaveLen(1))
+			Expect(rc.GetTextDeltas()[0].GetFragment()).NotTo(BeEmpty())
+			Expect(reconstruct(rc, held)).To(Equal(storedRow("w1")))
+		})
+
 		It("ships the document on a re-creation after a delete", func() {
 			base := bodyDoc("seed", "the quick brown fox jumps over the lazy dog")
 			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base}))
