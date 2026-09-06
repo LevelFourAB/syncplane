@@ -508,8 +508,11 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
 		exists(scoped("rows") + " AND t.deleted AND t.updated_at < " + next(at))
-		exists(scoped("clients") + " AND t.updated_at < " + next(at))
+		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+	}
+	if !cutoffs.Clients.IsZero() {
+		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))
 	}
 	if !cutoffs.IdempotencyKeys.IsZero() {
 		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))

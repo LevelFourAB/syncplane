@@ -1547,10 +1547,11 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				return ids
 			}
 			// all is a pass that would collect every kind, which is what the
-			// engine's default configuration amounts to.
+			// engine's fullest configuration amounts to.
 			all := func() storage.GCCutoffs {
 				return storage.GCCutoffs{
 					Tombstones:      future(),
+					Clients:         future(),
 					IdempotencyKeys: future(),
 					FieldDeltas:     future(),
 					Entities:        []storage.EntityCutoff{{Entity: "audit", Before: future()}},
@@ -1568,6 +1569,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				}),
 				Entry("a client watermark", func(tx storage.WriteTx) {
 					Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
+				}),
+				Entry("a client's recorded verdicts", func(tx storage.WriteTx) {
+					Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
 				}),
 				Entry("an effect consumer position", func(tx storage.WriteTx) {
 					Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: 1})).To(Succeed())
@@ -1620,7 +1624,22 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 				Expect(collectable(storage.GCCutoffs{}, "", 10)).To(BeEmpty(),
 					"a pass with no cutoffs at all collects nothing and has nowhere to go")
-				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(Equal([]string{"ws1"}))
+				Expect(collectable(storage.GCCutoffs{Clients: future()}, "", 10)).To(Equal([]string{"ws1"}))
+			})
+
+			It("leaves out an idle watermark on a pass that keeps watermarks", func() {
+				// The default pass: verdicts expire on the tombstone cutoff, the
+				// watermark itself is never collected. A bare watermark then
+				// holds nothing for the pass to do.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("c1", 5)).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(BeEmpty())
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 5, Code: "conflict"}})).To(Succeed())
+				})
+				Expect(collectable(storage.GCCutoffs{Tombstones: future()}, "", 10)).To(Equal([]string{"ws1"}),
+					"recorded verdicts are what the tombstone cutoff collects from a client")
 			})
 
 			It("names an entity cutoff's own entity", func() {
@@ -1958,6 +1977,108 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				recs, err := tx.ClientRejections("idle")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(recs).To(BeEmpty())
+			})
+		})
+
+		Describe("verdict expiry", func() {
+			It("clears an idle client's rejections and keeps its watermark", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("idle", 3)).To(Succeed())
+					Expect(tx.SetClientRejections("idle", []storage.ClientRejection{{MutationID: 3, Code: "conflict"}})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					expired, err := tx.ExpireClientRejections(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(Equal(1))
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					recs, err := tx.ClientRejections("idle")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(recs).To(BeEmpty())
+					id, err := tx.ClientLastMutationID("idle")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(id).To(BeEquivalentTo(3), "the watermark is not the expiry's to take")
+				})
+			})
+
+			It("counts only clients that held verdicts", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("bare", 1)).To(Succeed())
+					Expect(tx.SetClientLastMutationID("judged", 1)).To(Succeed())
+					Expect(tx.SetClientRejections("judged", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					expired, err := tx.ExpireClientRejections(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(Equal(1))
+					expired, err = tx.ExpireClientRejections(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(BeZero(), "a second pass finds nothing left to expire")
+				})
+			})
+
+			It("spares verdicts recorded since the cutoff", func() {
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientRejections("old", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+				})
+				cutoff := time.Now().Add(time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientRejections("old", []storage.ClientRejection{{MutationID: 2, Code: "conflict"}})).To(Succeed(), "refresh moves old past the cutoff")
+					Expect(tx.SetClientRejections("fresh", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					expired, err := tx.ExpireClientRejections(cutoff)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(BeZero())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					recs, err := tx.ClientRejections("old")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(recs).To(HaveLen(1))
+					recs, err = tx.ClientRejections("fresh")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(recs).To(HaveLen(1))
+				})
+			})
+
+			It("does not make an idle client look active", func() {
+				// The expiry runs on every pass, so if it refreshed the record's
+				// last-written time an idle client would never be collectable.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientLastMutationID("idle", 1)).To(Succeed())
+					Expect(tx.SetClientRejections("idle", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+				})
+				cutoff := time.Now().Add(time.Millisecond)
+				time.Sleep(5 * time.Millisecond)
+				write("ws1", func(tx storage.WriteTx) {
+					expired, err := tx.ExpireClientRejections(cutoff)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(Equal(1))
+				})
+				write("ws1", func(tx storage.WriteTx) {
+					removed, err := tx.CollectIdleClients(cutoff)
+					Expect(err).NotTo(HaveOccurred())
+					Expect(removed).To(Equal(1), "the record is as idle as it was before the expiry")
+				})
+			})
+
+			It("scopes expiry to the transaction's workspace", func() {
+				for _, ws := range []string{"ws1", "ws2"} {
+					write(ws, func(tx storage.WriteTx) {
+						Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+					})
+				}
+				write("ws1", func(tx storage.WriteTx) {
+					expired, err := tx.ExpireClientRejections(time.Now().Add(time.Hour))
+					Expect(err).NotTo(HaveOccurred())
+					Expect(expired).To(Equal(1))
+				})
+				read("ws2", func(tx storage.ReadTx) {
+					recs, err := tx.ClientRejections("c1")
+					Expect(err).NotTo(HaveOccurred())
+					Expect(recs).To(HaveLen(1), "other workspaces keep their verdicts")
+				})
 			})
 		})
 
@@ -3570,7 +3691,7 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 		})
 
 		It("scopes ListCollectableWorkspaceIDs to the namespace", func() {
-			cutoffs := storage.GCCutoffs{Tombstones: time.Now().Add(time.Hour)}
+			cutoffs := storage.GCCutoffs{Clients: time.Now().Add(time.Hour)}
 			writeTo(a, "ws1", func(tx storage.WriteTx) {
 				Expect(tx.SetClientLastMutationID("c1", 1)).To(Succeed())
 			})
@@ -3672,6 +3793,24 @@ func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cl
 				id, err := tx.ClientLastMutationID("c1")
 				Expect(err).NotTo(HaveOccurred())
 				Expect(id).To(BeEquivalentTo(4), "the other namespace keeps its watermark")
+			})
+		})
+
+		It("scopes verdict expiry to the namespace", func() {
+			for _, s := range []storage.Adapter{a, b} {
+				writeTo(s, "ws1", func(tx storage.WriteTx) {
+					Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
+				})
+			}
+			writeTo(a, "ws1", func(tx storage.WriteTx) {
+				expired, err := tx.ExpireClientRejections(time.Now().Add(time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(expired).To(Equal(1))
+			})
+			readFrom(b, "ws1", func(tx storage.ReadTx) {
+				recs, err := tx.ClientRejections("c1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recs).To(HaveLen(1), "the other namespace keeps its verdicts")
 			})
 		})
 	})

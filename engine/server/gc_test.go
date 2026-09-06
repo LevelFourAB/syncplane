@@ -10,6 +10,7 @@ import (
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -206,7 +207,8 @@ var _ = Describe("Garbage collection", func() {
 
 		srv := mustNewServer(store,
 			server.WithEntities(&todov1.Todo{}),
-			server.WithGC(0, time.Millisecond))
+			server.WithGC(0, time.Millisecond),
+			server.WithClientRetention(-time.Second))
 		start(srv)
 
 		push(
@@ -229,8 +231,75 @@ var _ = Describe("Garbage collection", func() {
 	})
 
 	Describe("idle clients and watermark adoption", func() {
-		It("prunes idle clients and re-admits a returning client at its next mutation id", func() {
+		// The client's pending queue is durable, so a push whose response was
+		// lost is resent however long the client stays away — long after the
+		// tombstone retention. The watermark is the only record that the resend
+		// was already applied, and the pass must leave it alone.
+		It("keeps an idle client's watermark so a resend after the pass is not applied twice", func() {
 			srv := newTestServer(server.WithGC(-time.Second, 0))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "stale"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+			)
+			// A newer write from someone else, which a re-applied resend would
+			// overwrite (last writer wins).
+			push(putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "newer"}))
+
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(2), "the watermark survives the pass")
+
+			resp, err := client.Push(ctx, connect.NewRequest(pushOf(
+				ws,
+				[]*syncplanev1.Mutation{
+					putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "stale"}),
+					putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				})))
+			Expect(err).NotTo(HaveOccurred())
+			for _, r := range pushResults(resp.Msg) {
+				Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+			}
+			titles := map[string]string{}
+			for _, c := range pull(nil).GetPatch().GetChanges() {
+				var todo todov1.Todo
+				Expect(proto.Unmarshal(c.GetValue(), &todo)).To(Succeed())
+				titles[c.GetKey()] = todo.GetTitle()
+			}
+			Expect(titles).To(HaveKeyWithValue("t1", "newer"), "the resend must not overwrite the newer write")
+		})
+
+		It("expires an idle client's recorded verdicts but keeps its watermark", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			resp, err := client.Push(ctx, connect.NewRequest(pushOf(
+				ws,
+				[]*syncplanev1.Mutation{
+					withExpectedVersion(putMutation("c1", 2, "todo", "t1", &todov1.Todo{Id: "t1", Title: "stale"}), 99),
+				})))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pushResults(resp.Msg)[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(2))
+
+			// The verdict is gone, so the resend gets the bare ack a trimmed
+			// verdict would — and is still not applied.
+			resp, err = client.Push(ctx, connect.NewRequest(pushOf(
+				ws,
+				[]*syncplanev1.Mutation{
+					withExpectedVersion(putMutation("c1", 2, "todo", "t1", &todov1.Todo{Id: "t1", Title: "stale"}), 99),
+				})))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(pushResults(resp.Msg)[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_ALREADY_APPLIED))
+		})
+
+		It("prunes idle clients and re-admits a returning client at its next mutation id", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0), server.WithClientRetention(-time.Second))
 			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
 			start(srv)
 
@@ -274,13 +343,23 @@ var _ = Describe("Garbage collection", func() {
 		})
 
 		It("keeps clients younger than the retention", func() {
-			srv := newTestServer(server.WithGC(time.Hour, 0))
+			srv := newTestServer(server.WithGC(time.Hour, 0), server.WithClientRetention(time.Hour))
 			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
 			start(srv)
 
 			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
 			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
 			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(1), "young client survives")
+		})
+
+		It("measures watermark rows against the client retention, not the tombstone retention", func() {
+			srv := newTestServer(server.WithGC(-time.Second, 0), server.WithClientRetention(time.Hour))
+			DeferCleanup(func() { Expect(srv.Close()).To(Succeed()) })
+			start(srv)
+
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+			Expect(srv.CollectGarbage(ctx, ws)).To(Succeed())
+			Expect(pull(nil).GetLastAckedMutationId()).To(BeEquivalentTo(1), "collectable tombstones do not take the watermark with them")
 		})
 	})
 

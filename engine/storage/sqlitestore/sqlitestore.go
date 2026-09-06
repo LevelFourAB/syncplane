@@ -936,8 +936,11 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
 		exists(scoped("rows") + " AND t.deleted = 1 AND t.updated_at < " + next(at))
-		exists(scoped("clients") + " AND t.updated_at < " + next(at))
+		exists(scoped("clients") + " AND t.updated_at < " + next(at) + " AND t.rejections IS NOT NULL")
 		exists(scoped("consumer_positions") + " AND t.updated_at < " + next(at))
+	}
+	if !cutoffs.Clients.IsZero() {
+		exists(scoped("clients") + " AND t.updated_at < " + next(cutoffs.Clients.UnixMilli()))
 	}
 	if !cutoffs.IdempotencyKeys.IsZero() {
 		exists(scoped("idempotency") + " AND t.updated_at < " + next(cutoffs.IdempotencyKeys.UnixMilli()))
@@ -2144,6 +2147,21 @@ func prefixUpperBound(prefix string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func (t *sqliteTx) ExpireClientRejections(cutoff time.Time) (int, error) {
+	// updated_at is deliberately left alone: it is what CollectIdleClients
+	// measures idleness by, and expiring verdicts is not client activity.
+	res, err := t.exec(
+		`UPDATE clients SET rejections = NULL
+		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ? AND rejections IS NOT NULL`,
+		t.ns, t.ws, cutoff.UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	return int(n), err
 }
 
 func (t *sqliteTx) CollectIdleClients(cutoff time.Time) (int, error) {

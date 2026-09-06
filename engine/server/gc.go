@@ -29,7 +29,12 @@ type gcLoop struct {
 	// keyRetention is: it is measured against how far back an app wants to be
 	// able to restore, which has nothing to do with client offline windows.
 	historyRetention time.Duration
-	interval         time.Duration
+	// clientRetention is how long an idle client's watermark record is kept;
+	// see WithClientRetention. Zero keeps every record, which is the default:
+	// the record is what stops a resent mutation from applying twice, and a
+	// client's pending queue outlives any retention.
+	clientRetention time.Duration
+	interval        time.Duration
 	// configured is set by WithGC. WithTextDeltaRetention can create the loop
 	// on its own, and a loop nobody asked to collect must not collect.
 	configured bool
@@ -55,19 +60,23 @@ const defaultIdempotencyRetention = 24 * time.Hour
 // WithGC enables garbage collection. One pass prunes, per workspace and with
 // the same retention, both tombstones (clients whose cursor predates a
 // collected tombstone get reset=true on the next pull and re-bootstrap) and
-// idle client watermark rows (bounding the clients table). The same pass also
-// carries the text delta log and the trusted-write idempotency ledger, each on
-// its own retention (WithTextDeltaRetention, WithIdempotencyRetention), and
-// effect consumers stranded below the horizon the pass just set — a consumer
-// still keeping up is never below it, however long it idles. The same pass also
-// expires field-history records (WithHistoryRetention), which it hard-deletes
-// rather than tombstones because nothing syncs them.
+// the rejection verdicts recorded for idle clients (a resend of a refused
+// mutation is then answered with a bare ALREADY_APPLIED instead of the
+// verdict). The same pass also carries the text delta log and the
+// trusted-write idempotency ledger, each on its own retention
+// (WithTextDeltaRetention, WithIdempotencyRetention), and effect consumers
+// stranded below the horizon the pass just set — a consumer still keeping up
+// is never below it, however long it idles. The same pass also expires
+// field-history records (WithHistoryRetention), which it hard-deletes rather
+// than tombstones because nothing syncs them.
+//
+// Idle clients' watermark records are kept whatever the retention: they are
+// what makes a resend idempotent, and a client's pending queue outlives any
+// offline window. WithClientRetention opts into deleting them.
 //
 // Retention MUST comfortably exceed the longest expected client offline
-// window. The push path's watermark adoption depends on it: a pruned client
-// that returns is re-admitted at whatever mutation id it pushes next, which
-// is only safe while no pruned client can still be retrying mutations the
-// server already applied. Weeks is a sane order of magnitude; minutes is not.
+// window, or clients spend their returns re-bootstrapping. Weeks is a sane
+// order of magnitude; minutes is not.
 //
 // interval > 0 runs a background pass each interval over the workspaces holding
 // something these retentions make collectable, which on an idle deployment is
@@ -85,6 +94,30 @@ func WithGC(retention, interval time.Duration) Option {
 		s.gc.retention = retention
 		s.gc.interval = interval
 		s.gc.configured = true
+		return nil
+	}
+}
+
+// WithClientRetention makes each GC pass delete the watermark records of
+// clients that have not pushed for d, bounding the clients table. It only
+// takes effect together with WithGC. Zero, the default, keeps every record.
+//
+// A deleted watermark forgets which mutation ids the client already had
+// applied. The client re-enters through watermark adoption at whatever id it
+// pushes next — and if that push is a resend of mutations whose response was
+// lost, they apply a second time: a stale PUT or DELETE then overwrites what
+// other clients wrote in the meantime, and a batch or custom mutator runs
+// twice. The client's pending queue is durable, so the resend can arrive
+// however long after the loss. Set d well past the longest time a client can
+// stay away and still be expected to hold unpushed work, and prefer leaving
+// it unset unless the clients table is a measured problem. See
+// docs/explanation/limits-and-trade-offs.md.
+func WithClientRetention(d time.Duration) Option {
+	return func(s *Server) error {
+		if s.gc == nil {
+			s.gc = &gcLoop{}
+		}
+		s.gc.clientRetention = d
 		return nil
 	}
 }
@@ -198,6 +231,16 @@ func (g *gcLoop) historyCutoff(now time.Time) (time.Time, bool) {
 	return now.Add(-d), true
 }
 
+// clientCutoff is the timestamp below which idle clients' watermark records
+// are collectable, and whether they are collectable at all — unset keeps them
+// (see WithClientRetention).
+func (g *gcLoop) clientCutoff(now time.Time) (time.Time, bool) {
+	if g.clientRetention == 0 {
+		return time.Time{}, false
+	}
+	return now.Add(-g.clientRetention), true
+}
+
 // idempotencyCutoff is the timestamp below which claimed keys are collectable.
 func (g *gcLoop) idempotencyCutoff(now time.Time) time.Time {
 	d := g.keyRetention
@@ -230,6 +273,9 @@ func (g *gcLoop) cutoffs(now time.Time) storage.GCCutoffs {
 		Tombstones:      now.Add(-g.retention),
 		IdempotencyKeys: g.idempotencyCutoff(now),
 		FieldDeltas:     g.textDeltaCutoff(now),
+	}
+	if at, prunes := g.clientCutoff(now); prunes {
+		c.Clients = at
 	}
 	if at, expires := g.historyCutoff(now); expires {
 		c.Entities = []storage.EntityCutoff{{Entity: historyEntityName, Before: at}}
@@ -277,9 +323,10 @@ func (g *gcLoop) close() {
 	g.done.Wait()
 }
 
-// CollectGarbage runs one manual collection pass (tombstones + idle
-// clients) for a single workspace using the retention configured via
-// WithGC. The pass runs in one write transaction, plus one transaction per
+// CollectGarbage runs one manual collection pass (tombstones, idle clients'
+// verdicts and, with WithClientRetention, their watermarks) for a single
+// workspace using the retention configured via WithGC. The pass runs in one
+// write transaction, plus one transaction per
 // further chunk of expired field history (see historyPurgeChunk); it is
 // stateless and safe to re-run, and an interrupted drain resumes on the next
 // pass.
@@ -313,21 +360,31 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 	// Server.purgeHistory). The age sweep is all they have left, and gating it on
 	// the catalog would make them immortal.
 	historyCutoff, historyExpires := s.gc.historyCutoff(now)
+	clientCutoff, clientsPruned := s.gc.clientCutoff(now)
 	var horizon, deltaHorizon uint64
-	var idleRemoved, keysRemoved, consumersRemoved, historyRemoved int
+	var verdictsExpired, idleRemoved, keysRemoved, consumersRemoved, historyRemoved int
 	var historyMore bool
 	if err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		// Re-zero on retry: the closure may run more than once (see the
 		// storage.Adapter write-closure contract).
-		horizon, deltaHorizon, idleRemoved, keysRemoved, consumersRemoved = 0, 0, 0, 0, 0
+		horizon, deltaHorizon, verdictsExpired, idleRemoved, keysRemoved, consumersRemoved = 0, 0, 0, 0, 0, 0
 		historyRemoved, historyMore = 0, false
 		h, err := tx.CollectTombstones(cutoff)
 		if err != nil {
 			return err
 		}
 		horizon = h
-		if idleRemoved, err = tx.CollectIdleClients(cutoff); err != nil {
+		// Verdicts go on the tombstone retention; the watermark they sit next to
+		// only goes when the operator opted in. The order matters: an expiry
+		// must not refresh the record, or the prune below would never see it
+		// idle (the storage contract holds adapters to that).
+		if verdictsExpired, err = tx.ExpireClientRejections(cutoff); err != nil {
 			return err
+		}
+		if clientsPruned {
+			if idleRemoved, err = tx.CollectIdleClients(clientCutoff); err != nil {
+				return err
+			}
 		}
 		// Effect consumers are collected against the horizon this pass just
 		// established: one below it has already missed collected tombstones and
@@ -379,6 +436,7 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		kind string
 		n    int
 	}{
+		{"client_verdicts", verdictsExpired},
 		{"idle_clients", idleRemoved},
 		{"idempotency_keys", keysRemoved},
 		{"history_records", historyRemoved},
@@ -404,6 +462,7 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 		slog.String("workspace", workspaceID),
 		slog.Uint64("tombstone_horizon", horizon),
 		slog.Uint64("text_delta_horizon", deltaHorizon),
+		slog.Int("client_verdicts_expired", verdictsExpired),
 		slog.Int("idle_clients_removed", idleRemoved),
 		slog.Int("idempotency_keys_removed", keysRemoved),
 		slog.Int("history_records_removed", historyRemoved),

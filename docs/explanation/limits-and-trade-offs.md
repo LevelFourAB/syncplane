@@ -307,6 +307,20 @@ This delay allows the client to compact the pending queue, folding bursts of edi
 
 Debouncing delays when peers receive updates by up to the maximum delay plus network latency. It does not risk data loss: mutations are committed to local storage and the pending queue immediately before the debounce timer starts. If a browser tab closes before the timer expires, pending mutations push when the tab restarts. Inbound sync operations, reconnects, and scope changes trigger immediate sync cycles. To push immediately without waiting for debouncing (such as on form submission or blur events), call `syncNow()`.
 
+## Deleting idle client watermarks can apply a resend twice
+
+The server keeps one small record per `(workspace, client_id)`: the highest mutation ID it has applied or rejected for that client. This watermark is the only thing that makes a resend idempotent. A push whose response is lost stays in the client's durable pending queue, and the client resends it on its next sync cycle, which can be weeks later if the device stays offline. The server cannot tell such a resend from new work: a resend carries no marker, and the client cannot add one, because it does not know whether the original push reached the server.
+
+Garbage collection therefore keeps watermark records by default, and the tombstone retention only clears the rejection verdicts stored next to them. The clients table then grows with the number of distinct client IDs that have ever pushed to a workspace. Each client ID is minted once per local database, so this is bounded by installs and sign-outs rather than by traffic.
+
+`WithClientRetention(d)` opts into deleting the records of clients that have not pushed for `d`. A client whose record is gone is re-admitted at whatever mutation ID it pushes next. If that push is a resend, every mutation in it applies a second time:
+
+- A `PUT` or `DELETE` overwrites what other clients wrote in the meantime, because the server applies mutations in arrival order (last writer wins).
+- A batch or custom mutator runs twice.
+- Nothing reports it. The client receives `APPLIED`, and the rows look like ordinary writes.
+
+Set `d` well past the longest time a client can stay away and still hold unpushed work, and prefer leaving the option unset unless the clients table is a measured problem.
+
 ## Wire cursors are opaque
 
 Wire cursors are opaque tokens. Clients must not parse or interpret cursor structure.

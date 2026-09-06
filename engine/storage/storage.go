@@ -211,8 +211,9 @@ type IdempotencyRecord struct {
 // explanation. The record is what lets the retry be answered with the original
 // verdict instead.
 //
-// Records are stored per client alongside the watermark, so CollectIdleClients
-// drops them with it.
+// Records are stored per client alongside the watermark. ExpireClientRejections
+// drops the records of an idle client on their own; CollectIdleClients drops
+// the whole record, watermark included.
 type ClientRejection struct {
 	// MutationID is the refused mutation's id, unique per client and never
 	// reused, which is what makes a record safe to keep past the retry it was
@@ -430,9 +431,13 @@ type TextCompactMark struct {
 // their cutoff one at a time, on a transaction the caller has already opened;
 // this is the same set of thresholds asked across workspaces instead.
 type GCCutoffs struct {
-	// Tombstones bounds deleted rows, idle client watermarks and idle effect
-	// consumers, which share one retention.
+	// Tombstones bounds deleted rows, idle clients' recorded verdicts and idle
+	// effect consumers, which share one retention.
 	Tombstones time.Time
+	// Clients bounds idle clients' watermark records as a whole
+	// (CollectIdleClients). Zero on a pass that keeps every watermark, which is
+	// the engine's default.
+	Clients time.Time
 	// IdempotencyKeys bounds claimed trusted-write keys.
 	IdempotencyKeys time.Time
 	// FieldDeltas bounds the collaborative-text delta log.
@@ -769,11 +774,20 @@ type WriteTx interface {
 	// age bound, no limit — those records must go with the row in its own
 	// transaction or not at all). Matching nothing is not an error.
 	PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (removed int, more bool, err error)
-	// CollectIdleClients deletes the workspace's per-client watermark rows
-	// not updated since cutoff and returns how many were removed. A pruned
-	// client that later returns re-enters via watermark adoption (see the
-	// server push path), so cutoff must lag the longest plausible client
-	// offline window.
+	// ExpireClientRejections clears the recorded verdicts of every client whose
+	// record was last written before cutoff and returns how many clients held
+	// verdicts to clear. The watermark stays, and the record's last-written time
+	// is NOT refreshed: an expiry must not make an idle client look active to
+	// CollectIdleClients. A client with no verdicts is not counted, so a second
+	// call with the same cutoff reports zero.
+	ExpireClientRejections(cutoff time.Time) (expired int, err error)
+	// CollectIdleClients deletes the workspace's per-client records — watermark
+	// and verdicts together — not updated since cutoff and returns how many were
+	// removed. Deleting a watermark forgets which mutation ids the client has
+	// already had applied: a pruned client that returns re-enters via watermark
+	// adoption (see the server push path), and a resend of an applied mutation
+	// then applies again. The engine only calls this when an operator opted in
+	// (server.WithClientRetention).
 	CollectIdleClients(cutoff time.Time) (removed int, err error)
 	// PutIdempotencyRecord claims key for this transaction's write, recording
 	// what it did (see ReadTx.IdempotencyRecord). It is an unconditional upsert,

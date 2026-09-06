@@ -211,8 +211,9 @@ single-workspace failures.
 contain collectable data. `outcome=skipped` indicates that another node held the
 workspace lease.
 
-`gc_kind` is one of `idle_clients`, `idempotency_keys`, `history_records`, or
-`stranded_consumers`. A value of `stranded_consumers` indicates that an effect
+`gc_kind` is one of `client_verdicts`, `idle_clients`, `idempotency_keys`,
+`history_records`, or `stranded_consumers`. `idle_clients` only appears with
+`WithClientRetention`. A value of `stranded_consumers` indicates that an effect
 consumer collected below the horizon stopped processing writes and cannot
 recover missed data.
 

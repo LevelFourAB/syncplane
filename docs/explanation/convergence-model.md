@@ -153,8 +153,9 @@ The server retains rejection verdicts within the following limits:
 
 - The server drops verdicts oldest-first when stored codes and messages exceed
   64 KiB per client.
-- The server removes stored verdicts when idle-client GC (`WithGC`) deletes the
-  watermark record. Subsequent resends re-apply through watermark adoption.
+- Garbage collection (`WithGC`) clears the verdicts of a client that has not
+  pushed within the tombstone retention. The watermark stays, so a later resend
+  is answered with a bare `ALREADY_APPLIED` and is still not applied.
 
 ## Atomic batches
 
@@ -195,8 +196,13 @@ retention window and advances the workspace horizon. If a client cursor
 predates the horizon, the client transparently performs a full re-bootstrap.
 
 Configure the retention window to exceed your longest anticipated client
-offline duration. When an idle client returns after its state is pruned, the
-server re-admits the client at its next pushed mutation ID.
+offline duration. A client that returns after the window re-bootstraps, but its
+watermark survives: the pending queue it brings back is resent against the
+same idempotency record it was pushed against. Only `WithClientRetention`
+deletes watermark records, and a client whose record is gone is re-admitted at
+its next pushed mutation ID; see
+[Limits and trade-offs](limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice)
+for what that costs.
 
 ## A bootstrap survives a dropped connection
 

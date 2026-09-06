@@ -55,6 +55,7 @@ The following table lists configuration options for `server.New`:
 | `WithCursorStateStore(st)`                  | adapter      | Sets the storage backend for cursor membership state. Defaults to the adapter's cursor store. Setting `nil` disables indirection and inlines membership sets into every cursor. See [Cursor state](#cursor-state).       |
 | `WithLeases(l)`                             | adapter      | Sets the `lease.Locker` used to deduplicate per-workspace background work (GC, index sweeps, text compaction, effects). Defaults to the adapter's locker, falling back to a process-local locker. See [Leases](#leases). |
 | `WithGC(retention, interval)`               | —            | Sets tombstone retention duration and background sweep interval. Setting `interval <= 0` restricts garbage collection to manual execution.                                                                               |
+| `WithClientRetention(d)`                    | keep         | Deletes the watermark records of clients idle for `d`. Unset keeps every record. See [Garbage collection](#garbage-collection).                                                                                          |
 | `WithTextDeltaRetention(d)`                 | 1h           | Sets retention duration for the collaborative-text delta log.                                                                                                                                                            |
 | `WithIdempotencyRetention(d)`               | 24h          | Sets retention duration for claimed `MutateIdempotent` keys.                                                                                                                                                             |
 | `WithHistoryRetention(d)`                   | 90d          | Sets retention duration for field-history records. `HistoryForever` disables time-based expiration. See [Field history](#field-history).                                                                                 |
@@ -136,7 +137,8 @@ A garbage collection pass prunes:
 - **Text delta logs** (`WithTextDeltaRetention`): Prunes collaborative-text delta entries.
 - **Idempotency keys** (`WithIdempotencyRetention`): Prunes keys claimed by `MutateIdempotent`. Retention must cover caller retry windows to prevent duplicate execution.
 - **Field history** (`WithHistoryRetention`): Prunes historical field records. Retention is independent of tombstone retention. A record's age is calculated from its last appended write rather than its initial `recorded_at` timestamp.
-- **Idle client watermark rows**: Pruned during the pass.
+- **Client rejection verdicts** (`WithGC`): Clears the verdicts recorded for clients that have not pushed within the tombstone retention. A resend of a refused mutation then receives `ALREADY_APPLIED` instead of the original verdict.
+- **Idle client watermark records** (`WithClientRetention`): Deletes the records of clients that have not pushed for the configured duration. Not deleted unless the option is set. A deleted watermark lets a resend of an already-applied mutation apply again; see [Limits and trade-offs](../explanation/limits-and-trade-offs.md#deleting-idle-client-watermarks-can-apply-a-resend-twice).
 
 Field-history records are hard-deleted without creating tombstones.
 

@@ -227,12 +227,12 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			case last == 0:
 				// Watermark adoption: 0 means either a brand-new client
 				// (mutation_id 1, the ordinary case) or a returning client
-				// whose watermark row was pruned by idle-client GC. Adopt
-				// mutation_id-1 and apply: GC retention (WithGC) far exceeds
-				// any in-flight retry window, so a resend of an
-				// already-applied mutation cannot race the prune. The
-				// trade-off — a buggy NEW client starting above 1 is accepted
-				// silently — is documented on WithGC.
+				// whose watermark record was deleted — which only
+				// WithClientRetention does. Adopt mutation_id-1 and apply.
+				// Nothing here can tell such a client's fresh work from a
+				// resend of mutations it already had applied; that hazard, and
+				// the buggy NEW client starting above 1 that is accepted
+				// silently, are documented on WithClientRetention.
 				if m.GetMutationId() > 1 {
 					// A first-seen mutation_id above 1 is the noteworthy case: a
 					// returning pruned client (or, less benignly, a buggy one).

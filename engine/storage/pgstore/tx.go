@@ -1072,6 +1072,20 @@ func prefixUpperBound(prefix string) (string, bool) {
 	return "", false
 }
 
+func (t *pgTx) ExpireClientRejections(cutoff time.Time) (int, error) {
+	// updated_at is deliberately left alone: it is what CollectIdleClients
+	// measures idleness by, and expiring verdicts is not client activity.
+	tag, err := t.tx.Exec(t.ctx,
+		`UPDATE clients SET rejections = NULL
+		 WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3 AND rejections IS NOT NULL`,
+		t.ns, t.ws, cutoff.UnixMilli(),
+	)
+	if err != nil {
+		return 0, err
+	}
+	return int(tag.RowsAffected()), nil
+}
+
 func (t *pgTx) CollectIdleClients(cutoff time.Time) (int, error) {
 	tag, err := t.tx.Exec(t.ctx,
 		`DELETE FROM clients WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,
