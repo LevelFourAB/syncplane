@@ -102,6 +102,21 @@ CREATE TABLE auth_members (
 		REFERENCES auth_workspaces(app_id, workspace_id) ON DELETE CASCADE
 );
 CREATE INDEX auth_members_user ON auth_members (user_id);
+CREATE TABLE auth_signing_keys (
+	id          {TEXT} PRIMARY KEY,
+	private_key {TEXT} NOT NULL,
+	created_at  BIGINT NOT NULL
+);
+CREATE TABLE auth_sessions (
+	id           {TEXT} PRIMARY KEY,
+	user_id      {TEXT} NOT NULL REFERENCES auth_users(id) ON DELETE CASCADE,
+	token_hash   {TEXT} NOT NULL,
+	created_at   BIGINT NOT NULL,
+	last_used_at BIGINT NOT NULL,
+	expires_at   BIGINT NOT NULL,
+	revoked_at   BIGINT
+);
+CREATE INDEX auth_sessions_user ON auth_sessions (user_id);
 `}
 
 const ledgerDDL = `

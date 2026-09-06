@@ -75,6 +75,14 @@ var (
 	// ErrIdentityLinked reports that the external identity is already linked
 	// to a different user.
 	ErrIdentityLinked = errors.New("auth: identity linked to another user")
+	// ErrInvalidSession reports a refresh token that names no live session:
+	// malformed, unknown, expired, revoked, or already rotated away. The
+	// caller must sign in again.
+	ErrInvalidSession = errors.New("auth: invalid session")
+	// ErrInvalidToken reports an access token that does not verify:
+	// malformed, signed by an unknown key, expired, or issued for another
+	// issuer.
+	ErrInvalidToken = errors.New("auth: invalid token")
 )
 
 // User is an account on the host. ID is opaque and stable for the life of the

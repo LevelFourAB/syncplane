@@ -32,3 +32,15 @@ var _ = describeStore("postgres", func() *auth.Store {
 	Expect(err).NotTo(HaveOccurred())
 	return store
 })
+
+var _ = describeSessions("sqlite", func() *auth.Store {
+	store, err := auth.OpenSQLite(filepath.Join(GinkgoT().TempDir(), "auth.db"))
+	Expect(err).NotTo(HaveOccurred())
+	return store
+})
+
+var _ = describeSessions("postgres", func() *auth.Store {
+	store, err := auth.OpenPostgres(context.Background(), pgtest.DSN())
+	Expect(err).NotTo(HaveOccurred())
+	return store
+})
