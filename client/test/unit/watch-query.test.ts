@@ -114,6 +114,29 @@ async function watchQuery(
 
 const keysOf = (rows: Row<Widget>[] | undefined): string[] => rows?.map((r) => r.key) ?? [];
 
+/** Everything one delivered page says, in a form toEqual can diff. */
+const pageOf = (rows: Row<Widget>[] | undefined): string[] =>
+	rows?.map((r) => `${r.key}:${r.value.count}:${r.version}`) ?? [];
+
+/**
+ * The page a watcher opened right now is given — the scan-and-filter answer a
+ * maintained one has to keep agreeing with.
+ */
+async function freshPage(hub: WatcherHub, q: Query<Widget>): Promise<Row<Widget>[]> {
+	const fresh = await watchQuery(hub, q);
+	fresh.unsub.close();
+	return fresh.seen.at(-1)!;
+}
+
+const widgetKey = (i: number): string => `w${String(i).padStart(2, '0')}`;
+
+/** `n` widgets, keyed and counted in step, as one commit. */
+const widgetRows = (n: number): RowChange[] =>
+	Array.from(
+		{ length: n },
+		(_, i) => serverRow(widgetKey(i), 1n, { id: widgetKey(i), count: i }),
+	);
+
 describe('maintained query results', () => {
 	/** Every transition one row can make, against an ordered query. */
 	it('keeps the order a scan would produce as rows enter, move and leave', async () => {
@@ -353,6 +376,93 @@ describe('maintained query results', () => {
 		await hub.notify(await applyServer(kv, [ serverRow('w1', 2n, { id: 'w1', count: 1 }) ]));
 		expect(seen).toHaveLength(3);
 		expect(seen.at(-1)?.[0]?.version).toBe(2n);
+		unsub.close();
+	});
+});
+
+// A delivery costs the range the commit disturbed, not the result: the rows
+// before it are the ones the last callback carried, so the page is rebuilt from
+// that array rather than read out of the match set. What that has to leave
+// intact is what these pin — a fresh array every time, row identity everywhere
+// the commit did not reach, and the answer a scan would have given.
+describe('rebuilding the page from the last delivery', () => {
+	/** Steps that shift indices at and after the change, in both directions. */
+	const STEPS: RowChange[][] = [
+		[ serverRow('a', 1n, { id: 'a', count: -5 }) ],
+		[ serverRow('z', 1n, { id: 'z', count: 500 }) ],
+		[ serverRow('w15', 2n, { id: 'w15', count: -1 }) ],
+		[ tombstone('w02', 3n) ],
+		[ tombstone('z', 2n) ],
+		[ serverRow('w18', 4n, { id: 'w18', count: 180 }) ],
+		// Same bytes, new version: the page moves without any index moving.
+		[ serverRow('a', 4n, { id: 'a', count: -5 }) ],
+		// One commit reaching both ends of the result at once.
+		[ tombstone('w03', 5n), serverRow('m', 1n, { id: 'm', count: 7 }) ],
+	];
+
+	it('keeps the rows before a change at the end of an unbounded result', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		await applyServer(kv, widgetRows(40));
+		const { seen, unsub } = await watchQuery(hub, {});
+		const before = seen.at(-1)!;
+		expect(before).toHaveLength(40);
+
+		await hub.notify(await applyServer(kv, [ serverRow('w39', 2n, { id: 'w39', count: 99 }) ]));
+		const after = seen.at(-1)!;
+
+		expect(after).not.toBe(before);
+		expect(after).toHaveLength(40);
+		for (let i = 0; i < 39; i++) expect(after[i]).toBe(before[i]);
+		expect(after[39]).not.toBe(before[39]);
+		expect(after[39]?.value.count).toBe(99);
+		unsub.close();
+	});
+
+	it('delivers nothing when a change at the end leaves the row identical', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		await applyServer(kv, widgetRows(40));
+		const { seen, unsub } = await watchQuery(hub, {});
+		const emits = seen.length;
+		const before = seen.at(-1)!;
+
+		// Same bytes and version, so the commit hands back the row already held.
+		await hub.notify(await applyServer(kv, [ serverRow('w39', 1n, { id: 'w39', count: 39 }) ]));
+
+		expect(seen).toHaveLength(emits);
+		expect(seen.at(-1)).toBe(before);
+		unsub.close();
+	});
+
+	it('agrees with a fresh read after every commit', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		await applyServer(kv, widgetRows(20));
+		const q: Query<Widget> = { orderBy: (w) => [ w.count.asc() ] };
+		const { seen, unsub } = await watchQuery(hub, q);
+
+		for (const changes of STEPS) {
+			await hub.notify(await applyServer(kv, changes));
+			expect(pageOf(seen.at(-1))).toEqual(pageOf(await freshPage(hub, q)));
+		}
+		unsub.close();
+	});
+
+	it('agrees with a fresh read after every commit under a window', async () => {
+		const kv = new MemoryKVStore();
+		const hub = new WatcherHub(kv, registry, new ChainMutex(), { debugVerifyTouches: true });
+		await applyServer(kv, widgetRows(20));
+		// Offset and limit both non-trivial: a commit below the offset shifts the
+		// whole page, and one past the limit must not reach it at all.
+		const q: Query<Widget> = { orderBy: (w) => [ w.count.asc() ], offset: 2, limit: 5 };
+		const { seen, unsub } = await watchQuery(hub, q);
+		expect(seen.at(-1)).toHaveLength(5);
+
+		for (const changes of STEPS) {
+			await hub.notify(await applyServer(kv, changes));
+			expect(pageOf(seen.at(-1))).toEqual(pageOf(await freshPage(hub, q)));
+		}
 		unsub.close();
 	});
 });

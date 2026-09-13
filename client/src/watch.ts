@@ -386,6 +386,24 @@ interface Watcher {
 	 */
 	lastWindow?: ResultRow[];
 	/**
+	 * The array handed to the last callback, before hydration. The next page is
+	 * built from it rather than mapped out of `matches` (see `dirtyFrom`), so a
+	 * delivery costs a copy plus the disturbed tail instead of a pass over the
+	 * whole result.
+	 */
+	lastRows?: Row<unknown>[];
+	/**
+	 * Lowest result index disturbed since the last DELIVERED callback (Infinity
+	 * for none), which is the index from which `lastWindow`/`lastRows` stop
+	 * describing the current match set — everything before it is the same
+	 * ResultRow the consumer already holds.
+	 *
+	 * It accumulates across dispatches for the reason `pending` does: a dispatch
+	 * superseded by a newer one never delivers, and the rows it disturbed are
+	 * still undelivered when the next one gets there.
+	 */
+	dirtyFrom: number;
+	/**
 	 * Matches behind the last emitted page. Like coverage, it rides on the result
 	 * and so moves it: a row entering or leaving the match set past a full page
 	 * changes nothing a reader can see EXCEPT this, and suppressing that emit
@@ -613,9 +631,9 @@ export interface WatcherHubOptions {
  * a rescan, and a first read falls back to one when no index covers the query.
  *
  * Decoded values and Row wrappers are shared between the watchers of a scope
- * AND reused across commits, so callbacks must not mutate the rows they
- * receive — a mutation would leak into every later emit, not just the current
- * one.
+ * AND reused across commits, and the delivered array is what the next page is
+ * built from, so callbacks must not mutate either — a mutation would leak into
+ * every later emit, not just the current one.
  */
 export class WatcherHub {
 	private watchers = new Set<Watcher>();
@@ -722,6 +740,7 @@ export class WatcherHub {
 			compare: comparatorFor(schema, query),
 			window: window ?? { offset: query?.offset, limit: query?.limit },
 			pending: 'reset',
+			dirtyFrom: 0,
 			emittedAt: 0,
 			rel,
 		};
@@ -1422,16 +1441,20 @@ export class WatcherHub {
 	/**
 	 * Hands one watcher its current page, unless nothing it reports has moved.
 	 *
-	 * `from` is the lowest result index the commit disturbed (Infinity for none),
-	 * which settles in one comparison whether a windowed watcher has to look at
-	 * all: an insert, delete or move at or past `offset + limit` cannot change
-	 * the rows before it. Only the rows — `total` and `coverage` ride on the
-	 * result too, and each moves it on its own. `force` bypasses the memo: the
-	 * first emit, and an include watcher whose hydration targets moved where its
-	 * own rows did not.
+	 * `from` is the lowest result index the commit disturbed (Infinity for none).
+	 * Folded into `dirtyFrom`, it settles in one comparison whether a windowed
+	 * watcher has to look at all — an insert, delete or move at or past
+	 * `offset + limit` cannot change the rows before it — and bounds the rest of
+	 * the work here to the disturbed tail. Only the rows — `total` and `coverage`
+	 * ride on the result too, and each moves it on its own. `force` bypasses the
+	 * memo: the first emit, and an include watcher whose hydration targets moved
+	 * where its own rows did not.
 	 */
 	private async emit(watcher: Watcher, from: number, force: boolean, at: number): Promise<void> {
 		if (!this.watchers.has(watcher) || watcher.matches === undefined) return;
+		// Lowered before the stamp gate below: a dispatch a newer one supersedes
+		// still disturbed these rows, and it is handed `from` exactly once.
+		if (from < watcher.dirtyFrom) watcher.dirtyFrom = from;
 		if (at <= watcher.emittedAt) return;
 		// Claimed before the callback (and before any hydrate), so a dispatch that
 		// starts while this one is still hydrating knows it is the newer of the two.
@@ -1448,23 +1471,42 @@ export class WatcherHub {
 		// The O(1) gate. `pending` has to be empty for it: a callback dropped by
 		// a newer dispatch leaves edits undelivered, and the consumer is behind
 		// by them however little this commit moved.
-		if (settled && from >= end && watcher.pending !== 'reset' && watcher.pending.length === 0) {
+		if (
+			settled && watcher.dirtyFrom >= end && watcher.pending !== 'reset'
+			&& watcher.pending.length === 0
+		) {
 			return;
 		}
-		const window = watcher.matches.ordered.slice(
-			watcher.window.offset ?? 0,
-			end === Infinity ? undefined : end,
-		);
-		if (settled && sameWindow(watcher.lastWindow!, window)) {
+		const offset = watcher.window.offset ?? 0;
+		const ordered = watcher.matches.ordered;
+		const length = Math.max(0, Math.min(total, end) - offset);
+		// Rows before `dirtyFrom` are the ResultRows the last callback carried, so
+		// neither the cancellation check nor the new page has to look at them: the
+		// check compares the tail, and the page is the last one's leading copy plus
+		// that tail. Without a last delivery there is nothing to reuse.
+		const last = watcher.lastWindow;
+		const lastRows = watcher.lastRows;
+		const keep = last === undefined || lastRows === undefined
+			? 0
+			: Math.min(Math.max(0, Math.min(watcher.dirtyFrom, end) - offset), length, last.length);
+		if (settled && sameTail(last!, ordered, offset, keep, length)) {
 			// The page the consumer holds is already this one, so whatever the
 			// edits were, they cancelled out.
 			watcher.pending = [];
+			watcher.dirtyFrom = Infinity;
 			return;
 		}
 		const delta: WatchDelta<unknown> = watcher.pending === 'reset'
 			? { kind: 'reset' }
 			: { kind: 'splice', changes: watcher.pending };
-		const rows = window.map((r) => r.row);
+		// A fresh array every time: consumers compare deliveries by array identity.
+		const window: ResultRow[] = keep > 0 ? last!.slice(0, keep) : [];
+		const rows: Row<unknown>[] = keep > 0 ? lastRows!.slice(0, keep) : [];
+		for (let i = keep; i < length; i++) {
+			const held = ordered[offset + i]!;
+			window.push(held);
+			rows.push(held.row);
+		}
 		if (watcher.include && this.refClient) {
 			// Hydrated after the read tx closed (own shared reads).
 			const hydrated = await hydrate(
@@ -1478,16 +1520,20 @@ export class WatcherHub {
 			// while this one hydrated; its rows win.
 			if (!this.watchers.has(watcher) || watcher.emittedAt !== at) return;
 			watcher.lastWindow = window;
+			watcher.lastRows = rows;
 			watcher.lastCoverage = coverage;
 			watcher.lastTotal = total;
 			watcher.pending = [];
+			watcher.dirtyFrom = Infinity;
 			deliver(watcher, withCoverage(hydrated, coverage, pageInfo(watcher, rows, total, end)), delta);
 			return;
 		}
 		watcher.lastWindow = window;
+		watcher.lastRows = rows;
 		watcher.lastCoverage = coverage;
 		watcher.lastTotal = total;
 		watcher.pending = [];
+		watcher.dirtyFrom = Infinity;
 		deliver(watcher, withCoverage(rows, coverage, pageInfo(watcher, rows, total, end)), delta);
 	}
 
@@ -2309,15 +2355,25 @@ function windowEnd(window: WatchWindow): number {
 }
 
 /**
- * Whether two pages hold the same rows. Identity is exact rather than merely
- * cheap: a ResultRow survives only while its bytes AND its version hold, and
- * both matter — a version that moves under identical bytes (an optimistic
- * create acked to the same encoding) is what a compare-and-swap guard reads.
+ * Whether the page `last` holds is still the page `ordered` gives, comparing
+ * only from `keep` on — the caller has established that the rows before it are
+ * the same objects (see Watcher.dirtyFrom).
+ *
+ * Identity is exact rather than merely cheap: a ResultRow survives only while
+ * its bytes AND its version hold, and both matter — a version that moves under
+ * identical bytes (an optimistic create acked to the same encoding) is what a
+ * compare-and-swap guard reads.
  */
-function sameWindow(a: readonly ResultRow[], b: readonly ResultRow[]): boolean {
-	if (a.length !== b.length) return false;
-	for (let i = 0; i < a.length; i++) {
-		if (a[i] !== b[i]) return false;
+function sameTail(
+	last: readonly ResultRow[],
+	ordered: readonly ResultRow[],
+	offset: number,
+	keep: number,
+	length: number,
+): boolean {
+	if (last.length !== length) return false;
+	for (let i = keep; i < length; i++) {
+		if (last[i] !== ordered[offset + i]) return false;
 	}
 	return true;
 }
