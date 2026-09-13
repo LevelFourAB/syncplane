@@ -528,13 +528,20 @@ var _ = Describe("Postgres transaction invariants", func() {
 		})).To(Succeed())
 	})
 
-	It("recovers a transaction aborted by a failed statement inside a savepoint", func() {
-		// The difference from SQLite that could have bitten the engine: ANY
-		// failed statement puts a Postgres transaction into an aborted state
-		// where every later statement fails with 25P02. The engine continues
-		// past an error inside a write transaction in exactly one place — the
-		// push path's rejected mutation — and it does so inside InSavepoint,
-		// whose ROLLBACK TO is what clears that state.
+	It("fails the whole transaction when a statement inside a savepoint fails", func() {
+		// The difference from SQLite the engine has to live with: ANY failed
+		// statement puts a Postgres transaction into an aborted state where
+		// every later statement fails with 25P02, and no savepoint here rewinds
+		// out of it — one batch carries statements from savepoints since
+		// released, so there is no single point to rewind to (see InSavepoint
+		// and queue.go).
+		//
+		// Nothing the engine does needs otherwise. The one place it continues
+		// past an error inside a write transaction is a rejected mutation, whose
+		// error is a verdict on the mutation rather than a statement Postgres
+		// refused; a storage error there fails the workspace batch. So this
+		// pins the safe direction instead: the failure surfaces, and none of the
+		// transaction lands.
 		//
 		// The conformance suite's savepoint specs roll back on a Go-level error
 		// with no failed statement behind it, so they never reach the aborted
@@ -544,26 +551,23 @@ var _ = Describe("Postgres transaction invariants", func() {
 		store := open()
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 
-		Expect(store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
-			err := tx.InSavepoint(func() error {
+		err := store.WithWriteTx(ctx, "ws1", func(tx storage.WriteTx) error {
+			Expect(tx.InSavepoint(func() error {
 				return tx.PutRow("widget", "bad\u0000key", []byte("v"), 1, storage.Actor{})
-			})
-			// It has to be the SERVER that rejected it. A driver-side rejection
-			// would never send a statement, so the transaction would never
-			// enter the aborted state and this spec would prove nothing.
-			var pgErr *pgconn.PgError
-			Expect(errors.As(err, &pgErr)).To(BeTrue(),
-				"the write must fail in Postgres, not in pgx: got %v", err)
-
-			// The transaction has to be usable again here, or the push path
-			// would lose every mutation after a rejected one.
+			})).To(Succeed(), "the write is queued, so nothing has failed yet")
 			return tx.PutRow("widget", "good", []byte("v"), 2, storage.Actor{})
-		})).To(Succeed())
+		})
+		// It has to be the SERVER that rejected it. A driver-side rejection
+		// would never send a statement, so the transaction would never enter
+		// the aborted state and this spec would prove nothing.
+		var pgErr *pgconn.PgError
+		Expect(errors.As(err, &pgErr)).To(BeTrue(),
+			"the write must fail in Postgres, not in pgx: got %v", err)
 
 		Expect(store.WithReadTx(ctx, "ws1", func(tx storage.ReadTx) error {
-			row, err := tx.GetRow("widget", "good")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(row.Value).To(Equal([]byte("v")))
+			_, err := tx.GetRow("widget", "good")
+			Expect(err).To(MatchError(storage.ErrNotFound),
+				"the write that followed the failure must not have landed either")
 			return nil
 		})).To(Succeed())
 	})

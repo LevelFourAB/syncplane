@@ -49,6 +49,13 @@ type pgTx struct {
 	wsSeq     uint64
 	wsHorizon uint64
 	wsEpoch   uint64
+	// queued holds the write-only statements this transaction has not sent yet,
+	// in the order they were written; sends counts the batches that have gone
+	// out, and failed holds the first error one of them returned. See queue.go.
+	// A read transaction never fills any of them.
+	queued []queuedStmt
+	sends  int
+	failed error
 }
 
 // loadWorkspace reads last_seq, tombstone_horizon and store_epoch in one
@@ -71,7 +78,7 @@ func (t *pgTx) loadWorkspace() error {
 	// store_epoch is stored as a signed BIGINT because Postgres has no unsigned
 	// one; reinterpret the bits. The value is opaque — only equality matters.
 	var seq, horizon, epoch int64
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT last_seq, tombstone_horizon, store_epoch FROM workspaces
 		 WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
 	).Scan(&seq, &horizon, &epoch)
@@ -103,7 +110,7 @@ func (t *pgTx) register() error {
 	if err != nil {
 		return err
 	}
-	if _, err := t.tx.Exec(t.ctx,
+	if err := t.queue(
 		`INSERT INTO workspaces (namespace, workspace_id, store_epoch) VALUES ($1, $2, $3)
 		 ON CONFLICT DO NOTHING`,
 		t.ns, t.ws, epoch,
@@ -148,7 +155,7 @@ func (t *pgTx) TombstoneHorizon() (uint64, error) {
 func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
 	row := storage.Row{Entity: entity, Key: key}
 	var version, created int64
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT value, version, created_version, deleted, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4`,
@@ -197,7 +204,7 @@ func (t *pgTx) GetRows(entity string, keys []string, fn func(storage.Row) error)
 }
 
 func (t *pgTx) readRowsByKey(entity string, keys []string) (map[string]storage.Row, error) {
-	rows, err := t.tx.Query(t.ctx,
+	rows, err := t.query(
 		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = ANY($4)`,
@@ -313,7 +320,7 @@ func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit 
 
 func (t *pgTx) ClientLastMutationID(clientID string) (uint64, error) {
 	var id int64
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT last_mutation_id FROM clients
 		 WHERE namespace = $1 AND workspace_id = $2 AND client_id = $3`,
 		t.ns, t.ws, clientID,
@@ -326,7 +333,7 @@ func (t *pgTx) ClientLastMutationID(clientID string) (uint64, error) {
 
 func (t *pgTx) ClientRejections(clientID string) ([]storage.ClientRejection, error) {
 	var blob []byte
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT rejections FROM clients
 		 WHERE namespace = $1 AND workspace_id = $2 AND client_id = $3`,
 		t.ns, t.ws, clientID,
@@ -349,7 +356,7 @@ func (t *pgTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, e
 		rec storage.IdempotencyRecord
 		seq int64
 	)
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT seq, result FROM idempotency
 		 WHERE namespace = $1 AND workspace_id = $2 AND key = $3`,
 		t.ns, t.ws, key,
@@ -373,18 +380,17 @@ func (t *pgTx) PutIdempotencyRecord(key string, rec storage.IdempotencyRecord) e
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO idempotency (namespace, workspace_id, key, seq, result, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (namespace, workspace_id, key)
 		 DO UPDATE SET seq = excluded.seq, result = excluded.result, updated_at = excluded.updated_at`,
 		t.ns, t.ws, key, int64(rec.Seq), notNilBytes(rec.Result), time.Now().UnixMilli(),
 	)
-	return err
 }
 
 func (t *pgTx) CollectIdempotencyKeys(cutoff time.Time) (int, error) {
-	tag, err := t.tx.Exec(t.ctx,
+	tag, err := t.exec(
 		`DELETE FROM idempotency WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,
 		t.ns, t.ws, cutoff.UnixMilli(),
 	)
@@ -400,7 +406,7 @@ func (t *pgTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, bool
 		seq     int64
 		updated int64
 	)
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT seq, entity, key, updated_at FROM consumer_positions
 		 WHERE namespace = $1 AND workspace_id = $2 AND consumer = $3`,
 		t.ns, t.ws, consumer,
@@ -417,7 +423,7 @@ func (t *pgTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, bool
 }
 
 func (t *pgTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
-	rows, err := t.tx.Query(t.ctx,
+	rows, err := t.query(
 		`SELECT consumer, seq, entity, key, updated_at FROM consumer_positions
 		 WHERE namespace = $1 AND workspace_id = $2 ORDER BY consumer`,
 		t.ns, t.ws,
@@ -447,7 +453,7 @@ func (t *pgTx) SetConsumerPosition(consumer string, p storage.ConsumerPosition) 
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO consumer_positions (namespace, workspace_id, consumer, seq, entity, key, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7)
 		 ON CONFLICT (namespace, workspace_id, consumer)
@@ -455,12 +461,11 @@ func (t *pgTx) SetConsumerPosition(consumer string, p storage.ConsumerPosition) 
 		               key = excluded.key, updated_at = excluded.updated_at`,
 		t.ns, t.ws, consumer, int64(p.Seq), p.Entity, p.Key, time.Now().UnixMilli(),
 	)
-	return err
 }
 
 func (t *pgTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) {
 	var snapshot []byte
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT snapshot FROM consumer_shadows
 		 WHERE namespace = $1 AND workspace_id = $2 AND consumer = $3 AND entity = $4 AND key = $5`,
 		t.ns, t.ws, consumer, entity, key,
@@ -480,44 +485,41 @@ func (t *pgTx) PutConsumerShadow(consumer, entity, key string, snapshot []byte) 
 	}
 	// The column is NOT NULL, so a nil snapshot stores as an empty blob and
 	// reads back as one. A consumer that wants "no shadow" deletes it.
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO consumer_shadows (namespace, workspace_id, consumer, entity, key, snapshot)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (namespace, workspace_id, consumer, entity, key)
 		 DO UPDATE SET snapshot = excluded.snapshot`,
 		t.ns, t.ws, consumer, entity, key, notNilBytes(snapshot),
 	)
-	return err
 }
 
 func (t *pgTx) DeleteConsumerShadow(consumer, entity, key string) error {
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`DELETE FROM consumer_shadows
 		 WHERE namespace = $1 AND workspace_id = $2 AND consumer = $3 AND entity = $4 AND key = $5`,
 		t.ns, t.ws, consumer, entity, key,
 	)
-	return err
 }
 
 func (t *pgTx) DeleteConsumer(consumer string) error {
-	if _, err := t.tx.Exec(t.ctx,
+	if err := t.queue(
 		`DELETE FROM consumer_shadows WHERE namespace = $1 AND workspace_id = $2 AND consumer = $3`,
 		t.ns, t.ws, consumer,
 	); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`DELETE FROM consumer_positions WHERE namespace = $1 AND workspace_id = $2 AND consumer = $3`,
 		t.ns, t.ws, consumer,
 	)
-	return err
 }
 
 func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, error) {
 	// Shadows first, while the positions that name their consumers still exist:
 	// the reverse order would leave every collected consumer's shadows behind
 	// with nothing left to identify them by.
-	if _, err := t.tx.Exec(t.ctx,
+	if _, err := t.exec(
 		`DELETE FROM consumer_shadows
 		 WHERE namespace = $1 AND workspace_id = $2 AND consumer IN (
 		     SELECT consumer FROM consumer_positions
@@ -527,7 +529,7 @@ func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, err
 	); err != nil {
 		return 0, err
 	}
-	tag, err := t.tx.Exec(t.ctx,
+	tag, err := t.exec(
 		`DELETE FROM consumer_positions
 		 WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3 AND seq < $4`,
 		t.ns, t.ws, cutoff.UnixMilli(), int64(belowSeq),
@@ -540,7 +542,7 @@ func (t *pgTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int, err
 
 func (t *pgTx) FieldDeltaHorizon() (uint64, error) {
 	var horizon int64
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws,
 	).Scan(&horizon)
@@ -563,7 +565,7 @@ func (t *pgTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]byte
 	if afterSeq < uint64(horizon) {
 		return nil, false, nil
 	}
-	rows, err := t.tx.Query(t.ctx,
+	rows, err := t.query(
 		`SELECT frag FROM field_deltas
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4 AND field = $5
 		   AND seq > $6
@@ -599,20 +601,19 @@ func (t *pgTx) PutFieldDelta(entity, key, field string, seq uint64, frag []byte)
 	}
 	// A gap marker must round-trip as an empty (not NULL) blob: the column is
 	// NOT NULL and the read path distinguishes empty from present.
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO field_deltas (namespace, workspace_id, entity, key, field, seq, frag, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 		 ON CONFLICT (namespace, workspace_id, entity, key, field, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
 		t.ns, t.ws, entity, key, field, int64(seq), notNilBytes(frag), time.Now().UnixMilli(),
 	)
-	return err
 }
 
 func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 	cutoffMillis := cutoff.UnixMilli()
 	var maxPruned int64
-	if err := t.tx.QueryRow(t.ctx,
+	if err := t.queryRow(
 		`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
 		 WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,
 		t.ns, t.ws, cutoffMillis,
@@ -620,7 +621,7 @@ func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		return 0, err
 	}
 	if maxPruned > 0 {
-		if _, err := t.tx.Exec(t.ctx,
+		if _, err := t.exec(
 			`DELETE FROM field_deltas WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,
 			t.ns, t.ws, cutoffMillis,
 		); err != nil {
@@ -628,7 +629,7 @@ func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		}
 		// GREATEST keeps the horizon monotonic even if an older cutoff runs
 		// after a newer one, exactly as CollectTombstones does.
-		if _, err := t.tx.Exec(t.ctx,
+		if _, err := t.exec(
 			`UPDATE workspaces SET field_delta_horizon = GREATEST(field_delta_horizon, $3)
 			 WHERE namespace = $1 AND workspace_id = $2`,
 			t.ns, t.ws, maxPruned,
@@ -637,7 +638,7 @@ func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		}
 	}
 	var horizon int64
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT field_delta_horizon FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws,
 	).Scan(&horizon)
@@ -649,7 +650,7 @@ func (t *pgTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 
 func (t *pgTx) TextFloor(entity, key, field string) ([]byte, error) {
 	var vv []byte
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT vv FROM text_floors
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4 AND field = $5`,
 		t.ns, t.ws, entity, key, field,
@@ -665,21 +666,19 @@ func (t *pgTx) PutTextFloor(entity, key, field string, vv []byte) error {
 		return err
 	}
 	if len(vv) == 0 {
-		_, err := t.tx.Exec(t.ctx,
+		return t.queue(
 			`DELETE FROM text_floors
 			 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4 AND field = $5`,
 			t.ns, t.ws, entity, key, field,
 		)
-		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO text_floors (namespace, workspace_id, entity, key, field, vv)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (namespace, workspace_id, entity, key, field)
 		 DO UPDATE SET vv = excluded.vv`,
 		t.ns, t.ws, entity, key, field, vv,
 	)
-	return err
 }
 
 func (t *pgTx) ScanIndex(
@@ -736,7 +735,7 @@ func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
 		specHash string
 		ready    bool
 	)
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT spec_hash, ready FROM index_state
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND idx = $4`,
 		t.ns, t.ws, entity, index,
@@ -755,32 +754,30 @@ func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
 // BuildIndexes call on an arbitrary id mint a workspace every later pass
 // iterates.
 func (t *pgTx) SetIndexBuildMark(mark string) error {
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`UPDATE workspaces SET index_build_mark = $3 WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws, mark,
 	)
-	return err
 }
 
 // SetTextCompactMark updates the workspace row and never calls register, for
 // SetIndexBuildMark's reason: a workspace holding no rows has no text to
 // compact, and a sweep must not mint one.
 func (t *pgTx) SetTextCompactMark(mark storage.TextCompactMark) error {
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`UPDATE workspaces
 		    SET text_compact_seq = $3, text_compact_entity = $4, text_compact_key = $5,
 		        text_compact_min_purged = $6
 		  WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws, int64(mark.Seq), mark.Entity, mark.Key, int32(mark.MinPurged),
 	)
-	return err
 }
 
 func (t *pgTx) TextCompactMark() (storage.TextCompactMark, error) {
 	var m storage.TextCompactMark
 	var seq int64
 	var minPurged int32
-	err := t.tx.QueryRow(t.ctx,
+	err := t.queryRow(
 		`SELECT text_compact_seq, text_compact_entity, text_compact_key, text_compact_min_purged
 		   FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws,
@@ -799,14 +796,13 @@ func (t *pgTx) SetIndexState(entity, index, specHash string, ready bool) error {
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO index_state (namespace, workspace_id, entity, idx, spec_hash, ready)
 		 VALUES ($1, $2, $3, $4, $5, $6)
 		 ON CONFLICT (namespace, workspace_id, entity, idx)
 		 DO UPDATE SET spec_hash = excluded.spec_hash, ready = excluded.ready`,
 		t.ns, t.ws, entity, index, specHash, ready,
 	)
-	return err
 }
 
 func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry) error {
@@ -842,7 +838,7 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	// that way, and failing the whole write on a harmless caller bug would
 	// stick the write path. There are no non-key columns, so there is nothing
 	// an update would change.
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`WITH want AS (SELECT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)),
 		      stale AS (
 		          DELETE FROM index_entries
@@ -854,19 +850,17 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 		 ON CONFLICT DO NOTHING`,
 		t.ns, t.ws, entity, key, idxs, ks,
 	)
-	return err
 }
 
 func (t *pgTx) DeleteIndexEntries(entity, key string) error {
 	// No register(): removing entries a row never had must leave no trace, the
 	// same reason a write closure that writes nothing does not create a
 	// workspace.
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`DELETE FROM index_entries
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4`,
 		t.ns, t.ws, entity, key,
 	)
-	return err
 }
 
 // NextSeq claims the first sequence with a statement and every later one from
@@ -887,7 +881,7 @@ func (t *pgTx) NextSeq() (uint64, error) {
 	// The first call reads and claims in one statement, so a transaction that
 	// allocates exactly one sequence costs exactly one statement.
 	var seq int64
-	if err := t.tx.QueryRow(t.ctx,
+	if err := t.queryRow(
 		`UPDATE workspaces SET last_seq = last_seq + 1
 		 WHERE namespace = $1 AND workspace_id = $2 RETURNING last_seq`,
 		t.ns, t.ws,
@@ -905,7 +899,7 @@ func (t *pgTx) flush() error {
 	if !t.seqLoaded || t.seq == t.seqPersisted {
 		return nil
 	}
-	if _, err := t.tx.Exec(t.ctx,
+	if err := t.queue(
 		`UPDATE workspaces SET last_seq = $3 WHERE namespace = $1 AND workspace_id = $2`,
 		t.ns, t.ws, int64(t.seq),
 	); err != nil {
@@ -921,7 +915,7 @@ func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor st
 	}
 	// created_version stays out of the conflict SET: the stored value is the
 	// key's original creation, which every overwrite keeps (see storage.Row).
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, FALSE, $8, $9, $10)
@@ -933,14 +927,13 @@ func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor st
 		t.ns, t.ws, entity, key, value, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
-	return err
 }
 
 func (t *pgTx) DeleteRow(entity, key string, version uint64, actor storage.Actor) error {
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
 		 VALUES ($1, $2, $3, $4, NULL, $5, $6, TRUE, $7, $8, $9)
@@ -952,21 +945,19 @@ func (t *pgTx) DeleteRow(entity, key string, version uint64, actor storage.Actor
 		t.ns, t.ws, entity, key, int64(version), int64(version), time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
-	return err
 }
 
 func (t *pgTx) SetClientLastMutationID(clientID string, mutationID uint64) error {
 	if err := t.register(); err != nil {
 		return err
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO clients (namespace, workspace_id, client_id, last_mutation_id, updated_at)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (namespace, workspace_id, client_id)
 		 DO UPDATE SET last_mutation_id = excluded.last_mutation_id, updated_at = excluded.updated_at`,
 		t.ns, t.ws, clientID, int64(mutationID), time.Now().UnixMilli(),
 	)
-	return err
 }
 
 func (t *pgTx) SetClientRejections(clientID string, recs []storage.ClientRejection) error {
@@ -980,51 +971,70 @@ func (t *pgTx) SetClientRejections(clientID string, recs []storage.ClientRejecti
 			return fmt.Errorf("pgstore: encode rejections for client %q: %w", clientID, err)
 		}
 	}
-	_, err := t.tx.Exec(t.ctx,
+	return t.queue(
 		`INSERT INTO clients (namespace, workspace_id, client_id, rejections, updated_at)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (namespace, workspace_id, client_id)
 		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
 		t.ns, t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
-	return err
 }
 
 // InSavepoint runs fn inside a nested savepoint.
 //
-// It carries more weight here than under SQLite. Any failed statement puts a
-// Postgres transaction into an aborted state where every later statement fails
-// with 25P02 until it rewinds to a savepoint — so ROLLBACK TO is not merely how
-// the engine undoes a rejected mutation's writes, it is the only way a
-// transaction continues past a storage error at all. A caller that swallows an
-// error and keeps writing outside a savepoint gets a loud, immediate failure
-// rather than a silent one, which is the safe direction for the difference to
-// fall.
+// The rewind covers what fn wrote, not what the server refused. A statement
+// Postgres rejects aborts the whole transaction — every later statement fails
+// with 25P02 — and no savepoint here recovers it: writes travel in batches that
+// may span savepoints already released, so there is no single point to rewind
+// to. Such an error fails the transaction, loudly and at once, which is the
+// safe direction for the difference to fall. It costs nothing the engine uses:
+// the one place it continues past an error inside a write transaction is a
+// rejected mutation, which is a verdict on the mutation rather than a statement
+// the server refused.
 //
 // # Deferred release
 //
 // A finished savepoint is left established rather than released on the spot:
-// the next call at the same depth releases it and opens the replacement in one
-// parameterless statement (pgx sends those over the simple protocol, so the
-// pair is one round trip), and COMMIT releases the last one. That is what makes
-// a push of N mutations cost N savepoint round trips rather than 2N. It holds
-// at most one deferred savepoint per nesting level, which keeps a long batch
-// far below the ~64 concurrent subtransactions past which Postgres spills the
-// subxact cache and slows every reader of the rows the transaction touches.
+// the next call at the same depth releases it and opens the replacement, and
+// COMMIT releases the last one. That is what makes a push of N mutations cost N
+// savepoint statements rather than 2N. It holds at most one deferred savepoint
+// per nesting level, which keeps a long batch far below the ~64 concurrent
+// subtransactions past which Postgres spills the subxact cache and slows every
+// reader of the rows the transaction touches.
 //
 // Statements issued between a deferred savepoint and its release run inside
 // that subtransaction. They still survive it, because the release always
 // precedes the ROLLBACK TO of the savepoint that replaces it.
+//
+// # Rewinding the queue instead of the server
+//
+// Both the savepoint statements and the writes they bracket go through the
+// write-behind queue (see queue.go), which gives the common rewind a cheaper
+// form than ROLLBACK TO: if nothing has been sent since this savepoint was
+// queued, the server has never seen any of it, and dropping the queue back to
+// where the savepoint starts is the whole undo. A push that rejects a mutation
+// pays nothing for it. Once something HAS been sent the savepoint exists on the
+// server, so the queued remainder is dropped and a ROLLBACK TO is queued in its
+// place — which lands before anything written afterwards, in order.
 func (t *pgTx) InSavepoint(fn func() error) error {
 	t.spDepth++
 	name := fmt.Sprintf("sp%d", t.spDepth)
 	defer func() { t.spDepth-- }()
 
-	open := `SAVEPOINT ` + name
-	if t.spPending == name {
-		open = `RELEASE ` + name + `; SAVEPOINT ` + name
+	// Where this savepoint's entries begin, and how many batches had gone out
+	// when it opened: together they say whether the rewind below can be the
+	// queue's own.
+	mark, sends, pending := len(t.queued), t.sends, t.spPending
+
+	// Two entries rather than one `RELEASE spN; SAVEPOINT spN` string: a batch
+	// speaks the extended query protocol, which carries one statement per
+	// message. Queued back to back they still cost no extra round trip.
+	if pending == name {
+		if err := t.queue(`RELEASE ` + name); err != nil {
+			return err
+		}
 	}
-	if _, err := t.tx.Exec(t.ctx, open); err != nil {
+	if err := t.queue(`SAVEPOINT ` + name); err != nil {
 		return err
 	}
 	// Any deeper deferred savepoint was released along with this name (RELEASE
@@ -1045,14 +1055,36 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 		// dropped rather than restored: what fn saw is not what the row holds now,
 		// and what preceded fn may not be either.
 		t.wsLoaded = false
-		// ROLLBACK TO rewinds the writes but leaves the savepoint established,
-		// which is exactly the deferred state — so the rewind costs one
-		// statement and the release rides on whatever comes next.
-		if _, rbErr := t.tx.Exec(t.ctx, `ROLLBACK TO `+name); rbErr != nil {
-			return errors.Join(err, fmt.Errorf("pgstore: rollback savepoint: %w", rbErr))
+		switch {
+		case t.failed != nil:
+			// A queued statement has already failed, which aborts the whole
+			// transaction in Postgres. No savepoint rewinds that — the batch it
+			// failed in may have carried statements from savepoints since
+			// released — so the transaction stays dead and WithWriteTx rolls it
+			// back. err is the failure itself wherever fn observed it.
+			return err
+		case t.sends == sends:
+			// Nothing has left this process since the SAVEPOINT was queued, so
+			// every statement fn wrote is still in the queue above mark, and
+			// truncating is an exact undo. The RELEASE of the savepoint this one
+			// replaced goes with it, leaving that one deferred exactly as it was.
+			t.queued = t.queued[:mark]
+			t.spPending = pending
+			return err
+		default:
+			// A send empties the queue, so everything still in it was queued by
+			// fn and must be dropped rather than sent: ROLLBACK TO would only
+			// undo it again. The savepoint itself went out with that send.
+			t.queued = t.queued[:0]
+			// ROLLBACK TO rewinds the writes but leaves the savepoint
+			// established, which is exactly the deferred state — so the rewind
+			// costs one statement and the release rides on whatever comes next.
+			if rbErr := t.queue(`ROLLBACK TO ` + name); rbErr != nil {
+				return errors.Join(err, fmt.Errorf("pgstore: rollback savepoint: %w", rbErr))
+			}
+			t.spPending = name
+			return err
 		}
-		t.spPending = name
-		return err
 	}
 	t.spPending = name
 	return nil
@@ -1061,7 +1093,7 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 	cutoffMillis := cutoff.UnixMilli()
 	var maxDeleted int64
-	if err := t.tx.QueryRow(t.ctx,
+	if err := t.queryRow(
 		`SELECT COALESCE(MAX(version), 0) FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND deleted AND updated_at < $3`,
 		t.ns, t.ws, cutoffMillis,
@@ -1069,7 +1101,7 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		return 0, err
 	}
 	if maxDeleted > 0 {
-		if _, err := t.tx.Exec(t.ctx,
+		if _, err := t.exec(
 			`DELETE FROM rows
 			 WHERE namespace = $1 AND workspace_id = $2 AND deleted AND updated_at < $3`,
 			t.ns, t.ws, cutoffMillis,
@@ -1078,7 +1110,7 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		}
 		// GREATEST keeps the horizon monotonic even if an older cutoff runs
 		// after a newer one.
-		if _, err := t.tx.Exec(t.ctx,
+		if _, err := t.exec(
 			`UPDATE workspaces SET tombstone_horizon = GREATEST(tombstone_horizon, $3)
 			 WHERE namespace = $1 AND workspace_id = $2`,
 			t.ns, t.ws, maxDeleted,
@@ -1121,7 +1153,7 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 		rowsWhere = `namespace = $1 AND workspace_id = $2 AND entity = $3 AND key IN (
 		   SELECT key FROM rows WHERE ` + selected + `)`
 	}
-	if _, err := t.tx.Exec(t.ctx,
+	if _, err := t.exec(
 		`DELETE FROM index_entries
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key IN (
 		   SELECT key FROM rows WHERE `+selected+`
@@ -1130,7 +1162,7 @@ func (t *pgTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit
 	); err != nil {
 		return 0, false, err
 	}
-	tag, err := t.tx.Exec(t.ctx, `DELETE FROM rows WHERE `+rowsWhere, args...)
+	tag, err := t.exec(`DELETE FROM rows WHERE `+rowsWhere, args...)
 	if err != nil {
 		return 0, false, err
 	}
@@ -1186,7 +1218,7 @@ func prefixUpperBound(prefix string) (string, bool) {
 func (t *pgTx) ExpireClientRejections(cutoff time.Time) (int, error) {
 	// updated_at is deliberately left alone: it is what CollectIdleClients
 	// measures idleness by, and expiring verdicts is not client activity.
-	tag, err := t.tx.Exec(t.ctx,
+	tag, err := t.exec(
 		`UPDATE clients SET rejections = NULL
 		 WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3 AND rejections IS NOT NULL`,
 		t.ns, t.ws, cutoff.UnixMilli(),
@@ -1198,7 +1230,7 @@ func (t *pgTx) ExpireClientRejections(cutoff time.Time) (int, error) {
 }
 
 func (t *pgTx) CollectIdleClients(cutoff time.Time) (int, error) {
-	tag, err := t.tx.Exec(t.ctx,
+	tag, err := t.exec(
 		`DELETE FROM clients WHERE namespace = $1 AND workspace_id = $2 AND updated_at < $3`,
 		t.ns, t.ws, cutoff.UnixMilli(),
 	)

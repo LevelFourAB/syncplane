@@ -165,6 +165,48 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("reads back what the CURRENT transaction wrote", func() {
+			// An adapter may defer its writes — batch them, buffer them — but not
+			// past its own readers. The engine depends on this at every turn: a
+			// push reads the row it is about to patch, an index build scans rows
+			// a earlier mutation of the same transaction wrote.
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())
+				row, err := tx.GetRow("widget", "k1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row.Value).To(Equal([]byte("v1")))
+
+				Expect(tx.PutRow("widget", "k2", []byte("v2"), 2, storage.Actor{})).To(Succeed())
+				var scanned []string
+				Expect(tx.ScanEntity("widget", func(r storage.Row) error {
+					scanned = append(scanned, r.Key)
+					return nil
+				})).To(Succeed())
+				Expect(scanned).To(Equal([]string{"k1", "k2"}), "a scan sees them too")
+
+				// And an overwrite of a row written moments ago reads as the
+				// overwrite, not as either value alone.
+				Expect(tx.PutRow("widget", "k1", []byte("v1b"), 3, storage.Actor{})).To(Succeed())
+				row, err = tx.GetRow("widget", "k1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row.Value).To(Equal([]byte("v1b")))
+
+				Expect(tx.SetClientLastMutationID("c1", 9)).To(Succeed())
+				Expect(tx.ClientLastMutationID("c1")).To(BeEquivalentTo(9))
+
+				Expect(tx.DeleteRow("widget", "k2", 4, storage.Actor{})).To(Succeed())
+				row, err = tx.GetRow("widget", "k2")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row.Deleted).To(BeTrue())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				row, err := tx.GetRow("widget", "k1")
+				Expect(err).NotTo(HaveOccurred())
+				Expect(row.Value).To(Equal([]byte("v1b")))
+				Expect(tx.ClientLastMutationID("c1")).To(BeEquivalentTo(9))
+			})
+		})
+
 		It("round-trips rows", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())

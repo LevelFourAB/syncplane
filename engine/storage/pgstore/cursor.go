@@ -69,7 +69,7 @@ func scanCursor[T any](
 	yield func(T) error,
 ) error {
 	name := t.nextCursorName(query)
-	if _, err := t.tx.Exec(t.ctx, "DECLARE "+name+" NO SCROLL CURSOR FOR "+query, args...); err != nil {
+	if _, err := t.exec("DECLARE "+name+" NO SCROLL CURSOR FOR "+query, args...); err != nil {
 		return err
 	}
 	defer func() {
@@ -77,7 +77,7 @@ func scanCursor[T any](
 		// too, and the error that aborted it is the one worth reporting; on a
 		// healthy transaction this releases the cursor's resources rather than
 		// holding them to commit.
-		_, _ = t.tx.Exec(t.ctx, "CLOSE "+name)
+		_, _ = t.exec("CLOSE " + name)
 	}()
 
 	fetch := fmt.Sprintf("FETCH FORWARD %d FROM %s", scanBatch, name)
@@ -101,7 +101,7 @@ func scanCursor[T any](
 // exists as its own function so the result set is closed by the time the batch
 // reaches a callback.
 func queryBatch[T any](t *pgTx, query string, args []any, capacity int, decode func(pgx.Rows) (T, error)) ([]T, error) {
-	rows, err := t.tx.Query(t.ctx, query, args...)
+	rows, err := t.query(query, args...)
 	if err != nil {
 		return nil, err
 	}

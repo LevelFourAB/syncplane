@@ -55,6 +55,15 @@
 // the replica path bounds staleness per read by workspace sequence rather
 // than by replication position.
 //
+// # Write batching
+//
+// A write transaction queues its write-only statements and sends them as one
+// pgx batch at the next read, at the next statement whose command tag it
+// inspects, and before COMMIT. A push of N mutations therefore costs a handful
+// of round trips rather than three per mutation, and savepoints ride in the
+// queue with the writes they bracket. See queue.go, which carries the rules
+// this rests on.
+//
 // # Scans and re-entrant reads
 //
 // Every scan method decodes rows into memory before handing any of them to the
@@ -402,6 +411,13 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 	// pgTx defers some of its bookkeeping to the end of the transaction (see
 	// pgTx.flush); COMMIT must not be the first thing that follows fn.
 	if err := ptx.flush(); err != nil {
+		return err
+	}
+	// And it defers the statements themselves (see queue.go). Anything still
+	// queued — the sequence write-back above included — has to reach the server
+	// before COMMIT, and a statement that fails here fails the transaction as
+	// it would have at the point it was written.
+	if err := ptx.send(); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)
