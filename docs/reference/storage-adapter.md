@@ -116,7 +116,7 @@ The engine uses `storage.As` to traverse the wrapper chain and locate optional c
 Syncplane provides two built-in adapters:
 
 - **`sqlitestore`**: The default storage adapter. Uses SQLite within a single process. A single writer connection serializes write transactions across all workspaces. The database file cannot be shared between processes.
-- **`pgstore`**: A PostgreSQL adapter using pgx v5 for multi-process deployments. Multiple nodes share a single database and commit transactions to different workspaces concurrently. It uses `pg_advisory_xact_lock` for workspace write exclusion, `REPEATABLE READ READ ONLY` for read transactions, and server-side cursors for re-entrant scan callbacks.
+- **`pgstore`**: A PostgreSQL adapter using pgx v5 for multi-process deployments. Multiple nodes share a single database and commit transactions to different workspaces concurrently. It uses `pg_advisory_xact_lock` for workspace write exclusion, `REPEATABLE READ READ ONLY` for read transactions, and buffered scans — a single statement where the scan's limit bounds the result, a server-side cursor where it does not — so a scan callback can read the transaction it is scanning.
 
 For multi-node coordination with `pgstore`, configure a shared notifier such as `pgnotify`. For more information, see [Run more than one node](../how-to/run-multiple-nodes.md).
 

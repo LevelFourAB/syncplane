@@ -42,6 +42,48 @@ type pgTx struct {
 	seq          uint64
 	seqPersisted uint64
 	seqLoaded    bool
+	// ws* memoize the workspaces row's three position scalars, which
+	// loadWorkspace reads together. wsLoaded false means "not read yet, or
+	// invalidated by a write of this transaction's own".
+	wsLoaded  bool
+	wsSeq     uint64
+	wsHorizon uint64
+	wsEpoch   uint64
+}
+
+// loadWorkspace reads last_seq, tombstone_horizon and store_epoch in one
+// statement and keeps them for the rest of the transaction. Every pull reads
+// all three, so the memo turns three round trips into one.
+//
+// Holding them is exact rather than approximate. A read transaction is
+// REPEATABLE READ, so its snapshot cannot change under it; a write transaction
+// holds the workspace advisory lock, so nothing else writes the row while it
+// runs, and the three places where the transaction moves the row itself —
+// register minting the epoch, NextSeq claiming a sequence, CollectTombstones
+// raising the horizon — drop the memo or answer from their own state.
+//
+// A workspace with no row yet reads as all zeroes, which is the value each
+// scalar has on the row register would create for it.
+func (t *pgTx) loadWorkspace() error {
+	if t.wsLoaded {
+		return nil
+	}
+	// store_epoch is stored as a signed BIGINT because Postgres has no unsigned
+	// one; reinterpret the bits. The value is opaque — only equality matters.
+	var seq, horizon, epoch int64
+	err := t.tx.QueryRow(t.ctx,
+		`SELECT last_seq, tombstone_horizon, store_epoch FROM workspaces
+		 WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
+	).Scan(&seq, &horizon, &epoch)
+	switch {
+	case errors.Is(err, pgx.ErrNoRows):
+		seq, horizon, epoch = 0, 0, 0
+	case err != nil:
+		return err
+	}
+	t.wsSeq, t.wsHorizon, t.wsEpoch = uint64(seq), uint64(horizon), uint64(epoch)
+	t.wsLoaded = true
+	return nil
 }
 
 // register creates the workspaces row, and is called by every mutating method
@@ -68,6 +110,9 @@ func (t *pgTx) register() error {
 	); err != nil {
 		return err
 	}
+	// The row may have just been minted, and with it the store epoch a reader
+	// earlier in this transaction saw as absent.
+	t.wsLoaded = false
 	t.registered = true
 	return nil
 }
@@ -76,42 +121,28 @@ func (t *pgTx) CurrentSeq() (uint64, error) {
 	if t.seqLoaded {
 		// Sequences NextSeq served from memory count as allocated: a caller
 		// inside this transaction must see what it just took, whether or not
-		// the write-back has happened yet.
+		// the write-back has happened yet. This also outranks the memo, whose
+		// last_seq predates the allocation whenever it was read first.
 		return t.seq, nil
 	}
-	var seq int64
-	err := t.tx.QueryRow(t.ctx,
-		`SELECT last_seq FROM workspaces WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
-	).Scan(&seq)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+	if err := t.loadWorkspace(); err != nil {
+		return 0, err
 	}
-	return uint64(seq), err
+	return t.wsSeq, nil
 }
 
 func (t *pgTx) StoreEpoch() (uint64, error) {
-	// Stored as a signed BIGINT because Postgres has no unsigned one;
-	// reinterpret the bits as the unsigned epoch. The value is opaque — only
-	// equality matters.
-	var epoch int64
-	err := t.tx.QueryRow(t.ctx,
-		`SELECT store_epoch FROM workspaces WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
-	).Scan(&epoch)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+	if err := t.loadWorkspace(); err != nil {
+		return 0, err
 	}
-	return uint64(epoch), err
+	return t.wsEpoch, nil
 }
 
 func (t *pgTx) TombstoneHorizon() (uint64, error) {
-	var h int64
-	err := t.tx.QueryRow(t.ctx,
-		`SELECT tombstone_horizon FROM workspaces WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
-	).Scan(&h)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return 0, nil
+	if err := t.loadWorkspace(); err != nil {
+		return 0, err
 	}
-	return uint64(h), err
+	return t.wsHorizon, nil
 }
 
 func (t *pgTx) GetRow(entity, key string) (storage.Row, error) {
@@ -212,13 +243,13 @@ func (t *pgTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 }
 
 func (t *pgTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(storage.Row) error) error {
-	return scanCursor(t,
+	return scanRows(t,
 		`SELECT key, value, version, created_version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted AND key > $4
 		 ORDER BY key
 		 LIMIT $5`,
-		[]any{t.ns, t.ws, entity, afterKey, limitArg(limit)},
+		[]any{t.ns, t.ws, entity, afterKey, limitArg(limit)}, limit,
 		decodeEntityRow(entity), fn)
 }
 
@@ -226,13 +257,13 @@ func (t *pgTx) ScanEntityByVersionDesc(entity string, limit int, fn func(storage
 	// ORDER BY matches rows_by_entity_version exactly (version DESC, key ASC,
 	// partial on NOT deleted), so this reads the index prefix and stops at the
 	// limit instead of sorting the entity.
-	return scanCursor(t,
+	return scanRows(t,
 		`SELECT key, value, version, created_version, actor_subject, actor_system
 		 FROM rows
 		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND NOT deleted
 		 ORDER BY version DESC, key
 		 LIMIT $4`,
-		[]any{t.ns, t.ws, entity, limitArg(limit)},
+		[]any{t.ns, t.ws, entity, limitArg(limit)}, limit,
 		decodeEntityRow(entity), fn)
 }
 
@@ -260,23 +291,23 @@ func (t *pgTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, limit 
 		// cannot be folded into the row comparison below — every row carries a
 		// non-empty entity, so (version, entity, key) > (afterSeq, '', '') would
 		// also take the rows AT afterSeq.
-		return scanCursor(t,
+		return scanRows(t,
 			cols+`WHERE namespace = $1 AND workspace_id = $2 AND version > $3
 			      ORDER BY version, entity, key
 			      LIMIT $4`,
-			[]any{t.ns, t.ws, int64(afterSeq), limitArg(limit)},
+			[]any{t.ns, t.ws, int64(afterSeq), limitArg(limit)}, limit,
 			decode, fn)
 	}
 	// Resume inside a same-version group. The row-value comparison is the whole
 	// tie-break in one predicate — Postgres compares it lexicographically,
 	// bytewise for entity and key because both columns are COLLATE "C" — where
 	// SQLite needs the disjunction spelled out.
-	return scanCursor(t,
+	return scanRows(t,
 		cols+`WHERE namespace = $1 AND workspace_id = $2
 		        AND (version, entity, key) > ($3::bigint, $4::text, $5::text)
 		      ORDER BY version, entity, key
 		      LIMIT $6`,
-		[]any{t.ns, t.ws, int64(afterSeq), afterEntity, afterKey, limitArg(limit)},
+		[]any{t.ns, t.ws, int64(afterSeq), afterEntity, afterKey, limitArg(limit)}, limit,
 		decode, fn)
 }
 
@@ -689,7 +720,7 @@ func (t *pgTx) ScanIndex(
 		entry  []byte
 		rowKey string
 	}
-	return scanCursor(t, query, args,
+	return scanRows(t, query, args, limit,
 		func(rows pgx.Rows) (indexRow, error) {
 			var r indexRow
 			if err := rows.Scan(&r.entry, &r.rowKey); err != nil {
@@ -1010,6 +1041,10 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 
 	if err := fn(); err != nil {
 		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
+		// The rewind may undo a register or a CollectTombstones, so the memo is
+		// dropped rather than restored: what fn saw is not what the row holds now,
+		// and what preceded fn may not be either.
+		t.wsLoaded = false
 		// ROLLBACK TO rewinds the writes but leaves the savepoint established,
 		// which is exactly the deferred state — so the rewind costs one
 		// statement and the release rides on whatever comes next.
@@ -1050,6 +1085,7 @@ func (t *pgTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		); err != nil {
 			return 0, err
 		}
+		t.wsLoaded = false
 	}
 	return t.TombstoneHorizon()
 }

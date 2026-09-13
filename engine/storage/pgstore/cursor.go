@@ -8,23 +8,59 @@ import (
 )
 
 // scanBatch is how many rows one FETCH pulls back. It trades round trips
-// against the memory a scan holds at once: every scan here is bounded by this
+// against the memory a scan holds at once: an unbounded scan is bounded by this
 // rather than by the size of its result, which is the point — ScanEntity takes
 // no limit, and bootstrap walks whole entities through it.
 const scanBatch = 256
 
-// scanCursor streams query's rows to yield through a server-side cursor.
+// maxDirectScan is the largest limit a scan may serve without a cursor. Past it
+// the cursor's paging is what keeps a scan's memory off the size of its result.
 //
-// This is the one mechanism in this adapter that sqlitestore has no counterpart
-// for, and the contract is what forces it: a scan callback may issue further
-// reads on the same transaction (ScanIndex re-reads each candidate row,
-// ScanChanges reads FieldDeltas), and pgx cannot run a second query on a
-// connection whose result set is still open. So each FETCH is decoded into
-// memory and its result set closed BEFORE any callback runs — while yield
-// executes, the connection is idle and free for the re-entrant read.
+// It sits above every bounded scan the engine issues at its default limits —
+// the largest is a pull page, which asks for one row more than MaxPullChanges
+// (4097 by default) so it can tell a full page from a final one — and a caller
+// that raises those limits keeps the direct path until it asks for more rows
+// than it would want buffered anyway.
+const maxDirectScan = 8192
+
+// scanRows streams query's rows to yield, buffering every row before any
+// callback runs.
+//
+// The buffering is what the contract forces, and it is the reason this
+// adapter has a mechanism sqlitestore has no counterpart for: a scan callback
+// may issue further reads on the same transaction (ScanIndex re-reads each
+// candidate row, ScanChanges reads FieldDeltas), and pgx cannot run a second
+// query on a connection whose result set is still open. So rows are decoded
+// into memory and their result set closed BEFORE any callback runs — while
+// yield executes, the connection is idle and free for the re-entrant read.
+//
+// limit is the scan's own LIMIT, and decides how the rows are read: a bounded
+// one small enough to hold at once takes a single query, and everything else —
+// an unlimited scan, or a limit past maxDirectScan — pages through a
+// server-side cursor at three round trips or more.
 //
 // decode runs with the result set open and must only Scan; yield runs with it
 // closed and may do anything a ReadTx can.
+func scanRows[T any](
+	t *pgTx,
+	query string,
+	args []any,
+	limit int,
+	decode func(pgx.Rows) (T, error),
+	yield func(T) error,
+) error {
+	if limit > 0 && limit <= maxDirectScan {
+		batch, err := queryBatch(t, query, args, min(limit, scanBatch), decode)
+		if err != nil {
+			return err
+		}
+		return yieldAll(batch, yield)
+	}
+	return scanCursor(t, query, args, decode, yield)
+}
+
+// scanCursor streams query's rows to yield through a server-side cursor, one
+// FETCH at a time. See scanRows for when a scan comes here.
 func scanCursor[T any](
 	t *pgTx,
 	query string,
@@ -46,14 +82,12 @@ func scanCursor[T any](
 
 	fetch := fmt.Sprintf("FETCH FORWARD %d FROM %s", scanBatch, name)
 	for {
-		batch, err := fetchBatch(t, fetch, decode)
+		batch, err := queryBatch(t, fetch, nil, scanBatch, decode)
 		if err != nil {
 			return err
 		}
-		for _, v := range batch {
-			if err := yield(v); err != nil {
-				return err
-			}
+		if err := yieldAll(batch, yield); err != nil {
+			return err
 		}
 		// A short batch means the cursor is exhausted, which saves the empty
 		// FETCH a full final batch would otherwise need.
@@ -63,15 +97,16 @@ func scanCursor[T any](
 	}
 }
 
-// fetchBatch pulls one FETCH into memory. It exists as its own function so the
-// result set is closed by the time the batch reaches a callback.
-func fetchBatch[T any](t *pgTx, fetch string, decode func(pgx.Rows) (T, error)) ([]T, error) {
-	rows, err := t.tx.Query(t.ctx, fetch)
+// queryBatch runs one statement and decodes its whole result into memory. It
+// exists as its own function so the result set is closed by the time the batch
+// reaches a callback.
+func queryBatch[T any](t *pgTx, query string, args []any, capacity int, decode func(pgx.Rows) (T, error)) ([]T, error) {
+	rows, err := t.tx.Query(t.ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	batch := make([]T, 0, scanBatch)
+	batch := make([]T, 0, capacity)
 	for rows.Next() {
 		v, err := decode(rows)
 		if err != nil {
@@ -80,6 +115,15 @@ func fetchBatch[T any](t *pgTx, fetch string, decode func(pgx.Rows) (T, error)) 
 		batch = append(batch, v)
 	}
 	return batch, rows.Err()
+}
+
+func yieldAll[T any](batch []T, yield func(T) error) error {
+	for _, v := range batch {
+		if err := yield(v); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // nextCursorName names a cursor uniquely within the transaction, and by the

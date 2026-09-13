@@ -57,16 +57,20 @@
 //
 // # Scans and re-entrant reads
 //
-// Every scan method streams through a server-side cursor, decoding one FETCH
-// into memory before handing rows to the callback (see scanCursor). This is
-// the one mechanism here that is not a transliteration of sqlitestore, and it
-// exists because the engine reads from INSIDE scan callbacks — ScanIndex
-// re-reads each candidate row, ScanChanges reads FieldDeltas to ship a text
-// delta. SQLite tolerates interleaved statements on one connection; pgx does
-// not, so holding one result set open across the callback would fail on the
-// engine's first indexed query or first pull of a text entity. Buffering the
-// whole result instead would work but is unbounded: ScanEntity has no limit and
-// bootstrap walks whole entities through it.
+// Every scan method decodes rows into memory before handing any of them to the
+// callback (see scanRows). This is the one mechanism here that is not a
+// transliteration of sqlitestore, and it exists because the engine reads from
+// INSIDE scan callbacks — ScanIndex re-reads each candidate row, ScanChanges
+// reads FieldDeltas to ship a text delta. SQLite tolerates interleaved
+// statements on one connection; pgx does not, so holding one result set open
+// across the callback would fail on the engine's first indexed query or first
+// pull of a text entity.
+//
+// A scan whose limit already bounds the result reads it in a single statement.
+// An unlimited one — ScanEntity takes no limit, and bootstrap walks whole
+// entities through it — pages through a server-side cursor instead, so its
+// memory stays off the size of the entity at the cost of a round trip per
+// batch.
 //
 // # Schema and physical layout
 //

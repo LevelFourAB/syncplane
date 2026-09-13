@@ -507,7 +507,9 @@ type ReadTx interface {
 	// they have reached storage yet.
 	CurrentSeq() (uint64, error)
 	// TombstoneHorizon returns the sequence below which tombstones may have
-	// been garbage-collected. Cursors older than this require a reset.
+	// been garbage-collected. Cursors older than this require a reset. Inside
+	// a write transaction it includes a horizon that transaction's own
+	// CollectTombstones raised.
 	TombstoneHorizon() (uint64, error)
 	// StoreEpoch returns a random identity minted by the workspace's first
 	// actual write and stable thereafter — it names the store lineage, not the
@@ -518,7 +520,8 @@ type ReadTx interface {
 	// or restored database) is recognized as foreign and reset, rather than
 	// splicing two lineages' histories together — a failure the sequence
 	// watermark cannot catch when the foreign store's seq sits above the
-	// client's cursor.
+	// client's cursor. Inside a write transaction it is 0 until that
+	// transaction's own first write, and the minted epoch from then on.
 	StoreEpoch() (uint64, error)
 	// GetRow returns the row (or tombstone) for entity/key.
 	// Returns ErrNotFound if the row has never existed.

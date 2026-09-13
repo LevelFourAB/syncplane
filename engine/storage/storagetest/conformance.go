@@ -142,6 +142,29 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("reports the workspace position the CURRENT transaction moved", func() {
+			// The three position scalars live in one place per workspace, so an
+			// adapter may read them together and keep them for the transaction.
+			// Keeping them may not outlive the transaction's own writes: the
+			// first write mints the epoch, and a collection raises the horizon.
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.StoreEpoch()).To(BeZero(), "nothing has registered the workspace yet")
+				seq, err := tx.NextSeq()
+				Expect(err).NotTo(HaveOccurred())
+				Expect(tx.StoreEpoch()).NotTo(BeZero(), "the first write minted the epoch")
+				Expect(tx.CurrentSeq()).To(Equal(seq))
+				Expect(tx.PutRow("widget", "k1", []byte("v"), seq, storage.Actor{})).To(Succeed())
+				Expect(tx.DeleteRow("widget", "k1", seq, storage.Actor{})).To(Succeed())
+			})
+			write("ws1", func(tx storage.WriteTx) {
+				Expect(tx.TombstoneHorizon()).To(BeZero())
+				horizon, err := tx.CollectTombstones(time.Now().Add(time.Hour))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(horizon).NotTo(BeZero())
+				Expect(tx.TombstoneHorizon()).To(Equal(horizon))
+			})
+		})
+
 		It("round-trips rows", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())
