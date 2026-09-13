@@ -258,15 +258,35 @@ export async function readMergedRow(
 	key: string,
 ): Promise<Uint8Array | undefined> {
 	const overlay = (await tx.get(overlayKey(entity, workspaceId, key))) as OverlayRecord | undefined;
-	if (overlay !== undefined) {
-		if (overlay.del) return undefined;
-		return await foldTextLog(tx, registry, entity, workspaceId, key, overlay.v);
-	}
-	const confirmed = (await tx.get(confirmedKey(entity, workspaceId, key))) as
-		| ConfirmedRecord
-		| undefined;
-	if (confirmed === undefined) return undefined;
-	return await foldTextLog(tx, registry, entity, workspaceId, key, confirmed.v);
+	// The confirmed row only counts when no overlay shadows it, so an overlaid
+	// row costs one read rather than two.
+	const confirmed = overlay !== undefined
+		? undefined
+		: ((await tx.get(confirmedKey(entity, workspaceId, key))) as ConfirmedRecord | undefined);
+	return await mergedRowFrom(tx, registry, entity, workspaceId, key, overlay, confirmed);
+}
+
+/**
+ * Resolves a row overlay-first from records the caller already holds, folding
+ * the row's optimistic text log in as readMergedRow does. Returns the row bytes,
+ * or undefined when the row is absent or locally deleted.
+ *
+ * `confirmed` is consulted only when there is no overlay, so a caller that read
+ * both may pass both. The records must be the row as of this call: read them in
+ * `tx`, and pass them only before anything in it has written the row.
+ */
+export async function mergedRowFrom(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+	key: string,
+	overlay: OverlayRecord | undefined,
+	confirmed: ConfirmedRecord | undefined,
+): Promise<Uint8Array | undefined> {
+	const base = overlay !== undefined ? (overlay.del ? undefined : overlay.v) : confirmed?.v;
+	if (base === undefined) return undefined;
+	return await foldTextLog(tx, registry, entity, workspaceId, key, base);
 }
 
 /** A merged-view row: its bytes plus the confirmed base version (see Row.version). */

@@ -41,6 +41,8 @@ import { AggregateOp } from './gen/syncplane/v1/query_pb.js';
 import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
 	compareWorkspaces,
+	confirmedKey,
+	type ConfirmedRecord,
 	confirmedWsPrefix,
 	FORMAT_VERSION,
 	META_CLIENT_ID,
@@ -49,6 +51,8 @@ import {
 	metaLastMutationId,
 	metaPushedThrough,
 	metaWsPrefix,
+	overlayKey,
+	type OverlayRecord,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
 	PENDING_ROOT,
@@ -152,6 +156,7 @@ import {
 	toWirePaths,
 } from './query/wire.js';
 import {
+	mergedRowFrom,
 	type NamedWorkspaces,
 	readMergedRow,
 	readMergedRowsWithVersion,
@@ -4413,7 +4418,24 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			await this.kvMutex.run(async () => {
 				const tx = await kv.write();
 				try {
-					const lastRaw = (await tx.get(metaLastMutationId(workspaceId))) as string | undefined;
+					const plan = payloadCruds === undefined
+						? undefined
+						: priorRowReadPlan(
+							this.entityRegistry,
+							workspaceId,
+							payloadCruds,
+							undoMgr !== undefined,
+						);
+					// One read-only round trip for the whole payload: the mutation-id
+					// watermark together with the records every crud below resolves its
+					// prior row from. A backend answers a getMany in ONE transaction
+					// where per-key gets each open their own (kv/idb.ts), and those
+					// transactions are most of what a local write costs.
+					const pre = await tx.getMany([
+						metaLastMutationId(workspaceId),
+						...(plan?.keys ?? []),
+					]);
+					const lastRaw = pre[0] as string | undefined;
 					const mutationId = (lastRaw ? BigInt(lastRaw) : 0n) + 1n;
 					const mutation = create(MutationSchema, { clientId, mutationId });
 					mutation.payload = payload;
@@ -4427,24 +4449,37 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						for (const crud of cruds) {
 							crudIndex++;
 							const def = this.entityRegistry.get(crud.entity);
-							// Read on first use, not up front. Every branch below can decline
-							// to look at the prior row, and for a collaborative-text keystroke
-							// all of them do — reading it would mean folding the row's text log
-							// back into a whole document (read.ts), which is the O(document)
-							// cost this path exists to stop paying per edit.
+							const at = plan?.at[crudIndex];
+							// The records are in hand, but the row is RESOLVED on first use:
+							// for a collaborative-text keystroke that means folding the row's
+							// text log back into a whole document (read.ts), the O(document)
+							// cost this path exists to stop paying per edit — and every branch
+							// below can decline to look at the row at all.
 							let priorRead = false;
 							let priorBytes: Uint8Array | undefined;
 							const priorRow = async (): Promise<Uint8Array | undefined> => {
-								if (!priorRead) {
-									priorRead = true;
-									priorBytes = def === undefined ? undefined : await readMergedRow(
+								if (priorRead || def === undefined) return priorBytes;
+								priorRead = true;
+								priorBytes = at === undefined
+									// Left out of the up-front read: a row an earlier crud of this
+									// payload has since written, or one nothing was expected to
+									// ask for. Read it here instead.
+									? await readMergedRow(
 										tx,
 										this.entityRegistry,
 										def.name,
 										workspaceId,
 										crud.key,
+									)
+									: await mergedRowFrom(
+										tx,
+										this.entityRegistry,
+										def.name,
+										workspaceId,
+										crud.key,
+										pre[at + 1] as OverlayRecord | undefined,
+										pre[at + 2] as ConfirmedRecord | undefined,
 									);
-								}
 								return priorBytes;
 							};
 							// Convert text strings — the caller's pending ones, and any
@@ -4500,10 +4535,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 									capturedInverses.push(inv && { kind: 'crud', crud: inv });
 								}
 							}
-							// Hand over the prior row only if something above actually read
-							// it: nothing since has written the row, so it is still current,
-							// and the apply reuses it rather than reading and decoding a
-							// second time. Left unread, the apply decides for itself — its
+							// Resolve it here when nothing above did and it costs nothing to:
+							// an entity with no text field folds no log, so the row is just
+							// the records the up-front read already returned. A PATCH needs
+							// it, and handing it over saves the apply a read of its own.
+							if (
+								!priorRead && at !== undefined && def !== undefined
+								&& this.entityRegistry.textPathsOf(def.name).length === 0
+							) {
+								await priorRow();
+							}
+							// Hand over the prior row only if it was actually resolved:
+							// nothing since has written the row, so it is still current, and
+							// the apply reuses it rather than reading and decoding a second
+							// time. Left unresolved, the apply decides for itself — its
 							// text-log fast path never needs it.
 							const outcome = await applyCrudLocally(
 								tx,
@@ -4895,6 +4940,58 @@ function requireUndo<E extends readonly DescMessage[]>(scope: WorkspaceScope<E>)
 		throw new Error('undo is not enabled: pass the `undo` option to SyncClient');
 	}
 	return mgr;
+}
+
+/**
+ * Which rows a payload's cruds can be given up front, and the keys to read them
+ * with: `keys` is what one getMany covers, and `at[i]` is where crud `i`'s
+ * overlay record lands in it, with its confirmed record next to it.
+ *
+ * A crud is left out — `at[i]` undefined — when reading its row up front would
+ * be wrong or wasted:
+ *
+ *   - Another crud earlier in the payload targets the same row. A pre-read
+ *     predates that crud's write, and the later one must see what it wrote.
+ *   - Nothing in the enqueue path can ask for the row: an undo capture inverts
+ *     against it, a PATCH merges onto it, and a text field unions with it, but a
+ *     plain PUT or DELETE of a row nobody inverts writes without reading.
+ *
+ * Being left out costs a read rather than correctness: an uncovered crud reads
+ * its own row (see readMergedRow), which is what every crud did before the
+ * batched read existed.
+ */
+function priorRowReadPlan(
+	registry: EntityRegistry,
+	workspaceId: string,
+	cruds: readonly CrudMutation[],
+	capturingUndo: boolean,
+): { keys: string[]; at: (number | undefined)[] } {
+	const keys: string[] = [];
+	const at: (number | undefined)[] = [];
+	const targeted = new Set<string>();
+	for (const crud of cruds) {
+		const def = registry.get(crud.entity);
+		if (def === undefined) {
+			at.push(undefined);
+			continue;
+		}
+		// Joined on a character an entity name cannot hold, so the pair is
+		// recoverable whatever an (opaque) row key is spelled with.
+		const row = `${def.name}\u0000${crud.key}`;
+		const wanted = !targeted.has(row)
+			&& (capturingUndo || crud.op === CrudOp.PATCH || registry.textPathsOf(def.name).length > 0);
+		targeted.add(row);
+		if (!wanted) {
+			at.push(undefined);
+			continue;
+		}
+		at.push(keys.length);
+		keys.push(
+			overlayKey(def.name, workspaceId, crud.key),
+			confirmedKey(def.name, workspaceId, crud.key),
+		);
+	}
+	return { keys, at };
 }
 
 /**
