@@ -502,7 +502,9 @@ func (o ScanOrder) String() string {
 // that cannot interleave statements has to buffer — see the package contract.
 type ReadTx interface {
 	// CurrentSeq returns the workspace's last allocated sequence (0 if the
-	// workspace has never been written).
+	// workspace has never been written). Inside a write transaction it counts
+	// the sequences that transaction has taken from NextSeq, whether or not
+	// they have reached storage yet.
 	CurrentSeq() (uint64, error)
 	// TombstoneHorizon returns the sequence below which tombstones may have
 	// been garbage-collected. Cursors older than this require a reset.

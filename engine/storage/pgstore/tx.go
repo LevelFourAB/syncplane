@@ -27,11 +27,21 @@ type pgTx struct {
 	ws  string
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
+	// spPending names the savepoint whose InSavepoint has returned but which is
+	// still established in Postgres, or "" for none. See InSavepoint.
+	spPending string
 	// cursorSeq names scan cursors uniquely within the transaction.
 	cursorSeq int
 	// registered memoizes register's INSERT so a write burst does not repeat
-	// it. Cleared on savepoint rollback, which may have undone that INSERT.
+	// it. Restored on savepoint rollback, which may have undone that INSERT.
 	registered bool
+	// seq is the highest workspace sequence NextSeq has handed out, and
+	// seqPersisted the value the workspaces row holds. They diverge between an
+	// in-memory allocation and the write-back flush makes before COMMIT.
+	// seqLoaded says whether either means anything yet.
+	seq          uint64
+	seqPersisted uint64
+	seqLoaded    bool
 }
 
 // register creates the workspaces row, and is called by every mutating method
@@ -63,6 +73,12 @@ func (t *pgTx) register() error {
 }
 
 func (t *pgTx) CurrentSeq() (uint64, error) {
+	if t.seqLoaded {
+		// Sequences NextSeq served from memory count as allocated: a caller
+		// inside this transaction must see what it just took, whether or not
+		// the write-back has happened yet.
+		return t.seq, nil
+	}
 	var seq int64
 	err := t.tx.QueryRow(t.ctx,
 		`SELECT last_seq FROM workspaces WHERE namespace = $1 AND workspace_id = $2`, t.ns, t.ws,
@@ -776,20 +792,19 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	// that triggered the write usually moves one or two of them; re-inserting
 	// the unchanged rest leaves a dead tuple per entry for vacuum and dirties
 	// a page per btree the entry sits in. The new set arrives as two parallel
-	// arrays so each direction stays one statement whatever the fan-out.
+	// arrays so the whole replacement stays one statement whatever the fan-out.
 	idxs := make([]string, len(entries))
 	ks := make([][]byte, len(entries))
 	for i, e := range entries {
 		idxs[i], ks[i] = e.Index, notNilBytes(e.Key)
 	}
-	if _, err := t.tx.Exec(t.ctx,
-		`DELETE FROM index_entries
-		 WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4
-		   AND (idx, k) NOT IN (SELECT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k))`,
-		t.ns, t.ws, entity, key, idxs, ks,
-	); err != nil {
-		return err
-	}
+	// Both directions ride in one data-modifying CTE, which is one round trip
+	// where two statements were two. The DELETE runs whether or not the main
+	// query reads it, and neither half sees the other's effect on the table —
+	// which is safe here because the DELETE takes only entries OUTSIDE the new
+	// set and the INSERT adds only entries inside it, so the rows they touch
+	// are disjoint by construction.
+	//
 	// DO NOTHING rather than failing: it absorbs both the entries that are
 	// already stored and a caller that passed the same entry twice — two
 	// components of one index can encode to the same entry for one row only
@@ -797,9 +812,14 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 	// stick the write path. There are no non-key columns, so there is nothing
 	// an update would change.
 	_, err := t.tx.Exec(t.ctx,
-		`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
-		 SELECT $1::text, $2::text, $3::text, u.idx, u.k, $4::text
-		   FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)
+		`WITH want AS (SELECT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)),
+		      stale AS (
+		          DELETE FROM index_entries
+		          WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4
+		            AND (idx, k) NOT IN (SELECT w.idx, w.k FROM want w)
+		      )
+		 INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
+		 SELECT $1::text, $2::text, $3::text, w.idx, w.k, $4::text FROM want w
 		 ON CONFLICT DO NOTHING`,
 		t.ns, t.ws, entity, key, idxs, ks,
 	)
@@ -818,20 +838,50 @@ func (t *pgTx) DeleteIndexEntries(entity, key string) error {
 	return err
 }
 
+// NextSeq claims the first sequence with a statement and every later one from
+// memory, so a push of N mutations costs one allocation statement rather than
+// N. The workspace advisory lock has already made this transaction the only
+// writer of the workspaces row, so nothing else can allocate against it in
+// between and the row only has to hold the final value: flush writes it back
+// before COMMIT, which is what keeps the invariant that a committed transaction
+// persists every sequence it allocated.
 func (t *pgTx) NextSeq() (uint64, error) {
 	if err := t.register(); err != nil {
 		return 0, err
 	}
-	// The UPDATE takes a row lock, but the workspace advisory lock has already
-	// made this transaction the only writer of the row; this is a read-modify-
-	// write in one statement rather than a concurrency control of its own.
+	if t.seqLoaded {
+		t.seq++
+		return t.seq, nil
+	}
+	// The first call reads and claims in one statement, so a transaction that
+	// allocates exactly one sequence costs exactly one statement.
 	var seq int64
-	err := t.tx.QueryRow(t.ctx,
+	if err := t.tx.QueryRow(t.ctx,
 		`UPDATE workspaces SET last_seq = last_seq + 1
 		 WHERE namespace = $1 AND workspace_id = $2 RETURNING last_seq`,
 		t.ns, t.ws,
-	).Scan(&seq)
-	return uint64(seq), err
+	).Scan(&seq); err != nil {
+		return 0, err
+	}
+	t.seq, t.seqPersisted, t.seqLoaded = uint64(seq), uint64(seq), true
+	return t.seq, nil
+}
+
+// flush writes back what NextSeq allocated in memory. The store calls it after
+// the write closure returns successfully and before COMMIT; it is a no-op for a
+// transaction that allocated at most one sequence.
+func (t *pgTx) flush() error {
+	if !t.seqLoaded || t.seq == t.seqPersisted {
+		return nil
+	}
+	if _, err := t.tx.Exec(t.ctx,
+		`UPDATE workspaces SET last_seq = $3 WHERE namespace = $1 AND workspace_id = $2`,
+		t.ns, t.ws, int64(t.seq),
+	); err != nil {
+		return err
+	}
+	t.seqPersisted = t.seq
+	return nil
 }
 
 func (t *pgTx) PutRow(entity, key string, value []byte, version uint64, actor storage.Actor) error {
@@ -919,32 +969,57 @@ func (t *pgTx) SetClientRejections(clientID string, recs []storage.ClientRejecti
 // error and keeps writing outside a savepoint gets a loud, immediate failure
 // rather than a silent one, which is the safe direction for the difference to
 // fall.
+//
+// # Deferred release
+//
+// A finished savepoint is left established rather than released on the spot:
+// the next call at the same depth releases it and opens the replacement in one
+// parameterless statement (pgx sends those over the simple protocol, so the
+// pair is one round trip), and COMMIT releases the last one. That is what makes
+// a push of N mutations cost N savepoint round trips rather than 2N. It holds
+// at most one deferred savepoint per nesting level, which keeps a long batch
+// far below the ~64 concurrent subtransactions past which Postgres spills the
+// subxact cache and slows every reader of the rows the transaction touches.
+//
+// Statements issued between a deferred savepoint and its release run inside
+// that subtransaction. They still survive it, because the release always
+// precedes the ROLLBACK TO of the savepoint that replaces it.
 func (t *pgTx) InSavepoint(fn func() error) error {
 	t.spDepth++
 	name := fmt.Sprintf("sp%d", t.spDepth)
 	defer func() { t.spDepth-- }()
-	if _, err := t.tx.Exec(t.ctx, `SAVEPOINT `+name); err != nil {
+
+	open := `SAVEPOINT ` + name
+	if t.spPending == name {
+		open = `RELEASE ` + name + `; SAVEPOINT ` + name
+	}
+	if _, err := t.tx.Exec(t.ctx, open); err != nil {
 		return err
 	}
+	// Any deeper deferred savepoint was released along with this name (RELEASE
+	// takes everything established above it), and the new one is active rather
+	// than deferred.
+	t.spPending = ""
+
+	// NextSeq allocates from memory, so the rewind below has to undo the
+	// allocation the way ROLLBACK TO undoes the statements — a rejected
+	// mutation must leave the next one the sequence it took, or the log would
+	// gap. registered rides along for the same reason: the rewind may undo
+	// register's INSERT.
+	seq, seqPersisted, seqLoaded, registered := t.seq, t.seqPersisted, t.seqLoaded, t.registered
+
 	if err := fn(); err != nil {
-		// The rewind may undo register's INSERT (a rejected mutation that was
-		// this transaction's only write), so re-run it on the next write. When
-		// the INSERT predates the savepoint the extra statement is a harmless
-		// ON CONFLICT DO NOTHING.
-		t.registered = false
-		// ROLLBACK TO rewinds the writes but keeps the savepoint open;
-		// RELEASE discards it.
+		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
+		// ROLLBACK TO rewinds the writes but leaves the savepoint established,
+		// which is exactly the deferred state — so the rewind costs one
+		// statement and the release rides on whatever comes next.
 		if _, rbErr := t.tx.Exec(t.ctx, `ROLLBACK TO `+name); rbErr != nil {
 			return errors.Join(err, fmt.Errorf("pgstore: rollback savepoint: %w", rbErr))
 		}
-		if _, rbErr := t.tx.Exec(t.ctx, `RELEASE `+name); rbErr != nil {
-			return errors.Join(err, fmt.Errorf("pgstore: release savepoint: %w", rbErr))
-		}
+		t.spPending = name
 		return err
 	}
-	if _, err := t.tx.Exec(t.ctx, `RELEASE `+name); err != nil {
-		return fmt.Errorf("pgstore: release savepoint: %w", err)
-	}
+	t.spPending = name
 	return nil
 }
 

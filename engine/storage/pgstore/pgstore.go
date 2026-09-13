@@ -391,7 +391,13 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	if err := fn(&pgTx{tx: tx, ctx: ctx, ns: s.ns, ws: workspaceID}); err != nil {
+	ptx := &pgTx{tx: tx, ctx: ctx, ns: s.ns, ws: workspaceID}
+	if err := fn(ptx); err != nil {
+		return err
+	}
+	// pgTx defers some of its bookkeeping to the end of the transaction (see
+	// pgTx.flush); COMMIT must not be the first thing that follows fn.
+	if err := ptx.flush(); err != nil {
 		return err
 	}
 	return tx.Commit(ctx)

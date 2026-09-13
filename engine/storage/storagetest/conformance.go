@@ -124,6 +124,24 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 		})
 
+		It("reports the sequences the CURRENT transaction allocated", func() {
+			// An adapter may defer the write-back of its allocations, but not
+			// past its own readers: a caller inside the transaction has to see
+			// what it just took.
+			write("ws1", func(tx storage.WriteTx) {
+				for want := uint64(1); want <= 3; want++ {
+					seq, err := tx.NextSeq()
+					Expect(err).NotTo(HaveOccurred())
+					Expect(seq).To(Equal(want))
+					Expect(tx.CurrentSeq()).To(Equal(want))
+				}
+				Expect(tx.PutRow("widget", "k1", []byte("v"), 3, storage.Actor{})).To(Succeed())
+			})
+			read("ws1", func(tx storage.ReadTx) {
+				Expect(tx.CurrentSeq()).To(BeEquivalentTo(3), "and persists all of them")
+			})
+		})
+
 		It("round-trips rows", func() {
 			write("ws1", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k1", []byte("v1"), 1, storage.Actor{})).To(Succeed())
@@ -1095,6 +1113,74 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(err).NotTo(HaveOccurred())
 					_, err = tx.GetRow("widget", "inner")
 					Expect(err).To(MatchError(storage.ErrNotFound))
+				})
+			})
+
+			It("hands a rolled-back savepoint's sequence to the next allocation", func() {
+				// The shape a push batch takes: a rejected mutation between two
+				// applied ones. Its rewind has to give the sequence back, or
+				// the change log gaps at a version no row ever carries and
+				// every client's cursor waits for it.
+				boom := errors.New("boom")
+				var first, second uint64
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.InSavepoint(func() error {
+						var err error
+						if first, err = tx.NextSeq(); err != nil {
+							return err
+						}
+						return tx.PutRow("widget", "k1", []byte("v"), first, storage.Actor{})
+					})).To(Succeed())
+					Expect(tx.InSavepoint(func() error {
+						seq, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(seq).To(Equal(first+1), "the rejected mutation takes the next one")
+						Expect(tx.PutRow("widget", "doomed", []byte("v"), seq, storage.Actor{})).To(Succeed())
+						return boom
+					})).To(MatchError(boom))
+					Expect(tx.InSavepoint(func() error {
+						var err error
+						if second, err = tx.NextSeq(); err != nil {
+							return err
+						}
+						return tx.PutRow("widget", "k2", []byte("v"), second, storage.Actor{})
+					})).To(Succeed())
+				})
+				Expect(first).To(BeEquivalentTo(1))
+				Expect(second).To(BeEquivalentTo(2), "and gives it back when it rolls back")
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(tx.CurrentSeq()).To(BeEquivalentTo(2))
+					_, err := tx.GetRow("widget", "doomed")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+				})
+			})
+
+			It("commits the writes around a savepoint rolled back LAST", func() {
+				// A push whose final mutation is rejected still writes that
+				// client's watermark afterwards, so the transaction ends with a
+				// rewound savepoint behind it and one write in front of it.
+				boom := errors.New("boom")
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.InSavepoint(func() error {
+						seq, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+						return tx.PutRow("widget", "kept", []byte("v"), seq, storage.Actor{})
+					})).To(Succeed())
+					Expect(tx.InSavepoint(func() error {
+						seq, err := tx.NextSeq()
+						Expect(err).NotTo(HaveOccurred())
+						Expect(tx.PutRow("widget", "doomed", []byte("v"), seq, storage.Actor{})).To(Succeed())
+						return boom
+					})).To(MatchError(boom))
+					Expect(tx.SetClientLastMutationID("c1", 7)).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					_, err := tx.GetRow("widget", "kept")
+					Expect(err).NotTo(HaveOccurred())
+					_, err = tx.GetRow("widget", "doomed")
+					Expect(err).To(MatchError(storage.ErrNotFound))
+					Expect(tx.ClientLastMutationID("c1")).To(BeEquivalentTo(7))
+					Expect(tx.CurrentSeq()).To(BeEquivalentTo(1), "only the applied write consumed one")
 				})
 			})
 
@@ -3203,6 +3289,27 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(BeEmpty())
 					Expect(scan(tx, "widget", "by_label", nil, nil)).To(BeEmpty())
 					Expect(scan(tx, "widget", "by_count", nil, nil)).To(BeEmpty())
+				})
+			})
+
+			It("replaces an overlapping set the SAME transaction wrote", func() {
+				// A batch that writes one row twice — a PUT then a PATCH of the
+				// same key — replaces its entries twice inside one transaction.
+				// The second replacement diffs against what the first left, not
+				// against what the transaction opened on.
+				write("ws1", func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x0a), entry("by_tag", 0x0b), entry("by_label", 0x01),
+					})).To(Succeed())
+					Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
+						entry("by_tag", 0x0b), entry("by_label", 0x01), entry("by_count", 0x07),
+					})).To(Succeed())
+				})
+				read("ws1", func(tx storage.ReadTx) {
+					Expect(scan(tx, "widget", "by_tag", nil, nil)).To(Equal([]string{"k1"}), "0x0a departed, 0x0b kept once")
+					Expect(scan(tx, "widget", "by_tag", []byte{0x0a}, []byte{0x0b})).To(BeEmpty())
+					Expect(scan(tx, "widget", "by_label", nil, nil)).To(Equal([]string{"k1"}), "an entry in both sets survives")
+					Expect(scan(tx, "widget", "by_count", nil, nil)).To(Equal([]string{"k1"}), "the new entry appears")
 				})
 			})
 

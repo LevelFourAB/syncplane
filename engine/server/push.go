@@ -161,6 +161,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		mutationID uint64
 	}
 	var adopted []adoption
+	// Which mutation may read which row from a shared fetch; a pure function of
+	// the wire batch, so it survives a closure retry unchanged.
+	owners := batchRowOwners(muts)
 	err = s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
 		// The adapter may run this closure more than once (see the
 		// storage.Adapter contract): reset everything captured from outside
@@ -170,12 +173,18 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		gap, badArg = "", ""
 		adopted = adopted[:0]
 		// Watermarks per client, loaded lazily and tracked as we bump them.
+		// bumped names the clients whose watermark this batch moved, which is
+		// what the single write per client after the loop is driven by.
 		watermarks := map[string]uint64{}
+		bumped := map[string]bool{}
 		// Recorded verdicts per client, loaded lazily by rejectionsOf and marked
 		// dirty when this batch adds one. Reset with the rest: a retried attempt
 		// must re-read rather than build on what an abandoned one collected.
 		verdicts := map[string][]storage.ClientRejection{}
 		dirty := map[string]bool{}
+		// Fresh per attempt: a retried closure must re-read rather than serve
+		// what an abandoned one fetched.
+		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
 		rejectionsOf := func(clientID string) ([]storage.ClientRejection, error) {
 			if recs, ok := verdicts[clientID]; ok {
 				return recs, nil
@@ -200,6 +209,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				if err != nil {
 					return err
 				}
+				watermarks[m.GetClientId()] = last
 			}
 
 			switch {
@@ -248,9 +258,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 
 			var seq uint64
+			rows.at = i
 			applyErr := tx.InSavepoint(func() error {
 				var err error
-				seq, err = s.applyMutation(ctx, ws, tx, fields, m, authz[i])
+				seq, err = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
 				return err
 			})
 
@@ -290,13 +301,21 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				return applyErr
 			}
 
-			// Rejection is an ack: the watermark advances either way, outside
-			// the savepoint so it survives the rollback.
-			if err := tx.SetClientLastMutationID(m.GetClientId(), m.GetMutationId()); err != nil {
+			// Rejection is an ack: the watermark advances either way. Tracked in
+			// memory here and written after the loop — the batch is one
+			// transaction, so the only value ever read back is the highest id
+			// each client reached, and a write per mutation would rewrite one
+			// row per mutation to get there.
+			watermarks[m.GetClientId()] = m.GetMutationId()
+			bumped[m.GetClientId()] = true
+			results = append(results, result)
+		}
+		// One write per client, after the loop and so outside every savepoint:
+		// the bump has to survive a rejected mutation's rollback.
+		for clientID := range bumped {
+			if err := tx.SetClientLastMutationID(clientID, watermarks[clientID]); err != nil {
 				return err
 			}
-			watermarks[m.GetClientId()] = m.GetMutationId()
-			results = append(results, result)
 		}
 		// One write per client, after the loop: a batch that rejects several of
 		// one client's mutations records them together.
@@ -454,6 +473,98 @@ func (s *Server) mutationAttrs(cat *catalog, m *syncplanev1.Mutation) []attribut
 	}
 }
 
+// batchRows serves applyCrud's base-row read out of ONE storage read per entity
+// for a whole push batch, where a point read per mutation would be a round trip
+// per mutation.
+//
+// A mutation reads from it only when it is the FIRST in the batch to target its
+// row. The batch applies in order inside one transaction, so whatever an
+// earlier mutation wrote is part of the base a later one must merge onto, and a
+// copy taken before the batch would be exactly the stale row that breaks. Every
+// other read falls through to the transaction, which sees the batch's own
+// writes. Nothing else invalidates the cache and nothing needs to: a row it
+// holds is handed to one mutation that runs before any write to that row.
+//
+// The fetch is lazy per entity, so a batch whose mutations never look at their
+// base row (an unguarded PUT of an entity with no text fields and no history)
+// pays for no read at all.
+type batchRows struct {
+	tx storage.WriteTx
+	// owners maps a row to the index of the mutation that may read it from the
+	// shared fetch. Rows nothing may share are absent.
+	owners map[rowRef]int
+	// fetched holds one entity's read keyed by row key. An entity present here
+	// has been read; a key missing from its map has no stored row.
+	fetched map[string]map[string]storage.Row
+	// at is the index of the mutation currently applying.
+	at int
+}
+
+// batchRowOwners picks, for each row a batch targets, the mutation that may
+// read its base from a shared fetch: the first one to name it, and only while
+// every preceding mutation's writes are still known from the wire. A custom
+// mutation writes whatever its mutator decides, so nothing past one qualifies.
+// Sub-mutations of a batch mutation write rows without being able to read one
+// back, so they only disqualify later readers.
+func batchRowOwners(muts []*syncplanev1.Mutation) map[rowRef]int {
+	owners := make(map[rowRef]int, len(muts))
+	seen := make(map[rowRef]bool, len(muts))
+	for i, m := range muts {
+		switch payload := m.GetPayload().(type) {
+		case *syncplanev1.Mutation_Crud:
+			ref := rowRef{entity: payload.Crud.GetEntity(), key: payload.Crud.GetKey()}
+			if !seen[ref] {
+				owners[ref] = i
+			}
+			seen[ref] = true
+		case *syncplanev1.Mutation_Batch:
+			for _, crud := range payload.Batch.GetMutations() {
+				seen[rowRef{entity: crud.GetEntity(), key: crud.GetKey()}] = true
+			}
+		default:
+			// A custom mutation, or a payload this build does not know: either
+			// way what it writes cannot be read off the wire, so no row after
+			// it can be claimed.
+			return owners
+		}
+	}
+	return owners
+}
+
+// get reads one row's stored state, through the shared fetch where the current
+// mutation owns it. It reports an absent row as storage.ErrNotFound, exactly as
+// ReadTx.GetRow does.
+func (b *batchRows) get(entity, key string) (storage.Row, error) {
+	ref := rowRef{entity: entity, key: key}
+	if owner, ok := b.owners[ref]; !ok || owner != b.at {
+		return b.tx.GetRow(entity, key)
+	}
+	byKey, fetched := b.fetched[entity]
+	if !fetched {
+		// Only the rows still ahead in the batch: one an earlier mutation owned
+		// has had its chance, and may since have been written.
+		keys := make([]string, 0, len(b.owners))
+		for r, owner := range b.owners {
+			if r.entity == entity && owner >= b.at {
+				keys = append(keys, r.key)
+			}
+		}
+		byKey = make(map[string]storage.Row, len(keys))
+		if err := b.tx.GetRows(entity, keys, func(r storage.Row) error {
+			byKey[r.Key] = r
+			return nil
+		}); err != nil {
+			return storage.Row{}, err
+		}
+		b.fetched[entity] = byKey
+	}
+	row, ok := byKey[key]
+	if !ok {
+		return storage.Row{}, storage.ErrNotFound
+	}
+	return row, nil
+}
+
 // errAbortBatch rolls a push's write transaction back when the batch is
 // rejected as a whole (a mutation-id gap). It never escapes pushWorkspace: the
 // caller reads the verdict from the captured reason instead, so the adapter
@@ -587,10 +698,14 @@ func (s *Server) checkCrudLimits(crud *syncplanev1.CrudMutation) error {
 // does NOT reach a custom mutation: a mutator body writes under the verdict on
 // its invocation, which is the escape hatch a protected field is designed
 // around.
+//
+// rows serves the CRUD base-row reads; it must be positioned on this mutation's
+// index (see batchRows).
 func (s *Server) applyMutation(
 	ctx context.Context,
 	ws string,
 	tx storage.WriteTx,
+	rows *batchRows,
 	g *fieldGate,
 	m *syncplanev1.Mutation,
 	authErr error,
@@ -617,7 +732,7 @@ func (s *Server) applyMutation(
 
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
-		if err := s.applyCrud(ctx, ws, tx, g, payload.Crud, seq, actor); err != nil {
+		if err := s.applyCrud(ctx, ws, tx, rows, g, payload.Crud, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
@@ -632,7 +747,7 @@ func (s *Server) applyMutation(
 		// row a preceding PUT created). An empty batch is rejected in
 		// checkLimits, above.
 		for _, crud := range payload.Batch.GetMutations() {
-			if err := s.applyCrud(ctx, ws, tx, g, crud, seq, actor); err != nil {
+			if err := s.applyCrud(ctx, ws, tx, rows, g, crud, seq, actor); err != nil {
 				return 0, err
 			}
 		}
@@ -680,6 +795,7 @@ func (s *Server) applyCrud(
 	ctx context.Context,
 	ws string,
 	tx storage.WriteTx,
+	rows *batchRows,
 	g *fieldGate,
 	crud *syncplanev1.CrudMutation,
 	seq uint64,
@@ -723,7 +839,7 @@ func (s *Server) applyCrud(
 	)
 	currentRow := func() (storage.Row, bool, error) {
 		if !fetched {
-			row, err := tx.GetRow(info.name, crud.GetKey())
+			row, err := rows.get(info.name, crud.GetKey())
 			if err != nil && err != storage.ErrNotFound {
 				return storage.Row{}, false, err
 			}
