@@ -43,13 +43,14 @@
 //
 // Tuning: the defaults suit a server rather than an embedded library, and each
 // has an Option to move it — WithCacheSize (page cache, charged per
-// connection), WithReadConnections (reader pool ceiling, and with it the
-// store's memory ceiling), WithWALSizeLimit (how large the -wal sidecar is
-// left after a checkpoint) and WithOptimizeInterval (how often query-planner
-// statistics are refreshed; see maintain). The rest is fixed: synchronous is
-// NORMAL, the WAL default, which trades the last commits before a power loss
-// or kernel panic — not a process crash — for not paying an fsync per
-// transaction. Each connection also holds a prepared statement per distinct SQL
+// connection), WithMmapSize (how much of the file is read through a shared
+// memory mapping instead of a syscall), WithReadConnections (reader pool
+// ceiling, and with it the store's memory ceiling), WithWALSizeLimit (how large
+// the -wal sidecar is left after a checkpoint) and WithOptimizeInterval (how
+// often query-planner statistics are refreshed; see maintain). The rest is
+// fixed: synchronous is NORMAL, the WAL default, which trades the last commits
+// before a power loss or kernel panic — not a process crash — for not paying an
+// fsync per transaction. Each connection also holds a prepared statement per distinct SQL
 // text the store has run on it — a bounded set, but one that counts against the
 // same per-connection budget as the page cache.
 package sqlitestore
@@ -349,6 +350,7 @@ type Option func(*config)
 type config struct {
 	ns               string
 	cacheSize        int64
+	mmapSize         int64
 	readConns        int
 	walSizeLimit     int64
 	optimizeInterval time.Duration
@@ -361,6 +363,12 @@ const (
 	// is sized for an embedded library rather than a server that keeps a hot
 	// working set of rows and index entries.
 	defaultCacheSize = 8 << 20
+	// defaultMmapSize is how much of the database file SQLite may read through a
+	// memory mapping rather than a read syscall (see WithMmapSize). A gibibyte
+	// covers a database far larger than the page cache does, because it costs
+	// address space rather than memory and is shared by every connection instead
+	// of charged to each; SQLite maps whichever is smaller, this or the file.
+	defaultMmapSize = 1 << 30
 	// defaultWALSizeLimit caps the -wal sidecar. A checkpoint hands the WAL's
 	// space back for reuse but does not shrink the file, so without a limit the
 	// sidecar keeps whatever size the single busiest write burst left it at for
@@ -389,6 +397,7 @@ const (
 func defaultConfig() config {
 	return config{
 		cacheSize:        defaultCacheSize,
+		mmapSize:         defaultMmapSize,
 		readConns:        max(4, min(runtime.GOMAXPROCS(0), 8)),
 		walSizeLimit:     defaultWALSizeLimit,
 		optimizeInterval: defaultOptimizeInterval,
@@ -409,6 +418,22 @@ func WithNamespace(ns string) Option {
 // WithReadConnections. Zero leaves SQLite's own default.
 func WithCacheSize(bytes int64) Option {
 	return func(c *config) { c.cacheSize = bytes }
+}
+
+// WithMmapSize caps how much of the database file each connection may read
+// through a memory mapping rather than a read syscall, in bytes. A mapped page
+// is read straight out of the operating system's page cache, with no syscall
+// and no copy into the connection's own cache, and the mapping is backed by
+// pages the operating system already holds — so unlike WithCacheSize it costs
+// address space rather than memory, and every connection shares one copy.
+// Zero disables mapping and puts every page read back on a syscall.
+//
+// The caveat is the one SQLite documents for mmap: an I/O error on a mapped
+// page reaches the process as a signal (SIGBUS) rather than an error code the
+// call can return. A database on storage that can fail out from under a running
+// process — a network mount, a removable disk — is a reason to pass zero.
+func WithMmapSize(bytes int64) Option {
+	return func(c *config) { c.mmapSize = bytes }
 }
 
 // WithReadConnections caps the reader pool, which bounds both read concurrency
@@ -540,6 +565,9 @@ func (c config) commonParams() []string {
 	}
 	if c.cacheSize > 0 {
 		params = append(params, cacheSizePragma(c.cacheSize))
+	}
+	if c.mmapSize > 0 {
+		params = append(params, fmt.Sprintf("_pragma=mmap_size(%d)", c.mmapSize))
 	}
 	return params
 }

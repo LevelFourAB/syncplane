@@ -35,6 +35,7 @@ var _ = Describe("SQLite tuning", func() {
 		Expect(pragma(store.write, "temp_store")).To(Equal("2"), "MEMORY")
 		Expect(pragma(store.write, "journal_size_limit")).To(Equal("1048576"))
 		Expect(pragma(store.write, "analysis_limit")).To(Equal("400"))
+		Expect(pragma(store.write, "mmap_size")).To(Equal("1073741824"), "the default mapping")
 
 		// The reader pool is a separate connection, and every pragma above is
 		// per-connection state: nothing carries over from the writer.
@@ -44,14 +45,25 @@ var _ = Describe("SQLite tuning", func() {
 		Expect(pragma(store.read, "query_only")).To(Equal("1"))
 	})
 
+	It("maps the database file on both pools", func() {
+		store, err := Open(filepath.Join(GinkgoT().TempDir(), "mapped.db"),
+			WithMmapSize(32<<20))
+		Expect(err).NotTo(HaveOccurred())
+		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
+
+		Expect(pragma(store.write, "mmap_size")).To(Equal("33554432"))
+		Expect(pragma(store.read, "mmap_size")).To(Equal("33554432"))
+	})
+
 	It("leaves SQLite's own defaults in place when a tunable is zero", func() {
 		store, err := Open(filepath.Join(GinkgoT().TempDir(), "plain.db"),
-			WithCacheSize(0), WithWALSizeLimit(0))
+			WithCacheSize(0), WithWALSizeLimit(0), WithMmapSize(0))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
 
 		Expect(pragma(store.write, "cache_size")).To(Equal("-2000"))
 		Expect(pragma(store.write, "journal_size_limit")).To(Equal("-1"), "no limit")
+		Expect(pragma(store.write, "mmap_size")).To(Equal("0"), "no mapping")
 	})
 
 	It("bounds the reader pool and holds its connections idle", func() {
