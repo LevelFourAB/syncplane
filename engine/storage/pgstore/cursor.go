@@ -2,6 +2,7 @@ package pgstore
 
 import (
 	"fmt"
+	"hash/fnv"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -31,7 +32,7 @@ func scanCursor[T any](
 	decode func(pgx.Rows) (T, error),
 	yield func(T) error,
 ) error {
-	name := t.nextCursorName()
+	name := t.nextCursorName(query)
 	if _, err := t.tx.Exec(t.ctx, "DECLARE "+name+" NO SCROLL CURSOR FOR "+query, args...); err != nil {
 		return err
 	}
@@ -81,12 +82,24 @@ func fetchBatch[T any](t *pgTx, fetch string, decode func(pgx.Rows) (T, error)) 
 	return batch, rows.Err()
 }
 
-// nextCursorName names a cursor uniquely within the transaction. Names are
-// never reused, even after a CLOSE, so a scan re-entered from another scan's
-// callback cannot collide with the cursor it is nested inside.
-func (t *pgTx) nextCursorName() string {
+// nextCursorName names a cursor uniquely within the transaction, and by the
+// shape of the query behind it across transactions. Names are never reused
+// within a transaction, even after a CLOSE, so a scan re-entered from another
+// scan's callback cannot collide with the cursor it is nested inside.
+//
+// The query hash is there for pgx's statement cache, which is keyed by SQL
+// text and lives per connection: the FETCH for a cursor is prepared once and
+// its result description reused for every later FETCH with the same text. Two
+// transactions on one connection each open their first cursor, so a name made
+// of the sequence alone would hand the second scan the first one's column
+// description — and a change-log scan followed by an entity scan fails with
+// "bind message has 8 result formats but query has 6 columns". Folding the
+// query in makes same-named cursors same-shaped.
+func (t *pgTx) nextCursorName(query string) string {
 	t.cursorSeq++
-	return fmt.Sprintf("syncplane_cur_%d", t.cursorSeq)
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(query))
+	return fmt.Sprintf("syncplane_cur_%d_%08x", t.cursorSeq, h.Sum32())
 }
 
 // limitArg renders the contract's "limit <= 0 means unlimited" for a SQL LIMIT
