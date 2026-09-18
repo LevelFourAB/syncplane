@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"connectrpc.com/connect"
@@ -9,6 +10,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/text"
@@ -29,12 +31,13 @@ const (
 	// server keeps no history to prove non-possession against.
 	rowHidden
 	// rowHiddenNonMember rows are hidden SOLELY because they are outside a
-	// bounded membership set — a purely windowed scope, or a follow-only
-	// entity's closure. Split from rowHidden because possession is provable
-	// here: the cursor stores those sets, so pull tombstones a non-member only
-	// if the cursor's prior set held it, and skips the rest instead of
-	// disclosing keys the client may not even be allowed to read. Everything
-	// except pull treats it exactly as rowHidden.
+	// bounded membership set — a purely windowed or keyed scope, or a
+	// follow-only entity's closure. Split from rowHidden because possession is
+	// provable here: the cursor stores the window and closure sets and a key
+	// set is part of sub_hash, so pull tombstones a non-member only if the
+	// cursor's prior set held it, and skips the rest instead of disclosing
+	// keys the client may not even be allowed to read. Everything except pull
+	// treats it exactly as rowHidden.
 	rowHiddenNonMember
 	// rowUnsubscribed rows belong to an entity outside the (non-empty)
 	// subscription set, or to no registered entity at all; either way nothing
@@ -44,10 +47,18 @@ const (
 
 // entityScope is the union of every subscription naming one entity: a row
 // is in scope if any subscription's predicate matches (no predicate =
-// whole entity), or if a windowed subscription's membership holds it.
+// whole entity), if a key set names it, or if a windowed subscription's
+// membership holds it.
 type entityScope struct {
 	whole bool
 	preds []scopePred
+	// keys is the union of every Subscription.key_set on this entity. A named
+	// row is in scope without a decode, but unlike a window or closure member
+	// it is NOT read-filtered in advance: the set is whatever the client sent,
+	// so classify still applies the filter to it. nil when no subscription
+	// names keys; an empty set (a present-but-empty key_set) is non-nil and
+	// admits nothing.
+	keys map[string]bool
 	// windowed is set by at least one Subscription.window on this entity. Such
 	// a subscription contributes NO predicate here — its predicate selects
 	// candidates for the window, and admitting every candidate would defeat the
@@ -176,6 +187,32 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 		if sc == nil {
 			sc = &entityScope{}
 			e.scopes[info.name] = sc
+		}
+		if sub.GetKeySet() != nil {
+			// Key set, predicate and window each pick the rows of one
+			// subscription by a different rule; letting two apply at once would
+			// leave whether they intersect or union up to the reader.
+			if sub.GetPredicate() != nil || sub.GetWindow() != nil {
+				return nil, connect.NewError(connect.CodeInvalidArgument,
+					fmt.Errorf("subscription for %q: key_set cannot combine with predicate or window", info.name))
+			}
+			keys := sub.GetKeySet().GetKeys()
+			if len(keys) > srv.limits.MaxSubscriptionKeys {
+				return nil, connect.NewError(connect.CodeInvalidArgument, errors.New(limitExceeded(
+					fmt.Sprintf("subscription for %q: key_set of %d keys", info.name, len(keys)),
+					"MaxSubscriptionKeys", srv.limits.MaxSubscriptionKeys)))
+			}
+			if sc.keys == nil {
+				sc.keys = make(map[string]bool, len(keys))
+			}
+			for _, key := range keys {
+				if err := naming.ValidateRowKey(key); err != nil {
+					return nil, connect.NewError(connect.CodeInvalidArgument,
+						fmt.Errorf("subscription for %q: key_set: %w", info.name, err))
+				}
+				sc.keys[key] = true
+			}
+			continue
 		}
 		if sub.GetWindow() != nil {
 			cw, err := compileWindow(info, sub, i, srv.limits)
@@ -311,11 +348,13 @@ func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 //	real tombstone                       → visible (pull passes it through)
 //	entity unsubscribed (subs non-empty) → unsubscribed (skip)
 //	follow-closure or window member      → visible (already read-filtered)
-//	outside a purely windowed scope,
-//	or a follow-only entity's closure    → hidden-non-member (pull: tombstone
+//	outside a purely windowed or keyed
+//	scope, or a follow-only entity's
+//	closure                              → hidden-non-member (pull: tombstone
 //	                                       only prior members; bootstrap: skip)
 //	row will not decode                  → hidden (quarantined, see poison.go)
 //	ReadFilter denies                    → hidden (pull: tombstone; bootstrap: skip)
+//	key-set member                       → visible (no predicate to evaluate)
 //	predicate non-match                  → hidden (pull: tombstone; bootstrap: skip)
 //	allowed + match                      → visible
 func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
@@ -376,12 +415,20 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 			return rowHiddenNonMember, nil
 		}
 	}
-	if scope != nil && !scope.whole && len(scope.preds) == 0 {
-		// A purely windowed scope: the window check above was the whole test,
-		// so a non-member is hidden without paying for a decode.
+	// A named key is in scope whatever the row holds, so no predicate applies
+	// to it — but the read filter still does, which is why it is not folded
+	// into the membership checks above.
+	keyed := scope != nil && scope.keys[row.Key]
+	if scope != nil && !scope.whole && !keyed && len(scope.preds) == 0 {
+		// A purely windowed or keyed scope: the membership checks above were
+		// the whole test, so a non-member is hidden without paying for a
+		// decode. Non-member rather than hidden because possession is
+		// provable: the window sets ride on the cursor, and a key set is part
+		// of sub_hash, so under a matching hash no row outside it was ever
+		// delivered through this scope.
 		return rowHiddenNonMember, nil
 	}
-	needPred := scope != nil && !scope.whole
+	needPred := scope != nil && !scope.whole && !keyed
 	filter, err := e.filterOf(row.Entity)
 	if err != nil {
 		return 0, err

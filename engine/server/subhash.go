@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"hash/fnv"
+	"slices"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
@@ -30,9 +31,14 @@ import (
 // away without it because a widened follow spec reaches rows through holders
 // the client already has.
 //
-// Existing clients send no window, so their subscriptions marshal exactly as
-// before and every cursor issued so far still hashes identically: upgrading
-// the server does not re-bootstrap anybody.
+// A KEY SET is included for the same reason a window is: a key added to the
+// set names a row the client never held. It is hashed as a set — sorted, with
+// duplicates folded — so a client that re-orders its keys between requests
+// does not pay a resync that would deliver nothing.
+//
+// Existing clients send no window and no key set, so their subscriptions
+// marshal exactly as before and every cursor issued so far still hashes
+// identically: upgrading the server does not re-bootstrap anybody.
 func subscriptionHash(subs []*syncplanev1.Subscription) (uint64, error) {
 	if len(subs) == 0 {
 		return 0, nil
@@ -44,14 +50,15 @@ func subscriptionHash(subs []*syncplanev1.Subscription) (uint64, error) {
 	mo := proto.MarshalOptions{Deterministic: true}
 	items := make([]item, 0, len(subs))
 	for _, sub := range subs {
-		// Hash the base scope plus the window; clone-and-clear follow so a
-		// follow change leaves the hash stable.
+		// Hash the base scope plus the window and the canonical key set;
+		// clone-and-clear follow so a follow change leaves the hash stable.
 		base := sub
-		if sub.GetFollow() != nil {
+		if sub.GetFollow() != nil || sub.GetKeySet() != nil {
 			base = &syncplanev1.Subscription{
 				Entity:    sub.GetEntity(),
 				Predicate: sub.GetPredicate(),
 				Window:    sub.GetWindow(),
+				KeySet:    canonicalKeySet(sub.GetKeySet()),
 			}
 		}
 		raw, err := mo.Marshal(base)
@@ -74,4 +81,16 @@ func subscriptionHash(subs []*syncplanev1.Subscription) (uint64, error) {
 		h.Write(it.raw)
 	}
 	return h.Sum64(), nil
+}
+
+// canonicalKeySet returns the set with its keys sorted and deduplicated, or
+// nil for a nil input. An empty set stays a present, empty message: it names
+// no rows, which is not what an absent set means.
+func canonicalKeySet(ks *syncplanev1.KeySet) *syncplanev1.KeySet {
+	if ks == nil {
+		return nil
+	}
+	keys := slices.Clone(ks.GetKeys())
+	sort.Strings(keys)
+	return &syncplanev1.KeySet{Keys: slices.Compact(keys)}
 }

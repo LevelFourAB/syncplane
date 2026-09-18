@@ -356,13 +356,14 @@ func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq ui
 // window members candidateKeys collects. ok is false when they are not, and the
 // entity must be scanned.
 //
-// Walking classify with a live row of the entity that matches no predicate and
-// is in neither membership set gives the same verdict every time under these
-// rules: an entity with no base scope of its own answers rowHiddenNonMember (it
-// is reached only through a follow spec, so the closure is its whole
-// visibility), a purely windowed scope answers rowHiddenNonMember, and a scope
-// with predicates answers rowHidden. None of the three is rowVisible, so the
-// candidates hold every row the snapshot could ship.
+// Walking classify with a live row of the entity that matches no predicate, is
+// named by no key set and is in neither membership set gives the same verdict
+// every time under these rules: an entity with no base scope of its own answers
+// rowHiddenNonMember (it is reached only through a follow spec, so the closure
+// is its whole visibility), a purely windowed or keyed scope answers
+// rowHiddenNonMember, and a scope with predicates answers rowHidden. None of
+// the three is rowVisible, so the candidates hold every row the snapshot could
+// ship.
 //
 // A nil scope with ok=true is the follow-only entity above. Full sync and a
 // scope covering the whole entity are the declines: every live row is visible

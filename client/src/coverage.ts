@@ -9,7 +9,8 @@ import type { Row, WorkspaceScope } from './read.js';
  *   subscription set is non-empty and does not name it. A local query returns
  *   an empty array, which is indistinguishable from "there are no matching
  *   rows" unless you look here.
- * - `predicate` — only rows matching a subscription predicate synced.
+ * - `predicate` — only rows matching a subscription predicate, or named by a
+ *   subscription's key set, synced.
  * - `window` — the synced set is capped by rank (see `limit`), so rows exist
  *   that no local query can reach no matter how it is written. In particular a
  *   client holding the top N by one order cannot answer a query ordered by
@@ -193,7 +194,9 @@ export function coverageOfEntity(subs: readonly Subscription[], entity: string):
 			limit += sub.window.limit;
 			continue;
 		}
-		if (sub.predicate) {
+		// A key set bounds the entity the way a predicate does: to a set of
+		// rows no local query can see past, and one no single number describes.
+		if (sub.predicate || sub.keySet) {
 			if (!bounds.includes('predicate')) bounds.push('predicate');
 			continue;
 		}

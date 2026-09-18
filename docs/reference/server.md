@@ -94,6 +94,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                              |
 | `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                      |
 | `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                  |
+| `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                  |
 | `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. Exceeding this limit fails the write.                                 |
 | `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates. Exceeding this limit falls back to a table scan.                     |
 | `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                            |

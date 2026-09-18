@@ -451,10 +451,11 @@ func (e *rowEmitter) buildClosure(tx storage.ReadTx, subs []*syncplanev1.Subscri
 // as the follow roots.
 //
 // The seeds are the expensive half of a following pull, because there are as
-// many of them as the base scope has rows and each one is walked. Two things
+// many of them as the base scope has rows and each one is walked. Three things
 // keep that from being a full scan and decode of the entity every time: a
-// windowed subscription seeds from rows already in hand, and a predicated one
-// asks the shared candidate source to name its anchors.
+// windowed subscription seeds from rows already in hand, a keyed one reads the
+// rows its set names, and a predicated one asks the shared candidate source to
+// name its anchors.
 func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscription) ([]frontierRow, error) {
 	info, ok := e.srv.catalogPtr().entities[sub.GetEntity()]
 	if !ok {
@@ -498,6 +499,23 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 		}
 		seeds = append(seeds, frontierRow{entity: info.name, key: row.Key, msg: m})
 		return nil
+	}
+	// A key set already names its seeds. They are read in key order, the order
+	// the scan below would produce them in, and each is still decoded and
+	// read-filtered: the set is the client's claim, not a resolved membership
+	// like a window's.
+	if ks := sub.GetKeySet(); ks != nil {
+		batch := &rowBatch{tx: tx, entity: info.name, size: maxRowBatch,
+			emit: func(row storage.Row) error { return consider(row, nil) }}
+		for _, key := range canonicalKeySet(ks).GetKeys() {
+			if err := batch.add(key); err != nil {
+				return nil, err
+			}
+		}
+		if err := batch.flush(); err != nil {
+			return nil, err
+		}
+		return seeds, nil
 	}
 	// The subscription's predicate is a predicate like any other, so the source
 	// that names a snapshot's or a resync's rows names the seeds too: a

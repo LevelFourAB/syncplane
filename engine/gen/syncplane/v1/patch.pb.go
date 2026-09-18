@@ -293,7 +293,18 @@ type Subscription struct {
 	// Unlike `follow`, a window IS part of sub_hash: widening or removing one
 	// needs rows the client does not hold, which only a delta resync can
 	// supply.
-	Window        *Window `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	Window *Window `protobuf:"bytes,4,opt,name=window,proto3" json:"window,omitempty"`
+	// Rows named by key: exactly these rows of the entity sync, whatever their
+	// fields hold. Set for "the documents this device has pinned" — a set the
+	// entity's fields cannot express and that N per-key predicates would cost N
+	// predicates to express. Mutually exclusive with `predicate` and `window`;
+	// `follow` combines with it and walks references from the named rows.
+	// Present-but-empty names no rows, which is different from absent (the
+	// whole entity). Part of sub_hash, like a window: a changed set is
+	// reconciled by a delta resync that reads only the rows named on either
+	// side. A key the caller may not read is withheld, never refused. Bounded by
+	// the server's MaxSubscriptionKeys.
+	KeySet        *KeySet `protobuf:"bytes,5,opt,name=key_set,json=keySet,proto3" json:"key_set,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -356,6 +367,61 @@ func (x *Subscription) GetWindow() *Window {
 	return nil
 }
 
+func (x *Subscription) GetKeySet() *KeySet {
+	if x != nil {
+		return x.KeySet
+	}
+	return nil
+}
+
+// KeySet names rows of one entity by key, in the row-key form
+// CrudMutation.key carries (see docs/reference/naming.md). Order carries no
+// meaning and duplicates are folded, so two sets with the same members hash
+// alike.
+type KeySet struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Keys          []string               `protobuf:"bytes,1,rep,name=keys,proto3" json:"keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *KeySet) Reset() {
+	*x = KeySet{}
+	mi := &file_syncplane_v1_patch_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *KeySet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*KeySet) ProtoMessage() {}
+
+func (x *KeySet) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_patch_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use KeySet.ProtoReflect.Descriptor instead.
+func (*KeySet) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *KeySet) GetKeys() []string {
+	if x != nil {
+		return x.Keys
+	}
+	return nil
+}
+
 // Window caps a subscription's scope by RANK rather than by attribute: "the
 // N most recently updated open issues" instead of "every open issue".
 //
@@ -384,7 +450,7 @@ type Window struct {
 
 func (x *Window) Reset() {
 	*x = Window{}
-	mi := &file_syncplane_v1_patch_proto_msgTypes[4]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -396,7 +462,7 @@ func (x *Window) String() string {
 func (*Window) ProtoMessage() {}
 
 func (x *Window) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_patch_proto_msgTypes[4]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -409,7 +475,7 @@ func (x *Window) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Window.ProtoReflect.Descriptor instead.
 func (*Window) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Window) GetOrderBy() []*OrderKey {
@@ -446,7 +512,7 @@ type RefPath struct {
 
 func (x *RefPath) Reset() {
 	*x = RefPath{}
-	mi := &file_syncplane_v1_patch_proto_msgTypes[5]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -458,7 +524,7 @@ func (x *RefPath) String() string {
 func (*RefPath) ProtoMessage() {}
 
 func (x *RefPath) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_patch_proto_msgTypes[5]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -471,7 +537,7 @@ func (x *RefPath) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RefPath.ProtoReflect.Descriptor instead.
 func (*RefPath) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *RefPath) GetSegments() []string {
@@ -494,7 +560,7 @@ type FollowSpec struct {
 
 func (x *FollowSpec) Reset() {
 	*x = FollowSpec{}
-	mi := &file_syncplane_v1_patch_proto_msgTypes[6]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -506,7 +572,7 @@ func (x *FollowSpec) String() string {
 func (*FollowSpec) ProtoMessage() {}
 
 func (x *FollowSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_patch_proto_msgTypes[6]
+	mi := &file_syncplane_v1_patch_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -519,7 +585,7 @@ func (x *FollowSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FollowSpec.ProtoReflect.Descriptor instead.
 func (*FollowSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_v1_patch_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *FollowSpec) GetPaths() []*RefPath {
@@ -556,12 +622,15 @@ const file_syncplane_v1_patch_proto_rawDesc = "" +
 	"\x04body\"_\n" +
 	"\x05Patch\x121\n" +
 	"\achanges\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\achanges\x12#\n" +
-	"\rdrop_entities\x18\x02 \x03(\tR\fdropEntities\"\xbd\x01\n" +
+	"\rdrop_entities\x18\x02 \x03(\tR\fdropEntities\"\xec\x01\n" +
 	"\fSubscription\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x125\n" +
 	"\tpredicate\x18\x02 \x01(\v2\x17.syncplane.v1.ConditionR\tpredicate\x120\n" +
 	"\x06follow\x18\x03 \x01(\v2\x18.syncplane.v1.FollowSpecR\x06follow\x12,\n" +
-	"\x06window\x18\x04 \x01(\v2\x14.syncplane.v1.WindowR\x06window\"p\n" +
+	"\x06window\x18\x04 \x01(\v2\x14.syncplane.v1.WindowR\x06window\x12-\n" +
+	"\akey_set\x18\x05 \x01(\v2\x14.syncplane.v1.KeySetR\x06keySet\"\x1c\n" +
+	"\x06KeySet\x12\x12\n" +
+	"\x04keys\x18\x01 \x03(\tR\x04keys\"p\n" +
 	"\x06Window\x121\n" +
 	"\border_by\x18\x01 \x03(\v2\x16.syncplane.v1.OrderKeyR\aorderBy\x12\x14\n" +
 	"\x05limit\x18\x02 \x01(\rR\x05limit\x12\x1d\n" +
@@ -586,31 +655,33 @@ func file_syncplane_v1_patch_proto_rawDescGZIP() []byte {
 	return file_syncplane_v1_patch_proto_rawDescData
 }
 
-var file_syncplane_v1_patch_proto_msgTypes = make([]protoimpl.MessageInfo, 7)
+var file_syncplane_v1_patch_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
 var file_syncplane_v1_patch_proto_goTypes = []any{
 	(*FieldDelta)(nil),   // 0: syncplane.v1.FieldDelta
 	(*RowChange)(nil),    // 1: syncplane.v1.RowChange
 	(*Patch)(nil),        // 2: syncplane.v1.Patch
 	(*Subscription)(nil), // 3: syncplane.v1.Subscription
-	(*Window)(nil),       // 4: syncplane.v1.Window
-	(*RefPath)(nil),      // 5: syncplane.v1.RefPath
-	(*FollowSpec)(nil),   // 6: syncplane.v1.FollowSpec
-	(*Condition)(nil),    // 7: syncplane.v1.Condition
-	(*OrderKey)(nil),     // 8: syncplane.v1.OrderKey
+	(*KeySet)(nil),       // 4: syncplane.v1.KeySet
+	(*Window)(nil),       // 5: syncplane.v1.Window
+	(*RefPath)(nil),      // 6: syncplane.v1.RefPath
+	(*FollowSpec)(nil),   // 7: syncplane.v1.FollowSpec
+	(*Condition)(nil),    // 8: syncplane.v1.Condition
+	(*OrderKey)(nil),     // 9: syncplane.v1.OrderKey
 }
 var file_syncplane_v1_patch_proto_depIdxs = []int32{
 	0, // 0: syncplane.v1.RowChange.text_deltas:type_name -> syncplane.v1.FieldDelta
 	1, // 1: syncplane.v1.Patch.changes:type_name -> syncplane.v1.RowChange
-	7, // 2: syncplane.v1.Subscription.predicate:type_name -> syncplane.v1.Condition
-	6, // 3: syncplane.v1.Subscription.follow:type_name -> syncplane.v1.FollowSpec
-	4, // 4: syncplane.v1.Subscription.window:type_name -> syncplane.v1.Window
-	8, // 5: syncplane.v1.Window.order_by:type_name -> syncplane.v1.OrderKey
-	5, // 6: syncplane.v1.FollowSpec.paths:type_name -> syncplane.v1.RefPath
-	7, // [7:7] is the sub-list for method output_type
-	7, // [7:7] is the sub-list for method input_type
-	7, // [7:7] is the sub-list for extension type_name
-	7, // [7:7] is the sub-list for extension extendee
-	0, // [0:7] is the sub-list for field type_name
+	8, // 2: syncplane.v1.Subscription.predicate:type_name -> syncplane.v1.Condition
+	7, // 3: syncplane.v1.Subscription.follow:type_name -> syncplane.v1.FollowSpec
+	5, // 4: syncplane.v1.Subscription.window:type_name -> syncplane.v1.Window
+	4, // 5: syncplane.v1.Subscription.key_set:type_name -> syncplane.v1.KeySet
+	9, // 6: syncplane.v1.Window.order_by:type_name -> syncplane.v1.OrderKey
+	6, // 7: syncplane.v1.FollowSpec.paths:type_name -> syncplane.v1.RefPath
+	8, // [8:8] is the sub-list for method output_type
+	8, // [8:8] is the sub-list for method input_type
+	8, // [8:8] is the sub-list for extension type_name
+	8, // [8:8] is the sub-list for extension extendee
+	0, // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_patch_proto_init() }
@@ -629,7 +700,7 @@ func file_syncplane_v1_patch_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_patch_proto_rawDesc), len(file_syncplane_v1_patch_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   7,
+			NumMessages:   8,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

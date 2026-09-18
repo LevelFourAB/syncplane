@@ -8,6 +8,14 @@ A window handles cases that a predicate cannot express. A predicate scope, such 
 
 A window is a rank scope: a `limit` plus an ordering. The `orderBy` or `byRecency` parameter decides which rows win the ranks, and ties break on the row key. With a window, working-set size becomes a policy choice rather than entity size.
 
+## Why key sets exist
+
+A key set handles the other case a predicate cannot express: a set of rows chosen by the user rather than by their fields. The typical shape is mixed data. A client syncs the metadata of every document through a predicate scope and holds the bodies of only the documents it works on or has marked for offline use. No field of the document says which device pinned it, so no predicate selects those rows.
+
+A key set is that set, sent as row keys. The server treats every key as a row it can read directly: a bootstrap reads the named rows and nothing else, and a change to the set reads only the rows named on either side of it. One subscription per pinned row would sync the same rows, but each would be a predicate the server has to recognise and resolve on every request, and a single `in()` over the key field is not a shape the server can resolve without walking the entity.
+
+A key set is a claim, not a grant. Every named row still passes the caller's read filter, and a row the caller may not see is withheld rather than refused.
+
 ## Window maintenance is exact, not best-effort
 
 The cursor records window membership as a key set. Every pull that delivers data brings the window up to date and computes a diff against that set:
@@ -21,7 +29,7 @@ This diff includes a row that sank below the rank boundary when no predicate cha
 
 ## What a bootstrap of a partial scope costs
 
-A cold bootstrap ships one entity at a time. Where the entity's scope names the rows it admits — a predicate a secondary index serves, a predicate pinning every key field to a literal, a window's membership, or a reference-following closure — the snapshot reads those rows and nothing else, so it costs the number of rows it ships. Every other shape reads every live row of the entity and keeps the ones the scope admits: full sync, a scope covering a whole entity, a predicate neither an index nor a pinned key reaches, and a candidate set larger than `MaxResyncScan`. Both paths ship the same rows in the same order, and an interrupted snapshot resumes across either. Indexing the fields a subscription filters on is what makes a snapshot of a narrow scope over a large entity cost the size of the scope.
+A cold bootstrap ships one entity at a time. Where the entity's scope names the rows it admits — a predicate a secondary index serves, a predicate pinning every key field to a literal, a key set, a window's membership, or a reference-following closure — the snapshot reads those rows and nothing else, so it costs the number of rows it ships. Every other shape reads every live row of the entity and keeps the ones the scope admits: full sync, a scope covering a whole entity, a predicate neither an index nor a pinned key reaches, and a candidate set larger than `MaxResyncScan`. Both paths ship the same rows in the same order, and an interrupted snapshot resumes across either. Indexing the fields a subscription filters on is what makes a snapshot of a narrow scope over a large entity cost the size of the scope.
 
 ## Changing the scope resyncs the difference
 
@@ -29,7 +37,7 @@ Changing subscriptions delta-resyncs the visible-set difference rather than forc
 
 The resync pages by the differences it emits rather than by the rows it examines. Each `Pull` compares up to `MaxResyncScan` live rows against both the old and the new visibility and returns at most `MaxPullChanges` differences. Rows visible under both scopes emit nothing, so a scope change over a large workspace costs round trips in proportion to the size of the difference rather than the size of the workspace. Lowering `MaxResyncScan` shortens the read transaction each `Pull` holds and adds round trips.
 
-What the entity's own scope is made of decides how many rows the comparison has to read. Where both the old and the new scope select rows by predicates a secondary index serves or a predicate pins the whole row key with, or by window membership alone, the only rows that can change visibility are the ones those predicates and windows name, so the resync reads them and leaves the rest of the entity untouched. Every other shape — a scope covering a whole entity, an entity reached by following references, a predicate no index serves, or a candidate set larger than `MaxResyncScan` — compares every live row of the entity instead. Both produce the same difference; indexing the fields a subscription filters on is what makes a scope change cost the size of the scope rather than the size of the entity.
+What the entity's own scope is made of decides how many rows the comparison has to read. Where both the old and the new scope select rows by predicates a secondary index serves or a predicate pins the whole row key with, by key sets, or by window membership alone, the only rows that can change visibility are the ones those predicates, key sets and windows name, so the resync reads them and leaves the rest of the entity untouched. Every other shape — a scope covering a whole entity, an entity reached by following references, a predicate no index serves, or a candidate set larger than `MaxResyncScan` — compares every live row of the entity instead. Both produce the same difference; indexing the fields a subscription filters on is what makes a scope change cost the size of the scope rather than the size of the entity.
 
 Rows the client holds through a `follow` are outside the comparison. The resync treats every member of the cursor's closure as visible under both scopes, so a row that leaves base scope but stays reachable through a reference is kept rather than tombstoned. The pull after the resync walks the closure under the new scope and reconciles it against the set the cursor carried: members the new scope reaches arrive, members it no longer reaches and that base scope does not hold drop. That one pull walks the closure from scratch, because a set walked from the old scope's seeds cannot be brought up to date from the rows that changed since.
 

@@ -359,8 +359,8 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 // decline below means.
 //
 // Soundness. Take a live row of this entity that matches no predicate of
-// either scope and is in neither scope's window membership, and walk classify
-// with it under each emitter in turn. The entity is registered and not
+// either scope, is named by neither scope's key set and is in neither scope's
+// window membership, and walk classify with it under each emitter in turn. The entity is registered and not
 // server-only (entities() yields no others). The row is not a tombstone — the
 // caller skips those. It is not a closure member: both sides of a resync
 // classify with the closure the cursor carries, whose members are rows of
@@ -371,8 +371,9 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 // not subscribe to the entity, so classify answers rowUnsubscribed; or it has
 // a scope that is neither full sync nor whole, so needPred is true and
 // scope.matches is false and classify answers rowHidden or, for a purely
-// windowed scope, rowHiddenNonMember. None of the three is rowVisible, so both
-// sides agree the row is not visible and the diff emits nothing for it. Every
+// windowed or keyed scope, rowHiddenNonMember. None of the three is
+// rowVisible, so both sides agree the row is not visible and the diff emits
+// nothing for it. Every
 // row that CAN produce a change is therefore in the union collected here.
 //
 // Quarantined rows agree between the two paths as well. A row that will not
@@ -406,8 +407,8 @@ func resyncCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, entity string
 }
 
 // resyncNarrowable reports this entity's base scope under one side of a resync
-// when that side's visibility is decided by predicates and window membership
-// alone. ok is false when it is not, and the entity must be scanned.
+// when that side's visibility is decided by predicates, key sets and window
+// membership alone. ok is false when it is not, and the entity must be scanned.
 //
 // A nil scope with ok=true is the side that does not subscribe to the entity
 // at all: nothing of it is visible there, so it contributes no candidates.

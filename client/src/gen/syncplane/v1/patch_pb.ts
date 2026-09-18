@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/patch.proto.
  */
 export const file_syncplane_v1_patch: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvcGF0Y2gucHJvdG8SDHN5bmNwbGFuZS52MSItCgpGaWVsZERlbHRhEg0KBWZpZWxkGAEgASgJEhAKCGZyYWdtZW50GAIgASgMIpYBCglSb3dDaGFuZ2USDgoGZW50aXR5GAEgASgJEgsKA2tleRgCIAEoCRIPCgd2ZXJzaW9uGAMgASgEEg8KBXZhbHVlGAQgASgMSAASEwoJdG9tYnN0b25lGAUgASgISAASLQoLdGV4dF9kZWx0YXMYBiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGREZWx0YUIGCgRib2R5IkgKBVBhdGNoEigKB2NoYW5nZXMYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhUKDWRyb3BfZW50aXRpZXMYAiADKAkimgEKDFN1YnNjcmlwdGlvbhIOCgZlbnRpdHkYASABKAkSKgoJcHJlZGljYXRlGAIgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCgZmb2xsb3cYAyABKAsyGC5zeW5jcGxhbmUudjEuRm9sbG93U3BlYxIkCgZ3aW5kb3cYBCABKAsyFC5zeW5jcGxhbmUudjEuV2luZG93IlUKBldpbmRvdxIoCghvcmRlcl9ieRgBIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgCIAEoDRISCgpieV9yZWNlbmN5GAMgASgIIhsKB1JlZlBhdGgSEAoIc2VnbWVudHMYASADKAkiQQoKRm9sbG93U3BlYxIkCgVwYXRocxgBIAMoCzIVLnN5bmNwbGFuZS52MS5SZWZQYXRoEg0KBWRlcHRoGAIgASgNQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_query]);
+  fileDesc("ChhzeW5jcGxhbmUvdjEvcGF0Y2gucHJvdG8SDHN5bmNwbGFuZS52MSItCgpGaWVsZERlbHRhEg0KBWZpZWxkGAEgASgJEhAKCGZyYWdtZW50GAIgASgMIpYBCglSb3dDaGFuZ2USDgoGZW50aXR5GAEgASgJEgsKA2tleRgCIAEoCRIPCgd2ZXJzaW9uGAMgASgEEg8KBXZhbHVlGAQgASgMSAASEwoJdG9tYnN0b25lGAUgASgISAASLQoLdGV4dF9kZWx0YXMYBiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGREZWx0YUIGCgRib2R5IkgKBVBhdGNoEigKB2NoYW5nZXMYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhUKDWRyb3BfZW50aXRpZXMYAiADKAkiwQEKDFN1YnNjcmlwdGlvbhIOCgZlbnRpdHkYASABKAkSKgoJcHJlZGljYXRlGAIgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCgZmb2xsb3cYAyABKAsyGC5zeW5jcGxhbmUudjEuRm9sbG93U3BlYxIkCgZ3aW5kb3cYBCABKAsyFC5zeW5jcGxhbmUudjEuV2luZG93EiUKB2tleV9zZXQYBSABKAsyFC5zeW5jcGxhbmUudjEuS2V5U2V0IhYKBktleVNldBIMCgRrZXlzGAEgAygJIlUKBldpbmRvdxIoCghvcmRlcl9ieRgBIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgCIAEoDRISCgpieV9yZWNlbmN5GAMgASgIIhsKB1JlZlBhdGgSEAoIc2VnbWVudHMYASADKAkiQQoKRm9sbG93U3BlYxIkCgVwYXRocxgBIAMoCzIVLnN5bmNwbGFuZS52MS5SZWZQYXRoEg0KBWRlcHRoGAIgASgNQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_query]);
 
 /**
  * FieldDelta carries one collaborative-text document of a RowChange as delta
@@ -191,6 +191,22 @@ export type Subscription = Message<"syncplane.v1.Subscription"> & {
    * @generated from field: syncplane.v1.Window window = 4;
    */
   window?: Window | undefined;
+
+  /**
+   * Rows named by key: exactly these rows of the entity sync, whatever their
+   * fields hold. Set for "the documents this device has pinned" — a set the
+   * entity's fields cannot express and that N per-key predicates would cost N
+   * predicates to express. Mutually exclusive with `predicate` and `window`;
+   * `follow` combines with it and walks references from the named rows.
+   * Present-but-empty names no rows, which is different from absent (the
+   * whole entity). Part of sub_hash, like a window: a changed set is
+   * reconciled by a delta resync that reads only the rows named on either
+   * side. A key the caller may not read is withheld, never refused. Bounded by
+   * the server's MaxSubscriptionKeys.
+   *
+   * @generated from field: syncplane.v1.KeySet key_set = 5;
+   */
+  keySet?: KeySet | undefined;
 };
 
 /**
@@ -199,6 +215,28 @@ export type Subscription = Message<"syncplane.v1.Subscription"> & {
  */
 export const SubscriptionSchema: GenMessage<Subscription> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_patch, 3);
+
+/**
+ * KeySet names rows of one entity by key, in the row-key form
+ * CrudMutation.key carries (see docs/reference/naming.md). Order carries no
+ * meaning and duplicates are folded, so two sets with the same members hash
+ * alike.
+ *
+ * @generated from message syncplane.v1.KeySet
+ */
+export type KeySet = Message<"syncplane.v1.KeySet"> & {
+  /**
+   * @generated from field: repeated string keys = 1;
+   */
+  keys: string[];
+};
+
+/**
+ * Describes the message syncplane.v1.KeySet.
+ * Use `create(KeySetSchema)` to create a new message.
+ */
+export const KeySetSchema: GenMessage<KeySet> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_patch, 4);
 
 /**
  * Window caps a subscription's scope by RANK rather than by attribute: "the
@@ -246,7 +284,7 @@ export type Window = Message<"syncplane.v1.Window"> & {
  * Use `create(WindowSchema)` to create a new message.
  */
 export const WindowSchema: GenMessage<Window> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_patch, 4);
+  messageDesc(file_syncplane_v1_patch, 5);
 
 /**
  * RefPath names a chain of reference relations to follow from a root entity.
@@ -268,7 +306,7 @@ export type RefPath = Message<"syncplane.v1.RefPath"> & {
  * Use `create(RefPathSchema)` to create a new message.
  */
 export const RefPathSchema: GenMessage<RefPath> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_patch, 5);
+  messageDesc(file_syncplane_v1_patch, 6);
 
 /**
  * FollowSpec is one shared shape driving include (client-local hydration) and
@@ -294,5 +332,5 @@ export type FollowSpec = Message<"syncplane.v1.FollowSpec"> & {
  * Use `create(FollowSpecSchema)` to create a new message.
  */
 export const FollowSpecSchema: GenMessage<FollowSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_patch, 6);
+  messageDesc(file_syncplane_v1_patch, 7);
 

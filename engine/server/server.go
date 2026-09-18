@@ -381,6 +381,14 @@ type Limits struct {
 	// because the membership diff runs at a clean version boundary and has no
 	// paging state of its own. Default 1000, against MaxPullChanges' 4096.
 	MaxWindowSize int
+	// Maximum keys a single Subscription.key_set may name. A larger set is
+	// InvalidArgument rather than clamped, for the same reason a window is: a
+	// silently shorter set would look like missing data to the app.
+	//
+	// The set rides on every Pull and Subscribe request the client sends, so
+	// this bounds request size as much as it bounds the rows a scope pins.
+	// Default 1000.
+	MaxSubscriptionKeys int
 	// Maximum secondary-index entries one row may occupy across all of its
 	// entity's indexes. This is the WRITE cost of indexing: every row write
 	// re-encodes and stores the whole set, so the count multiplies the price
@@ -532,6 +540,9 @@ func (l Limits) withDefaults() Limits {
 	}
 	if l.MaxWindowSize <= 0 {
 		l.MaxWindowSize = 1000
+	}
+	if l.MaxSubscriptionKeys <= 0 {
+		l.MaxSubscriptionKeys = 1000
 	}
 	if l.MaxFollowDepth <= 0 {
 		l.MaxFollowDepth = 4

@@ -6,7 +6,7 @@ Syncplane is a sync engine for local-first applications. Clients read and write 
 
 ### Sync
 
-- **Partial sync**: Sync only the rows that a user needs. Filter by predicate, or keep a bounded window such as the most recently updated rows. Every read reports whether it saw complete data.
+- **Partial sync**: Sync only the rows that a user needs. Filter by predicate, keep a bounded window such as the most recently updated rows, or name the rows a device has pinned by key. Every read reports whether it saw complete data.
 - **Live updates**: The server pushes changed rows to connected clients, with polling as a fallback.
 - **Multi-tab and multi-workspace**: When you open the application in multiple tabs, the tabs share one local store and one server connection. A user in several workspaces syncs all of them over that same connection.
 
@@ -125,12 +125,13 @@ const found = await client.db.todo.queryServer({
 });
 ```
 
-Sync a subset of a workspace by predicate, or by recency rank with a limit:
+Sync a subset of a workspace by predicate, by recency rank with a limit, or by row key:
 
 ```ts
 client.setSubscriptions([
 	subscription(TodoSchema, (t) => t.completed.eq(false)),
-	subscription(CommentSchema, undefined, { limit: 500, byRecency: true }),
+	subscription(CommentSchema, { limit: 500, byRecency: true }),
+	subscription(DocSchema, { keys: pinnedDocIds }),
 ]);
 ```
 

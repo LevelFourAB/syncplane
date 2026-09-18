@@ -1030,7 +1030,8 @@ const specs = [
 		limit: 100,
 		orderBy: (i) => [ i.priority.desc() ],
 	}),
-	subscription(Comment, undefined, { limit: 500, byRecency: true }),
+	subscription(Comment, { limit: 500, byRecency: true }),
+	subscription(Document, { keys: pinnedDocumentIds, include: { author: true } }),
 ];
 
 const client = new SyncClient({ subscriptions: specs, ... });
@@ -1048,20 +1049,30 @@ interface SubscriptionSpec {
 	orderBy?: (w: unknown) => OrderKey[];
 	limit?: number;
 	byRecency?: boolean;
+	keys?: readonly string[];
+}
+
+interface SubscriptionOptions<D> {
+	include?: IncludeSpec;
+	depth?: number;
+	limit?: number;
+	orderBy?: (w: QueryRef<MessageShape<D>>) => OrderKey[];
+	byRecency?: boolean;
+	keys?: readonly string[];
 }
 
 function subscription<D>(
 	schema: D,
 	where?: (w: QueryRef<MessageShape<D>>) => Cond,
-	opts?: {
-		include?: IncludeSpec;
-		depth?: number;
-		limit?: number;
-		orderBy?: (w: QueryRef<MessageShape<D>>) => OrderKey[];
-		byRecency?: boolean;
-	},
+	opts?: SubscriptionOptions<D>,
+): SubscriptionSpec;
+function subscription<D>(
+	schema: D,
+	opts: SubscriptionOptions<D>,
 ): SubscriptionSpec;
 ```
+
+The second form takes the options in place of the predicate, for a subscription that has none.
 
 Entities declared with [`server_only`](proto-options.md#server-only-entities) must not appear in subscription specifications.
 Including a `server_only` entity in a subscription throws an error.
@@ -1079,6 +1090,24 @@ Validation rules:
 - Supplying both `orderBy` and `byRecency` throws an error.
 - Window sizes exceeding the server maximum (`MaxWindowSize`, [default 1000](server.md)) are rejected by the server.
 - See [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
+
+### Key sets: naming a subscription's rows
+
+Adding `keys` creates a key-set subscription.
+The client synchronizes exactly the named rows, whatever their fields hold, and nothing else of the entity.
+The keys are the row keys `get()` takes.
+An empty array names no rows, which differs from omitting `keys` (the whole entity).
+`include` walks references from the named rows.
+
+Changing the set delta-resyncs the difference: rows entering the set arrive, rows leaving it are deleted from local storage.
+The server reads only the rows named on either side of the change.
+Local reads of the entity report the `predicate` coverage bound.
+
+Validation rules:
+
+- Supplying `keys` together with `where`, `limit`, `orderBy` or `byRecency` throws an error.
+- Supplying an empty key, or one with a control character, throws an error.
+- Sets exceeding the server maximum (`MaxSubscriptionKeys`, [default 1000](server.md)) are rejected by the server.
 
 ### Coverage
 
@@ -1102,7 +1131,7 @@ interface Coverage {
 Coverage bounds:
 
 - `unsubscribed`: The entity is not included in active subscriptions.
-- `predicate`: The entity is filtered by a subscription predicate.
+- `predicate`: The entity is filtered by a subscription predicate or named by a subscription key set.
 - `window`: The entity is constrained by a window `limit`.
 - `hydrating`: The initial snapshot for the entity is currently downloading.
 - `relation`: A reference traversal (`matches()`) encountered targets that may not be present locally.

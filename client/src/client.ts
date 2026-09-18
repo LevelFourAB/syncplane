@@ -31,6 +31,8 @@ import {
 import {
 	type FollowSpec,
 	FollowSpecSchema,
+	type KeySet,
+	KeySetSchema,
 	RefPathSchema,
 	type Subscription,
 	SubscriptionSchema,
@@ -99,7 +101,7 @@ import {
 	type TextStringEdits,
 } from './mutations.js';
 import { createKvMutex, type Mutex } from './mutex.js';
-import { validateWorkspaceId } from './naming.js';
+import { validateRowKey, validateWorkspaceId } from './naming.js';
 import { buildIndexes } from './optimistic/index-build.js';
 import { IndexCache } from './optimistic/index-maintain.js';
 import { enqueuePending, readPending } from './optimistic/queue.js';
@@ -344,34 +346,94 @@ export interface SubscriptionSpec<D extends DescMessage = DescMessage> {
 	 * the server to maintain, since it needs no field comparison.
 	 */
 	byRecency?: boolean;
+	/**
+	 * Rows named by key: exactly these rows sync, whatever their fields hold.
+	 * This is how a client holds "the documents pinned on this device" — a set
+	 * no field of the entity expresses, and one that N per-key predicates
+	 * would make the server resolve N times over. The keys are the row keys
+	 * `get()` takes, and the set is read only for rows the caller may see.
+	 *
+	 * Mutually exclusive with `where` and `limit`; `follow` combines with it
+	 * and walks references from the named rows. An empty array names no rows,
+	 * which is different from omitting it (the whole entity). Changing the set
+	 * delta-resyncs the difference: rows entering it arrive, rows leaving it
+	 * drop. Capped by the server's MaxSubscriptionKeys (default 1000). Local
+	 * reads of the entity report the `predicate` coverage bound.
+	 */
+	keys?: readonly string[];
+}
+
+/** The options `subscription()` takes after the schema and the predicate. */
+export interface SubscriptionOptions<D extends DescMessage = DescMessage> {
+	include?: IncludeSpec;
+	depth?: number;
+	/** Row cap; see SubscriptionSpec.limit. */
+	limit?: number;
+	orderBy?: (w: QueryRef<MessageShape<D>>) => OrderKey[];
+	byRecency?: boolean;
+	/** Rows named by key; see SubscriptionSpec.keys. */
+	keys?: readonly string[];
 }
 
 /**
  * Typed builder for SubscriptionSpec, and the recommended way to write one:
  * the predicate's field reference is inferred from `schema`, which a bare spec
  * literal in an array cannot get.
+ *
+ * The predicate may be left out: `subscription(Doc, { keys })` and
+ * `subscription(Doc, { limit: 100, byRecency: true })` are the same call with
+ * the options moved up.
  */
 export function subscription<D extends DescMessage>(
 	schema: D,
 	where?: (w: QueryRef<MessageShape<D>>) => Cond,
-	opts?: {
-		include?: IncludeSpec;
-		depth?: number;
-		/** Row cap; see SubscriptionSpec.limit. */
-		limit?: number;
-		orderBy?: (w: QueryRef<MessageShape<D>>) => OrderKey[];
-		byRecency?: boolean;
-	},
+	opts?: SubscriptionOptions<D>,
+): SubscriptionSpec;
+export function subscription<D extends DescMessage>(
+	schema: D,
+	opts: SubscriptionOptions<D>,
+): SubscriptionSpec;
+export function subscription<D extends DescMessage>(
+	schema: D,
+	whereOrOpts?: ((w: QueryRef<MessageShape<D>>) => Cond) | SubscriptionOptions<D>,
+	opts?: SubscriptionOptions<D>,
 ): SubscriptionSpec {
+	const where = typeof whereOrOpts === 'function' ? whereOrOpts : undefined;
+	const options = whereOrOpts !== undefined && typeof whereOrOpts !== 'function'
+		? whereOrOpts
+		: opts;
 	return {
 		schema,
 		where: where as SubscriptionSpec['where'],
-		follow: opts?.include,
-		followDepth: opts?.depth,
-		orderBy: opts?.orderBy as SubscriptionSpec['orderBy'],
-		limit: opts?.limit,
-		byRecency: opts?.byRecency,
+		follow: options?.include,
+		followDepth: options?.depth,
+		orderBy: options?.orderBy as SubscriptionSpec['orderBy'],
+		limit: options?.limit,
+		byRecency: options?.byRecency,
+		keys: options?.keys,
 	};
+}
+
+/**
+ * Serializes a spec's key set into a wire KeySet, or undefined when the spec
+ * names none. Each key is checked the way a write's key is, since a key no row
+ * could have is a mistake at the call site, not a row that happens to be
+ * absent. Sorted and deduplicated so the same set always marshals the same
+ * way, whatever order the app produced it in.
+ *
+ * A key set is refused alongside a predicate or a window rather than
+ * intersected with them: which of the two rules the rows would follow is not
+ * something a reader of the spec should have to know.
+ */
+function compileKeySet(spec: SubscriptionSpec, entity: string): KeySet | undefined {
+	if (spec.keys === undefined) return undefined;
+	if (spec.where || spec.limit !== undefined || spec.orderBy || spec.byRecency) {
+		throw new Error(
+			`subscription for "${entity}" names keys; a key set cannot combine with where, limit, orderBy or byRecency`,
+		);
+	}
+	for (const key of spec.keys) validateRowKey(entity, key);
+	return create(KeySetSchema, { keys: [ ...new Set(spec.keys) ].sort() });
 }
 
 /** Flattens an include tree into root-to-leaf relation chains (RefPath segments). */
@@ -2650,6 +2712,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				predicate: wire.where ? condToProto(wire.where) : undefined,
 				follow: spec.follow ? compileFollow(spec.follow, spec.followDepth) : undefined,
 				window: compileWindow(spec, wire.orderBy),
+				keySet: compileKeySet(spec, def.name),
 			});
 		});
 	}

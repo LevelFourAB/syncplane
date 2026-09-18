@@ -6,7 +6,11 @@ import { coverageOfEntity, CoverageResolver, withCoverage } from '../../src/cove
 import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
-import { SubscriptionSchema, WindowSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
+import {
+	KeySetSchema,
+	SubscriptionSchema,
+	WindowSchema,
+} from '../../src/gen/syncplane/v1/patch_pb.js';
 import { CmpOp, ConditionSchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 
@@ -20,12 +24,13 @@ const anyPredicate = () =>
 
 const sub = (
 	entity: string,
-	opts: { predicate?: boolean; limit?: number } = {},
+	opts: { predicate?: boolean; limit?: number; keys?: string[] } = {},
 ) =>
 	create(SubscriptionSchema, {
 		entity,
 		predicate: opts.predicate ? anyPredicate() : undefined,
 		window: opts.limit === undefined ? undefined : create(WindowSchema, { limit: opts.limit }),
+		keySet: opts.keys === undefined ? undefined : create(KeySetSchema, { keys: opts.keys }),
 	});
 
 describe('coverageOfEntity', () => {
@@ -52,6 +57,25 @@ describe('coverageOfEntity', () => {
 			complete: false,
 			bounds: [ 'predicate' ],
 		});
+	});
+
+	it('reports a key set as a predicate bound, even an empty one', () => {
+		expect(coverageOfEntity([ sub('widget', { keys: [ 'w1', 'w2' ] }) ], 'widget')).toEqual({
+			complete: false,
+			bounds: [ 'predicate' ],
+		});
+		// An empty set names no rows; it is still a scope, not full sync.
+		expect(coverageOfEntity([ sub('widget', { keys: [] }) ], 'widget')).toEqual({
+			complete: false,
+			bounds: [ 'predicate' ],
+		});
+	});
+
+	it('omits the cap when a key set also bounds a windowed entity', () => {
+		expect(
+			coverageOfEntity([ sub('widget', { limit: 50 }), sub('widget', { keys: [ 'w1' ] }) ], 'widget'),
+		)
+			.toEqual({ complete: false, bounds: [ 'window', 'predicate' ] });
 	});
 
 	it('reports a window bound with its row cap', () => {
@@ -327,6 +351,58 @@ describe('subscription window compilation', () => {
 				}),
 			])
 		).toThrow(/byRecency and orderBy/);
+		void client.close();
+	});
+});
+
+describe('subscription key set compilation', () => {
+	const newLocalClient = () =>
+		new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ WidgetSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+
+	it('takes the options in place of the predicate', () => {
+		const spec = subscription(WidgetSchema, { keys: [ 'w2', 'w1' ], include: { settings: true } });
+		expect(spec.where).toBeUndefined();
+		expect(spec.keys).toEqual([ 'w2', 'w1' ]);
+		expect(spec.follow).toEqual({ settings: true });
+	});
+
+	it('bounds a local read like a predicate does', async () => {
+		const client = newLocalClient();
+		client.setSubscriptions([ subscription(WidgetSchema, { keys: [ 'w1' ] }) ]);
+		expect((await client.db.widget.query({})).coverage).toEqual({
+			complete: false,
+			bounds: [ 'predicate' ],
+		});
+		await client.close();
+	});
+
+	it('rejects a key set combined with a predicate or a window', () => {
+		const client = newLocalClient();
+		expect(() =>
+			client.setSubscriptions([ subscription(WidgetSchema, (w) => w.count.gt(0), { keys: [ 'w1' ] }) ])
+		)
+			.toThrow(/cannot combine/);
+		expect(() =>
+			client.setSubscriptions([
+				subscription(WidgetSchema, { keys: [ 'w1' ], limit: 5, byRecency: true }),
+			])
+		)
+			.toThrow(/cannot combine/);
+		void client.close();
+	});
+
+	it('rejects a key no row could have', () => {
+		const client = newLocalClient();
+		expect(() => client.setSubscriptions([ subscription(WidgetSchema, { keys: [ 'w1', '' ] }) ]))
+			.toThrow(/row key is empty/);
+		expect(() => client.setSubscriptions([ subscription(WidgetSchema, { keys: [ 'a\u001fb' ] }) ]))
+			.toThrow(/control character/);
 		void client.close();
 	});
 });

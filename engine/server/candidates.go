@@ -31,10 +31,11 @@ import (
 // sorted in key order. ok is false when the entity has to be scanned instead,
 // which is always legal and is what every decline below means.
 //
-// Each scope contributes its predicates' candidates, from a secondary index or
-// from the single key an equality on every key field pins (see keyRowCandidate).
-// A predicate neither reaches abandons the whole set: a partial union would
-// silently drop rows the caller owes its client.
+// Each scope contributes its key set as it stands and its predicates'
+// candidates, from a secondary index or from the single key an equality on
+// every key field pins (see keyRowCandidate). A predicate neither reaches
+// abandons the whole set: a partial union would silently drop rows the caller
+// owes its client.
 //
 // extras are key sets whose members are admitted whatever the predicates say —
 // window membership, a follow closure — restricted here to this entity. Read
@@ -70,6 +71,16 @@ func candidateKeys(
 	for _, scope := range scopes {
 		if scope == nil {
 			continue
+		}
+		// A key set names its rows outright: the candidates are the set, and
+		// the row read that follows is the only cost. This is what pinning N
+		// rows buys over N per-key predicates — the same rows, without N
+		// predicate walks to find them.
+		for key := range scope.keys {
+			add(key)
+		}
+		if over {
+			return nil, false, nil
 		}
 		for _, pred := range scope.preds {
 			// The pinned key first: it costs no read at all, and an entity

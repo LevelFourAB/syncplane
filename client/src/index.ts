@@ -14,6 +14,7 @@ export type {
 	Row,
 	SchemaSkewAction,
 	SchemaSkewInfo,
+	SubscriptionOptions,
 	SubscriptionSpec,
 	SyncClientOptions,
 	SyncErrorInfo,

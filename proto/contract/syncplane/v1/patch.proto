@@ -81,6 +81,25 @@ message Subscription {
 	// needs rows the client does not hold, which only a delta resync can
 	// supply.
 	Window window = 4;
+	// Rows named by key: exactly these rows of the entity sync, whatever their
+	// fields hold. Set for "the documents this device has pinned" — a set the
+	// entity's fields cannot express and that N per-key predicates would cost N
+	// predicates to express. Mutually exclusive with `predicate` and `window`;
+	// `follow` combines with it and walks references from the named rows.
+	// Present-but-empty names no rows, which is different from absent (the
+	// whole entity). Part of sub_hash, like a window: a changed set is
+	// reconciled by a delta resync that reads only the rows named on either
+	// side. A key the caller may not read is withheld, never refused. Bounded
+	// by the server's MaxSubscriptionKeys.
+	KeySet key_set = 5;
+}
+
+// KeySet names rows of one entity by key, in the row-key form
+// CrudMutation.key carries (see docs/reference/naming.md). Order carries no
+// meaning and duplicates are folded, so two sets with the same members hash
+// alike.
+message KeySet {
+	repeated string keys = 1;
 }
 
 // Window caps a subscription's scope by RANK rather than by attribute: "the
