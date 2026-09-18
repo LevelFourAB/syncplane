@@ -72,6 +72,23 @@ Before you configure partial sync, ensure that you have:
    - If bounds include `unsubscribed`, `predicate`, or `window`, call `queryServer` to fetch full results from the server. A key scope reports `predicate`.
    - If the bound is `hydrating`, display a loading state instead of querying the server. The initial snapshot lands entity by entity, and readers re-fire when the snapshot fills. `bootstrapPriority` decides which entities land first, and `status().workspaces[id].hydration` reports outstanding entities.
 
+4. Bring one row into scope on demand.
+   A row found by `queryServer` is a snapshot: it is not stored locally, so it cannot be watched or edited. Hold it to sync it while it is open:
+
+   ```ts
+   const hits = await client.db.document.queryServer({
+   	where: (d) => d.title.match(term),
+   });
+   const hold = client.db.document.hold(hits[0].key);
+   await hold.ready;
+   const text = await client.db.document.text(hits[0].key, 'body');
+   // ... edit, then:
+   await text.close();
+   hold.release();
+   ```
+
+   The row arrives on the next sync cycle and stays until the last hold on it is released, plus `holdGraceMs` (default 30 seconds). In React, `useRow(key, { hold: true })` and `useText(key, field, { hold: true })` take the hold for the component's lifetime. See [Holds](../reference/typescript-client.md#holds-one-row-in-scope-on-demand).
+
 ## Confirming the result
 
 To confirm that partial sync is working:

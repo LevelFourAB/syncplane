@@ -274,6 +274,29 @@ var _ = Describe("Key-set subscriptions", func() {
 			Expect(counter.count("batchkeys")).To(Equal(3))
 		})
 
+		It("reads nothing of an entity whose scope did not change", func() {
+			// A hold names one more row of one entity. Every other entity in
+			// the set keeps the scope it had, so the resync must not walk any
+			// of them to learn that nothing of theirs moved.
+			for i := 1; i <= 5; i++ {
+				nextMut++
+				id := fmt.Sprintf("t%d", i)
+				push(putMutation("c1", nextMut, "todo", id, &todov1.Todo{Id: id, Title: id}))
+			}
+			seedWidgets(3)
+			whole := &syncplanev1.Subscription{Entity: "todo"}
+			cursor, rows := bootstrap(whole, keySub("w1"))
+			Expect(valueKeys(rows, "todo")).To(HaveLen(5))
+			counter.reset()
+
+			_, changes := drain(cursor, whole, keySub("w1", "w2"))
+			Expect(valueKeys(changes, "widget")).To(Equal([]string{"w2"}))
+			Expect(tombstoneKeys(changes)).To(BeEmpty())
+			Expect(counter.count("scanafter:todo")).To(BeZero(), "an unchanged whole-entity scope is not walked")
+			Expect(counter.count("scanafter:widget")).To(BeZero())
+			Expect(counter.count("batchkeys")).To(Equal(2), "the keys named on either side, once each")
+		})
+
 		It("resyncs from a predicate to a key set and back", func() {
 			seedWidgets(3)
 			countEq := func(n int32) *syncplanev1.Condition {

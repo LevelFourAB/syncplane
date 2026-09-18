@@ -9,10 +9,12 @@ import { ScalarType } from '@bufbuild/protobuf';
 
 import type {
 	CasOptions,
+	HoldHandle,
 	MaskedPatchOptions,
 	PatchOptions,
 	UpdateOptions,
 	UpdateRecipe,
+	WorkspaceClient,
 } from './client.js';
 import type { RowSet } from './coverage.js';
 import { newId } from './id.js';
@@ -183,6 +185,13 @@ export interface EntityApi<D extends DescMessage> {
 	 * changes as in-place deltas. Indices are UTF-16 string indices.
 	 */
 	text(key: string, field: string): Promise<TextHandle>;
+	/**
+	 * Brings one row into scope on demand until the handle is released — the
+	 * way to open a row found by `queryServer` for editing without changing the
+	 * declared subscriptions. See {@link WorkspaceClient.hold} for what a hold
+	 * does and does not do.
+	 */
+	hold(key: string): HoldHandle;
 	refs: EntityRefs<D>;
 	mutate: {
 		/**
@@ -316,6 +325,8 @@ interface SchemaApi {
 	): Promise<Row<Message>[]>;
 	/** Absent on facades that cannot host a live handle (transactions). */
 	textHandle?<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle>;
+	/** Absent on facades that cannot change scope (transactions). */
+	hold?<D extends DescMessage>(schema: D, key: string): HoldHandle;
 	mutate: {
 		put<D extends DescMessage>(
 			schema: D,
@@ -429,6 +440,10 @@ export function buildEntityApis<E extends readonly DescMessage[]>(
 					);
 				}
 				return client.textHandle(schema, k, field);
+			},
+			hold: (k) => {
+				if (!client.hold) throw unavailable(key, 'hold', 'holds');
+				return client.hold(schema, k);
 			},
 			get refs(): EntityRefs {
 				return (refsCache ??= buildRefs(schema, client, registry));

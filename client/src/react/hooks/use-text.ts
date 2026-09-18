@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 
 import type { TextHandle, TextSpan } from '../../text/handle.js';
 import { useWorkspaceScope } from '../context.js';
-import type { UseWorkspaceOptions } from '../types.js';
+import type { UseTextOptions } from '../types.js';
 
 /** What useText returns: the live value plus the handle for edits. */
 export interface UseTextResult {
@@ -67,9 +67,10 @@ export function useTextHook<D extends DescMessage>(
 	schema: D,
 	key: string,
 	field: string,
-	opts?: UseWorkspaceOptions,
+	opts?: UseTextOptions,
 ): UseTextResult {
 	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
+	const hold = opts?.hold === true;
 	const identity = `${scope.workspaceId}\u0000${schema.typeName}\u0000${key}\u0000${field}`;
 	const [ state, setState ] = useState<TextState>(() => loading(identity));
 	const handleRef = useRef<TextHandle>(undefined);
@@ -81,7 +82,14 @@ export function useTextHook<D extends DescMessage>(
 		// are re-read exactly when a delta says they may have moved (see
 		// TextDelta.marksChanged) and keep their reference otherwise.
 		let marks: readonly TextSpan[] = NO_MARKS;
-		void scope.text(schema, key, field).then((handle) => {
+		// A held row may not be local yet, and a handle opened on an absent row
+		// fails for good: wait for the hold's sync before opening.
+		const held = hold ? scope.hold(schema, key) : undefined;
+		if (held) unsubs.push(() => held.release());
+		const opening = held
+			? held.ready.then(() => scope.text(schema, key, field))
+			: scope.text(schema, key, field);
+		void opening.then((handle) => {
 			if (cancelled) {
 				handle.close();
 				return;
@@ -125,7 +133,7 @@ export function useTextHook<D extends DescMessage>(
 			void handleRef.current?.close();
 			handleRef.current = undefined;
 		};
-	}, [ scope, schema, key, field, identity ]);
+	}, [ scope, schema, key, field, identity, hold ]);
 
 	const setText = useCallback((text: string): Promise<void> => {
 		const handle = handleRef.current;

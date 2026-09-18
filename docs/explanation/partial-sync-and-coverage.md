@@ -16,6 +16,16 @@ A key set is that set, sent as row keys. The server treats every key as a row it
 
 A key set is a claim, not a grant. Every named row still passes the caller's read filter, and a row the caller may not see is withheld rather than refused.
 
+## Why holds exist
+
+A key set is declared: the app decides which rows it names. A hold is the same shape managed at runtime. A row found by a server query, or opened from a link, is outside every declared subscription, and the client cannot edit what it does not hold locally: text handles, watchers, the optimistic overlay and undo all assume a local row. A parallel cache of server snapshots would have none of that. A hold makes the row local instead.
+
+The client keeps one key set per entity of the rows currently held and appends it to the declared subscriptions as one more subscription. Nothing on the server distinguishes a held row from a declared one. Taking or releasing a hold changes the subscription set, and the server reconciles the change with a delta resync that reads the rows named on either side. An entity whose subscriptions did not change is skipped without a read, so a hold on one document costs one point read however large the rest of the scope is.
+
+Holds are shared across tabs the same way declared subscriptions are: every tab publishes its own set and syncs the union. A row one tab holds stays in scope for every tab, and stays when that tab closes as long as another holds it. Holds are not persisted, because a reload has no components holding anything, and the grace period after the last release absorbs a view that closes a row and reopens it.
+
+A held row does not make its entity complete. Reads report the `predicate` bound, as they do for a declared key set. Under full sync there is nothing to add to, and an entity a declared subscription already covers whole gains nothing from naming rows of it, so a hold changes nothing in either case.
+
 ## Window maintenance is exact, not best-effort
 
 The cursor records window membership as a key set. Every pull that delivers data brings the window up to date and computes a diff against that set:
@@ -38,6 +48,8 @@ Changing subscriptions delta-resyncs the visible-set difference rather than forc
 The resync pages by the differences it emits rather than by the rows it examines. Each `Pull` compares up to `MaxResyncScan` live rows against both the old and the new visibility and returns at most `MaxPullChanges` differences. Rows visible under both scopes emit nothing, so a scope change over a large workspace costs round trips in proportion to the size of the difference rather than the size of the workspace. Lowering `MaxResyncScan` shortens the read transaction each `Pull` holds and adds round trips.
 
 What the entity's own scope is made of decides how many rows the comparison has to read. Where both the old and the new scope select rows by predicates a secondary index serves or a predicate pins the whole row key with, by key sets, or by window membership alone, the only rows that can change visibility are the ones those predicates, key sets and windows name, so the resync reads them and leaves the rest of the entity untouched. Every other shape — a scope covering a whole entity, an entity reached by following references, a predicate no index serves, or a candidate set larger than `MaxResyncScan` — compares every live row of the entity instead. Both produce the same difference; indexing the fields a subscription filters on is what makes a scope change cost the size of the scope rather than the size of the entity.
+
+An entity whose subscriptions are the same on both sides of the change, under the same read filter, is skipped without a read. Both sides would classify every row of it alike, so the diff has nothing to find there. A change to one entity of a large scope therefore costs the rows that entity names, not a walk of every other entity in the set.
 
 Rows the client holds through a `follow` are outside the comparison. The resync treats every member of the cursor's closure as visible under both scopes, so a row that leaves base scope but stays reachable through a reference is kept rather than tombstoned. The pull after the resync walks the closure under the new scope and reconciles it against the set the cursor carried: members the new scope reaches arrive, members it no longer reaches and that base scope does not hold drop. That one pull walks the closure from scratch, because a set walked from the old scope's seeds cannot be brought up to date from the rows that changed since.
 

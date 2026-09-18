@@ -344,12 +344,25 @@ export interface CoordinatorOptions {
 	 * in-flight pull commits a fresh cursor over them.
 	 */
 	forceResync?: boolean;
+	/**
+	 * Called after a workspace's pull completes with `gen` the scope generation
+	 * the cycle ran under (see setSubscriptions). Every row that generation's
+	 * subscription set admits, and the server holds, is in the local store by
+	 * then.
+	 */
+	onScopeSynced?: (workspaceId: string, gen: number) => void;
 }
 
 /** Per-workspace sync state that lives only in memory. */
 interface WorkspaceSync {
 	/** This tab's own subscription request; empty = full sync. */
 	subscriptions: Subscription[];
+	/**
+	 * Counts replacements of `subscriptions`, so a completed pull can say which
+	 * request it served (CoordinatorOptions.onScopeSynced). Starts at 0 for the
+	 * set the coordinator was constructed with.
+	 */
+	scopeGen: number;
 	/**
 	 * Workspace seq this client has pulled through, from PullResponse.seq /
 	 * Begin.seq (the cursor itself is an opaque token). Judges streamed page
@@ -566,7 +579,7 @@ export class Coordinator {
 		this.opts = opts;
 		this.rpc = createClient(SyncService, opts.transport);
 		for (const [ ws, subs ] of opts.scopes) {
-			this.workspaces.set(ws, { subscriptions: subs, serverSeq: 0n, revoked: false });
+			this.workspaces.set(ws, { subscriptions: subs, scopeGen: 0, serverSeq: 0n, revoked: false });
 		}
 		this.forceResync = opts.forceResync ?? false;
 		this.poisonThreshold = opts.poisonThreshold ?? DEFAULT_POISON_THRESHOLD;
@@ -594,12 +607,17 @@ export class Coordinator {
 	 * scope as values, rows leaving as tombstones or entity drops). When the
 	 * server cannot reconstruct the old scope it replies reset=true (or drops the
 	 * scope from the stream), which re-bootstraps into the new scope.
+	 *
+	 * Returns the generation of the new set, which onScopeSynced reports once a
+	 * pull has run under it; 0 for a workspace this coordinator does not hold.
 	 */
-	setSubscriptions(workspaceId: string, subs: Subscription[]): void {
+	setSubscriptions(workspaceId: string, subs: Subscription[]): number {
 		const state = this.workspaces.get(workspaceId);
-		if (!state) return;
+		if (!state) return 0;
 		state.subscriptions = subs;
+		state.scopeGen++;
 		this.publishScopes();
+		return state.scopeGen;
 	}
 
 	/** Begins syncing a workspace that was not in the initial set. */
@@ -608,7 +626,12 @@ export class Coordinator {
 			this.setSubscriptions(workspaceId, subs);
 			return;
 		}
-		this.workspaces.set(workspaceId, { subscriptions: subs, serverSeq: 0n, revoked: false });
+		this.workspaces.set(workspaceId, {
+			subscriptions: subs,
+			scopeGen: 0,
+			serverSeq: 0n,
+			revoked: false,
+		});
 		// Its store-resident queue is inherited exactly like those start() found,
 		// so it needs the same watermark seed before anything compacts it. Deferred
 		// to the push path (this method is synchronous) — see initPushedThrough.
@@ -874,6 +897,12 @@ export class Coordinator {
 			// pull. Recomputed every cycle — one shared-lock KV scan is negligible
 			// next to the RPCs.
 			const own = this.ownScopes();
+			// The generation each workspace's set had when this cycle snapshotted
+			// it, taken in the same synchronous step as the snapshot itself: a set
+			// replaced during the union read below belongs to the next cycle, and
+			// this one must not report it as served.
+			const gens = new Map<string, number>();
+			for (const [ ws, state ] of this.workspaces) gens.set(ws, state.scopeGen);
 			const union = intent ? await intent.unionScopes(own) : own;
 			this.reportScopes(union);
 			// Push/pull/bootstrap only the workspaces THIS tab holds — a peer's are
@@ -940,6 +969,7 @@ export class Coordinator {
 					if (this.workspaces.get(ws)?.revoked) continue;
 					try {
 						await this.doPull(ws, subs);
+						this.opts.onScopeSynced?.(ws, gens.get(ws) ?? 0);
 					} catch (err) {
 						if (!this.noteRevoked(ws, err)) errors.push(err);
 					}

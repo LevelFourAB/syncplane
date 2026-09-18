@@ -100,8 +100,15 @@ type rowEmitter struct {
 	filters     map[string]RowFilter
 	filterKnown map[string]bool
 	// filterSource resolves an entity's read filter. Defaults to the current
-	// ReadFilter; delta resync overrides it with the cursor's old epoch.
-	filterSource func(entity string) (RowFilter, error)
+	// ReadFilter; delta resync overrides it with the cursor's old epoch, and
+	// filterEpochShifted records that it did, so a resync knows the two sides
+	// may disagree on a row even where their subscriptions agree.
+	filterSource       func(entity string) (RowFilter, error)
+	filterEpochShifted bool
+	// subs is the subscription set this emitter was built from, as given; nil
+	// for full sync. A resync compares the two sides' sets per entity to skip
+	// the entities whose scope did not change.
+	subs []*syncplanev1.Subscription
 	// followEntities is the static set of entities any subscription's follow
 	// spec can reach (intermediate or terminal). They count as subscribed so
 	// the scan covers them and the resync diff can carry them, even when they
@@ -169,6 +176,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 	if len(subs) == 0 {
 		return e, nil
 	}
+	e.subs = subs
 	e.scopes = make(map[string]*entityScope, len(subs))
 	for i, sub := range subs {
 		info, ok := srv.catalogPtr().entities[sub.GetEntity()]

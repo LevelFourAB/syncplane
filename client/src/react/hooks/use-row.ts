@@ -1,5 +1,5 @@
 import type { DescMessage, MessageInitShape, MessageShape } from '@bufbuild/protobuf';
-import { useCallback, useMemo } from 'react';
+import { useCallback, useEffect, useMemo } from 'react';
 
 import type { UpdateRecipe } from '../../client.js';
 import type { PatchInit } from '../../mutations.js';
@@ -52,6 +52,16 @@ export function useRowHook<D extends DescMessage>(
 	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId, opts?.undo);
 	const include = opts?.include;
+	const hold = opts?.hold === true;
+	// The hold is separate from the shared watch on purpose: the watch reads
+	// whatever the store has, and the hold is what makes the store have it. A
+	// released row does not tear the watch down — it reports the row gone
+	// once the row leaves scope.
+	useEffect(() => {
+		if (!hold) return;
+		const handle = scope.hold(schema, key);
+		return () => handle.release();
+	}, [ scope, schema, key, hold ]);
 	const identity = rowWatchIdentity(scope.workspaceId, schema.typeName, include);
 	const cell = useRowStore<MessageShape<D>>({
 		identity,

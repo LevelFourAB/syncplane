@@ -70,6 +70,7 @@ The `SyncClientOptions<E extends readonly DescMessage[]>` interface accepts the 
 | `maxMutationsPerPush`     | `number`                                       | Optional | `256`                                   | Maximum batch size per push RPC.                                                                                                                                |
 | `maxWorkspacesPerRequest` | `number`                                       | Optional | `64`                                    | Maximum workspaces named in a single request. Extra workspaces sync by polling.                                                                                 |
 | `subscriptions`           | `SubscriptionSpec[]`                           | Optional | `[]`                                    | Partial synchronization scope. Empty or absent values perform full synchronization.                                                                             |
+| `holdGraceMs`             | `number`                                       | Optional | `30000`                                 | Milliseconds a row stays in scope after its last hold is released. `0` drops it on the next sync cycle. See [Holds](#holds-one-row-in-scope-on-demand).         |
 | `bootstrapPriority`       | `readonly DescMessage[]`                       | Optional | None                                    | Priority order for entities delivered during the first snapshot.                                                                                                |
 | `schemaRevision`          | `string`                                       | Optional | None                                    | Opaque token matched against the server schema for skew negotiation.                                                                                            |
 | `onSchemaSkew`            | `(info: {client, server}) => SchemaSkewAction` | Optional | `'warn'` when `schemaRevision` is set   | Handler returning `'ignore'`, `'warn'`, `'block'`, or `'resync'`.                                                                                               |
@@ -106,6 +107,7 @@ client.onStatusChange(cb): () => void                // subscribe; returns unsub
 client.onMutationRejected(cb): () => void            // multi-listener callback for rejections
 client.onSyncEvent(cb): () => void                   // multi-listener callback for sync events
 client.setSubscriptions(specs: SubscriptionSpec[]): void  // swap partial sync scope at runtime
+client.hold(schema, key): HoldHandle                     // keep one row in scope on demand
 ```
 
 `client.close()` tears down client resources and is idempotent.
@@ -140,7 +142,7 @@ interface RemoveWorkspaceResult {
 }
 ```
 
-A `WorkspaceClient` binds reads, `mutate`, `db`, `transact`, `text`, `undoScope`, `pendingCount`, `setSubscriptions`, and `status()` to one workspace.
+A `WorkspaceClient` binds reads, `mutate`, `db`, `transact`, `text`, `hold`, `undoScope`, `pendingCount`, `setSubscriptions`, and `status()` to one workspace.
 Cross-workspace reads (`scanAll`, `queryAll`, `watchQueryAll`) remain on the root client and label each row with its `workspaceId`.
 
 When `purge` is `true` in `removeWorkspace`, the client deletes the workspace's local rows, overlay, cursors, and mutation queue.
@@ -1109,6 +1111,51 @@ Validation rules:
 - Supplying an empty key, or one with a control character, throws an error.
 - Sets exceeding the server maximum (`MaxSubscriptionKeys`, [default 1000](server.md)) are rejected by the server.
 
+### Holds: one row in scope on demand
+
+`hold(key)` brings one row into scope without changing the declared subscriptions.
+It is the way to open a row found by `queryServer`, or by a link, for editing:
+
+```ts
+const hold = client.db.document.hold(id); // or client.hold(Document, id)
+await hold.ready; // the row is local if the server holds it
+const text = await client.db.document.text(id, 'body');
+// ...
+await text.close();
+hold.release();
+```
+
+```ts
+interface HoldHandle {
+	readonly ready: Promise<void>;
+	release(): void;
+}
+```
+
+A held row syncs like a row named by a key-set subscription.
+It arrives on the next sync cycle, follows server writes, feeds watchers and text handles, and leaves as a tombstone if it is deleted on the server.
+`ready` resolves once a sync cycle has pulled with the row in scope.
+It resolves early when the hold is released or the client closes, and never rejects.
+A row the server does not hold, or that the caller may not read, stays absent after `ready`.
+
+The row stays in scope until the last hold on it is released, plus `holdGraceMs`.
+Holds on one row count: two holds need two releases.
+`release()` is idempotent.
+
+Holds do not persist across a reload.
+Every tab on the account syncs the union of all tabs' holds, so a row a peer tab holds stays when this tab closes.
+See [Partial sync and coverage](../explanation/partial-sync-and-coverage.md#why-holds-exist) for what a hold costs the server.
+
+Rules:
+
+- Under full sync a hold changes nothing.
+- For an entity a declared subscription covers whole, a hold adds nothing.
+- Local reads of an entity scoped only by holds report the `predicate` coverage bound.
+- Supplying an empty key, or one with a control character, throws an error.
+- Naming a `server_only` entity throws an error.
+- `hold` is not available inside a transaction.
+- The server bounds the held rows of one entity with `MaxSubscriptionKeys` ([default 1000](server.md)).
+
 ### Coverage
 
 The `Coverage` object describes the completeness of locally stored entity data:
@@ -1440,7 +1487,15 @@ interface ReactEntityApi<D> {
 		opts?: UseRowsAllOptions,
 	): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>;
-	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;
+	useText(key: string, field: string, opts?: UseTextOptions): UseTextResult;
+}
+
+interface UseRowOptions extends UseWatchOptions {
+	hold?: boolean; // keep the row in scope while mounted
+}
+
+interface UseTextOptions extends UseWorkspaceOptions {
+	hold?: boolean; // keep the row in scope while mounted; open once it has synced
 }
 ```
 
@@ -1545,6 +1600,11 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   scales with how big the entity is — and a commit re-renders only the hooks
   whose own row moved.
 
+  Pass `{ hold: true }` to keep the row in scope while the component is
+  mounted, for a row the declared subscriptions do not cover (see
+  [holds](#holds-one-row-in-scope-on-demand)). The hold is released on unmount
+  and when the key changes.
+
 - **`useRows(keys, opts?)`** — the same subscription, read as a set: one result
   slot per key, in the order given, `undefined` where a key names no row.
   `loading` stays true until every key has been answered. Reach for it when the
@@ -1618,7 +1678,10 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   [Handle failures](../how-to/handle-failures.md).
 
 - **`useText(key, field, opts?)`** — see
-  [Use collaborative text](../how-to/use-collaborative-text.md).
+  [Use collaborative text](../how-to/use-collaborative-text.md). Pass
+  `{ hold: true }` to keep the row in scope while mounted; the handle opens
+  once the row has synced, so a document outside the declared subscriptions
+  can be edited without a scope change.
 
 - **`useSyncStatus()`** — the live account-wide status object.
   **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending

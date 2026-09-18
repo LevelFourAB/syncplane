@@ -187,6 +187,24 @@ function TaskDialogBody({ id }: { id: string }) {
 
 Writes under the provider record to the isolated scope stack. Reads are shared with the workspace's subscriptions, store, and queue. When the dialog unmounts, the scope stack is discarded without altering the workspace history. Outside React, use `useUndoScope()` or `client.ws(id).undoScope()`.
 
+## Editing a row outside the subscription scope
+
+A row found by `queryServer`, or opened from a link, is outside every declared subscription. Pass `{ hold: true }` to keep it in scope for as long as the component is mounted:
+
+```tsx
+function DocumentEditor({ id }: { id: string }) {
+	const { row } = db.document.useRow(id, { hold: true });
+	const body = db.document.useText(id, 'body', { hold: true });
+	if (row === undefined || body.handle === undefined) return <Spinner />;
+	return <textarea
+		value={ body.value }
+		onChange={ (e) => void body.setText(e.target.value) }
+	/>;
+}
+```
+
+The row arrives on the next sync cycle. `useText` opens its handle once the row has synced, and both hooks release the hold on unmount. See [Holds](../reference/typescript-client.md#holds-one-row-in-scope-on-demand).
+
 ## Compare-and-swap from a row hook
 
 `useRow` writer functions accept `{ cas: true }`, which binds the row's current `version` as `expectedVersion` so the write succeeds only if no other write has modified the row:

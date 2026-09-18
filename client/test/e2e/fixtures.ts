@@ -302,6 +302,18 @@ export class Tab {
 		return this.page.evaluate(() => window.harness.rejections());
 	}
 
+	holdWidget(id: string): Promise<number> {
+		return this.page.evaluate((i) => window.harness.holdWidget(i), id);
+	}
+
+	releaseHold(hold: number): Promise<void> {
+		return this.page.evaluate((h) => window.harness.releaseHold(h), hold);
+	}
+
+	hasWidget(id: string): Promise<boolean> {
+		return this.page.evaluate((i) => window.harness.hasWidget(i), id);
+	}
+
 	setVisibility(state: 'visible' | 'hidden'): Promise<void> {
 		return this.page.evaluate((s) => window.harness.setVisibility(s), state);
 	}

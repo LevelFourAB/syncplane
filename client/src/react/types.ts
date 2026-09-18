@@ -79,10 +79,19 @@ export interface UseQueryAllOptions extends WorkspacesOption {
  * entity and workspace: the include tree is part of the shared subscription's
  * identity, so two different trees are two subscriptions.
  */
-export type UseRowOptions = UseWatchOptions;
+export interface UseRowOptions extends UseWatchOptions {
+	/**
+	 * Hold the row in scope while the component is mounted (see
+	 * WorkspaceClient.hold), so a row outside the declared subscriptions — one
+	 * found by `queryServer`, or opened from a link — arrives and stays
+	 * editable for as long as it is shown. Released on unmount and when the
+	 * key changes.
+	 */
+	hold?: boolean;
+}
 
 /** Options for `useRows`; the same shared subscription as `useRow` (see UseRowOptions). */
-export type UseRowsOptions = UseRowOptions;
+export type UseRowsOptions = UseWatchOptions;
 
 /**
  * Options for `useRowsAll`. `UseRowsOptions` without the workspace selector or
@@ -239,7 +248,18 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useRowsAll(refs: readonly RowRef[], opts?: UseRowsAllOptions): UseRowsResultFor<D>;
 	useMutate(opts?: UseWorkspaceOptions): EntityMutate<D>;
 	/** Live view of a collaborative text field (see useTextHook). */
-	useText(key: string, field: string, opts?: UseWorkspaceOptions): UseTextResult;
+	useText(key: string, field: string, opts?: UseTextOptions): UseTextResult;
+}
+
+/** Options for `useText`. */
+export interface UseTextOptions extends UseWorkspaceOptions {
+	/**
+	 * Hold the row in scope while the component is mounted (see
+	 * WorkspaceClient.hold), and open the handle once the row has synced. The
+	 * way to edit a document the declared subscriptions do not cover. Released
+	 * on unmount and when the row or field changes.
+	 */
+	hold?: boolean;
 }
 
 /** `UseRowResult` specialized to an entity's message shape. */

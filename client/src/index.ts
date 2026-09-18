@@ -1,6 +1,7 @@
 export { subscription, SyncClient } from './client.js';
 export type {
 	DiscardedMutation,
+	HoldHandle,
 	HydrationInfo,
 	ListHandle,
 	MirrorTx,

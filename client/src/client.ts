@@ -13,6 +13,7 @@ import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './code
 import {
 	COMPLETE,
 	type Coverage,
+	coverageOfEntity,
 	CoverageResolver,
 	type PageInfo,
 	type RelCoverageRef,
@@ -688,6 +689,13 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 */
 	subscriptions?: SubscriptionSpec[];
 	/**
+	 * How long a row stays in scope after its last hold is released, in
+	 * milliseconds (see WorkspaceClient.hold). A view that closes a row and
+	 * reopens it inside the grace costs no scope change either way. Default
+	 * 30000; 0 drops the row on the next sync cycle.
+	 */
+	holdGraceMs?: number;
+	/**
 	 * Entities the first snapshot should deliver first, most important first.
 	 *
 	 * A cold client applies the snapshot entity by entity and can read each one
@@ -963,6 +971,36 @@ export interface RemoveWorkspaceResult {
 	discarded: DiscardedMutation[];
 }
 
+/** One held row: how many holds it has, and the grace timer once it has none. */
+interface HeldRow {
+	count: number;
+	expiry?: ReturnType<typeof setTimeout>;
+}
+
+/** A hold whose `ready` is pending; `gen` is set once its scope was published. */
+interface HoldWaiter {
+	gen?: number;
+	resolve(): void;
+}
+
+const DEFAULT_HOLD_GRACE_MS = 30_000;
+
+/**
+ * A hold on one row (see WorkspaceClient.hold). The row stays in scope until
+ * every hold on it is released.
+ */
+export interface HoldHandle {
+	/**
+	 * Resolves once a sync cycle has pulled with the row in scope. From then on
+	 * the row is in the local store if the server holds it and the caller may
+	 * read it; a row the server does not hold stays absent. Resolves early when
+	 * the hold is released or the client closes first, and never rejects.
+	 */
+	readonly ready: Promise<void>;
+	/** Releases the hold. Idempotent. */
+	release(): void;
+}
+
 /**
  * Everything the client does inside one workspace. Reached through
  * `client.ws(id)`; the same surface is mirrored on the client itself, bound to
@@ -1053,6 +1091,24 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	status(): WorkspaceStatus;
 	/** Replaces the subscription set for this workspace alone. */
 	setSubscriptions(specs: SubscriptionSpec[]): void;
+	/**
+	 * Brings one row into scope on demand, without changing the declared
+	 * subscriptions. The row syncs like a row named by a key-set subscription:
+	 * it arrives on the next sync cycle, follows server writes, feeds watchers
+	 * and text handles, and drops as a tombstone if deleted on the server. It
+	 * stays until the last hold on it is released, plus the client's
+	 * `holdGraceMs`. Await `ready` on the handle before reading it or opening a
+	 * text handle on it.
+	 *
+	 * Reads of the entity report the `predicate` coverage bound while holds are
+	 * the only thing scoping it. Under full sync, or for an entity a declared
+	 * subscription already covers whole, a hold changes nothing.
+	 *
+	 * Holds are shared by every tab on the account, so a row a peer tab holds
+	 * stays when this tab closes. They are not persisted: a reload starts with
+	 * none. Throws for a server-only entity or a malformed key.
+	 */
+	hold<D extends DescMessage>(schema: D, key: string): HoldHandle;
 	undo(): Promise<boolean>;
 	redo(): Promise<boolean>;
 	canUndo(): boolean;
@@ -1435,6 +1491,10 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		this.client.setWorkspaceSubscriptions(this.workspaceId, specs);
 	}
 
+	hold<D extends DescMessage>(schema: D, key: string): HoldHandle {
+		return this.client.holdIn(this.workspaceId, schema, key);
+	}
+
 	undo(): Promise<boolean> {
 		return this.client.undoIn(this);
 	}
@@ -1653,6 +1713,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private statusTracker = new StatusTracker();
 	private scopes = new Map<string, WorkspaceScope<E>>();
 	/**
+	 * Rows held in scope on demand, per workspace and entity (see holdIn). A
+	 * row with an `expiry` timer was released and is waiting out holdGraceMs.
+	 */
+	private holds = new Map<string, Map<string, Map<string, HeldRow>>>();
+	/** Holds whose `ready` has not resolved yet, per workspace. */
+	private holdWaiters = new Map<string, Set<HoldWaiter>>();
+	/** Workspaces whose hold set changed since it was last published. */
+	private dirtyHolds = new Set<string>();
+	private holdPublishQueued = false;
+	/**
 	 * Workspaces with an index build running. `again` records that a request
 	 * arrived while one was in flight; see buildWorkspaceIndexes().
 	 */
@@ -1737,11 +1807,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const existing = this.scopes.get(workspaceId);
 		if (existing) {
 			existing.subscriptions = compiled;
-			this.coordinator?.setSubscriptions(workspaceId, compiled);
+			this.coordinator?.setSubscriptions(workspaceId, this.effectiveScope(workspaceId));
 			return existing;
 		}
 		const scope = this.createScope(workspaceId, compiled);
-		this.coordinator?.addWorkspace(workspaceId, compiled);
+		this.coordinator?.addWorkspace(workspaceId, this.effectiveScope(workspaceId));
 		return scope;
 	}
 
@@ -1764,6 +1834,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (!this.scopes.delete(workspaceId)) {
 			return { removed: false, purged: false, discarded: [] };
 		}
+		this.dropHolds(workspaceId);
 		this.coordinator?.removeWorkspace(workspaceId);
 		this.statusTracker.removeWorkspace(workspaceId);
 		if (this.defaultWorkspaceId === workspaceId) {
@@ -1918,6 +1989,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** Opens a live text-field handle in the default workspace (see TextHandle). */
 	text<D extends DescMessage>(schema: D, key: string, field: string): Promise<TextHandle> {
 		return this.textHandleIn(this.defaultScope(), schema, key, field);
+	}
+
+	/** Holds one row of the default workspace in scope (see WorkspaceClient.hold). */
+	hold<D extends DescMessage>(schema: D, key: string): HoldHandle {
+		return this.holdIn(this.defaultScope().workspaceId, schema, key);
 	}
 
 	/** Opens a room in the default workspace (see WorkspaceClient.room). */
@@ -2441,6 +2517,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			onSchemaSkew: this.opts.onSchemaSkew,
 			intent: this.intentReg,
 			forceResync: newEntities,
+			onScopeSynced: (ws, gen) => this.settleHolds(ws, gen),
 		});
 		// Published before start() so a racing close() finds it (see above), and
 		// withdrawn again if that start fails, so a retry builds a fresh one rather
@@ -2632,8 +2709,149 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	private ownScopes(): Map<string, Subscription[]> {
 		const out = new Map<string, Subscription[]>();
-		for (const [ ws, scope ] of this.scopes) out.set(ws, scope.subscriptions);
+		for (const ws of this.scopes.keys()) out.set(ws, this.effectiveScope(ws));
 		return out;
+	}
+
+	/**
+	 * A workspace's declared subscriptions plus one key-set subscription per
+	 * entity with held rows: what the coordinator syncs and what coverage
+	 * answers from. Full sync has nothing to add to, and an entity a declared
+	 * subscription covers whole gains nothing from naming rows of it, so both
+	 * return the declared set itself and cost no scope change.
+	 */
+	private effectiveScope(workspaceId: string): Subscription[] {
+		const declared = this.scopes.get(workspaceId)?.subscriptions ?? [];
+		const held = this.holds.get(workspaceId);
+		if (declared.length === 0 || held === undefined) return declared;
+		let out: Subscription[] | undefined;
+		for (const [ entity, rows ] of held) {
+			if (rows.size === 0 || coverageOfEntity(declared, entity).complete) continue;
+			(out ??= [ ...declared ]).push(create(SubscriptionSchema, {
+				entity,
+				keySet: { keys: [ ...rows.keys() ].sort() },
+			}));
+		}
+		return out ?? declared;
+	}
+
+	/** @internal backs WorkspaceClient.hold. */
+	holdIn<D extends DescMessage>(workspaceId: string, schema: D, key: string): HoldHandle {
+		this.assertOpen();
+		if (!this.scopes.has(workspaceId)) {
+			throw new Error(
+				`workspace "${workspaceId}" is not held by this client; call addWorkspace() first`,
+			);
+		}
+		const def = this.entityRegistry.bySchema(schema);
+		if (def.serverOnly) {
+			throw new Error(
+				`entity "${def.name}" is server-only and never syncs to a client; read it with queryServer()`,
+			);
+		}
+		validateRowKey(def.name, key);
+
+		let byEntity = this.holds.get(workspaceId);
+		if (byEntity === undefined) this.holds.set(workspaceId, byEntity = new Map());
+		let rows = byEntity.get(def.name);
+		if (rows === undefined) byEntity.set(def.name, rows = new Map());
+		let row = rows.get(key);
+		if (row === undefined) {
+			rows.set(key, row = { count: 0 });
+			this.scheduleHoldPublish(workspaceId);
+		} else if (row.expiry !== undefined) {
+			// Re-held inside the grace: the row never left scope, so nothing
+			// has to be published.
+			clearTimeout(row.expiry);
+			row.expiry = undefined;
+		}
+		row.count++;
+
+		let resolveReady!: () => void;
+		const ready = new Promise<void>((resolve) => {
+			resolveReady = resolve;
+		});
+		const waiter: HoldWaiter = { resolve: resolveReady };
+		let waiters = this.holdWaiters.get(workspaceId);
+		if (waiters === undefined) this.holdWaiters.set(workspaceId, waiters = new Set());
+		waiters.add(waiter);
+
+		const held = row;
+		const drop = (): void => {
+			held.expiry = undefined;
+			if (held.count > 0 || rows.get(key) !== held) return;
+			rows.delete(key);
+			if (rows.size === 0) byEntity.delete(def.name);
+			this.scheduleHoldPublish(workspaceId);
+		};
+		let released = false;
+		return {
+			ready,
+			release: () => {
+				if (released) return;
+				released = true;
+				waiters.delete(waiter);
+				waiter.resolve();
+				held.count--;
+				if (held.count > 0) return;
+				const grace = this.opts.holdGraceMs ?? DEFAULT_HOLD_GRACE_MS;
+				if (grace <= 0 || this.closed) drop();
+				else held.expiry = setTimeout(drop, grace);
+			},
+		};
+	}
+
+	/**
+	 * Coalesces hold changes into one scope publish per tick, so a screen that
+	 * mounts a list of held rows re-scopes the coordinator once rather than
+	 * once per row. Waiters learn the generation their hold was published under
+	 * here; settleHolds resolves them once a pull has run under it.
+	 */
+	private scheduleHoldPublish(workspaceId: string): void {
+		this.dirtyHolds.add(workspaceId);
+		if (this.holdPublishQueued) return;
+		this.holdPublishQueued = true;
+		queueMicrotask(() => {
+			this.holdPublishQueued = false;
+			const dirty = [ ...this.dirtyHolds ];
+			this.dirtyHolds.clear();
+			if (this.closed) return;
+			for (const ws of dirty) {
+				if (!this.scopes.has(ws)) continue;
+				// Before start() there is no coordinator: the set goes in with its
+				// construction as generation 0, which the first cycle reports.
+				const gen = this.coordinator?.setSubscriptions(ws, this.effectiveScope(ws)) ?? 0;
+				for (const waiter of this.holdWaiters.get(ws) ?? []) waiter.gen ??= gen;
+			}
+		});
+	}
+
+	/** Resolves every hold published at or before the generation a pull served. */
+	private settleHolds(workspaceId: string, gen: number): void {
+		const waiters = this.holdWaiters.get(workspaceId);
+		if (waiters === undefined) return;
+		for (const waiter of waiters) {
+			if (waiter.gen !== undefined && waiter.gen <= gen) {
+				waiters.delete(waiter);
+				waiter.resolve();
+			}
+		}
+	}
+
+	/**
+	 * Forgets a workspace's holds: timers cleared, waiters resolved (nothing
+	 * will sync them now), rows dropped. Nothing is published — the caller is
+	 * removing the workspace or closing the client.
+	 */
+	private dropHolds(workspaceId: string): void {
+		for (const rows of this.holds.get(workspaceId)?.values() ?? []) {
+			for (const row of rows.values()) {
+				if (row.expiry !== undefined) clearTimeout(row.expiry);
+			}
+		}
+		this.holds.delete(workspaceId);
+		for (const waiter of this.holdWaiters.get(workspaceId) ?? []) waiter.resolve();
+		this.holdWaiters.delete(workspaceId);
 	}
 
 	/**
@@ -2661,7 +2879,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const compiled = this.compileSubscriptions(specs);
 		for (const [ ws, scope ] of this.scopes) {
 			scope.subscriptions = compiled;
-			this.coordinator?.setSubscriptions(ws, compiled);
+			this.coordinator?.setSubscriptions(ws, this.effectiveScope(ws));
 		}
 	}
 
@@ -2671,7 +2889,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const scope = this.scopes.get(workspaceId);
 		if (!scope) return;
 		scope.subscriptions = this.compileSubscriptions(specs);
-		this.coordinator?.setSubscriptions(workspaceId, scope.subscriptions);
+		this.coordinator?.setSubscriptions(workspaceId, this.effectiveScope(workspaceId));
 	}
 
 	private compileSubscriptions(specs: SubscriptionSpec[]): Subscription[] {
@@ -3147,6 +3365,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
+		for (const ws of [ ...this.holds.keys(), ...this.holdWaiters.keys() ]) this.dropHolds(ws);
 		await this.coordinator?.stop();
 		await this.presence?.stop();
 		this.changeShare?.stop();

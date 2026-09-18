@@ -64,6 +64,7 @@ export type {
 	UseRowsOptions,
 	UseRowsResultFor,
 	UseRowUpdateOptions,
+	UseTextOptions,
 	UseWatchOptions,
 	UseWorkspaceOptions,
 } from './types.js';

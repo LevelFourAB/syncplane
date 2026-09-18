@@ -16,7 +16,9 @@ import { TodoSchema } from '../../../src/gen/example/todo/v1/todo_pb.js';
 import { WidgetSchema } from '../../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
 	decodeTextDoc,
+	type HoldHandle,
 	type Room,
+	subscription,
 	SyncClient,
 	type TextHandle,
 	textMarksOf,
@@ -46,6 +48,9 @@ const rejections: string[] = [];
 /** Open text handles, keyed by the number the spec holds (handles are not JSON). */
 const textHandles = new Map<number, TextHandle>();
 let nextTextHandle = 1;
+/** Live holds, keyed the same way. */
+const holds = new Map<number, HoldHandle>();
+let nextHold = 1;
 /**
  * Open rooms, keyed the same way, each with the broadcasts it has received —
  * messages are at-most-once and not replayed, so a spec that asked for them
@@ -166,6 +171,10 @@ const harness: HarnessApi = {
 			entities: (opts.entities ?? [ 'todo', 'widget' ]).map((name) =>
 				name === 'todo' ? TodoSchema : WidgetSchema
 			),
+			subscriptions: opts.subscriptions?.map((name) =>
+				subscription(name === 'todo' ? TodoSchema : WidgetSchema)
+			),
+			holdGraceMs: opts.holdGraceMs ?? 0,
 			// Both default off so a spec only pays for the machinery it asserts on;
 			// the leadership specs turn the stream on explicitly.
 			streamEnabled: opts.streamEnabled ?? false,
@@ -191,6 +200,8 @@ const harness: HarnessApi = {
 	async close() {
 		unwatch?.close();
 		unwatch = undefined;
+		for (const hold of holds.values()) hold.release();
+		holds.clear();
 		// Awaited: closing drains each handle's write chain, so an edit made just
 		// before the tab closes is queued before the client goes away.
 		for (const handle of textHandles.values()) await handle.close();
@@ -256,6 +267,25 @@ const harness: HarnessApi = {
 		const key = nextTextHandle++;
 		textHandles.set(key, handle);
 		return key;
+	},
+
+	async holdWidget(id) {
+		const hold = current().hold(WidgetSchema, id);
+		const key = nextHold++;
+		holds.set(key, hold);
+		await hold.ready;
+		return key;
+	},
+
+	async releaseHold(key) {
+		const hold = holds.get(key);
+		if (hold === undefined) throw new Error(`harness: no hold ${key}`);
+		hold.release();
+		holds.delete(key);
+	},
+
+	async hasWidget(id) {
+		return (await current().get(WidgetSchema, id)) !== undefined;
 	},
 
 	async textPeer(handle) {

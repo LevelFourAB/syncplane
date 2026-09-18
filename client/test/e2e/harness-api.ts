@@ -37,6 +37,13 @@ export interface OpenOptions {
 	 * the pending queue with newer tabs that register more.
 	 */
 	entities?: ('todo' | 'widget')[];
+	/**
+	 * Whole-entity subscriptions this tab declares. Default none, which is full
+	 * sync; a tab that names only `todo` holds no widget unless it holds one.
+	 */
+	subscriptions?: ('todo' | 'widget')[];
+	/** How long a released hold keeps its row, in ms. Default 0 here: drop at once. */
+	holdGraceMs?: number;
 }
 
 export interface TodoView {
@@ -126,6 +133,17 @@ export interface HarnessApi {
 	createTextRow(id: string): Promise<void>;
 	/** Opens a live handle on `body`; returns the number the spec refers to it by. */
 	openText(id: string): Promise<number>;
+
+	/**
+	 * Holds widget `id` in scope and resolves once a sync cycle has run with
+	 * it; returns the number the spec releases it by. Holds are what let a tab
+	 * scoped to todos edit one widget, and the union across tabs is what this
+	 * tier can observe: a row one tab holds must survive another tab closing.
+	 */
+	holdWidget(id: string): Promise<number>;
+	releaseHold(hold: number): Promise<void>;
+	/** Whether the local store holds widget `id`, read through the client. */
+	hasWidget(id: string): Promise<boolean>;
 	/**
 	 * The writer identity that handle leased. Distinct per live handle — across
 	 * tabs and within one — which is the invariant this tier exists to check,

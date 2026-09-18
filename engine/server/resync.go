@@ -27,9 +27,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"sort"
+
+	"google.golang.org/protobuf/proto"
 
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -65,6 +68,7 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		oldEm.filterSource = func(entity string) (RowFilter, error) {
 			return erf.ReadFilterAt(ctx, principalOf(ctx), ws, entity, cur.epoch)
 		}
+		oldEm.filterEpochShifted = true
 	}
 	// Resolve every filter the scan will consult up front, so an
 	// unreconstructable epoch surfaces here as a clean reset rather than
@@ -271,6 +275,9 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		if emitted >= emitLimit || scanned >= scanLimit {
 			return resyncPos{entity: entity, afterKey: afterKey}, false, nil
 		}
+		if entityScopeUnchanged(oldEm, newEm, entity) {
+			continue
+		}
 		keys, narrowed, err := resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)
 		if err != nil {
 			return resyncPos{}, false, err
@@ -351,6 +358,75 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		}
 	}
 	return resyncPos{}, true, nil
+}
+
+// entityScopeUnchanged reports whether both sides of a resync decide this
+// entity's rows by the same rules, so the diff can skip it without reading a
+// row. A scope change that touches one entity — a key set gaining a row, a
+// predicate narrowing — otherwise costs a visit to every OTHER entity in the
+// set, and the whole-entity ones are walked in full to learn that nothing of
+// theirs moved.
+//
+// Soundness. Both sides classify a row from the same inputs when all of these
+// hold: the entity's own subscriptions marshal identically (predicate, window,
+// canonical key set and follow spec alike), the read filter is the current
+// epoch's on both sides, and neither side is full sync. The closure is the
+// cursor's on both sides, and window membership is built from the same specs
+// against the same snapshot. Every verdict then agrees, and the diff would
+// emit nothing. Full sync is excluded because it subscribes to an entity
+// without naming it, so two empty per-entity sets do not mean two equal
+// scopes.
+func entityScopeUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
+	if oldEm.scopes == nil || newEm.scopes == nil || oldEm.filterEpochShifted {
+		return false
+	}
+	oldRaw, err := canonicalEntitySubs(oldEm.subs, entity)
+	if err != nil {
+		return false
+	}
+	newRaw, err := canonicalEntitySubs(newEm.subs, entity)
+	if err != nil {
+		return false
+	}
+	if len(oldRaw) != len(newRaw) {
+		return false
+	}
+	for i := range oldRaw {
+		if !bytes.Equal(oldRaw[i], newRaw[i]) {
+			return false
+		}
+	}
+	return true
+}
+
+// canonicalEntitySubs marshals the subscriptions naming one entity in a form
+// two sets can be compared by: key sets canonical, deterministic encoding,
+// sorted bytes.
+func canonicalEntitySubs(subs []*syncplanev1.Subscription, entity string) ([][]byte, error) {
+	mo := proto.MarshalOptions{Deterministic: true}
+	var out [][]byte
+	for _, sub := range subs {
+		if sub.GetEntity() != entity {
+			continue
+		}
+		canonical := sub
+		if sub.GetKeySet() != nil {
+			canonical = &syncplanev1.Subscription{
+				Entity:    sub.GetEntity(),
+				Predicate: sub.GetPredicate(),
+				Follow:    sub.GetFollow(),
+				Window:    sub.GetWindow(),
+				KeySet:    canonicalKeySet(sub.GetKeySet()),
+			}
+		}
+		raw, err := mo.Marshal(canonical)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, raw)
+	}
+	sort.Slice(out, func(i, j int) bool { return bytes.Compare(out[i], out[j]) < 0 })
+	return out, nil
 }
 
 // resyncCandidates returns the row keys of one entity whose visibility can
