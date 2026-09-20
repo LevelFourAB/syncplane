@@ -38,6 +38,7 @@ import {
 
 import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
 import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
+import { searchDeclOf } from './match.js';
 
 /**
  * The descriptor a query's candidate rows may be decoded through: the entity's
@@ -69,6 +70,52 @@ export function projectionFor(
 ): DescMessage | undefined {
 	if (compiled.limit === undefined) return undefined;
 	return assemble(schema, (keep) => collectQuery(schema, compiled, keep), extra);
+}
+
+/**
+ * The descriptor an OVERLAY row may be decoded through while a local read
+ * decides whether to keep it: {@link projectionFor}'s field set, built whether
+ * or not the query carries a limit.
+ *
+ * The limit rule does not apply here. A limitless query returns every row it
+ * keeps, but it still REJECTS overlay rows on the predicate and the page
+ * window, and a rejected row is never decoded again — so the projection pays
+ * over the rejected ones however the query is cut. A kept row is decoded whole
+ * again, from the bytes it came from, before it leaves the read.
+ *
+ * Undefined means "decode whole rows", for {@link projectionFor}'s other
+ * reasons.
+ */
+export function projectionForOverlay(
+	schema: DescMessage,
+	compiled: CompiledQuery,
+	extra?: Iterable<Cond | undefined>,
+): DescMessage | undefined {
+	return assemble(schema, (keep) => collectQuery(schema, compiled, keep), extra);
+}
+
+/**
+ * {@link projectionForOverlay} for a read served by the SEARCH index, whose
+ * predicate carries the match that sent it there.
+ *
+ * A match condition and a relevance ordering name no paths of their own — they
+ * read the entity's search declaration — so the declared fields are carried
+ * too, and with them those constructs resolve on a projected row like any
+ * other. An entity declaring no searchable field gets no projection; so does a
+ * declaration naming a field this schema cannot resolve.
+ */
+export function projectionForSearchOverlay(
+	schema: DescMessage,
+	compiled: CompiledQuery,
+): DescMessage | undefined {
+	return assemble(schema, (keep) => {
+		const decl = searchDeclOf(schema);
+		if (decl === undefined) return false;
+		for (const field of decl.fields) {
+			if (!collectPath(schema, field.path, keep)) return false;
+		}
+		return collectQuery(schema, compiled, keep, true);
+	}, undefined);
 }
 
 /**
@@ -119,9 +166,14 @@ function assemble(
 
 /** Every field of `q` a row value can be resolved through; false when one of
  * them cannot be named. */
-function collectQuery(schema: DescMessage, q: CompiledQuery, keep: Set<string>): boolean {
-	if (q.where !== undefined && !collectCond(schema, q.where, keep)) return false;
-	if (!collectOrder(schema, q.orderBy, keep)) return false;
+function collectQuery(
+	schema: DescMessage,
+	q: CompiledQuery,
+	keep: Set<string>,
+	searchable = false,
+): boolean {
+	if (q.where !== undefined && !collectCond(schema, q.where, keep, searchable)) return false;
+	if (!collectOrder(schema, q.orderBy, keep, searchable)) return false;
 	for (const facet of q.facets ?? []) {
 		if (!collectPath(schema, facet.by, keep)) return false;
 	}
@@ -144,24 +196,33 @@ function collectOrder(
 	schema: DescMessage,
 	orderBy: OrderKey[] | undefined,
 	keep: Set<string>,
+	searchable = false,
 ): boolean {
 	for (const key of orderBy ?? []) {
 		// A relevance rank is computed from the entity's search fields, which the
 		// order key does not name.
-		if (key.relevance) return false;
+		if (key.relevance) return searchable;
 		if (!collectPath(schema, key.path, keep)) return false;
 	}
 	return true;
 }
 
-function collectCond(schema: DescMessage, cond: Cond, keep: Set<string>): boolean {
+/** `searchable` means the entity's declared search fields are already kept, so
+ * the constructs that read them resolve. */
+function collectCond(
+	schema: DescMessage,
+	cond: Cond,
+	keep: Set<string>,
+	searchable = false,
+): boolean {
 	switch (cond.kind) {
 		case 'and':
 		case 'or':
-			return cond.conds.every((c) => collectCond(schema, c, keep));
+			return cond.conds.every((c) => collectCond(schema, c, keep, searchable));
 		case 'not':
-			return collectCond(schema, cond.cond, keep);
+			return collectCond(schema, cond.cond, keep, searchable);
 		case 'match':
+			return searchable;
 		case 'rel':
 			return false;
 		// `exists` needs the head field alone: its sub-condition is scoped to an

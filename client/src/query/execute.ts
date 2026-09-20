@@ -72,7 +72,12 @@ import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
-import { projectionFor, projectionForGroup } from './projection.js';
+import {
+	projectionFor,
+	projectionForGroup,
+	projectionForOverlay,
+	projectionForSearchOverlay,
+} from './projection.js';
 import {
 	requiredMatchCond,
 	searchOverflowRange,
@@ -160,6 +165,18 @@ const SEARCH_NARROW_RATIO = 4;
  * the walk needs no cap to stay correct.
  */
 const SHADOW_COUNT_CAP = 2048;
+
+/**
+ * How many index positions a settled walk will step through rather than take
+ * one shadowed row's confirmed record as a point read (see countAssist below).
+ *
+ * Both finish the range with the same total. Stepping a position costs a key
+ * out of a bulk getAllKeys over a range already in the store's index order,
+ * where a point read costs a record lookup and its deserialization, so the
+ * range has to be a large multiple of the pending queue before the reads are
+ * the cheaper side.
+ */
+const POSITIONS_PER_BASE_READ = 4;
 
 /**
  * A result row together with the merged-view bytes it was decoded from — the
@@ -350,6 +367,16 @@ export async function queryByIndex<D extends DescMessage>(
 
 	// The overlay first, so its size bounds how far the confirmed walk has to
 	// go: only an overlay row can displace a confirmed one from the result.
+	//
+	// Its rows are decoded as only the fields this read can look at, the same
+	// way candidate rows are: the queue holds what this device has written and
+	// not had acked, which a query bracketed by an index mostly rejects. Unlike
+	// the candidate view this one is built whatever the query's shape, because
+	// rejecting an overlay row is the one thing every shape does — and only
+	// once a row turns up, because an empty pending queue is the common case
+	// and it needs no view at all.
+	let overlayView: DescMessage | undefined;
+	let viewResolved = false;
 	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
 	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
@@ -358,7 +385,20 @@ export async function queryByIndex<D extends DescMessage>(
 		shadowed.add(key);
 		const record = v as OverlayRecord;
 		if (record.del) continue; // a local tombstone: shadowed and gone
-		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		if (!viewResolved) {
+			viewResolved = true;
+			overlayView = projectionForOverlay(schema, compiled);
+		}
+		const decoded = await decodeRow(
+			tx,
+			registry,
+			def,
+			schema,
+			workspaceId,
+			key,
+			record.v,
+			overlayView,
+		);
 		if (!matches(decoded.value, compiled.where, schema)) continue;
 		if (window && !window.within(decoded.value, key)) continue;
 		kept.push({ key, ...decoded });
@@ -369,7 +409,9 @@ export async function queryByIndex<D extends DescMessage>(
 	// subtracting the positions the records themselves carry (ConfirmedRecord.ix,
 	// the field the store's index is built from). That takes every shadowed
 	// row's confirmed record, not only the matching ones, and is capped for it
-	// (SHADOW_COUNT_CAP).
+	// (SHADOW_COUNT_CAP). It says the shortcut MAY read them, not that it has:
+	// see shadowBases, which the walk calls only if it gets that far and only
+	// if the read is the cheaper of the two ways to finish.
 	const wantTotal = compiled.total !== false;
 	const countAssist = wantTotal
 		&& shadowed.size > 0
@@ -386,22 +428,36 @@ export async function queryByIndex<D extends DescMessage>(
 	// that exists only optimistically has no base, hence 0n. The scan path
 	// resolves it the same way. One getMany rather than a get per row: the
 	// bases are per overlay row, and a well-fed pending queue would otherwise
-	// turn them into a queue-sized run of point reads on every query. Under
-	// countAssist the read widens from the matching overlay rows to every
-	// shadowed one, because the subtraction needs each row's positions.
-	const baseKeys = countAssist ? [ ...shadowed ] : kept.map((c) => c.key);
-	const baseRecords = await tx.getMany(
-		baseKeys.map((k) => confirmedKey(def.name, workspaceId, k)),
-	);
+	// turn them into a queue-sized run of point reads on every query.
 	const bases = new Map<string, ConfirmedRecord>();
-	for (let i = 0; i < baseKeys.length; i++) {
-		const record = baseRecords[i] as ConfirmedRecord | undefined;
-		if (record !== undefined) bases.set(baseKeys[i]!, record);
-	}
+	const readBases = async (keys: readonly string[]): Promise<void> => {
+		if (keys.length === 0) return;
+		const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
+		for (let i = 0; i < keys.length; i++) {
+			const record = records[i] as ConfirmedRecord | undefined;
+			if (record !== undefined) bases.set(keys[i]!, record);
+		}
+	};
+	const keptKeys = new Set(kept.map((c) => c.key));
+	await readBases([ ...keptKeys ]);
+	// Widens `bases` from the rows the overlay keeps to every row it shadows,
+	// which is what the count shortcut's subtraction reads positions from.
+	// Deferred because most reads never ask: a walk that does not settle inside
+	// its range never counts, and a settled one asks only when the read beats
+	// walking the rest of the range out.
+	const shadowBases = (): Promise<void> =>
+		readBases([ ...shadowed ].filter((k) => !keptKeys.has(k)));
+	// A projected overlay row still has to leave this function whole. A read
+	// that cuts a page defers that to the cut, which decodes the page rather
+	// than the match set; one that returns every match gains nothing by waiting
+	// and does it here.
+	const cutsAPage = compiled.limit !== undefined;
+	const overlayProjected = overlayView !== undefined && kept.length > 0;
 	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c) => {
 		const base = bases.get(c.key);
+		const row = { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n };
 		return {
-			row: { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
+			row: overlayProjected && !cutsAPage ? decodeWholeRow(schema, row, c.bytes) : row,
 			bytes: c.bytes,
 		};
 	});
@@ -417,6 +473,12 @@ export async function queryByIndex<D extends DescMessage>(
 	let reads = 0;
 	// Matches past the page, which `total` still has to account for.
 	let beyond = 0;
+	// How a settled walk accounts for the rest of its range, and the range's
+	// position count the decision was made from. Both are resolved at the first
+	// settled position and then hold, so the choice cannot flip mid-range and
+	// the count is requested once.
+	let settleBy: 'count' | 'walk' | undefined;
+	let rangeCount: number | undefined;
 	// Flushed rows the page window rejected — the positions at the `after`
 	// boundary its seek could not leave out: the boundary row alone when the
 	// bound carried the row key, its whole tie group otherwise (see seekRange).
@@ -429,7 +491,8 @@ export async function queryByIndex<D extends DescMessage>(
 	// residual rejects rows, an unpinned fan-out gives one row several
 	// positions, and a second range can repeat a row the first already yielded.
 	// A shadowed row is answered by the overlay instead — survivable only when
-	// countAssist read the positions the count must take back out.
+	// countAssist can put the positions the count must take back out within
+	// reach (see shadowBases).
 	//
 	// A forward page window is compatible: its seek can admit positions at the
 	// AFTER boundary that the page excludes, but those sit at the start of the
@@ -530,27 +593,47 @@ export async function queryByIndex<D extends DescMessage>(
 					break ranges;
 				}
 				if (countable) {
-					// Shadowed rows' confirmed positions are in the count — whether
-					// the walk already skipped them or never reached them — without
-					// being matches. Each one inside the counted range comes back
-					// out; under distinctPerRange that is at most one per row,
-					// exactly what the walk would have skipped.
-					let shadowedInRange = 0;
-					for (const record of bases.values()) {
-						for (const p of record.ix ?? []) {
-							if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
-						}
+					// Both ways of finishing the range are correct, and which is
+					// cheaper is decided here, once, from the two sizes involved.
+					// Counting costs one point read per shadowed row; walking costs
+					// the keys of the positions that are left, under two per position
+					// because a continued indexScan re-requests what it has yielded
+					// (see INDEX_SCAN_CHUNK). A key out of a bulk getAllKeys is far
+					// cheaper than a record out of a point read, hence the ratio.
+					if (rangeCount === undefined) {
+						rangeCount = await tx.indexCount(lo, hi);
+						settleBy = shadowed.size === 0
+								|| rangeCount - walked > shadowed.size * POSITIONS_PER_BASE_READ
+							? 'count'
+							: 'walk';
 					}
-					// Assigned, not accumulated: the count covers every position past
-					// the ones in hand, including any a too-large flush has already
-					// classified as beyond — adding would count those twice. The
-					// flush below still classifies the in-hand tail, and either way
-					// the total comes out as the range's position count, less the
-					// boundary positions a page window rejected and the shadowed
-					// positions the overlay answers for.
-					beyond = (await tx.indexCount(lo, hi))
-						- confirmed.length - batch.length - windowRejected - shadowedInRange;
-					break ranges;
+					if (settleBy === 'count') {
+						await shadowBases();
+						// Shadowed rows' confirmed positions are in the count — whether
+						// the walk already skipped them or never reached them — without
+						// being matches. Each one inside the counted range comes back
+						// out; under distinctPerRange that is at most one per row,
+						// exactly what the walk would have skipped.
+						let shadowedInRange = 0;
+						for (const record of bases.values()) {
+							for (const p of record.ix ?? []) {
+								if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
+							}
+						}
+						// Assigned, not accumulated: the count covers every position past
+						// the ones in hand, including any a too-large flush has already
+						// classified as beyond — adding would count those twice. The
+						// flush below still classifies the in-hand tail, and either way
+						// the total comes out as the range's position count, less the
+						// boundary positions a page window rejected and the shadowed
+						// positions the overlay answers for.
+						beyond = rangeCount
+							- confirmed.length - batch.length - windowRejected - shadowedInRange;
+						break ranges;
+					}
+					// Walking on counts the rest itself: a shadowed position is
+					// skipped above rather than counted, so nothing has to come back
+					// out afterwards.
 				}
 				beyond++;
 				continue;
@@ -577,13 +660,15 @@ export async function queryByIndex<D extends DescMessage>(
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
 	// A projected row holds only what the query read, so the rows that leave
-	// here are decoded again from the bytes they came from. Overlay rows were
-	// never projected and are decoded twice; there are at most a pending
-	// queue's worth of them, and only those inside the page.
+	// here are decoded again from the bytes they came from. Either side of the
+	// merge may have been projected, and the page is cut before this runs, so
+	// one projection is enough to put every returned row through it — a row
+	// that was already whole decodes to the same value from the same bytes.
+	const projected = view !== undefined || (overlayProjected && cutsAPage);
 	const page = (rows: IndexedRow<MessageShape<D>>[]): IndexedRow<MessageShape<D>>[] =>
-		view === undefined
-			? rows
-			: rows.map((e) => ({ row: decodeWholeRow(schema, e.row, e.bytes), bytes: e.bytes }));
+		projected
+			? rows.map((e) => ({ row: decodeWholeRow(schema, e.row, e.bytes), bytes: e.bytes }))
+			: rows;
 	// `matched` still counts what the walk classified even when the total is
 	// opted out — hasMore rides on it, and the fast exit above left `beyond` at
 	// 1 for exactly that comparison.
@@ -1190,7 +1275,13 @@ async function querySearchIndex<D extends DescMessage>(
 ): Promise<IndexedPage<MessageShape<D>> | undefined> {
 	// The overlay is authoritative for rows it holds — edited or tombstoned —
 	// so its keys drop out of the candidate set and matching rows come back
-	// from here.
+	// from here. Deciding that reads the predicate's fields and the declared
+	// search fields the match reads, which is what the projection carries; a
+	// row that survives is decoded whole again, because nothing downstream of
+	// here does it for a search result. The view is built once a row turns up,
+	// because an empty pending queue needs none.
+	let overlayView: DescMessage | undefined;
+	let viewResolved = false;
 	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
 	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
@@ -1199,7 +1290,20 @@ async function querySearchIndex<D extends DescMessage>(
 		shadowed.add(key);
 		const record = v as OverlayRecord;
 		if (record.del) continue;
-		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		if (!viewResolved) {
+			viewResolved = true;
+			overlayView = projectionForSearchOverlay(schema, compiled);
+		}
+		const decoded = await decodeRow(
+			tx,
+			registry,
+			def,
+			schema,
+			workspaceId,
+			key,
+			record.v,
+			overlayView,
+		);
 		if (!matches(decoded.value, compiled.where, schema)) continue;
 		if (window && !window.within(decoded.value, key)) continue;
 		kept.push({ key, ...decoded });
@@ -1209,8 +1313,9 @@ async function querySearchIndex<D extends DescMessage>(
 	);
 	const overlayRows: IndexedRow<MessageShape<D>>[] = kept.map((c, i) => {
 		const base = baseRecords[i] as ConfirmedRecord | undefined;
+		const row = { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n };
 		return {
-			row: { key: c.key, value: c.value, workspaceId, version: base ? BigInt(base.ver) : 0n },
+			row: overlayView === undefined ? row : decodeWholeRow(schema, row, c.bytes),
 			bytes: c.bytes,
 		};
 	});

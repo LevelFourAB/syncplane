@@ -14,7 +14,7 @@ import type { RowSet } from '../../src/coverage.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { metaCursor } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import type { KVStore } from '../../src/kv/store.js';
+import type { KVRead, KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
@@ -155,7 +155,11 @@ const SEED: SeedIssue[] = [
 ];
 
 /** Plants rows as CONFIRMED state — the only state an index covers. */
-async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
+async function seedConfirmed(
+	kv: KVStore,
+	indexes: IndexCache,
+	rows: SeedIssue[] = SEED,
+): Promise<void> {
 	const tx = await kv.write();
 	// A build walks only a workspace whose rows are a whole installed snapshot,
 	// and the cursor is what says so — without one these rows look like a
@@ -165,7 +169,7 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
 		tx,
 		registry,
 		WS,
-		SEED.map((row, i) =>
+		rows.map((row, i) =>
 			create(RowChangeSchema, {
 				entity: 'issue',
 				key: row.id,
@@ -760,10 +764,12 @@ describe('index-served local queries', () => {
 			expect(scanned.total).toBe(2);
 		});
 
-		it('answers the remainder with a count, not a walk, through a pending overlay', async () => {
+		it('takes one count request, and none with the total opted out', async () => {
 			// The differential cases above stay green whichever path answers; this
-			// is the receipt that the shortcut actually fired — without it a typo
-			// in countAssist would quietly put every overlay read back on the walk.
+			// is the receipt that a counted read asks the store exactly once and
+			// an uncounted one not at all. Which way the count is SPENT — the
+			// subtraction or the key walk — is priced per read; the receipts for
+			// that are in "finishing a range through a pending overlay" below.
 			const kv = new MemoryKVStore();
 			const indexes = new IndexCache(registry);
 			await seedConfirmed(kv, indexes);
@@ -946,6 +952,209 @@ describe('index-served local queries', () => {
 			}
 			expect(await served(true, { ...open, after })).toBe(true);
 		});
+	});
+});
+
+// A settled walk has two ways to account for the rest of its range — subtract
+// the shadowed rows' index positions from one count, or keep stepping keys —
+// and a walk that never settles needs neither. All three must answer
+// identically, and none of them may read a confirmed record it has no use for:
+// the point reads are what made an overlay-heavy read expensive.
+describe('finishing a range through a pending overlay', () => {
+	// Sixty matching rows, so the range is large against a small overlay and
+	// small against a large one, plus rows outside it. An overlay row over one
+	// of those is shadowed without ever being a candidate, which is what makes
+	// a read of its confirmed record visible.
+	const OPEN: SeedIssue[] = Array.from({ length: 60 }, (_, i) => ({
+		id: `o${i + 1}`,
+		title: `open ${i + 1}`,
+		state: 'open',
+		rank: i + 1,
+		done: false,
+		labels: [],
+		custom: {},
+	}));
+	const ELSEWHERE: SeedIssue[] = Array.from({ length: 24 }, (_, i) => ({
+		id: `d${i + 1}`,
+		title: `done ${i + 1}`,
+		state: 'done',
+		rank: i + 1,
+		done: true,
+		labels: [],
+		custom: {},
+	}));
+	const ROWS = [ ...OPEN, ...ELSEWHERE ];
+
+	const edited = (row: SeedIssue, patch: Partial<SeedIssue>): SeedIssue => ({ ...row, ...patch });
+
+	// One overlay row of every kind: an edit that keeps the row matching, an
+	// edit that takes it out of the match set while its confirmed position
+	// stays in the range, and a row with no confirmed record at all. `o3` is
+	// deleted alongside them.
+	const PENDING: SeedIssue[] = [
+		edited(OPEN[0]!, { rank: 99 }),
+		edited(OPEN[1]!, { state: 'done' }),
+		{ id: 'n1', title: 'new', state: 'open', rank: 50, done: false, labels: [], custom: {} },
+	];
+	const DELETED = [ 'o3' ];
+	// Enough extra shadowed rows that stepping the range out beats reading them
+	// all. Their confirmed positions are outside it, so they are shadowed
+	// without ever being walked.
+	const WIDE: SeedIssue[] = [
+		...PENDING,
+		...ELSEWHERE.map((row) => edited(row, { title: `${row.title} edited` })),
+	];
+
+	// Shadowed rows the walk skips and the overlay drops: no path through the
+	// read has any use for their confirmed records except the count shortcut's
+	// subtraction, so a request for one says the widening happened.
+	const SKIPPED = [ 'o2', ...DELETED ];
+
+	async function clientOver(built: boolean, overlay: SeedIssue[]) {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await seedConfirmed(kv, indexes, ROWS);
+		if (built) {
+			const mutex = new ChainMutex();
+			await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+		}
+		const client = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ IssueSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		}) as unknown as SyncClient<never>;
+		for (const row of overlay) await client.mutate.put(IssueSchema, row as never);
+		for (const key of DELETED) await client.mutate.del(IssueSchema, key);
+		return { kv, indexes, client };
+	}
+
+	/** The index arm and the scan arm of one query, as comparable plain data. */
+	async function arms(q: Query<Issue>, overlay: SeedIssue[]) {
+		const shape = (rows: RowSet<Issue>) => ({
+			rows: rows.map((r) => ({ key: r.key, version: r.version, rank: r.value.rank })),
+			total: rows.total,
+			hasMore: rows.hasMore,
+		});
+		const scanned = await clientOver(false, overlay);
+		const indexed = await clientOver(true, overlay);
+		try {
+			return {
+				scanned: shape(await run(scanned.client, q)),
+				indexed: shape(await run(indexed.client, q)),
+			};
+		} finally {
+			await scanned.client.close();
+			await indexed.client.close();
+		}
+	}
+
+	/**
+	 * Runs one query straight through queryByIndex over a recording read, and
+	 * reports what the store was asked for: every key a point read named, and
+	 * how many counts the walk took.
+	 */
+	async function trace(q: Query<Issue>, overlay: SeedIssue[]) {
+		const { kv, indexes, client } = await clientOver(true, overlay);
+		const asked: string[] = [];
+		let counts = 0;
+		const tx = await kv.read();
+		const recording = new Proxy(tx, {
+			get(target, prop, receiver) {
+				if (prop === 'getMany') {
+					return (keys: string[]) => {
+						asked.push(...keys);
+						return target.getMany(keys);
+					};
+				}
+				if (prop === 'get') {
+					return (key: string) => {
+						asked.push(key);
+						return target.get(key);
+					};
+				}
+				if (prop === 'indexCount') {
+					return (lo?: string, hi?: string) => {
+						counts++;
+						return target.indexCount(lo, hi);
+					};
+				}
+				const value = Reflect.get(target, prop, receiver);
+				return typeof value === 'function' ? value.bind(target) : value;
+			},
+		}) as KVRead;
+		try {
+			const page = await queryByIndex(
+				recording,
+				registry,
+				registry.get('issue')!,
+				IssueSchema,
+				indexes.for('issue'),
+				prepareQuery(IssueSchema, compileQuery(q)),
+				WS,
+			);
+			// A read that never reached the index would make every assertion
+			// below vacuous.
+			expect(page).toBeDefined();
+			return {
+				page: page!,
+				counts,
+				widened: SKIPPED.some((key) => asked.some((k) => k.endsWith(`/${key}`))),
+			};
+		} finally {
+			tx.release();
+			await client.close();
+		}
+	}
+
+	const openByRank = (limit: number): Query<Issue> => ({
+		where: (i) => i.state.eq('open'),
+		orderBy: (i) => [ i.rank.desc() ],
+		limit,
+	});
+
+	it('a walk that never settles answers the scan and reads no shadowed bases', async () => {
+		// The limit is past every row the range holds, so the walk runs out of
+		// positions before it has enough in hand to stop — and the count
+		// shortcut, whose subtraction is the only reason to read them, is never
+		// consulted.
+		const { scanned, indexed } = await arms(openByRank(100), WIDE);
+		expect(indexed).toEqual(scanned);
+		expect(scanned.hasMore).toBe(false);
+
+		const { counts, widened } = await trace(openByRank(100), WIDE);
+		expect(counts).toBe(0);
+		expect(widened).toBe(false);
+	});
+
+	it('a settled walk over a small range steps the rest out', async () => {
+		// Sixty positions against twenty-seven shadowed rows: stepping the keys
+		// costs less than a point read each.
+		const { scanned, indexed } = await arms(openByRank(2), WIDE);
+		expect(indexed).toEqual(scanned);
+		expect(scanned.hasMore).toBe(true);
+
+		const { page, counts, widened } = await trace(openByRank(2), WIDE);
+		// One count, taken to price the two ways of finishing rather than to
+		// answer with.
+		expect(counts).toBe(1);
+		expect(page.total).toBe(scanned.total);
+		expect(widened).toBe(false);
+	});
+
+	it('a settled walk over a large range counts it and subtracts', async () => {
+		// The same sixty positions against three shadowed rows, where the reads
+		// are the cheaper side — and the subtraction is what keeps the shadowed
+		// positions inside the counted remainder out of the total.
+		const { scanned, indexed } = await arms(openByRank(2), PENDING);
+		expect(indexed).toEqual(scanned);
+		expect(scanned.hasMore).toBe(true);
+
+		const { page, counts, widened } = await trace(openByRank(2), PENDING);
+		expect(counts).toBe(1);
+		expect(page.total).toBe(scanned.total);
+		expect(widened).toBe(true);
 	});
 });
 
