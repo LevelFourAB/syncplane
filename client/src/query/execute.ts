@@ -53,7 +53,7 @@ import type { KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
-import { foldTextLog, type Row } from '../read.js';
+import { decodeWholeRow, foldTextLog, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
@@ -69,6 +69,7 @@ import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
+import { projectionFor } from './projection.js';
 import {
 	requiredMatchCond,
 	searchOverflowRange,
@@ -273,6 +274,25 @@ export async function queryByIndex<D extends DescMessage>(
 		compiled.orderBy,
 	);
 	if (plan === undefined) return decline(report, 'no-plan');
+	// Candidate rows are decoded as only the fields this query can look at; the
+	// rows that reach the page are decoded again, whole, from the same bytes.
+	//
+	// Only where the walk reads more rows than the page keeps. An ordered plan
+	// with nothing left to reject settles at the page (see candidateBudget), so
+	// its candidates ARE the page and projecting them would decode each row
+	// twice for nothing. A facet fold, a backward page and an unordered plan all
+	// read the whole match set, and a residual rejects rows that were read.
+	//
+	// The residual is a sub-condition of `where` and so names no path `where`
+	// does not; passing it keeps that a property of this call rather than a
+	// promise about the planner.
+	const readsPastThePage = compiled.facets !== undefined
+		|| window?.backward === true
+		|| !plan.ordered
+		|| plan.residual !== undefined;
+	const view = readsPastThePage
+		? projectionFor(schema, compiled, [ plan.residual ])
+		: undefined;
 	// A union plan reads one set of ranges per branch, each from its own
 	// index; a single plan is one branch of itself. Every index a branch
 	// names came from `built`, because those were the planner's candidates.
@@ -429,7 +449,9 @@ export async function queryByIndex<D extends DescMessage>(
 		if (batch.length === 0) return;
 		const keys = batch;
 		batch = [];
-		for (const entry of await readConfirmedMany(tx, registry, def, schema, workspaceId, keys)) {
+		for (
+			const entry of await readConfirmedMany(tx, registry, def, schema, workspaceId, keys, view)
+		) {
 			// A position and its row are one record, so a position cannot outlive
 			// its row — and a reader holds the shared lock, so no commit lands
 			// between the index read and this one. The guard stays because
@@ -537,6 +559,14 @@ export async function queryByIndex<D extends DescMessage>(
 		// No ordering: the scan path returns rows in key order, so this must too.
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
+	// A projected row holds only what the query read, so the rows that leave
+	// here are decoded again from the bytes they came from. Overlay rows were
+	// never projected and are decoded twice; there are at most a pending
+	// queue's worth of them, and only those inside the page.
+	const page = (rows: IndexedRow<MessageShape<D>>[]): IndexedRow<MessageShape<D>>[] =>
+		view === undefined
+			? rows
+			: rows.map((e) => ({ row: decodeWholeRow(schema, e.row, e.bytes), bytes: e.bytes }));
 	// `matched` still counts what the walk classified even when the total is
 	// opted out — hasMore rides on it, and the fast exit above left `beyond` at
 	// 1 for exactly that comparison.
@@ -553,13 +583,13 @@ export async function queryByIndex<D extends DescMessage>(
 		// for one — so `out` is the whole match set and the tail of it is the
 		// page.
 		return out.length > compiled.limit
-			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true, ...facets }
-			: { rows: out, total, hasMore: false, ...facets };
+			? { rows: page(out.slice(out.length - compiled.limit)), total, hasMore: true, ...facets }
+			: { rows: page(out), total, hasMore: false, ...facets };
 	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
 	return {
-		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+		rows: page(start !== 0 || end !== undefined ? out.slice(start, end) : out),
 		total,
 		hasMore: end !== undefined && matched > end,
 		...facets,
@@ -1559,6 +1589,7 @@ async function readConfirmedMany<D extends DescMessage>(
 	schema: D,
 	workspaceId: string,
 	keys: readonly string[],
+	view?: DescMessage,
 ): Promise<(IndexedRow<MessageShape<D>> | undefined)[]> {
 	const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
 	const out: (IndexedRow<MessageShape<D>> | undefined)[] = new Array(keys.length);
@@ -1566,7 +1597,7 @@ async function readConfirmedMany<D extends DescMessage>(
 		const record = records[i] as ConfirmedRecord | undefined;
 		if (record === undefined) continue;
 		const key = keys[i]!;
-		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v);
+		const decoded = await decodeRow(tx, registry, def, schema, workspaceId, key, record.v, view);
 		out[i] = {
 			row: { key, value: decoded.value, workspaceId, version: BigInt(record.ver) },
 			bytes: decoded.bytes,
@@ -1585,6 +1616,11 @@ async function readConfirmedMany<D extends DescMessage>(
  * the user's own keystrokes missing, which is the divergence this whole file
  * exists to avoid. The fold is per returned row rather than per entity row, so
  * it costs O(result).
+ *
+ * `view` decodes the row as a projection of itself instead — only the fields
+ * the query reads. The fold runs on the bytes either way, so the value is the
+ * same one the whole decode would have given for every field the projection
+ * carries, and `bytes` is the whole row whichever was used.
  */
 async function decodeRow<D extends DescMessage>(
 	tx: KVRead,
@@ -1594,9 +1630,14 @@ async function decodeRow<D extends DescMessage>(
 	workspaceId: string,
 	key: string,
 	bytes: Uint8Array,
+	view?: DescMessage,
 ): Promise<{ value: MessageShape<D>; bytes: Uint8Array }> {
 	const folded = await foldTextLog(tx, registry, def.name, workspaceId, key, bytes);
-	const value = fromBinary(schema, folded);
+	// Retaining unknown fields would keep exactly the bytes a projection exists
+	// to skip; nothing re-encodes a projected value, so dropping them is free.
+	const value = view === undefined
+		? fromBinary(schema, folded)
+		: fromBinary(view, folded, { readUnknownFields: false }) as unknown as MessageShape<D>;
 	sortOrderedFields(schema, value);
 	return { value, bytes: folded };
 }

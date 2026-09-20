@@ -557,3 +557,52 @@ export async function scanDecoded<D extends DescMessage>(
 		return { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
 	});
 }
+
+/**
+ * scanDecoded, with each row decoded through `view` — a projection holding only
+ * the fields the caller's query reads (see query/projection.ts) — instead of
+ * through `schema`.
+ *
+ * `sources` gives each returned row the merged-view bytes it was decoded from,
+ * so a caller keeping some of them can decode those in full with
+ * {@link decodeWholeRow} rather than reading the store again. It is keyed by row
+ * identity, which filtering, sorting and slicing the rows preserve.
+ */
+export async function scanProjected<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	view: DescMessage,
+	scope?: WorkspaceScope,
+): Promise<{ rows: Row<MessageShape<D>>[]; sources: Map<Row<MessageShape<D>>, Uint8Array> }> {
+	const merged = await scanMergedRows(tx, registry, def.name, scope);
+	const rows: Row<MessageShape<D>>[] = [];
+	const sources = new Map<Row<MessageShape<D>>, Uint8Array>();
+	for (const row of merged) {
+		// Retaining unknown fields would keep exactly the bytes the projection
+		// exists to skip.
+		const value = fromBinary(view, row.v, {
+			readUnknownFields: false,
+		}) as unknown as MessageShape<D>;
+		sortOrderedFields(schema, value);
+		const out = { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+		rows.push(out);
+		sources.set(out, row.v);
+	}
+	return { rows, sources };
+}
+
+/**
+ * One row decoded in full from the merged-view bytes it was projected from —
+ * the value {@link scanDecoded} would have given it.
+ */
+export function decodeWholeRow<D extends DescMessage>(
+	schema: D,
+	row: Row<unknown>,
+	bytes: Uint8Array,
+): Row<MessageShape<D>> {
+	const value = fromBinary(schema, bytes);
+	sortOrderedFields(schema, value);
+	return { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+}

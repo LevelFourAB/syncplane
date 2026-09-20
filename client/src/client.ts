@@ -154,6 +154,7 @@ import {
 	type TotalOf,
 	type WorkspaceQuery,
 } from './query/index.js';
+import { projectionFor } from './query/projection.js';
 import { condToProto, orderKeyToProto, scalarFromProto } from './query/proto.js';
 import {
 	type PreparedGroupQuery,
@@ -163,6 +164,7 @@ import {
 	toWirePaths,
 } from './query/wire.js';
 import {
+	decodeWholeRow,
 	mergedRowFrom,
 	type NamedWorkspaces,
 	readMergedRow,
@@ -170,6 +172,7 @@ import {
 	type ReadScope,
 	type Row,
 	scanDecoded,
+	scanProjected,
 	workspacesWithRows,
 } from './read.js';
 import {
@@ -3923,22 +3926,39 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						named.workspaces.map((ws): [string, Cond] => [ ws, relWhere(ws)! ]),
 					),
 				};
+				// A rel query spanning every workspace has a predicate per workspace
+				// the store happens to hold, which no NamedWorkspaces can carry; each
+				// row is tested under its own workspace's. It is also the one shape
+				// whose predicates this call cannot enumerate, which is what a
+				// projection has to be built from.
+				const perRowPredicate = relWhere !== undefined && effNamed === undefined
+					&& workspaceId === undefined;
+				// Rows are read as only the fields this query looks at, and the ones
+				// that make the page are decoded again, whole, from the bytes they
+				// came from (see query/projection.ts).
+				const view = perRowPredicate
+					? undefined
+					: projectionFor(schema, effective, effNamed?.predicates?.values());
 				// The definition of the result. A per-workspace predicate is applied
 				// before it rather than inside it — the same set, since runQueryPage
 				// filters first — leaving one query for the one order it has to be in.
 				const scan = async () => {
-					const rows = await scanDecoded(tx, this.entityRegistry, def, schema, scanned);
-					// A rel query spanning every workspace has a predicate per
-					// workspace the store happens to hold, which no NamedWorkspaces
-					// can carry; each row is tested under its own workspace's.
-					const admitted = relWhere !== undefined && effNamed === undefined
-							&& workspaceId === undefined
-						? rows.filter((r) => {
-							const where = relWhere(r.workspaceId);
+					const read = view === undefined
+						? { rows: await scanDecoded(tx, this.entityRegistry, def, schema, scanned) }
+						: await scanProjected(tx, this.entityRegistry, def, schema, view, scanned);
+					const admitted = perRowPredicate
+						? read.rows.filter((r) => {
+							const where = relWhere!(r.workspaceId);
 							return where === undefined || evalCond(r.value, where, schema);
 						})
-						: admittedIn(effNamed, rows, schema);
-					return runQueryPage(admitted, effective, schema, window);
+						: admittedIn(effNamed, read.rows, schema);
+					const page = runQueryPage(admitted, effective, schema, window);
+					if (!('sources' in read)) return page;
+					const { sources } = read;
+					return {
+						...page,
+						rows: page.rows.map((r) => decodeWholeRow(schema, r, sources.get(r)!)),
+					};
 				};
 				// An index narrows which rows are read; it never changes which
 				// match, so a decline here is not a fallback in the apologetic
