@@ -726,9 +726,13 @@ var _ = Describe("Membership maintenance", func() {
 			rebuilt.pull(ctx, subs, 0)
 
 			// The reference point the two specs above are measured against: the
-			// window is resolved again and every one of its members is followed,
-			// however little changed.
-			Expect(counter.count("batchkeys")).To(BeNumerically(">=", projects*perProject))
+			// window is resolved again and every target its members point at is
+			// read again, however little changed. Batching the hop is what keeps
+			// that at one read per 256 targets instead of one per member, so
+			// what the rebuild costs over maintenance is the TARGETS — which
+			// maintenance reads none of.
+			Expect(counter.count("recency")).To(BeNumerically(">", 0))
+			Expect(counter.count("batchkeys")).To(BeNumerically(">=", projects))
 		})
 
 		It("reorders a recency window without reading the entity", func() {

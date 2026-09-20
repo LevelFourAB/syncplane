@@ -63,6 +63,30 @@ func (cr closureRows) has(entity, key string) bool {
 	return ok
 }
 
+// readUnread resolves the rows of the named members of one entity that were
+// carried over unread, caching them. Keys that are not members are ignored.
+//
+// This is rowOf for many members at once: a read per maxRowBatch of them rather
+// than a point read each, which is what a caller about to walk every member
+// wants. A member whose row has since gone stays unread, and so still reports
+// gone from rowOf.
+func (cr closureRows) readUnread(tx storage.ReadTx, entity string, keys []string) error {
+	batch := &rowBatch{tx: tx, entity: entity, size: maxRowBatch, emit: func(row storage.Row) error {
+		cr[closureKey{entity, row.Key}] = row
+		return nil
+	}}
+	for _, key := range keys {
+		row, ok := cr[closureKey{entity, key}]
+		if !ok || row.Entity != "" {
+			continue
+		}
+		if err := batch.add(key); err != nil {
+			return err
+		}
+	}
+	return batch.flush()
+}
+
 // rowOf resolves a member to its row, reading one that was carried over unread
 // and caching it. Reports false for a non-member and for a member whose row has
 // since gone — a set maintained against a cursor can name a row this snapshot
@@ -426,20 +450,27 @@ func (e *rowEmitter) buildClosure(tx storage.ReadTx, subs []*syncplanev1.Subscri
 		visited := map[closureKey]bool{}
 		frontier := seeds
 		for round := 0; round < depth && len(frontier) > 0; round++ {
-			var next []frontierRow
+			// A round walks each path over the WHOLE frontier rather than each
+			// frontier row over each path, so that a forward hop sees every
+			// holder's targets at once and can read them in batches. The rows
+			// reached are the same set either way; only the order the closure
+			// gains them in changes, and it stays deterministic.
+			holders := make([]frontierRow, 0, len(frontier))
 			for _, holder := range frontier {
 				hk := closureKey{holder.entity, holder.key}
 				if visited[hk] {
 					continue
 				}
 				visited[hk] = true
-				for _, path := range follow.GetPaths() {
-					ends, err := e.walkPath(tx, g, holder, path.GetSegments(), cr, limits)
-					if err != nil {
-						return nil, err
-					}
-					next = append(next, ends...)
+				holders = append(holders, holder)
+			}
+			var next []frontierRow
+			for _, path := range follow.GetPaths() {
+				ends, err := e.walkPath(tx, g, holders, path.GetSegments(), cr, limits)
+				if err != nil {
+					return nil, err
 				}
+				next = append(next, ends...)
 			}
 			frontier = next
 		}
@@ -566,8 +597,10 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 // The window has already been resolved against this snapshot and read-filtered
 // (see rowEmitter.readable), so the seeds ARE its members and the only work
 // left is the decode the walk needs. Scanning the entity to re-derive a set
-// already in hand is what this replaces. A member the window maintained without
-// re-reading costs one point lookup here (see closureRows.rowOf).
+// already in hand is what this replaces. The members a window maintained
+// without re-reading — which is most of them when a pull maintains its windows
+// but still rebuilds its closure — are read in batches before the loop rather
+// than one point lookup each (see closureRows.readUnread).
 //
 // windowMembers is the union across every windowed subscription, which is
 // exactly what the client holds: two windows on one entity seed each other's
@@ -584,6 +617,9 @@ func (e *rowEmitter) windowSeeds(tx storage.ReadTx, info *entityInfo) ([]frontie
 		}
 	}
 	sort.Strings(keys)
+	if err := e.windowMembers.readUnread(tx, info.name, keys); err != nil {
+		return nil, err
+	}
 	seeds := make([]frontierRow, 0, len(keys))
 	for _, key := range keys {
 		row, ok, err := e.windowMembers.rowOf(tx, closureKey{entity: info.name, key: key})
@@ -602,32 +638,60 @@ func (e *rowEmitter) windowSeeds(tx storage.ReadTx, info *entityInfo) ([]frontie
 	return seeds, nil
 }
 
-// walkPath walks a path's segments from one holder, adding every resolved row
-// to the closure and returning the path's terminal rows (the next depth round
-// re-applies the whole path set from these).
-func (e *rowEmitter) walkPath(tx storage.ReadTx, g *refGraph, holder frontierRow, segments []string, cr closureRows, limits Limits) ([]frontierRow, error) {
-	current := []frontierRow{holder}
+// walkPath walks a path's segments from a set of holders at once, adding every
+// resolved row to the closure and returning the path's terminal rows (the next
+// depth round re-applies the whole path set from these).
+//
+// The holders take a segment TOGETHER, which is what lets the forward direction
+// read in batches (see followForward). The rows are then fanned back out in
+// holder order and, within a holder, in the ref field's order — the order a
+// walk per holder produced them in, and the one that keeps two runs of the same
+// pull comparable.
+func (e *rowEmitter) walkPath(tx storage.ReadTx, g *refGraph, holders []frontierRow, segments []string, cr closureRows, limits Limits) ([]frontierRow, error) {
+	current := holders
 	for _, seg := range segments {
+		targets, rows, err := e.followForward(tx, g, current, seg)
+		if err != nil {
+			return nil, err
+		}
 		var next []frontierRow
 		seen := map[closureKey]bool{}
-		for _, h := range current {
-			rows, err := e.followSegment(tx, g, h, seg, limits)
+		join := func(r resolved) error {
+			ck := closureKey{r.row.Entity, r.row.Key}
+			if seen[ck] {
+				return nil
+			}
+			seen[ck] = true
+			if _, ok := cr[ck]; !ok {
+				cr[ck] = r.row
+				if len(cr) > limits.MaxClosureSize {
+					return errClosureTooLarge(len(cr), limits.MaxClosureSize)
+				}
+			}
+			next = append(next, r.front)
+			return nil
+		}
+		for i, h := range current {
+			if t := targets[i]; t.entity != "" {
+				for _, key := range t.keys {
+					r, ok := rows[closureKey{t.entity, key}]
+					if !ok {
+						continue // orphan, tombstone, quarantined or read-filtered
+					}
+					if err := join(r); err != nil {
+						return nil, err
+					}
+				}
+				continue
+			}
+			out, err := e.followReverse(tx, h, g.reverseBy(h.entity, seg), limits)
 			if err != nil {
 				return nil, err
 			}
-			for _, r := range rows {
-				ck := closureKey{r.row.Entity, r.row.Key}
-				if seen[ck] {
-					continue
+			for _, r := range out {
+				if err := join(r); err != nil {
+					return nil, err
 				}
-				seen[ck] = true
-				if _, ok := cr[ck]; !ok {
-					cr[ck] = r.row
-					if len(cr) > limits.MaxClosureSize {
-						return nil, errClosureTooLarge(len(cr), limits.MaxClosureSize)
-					}
-				}
-				next = append(next, r.front)
 			}
 		}
 		current = next
@@ -642,73 +706,129 @@ type resolved struct {
 	front frontierRow
 }
 
-func (e *rowEmitter) followSegment(tx storage.ReadTx, g *refGraph, holder frontierRow, seg string, limits Limits) ([]resolved, error) {
-	if fr := g.forwardBy(holder.entity, seg); fr != nil {
-		return e.followForward(tx, holder, fr)
-	}
-	if rr := g.reverseBy(holder.entity, seg); rr != nil {
-		return e.followReverse(tx, holder, rr, limits)
-	}
-	return nil, errUnknownSegment(g, holder.entity, seg)
+// forwardTargets names the rows one holder's forward ref points at: the entity
+// they live in, and their keys in the ref field's order. A zero entity marks a
+// holder that takes the segment's REVERSE direction instead.
+type forwardTargets struct {
+	entity string
+	keys   []string
 }
 
-// followForward resolves a holder's forward ref (singular or repeated) to its
-// live, readable target rows. Missing targets (orphans) and read-filtered
-// targets are silently dropped.
+// followForward resolves the forward hop of one segment for every holder that
+// takes it, and reports what each holder pointed at so the caller can fan the
+// rows back out in holder order.
 //
-// The stubs name their targets outright, so a repeated ref is a batch of keys
-// known before any of them is read (see rowBatch) rather than a lookup per
-// element. Targets come back in the field's order, which is the order the
-// caller walks onward in.
-func (e *rowEmitter) followForward(tx storage.ReadTx, holder frontierRow, fr *forwardRefRel) ([]resolved, error) {
-	if !holder.msg.Has(fr.fd) {
-		return nil, nil
+// The stubs name their targets outright, so every holder's keys are known
+// before any row is read: one batch per 256 distinct targets replaces a lookup
+// per holder, and holders naming the same target — the ~20 projects a window of
+// 500 issues points at — cost one read between them. That matters most where a
+// read is a network round trip, which is the whole cost of a from-scratch
+// closure build on a remote store.
+//
+// Only live, readable targets reach the returned rows: a missing target
+// (orphan), a tombstone, a quarantined row and a read-filtered one are each
+// absent from it, and the caller drops the holder's key accordingly.
+//
+// Returns an error for a segment that names no relation on some holder's
+// entity; holders taking the reverse direction are left to the caller, since
+// that hop is an index probe per holder.
+func (e *rowEmitter) followForward(tx storage.ReadTx, g *refGraph, holders []frontierRow, seg string) ([]forwardTargets, map[closureKey]resolved, error) {
+	targets := make([]forwardTargets, len(holders))
+	// Distinct target keys per entity, in holder-then-field order, so two runs
+	// of the same pull read in the same order.
+	var entities []string
+	byEntity := map[string][]string{}
+	queued := map[closureKey]bool{}
+	for i, h := range holders {
+		fr := g.forwardBy(h.entity, seg)
+		if fr == nil {
+			if g.reverseBy(h.entity, seg) == nil {
+				return nil, nil, errUnknownSegment(g, h.entity, seg)
+			}
+			continue
+		}
+		targetInfo := e.srv.catalogPtr().entities[fr.targetEntity]
+		if _, known := byEntity[fr.targetEntity]; !known {
+			entities = append(entities, fr.targetEntity)
+			byEntity[fr.targetEntity] = nil
+		}
+		targets[i] = forwardTargets{entity: fr.targetEntity, keys: forwardTargetKeys(h.msg, fr, targetInfo, e.ws)}
+		for _, key := range targets[i].keys {
+			ck := closureKey{fr.targetEntity, key}
+			if queued[ck] {
+				continue
+			}
+			queued[ck] = true
+			byEntity[fr.targetEntity] = append(byEntity[fr.targetEntity], key)
+		}
 	}
-	targetInfo := e.srv.catalogPtr().entities[fr.targetEntity]
-	filter, err := e.filterOf(fr.targetEntity)
-	if err != nil {
-		return nil, err
-	}
-	var out []resolved
-	batch := &rowBatch{tx: tx, entity: fr.targetEntity, size: maxRowBatch, emit: func(row storage.Row) error {
-		// A key with no row at all is an orphan the batch already dropped:
-		// a target never synced here, or one that never existed.
-		if row.Deleted {
+	rows := map[closureKey]resolved{}
+	for _, entity := range entities {
+		keys := byEntity[entity]
+		if len(keys) == 0 {
+			continue
+		}
+		targetInfo := e.srv.catalogPtr().entities[entity]
+		filter, err := e.filterOf(entity)
+		if err != nil {
+			return nil, nil, err
+		}
+		batch := &rowBatch{tx: tx, entity: entity, size: maxRowBatch, emit: func(row storage.Row) error {
+			// A key with no row at all is an orphan the batch already dropped:
+			// a target never synced here, or one that never existed.
+			if row.Deleted {
+				return nil
+			}
+			msg, ok := e.decodeRow(targetInfo, row)
+			if !ok {
+				return nil // quarantined: dropped like an orphan, and unfollowable
+			}
+			if filter != nil && !filter(row.Key, msg) {
+				return nil // permission prune — and we cannot follow through it
+			}
+			rows[closureKey{row.Entity, row.Key}] = resolved{
+				row:   row,
+				front: frontierRow{entity: entity, key: row.Key, msg: msg.ProtoReflect()},
+			}
 			return nil
-		}
-		msg, ok := e.decodeRow(targetInfo, row)
-		if !ok {
-			return nil // quarantined: dropped like an orphan, and unfollowable
-		}
-		if filter != nil && !filter(row.Key, msg) {
-			return nil // permission prune — and we cannot follow through it
-		}
-		out = append(out, resolved{row: row, front: frontierRow{entity: fr.targetEntity, key: row.Key, msg: msg.ProtoReflect()}})
-		return nil
-	}}
-	// A stored value naming another workspace resolves there, not in this
-	// one (see ReferenceOptions), so it contributes nothing to this closure.
-	addValue := func(value protoreflect.Message) error {
-		stub, ok := fr.ref.Stub(value)
-		if !ok || !fr.ref.ResolvesIn(value, e.ws) {
-			return nil
-		}
-		return batch.add(targetInfo.keyOf(stub))
-	}
-	if fr.fd.IsList() {
-		list := holder.msg.Get(fr.fd).List()
-		for i := 0; i < list.Len(); i++ {
-			if err := addValue(list.Get(i).Message()); err != nil {
-				return nil, err
+		}}
+		for _, key := range keys {
+			if err := batch.add(key); err != nil {
+				return nil, nil, err
 			}
 		}
-	} else if err := addValue(holder.msg.Get(fr.fd).Message()); err != nil {
-		return nil, err
+		if err := batch.flush(); err != nil {
+			return nil, nil, err
+		}
 	}
-	if err := batch.flush(); err != nil {
-		return nil, err
+	return targets, rows, nil
+}
+
+// forwardTargetKeys names the rows one holder's forward ref (singular or
+// repeated) points at, in the field's order.
+func forwardTargetKeys(holder protoreflect.Message, fr *forwardRefRel, targetInfo *entityInfo, ws string) []string {
+	if !holder.Has(fr.fd) {
+		return nil
 	}
-	return out, nil
+	if !fr.fd.IsList() {
+		if key, ok := forwardTargetKey(holder, fr, targetInfo, ws); ok {
+			return []string{key}
+		}
+		return nil
+	}
+	list := holder.Get(fr.fd).List()
+	keys := make([]string, 0, list.Len())
+	for i := 0; i < list.Len(); i++ {
+		value := list.Get(i).Message()
+		// A stored value naming another workspace resolves there, not in this
+		// one (see ReferenceOptions), so it contributes nothing to this closure.
+		stub, ok := fr.ref.Stub(value)
+		if !ok || !fr.ref.ResolvesIn(value, ws) {
+			continue
+		}
+		keys = append(keys, targetInfo.keyOf(stub))
+	}
+	return keys
 }
 
 // followReverse resolves a reverse relation: find the live, readable rows of

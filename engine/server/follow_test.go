@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -58,6 +59,19 @@ func (t *scanCountingTx) ScanEntity(entity string, fn func(storage.Row) error) e
 	t.owner.scans[entity]++
 	t.owner.mu.Unlock()
 	return t.ReadTx.ScanEntity(entity, fn)
+}
+
+// hidingProjects withholds one project from every read, so a spec can put a
+// read-filtered row among a forward hop's targets.
+type hidingProjects struct{ server.AllowAll }
+
+func (hidingProjects) ReadFilter(_ context.Context, _ server.Principal, _, entity string) (server.RowFilter, error) {
+	if entity != "project" {
+		return nil, nil
+	}
+	return func(_ string, row proto.Message) bool {
+		return row.(*testdatav1.Project).GetName() != "hidden"
+	}, nil
 }
 
 // Reference-following subscriptions: a subscription's synced set is its base
@@ -584,6 +598,103 @@ var _ = Describe("Reference-following subscriptions", func() {
 			})
 			Expect(values(r.GetPatch())).To(BeEmpty())
 			Expect(counter.count("issue")).To(BeZero())
+		})
+
+		// A forward hop's targets are named by the holders' own stubs, so the
+		// build knows every key it wants before it reads any of them. What this
+		// pins is that it USES that: the reads a hop costs follow the number of
+		// distinct targets (a batch per maxRowBatch of them) and not the number
+		// of holders — the difference between one query and one per holder on a
+		// store where a read is a network round trip.
+		It("resolves a forward hop in batches rather than a read per holder", func() {
+			const holders = 60
+			rep, reads := startCountingReplica(server.WithPermissions(hidingProjects{}))
+			muts := []*syncplanev1.Mutation{
+				putMutation("c1", 1, "project", "p0", &testdatav1.Project{Id: "p0", Name: "zero"}),
+				putMutation("c1", 2, "project", "p1", &testdatav1.Project{Id: "p1", Name: "one"}),
+				putMutation("c1", 3, "project", "p2", &testdatav1.Project{Id: "p2", Name: "two"}),
+				putMutation("c1", 4, "project", "dead", &testdatav1.Project{Id: "dead", Name: "gone"}),
+				deleteMutation("c1", 5, "project", "dead"),
+				putMutation("c1", 6, "project", "secret", &testdatav1.Project{Id: "secret", Name: "hidden"}),
+			}
+			mut := uint64(len(muts))
+			// The holders share three live targets between them, and three of
+			// them point at the cases a hop drops: a key with no row at all, a
+			// tombstone, and a row the read filter hides.
+			for i := 0; i < holders; i++ {
+				target := fmt.Sprintf("p%d", i%3)
+				switch i {
+				case 0:
+					target = "ghost"
+				case 1:
+					target = "dead"
+				case 2:
+					target = "secret"
+				}
+				mut++
+				muts = append(muts, putMutation("c1", mut, "issue", fmt.Sprintf("i%02d", i),
+					issue(fmt.Sprintf("i%02d", i), "t", target)))
+			}
+			rep.push(ctx, muts)
+
+			reads.reset()
+			page := rep.pull(ctx, []*syncplanev1.Subscription{followProject(1)}, 0)
+
+			want := make([]string, 0, holders+3)
+			for i := 0; i < holders; i++ {
+				want = append(want, fmt.Sprintf("issue/i%02d", i))
+			}
+			want = append(want, "project/p0", "project/p1", "project/p2")
+			Expect(values(page.GetPatch())).To(ConsistOf(want))
+
+			// Six distinct targets fit in one batch, and the seeds come from a
+			// scan that reads no keys of its own.
+			Expect(reads.count("get")).To(BeZero())
+			Expect(reads.count("batch")).To(Equal(1),
+				"batchkeys=%d", reads.count("batchkeys"))
+		})
+
+		// A pull can maintain its windows and still rebuild its closure — a
+		// follow spec deeper than one hop is the plainest way in. The window's
+		// members then arrive carried over unread, and the walk needs every one
+		// of their rows.
+		It("reads a maintained window's seeds in batches", func() {
+			const members = 40
+			rep, reads := startCountingReplica()
+			blocked := func(id, dep string) *testdatav1.Issue {
+				return &testdatav1.Issue{
+					Id: id, Title: id, BlockedBy: []*testdatav1.Issue{{Id: dep}},
+				}
+			}
+			muts := make([]*syncplanev1.Mutation, 0, members+1)
+			for i := 0; i < members; i++ {
+				muts = append(muts, putMutation("c1", uint64(i+1), "issue", fmt.Sprintf("i%02d", i),
+					blocked(fmt.Sprintf("i%02d", i), fmt.Sprintf("i%02d", (i+1)%members))))
+			}
+			rep.push(ctx, muts)
+			subs := []*syncplanev1.Subscription{{
+				Entity: "issue",
+				Window: &syncplanev1.Window{ByRecency: true, Limit: members},
+				Follow: &syncplanev1.FollowSpec{
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"blockedBy"}}},
+					Depth: 2,
+				},
+			}}
+			rep.pull(ctx, subs, 0) // settle: the first pull has no state to maintain from
+
+			// A row of another entity moves the workspace on without moving the
+			// window, so its members are all carried over unread.
+			rep.push(ctx, []*syncplanev1.Mutation{putMutation("c1", members+1, "project", "p0",
+				&testdatav1.Project{Id: "p0", Name: "zero"})})
+			reads.reset()
+			rep.pull(ctx, subs, 0)
+
+			// One batch reads the seeds, one reads what they point at, and the
+			// second depth round walks nothing new. A point read per member
+			// would be forty.
+			Expect(reads.count("get")).To(BeZero())
+			Expect(reads.count("batch")).To(Equal(2),
+				"batch=%d batchkeys=%d", reads.count("batch"), reads.count("batchkeys"))
 		})
 	})
 
