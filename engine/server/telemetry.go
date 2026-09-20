@@ -97,6 +97,12 @@ type metrics struct {
 	// pushBatch times one workspace's batch — the unit that holds a write
 	// transaction, and so the unit that contends.
 	pushBatch metric.Float64Histogram
+	// pushSavepointReruns counts batches thrown away and applied a second time
+	// with every mutation inside a savepoint, which is what a rejection costs.
+	// A rate approaching the batch rate means the saving the unguarded first
+	// attempt exists for is gone, and clients are pushing writes the server
+	// refuses.
+	pushSavepointReruns metric.Int64Counter
 
 	// pullChanges distributes how many changes a pull returned. A pull that
 	// consistently returns a full page means clients are not keeping up.
@@ -202,6 +208,7 @@ const (
 	metricPushMutations          = "syncplane.push.mutations"
 	metricPushRejections         = "syncplane.push.rejections"
 	metricPushBatchDuration      = "syncplane.push.batch.duration"
+	metricPushSavepointReruns    = "syncplane.push.savepoint.reruns"
 	metricPullChanges            = "syncplane.pull.changes"
 	metricPullResets             = "syncplane.pull.resets"
 	metricCursorStateMisses      = "syncplane.cursor_state.misses"
@@ -240,6 +247,9 @@ func newMetrics(p telemetry.Providers) (*metrics, error) {
 		pushBatch: b.Float64Histogram(metricPushBatchDuration,
 			metric.WithDescription("Duration of one workspace's push batch."),
 			metric.WithUnit("s")),
+		pushSavepointReruns: b.Int64Counter(metricPushSavepointReruns,
+			metric.WithDescription("Push batches re-applied with per-mutation savepoints after a rejection."),
+			metric.WithUnit("{batch}")),
 		pullChanges: b.Int64Histogram(metricPullChanges,
 			metric.WithDescription("Changes returned by one pull."),
 			metric.WithUnit("{change}")),

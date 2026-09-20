@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -15,6 +16,7 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 // What a batch of mutations owes each of its members. One push batch is one
@@ -290,4 +292,166 @@ var _ = Describe("Push batches", func() {
 			Expect(todoAt("t1").GetTitle()).To(Equal("three"))
 		})
 	})
+
+	// A batch applies its mutations unguarded and is thrown away and replayed
+	// under per-mutation savepoints as soon as one of them is rejected. What the
+	// client sees must not depend on which of the two attempts committed, so
+	// these specs pin the outcome of a rewound batch alongside what it cost.
+	Describe("a batch rewound by a rejection", func() {
+		var counter *savepointCountingAdapter
+
+		// A CAS guard against a version the row never had: a rejection that
+		// needs no fixture beyond the row itself.
+		staleCAS := func(clientID string, mutationID uint64, key string, version uint64) *syncplanev1.Mutation {
+			return withExpectedVersion(
+				patchMutation(clientID, mutationID, "todo", key, &todov1.Todo{Title: "stale"}, "title"),
+				version)
+		}
+
+		BeforeEach(func() {
+			counter = &savepointCountingAdapter{Adapter: newTestStore()}
+			start(mustNewServer(counter, testEntities()))
+		})
+
+		It("opens no savepoint at all when nothing is rejected", func() {
+			counter.reset()
+			Expect(statuses(push(
+				putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3", Title: "three"}),
+			))).To(Equal([]syncplanev1.MutationStatus{applied, applied, applied}))
+
+			attempts, savepoints := counter.counted()
+			Expect(attempts).To(Equal(1))
+			Expect(savepoints).To(BeZero())
+		})
+
+		It("guards every mutation of the one attempt it repeats", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			counter.reset()
+			Expect(statuses(push(
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				staleCAS("c1", 3, "t1", 99),
+				putMutation("c1", 4, "todo", "t4", &todov1.Todo{Id: "t4", Title: "four"}),
+			))).To(Equal([]syncplanev1.MutationStatus{applied, refused, applied}))
+
+			attempts, savepoints := counter.counted()
+			Expect(attempts).To(Equal(2), "the unguarded attempt is discarded and the batch replayed")
+			Expect(savepoints).To(Equal(3), "one per mutation, and only in the second attempt")
+		})
+
+		It("applies the mutations around a rejected one and acks all three", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			results := push(
+				putMutation("c1", 2, "todo", "before", &todov1.Todo{Id: "before", Title: "b"}),
+				staleCAS("c1", 3, "t1", 99),
+				putMutation("c1", 4, "todo", "after", &todov1.Todo{Id: "after", Title: "a"}),
+			)
+			Expect(statuses(results)).To(Equal([]syncplanev1.MutationStatus{applied, refused, applied}))
+			Expect(results[1].GetErrorCode()).To(Equal(server.CodeConflict))
+			Expect(results[0].GetSeq()).To(BeEquivalentTo(2))
+			Expect(results[1].GetSeq()).To(BeZero(), "a rejected mutation consumes no sequence")
+			Expect(results[2].GetSeq()).To(BeEquivalentTo(3))
+			Expect(todoAt("before").GetTitle()).To(Equal("b"))
+			Expect(todoAt("after").GetTitle()).To(Equal("a"))
+			Expect(todoAt("t1").GetTitle()).To(Equal("one"), "the rejected patch left nothing behind")
+			Expect(pullAs("c1").GetLastAckedMutationId()).To(BeEquivalentTo(4))
+		})
+
+		It("acks both rejections of a batch that holds two", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			counter.reset()
+			results := push(
+				staleCAS("c1", 2, "t1", 99),
+				putMutation("c1", 3, "todo", "t3", &todov1.Todo{Id: "t3", Title: "three"}),
+				staleCAS("c1", 4, "t1", 98),
+				putMutation("c1", 5, "todo", "t5", &todov1.Todo{Id: "t5", Title: "five"}),
+			)
+			Expect(statuses(results)).To(Equal([]syncplanev1.MutationStatus{refused, applied, refused, applied}))
+			Expect(results[0].GetErrorCode()).To(Equal(server.CodeConflict))
+			Expect(results[2].GetErrorCode()).To(Equal(server.CodeConflict))
+			Expect(results[1].GetSeq()).To(BeEquivalentTo(2))
+			Expect(results[3].GetSeq()).To(BeEquivalentTo(3))
+			Expect(pullAs("c1").GetLastAckedMutationId()).To(BeEquivalentTo(5))
+
+			attempts, savepoints := counter.counted()
+			Expect(attempts).To(Equal(2), "one rejection is enough; the second costs no further attempt")
+			Expect(savepoints).To(Equal(4))
+		})
+
+		It("applies the rest when the FIRST mutation is rejected", func() {
+			// The unguarded attempt has written nothing when it gives up, which
+			// is the case a rewind could quietly get away with skipping.
+			results := push(
+				patchOfNothing("c1", 1, "gone"),
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+			)
+			Expect(statuses(results)).To(Equal([]syncplanev1.MutationStatus{refused, applied}))
+			Expect(results[1].GetSeq()).To(BeEquivalentTo(1))
+			Expect(todoAt("t2").GetTitle()).To(Equal("two"))
+			Expect(pullAs("c1").GetLastAckedMutationId()).To(BeEquivalentTo(2))
+		})
+
+		It("replays the verdicts when the whole batch is resent", func() {
+			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "one"}))
+			batch := []*syncplanev1.Mutation{
+				putMutation("c1", 2, "todo", "t2", &todov1.Todo{Id: "t2", Title: "two"}),
+				staleCAS("c1", 3, "t1", 99),
+				putMutation("c1", 4, "todo", "t4", &todov1.Todo{Id: "t4", Title: "four"}),
+			}
+			Expect(statuses(push(batch...))).To(Equal([]syncplanev1.MutationStatus{applied, refused, applied}))
+			seq := pullAs("reader").GetSeq()
+
+			replay := push(batch...)
+			Expect(statuses(replay)).To(Equal([]syncplanev1.MutationStatus{already, refused, already}))
+			Expect(replay[1].GetErrorCode()).To(Equal(server.CodeConflict))
+			Expect(pullAs("reader").GetSeq()).To(Equal(seq), "a resend applies nothing a second time")
+		})
+	})
 })
+
+// savepointCountingAdapter counts what a push batch spent on rewind machinery:
+// how many times the write closure ran, and how many savepoints it opened. A
+// response says nothing about either — the same results come back whichever way
+// the batch was applied — so the specs that pin the unguarded first attempt
+// count them instead.
+type savepointCountingAdapter struct {
+	storage.Adapter
+	mu         sync.Mutex
+	attempts   int
+	savepoints int
+}
+
+func (a *savepointCountingAdapter) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
+	return a.Adapter.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+		a.mu.Lock()
+		a.attempts++
+		a.mu.Unlock()
+		return fn(&savepointCountingTx{WriteTx: tx, owner: a})
+	})
+}
+
+func (a *savepointCountingAdapter) reset() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.attempts, a.savepoints = 0, 0
+}
+
+// counted reports the closure runs and savepoints since the last reset.
+func (a *savepointCountingAdapter) counted() (attempts, savepoints int) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.attempts, a.savepoints
+}
+
+type savepointCountingTx struct {
+	storage.WriteTx
+	owner *savepointCountingAdapter
+}
+
+func (t *savepointCountingTx) InSavepoint(fn func() error) error {
+	t.owner.mu.Lock()
+	t.owner.savepoints++
+	t.owner.mu.Unlock()
+	return t.WriteTx.InSavepoint(fn)
+}

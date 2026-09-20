@@ -24,10 +24,9 @@ import (
 )
 
 // Push applies one batch of mutations per workspace, each in its own write
-// transaction. Within a batch each mutation runs inside a savepoint: a business
-// rejection rolls back every row the mutation wrote (and its sequence) while
-// the rest of the batch — and the watermark bump for the rejected mutation —
-// still commits.
+// transaction. Within a batch a business rejection rolls back every row the
+// rejected mutation wrote (and its sequence) while the rest of the batch — and
+// the watermark bump for the rejected mutation — still commits.
 //
 // Per-client watermark rules: mutation_id <= watermark is ALREADY_APPLIED, or
 // REJECTED again if that id's verdict is still on record (which is what keeps a
@@ -164,7 +163,12 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// Which mutation may read which row from a shared fetch; a pure function of
 	// the wire batch, so it survives a closure retry unchanged.
 	owners := batchRowOwners(muts)
-	err = s.store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+	// Whether mutations apply inside savepoints. Read by the closure, never
+	// written by it: the storage adapter may invoke the closure again on its own
+	// (see the storage.Adapter contract), and such a retry must repeat the same
+	// attempt rather than switch mode underneath itself.
+	guarded := false
+	apply := func(tx storage.WriteTx) error {
 		// The adapter may run this closure more than once (see the
 		// storage.Adapter contract): reset everything captured from outside
 		// so a retried attempt does not duplicate results.
@@ -258,12 +262,17 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 
 			var seq uint64
+			var applyErr error
 			rows.at = i
-			applyErr := tx.InSavepoint(func() error {
-				var err error
-				seq, err = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
-				return err
-			})
+			if guarded {
+				applyErr = tx.InSavepoint(func() error {
+					var err error
+					seq, err = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
+					return err
+				})
+			} else {
+				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
+			}
 
 			var result *syncplanev1.MutationResult
 			switch r, isRejection := AsRejection(applyErr); {
@@ -275,6 +284,12 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					Seq:        seq,
 				}
 			case isRejection:
+				if !guarded {
+					// Nothing rewound the rejected mutation's partial writes, so
+					// this attempt cannot go on; the caller rolls it back and runs
+					// the batch again under savepoints.
+					return errNeedsSavepoints
+				}
 				// The savepoint already rolled the mutation's writes back; a
 				// rejected mutation consumes no sequence.
 				result = &syncplanev1.MutationResult{
@@ -325,7 +340,22 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			}
 		}
 		return nil
-	})
+	}
+	// A savepoint pair is two statements per mutation, and on a networked
+	// adapter every statement is paid for whether or not the database spends any
+	// time on it — for a 256-mutation batch the pairs are half of everything the
+	// transaction sends. Rejections are rare (a CAS conflict, a refused write, an
+	// oversized value), so the batch runs unguarded first and pays for the
+	// rewind machinery only in the batches that turn out to need it: the whole
+	// attempt is discarded and replayed with every mutation in its own savepoint.
+	// Replaying is safe because the closure rebuilds everything it reports from
+	// the transaction it is handed.
+	err = s.store.WithWriteTx(ctx, ws, apply)
+	if errors.Is(err, errNeedsSavepoints) {
+		guarded = true
+		s.tel().pushSavepointReruns.Add(ctx, 1)
+		err = s.store.WithWriteTx(ctx, ws, apply)
+	}
 	switch {
 	case gap != "":
 		// errAbortBatch only exists to roll the transaction back; the verdict
@@ -571,6 +601,12 @@ func (b *batchRows) get(entity, key string) (storage.Row, error) {
 // sees an ordinary closure failure and the client sees a typed code.
 var errAbortBatch = errors.New("push batch aborted")
 
+// errNeedsSavepoints rolls a push's first, unguarded write attempt back when a
+// mutation is rejected: without a savepoint around it nothing rewound the rows
+// it wrote before failing. It never escapes pushWorkspace — the batch is run
+// again with every mutation guarded, and that attempt decides the outcome.
+var errNeedsSavepoints = errors.New("push batch needs savepoints")
+
 // mutationLabel names a mutation's target for logging: the entity for CRUD, the
 // mutator name for a custom mutation, or a batch summary. Best-effort and
 // side-effect free.
@@ -683,15 +719,15 @@ func (s *Server) checkCrudLimits(crud *syncplanev1.CrudMutation) error {
 	return nil
 }
 
-// applyMutation runs one mutation inside its push savepoint and returns the
-// sequence it was assigned. Deterministic validation failures (bad payload,
+// applyMutation applies one mutation of a push batch and returns the sequence
+// it was assigned. Deterministic validation failures (bad payload,
 // unknown entity/mutator/field, oversized value) surface as *Rejection errors
 // so the caller acks and rolls them back instead of wedging the queue; only
 // genuine infrastructure errors abort the batch.
 //
 // authErr carries the precomputed CanMutate verdict for this mutation (see
 // Push): the hook already ran outside the tx, so a non-nil authErr is replayed
-// here — a Rejection rolls the savepoint back and acks, a non-rejection aborts
+// here — a Rejection rolls the mutation back and acks, a non-rejection aborts
 // the batch. checkLimits (cheap, deterministic) still runs first.
 //
 // g is the same gate authorization warmed, carried in for the CRUD writes. It
@@ -740,9 +776,9 @@ func (s *Server) applyMutation(
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
-		// All sub-mutations share this one sequence and run inside the caller's
-		// savepoint, so the batch is atomic: the first rejection aborts the
-		// whole mutation and the savepoint rolls every row back. Applying in
+		// All sub-mutations share this one sequence and are rewound together by
+		// the caller, so the batch is atomic: the first rejection aborts the
+		// whole mutation and every row it wrote rolls back. Applying in
 		// order lets a later sub-mutation observe earlier ones (e.g. PATCH the
 		// row a preceding PUT created). An empty batch is rejected in
 		// checkLimits, above.
@@ -824,7 +860,7 @@ func (s *Server) applyCrud(
 	}
 
 	// The stored row as it stands before this mutation, fetched at most once.
-	// Four sites inside this one savepoint want it — the CAS guard below, the
+	// Four sites inside this one mutation want it — the CAS guard below, the
 	// PUT text union, the PATCH merge base and history capture — and each has to
 	// treat an absent row and a tombstone alike; one fetch behind one `live`
 	// flag is what keeps that handling from drifting apart between them.
