@@ -48,6 +48,11 @@ export async function startBenchServer(opts: BenchServerOptions): Promise<BenchS
 		stdio: 'inherit',
 	});
 
+	const pgDsn = process.env[PG_DSN_ENV];
+	if (pgDsn !== undefined && pgDsn !== '') {
+		return startPostgresServer(bin, pgDsn, opts, log);
+	}
+
 	const version = execFileSync(bin, [ '-corpus-version' ], { encoding: 'utf8' }).trim();
 	const tiers = [ ...opts.tiers ].sort();
 	const cached = join(cacheDir, `corpus-v${version}-${tiers.join('')}-s${opts.seed}.db`);
@@ -69,6 +74,46 @@ export async function startBenchServer(opts: BenchServerOptions): Promise<BenchS
 			rmSync(runDb, { force: true });
 		},
 	};
+}
+
+/**
+ * A postgres:// DSN naming a database the benchmark may drop and recreate. Set,
+ * it replaces the SQLite corpus cache: every run resets that database and seeds
+ * the requested tiers into it, so the numbers describe the engine on the store a
+ * multi-node deployment runs — at the price of seeding on every run rather than
+ * once per fingerprint.
+ */
+export const PG_DSN_ENV = 'SYNC_BENCH_PG_DSN';
+
+/**
+ * Spawns the server on a Postgres database it has just reset, and seeds every
+ * requested tier into it. There is no cache to protect: the reset is what makes
+ * one run's writes invisible to the next.
+ */
+async function startPostgresServer(
+	bin: string,
+	dsn: string,
+	opts: BenchServerOptions,
+	log: (message: string) => void,
+): Promise<BenchServer> {
+	const server = await spawnServer(bin, [ `-db=${dsn}`, '-db-reset', ...(opts.args ?? []) ]);
+	log(`seeding corpus (${opts.tiers.join(', ')}) into Postgres`);
+	try {
+		for (const tier of [ ...opts.tiers ].sort()) {
+			const started = Date.now();
+			const res = await fetch(new URL('/debug/seed', server.url), {
+				method: 'POST',
+				body: JSON.stringify({ tier, seed: opts.seed }),
+			});
+			if (!res.ok) throw new Error(`seeding tier ${tier} failed: ${await res.text()}`);
+			const body = await res.json() as { counts: { total: number } };
+			log(`  tier ${tier}: ${body.counts.total} rows in ${Date.now() - started}ms`);
+		}
+	} catch (err) {
+		server.stop();
+		throw err;
+	}
+	return { url: server.url, stop: () => server.stop() };
 }
 
 /**

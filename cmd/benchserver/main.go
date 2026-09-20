@@ -10,6 +10,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net"
@@ -17,9 +18,14 @@ import (
 	"net/http/pprof"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 	"github.com/levelfourab/syncplane/internal/benchapp"
 	"github.com/levelfourab/syncplane/internal/clilog"
@@ -27,7 +33,8 @@ import (
 
 func main() {
 	var (
-		dbPath    = flag.String("db", "", "SQLite database path (default: temp file)")
+		dbPath    = flag.String("db", "", "SQLite database path, or a postgres:// DSN (default: temp file)")
+		dbReset   = flag.Bool("db-reset", false, "drop and recreate the database a postgres:// -db names before opening it")
 		addr      = flag.String("addr", "127.0.0.1:0", "listen address")
 		heartbeat = flag.Duration("heartbeat", 30*time.Second, "Subscribe stream heartbeat interval")
 		// The engine's default coalescing window would fold a benchmark's
@@ -49,20 +56,38 @@ func main() {
 	}
 	logger := buildLogger()
 
-	if *dbPath == "" {
-		dir, err := os.MkdirTemp("", "syncbench-*")
-		if err != nil {
-			clilog.Fatal(logger, "create temp dir", err)
+	var store storage.Adapter
+	if isPostgresDSN(*dbPath) {
+		if *dbReset {
+			if err := resetDatabase(context.Background(), *dbPath); err != nil {
+				clilog.Fatal(logger, "reset database", err)
+			}
 		}
-		defer os.RemoveAll(dir)
-		*dbPath = filepath.Join(dir, "bench.db")
+		pg, err := pgstore.Open(context.Background(), *dbPath)
+		if err != nil {
+			clilog.Fatal(logger, "open store", err)
+		}
+		defer pg.Close()
+		store = pg
+	} else {
+		if *dbReset {
+			clilog.Fatal(logger, "flags", fmt.Errorf("-db-reset requires -db to be a postgres:// DSN"))
+		}
+		if *dbPath == "" {
+			dir, err := os.MkdirTemp("", "syncbench-*")
+			if err != nil {
+				clilog.Fatal(logger, "create temp dir", err)
+			}
+			defer os.RemoveAll(dir)
+			*dbPath = filepath.Join(dir, "bench.db")
+		}
+		sqlite, err := sqlitestore.Open(*dbPath)
+		if err != nil {
+			clilog.Fatal(logger, "open store", err)
+		}
+		defer sqlite.Close()
+		store = sqlite
 	}
-
-	store, err := sqlitestore.Open(*dbPath)
-	if err != nil {
-		clilog.Fatal(logger, "open store", err)
-	}
-	defer store.Close()
 
 	opts := append(benchapp.Options(),
 		server.WithHeartbeat(*heartbeat),
@@ -108,6 +133,39 @@ func main() {
 	os.Stdout.Sync()
 
 	clilog.Fatal(logger, "http server stopped", http.Serve(ln, cors(mux)))
+}
+
+// isPostgresDSN tells a Postgres DSN from a SQLite path by URI scheme, exactly
+// as syncplaned does for its -db flag.
+func isPostgresDSN(db string) bool {
+	return strings.HasPrefix(db, "postgres://") || strings.HasPrefix(db, "postgresql://")
+}
+
+// resetDatabase drops and recreates the database `dsn` names, connecting to the
+// server's maintenance database with the same credentials. A benchmark run
+// writes to its corpus, so each run starts from an empty database it then seeds,
+// the way a SQLite run starts from a fresh copy of the cached file.
+func resetDatabase(ctx context.Context, dsn string) error {
+	cfg, err := pgx.ParseConfig(dsn)
+	if err != nil {
+		return err
+	}
+	name := cfg.Database
+	if name == "" || name == "postgres" {
+		return fmt.Errorf("-db-reset refuses to reset database %q", name)
+	}
+	cfg.Database = "postgres"
+	conn, err := pgx.ConnectConfig(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	defer conn.Close(ctx)
+	quoted := pgx.Identifier{name}.Sanitize()
+	if _, err := conn.Exec(ctx, "DROP DATABASE IF EXISTS "+quoted+" WITH (FORCE)"); err != nil {
+		return err
+	}
+	_, err = conn.Exec(ctx, "CREATE DATABASE "+quoted)
+	return err
 }
 
 // cors is permissive because this binary only ever serves the benchmark
