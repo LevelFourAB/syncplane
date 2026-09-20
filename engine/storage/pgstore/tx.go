@@ -826,28 +826,44 @@ func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry)
 		idxs[i], ks[i] = e.Index, notNilBytes(e.Key)
 	}
 	// Both directions ride in one data-modifying CTE, which is one round trip
-	// where two statements were two. The DELETE runs whether or not the main
-	// query reads it, and neither half sees the other's effect on the table —
-	// which is safe here because the DELETE takes only entries OUTSIDE the new
-	// set and the INSERT adds only entries inside it, so the rows they touch
-	// are disjoint by construction.
+	// where two statements were two. Every part reads the same snapshot, so
+	// have holds the row's entries as they stood before the statement and the
+	// two halves cannot see each other's effect: the DELETE takes only entries
+	// OUTSIDE the new set and the INSERT adds only entries inside it that have
+	// does not already hold, so the rows they touch are disjoint by
+	// construction.
 	//
-	// DO NOTHING rather than failing: it absorbs both the entries that are
-	// already stored and a caller that passed the same entry twice — two
-	// components of one index can encode to the same entry for one row only
-	// that way, and failing the whole write on a harmless caller bug would
-	// stick the write path. There are no non-key columns, so there is nothing
-	// an update would change.
+	// Filtering the INSERT against have is what makes an unchanged entry free.
+	// The obvious shape — insert the whole set under ON CONFLICT DO NOTHING and
+	// let the primary key sort it out — makes every row a SPECULATIVE insert,
+	// so Postgres descends the wide primary key once per entry only to discard
+	// it, for all but the two or three a PATCH moved. have comes off
+	// index_entries_by_row, the index the DELETE scans anyway, at one descent
+	// for the whole row. Replacing a 31-entry row of which 3 changed, in a
+	// 1.6M-entry table: 189 buffers down to 36, and half the wall time of a
+	// 200-row push (see BenchmarkPutIndexEntries).
+	//
+	// DISTINCT because the caller may hand in the same entry twice — two
+	// components of one index can encode to the same entry for one row — and
+	// the primary key would refuse the second copy. Collapsing the duplicate
+	// here is what keeps that harmless caller bug off the write path. It is the
+	// only conflict there is to absorb: a write transaction holds the workspace
+	// advisory lock, so nothing else writes this row's entries while the
+	// statement runs.
 	return t.queue(
-		`WITH want AS (SELECT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)),
-		      stale AS (
-		          DELETE FROM index_entries
+		`WITH want AS (SELECT DISTINCT u.idx, u.k FROM unnest($5::text[], $6::bytea[]) AS u(idx, k)),
+		      have AS (
+		          SELECT idx, k FROM index_entries
 		          WHERE namespace = $1 AND workspace_id = $2 AND entity = $3 AND key = $4
-		            AND (idx, k) NOT IN (SELECT w.idx, w.k FROM want w)
+		      ),
+		      stale AS (
+		          DELETE FROM index_entries e
+		          WHERE e.namespace = $1 AND e.workspace_id = $2 AND e.entity = $3 AND e.key = $4
+		            AND NOT EXISTS (SELECT 1 FROM want w WHERE w.idx = e.idx AND w.k = e.k)
 		      )
 		 INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
 		 SELECT $1::text, $2::text, $3::text, w.idx, w.k, $4::text FROM want w
-		 ON CONFLICT DO NOTHING`,
+		 WHERE NOT EXISTS (SELECT 1 FROM have h WHERE h.idx = w.idx AND h.k = w.k)`,
 		t.ns, t.ws, entity, key, idxs, ks,
 	)
 }
