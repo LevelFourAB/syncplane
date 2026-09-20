@@ -1422,6 +1422,7 @@ interface RegisterResult {
 import {
 	DEFAULT_STORAGE_PREFIX,
 	IDBKVStore,
+	type IndexEntry,
 	type KVRead,
 	type KVStore,
 	type KVWrite,

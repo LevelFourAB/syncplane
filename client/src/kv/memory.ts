@@ -1,4 +1,4 @@
-import { type KVRead, type KVStore, type KVWrite, positionsOf } from './store.js';
+import { type IndexEntry, type KVRead, type KVStore, type KVWrite, positionsOf } from './store.js';
 
 /**
  * In-memory KVStore for tests and Node usage.
@@ -77,7 +77,11 @@ class MemoryRead implements KVRead {
 	 * the asymptotics of the two paths still match.
 	 */
 	async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		for (const [ , k ] of this.indexPairs(lo, hi)) yield k;
+		for (const entry of this.indexEntries(lo, hi)) yield entry.key;
+	}
+
+	async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		yield* this.indexEntries(lo, hi);
 	}
 
 	async indexSeek(
@@ -85,28 +89,32 @@ class MemoryRead implements KVRead {
 		hi?: string,
 		direction: 'asc' | 'desc' = 'asc',
 	): Promise<{ position: string; key: string } | undefined> {
-		const pairs = this.indexPairs(lo, hi);
-		const at = direction === 'desc' ? pairs[pairs.length - 1] : pairs[0];
-		return at === undefined ? undefined : { position: at[0], key: at[1] };
+		const entries = this.indexEntries(lo, hi);
+		const at = direction === 'desc' ? entries[entries.length - 1] : entries[0];
+		return at === undefined ? undefined : { position: at.position, key: at.key };
 	}
 
-	/** The (position, record key) pairs of a range, in the order an IDB index
-	 * over the same records yields them. */
-	private indexPairs(lo?: string, hi?: string): [string, string][] {
-		const pairs: [string, string][] = [];
+	/** The entries of a range, in the order an IDB index over the same records
+	 * yields them. */
+	private indexEntries(lo?: string, hi?: string): IndexEntry[] {
+		const entries: IndexEntry[] = [];
 		for (const [ k, v ] of this.snapshot) {
 			for (const position of positionsOf(v)) {
 				if ((lo === undefined || position >= lo) && (hi === undefined || position < hi)) {
-					pairs.push([ position, k ]);
+					entries.push({ position, key: k, value: v });
 				}
 			}
 		}
 		// Position order, ties broken on the record key — what an IDB index over
 		// the same records yields, so a caller cannot tell the backends apart.
-		pairs.sort((a, b) =>
-			a[0] !== b[0] ? (a[0] < b[0] ? -1 : 1) : a[1] !== b[1] ? (a[1] < b[1] ? -1 : 1) : 0
+		entries.sort((a, b) =>
+			a.position !== b.position
+				? (a.position < b.position ? -1 : 1)
+				: a.key !== b.key
+				? (a.key < b.key ? -1 : 1)
+				: 0
 		);
-		return pairs;
+		return entries;
 	}
 
 	async indexCount(lo?: string, hi?: string): Promise<number> {

@@ -77,7 +77,7 @@ export { BASE_62_DIGITS, generateKeyBetween, generateNKeysBetween } from './frac
 export { newId } from './id.js';
 export { IDBKVStore } from './kv/idb.js';
 export { MemoryKVStore } from './kv/memory.js';
-export type { KVRead, KVStore, KVWrite } from './kv/store.js';
+export type { IndexEntry, KVRead, KVStore, KVWrite } from './kv/store.js';
 // What SyncClientOptions.mergers names, plus the mask merge itself — a reader
 // that walks field history folds each record back over the live row with it.
 // The registry and the ref plumbing around them stay module-private.

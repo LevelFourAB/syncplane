@@ -9,6 +9,7 @@
 //   - a maintained result keeps its facets from the rows a commit moved, and
 //     re-emits when only they changed.
 
+import 'fake-indexeddb/auto';
 import { create, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
@@ -16,6 +17,7 @@ import { SyncClient } from '../../src/client.js';
 import type { RowSet } from '../../src/coverage.js';
 import { RowChangeSchema } from '../../src/gen/syncplane/v1/patch_pb.js';
 import { metaCursor } from '../../src/keys.js';
+import { IDBKVStore } from '../../src/kv/idb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVStore } from '../../src/kv/store.js';
 import { EntityRegistry } from '../../src/mutations.js';
@@ -458,6 +460,86 @@ describe('a faceted query whose range outgrows the candidate ceiling', () => {
 			expect(rows.facets).toEqual({ area: [ g('home', 12, A), g('work', 12, A) ] });
 		} finally {
 			restore();
+		}
+	});
+});
+
+/**
+ * A range wider than one store request. The IDB backend takes such a range in
+ * growing chunks and resumes each one at the last position it yielded, which no
+ * memory-backed test can reach — so this asks both backends the same question
+ * and requires the same answer. How a store cuts a range into requests is not
+ * something a caller may be able to see.
+ */
+describe('a faceted query whose range outruns one store request', () => {
+	// Six rows in seven carry `open`, which puts the walked range past every
+	// chunk size the backend starts at, and area cycles so the fold has
+	// something to count.
+	const WIDE: Record<string, Task[]> = {
+		[A]: Array.from({ length: 700 }, (_, i) =>
+			row(
+				`w${String(i).padStart(3, '0')}`,
+				i % 7 === 0 ? 'done' : 'open',
+				[ 'home', 'work', '' ][i % 3]!,
+				i,
+			)),
+		[B]: [],
+	};
+
+	const wide: Query<Task> = {
+		where: (t) => t.state.eq('open'),
+		orderBy: (t) => [ t.rank.desc() ],
+		limit: 5,
+		facets: { area: (t) => t.area },
+	};
+
+	/** The page one backend answers `wide` with, and what the walk cost. */
+	async function answer(kv: KVStore) {
+		const indexes = new IndexCache(registry);
+		await seedConfirmed(kv, indexes, WIDE);
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, A);
+		const tx = await kv.read();
+		const report: IndexReport = { candidates: 0 };
+		try {
+			const page = await queryByIndex(
+				tx,
+				registry,
+				registry.get('task')!,
+				TaskSchema,
+				indexes.for('task'),
+				prepareQuery(TaskSchema, compileQuery<Task>(wide)),
+				A,
+				undefined,
+				report,
+			);
+			return {
+				keys: page!.rows.map((e) => e.row.key),
+				total: page!.total,
+				facets: page!.facets,
+				report,
+			};
+		} finally {
+			tx.release();
+		}
+	}
+
+	it('answers it as the reference backend does, walking every position once', async () => {
+		const idb = await IDBKVStore.open('facets-wide');
+		try {
+			const reference = await answer(new MemoryKVStore());
+			const chunked = await answer(idb);
+			expect(chunked.keys).toEqual(reference.keys);
+			expect(chunked.total).toBe(600);
+			expect(chunked.total).toBe(reference.total);
+			expect(chunked.facets).toEqual(reference.facets);
+			expect(chunked.report.declined).toBeUndefined();
+			// One per matching position and not one more: a chunk that resumed
+			// where the last one ended would count its boundary twice.
+			expect(chunked.report.candidates).toBe(600);
+			expect(chunked.report.candidates).toBe(reference.report.candidates);
+		} finally {
+			await idb.close();
 		}
 	});
 });

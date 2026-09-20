@@ -49,7 +49,7 @@ import {
 	overlayWsPrefix,
 	splitOverlayTextSuffix,
 } from '../keys.js';
-import type { KVRead } from '../kv/store.js';
+import type { IndexEntry, KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
@@ -445,12 +445,21 @@ export async function queryByIndex<D extends DescMessage>(
 	// batch flushes, in position order, so the outcome per row is the same as
 	// reading them one at a time.
 	let batch: string[] = [];
+	// The candidate rows themselves, on the walk that reads them alongside their
+	// positions — one request per chunk of the range rather than one per batch
+	// of keys. Undefined on the walk that settles at the page, which names far
+	// fewer rows than the range holds and must not read the rest.
+	let batchRows: unknown[] | undefined = readsPastThePage ? [] : undefined;
 	const flush = async (): Promise<void> => {
 		if (batch.length === 0) return;
 		const keys = batch;
+		const rows = batchRows;
 		batch = [];
+		if (batchRows !== undefined) batchRows = [];
 		for (
-			const entry of await readConfirmedMany(tx, registry, def, schema, workspaceId, keys, view)
+			const entry of rows === undefined
+				? await readConfirmedMany(tx, registry, def, schema, workspaceId, keys, view)
+				: await decodeConfirmedMany(tx, registry, def, schema, workspaceId, keys, rows, view)
 		) {
 			// A position and its row are one record, so a position cannot outlive
 			// its row — and a reader holds the shared lock, so no commit lands
@@ -472,7 +481,11 @@ export async function queryByIndex<D extends DescMessage>(
 	};
 
 	ranges: for (const { lo, hi } of legs) {
-		for await (const cKey of tx.indexScan(lo, hi)) {
+		const entries: AsyncIterable<string | IndexEntry> = batchRows === undefined
+			? tx.indexScan(lo, hi)
+			: tx.indexScanRows(lo, hi);
+		for await (const at of entries) {
+			const cKey = typeof at === 'string' ? at : at.key;
 			walked++;
 			// A position of THIS index can only sit on a row of this entity and
 			// workspace — that is what its prefix means, and the bounds above are
@@ -541,6 +554,7 @@ export async function queryByIndex<D extends DescMessage>(
 			}
 			if (++reads > readCeiling) return decline(report, 'budget', walked);
 			batch.push(key);
+			batchRows?.push((at as IndexEntry).value);
 			if (batch.length >= READ_BATCH) await flush();
 		}
 	}
@@ -767,9 +781,17 @@ async function walkGroup<D extends DescMessage>(
 	distinct: boolean,
 ): Promise<GroupContribution | undefined> {
 	const keys: string[] = [];
+	// A group that is read whole takes its rows alongside their positions. A
+	// distinct read stops at the first row that survives the residual, so it
+	// names the rows and reads only as far as it gets.
+	const records: unknown[] | undefined = distinct ? undefined : [];
 	const seen = new Set<string>();
 	let walked = 0;
-	for await (const cKey of at.tx.indexScan(lo, hi)) {
+	const entries: AsyncIterable<string | IndexEntry> = records === undefined
+		? at.tx.indexScan(lo, hi)
+		: at.tx.indexScanRows(lo, hi);
+	for await (const entry of entries) {
+		const cKey = typeof entry === 'string' ? entry : entry.key;
 		walked++;
 		if (walked > at.ceiling) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
@@ -779,20 +801,32 @@ async function walkGroup<D extends DescMessage>(
 		if (seen.has(key)) continue;
 		seen.add(key);
 		keys.push(key);
+		records?.push((entry as IndexEntry).value);
 	}
 	let value: GroupValue | undefined;
 	let count = 0;
 	for (let i = 0; i < keys.length; i += READ_BATCH) {
 		const batch = keys.slice(i, i + READ_BATCH);
-		const rows = await readConfirmedMany(
-			at.tx,
-			at.registry,
-			at.def,
-			at.schema,
-			at.workspaceId,
-			batch,
-			at.view,
-		);
+		const rows = records === undefined
+			? await readConfirmedMany(
+				at.tx,
+				at.registry,
+				at.def,
+				at.schema,
+				at.workspaceId,
+				batch,
+				at.view,
+			)
+			: await decodeConfirmedMany(
+				at.tx,
+				at.registry,
+				at.def,
+				at.schema,
+				at.workspaceId,
+				batch,
+				records.slice(i, i + READ_BATCH),
+				at.view,
+			);
 		for (const entry of rows) {
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, at.plan.residual, at.schema)) continue;
@@ -949,20 +983,40 @@ async function walkGroupRows<D extends DescMessage>(
 	let total = 0;
 	let walked = 0;
 	let batch: string[] = [];
+	// The rows themselves, on the walk that owes the group every one of them —
+	// a total to report, or a residual that can reject any row it reads. A walk
+	// bounded to `perGroup + 1` matching rows names them instead, so that it
+	// reads no further than it must.
+	let batchRows: unknown[] | undefined = wantTotal || at.plan.residual !== undefined
+		? []
+		: undefined;
 	const flush = async (): Promise<void> => {
 		if (batch.length === 0) return;
 		const keys = batch;
+		const held = batchRows;
 		batch = [];
+		if (batchRows !== undefined) batchRows = [];
 		for (
-			const entry of await readConfirmedMany(
-				at.tx,
-				at.registry,
-				at.def,
-				at.schema,
-				at.workspaceId,
-				keys,
-				at.view,
-			)
+			const entry of held === undefined
+				? await readConfirmedMany(
+					at.tx,
+					at.registry,
+					at.def,
+					at.schema,
+					at.workspaceId,
+					keys,
+					at.view,
+				)
+				: await decodeConfirmedMany(
+					at.tx,
+					at.registry,
+					at.def,
+					at.schema,
+					at.workspaceId,
+					keys,
+					held,
+					at.view,
+				)
 		) {
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, at.plan.residual, at.schema)) continue;
@@ -971,11 +1025,16 @@ async function walkGroupRows<D extends DescMessage>(
 			if (rows.length < compiled.perGroup) rows.push(entry);
 		}
 	};
-	for await (const cKey of at.tx.indexScan(lo, hi)) {
+	const entries: AsyncIterable<string | IndexEntry> = batchRows === undefined
+		? at.tx.indexScan(lo, hi)
+		: at.tx.indexScanRows(lo, hi);
+	for await (const entry of entries) {
+		const cKey = typeof entry === 'string' ? entry : entry.key;
 		walked++;
 		if (walked > at.ceiling) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
 		batch.push(cKey.slice(at.rowPrefix.length));
+		batchRows?.push((entry as IndexEntry).value);
 		// The walk reads ahead by a batch, and `total` only moves during a flush,
 		// so sizing the batch to what the group still needs is what keeps it from
 		// reading rows nothing will look at. Each position is a distinct row —
@@ -1660,6 +1719,24 @@ async function readConfirmedMany<D extends DescMessage>(
 	view?: DescMessage,
 ): Promise<(IndexedRow<MessageShape<D>> | undefined)[]> {
 	const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
+	return decodeConfirmedMany(tx, registry, def, schema, workspaceId, keys, records, view);
+}
+
+/**
+ * readConfirmedMany over records the caller already holds — what an index walk
+ * that read its rows alongside their positions has (see KVRead.indexScanRows).
+ * `records` is parallel to `keys`, and an undefined slot is a missing row.
+ */
+async function decodeConfirmedMany<D extends DescMessage>(
+	tx: KVRead,
+	registry: EntityRegistry,
+	def: EntityDef,
+	schema: D,
+	workspaceId: string,
+	keys: readonly string[],
+	records: readonly unknown[],
+	view?: DescMessage,
+): Promise<(IndexedRow<MessageShape<D>> | undefined)[]> {
 	const out: (IndexedRow<MessageShape<D>> | undefined)[] = new Array(keys.length);
 	for (let i = 0; i < keys.length; i++) {
 		const record = records[i] as ConfirmedRecord | undefined;

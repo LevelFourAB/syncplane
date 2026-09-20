@@ -12,7 +12,7 @@ import {
 } from '../../src/gen/syncplane/v1/service_pb.js';
 import { metaCursor, metaLastMutationId, metaPushedThrough, pendingKey } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import type { KVWrite } from '../../src/kv/store.js';
+import type { IndexEntry, KVWrite } from '../../src/kv/store.js';
 import { buildPut, EntityRegistry } from '../../src/mutations.js';
 import { createKvMutex } from '../../src/mutex.js';
 import { enqueuePending, readPending } from '../../src/optimistic/queue.js';
@@ -101,6 +101,10 @@ class HookedWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		return this.inner.indexScanRows(lo, hi);
 	}
 
 	indexCount(lo?: string, hi?: string): Promise<number> {

@@ -15,7 +15,7 @@
  * other spec in this tier — the meter only counts what goes past.
  */
 
-import type { KVRead, KVStore, KVWrite } from '../../../src/kv/store.js';
+import type { IndexEntry, KVRead, KVStore, KVWrite } from '../../../src/kv/store.js';
 
 /** Bytes committed per keyspace since the last reset. See keys.ts for the layout. */
 export interface WriteTally {
@@ -172,6 +172,10 @@ class MeteredWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		return this.inner.indexScanRows(lo, hi);
 	}
 
 	indexCount(lo?: string, hi?: string): Promise<number> {

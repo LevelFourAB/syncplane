@@ -1,5 +1,12 @@
 import { safeRun } from '../report.js';
-import { INDEX_FIELD, type KVRead, type KVStore, type KVWrite, positionsOf } from './store.js';
+import {
+	INDEX_FIELD,
+	type IndexEntry,
+	type KVRead,
+	type KVStore,
+	type KVWrite,
+	positionsOf,
+} from './store.js';
 
 export interface IDBKVStoreOptions {
 	/**
@@ -220,12 +227,104 @@ const INDEX_SCAN_CHUNK = 128;
 const SCAN_CHUNK = 256;
 const SCAN_CHUNK_MAX = 8192;
 
-/** Orders (position, key) pairs the way an IDB index does: by index key, ties
- * broken on the record's primary key. */
-function comparePositions(a: readonly [string, string], b: readonly [string, string]): number {
-	if (a[0] !== b[0]) return a[0] < b[0] ? -1 : 1;
-	if (a[1] !== b[1]) return a[1] < b[1] ? -1 : 1;
+/**
+ * Entries one indexScanRows request materializes before yielding, and the cap
+ * requests grow toward.
+ *
+ * Capped where indexScan's growth is not, because the two pay differently for a
+ * continuation: indexScan re-requests the whole prefix it already yielded, so
+ * only unbounded growth keeps that under a constant factor, while this one
+ * resumes at the last position and re-reads nothing but a tie group. What grows
+ * here is the records held in memory at once, and the cap is what bounds them.
+ */
+const INDEX_ROW_CHUNK = 256;
+const INDEX_ROW_CHUNK_MAX = 8192;
+
+/** One entry of an IDB index, as getAllRecords answers with it: `key` is the
+ * index key, `primaryKey` the record's. */
+interface IDBIndexRecord {
+	key: string;
+	primaryKey: string;
+	value: unknown;
+}
+
+/**
+ * `IDBIndex.getAllRecords`, declared here because TypeScript's lib.dom has no
+ * definition for it yet. Engines that predate it are served by the paired
+ * getAllKeys/getAll request instead, so every use is feature-detected.
+ */
+interface RecordReadingIndex extends IDBIndex {
+	getAllRecords(
+		options?: { query?: IDBKeyRange | null; count?: number },
+	): IDBRequest<IDBIndexRecord[]>;
+}
+
+function readsRecords(index: IDBIndex): RecordReadingIndex | undefined {
+	return 'getAllRecords' in index ? index as RecordReadingIndex : undefined;
+}
+
+/** Orders index entries the way an IDB index does: by index key, ties broken on
+ * the record's primary key. */
+function comparePositions(a: IndexEntry, b: IndexEntry): number {
+	if (a.position !== b.position) return a.position < b.position ? -1 : 1;
+	if (a.key !== b.key) return a.key < b.key ? -1 : 1;
 	return 0;
+}
+
+/**
+ * Which position each record of a paired getAllKeys/getAll chunk was returned
+ * for, recovered from the record's own INDEX_FIELD list.
+ *
+ * getAllKeys on an index answers with PRIMARY keys, so the position is not in
+ * the response. It is recoverable because the response is in position order: a
+ * record's n-th appearance in the chunk is its n-th position inside [lo, hi).
+ *
+ * The single-position case — every entry of an index nothing fans out on —
+ * builds no list at all. This runs once per entry of a bulk read, so a list per
+ * record is a cost the read cannot absorb.
+ */
+function recoverEntries(
+	keys: readonly string[],
+	values: readonly unknown[],
+	lo: string | undefined,
+	hi: string | undefined,
+): IndexEntry[] {
+	const within = (p: string): boolean =>
+		(lo === undefined || p >= lo) && (hi === undefined || p < hi);
+	const entries: IndexEntry[] = [];
+	// Only a record holding SEVERAL positions of the range needs a count of the
+	// times it has been seen, and an index without fan-out gives none.
+	let repeats: Map<string, number> | undefined;
+	for (let i = 0; i < keys.length; i++) {
+		const key = keys[i]!;
+		const value = values[i];
+		const ix = typeof value === 'object' && value !== null
+			? (value as Record<string, unknown>)[INDEX_FIELD]
+			: undefined;
+		if (!Array.isArray(ix)) continue;
+		let position: string | undefined;
+		let several = false;
+		for (const p of ix as string[]) {
+			if (!within(p)) continue;
+			if (position === undefined) position = p;
+			else if (p !== position) {
+				several = true;
+				if (p < position) position = p;
+			}
+		}
+		if (position === undefined) continue;
+		if (several) {
+			repeats ??= new Map();
+			const n = repeats.get(key) ?? 0;
+			repeats.set(key, n + 1);
+			if (n > 0) {
+				position = [ ...new Set(ix as string[]) ].filter(within).sort()[n];
+				if (position === undefined) continue;
+			}
+		}
+		entries.push({ position, key, value });
+	}
+	return entries;
 }
 
 class IDBRead implements KVRead {
@@ -323,6 +422,64 @@ class IDBRead implements KVRead {
 			yielded = keys.length;
 			want *= 2;
 		}
+	}
+
+	async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		if (emptyRange(lo, hi)) return;
+		let want = INDEX_ROW_CHUNK;
+		let from = lo;
+		// The last entry yielded, which the next request resumes AT rather than
+		// after: a position can be held by several records and the request range
+		// is over positions alone, so the range has to take the position again
+		// and the entries at or before this one are dropped here.
+		let last: IndexEntry | undefined;
+		for (;;) {
+			const chunk = await this.indexChunk(from, hi, want);
+			let fresh = 0;
+			for (const entry of chunk) {
+				if (last !== undefined && comparePositions(entry, last) <= 0) continue;
+				last = entry;
+				fresh++;
+				yield entry;
+			}
+			// Short of what was asked for means the range is exhausted. Each
+			// request opens its own transaction; the client holds a shared lock
+			// across a logical read, so no commit lands between them (see the
+			// class docs).
+			if (chunk.length < want) return;
+			if (last !== undefined) from = last.position;
+			// A whole chunk of already-yielded entries means the tie group at
+			// `last` is longer than the request, and only a bigger request gets
+			// past it — so that case grows past the cap rather than spinning.
+			want = fresh === 0 ? want * 2 : Math.min(want * 2, INDEX_ROW_CHUNK_MAX);
+		}
+	}
+
+	/**
+	 * Up to `want` entries of [lo, hi) in one request, in index order.
+	 *
+	 * getAllRecords answers with the index key, the primary key and the value
+	 * together; where it is missing, the same chunk takes a paired
+	 * getAllKeys/getAll on ONE transaction — so the two describe the same
+	 * entries — and the positions are recovered from the records.
+	 */
+	protected async indexChunk(
+		lo: string | undefined,
+		hi: string | undefined,
+		want: number,
+	): Promise<IndexEntry[]> {
+		const index = this.store().index(INDEX_FIELD);
+		const range = boundRange(lo, hi);
+		const full = readsRecords(index);
+		if (full !== undefined) {
+			const records = await requestDone(full.getAllRecords({ query: range, count: want }));
+			return records.map((r) => ({ position: r.key, key: r.primaryKey, value: r.value }));
+		}
+		const [ keys, values ] = await Promise.all([
+			requestDone(index.getAllKeys(range, want)) as Promise<string[]>,
+			requestDone(index.getAll(range, want)),
+		]);
+		return recoverEntries(keys, values, lo, hi);
 	}
 
 	async indexSeek(
@@ -425,7 +582,13 @@ class IDBWrite extends IDBRead implements KVWrite {
 	 * semantics are worth more here than the request-shaped ones above.
 	 */
 	override async *indexScan(lo?: string, hi?: string): AsyncIterable<string> {
-		for (const [ , k ] of await this.indexPairs(lo, hi)) yield k;
+		for (const entry of await this.indexEntries(lo, hi)) yield entry.key;
+	}
+
+	/** indexScanRows with this transaction's uncommitted writes folded in, for
+	 * the reason indexScan above does. */
+	override async *indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		yield* await this.indexEntries(lo, hi);
 	}
 
 	/**
@@ -435,7 +598,7 @@ class IDBWrite extends IDBRead implements KVWrite {
 	 * path counts an index inside a write transaction.
 	 */
 	override async indexCount(lo?: string, hi?: string): Promise<number> {
-		return (await this.indexPairs(lo, hi)).length;
+		return (await this.indexEntries(lo, hi)).length;
 	}
 
 	override async indexSeek(
@@ -443,9 +606,9 @@ class IDBWrite extends IDBRead implements KVWrite {
 		hi?: string,
 		direction: 'asc' | 'desc' = 'asc',
 	): Promise<{ position: string; key: string } | undefined> {
-		const pairs = await this.indexPairs(lo, hi);
-		const at = direction === 'desc' ? pairs[pairs.length - 1] : pairs[0];
-		return at === undefined ? undefined : { position: at[0], key: at[1] };
+		const entries = await this.indexEntries(lo, hi);
+		const at = direction === 'desc' ? entries[entries.length - 1] : entries[0];
+		return at === undefined ? undefined : { position: at.position, key: at.key };
 	}
 
 	/**
@@ -476,9 +639,9 @@ class IDBWrite extends IDBRead implements KVWrite {
 		return buffered < stored ? buffered : stored;
 	}
 
-	/** The (position, record key) pairs of a range, in position order, with this
-	 * transaction's uncommitted writes folded in. */
-	private async indexPairs(lo?: string, hi?: string): Promise<[string, string][]> {
+	/** The entries of a range, in position order, with this transaction's
+	 * uncommitted writes folded in. */
+	private async indexEntries(lo?: string, hi?: string): Promise<IndexEntry[]> {
 		if (emptyRange(lo, hi)) return [];
 		const range = boundRange(lo, hi);
 		const index = this.store().index(INDEX_FIELD);
@@ -494,16 +657,16 @@ class IDBWrite extends IDBRead implements KVWrite {
 		for (let i = 0; i < keys.length; i++) records.set(keys[i] as string, values[i]);
 		for (const [ k, v ] of this.pending) records.set(k, v);
 		for (const k of this.deleted) records.delete(k);
-		const pairs: [string, string][] = [];
+		const entries: IndexEntry[] = [];
 		for (const [ k, v ] of records) {
 			for (const position of positionsOf(v)) {
 				if ((lo === undefined || position >= lo) && (hi === undefined || position < hi)) {
-					pairs.push([ position, k ]);
+					entries.push({ position, key: k, value: v });
 				}
 			}
 		}
-		pairs.sort(comparePositions);
-		return pairs;
+		entries.sort(comparePositions);
+		return entries;
 	}
 
 	/**

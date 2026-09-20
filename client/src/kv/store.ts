@@ -72,6 +72,16 @@ export interface KVStore {
 	close(): Promise<void>;
 }
 
+/**
+ * One entry of the store's secondary index, as indexScanRows yields it: the
+ * position, the key of the record holding it, and that record's value.
+ */
+export interface IndexEntry {
+	position: string;
+	key: string;
+	value: unknown;
+}
+
 export interface KVRead {
 	get(key: string): Promise<unknown | undefined>;
 	/**
@@ -115,6 +125,27 @@ export interface KVRead {
 	 * tail a caller never pulled. Stopping the iteration stops the work.
 	 */
 	indexScan(lo?: string, hi?: string): AsyncIterable<string>;
+	/**
+	 * Yields every index position in [lo, hi) together with the record holding
+	 * it — indexScan's entries, each against the value a caller would otherwise
+	 * fetch by key. An undefined bound is open on that end.
+	 *
+	 * Order is indexScan's: by position, ties broken on the record's key. A
+	 * record occupying several positions in the range comes back once per
+	 * position, carrying the same value each time, so a caller that wants rows
+	 * dedupes on `key`.
+	 *
+	 * Lazy: stopping the iteration stops the work. The range is taken a chunk at
+	 * a time, and continuing past a chunk re-reads only the records sharing the
+	 * last position yielded — where positions are distinct, each record of the
+	 * range is read once.
+	 *
+	 * It costs one request per chunk where indexScan and a read per key cost one
+	 * per row, and it reads every record it is pulled over. A caller wanting a
+	 * page out of a wide range wants indexScan, which reads no record it does
+	 * not name.
+	 */
+	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry>;
 	/**
 	 * The number of index positions in [lo, hi) — how many entries an indexScan
 	 * over the same range would yield, counted per POSITION exactly as indexScan
@@ -202,6 +233,10 @@ export class CountingWrite implements KVWrite {
 
 	indexScan(lo?: string, hi?: string): AsyncIterable<string> {
 		return this.inner.indexScan(lo, hi);
+	}
+
+	indexScanRows(lo?: string, hi?: string): AsyncIterable<IndexEntry> {
+		return this.inner.indexScanRows(lo, hi);
 	}
 
 	indexSeek(
