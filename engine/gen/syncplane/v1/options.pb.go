@@ -548,10 +548,10 @@ func (*HistoryOptions) Descriptor() ([]byte, []int) {
 //
 // A reference message is replaced whole on every write: a PATCH mask that
 // names one names the whole message, so the workspace and the key never
-// split. A repeated reference message list has no per-element identity and is
-// replaced whole as well, unlike a repeated entity-typed reference, which
-// merges per target key; a list that must merge per element wraps each
-// reference in a keyed list element of its own.
+// split. A repeated reference message merges as a set, each element
+// identified by its workspace and key together, so a PATCH adds or removes
+// one element without touching the others; an element that names no
+// workspace and one that names the holder's own are two elements.
 //
 // Reading is client-local: a client resolves each stub in the workspace it
 // names, from the workspaces it holds. The server evaluates `matches()`,

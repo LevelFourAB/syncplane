@@ -1,13 +1,15 @@
+import { create } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import {
 	type Task,
 	TaskSchema,
 	type User,
+	UserRefSchema,
 	UserSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import type { Row } from '../../src/read.js';
-import { freshWorkspace, newMultiClient } from './helpers.js';
+import { freshWorkspace, newClient, newMultiClient } from './helpers.js';
 
 // Workspace-qualified references against the real engine: a Task's UserRef
 // stub naming another workspace survives the round trip through the server,
@@ -106,5 +108,57 @@ describe('workspace-qualified references', () => {
 		expect(keysOf(serverLocal)).toEqual([ 't2' ]);
 
 		await client.close();
+	});
+});
+
+// A repeated workspace-qualified reference over the wire: the client expands
+// an edit to the list into one mask path per element that moved, and the
+// server merges each element on its own. Two clients that add and remove
+// different watchers offline therefore both keep their edit, where a list
+// replaced whole would keep only the later arrival's copy.
+describe('repeated workspace-qualified references', () => {
+	const uref = (workspaceId: string, id: string) => ({ workspaceId, user: { id } });
+	const names = (t: Task) => t.watchers.map((w) => `${w.workspaceId}/${w.user?.id}`).sort();
+
+	it('two clients add and remove different elements offline → both survive', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws, entities);
+		const b = newClient(ws, entities);
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(TaskSchema, {
+			id: 't1',
+			title: 'watched',
+			watchers: [ uref('org', 'u1'), uref('org', 'u2') ],
+		});
+		await a.syncNow();
+		await b.syncNow();
+
+		// A drops u1 while B adds u3 in another workspace, neither seeing the other.
+		await a.mutate.update(TaskSchema, 't1', (t) => {
+			t.watchers = t.watchers.filter((w) => w.user?.id !== 'u1');
+		});
+		await b.mutate.update(TaskSchema, 't1', (t) => {
+			t.watchers.push(create(UserRefSchema, uref('proj', 'u3')));
+		});
+
+		await a.syncNow();
+		await b.syncNow();
+		await a.syncNow();
+
+		for (const client of [ a, b ]) {
+			expect(names((await client.get(TaskSchema, 't1'))!)).toEqual([ 'org/u2', 'proj/u3' ]);
+		}
+
+		// A fresh replica bootstraps the server's copy, which is the same set.
+		const c = newClient(ws, entities);
+		await c.start();
+		await c.syncNow();
+		expect(names((await c.get(TaskSchema, 't1'))!)).toEqual([ 'org/u2', 'proj/u3' ]);
+
+		await a.close();
+		await b.close();
+		await c.close();
 	});
 });

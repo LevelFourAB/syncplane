@@ -378,10 +378,36 @@ export function isRef(field: DescField): boolean {
 
 /**
  * Whether a field is a reference whose stored shape is a reference message —
- * the shape that is replaced whole on every write.
+ * the shape whose workspace and key are one merge unit: a singular field is
+ * replaced whole on every write, a repeated one merges per element with the
+ * whole element as the identity (see {@link refItemKey}).
  */
 export function isRefMessageField(field: DescField): boolean {
 	return refShape(field)?.valueField !== undefined;
+}
+
+/**
+ * Renders one stored value of a repeated reference message as the mask segment
+ * that addresses it, so a PATCH can add or remove an element on its own: the
+ * element's workspace and its key, escaped and joined the way a composite
+ * keyed-list identity is (see {@link encodeItemKey}). The workspace part is
+ * always present, empty when the value names none, so a value with an empty
+ * workspace and one naming the holder's own are two elements even though they
+ * resolve to the same row. A reference without a workspace field renders the
+ * key alone, exactly as an element of a repeated entity-typed reference.
+ * Mirror of lww.Ref.ItemKey, byte for byte.
+ */
+export function refItemKey(shape: RefShape, value: Message): string {
+	const stub = (refStub(shape, value) ?? create(shape.targetSchema)) as unknown as Rec;
+	if (shape.workspaceField === undefined) {
+		return encodeItemKey(stub as unknown as Message, shape.keyFields);
+	}
+	const ws = (value as unknown as Rec)[shape.workspaceField.localName];
+	const parts = [ escapeKeySegment(typeof ws === 'string' ? ws : '', true) ];
+	for (const kf of shape.keyFields) {
+		parts.push(escapeKeySegment(keyComponent(kf, stub[kf.localName]), true));
+	}
+	return parts.join('/');
 }
 
 /** The target entity's message schema of a reference field, or undefined. */
@@ -1032,9 +1058,11 @@ function mergePath(
 	const opaque = isOpaque(field);
 	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
 	// replaced/merged whole even when the mask names a sub-path into it), or a
-	// reference message, whose workspace and key must never split across a
-	// masked write. Mirrors lww.go.
-	if (rest === '' || opaque || isRefMessageField(field)) {
+	// singular reference message, whose workspace and key must never split
+	// across a masked write. A repeated one falls through to mergeItem, which
+	// keeps the two together by addressing each element as one value. Mirrors
+	// lww.go.
+	if (rest === '' || opaque || (isRefMessageField(field) && field.fieldKind !== 'list')) {
 		const merge = mergers?.get(prefix + seg);
 		if (merge && opaque && applyMerger(dst, src, field, merge)) {
 			return;
@@ -1108,6 +1136,11 @@ function mergeItem(
 		return;
 	}
 	if (field.fieldKind === 'list' && field.listKind === 'message') {
+		const shape = refShape(field);
+		if (shape?.valueField !== undefined) {
+			mergeRefSetItem(dst, src, field, shape, itemKey);
+			return;
+		}
 		const keyFields = keyFieldsFor(field);
 		if (keyFields.length === 0) {
 			// No determinable identity: fall back to whole-replace (expansion never
@@ -1119,6 +1152,30 @@ function mergeItem(
 		return;
 	}
 	mergeScalarSetItem(dst, src, field, itemKey, rest);
+}
+
+/**
+ * Applies one element of a repeated reference message. The stored element is
+ * nothing but its identity — the workspace beside the target key, see
+ * {@link refItemKey} — so the list merges like a scalar set: src has the
+ * element => ensure present once, src lacks it => remove every copy. A
+ * sub-path below the element addresses the element, the same way a sub-path
+ * into a singular reference message names the whole message. Mirror of lww.go
+ * mergeRefSetItem.
+ */
+function mergeRefSetItem(
+	dst: Rec,
+	src: Rec,
+	field: MessageListField,
+	shape: RefShape,
+	itemKey: string,
+): void {
+	const srcList = (src[field.localName] as Message[] | undefined) ?? [];
+	const srcElem = srcList.find((e) => refItemKey(shape, e) === itemKey);
+	const dstList = (dst[field.localName] as Message[] | undefined) ?? [];
+	const kept = dstList.filter((e) => refItemKey(shape, e) !== itemKey);
+	if (srcElem !== undefined) kept.push(clone(field.message, srcElem));
+	dst[field.localName] = kept;
 }
 
 type MapField = Extract<DescField, { fieldKind: 'map' }>;
@@ -2320,8 +2377,11 @@ export function expandCollectionMask(
 		if (field.fieldKind === 'map') {
 			out.push(...expandMap(field, seg, priorRec, nextRec));
 		} else if (field.listKind === 'message') {
+			const shape = refShape(field);
 			const keyFields = keyFieldsFor(field);
-			if (keyFields.length === 0) {
+			if (shape?.valueField !== undefined) {
+				out.push(...expandRefSet(field, seg, shape, priorRec, nextRec));
+			} else if (keyFields.length === 0) {
 				out.push(path); // non-keyed message list → whole-replace
 			} else {
 				out.push(...expandKeyedList(field, seg, keyFields, priorRec, nextRec));
@@ -2489,6 +2549,28 @@ function hasTextDescendant(desc: DescMessage): boolean {
 	const result = walk(desc, []);
 	textDescendantMemo.set(desc, result);
 	return result;
+}
+
+/**
+ * A repeated reference message diffs as a set of identities (see
+ * {@link refItemKey}): an element is added or removed, never edited, because
+ * the stored value is nothing but its identity.
+ */
+function expandRefSet(
+	field: MessageListField,
+	seg: string,
+	shape: RefShape,
+	prior: Rec,
+	next: Rec,
+): string[] {
+	const keysOf = (rec: Rec): Set<string> =>
+		new Set(((rec[field.localName] as Message[] | undefined) ?? []).map((e) => refItemKey(shape, e)));
+	const pKeys = keysOf(prior);
+	const nKeys = keysOf(next);
+	const out: string[] = [];
+	for (const k of pKeys) if (!nKeys.has(k)) out.push(`${seg}.${k}`);
+	for (const k of nKeys) if (!pKeys.has(k)) out.push(`${seg}.${k}`);
+	return out;
 }
 
 function expandScalarSet(field: DescField, seg: string, prior: Rec, next: Rec): string[] {

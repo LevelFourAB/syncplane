@@ -116,9 +116,10 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 	opaque := isOpaque(fd)
 	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
 	// replaced/merged whole even when the mask names a sub-path into it), or a
-	// reference message, whose workspace and key must never split across a
-	// masked write.
-	if rest == "" || opaque || IsRefMessageField(fd) {
+	// singular reference message, whose workspace and key must never split
+	// across a masked write. A repeated one falls through to mergeItem, which
+	// keeps the two together by addressing each element as one value.
+	if rest == "" || opaque || (IsRefMessageField(fd) && !fd.IsList()) {
 		mg, hasMerger := m[prefix+seg]
 		if hasMerger && opaque && src.Has(fd) && (dst.Has(fd) || mg.MergeAbsentBase) {
 			fn := mg.Fn
@@ -196,6 +197,8 @@ func mergeItem(
 	switch {
 	case fd.IsMap():
 		return mergeMapItem(dst, src, fd, itemKey, rest, prefix+fieldSeg+".", itemInstPrefix, m)
+	case IsRefMessageField(fd):
+		return mergeRefSetItem(dst, src, fd, RefOf(fd), itemKey)
 	case fd.Kind() == protoreflect.MessageKind:
 		keyFields := keyFieldsFor(fd)
 		if len(keyFields) == 0 {
@@ -298,6 +301,42 @@ func mergeKeyedListItem(
 		dl.Append(protoreflect.ValueOfMessage(dstElem))
 	}
 	return mergePath(dstElem, srcElem, rest, prefix, instPrefix, m)
+}
+
+// mergeRefSetItem applies one element of a repeated reference message. The
+// stored element is nothing but its identity — the workspace beside the target
+// key, see Ref.ItemKey — so the list merges like a scalar set: src has the
+// element => ensure present once, src lacks it => remove every copy. A sub-path
+// below the element is not an error but addresses the element, the same way a
+// sub-path into a singular reference message names the whole message.
+func mergeRefSetItem(dst, src protoreflect.Message, fd protoreflect.FieldDescriptor, ref *Ref, itemKey string) error {
+	sl := src.Get(fd).List()
+	var srcElem protoreflect.Value
+	found := false
+	for i := 0; i < sl.Len(); i++ {
+		if ref.ItemKey(sl.Get(i).Message()) == itemKey {
+			srcElem = sl.Get(i)
+			found = true
+			break
+		}
+	}
+	dl := dst.Mutable(fd).List()
+	kept := make([]protoreflect.Value, 0, dl.Len()+1)
+	for i := 0; i < dl.Len(); i++ {
+		if ref.ItemKey(dl.Get(i).Message()) != itemKey {
+			kept = append(kept, dl.Get(i))
+		}
+	}
+	if found {
+		// Duplicates already in dst collapse to the one copy src carries: the
+		// element is its identity, so one copy is the whole of the information.
+		kept = append(kept, protoreflect.ValueOfMessage(proto.Clone(srcElem.Message().Interface()).ProtoReflect()))
+	}
+	dl.Truncate(0)
+	for _, v := range kept {
+		dl.Append(v)
+	}
+	return nil
 }
 
 // mergeScalarSetItem applies one element of a scalar set list (identity is the
@@ -584,6 +623,35 @@ func (r *Ref) WorkspaceOf(value protoreflect.Message) string {
 	return value.Get(r.Workspace).String()
 }
 
+// ItemKey renders one stored value of a repeated reference message as the mask
+// segment that addresses it, so a PATCH can add or remove an element on its
+// own: the element's workspace and its key, escaped and joined the way a
+// composite keyed-list identity is (see EncodeItemKey). The workspace part is
+// always present, empty when the value names none, so a value with an empty
+// workspace and one naming the holder's own are two elements even though
+// they resolve to the same row. A reference without a workspace field renders
+// the key alone, exactly as an element of a repeated entity-typed reference.
+//
+// Callers render every element through this, and the merge decodes with it;
+// a segment produced any other way addresses no element.
+func (r *Ref) ItemKey(value protoreflect.Message) string {
+	// Get, not Stub: a value holding no stub still needs an identity, and Get
+	// hands back the zero message where Stub reports nothing.
+	stub := value
+	if r.Value != nil {
+		stub = value.Get(r.Value).Message()
+	}
+	if r.Workspace == nil {
+		return encodeItemKey(stub, r.KeyFields)
+	}
+	parts := make([]string, 0, len(r.KeyFields)+1)
+	parts = append(parts, escapeKeySegment(value.Get(r.Workspace).String(), true))
+	for _, kf := range r.KeyFields {
+		parts = append(parts, escapeKeySegment(scalarKeyString(kf, stub.Get(kf)), true))
+	}
+	return strings.Join(parts, "/")
+}
+
 // ResolvesIn reports whether a stored reference value points into workspace,
 // the holder's own: it names that workspace, or names none.
 func (r *Ref) ResolvesIn(value protoreflect.Message, workspace string) bool {
@@ -641,7 +709,9 @@ func IsRef(fd protoreflect.FieldDescriptor) bool {
 }
 
 // IsRefMessageField reports whether fd is a reference whose stored shape is a
-// reference message — the shape that is replaced whole on every write.
+// reference message — the shape whose workspace and key are one merge unit: a
+// singular field is replaced whole on every write, a repeated one merges per
+// element with the whole element as the identity (see Ref.ItemKey).
 func IsRefMessageField(fd protoreflect.FieldDescriptor) bool {
 	r := RefOf(fd)
 	return r != nil && r.Value != nil

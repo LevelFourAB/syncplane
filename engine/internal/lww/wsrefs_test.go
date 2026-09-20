@@ -97,6 +97,76 @@ var _ = Describe("Workspace-qualified references", func() {
 		Expect(base.GetAssignee().GetUser().GetId()).To(Equal("u2"))
 	})
 
+	// A repeated reference message merges as a SET keyed by the stored value —
+	// the workspace beside the target key — so two writers that add and remove
+	// different elements both land, as they do on a repeated entity-typed
+	// reference. Nothing else in an element could carry a change: the stored
+	// value is projected down to exactly those fields.
+	Describe("a repeated reference message", func() {
+		uref := func(ws, id string) *testdatav1.UserRef {
+			return &testdatav1.UserRef{WorkspaceId: ws, User: &testdatav1.User{Id: id}}
+		}
+		names := func(t *testdatav1.Task) []string {
+			out := make([]string, 0, len(t.GetWatchers()))
+			for _, w := range t.GetWatchers() {
+				out = append(out, w.GetWorkspaceId()+"/"+w.GetUser().GetId())
+			}
+			return out
+		}
+		watchers := field(task, "watchers")
+
+		It("renders an element's identity as its workspace beside its key", func() {
+			r := lww.RefOf(watchers)
+			Expect(r.ItemKey(uref("org", "u1").ProtoReflect())).To(Equal("org/u1"))
+			// An empty workspace is a part of its own, so it never collides with
+			// a key that happens to contain the separator.
+			Expect(r.ItemKey(uref("", "u1").ProtoReflect())).To(Equal("/u1"))
+			Expect(r.ItemKey(uref("a/b", "c.d").ProtoReflect())).To(Equal(`a\/b/c\.d`))
+			Expect(lww.KeyFieldsFor(watchers)).To(BeEmpty(), "the identity is not a key-field list")
+		})
+
+		It("merges per element, so an add and a remove from different writers both land", func() {
+			base := &testdatav1.Task{Id: "t1", Watchers: []*testdatav1.UserRef{uref("org", "u1"), uref("org", "u2")}}
+			fromA := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("org", "u2")}}
+			Expect(lww.Merge(base, fromA, []string{"watchers.org/u1"})).To(Succeed())
+			fromB := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("org", "u1"), uref("org", "u2"), uref("org", "u3")}}
+			Expect(lww.Merge(base, fromB, []string{"watchers.org/u3"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"org/u2", "org/u3"}))
+		})
+
+		It("keeps the same key in two workspaces as two elements", func() {
+			base := &testdatav1.Task{Id: "t1", Watchers: []*testdatav1.UserRef{uref("org", "u1")}}
+			src := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("", "u1")}}
+			Expect(lww.Merge(base, src, []string{"watchers./u1"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"org/u1", "/u1"}))
+			Expect(lww.Merge(base, &testdatav1.Task{}, []string{"watchers.org/u1"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"/u1"}))
+		})
+
+		It("holds each element once, whatever either side repeats", func() {
+			base := &testdatav1.Task{Id: "t1", Watchers: []*testdatav1.UserRef{uref("org", "u1"), uref("org", "u1")}}
+			src := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("org", "u1"), uref("org", "u1")}}
+			Expect(lww.Merge(base, src, []string{"watchers.org/u1"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"org/u1"}))
+			Expect(lww.Merge(base, &testdatav1.Task{}, []string{"watchers.org/u1"})).To(Succeed())
+			Expect(names(base)).To(BeEmpty())
+		})
+
+		It("addresses the whole element when a mask reaches below it", func() {
+			base := &testdatav1.Task{Id: "t1"}
+			src := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("org", "u1")}}
+			Expect(lww.Merge(base, src, []string{"watchers.org/u1.user.id"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"org/u1"}))
+		})
+
+		It("replaces the list whole when the mask names the field bare", func() {
+			base := &testdatav1.Task{Id: "t1", Watchers: []*testdatav1.UserRef{uref("org", "u1")}}
+			src := &testdatav1.Task{Watchers: []*testdatav1.UserRef{uref("org", "u2")}}
+			Expect(lww.Merge(base, src, []string{"watchers"})).To(Succeed())
+			Expect(names(base)).To(Equal([]string{"org/u2"}))
+		})
+	})
+
 	Describe("a malformed reference message", func() {
 		stringField := func(name string, number int32, workspace bool) *descriptorpb.FieldDescriptorProto {
 			f := &descriptorpb.FieldDescriptorProto{

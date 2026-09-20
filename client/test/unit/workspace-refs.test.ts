@@ -29,6 +29,7 @@ import {
 	TaskSchema,
 	type User,
 	type UserRef,
+	UserRefSchema,
 	UserSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import {
@@ -40,7 +41,14 @@ import {
 	ReferenceOptionsSchema,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
-import { EntityRegistry, mergeMask, projectRefs } from '../../src/mutations.js';
+import {
+	EntityRegistry,
+	expandCollectionMask,
+	mergeMask,
+	projectRefs,
+	refItemKey,
+	refShape,
+} from '../../src/mutations.js';
 import { compileQuery } from '../../src/query/proxy.js';
 import type { QueryRef, RefTargetOf } from '../../src/query/types.js';
 import { prepareQuery } from '../../src/query/wire.js';
@@ -238,6 +246,86 @@ describe('workspace-qualified reference storage', () => {
 		// lands alongside its key, never the old workspace beside a new key.
 		expect(dst.assignee?.workspaceId).toBe('');
 		expect(dst.assignee?.user?.id).toBe('u2');
+	});
+
+	// A repeated reference message merges as a set keyed by the stored value —
+	// the workspace beside the target key — so an add and a remove from two
+	// writers both land, as on a repeated entity-typed reference.
+	describe('a repeated reference message', () => {
+		const uref = (workspaceId: string, id: string) => ({ workspaceId, user: { id } });
+		const names = (t: Task) => t.watchers.map((w) => `${w.workspaceId}/${w.user?.id}`);
+		const watchers = TaskSchema.field.watchers;
+
+		it("renders an element's identity as its workspace beside its key", () => {
+			const shape = refShape(watchers)!;
+			const key = (ws: string, id: string) => refItemKey(shape, create(UserRefSchema, uref(ws, id)));
+			expect(key(ORG, 'u1')).toBe('org/u1');
+			// An empty workspace is a part of its own, so it never collides with
+			// a key that happens to contain the separator.
+			expect(key('', 'u1')).toBe('/u1');
+			expect(key('a/b', 'c.d')).toBe('a\\/b/c\\.d');
+		});
+
+		it('merges per element, so an add and a remove from different writers both land', () => {
+			const dst = create(TaskSchema, { id: 't', watchers: [ uref(ORG, 'u1'), uref(ORG, 'u2') ] });
+			mergeMask(TaskSchema, dst, create(TaskSchema, { watchers: [ uref(ORG, 'u2') ] }), [
+				'watchers.org/u1',
+			]);
+			mergeMask(
+				TaskSchema,
+				dst,
+				create(TaskSchema, { watchers: [ uref(ORG, 'u1'), uref(ORG, 'u2'), uref(ORG, 'u3') ] }),
+				[ 'watchers.org/u3' ],
+			);
+			expect(names(dst)).toEqual([ 'org/u2', 'org/u3' ]);
+		});
+
+		it('keeps the same key in two workspaces as two elements', () => {
+			const dst = create(TaskSchema, { id: 't', watchers: [ uref(ORG, 'u1') ] });
+			mergeMask(TaskSchema, dst, create(TaskSchema, { watchers: [ uref('', 'u1') ] }), [
+				'watchers./u1',
+			]);
+			expect(names(dst)).toEqual([ 'org/u1', '/u1' ]);
+			mergeMask(TaskSchema, dst, create(TaskSchema), [ 'watchers.org/u1' ]);
+			expect(names(dst)).toEqual([ '/u1' ]);
+		});
+
+		it('holds each element once, whatever either side repeats', () => {
+			const dst = create(TaskSchema, { id: 't', watchers: [ uref(ORG, 'u1'), uref(ORG, 'u1') ] });
+			mergeMask(
+				TaskSchema,
+				dst,
+				create(TaskSchema, { watchers: [ uref(ORG, 'u1'), uref(ORG, 'u1') ] }),
+				[
+					'watchers.org/u1',
+				],
+			);
+			expect(names(dst)).toEqual([ 'org/u1' ]);
+			mergeMask(TaskSchema, dst, create(TaskSchema), [ 'watchers.org/u1' ]);
+			expect(names(dst)).toEqual([]);
+		});
+
+		it('addresses the whole element when a mask reaches below it', () => {
+			const dst = create(TaskSchema, { id: 't' });
+			mergeMask(TaskSchema, dst, create(TaskSchema, { watchers: [ uref(ORG, 'u1') ] }), [
+				'watchers.org/u1.user.id',
+			]);
+			expect(names(dst)).toEqual([ 'org/u1' ]);
+		});
+
+		it('expands a bare mask into the elements that moved', () => {
+			const prior = create(TaskSchema, { watchers: [ uref(ORG, 'u1'), uref(ORG, 'u2') ] });
+			const next = create(TaskSchema, {
+				watchers: [ uref(ORG, 'u2'), uref('', 'u2'), uref(PROJ, 'u3') ],
+			});
+			expect(expandCollectionMask(TaskSchema, prior, next, [ 'watchers' ]).sort()).toEqual([
+				'watchers./u2',
+				'watchers.org/u1',
+				'watchers.proj/u3',
+			]);
+			// Nothing moved: the mask names nothing, so the write touches nothing.
+			expect(expandCollectionMask(TaskSchema, prior, prior, [ 'watchers' ])).toEqual([]);
+		});
 	});
 });
 

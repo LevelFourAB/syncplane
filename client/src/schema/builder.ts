@@ -455,9 +455,11 @@ export const workspaceRef = <E extends EntitySchema>(
 
 /**
  * A to-many workspace-qualified reference (repeated `workspaceRef`). Each
- * element names its own workspace. The list is replaced whole on every write:
- * a reference message has no per-element identity, unlike a `refList`, which
- * merges per target key.
+ * element names its own workspace. The list merges as a set: an `update` that
+ * adds or removes elements writes only those, identified by their workspace
+ * and key together, so concurrent adds and removes from different clients all
+ * land. An element with an empty `workspaceId` and one naming the holder's
+ * own workspace are two elements, even though they resolve to the same row.
  */
 export const workspaceRefList = <E extends EntitySchema>(
 	target: () => E,

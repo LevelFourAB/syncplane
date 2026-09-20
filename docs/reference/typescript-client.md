@@ -945,7 +945,7 @@ Resolution rules:
 - `t.assignee.eq(id)` compares the key; `t.assignee.workspaceId.eq(ws)` compares the workspace. Any other field of the stub is rejected at query time.
 - Watchers that hydrate or cross such a reference re-fire on a commit to the target entity in any workspace.
 - `queryServer`, server-side `include`, and `follow` resolve inside one workspace: a stub naming another workspace matches nothing there.
-- A reference message is replaced whole on every write, and a `workspaceRefList` has no per-element merge. Wrap each reference in a `keyedList` element when concurrent adds must merge.
+- A reference message is replaced whole on every write. A `workspaceRefList` merges as a set: an `update` that adds or removes elements writes only those, identified by `workspaceId` and key together, so concurrent adds and removes from different clients all land. Wrap each reference in a `keyedList` element when an element must carry more than the reference.
 
 ## Undo and redo
 
@@ -1295,7 +1295,7 @@ The `schema` builder provides the following field types:
 | `schema.ref(() => target)`              | `Field<Infer<E>>`                 | Strongly-typed to-one reference.                                                                                               |
 | `schema.refList(() => target)`          | `Field<Infer<E>[]>`               | Strongly-typed to-many reference list.                                                                                         |
 | `schema.workspaceRef(() => target)`     | `Field<WorkspaceRef<Infer<E>>>`   | To-one reference that may point into another workspace. See [Workspace-qualified references](#workspace-qualified-references). |
-| `schema.workspaceRefList(() => target)` | `Field<WorkspaceRef<Infer<E>>[]>` | To-many form of `workspaceRef`. The list is replaced whole on write.                                                           |
+| `schema.workspaceRefList(() => target)` | `Field<WorkspaceRef<Infer<E>>[]>` | To-many form of `workspaceRef`. Merges as a set of (`workspaceId`, key) elements.                                              |
 | `schema.keyedList(elem, ...keyFields)`  | `KeyedListField`                  | Repeated message list merged by item key. Supports `.order(posField)`.                                                         |
 | `schema.map(keyType, value)`            | `Field<Record<...>>`              | Key-value map.                                                                                                                 |
 
