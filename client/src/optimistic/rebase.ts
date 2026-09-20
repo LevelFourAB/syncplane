@@ -146,6 +146,12 @@ export type LocalApplyOutcome = 'applied' | 'no-target';
  * boxed rather than passed bare so an absent row stays distinguishable from an
  * absent argument. It must be the row as of this call: pass it only from the
  * same transaction, and only before anything else in it has written the row.
+ *
+ * `confirmed` is the row's confirmed base version, which a caller that read the
+ * confirmed record up front already holds. Given it, a write that produces a
+ * whole row reports that row on `touched` as well as its key, so a consumer can
+ * take the post-commit merged view from there rather than reading it back (see
+ * TouchSet.rowWithView). Leaving it out costs a read, not correctness.
  */
 export async function applyCrudLocally(
 	tx: KVWrite,
@@ -155,6 +161,7 @@ export async function applyCrudLocally(
 	touched: TouchSet,
 	prior?: { bytes: Uint8Array | undefined },
 	slot?: TextLogSlot,
+	confirmed?: { version: bigint },
 ): Promise<LocalApplyOutcome> {
 	const def = registry.get(crud.entity);
 	if (!def) throw new Error(`unknown entity "${crud.entity}"`);
@@ -187,6 +194,14 @@ export async function applyCrudLocally(
 			// was folded from must go — or the next read would apply those edits a
 			// second time. (Idempotent for the document, but it would grow forever.)
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
+			// Which is also what makes these bytes the whole merged view: with the
+			// log gone there is nothing left for a reader to fold into them.
+			if (confirmed) {
+				touched.rowWithView(workspaceId, def.name, crud.key, {
+					v: value,
+					version: confirmed.version,
+				});
+			}
 			return 'applied';
 		}
 		case CrudOp.PATCH: {
@@ -216,15 +231,26 @@ export async function applyCrudLocally(
 			} catch (err) {
 				merged = withoutUnapplicableText(def, registry, baseBytes, src, paths, mergers, err);
 			}
-			const record: OverlayRecord = { v: toBinary(def.schema, merged) };
+			const bytes = toBinary(def.schema, merged);
+			const record: OverlayRecord = { v: bytes };
 			await tx.put(overlayKey(def.name, workspaceId, crud.key), record);
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
+			// Whole row, empty log: the same reasoning as the PUT branch above.
+			if (confirmed) {
+				touched.rowWithView(workspaceId, def.name, crud.key, {
+					v: bytes,
+					version: confirmed.version,
+				});
+			}
 			return 'applied';
 		}
 		case CrudOp.DELETE: {
 			const record: OverlayRecord = { del: true };
 			await tx.put(overlayKey(def.name, workspaceId, crud.key), record);
 			await clearRowTextLog(tx, registry, def.name, workspaceId, crud.key);
+			// No version to know: a locally deleted row has no merged view whatever
+			// the confirmed record behind it says, so this needs no `confirmed`.
+			touched.rowWithView(workspaceId, def.name, crud.key, undefined);
 			return 'applied';
 		}
 		default:

@@ -55,6 +55,7 @@ import {
 } from './query/index.js';
 import type { PreparedGroupQuery, PreparedGroupRowsQuery } from './query/wire.js';
 import {
+	type MergedRow,
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
@@ -1271,6 +1272,187 @@ export class WatcherHub {
 		for (const p of keyedPending) await this.emitKeyed(p.watcher, at, p.force);
 	}
 
+	/**
+	 * Updates every watcher a commit reaches from the rows the writer attached
+	 * to it, reading nothing, and returns a function that delivers the callbacks
+	 * — or undefined when some watcher it reaches needs a read after all and the
+	 * caller has to fall back to {@link notify}.
+	 *
+	 * Call it from INSIDE the writer's exclusive KV section, immediately after
+	 * the commit. That section is what orders this against every other update:
+	 * `notify` gets the same ordering from its own shared acquisition, and two
+	 * deltas applied out of order would lose a row change rather than merely
+	 * deliver it late. Nothing here acquires the mutex — a nested exclusive
+	 * acquire would deadlock (see mutex.ts) — so nothing here may read the
+	 * store outside the one debug check that has the section's exclusion behind
+	 * it.
+	 *
+	 * Declines — returns undefined without touching any watcher — unless every
+	 * one of these holds:
+	 *
+	 *   - every pair the commit names is keyed AND carries a view for every key
+	 *     (see TouchSet.rowWithView), so no row would have to be read;
+	 *   - no query watcher it reaches crosses references (a pre-pass reads the
+	 *     target entity), hydrates an `include` (which reads the rows it joins),
+	 *     or is still without a match set to splice into;
+	 *   - no keyed watcher it reaches hydrates an `include`.
+	 *
+	 * Grouped watchers hold nothing to update and re-read for themselves, here
+	 * exactly as in `notify`.
+	 */
+	async notifyWithRows(touched: TouchSet): Promise<(() => Promise<void>) | undefined> {
+		if (this.closed) return undefined;
+		const pairs = [ ...touched.pairs() ];
+		const byScope = new Map<string, Watcher[]>();
+		for (const w of this.watchers) {
+			if (!reaches(w, pairs)) continue;
+			if (w.rel !== undefined || w.include !== undefined || w.matches === undefined) {
+				return undefined;
+			}
+			const scope = scanScope(w);
+			const group = byScope.get(scope);
+			if (group === undefined) byScope.set(scope, [ w ]);
+			else group.push(w);
+		}
+		const keyed: KeyWatcher[] = [];
+		for (const w of this.keyWatchers) {
+			if (!reaches(w, pairs)) continue;
+			if (w.include !== undefined) return undefined;
+			keyed.push(w);
+		}
+		const grouped: GroupWatcher[] = [];
+		for (const w of this.groupWatchers) {
+			if (reaches(w, pairs)) grouped.push(w);
+		}
+		const pending: { watcher: Watcher; from: number }[] = [];
+		let at = 0;
+		if (byScope.size > 0 || keyed.length > 0) {
+			// Built only once something would consume it, and the last thing that
+			// can decline: a commit reaching no result costs nothing either way.
+			const handed = handedRows(pairs);
+			if (handed === undefined) return undefined;
+			for (const [ scope, group ] of byScope) {
+				const changed = this.handedChanged(scope, group[0]!, handed);
+				for (const w of group) {
+					pending.push({ watcher: w, from: applyDelta(w, { rebuild: false, changed }) });
+				}
+				this.pruneScope(scope, new Set(changed.keys()));
+			}
+			for (const w of keyed) {
+				this.pruneScope(scanScope(w), new Set(this.handedRefs(w, handed)));
+			}
+			// Stamped here for the reason notify stamps inside its read section.
+			at = ++this.readSeq;
+			if (this.verifyTouches) await this.verifyHanded(byScope, keyed);
+		}
+		return async () => {
+			void this.dispatchGroups(grouped);
+			// `force` is always false: an include watcher is what it exists for, and
+			// this path declines those.
+			for (const p of pending) await this.emit(p.watcher, p.from, false, at);
+			for (const w of keyed) await this.emitKeyed(w, at, false);
+		};
+	}
+
+	/**
+	 * The scope delta for one group, built from handed-over rows rather than
+	 * read — readDelta's keyed branch with the getMany taken out, down to which
+	 * rows land in the scope's shared decode cache.
+	 */
+	private handedChanged(
+		scope: string,
+		sample: Watcher,
+		handed: readonly HandedRow[],
+	): Map<string, ResultRow | undefined> {
+		const scoped = this.scopeRows(scope);
+		const changed = new Map<string, ResultRow | undefined>();
+		for (const { workspaceId, entity, key, view } of handed) {
+			if (entity !== sample.entity || !inScope(sample, workspaceId)) continue;
+			const id = rowId(workspaceId, key);
+			if (view === undefined) {
+				scoped.rows.delete(id);
+				changed.set(id, undefined);
+				continue;
+			}
+			const row = resultRow(
+				sample.schema,
+				scoped.rows.get(id),
+				id,
+				suffixOf(sample, workspaceId, key),
+				{
+					...view,
+					workspaceId,
+					key,
+				},
+			);
+			scoped.rows.set(id, row);
+			changed.set(id, row);
+		}
+		return changed;
+	}
+
+	/**
+	 * Brings one keyed watcher's held rows up to date from handed-over rows,
+	 * returning the watched refs the commit named — readRefs with the getMany
+	 * taken out, for the refs it would have re-read (`first` is never in play:
+	 * a ref answered for the first time comes through flushAdds, which reads).
+	 */
+	private handedRefs(watcher: KeyWatcher, handed: readonly HandedRow[]): string[] {
+		const scoped = this.scopeRows(scanScope(watcher));
+		const named: string[] = [];
+		for (const { workspaceId, entity, key, view } of handed) {
+			if (entity !== watcher.entity || !inScope(watcher, workspaceId)) continue;
+			const id = rowId(workspaceId, key);
+			if (!watcher.refs.has(id)) continue;
+			named.push(id);
+			if (view === undefined) {
+				const had = watcher.held.delete(id);
+				scoped.rows.delete(id);
+				if (had) watcher.pending.set(id, undefined);
+				continue;
+			}
+			const row = resultRow(
+				watcher.schema,
+				scoped.rows.get(id),
+				id,
+				suffixOf(watcher, workspaceId, key),
+				{
+					...view,
+					workspaceId,
+					key,
+				},
+			);
+			scoped.rows.set(id, row);
+			const moved = watcher.held.get(id) !== row;
+			watcher.held.set(id, row);
+			if (moved) watcher.pending.set(id, row);
+		}
+		return named;
+	}
+
+	/**
+	 * Runs the divergence check over an update served from handed-over rows.
+	 * Only reachable under debugVerifyTouches.
+	 *
+	 * Reads WITHOUT taking the mutex, which is sound only here: the caller holds
+	 * it exclusively, and that excludes every reader and writer a shared
+	 * acquisition would — which is also why acquiring it would deadlock.
+	 */
+	private async verifyHanded(
+		byScope: ReadonlyMap<string, Watcher[]>,
+		keyed: readonly KeyWatcher[],
+	): Promise<void> {
+		const tx = await this.kv.read();
+		try {
+			for (const group of byScope.values()) {
+				for (const w of group) await this.verifyMatches(tx, w);
+			}
+			for (const w of keyed) await this.verifyKeys(tx, w);
+		} finally {
+			tx.release();
+		}
+	}
+
 	/** Reads one watcher's result for the first time, from an index or a scan. */
 	private async emitTo(watcher: Watcher): Promise<void> {
 		if (!this.watchers.has(watcher)) return;
@@ -2017,6 +2199,8 @@ interface TouchedPair {
 	workspaceId: string;
 	entity: string;
 	keys?: ReadonlySet<string>;
+	/** Merged views the writer attached to some of `keys`; see TouchSet.pairs. */
+	views?: ReadonlyMap<string, MergedRow | undefined>;
 }
 
 /** What a watcher's hydration and relations reach; see Watcher.reaches and Watcher.anywhere. */
@@ -2302,6 +2486,35 @@ function plannedKeys(
 		return undefined;
 	}
 	return keys;
+}
+
+/** One changed row a commit named, with the merged view its writer attached. */
+interface HandedRow {
+	workspaceId: string;
+	entity: string;
+	key: string;
+	view: MergedRow | undefined;
+}
+
+/**
+ * Every row a commit named, with the view attached to it — or undefined as soon
+ * as one came without a view, whether because the pair named no rows at all or
+ * because the writer could not state that row's post-commit merged view.
+ *
+ * All or nothing: serving half a commit from handed-over rows and reading the
+ * other half back would mix two views of the store into one update, and the
+ * point of the handover is that there is no read to mix with.
+ */
+function handedRows(pairs: readonly TouchedPair[]): HandedRow[] | undefined {
+	const out: HandedRow[] = [];
+	for (const { workspaceId, entity, keys, views } of pairs) {
+		if (keys === undefined || views === undefined) return undefined;
+		for (const key of keys) {
+			if (!views.has(key)) return undefined;
+			out.push({ workspaceId, entity, key, view: views.get(key) });
+		}
+	}
+	return out;
 }
 
 /**

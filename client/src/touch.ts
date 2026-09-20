@@ -1,4 +1,5 @@
 import { parseTouchKey, rowTouchKey, touchKey } from './keys.js';
+import type { MergedRow } from './read.js';
 
 /**
  * What a commit touched, at row granularity where the writer knows the row and
@@ -8,7 +9,9 @@ import { parseTouchKey, rowTouchKey, touchKey } from './keys.js';
  * that reaches it re-reads the merged view. Reporting only the ENTITY forces
  * that re-read to be a full prefix scan, which makes a keystroke-sized mutation
  * cost the whole entity (see WatcherHub). Reporting ROWS lets the hub patch its
- * snapshot instead, so a commit costs O(changed rows).
+ * snapshot instead, so a commit costs O(changed rows). A writer that produced
+ * the whole post-commit row can go one further and report the ROW ITSELF
+ * (`rowWithView`), which removes the read as well.
  *
  * The invariant this class exists to hold: within one commit a given
  * (workspace, entity) pair is EITHER fully keyed OR wildcard, never both.
@@ -23,6 +26,12 @@ export class TouchSet {
 	private wildcards = new Set<string>();
 	/** Pair token → the exact row keys that changed. Disjoint from wildcards. */
 	private keyed = new Map<string, Set<string>>();
+	/**
+	 * Pair token → the merged view attached to a changed row, for the rows one
+	 * was attached to. A subset of `keyed`; a key absent here changed without
+	 * the writer saying what into.
+	 */
+	private views = new Map<string, Map<string, MergedRow | undefined>>();
 
 	/** Records that one row of an entity changed. */
 	row(workspaceId: string, entity: string, key: string): void {
@@ -34,6 +43,33 @@ export class TouchSet {
 			this.keyed.set(pair, keys);
 		}
 		keys.add(key);
+		// A later writer reporting the row without a view supersedes whatever an
+		// earlier one attached: having written the row again is why it is here.
+		this.views.get(pair)?.delete(key);
+	}
+
+	/**
+	 * Records that one row changed, together with the merged view it now has —
+	 * its bytes and confirmed base version, or `undefined` where the row is gone.
+	 *
+	 * A consumer may serve the row from this INSTEAD of reading the store, so
+	 * attach a view only where the whole post-commit row was produced here and
+	 * nothing else can still fold into it (a row with an optimistic text log is
+	 * not its own merged view — see read.foldTextLog). Reporting the change with
+	 * `row()` leaves it to be read, which is always correct.
+	 */
+	rowWithView(
+		workspaceId: string,
+		entity: string,
+		key: string,
+		view: MergedRow | undefined,
+	): void {
+		const pair = touchKey(workspaceId, entity);
+		if (this.wildcards.has(pair)) return;
+		this.row(workspaceId, entity, key);
+		let views = this.views.get(pair);
+		if (views === undefined) this.views.set(pair, views = new Map());
+		views.set(key, view);
 	}
 
 	/**
@@ -47,6 +83,7 @@ export class TouchSet {
 		const pair = touchKey(workspaceId, entity);
 		this.wildcards.add(pair);
 		this.keyed.delete(pair);
+		this.views.delete(pair);
 	}
 
 	/** True when nothing was touched — a commit that changed no merged view. */
@@ -54,20 +91,30 @@ export class TouchSet {
 		return this.wildcards.size === 0 && this.keyed.size === 0;
 	}
 
-	/** The touched pairs, each with its exact keys or `undefined` for wildcard. */
-	*pairs(): IterableIterator<{ workspaceId: string; entity: string; keys?: ReadonlySet<string> }> {
+	/**
+	 * The touched pairs, each with its exact keys or `undefined` for wildcard,
+	 * and the views attached to those keys that carry one (see `rowWithView`).
+	 * A key absent from `views` has to be read.
+	 */
+	*pairs(): IterableIterator<{
+		workspaceId: string;
+		entity: string;
+		keys?: ReadonlySet<string>;
+		views?: ReadonlyMap<string, MergedRow | undefined>;
+	}> {
 		for (const pair of this.wildcards) {
 			yield parseTouchKey(pair) as { workspaceId: string; entity: string };
 		}
 		for (const [ pair, keys ] of this.keyed) {
 			const { workspaceId, entity } = parseTouchKey(pair);
-			yield { workspaceId, entity, keys };
+			yield { workspaceId, entity, keys, views: this.views.get(pair) };
 		}
 	}
 
 	/**
 	 * The canonical token set: one keyed token per changed row, or one wildcard
-	 * token per wildcard pair — never both for the same pair.
+	 * token per wildcard pair — never both for the same pair. Views do not
+	 * travel: a token names the row, and the tab that receives it reads it.
 	 */
 	tokens(): Set<string> {
 		const out = new Set<string>(this.wildcards);

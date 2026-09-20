@@ -2426,14 +2426,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * other tabs. Every path that commits a write (enqueue, rebase, bootstrap,
 	 * rollback, purge) routes its notification through here so the broadcast can
 	 * never be forgotten alongside a local notify.
+	 *
+	 * `deliver` is what a writer that already updated the hub inside its own
+	 * write section got back from WatcherHub.notifyWithRows; given it, only the
+	 * callbacks and the broadcast are left to do here.
 	 */
-	private async notifyChange(touched: TouchSet): Promise<void> {
+	private async notifyChange(touched: TouchSet, deliver?: () => Promise<void>): Promise<void> {
 		// An in-flight enqueue can land here after close(); skip rather than have
 		// hub() spin up a fresh WatcherHub/BroadcastChannel past teardown.
 		if (this.closed) return;
-		const hub = await this.hub();
-		if (this.closed) return;
-		await hub.notify(touched);
+		if (deliver !== undefined) {
+			await deliver();
+		} else {
+			const hub = await this.hub();
+			if (this.closed) return;
+			await hub.notify(touched);
+		}
 		// Peers get the compat encoding (keyed tokens PLUS a wildcard per pair),
 		// so a tab of an older build still full-scans while a current one patches.
 		this.changeShare?.broadcast(touched.broadcastTokens());
@@ -4704,8 +4712,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const undoMgr = scope.undoMgr;
 		const kv = await this.kv();
 		const clientId = await this.clientId();
+		// Resolved before the write section, because hub() is async on its first
+		// use and the section below must not await anything that could queue
+		// behind the kv mutex it holds.
+		const hub = await this.hub();
 		const touched = new TouchSet();
 		let undoBarrier = false;
+		/** Set when the hub took the commit's rows; delivers its callbacks. */
+		let deliver: (() => Promise<void>) | undefined;
 		let capturedId: bigint | undefined;
 		const capturedInverses: (Inverse | undefined)[] = [];
 		const payloadCruds = payload.case === 'crud'
@@ -4768,6 +4782,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							crudIndex++;
 							const def = this.entityRegistry.get(crud.entity);
 							const at = plan?.at[crudIndex];
+							// The confirmed base version, where the up-front read covered the
+							// row: what lets the apply below state the merged view it leaves,
+							// so a watcher takes the row from the touch set instead of
+							// reading it back (see TouchSet.rowWithView).
+							let confirmed: { version: bigint } | undefined;
+							if (at !== undefined) {
+								const rec = pre[at + 2] as ConfirmedRecord | undefined;
+								confirmed = { version: rec ? BigInt(rec.ver) : 0n };
+							}
 							// The records are in hand, but the row is RESOLVED on first use:
 							// for a collaborative-text keystroke that means folding the row's
 							// text log back into a whole document (read.ts), the O(document)
@@ -4876,6 +4899,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 								touched,
 								priorRead ? { bytes: priorBytes } : undefined,
 								{ mutationId, index: crudIndex },
+								confirmed,
 							);
 							if (outcome === 'no-target') warnPatchWithoutTarget(crud, workspaceId);
 						}
@@ -4925,6 +4949,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
 					await tx.commit();
+					// Inside the section on purpose: the hub orders the updates it
+					// applies by the lock that granted them, and a write hands its rows
+					// over rather than having them read back, so this is where the
+					// commit's view is both current and exclusively ours. Only the
+					// callbacks run after (see WatcherHub.notifyWithRows).
+					deliver = await hub.notifyWithRows(touched);
 				} catch (err) {
 					tx.release();
 					throw err;
@@ -4942,7 +4972,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			undoMgr.recordGroup(capturedId, capturedInverses, captureStack, undoOpts?.coalesce);
 		}
 		this.statusTracker.incrementPending(workspaceId);
-		await this.notifyChange(touched);
+		await this.notifyChange(touched, deliver);
 		this.coordinator?.syncAfterWrite();
 	}
 
