@@ -368,13 +368,13 @@ The `query` event reports execution metrics for local store reads:
 The `path` field indicates the execution strategy: `index` or `scan`. When
 `path` is `scan`, `declined` contains the reason:
 
-| Value       | Meaning                                                                                                                                                |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `no-query`  | A `watch()` call executed without a query filter (reads entire entity).                                                                                |
-| `no-index`  | The entity declares no index matching the query.                                                                                                       |
-| `not-built` | An index is declared but still building for this workspace. A cross-workspace read reports this while any covered workspace's index is still building. |
-| `no-plan`   | No declared index matches the query filter and ordering.                                                                                               |
-| `budget`    | Index traversal exceeded the row ceiling and fell back to a table scan.                                                                                |
+| Value       | Meaning                                                                                                                                                                                        |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `no-query`  | A `watch()` call executed without a query filter (reads entire entity).                                                                                                                        |
+| `no-index`  | The entity declares no index matching the query.                                                                                                                                               |
+| `not-built` | An index is declared but still building for this workspace. A cross-workspace read reports this while any covered workspace's index is still building.                                         |
+| `no-plan`   | No declared index matches the query filter and ordering.                                                                                                                                       |
+| `budget`    | Index traversal exceeded the row ceiling and fell back to a table scan. A faceted query reports it when the index range it would walk covers too large a share of the entity to beat the scan. |
 
 A cross-workspace read reports `path: 'index'`. The `index` field contains the
 index names joined with `+` (for example, `index1+index2`). The `workspaceId`

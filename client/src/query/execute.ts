@@ -90,12 +90,21 @@ import type { FacetTable } from './types.js';
  * rows. Charging that walk here would turn the most selective indexed query on
  * a large entity into a permanent full scan the moment its range outgrew the
  * ceiling.
+ *
+ * A faceted query has no page to settle at, so this ceiling would end every one
+ * of them at the scan; those are priced by FACET_RANGE_SHARE instead.
  */
 const MAX_INDEX_CANDIDATES = 10000;
 
 /** MAX_INDEX_CANDIDATES, or what a test lowered it to; see
  * {@link withIndexCandidateBudget}. */
 let indexCandidateBudget = MAX_INDEX_CANDIDATES;
+
+/**
+ * The share of an index a faceted query's ranges may cover and still be walked:
+ * at most one part in this many. See the pricing in queryByIndex.
+ */
+const FACET_RANGE_SHARE = 2;
 
 /**
  * Lowers the candidate budget and returns the call that restores it, so a test
@@ -268,6 +277,53 @@ export async function queryByIndex<D extends DescMessage>(
 	// index; a single plan is one branch of itself. Every index a branch
 	// names came from `built`, because those were the planner's candidates.
 	const branches = plan.union ?? [ { index: plan.index, ranges: plan.ranges } ];
+	// The bounds of every range the walk will read, resolved once so the pricing
+	// below and the walk agree on what they are talking about.
+	const legs = branches.flatMap((br) => {
+		const branchIdx = built.find((idx) => idx.name === br.index)!;
+		const prefix = indexPositionPrefix(def.name, branchIdx.name, branchIdx.specHash, workspaceId);
+		return br.ranges.map((range) => {
+			const seek = seekRange(plan, range, window);
+			return {
+				prefix,
+				lo: seek.lo === undefined ? prefix : prefix + seek.lo,
+				hi: seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi,
+			};
+		});
+	});
+
+	// How many rows the walk may read. A faceted query owes the fold every
+	// matching row, so it never settles at the page (see candidateBudget) and the
+	// ceiling is the only thing that ends its walk. Ending there is the wrong
+	// trade: the fallback scan reads and decodes EVERY row of the entity, where
+	// the range is a subset of them, and the reads spent before the decline are
+	// pure loss. So a range that outgrows the ceiling is priced against the whole
+	// index instead — walked without a ceiling when it is the smaller read, and
+	// declined before a single row read when it is not.
+	//
+	// Both sides are counted in positions of the same index, which keeps the
+	// comparison honest under fan-out — a repeated field inflates the range and
+	// the whole index alike — and each count is one indexCount request rather
+	// than a walk. A union prices against the smallest of its indexes, the most
+	// conservative denominator available.
+	//
+	// The share: a walked position costs an index step, a slot in a getMany batch
+	// and a decode, where a scanned row costs a cursor step and a decode. The two
+	// are within a small factor, so a range has to be a clear minority of the
+	// index before walking it is the cheaper of the two.
+	let readCeiling = indexCandidateBudget;
+	if (compiled.facets !== undefined) {
+		let ranged = 0;
+		for (const leg of legs) ranged += await tx.indexCount(leg.lo, leg.hi);
+		if (ranged > readCeiling) {
+			let whole = Infinity;
+			for (const prefix of new Set(legs.map((leg) => leg.prefix))) {
+				whole = Math.min(whole, await tx.indexCount(prefix, successorOf(prefix)));
+			}
+			if (ranged * FACET_RANGE_SHARE > whole) return decline(report, 'budget');
+			readCeiling = Infinity;
+		}
+	}
 
 	// The overlay first, so its size bounds how far the confirmed walk has to
 	// go: only an overlay row can displace a confirmed one from the result.
@@ -393,84 +449,77 @@ export async function queryByIndex<D extends DescMessage>(
 		}
 	};
 
-	ranges: for (const br of branches) {
-		const branchIdx = built.find((idx) => idx.name === br.index)!;
-		const prefix = indexPositionPrefix(def.name, branchIdx.name, branchIdx.specHash, workspaceId);
-		for (const range of br.ranges) {
-			const seek = seekRange(plan, range, window);
-			const lo = seek.lo === undefined ? prefix : prefix + seek.lo;
-			const hi = seek.hi === undefined ? successorOf(prefix) : prefix + seek.hi;
-			for await (const cKey of tx.indexScan(lo, hi)) {
-				walked++;
-				// A position of THIS index can only sit on a row of this entity and
-				// workspace — that is what its prefix means, and the bounds above are
-				// inside it. The guard is a fence against a record that acquired one
-				// some other way, not a path the layout can reach.
-				if (!cKey.startsWith(rowPrefix)) continue;
-				const key = cKey.slice(rowPrefix.length);
-				// One row can appear several times: across ranges (an `in` whose
-				// values overlap nothing else is disjoint, but the planner does not
-				// promise it), and within one range, because an index over a repeated
-				// field puts one position per element on the row. The scan path visits
-				// each row once and the two must agree.
-				if (seen.has(key)) continue;
-				seen.add(key);
-				// The overlay is authoritative for a row it holds — edited or
-				// tombstoned — so the confirmed copy drops out here and reappears,
-				// if it still matches, from the overlay stream.
-				if (shadowed.has(key)) continue;
-				// An ordered plan yields matches in result order, so once enough of
-				// them are in hand no later one can reach the page — bounded above by
-				// how many the overlay could displace. A batched key is in hand only
-				// when nothing left can reject its row; with a residual or a window
-				// the row still decides, so only flushed rows count.
-				const inHand = confirmed.length
-					+ (plan.residual === undefined && window === undefined ? batch.length : 0);
-				const settled = budget !== undefined && plan.ordered && inHand >= budget;
-				// With nothing left for the row to decide, a position IS a match, so
-				// counting the rest of the range costs no row reads at all. A residual
-				// predicate takes that away — the row is the only thing that can
-				// settle it — which is the price of reporting a total here.
-				if (settled && plan.residual === undefined) {
-					// With the total opted out the walk only owes hasMore, and this
-					// position settles it: not seen, not shadowed, no residual left to
-					// reject its row — one distinct live match past the page. A `before`
-					// bound is the exception (what its seek keeps at the end could
-					// still fail `within`), so that shape keeps walking.
-					if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
-						beyond = 1;
-						break ranges;
-					}
-					if (countable) {
-						// Shadowed rows' confirmed positions are in the count — whether
-						// the walk already skipped them or never reached them — without
-						// being matches. Each one inside the counted range comes back
-						// out; under distinctPerRange that is at most one per row,
-						// exactly what the walk would have skipped.
-						let shadowedInRange = 0;
-						for (const record of bases.values()) {
-							for (const p of record.ix ?? []) {
-								if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
-							}
-						}
-						// Assigned, not accumulated: the count covers every position past
-						// the ones in hand, including any a too-large flush has already
-						// classified as beyond — adding would count those twice. The
-						// flush below still classifies the in-hand tail, and either way
-						// the total comes out as the range's position count, less the
-						// boundary positions a page window rejected and the shadowed
-						// positions the overlay answers for.
-						beyond = (await tx.indexCount(lo, hi))
-							- confirmed.length - batch.length - windowRejected - shadowedInRange;
-						break ranges;
-					}
-					beyond++;
-					continue;
+	ranges: for (const { lo, hi } of legs) {
+		for await (const cKey of tx.indexScan(lo, hi)) {
+			walked++;
+			// A position of THIS index can only sit on a row of this entity and
+			// workspace — that is what its prefix means, and the bounds above are
+			// inside it. The guard is a fence against a record that acquired one
+			// some other way, not a path the layout can reach.
+			if (!cKey.startsWith(rowPrefix)) continue;
+			const key = cKey.slice(rowPrefix.length);
+			// One row can appear several times: across ranges (an `in` whose
+			// values overlap nothing else is disjoint, but the planner does not
+			// promise it), and within one range, because an index over a repeated
+			// field puts one position per element on the row. The scan path visits
+			// each row once and the two must agree.
+			if (seen.has(key)) continue;
+			seen.add(key);
+			// The overlay is authoritative for a row it holds — edited or
+			// tombstoned — so the confirmed copy drops out here and reappears,
+			// if it still matches, from the overlay stream.
+			if (shadowed.has(key)) continue;
+			// An ordered plan yields matches in result order, so once enough of
+			// them are in hand no later one can reach the page — bounded above by
+			// how many the overlay could displace. A batched key is in hand only
+			// when nothing left can reject its row; with a residual or a window
+			// the row still decides, so only flushed rows count.
+			const inHand = confirmed.length
+				+ (plan.residual === undefined && window === undefined ? batch.length : 0);
+			const settled = budget !== undefined && plan.ordered && inHand >= budget;
+			// With nothing left for the row to decide, a position IS a match, so
+			// counting the rest of the range costs no row reads at all. A residual
+			// predicate takes that away — the row is the only thing that can
+			// settle it — which is the price of reporting a total here.
+			if (settled && plan.residual === undefined) {
+				// With the total opted out the walk only owes hasMore, and this
+				// position settles it: not seen, not shadowed, no residual left to
+				// reject its row — one distinct live match past the page. A `before`
+				// bound is the exception (what its seek keeps at the end could
+				// still fail `within`), so that shape keeps walking.
+				if (!wantTotal && (window === undefined || window.seek.before === undefined)) {
+					beyond = 1;
+					break ranges;
 				}
-				if (++reads > indexCandidateBudget) return decline(report, 'budget', walked);
-				batch.push(key);
-				if (batch.length >= READ_BATCH) await flush();
+				if (countable) {
+					// Shadowed rows' confirmed positions are in the count — whether
+					// the walk already skipped them or never reached them — without
+					// being matches. Each one inside the counted range comes back
+					// out; under distinctPerRange that is at most one per row,
+					// exactly what the walk would have skipped.
+					let shadowedInRange = 0;
+					for (const record of bases.values()) {
+						for (const p of record.ix ?? []) {
+							if (p >= lo && (hi === undefined || p < hi)) shadowedInRange++;
+						}
+					}
+					// Assigned, not accumulated: the count covers every position past
+					// the ones in hand, including any a too-large flush has already
+					// classified as beyond — adding would count those twice. The
+					// flush below still classifies the in-hand tail, and either way
+					// the total comes out as the range's position count, less the
+					// boundary positions a page window rejected and the shadowed
+					// positions the overlay answers for.
+					beyond = (await tx.indexCount(lo, hi))
+						- confirmed.length - batch.length - windowRejected - shadowedInRange;
+					break ranges;
+				}
+				beyond++;
+				continue;
 			}
+			if (++reads > readCeiling) return decline(report, 'budget', walked);
+			batch.push(key);
+			if (batch.length >= READ_BATCH) await flush();
 		}
 	}
 	await flush();

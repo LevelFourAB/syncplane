@@ -24,6 +24,11 @@ import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import {
+	type IndexReport,
+	queryByIndex,
+	withIndexCandidateBudget,
+} from '../../src/query/execute.js';
+import {
 	compileQuery,
 	type FacetGroup,
 	type FacetTable,
@@ -84,8 +89,12 @@ const SEED: Record<string, Task[]> = {
 	],
 };
 
-async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
-	for (const [ workspaceId, rows ] of Object.entries(SEED)) {
+async function seedConfirmed(
+	kv: KVStore,
+	indexes: IndexCache,
+	seed: Record<string, Task[]> = SEED,
+): Promise<void> {
+	for (const [ workspaceId, rows ] of Object.entries(seed)) {
 		const tx = await kv.write();
 		await tx.put(metaCursor(workspaceId), new Uint8Array([ 1 ]));
 		await applyServerChanges(
@@ -108,13 +117,17 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
 }
 
 /** A two-workspace client over the seed; `built` is the only difference. */
-async function clientWith(built: boolean, onEvent?: (event: SyncEvent) => void) {
+async function clientWith(
+	built: boolean,
+	onEvent?: (event: SyncEvent) => void,
+	seed: Record<string, Task[]> = SEED,
+) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
-	await seedConfirmed(kv, indexes);
+	await seedConfirmed(kv, indexes, seed);
 	if (built) {
 		const mutex = new ChainMutex();
-		for (const workspaceId of Object.keys(SEED)) {
+		for (const workspaceId of Object.keys(seed)) {
 			await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, workspaceId);
 		}
 	}
@@ -149,9 +162,10 @@ const put = (client: SyncClient<never>, workspaceId: string, r: Task): Promise<v
 /** Runs a read through both arms, asserting they agree on rows and facets. */
 async function both(
 	fn: (client: SyncClient<never>) => Promise<Facetted>,
+	seed: Record<string, Task[]> = SEED,
 ): Promise<Facetted> {
-	const scanned = await clientWith(false);
-	const indexed = await clientWith(true);
+	const scanned = await clientWith(false, undefined, seed);
+	const indexed = await clientWith(true, undefined, seed);
 	try {
 		const s = await fn(scanned);
 		const i = await fn(indexed);
@@ -356,6 +370,94 @@ describe('facets on a maintained result', () => {
 		} finally {
 			w.close();
 			await client.close();
+		}
+	});
+});
+
+// A facet folds from every matching row, so the walk never settles at the page
+// and the candidate ceiling alone decides how far it goes. These pin what
+// decides it instead: the size of the range against the size of the entity.
+describe('a faceted query whose range outgrows the candidate ceiling', () => {
+	// Six rows of thirty carry `open` and twenty-four carry `done` — one range
+	// either side of the share a walk has to fit inside, both of them past a
+	// ceiling of three. Rank ascends with the row, area alternates.
+	const BULK: Record<string, Task[]> = {
+		[A]: Array.from({ length: 30 }, (_, i) =>
+			row(
+				`c${String(i).padStart(2, '0')}`,
+				i % 5 === 0 ? 'open' : 'done',
+				i % 2 === 0 ? 'work' : 'home',
+				i,
+			)),
+		[B]: [],
+	};
+
+	const CEILING = 3;
+
+	const faceted = (state: string): Query<Task> => ({
+		where: (t) => t.state.eq(state),
+		orderBy: (t) => [ t.rank.desc() ],
+		limit: 2,
+		facets: { area: (t) => t.area },
+	});
+
+	/** What queryByIndex reports about one read of the bulk seed. */
+	async function receipt(q: Query<Task>): Promise<IndexReport> {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await seedConfirmed(kv, indexes, BULK);
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, A);
+		const tx = await kv.read();
+		const report: IndexReport = { candidates: 0 };
+		try {
+			await queryByIndex(
+				tx,
+				registry,
+				registry.get('task')!,
+				TaskSchema,
+				indexes.for('task'),
+				prepareQuery(TaskSchema, compileQuery<Task>(q)),
+				A,
+				undefined,
+				report,
+			);
+		} finally {
+			tx.release();
+		}
+		return report;
+	}
+
+	it('is served by the index when the range is a fraction of the entity', async () => {
+		const restore = withIndexCandidateBudget(CEILING);
+		try {
+			const report = await receipt(faceted('open'));
+			expect(report.declined).toBeUndefined();
+			expect(report.index).toBe('by_state_rank');
+			expect(report.candidates).toBe(6);
+
+			const rows = await both((c) => read(c, faceted('open')), BULK);
+			expect(rows.map((r) => r.key)).toEqual([ 'c25', 'c20' ]);
+			expect(rows.total).toBe(6);
+			expect(rows.facets).toEqual({ area: [ g('home', 3, A), g('work', 3, A) ] });
+		} finally {
+			restore();
+		}
+	});
+
+	it('falls to the scan without reading a row when the range is most of the entity', async () => {
+		const restore = withIndexCandidateBudget(CEILING);
+		try {
+			const report = await receipt(faceted('done'));
+			expect(report.declined).toBe('budget');
+			expect(report.candidates).toBe(0);
+
+			const rows = await both((c) => read(c, faceted('done')), BULK);
+			expect(rows.map((r) => r.key)).toEqual([ 'c29', 'c28' ]);
+			expect(rows.total).toBe(24);
+			expect(rows.facets).toEqual({ area: [ g('home', 12, A), g('work', 12, A) ] });
+		} finally {
+			restore();
 		}
 	});
 });

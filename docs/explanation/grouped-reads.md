@@ -108,7 +108,7 @@ Because the watcher updates facet buckets per moved row, maintaining facets in a
 The choice between a grouped read and a facet involves distinct trade-offs:
 
 - **Grouped reads:** A grouped read answers from an index without reading rows. It serves entities too large to hold in local memory and queries where no list of rows is retrieved.
-- **Facets:** A facet reads every matching row to extract field values. For a one-shot query, computing facets gives up the early stop an ordered index walk takes when a page is full. A live query pays nothing beyond the rows moved.
+- **Facets:** A facet reads every matching row to extract field values. For a one-shot query, computing facets gives up the early stop an ordered index walk takes when a page is full. Without that stop, the planner decides between the index and a scan by size: it counts the index range it would walk and compares it against the whole index, walks the range when it covers a clear minority of the entity, and scans when it does not. A predicate matching most of the entity therefore reports `declined: 'budget'` and reads the entity once instead of walking most of it row by row. A live query pays nothing beyond the rows moved.
 - **Cross-workspace keying:** In cross-workspace queries, facets key groups by workspace ID in addition to the group value, unless an axis opts out. Grouped reads operate only within a single workspace.
 
 ## Related documentation
