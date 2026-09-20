@@ -397,12 +397,35 @@ export async function scanMergedRows(
 	entity: string,
 	scope?: WorkspaceScope,
 ): Promise<ScopedRow[]> {
+	const out: ScopedRow[] = [];
+	await forEachMergedRow(tx, registry, entity, scope, (row) => {
+		out.push(row);
+	});
+	return out;
+}
+
+/**
+ * {@link scanMergedRows}, handing each row to `visit` as the scan reaches it
+ * instead of collecting them. Rows arrive in the order scanMergedRows returns
+ * them, and `visit` has run for every one of them by the time the promise
+ * settles.
+ *
+ * `visit` runs between the store's chunk reads, so whatever it does — decoding
+ * the row, above all — overlaps the read of the rows that follow. That is the
+ * reason to prefer it over mapping the array.
+ */
+export async function forEachMergedRow(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	scope: WorkspaceScope | undefined,
+	visit: (row: ScopedRow) => void,
+): Promise<void> {
 	if (typeof scope === 'object') {
-		const out: ScopedRow[] = [];
 		for (const ws of [ ...new Set(scope) ].sort(compareWorkspaces)) {
-			out.push(...await scanMergedRows(tx, registry, entity, ws));
+			await forEachMergedRow(tx, registry, entity, ws, visit);
 		}
-		return out;
+		return;
 	}
 	const workspaceId = scope;
 	const cPrefix = workspaceId === undefined
@@ -411,37 +434,58 @@ export async function scanMergedRows(
 	const oPrefix = workspaceId === undefined
 		? overlayPrefix(entity)
 		: overlayWsPrefix(entity, workspaceId);
-	// Keyed by the raw suffix (`<wsSegment>/<key>` or `<key>`), which is exactly
-	// what both prefixes share, so the overlay lines up with the confirmed row
-	// without re-encoding the workspace.
-	const rows = new Map<string, ScopedRow>();
 	const split = (suffix: string): { workspaceId: string; key: string } =>
 		workspaceId === undefined ? splitWsKey(suffix) : { workspaceId, key: suffix };
+	// The overlay comes first so that what an unacked write shadows is settled
+	// before the confirmed prefix — the scan that actually costs something — is
+	// walked, which is what lets a confirmed row be handed on the moment it is
+	// read. The overlay is bounded by the pending queue; the confirmed prefix is
+	// the whole entity.
+	//
+	// Suffixes (`<wsSegment>/<key>` or `<key>`) are exactly what the two
+	// prefixes share, so the overlay lines up with the confirmed row without
+	// re-encoding the workspace, and both prefix scans yield them in the same
+	// ascending order — hence one merging pass rather than a map and a sort.
+	const overlay: { suffix: string; record: OverlayRecord }[] = [];
+	for await (const [ k, v ] of tx.scan(oPrefix)) {
+		overlay.push({ suffix: k.slice(oPrefix.length), record: v as OverlayRecord });
+	}
+	const texts = registry.textPathsOf(entity).length === 0
+		? undefined
+		: await readTextLogs(tx, entity, workspaceId);
+	const emit = (suffix: string, row: ScopedRow): void => {
+		const fields = texts?.get(suffix);
+		if (fields === undefined) {
+			visit(row);
+			return;
+		}
+		visit({ ...row, v: applyTextLog(registry, entity, row.workspaceId, row.key, fields, row.v) });
+	};
+	let next = 0;
+	const overlayOnly = (upto: string | undefined): void => {
+		for (; next < overlay.length; next++) {
+			const { suffix, record } = overlay[next]!;
+			if (upto !== undefined && suffix >= upto) return;
+			// A delete of a row with no confirmed base removes nothing.
+			if (record.del) continue;
+			emit(suffix, { ...split(suffix), v: record.v, version: 0n });
+		}
+	};
 	for await (const [ k, v ] of tx.scan(cPrefix)) {
 		const suffix = k.slice(cPrefix.length);
-		const rec = v as ConfirmedRecord;
-		rows.set(suffix, { ...split(suffix), v: rec.v, version: BigInt(rec.ver) });
-	}
-	for await (const [ k, v ] of tx.scan(oPrefix)) {
-		const suffix = k.slice(oPrefix.length);
-		const record = v as OverlayRecord;
-		if (record.del) {
-			rows.delete(suffix);
-		} else {
-			// Keep the confirmed base version under an optimistic edit; a row that
-			// exists only optimistically has no confirmed base, so version 0n.
-			const prior = rows.get(suffix);
-			rows.set(suffix, {
-				...(prior ?? split(suffix)),
-				v: record.v,
-				version: prior?.version ?? 0n,
-			});
+		overlayOnly(suffix);
+		const version = BigInt((v as ConfirmedRecord).ver);
+		if (next < overlay.length && overlay[next]!.suffix === suffix) {
+			const { record } = overlay[next]!;
+			next++;
+			if (record.del) continue;
+			// Keep the confirmed base version under an optimistic edit.
+			emit(suffix, { ...split(suffix), v: record.v, version });
+			continue;
 		}
+		emit(suffix, { ...split(suffix), v: (v as ConfirmedRecord).v, version });
 	}
-	await foldTextLogsInto(tx, registry, entity, workspaceId, rows);
-	return [ ...rows.entries() ]
-		.sort(([ a ], [ b ]) => (a < b ? -1 : a > b ? 1 : 0))
-		.map(([ , row ]) => row);
+	overlayOnly(undefined);
 }
 
 /**
@@ -481,24 +525,21 @@ export async function workspacesWithRows(tx: KVRead, entity: string): Promise<st
 
 /**
  * The scan's counterpart to foldTextLog: one prefix scan of the whole entity's
- * text log, grouped onto the rows it belongs to, rather than a scan per row.
- * Rows are keyed by the same `<wsSegment>/<key>` (or `<key>`) suffix the row
- * keyspaces share, so a log entry lines up with its row without re-encoding the
- * workspace.
+ * text log, grouped by the row each entry belongs to, rather than a scan per
+ * row. Rows are keyed by the same `<wsSegment>/<key>` (or `<key>`) suffix the
+ * row keyspaces share, so a log entry lines up with its row without re-encoding
+ * the workspace. Undefined when the log holds nothing for the scope.
  */
-async function foldTextLogsInto(
+async function readTextLogs(
 	tx: KVRead,
-	registry: EntityRegistry,
 	entity: string,
 	workspaceId: string | undefined,
-	rows: Map<string, ScopedRow>,
-): Promise<void> {
-	if (registry.textPathsOf(entity).length === 0 || rows.size === 0) return;
+): Promise<Map<string, Map<string, Uint8Array[]>> | undefined> {
 	const prefix = workspaceId === undefined
 		? overlayTextPrefix(entity)
 		: overlayTextWsPrefix(entity, workspaceId);
 	const entityPrefix = overlayTextPrefix(entity);
-	const byRow = new Map<string, Map<string, Uint8Array[]>>();
+	let byRow: Map<string, Map<string, Uint8Array[]>> | undefined;
 	for await (const [ k, v ] of tx.scan(prefix)) {
 		// Split from the entity prefix, not the scan prefix: an `ot/` key always
 		// carries its workspace segment, and a cross-workspace scan needs it back
@@ -509,20 +550,14 @@ async function foldTextLogsInto(
 		const suffix = workspaceId === undefined
 			? `${rest.slice(0, rest.indexOf('/'))}/${parts.key}`
 			: parts.key;
-		if (!rows.has(suffix)) continue;
+		byRow ??= new Map();
 		let fields = byRow.get(suffix);
 		if (fields === undefined) byRow.set(suffix, fields = new Map());
 		const list = fields.get(parts.field);
 		if (list === undefined) fields.set(parts.field, [ v as Uint8Array ]);
 		else list.push(v as Uint8Array);
 	}
-	for (const [ suffix, fields ] of byRow) {
-		const row = rows.get(suffix)!;
-		rows.set(suffix, {
-			...row,
-			v: applyTextLog(registry, entity, row.workspaceId, row.key, fields, row.v),
-		});
-	}
+	return byRow;
 }
 
 export interface Row<T = unknown> {
@@ -550,12 +585,13 @@ export async function scanDecoded<D extends DescMessage>(
 	schema: D,
 	scope?: WorkspaceScope,
 ): Promise<Row<MessageShape<D>>[]> {
-	const rows = await scanMergedRows(tx, registry, def.name, scope);
-	return rows.map((row) => {
+	const rows: Row<MessageShape<D>>[] = [];
+	await forEachMergedRow(tx, registry, def.name, scope, (row) => {
 		const value = fromBinary(schema, row.v);
 		sortOrderedFields(schema, value);
-		return { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
+		rows.push({ key: row.key, value, workspaceId: row.workspaceId, version: row.version });
 	});
+	return rows;
 }
 
 /**
@@ -576,10 +612,9 @@ export async function scanProjected<D extends DescMessage>(
 	view: DescMessage,
 	scope?: WorkspaceScope,
 ): Promise<{ rows: Row<MessageShape<D>>[]; sources: Map<Row<MessageShape<D>>, Uint8Array> }> {
-	const merged = await scanMergedRows(tx, registry, def.name, scope);
 	const rows: Row<MessageShape<D>>[] = [];
 	const sources = new Map<Row<MessageShape<D>>, Uint8Array>();
-	for (const row of merged) {
+	await forEachMergedRow(tx, registry, def.name, scope, (row) => {
 		// Retaining unknown fields would keep exactly the bytes the projection
 		// exists to skip.
 		const value = fromBinary(view, row.v, {
@@ -589,7 +624,7 @@ export async function scanProjected<D extends DescMessage>(
 		const out = { key: row.key, value, workspaceId: row.workspaceId, version: row.version };
 		rows.push(out);
 		sources.set(out, row.v);
-	}
+	});
 	return { rows, sources };
 }
 

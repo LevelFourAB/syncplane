@@ -149,6 +149,18 @@ function requestDone<T>(req: IDBRequest<T>): Promise<T> {
 }
 
 /**
+ * The same promise, marked as already having a rejection handler.
+ *
+ * A promise that is created now and awaited several turns later — or abandoned
+ * when a consumer stops mid-scan — would otherwise surface a failed request as
+ * an unhandled rejection on the page before anything can await it.
+ */
+function handled<T>(p: Promise<T>): Promise<T> {
+	p.catch(() => {});
+	return p;
+}
+
+/**
  * Bounds a prefix scan exactly. IDB orders strings by UTF-16 code unit, so
  * every key starting with `prefix` sorts in [prefix, successor(prefix)) and
  * nothing else does — matching MemoryKVStore's `startsWith` filter for any key
@@ -369,32 +381,64 @@ class IDBRead implements KVRead {
 	}
 
 	/**
+	 * Up to `want` entries of [lo, hi) as two requests on ONE transaction, so
+	 * the keys and the values describe the same rows.
+	 *
+	 * The two are handed back separately rather than joined, because the keys
+	 * alone bound the next chunk: a caller that awaits them first can issue the
+	 * next request while this chunk's values are still being deserialized.
+	 */
+	private scanChunk(
+		lo: string | undefined,
+		hi: string | undefined,
+		want: number,
+		loOpen: boolean,
+	): { keys: Promise<string[]>; values: Promise<unknown[]> } {
+		const store = this.store();
+		const range = boundRange(lo, hi, loOpen);
+		return {
+			keys: handled(requestDone(store.getAllKeys(range, want)) as Promise<string[]>),
+			values: handled(requestDone(store.getAll(range, want))),
+		};
+	}
+
+	/**
 	 * The shared body of scan and scanRange: [lo, hi) in SCAN_CHUNK-sized
 	 * getAll requests, continuing exclusively after the last key yielded. Each
 	 * request opens its own transaction; the client holds a shared lock across
 	 * a logical read, so no commit lands between them (see the class docs).
+	 *
+	 * At most one chunk is read ahead, and only once the consumer has taken a
+	 * whole one: the store is a different thread, so a scan that waits for a
+	 * chunk to arrive before asking for the next one spends the deserialization
+	 * of every chunk with the store idle and the store's read of every chunk
+	 * with the main thread idle. A consumer that stops inside its first chunk
+	 * still costs exactly the one request it took.
 	 */
 	protected async *ranged(lo?: string, hi?: string): AsyncIterable<[string, unknown]> {
 		let want = SCAN_CHUNK;
-		let from = lo;
-		let fromOpen = false;
+		let chunk = this.scanChunk(lo, hi, want, false);
+		let drained = false;
 		for (;;) {
-			const store = this.store();
-			const range = boundRange(from, hi, fromOpen);
-			// Keys and values in two requests on ONE transaction, so they describe
-			// the same rows.
-			const [ keys, values ] = await Promise.all([
-				requestDone(store.getAllKeys(range, want)),
-				requestDone(store.getAll(range, want)),
-			]);
-			for (let i = 0; i < keys.length; i++) {
-				yield [ keys[i] as string, values[i] ];
-			}
+			const keys = await chunk.keys;
 			// Short of what was asked for means the range is exhausted.
-			if (keys.length < want) return;
-			from = keys[keys.length - 1] as string;
-			fromOpen = true;
-			if (want < SCAN_CHUNK_MAX) want *= 2;
+			const more = keys.length === want;
+			const next = more && want < SCAN_CHUNK_MAX ? want * 2 : want;
+			const last = more ? keys[keys.length - 1]! : undefined;
+			// Placed before the values are awaited, which is where the overlap
+			// comes from: this chunk's values are still crossing into the page
+			// while the store is already reading the next chunk's.
+			const ahead = last !== undefined && drained
+				? this.scanChunk(last, hi, next, true)
+				: undefined;
+			const values = await chunk.values;
+			for (let i = 0; i < keys.length; i++) {
+				yield [ keys[i]!, values[i] ];
+			}
+			if (last === undefined) return;
+			drained = true;
+			chunk = ahead ?? this.scanChunk(last, hi, next, true);
+			want = next;
 		}
 	}
 
