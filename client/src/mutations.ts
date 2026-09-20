@@ -30,7 +30,9 @@ import {
 	CreatePolicy,
 	DeletePolicy,
 	entity as entityExt,
+	type EntityOptions,
 	field_behavior as fieldBehaviorExt,
+	type FieldBehavior,
 	FieldWritePolicy,
 	reference as referenceExt,
 	UpdatePolicy,
@@ -53,6 +55,53 @@ import {
 	mergeText,
 	plainString,
 } from './text/index.js';
+
+// Descriptor-derived facts are memoized per descriptor below. getOption decodes
+// the extension out of the descriptor's raw option bytes on every call, and the
+// write path asks the same questions of the same fields for every row it
+// touches; a DescField/DescMessage is an immutable singleton created once per
+// generated schema, so one answer per descriptor is the whole lifetime's worth.
+// A memo holds null for "declares none", which keeps a WeakMap miss (undefined)
+// distinct from a computed absence.
+const fieldBehaviors = new WeakMap<DescField, FieldBehavior | null>();
+const entityOptions = new WeakMap<DescMessage, EntityOptions | null>();
+const referenceMessages = new WeakMap<DescMessage, boolean>();
+const refShapes = new WeakMap<DescField, RefShape | null>();
+const entityKeys = new WeakMap<DescMessage, DescField[] | null>();
+const listKeyFields = new WeakMap<DescField, DescField[]>();
+const schemaRefFields = new WeakMap<DescMessage, [DescField, RefShape][]>();
+const fieldsByLocalName = new WeakMap<DescMessage, Map<string, DescField>>();
+
+/**
+ * A field's (syncplane.v1.field_behavior), or undefined when it declares none.
+ *
+ * The returned message is shared with every other caller and must not be
+ * modified.
+ */
+export function fieldBehaviorOf(field: DescField): FieldBehavior | undefined {
+	let behavior = fieldBehaviors.get(field);
+	if (behavior === undefined) {
+		behavior = hasOption(field, fieldBehaviorExt) ? getOption(field, fieldBehaviorExt) : null;
+		fieldBehaviors.set(field, behavior);
+	}
+	return behavior ?? undefined;
+}
+
+/**
+ * A message's (syncplane.v1.entity), or undefined when it declares none — which
+ * is also how a non-entity message is told from an entity.
+ *
+ * The returned message is shared with every other caller and must not be
+ * modified.
+ */
+export function entityOptionsOf(desc: DescMessage): EntityOptions | undefined {
+	let opts = entityOptions.get(desc);
+	if (opts === undefined) {
+		opts = hasOption(desc, entityExt) ? getOption(desc, entityExt) : null;
+		entityOptions.set(desc, opts);
+	}
+	return opts ?? undefined;
+}
 
 /** A registered syncable entity, derived from (syncplane.v1.entity) options. */
 export interface EntityDef {
@@ -114,10 +163,10 @@ export interface IndexDef {
 }
 
 export function entityDefOf(schema: DescMessage): EntityDef {
-	if (!hasOption(schema, entityExt)) {
+	const opts = entityOptionsOf(schema);
+	if (!opts) {
 		throw new Error(`${schema.typeName} lacks (syncplane.v1.entity) options`);
 	}
-	const opts = getOption(schema, entityExt);
 	if (!opts.name || opts.keyFields.length === 0) {
 		throw new Error(`${schema.typeName}: entity options need name and key_fields`);
 	}
@@ -167,8 +216,7 @@ function protectedFieldsOf(schema: DescMessage, keyFields: DescField[]): string[
 	const out: string[] = [];
 	const seen = new Set<string>();
 	for (const field of schema.fields) {
-		if (!hasOption(field, fieldBehaviorExt)) continue;
-		if (getOption(field, fieldBehaviorExt).writePolicy !== FieldWritePolicy.TRUSTED_ONLY) continue;
+		if (fieldBehaviorOf(field)?.writePolicy !== FieldWritePolicy.TRUSTED_ONLY) continue;
 		if (keys.has(field.name)) {
 			throw new Error(
 				`${schema.typeName}: key field "${field.name}" is marked write_policy TRUSTED_ONLY; `
@@ -294,8 +342,7 @@ function indexesOf(
 ): IndexDef[] {
 	const out: IndexDef[] = [];
 	for (const field of schema.fields) {
-		if (!hasOption(field, fieldBehaviorExt)) continue;
-		if (!getOption(field, fieldBehaviorExt).indexed) continue;
+		if (!fieldBehaviorOf(field)?.indexed) continue;
 		out.push({ name: `__field_${field.name}`, key: [ { path: [ field.name ], desc: false } ] });
 	}
 	for (const spec of opts.index) {
@@ -341,8 +388,20 @@ export interface RefShape {
  * well-formed reference message. A malformed reference message is not a
  * reference either — registration reports it, and everything else sees an
  * ordinary sub-message.
+ *
+ * The returned shape is shared with every other caller and must not be
+ * modified.
  */
 export function refShape(field: DescField): RefShape | undefined {
+	let shape = refShapes.get(field);
+	if (shape === undefined) {
+		shape = computeRefShape(field) ?? null;
+		refShapes.set(field, shape);
+	}
+	return shape ?? undefined;
+}
+
+function computeRefShape(field: DescField): RefShape | undefined {
 	const elem = field.fieldKind === 'message'
 		? field.message
 		: field.fieldKind === 'list' && field.listKind === 'message'
@@ -352,7 +411,7 @@ export function refShape(field: DescField): RefShape | undefined {
 	// The reference declaration wins over an entity declaration on the same
 	// message: such a message is refused at registration, and until then it
 	// must not pass for an entity-typed stub. Mirrors lww.RefOf.
-	if (!hasOption(elem, referenceExt)) {
+	if (!isReferenceMessage(elem)) {
 		const keyFields = entityKeyFields(elem);
 		return keyFields ? { targetSchema: elem, keyFields } : undefined;
 	}
@@ -469,7 +528,12 @@ export function refWorkspaceOf(shape: RefShape, value: Message, holderWorkspace:
  * Whether a message declares (syncplane.v1.reference), well-formed or not.
  */
 export function isReferenceMessage(desc: DescMessage): boolean {
-	return hasOption(desc, referenceExt);
+	let declared = referenceMessages.get(desc);
+	if (declared === undefined) {
+		declared = hasOption(desc, referenceExt);
+		referenceMessages.set(desc, declared);
+	}
+	return declared;
 }
 
 /**
@@ -479,7 +543,7 @@ export function isReferenceMessage(desc: DescMessage): boolean {
  * a oneof. Mirrors the engine's registration check.
  */
 function parseReferenceMessage(desc: DescMessage): RefShape | string {
-	if (hasOption(desc, entityExt)) {
+	if (entityOptionsOf(desc)) {
 		return `reference message ${desc.typeName} is also an entity; a reference message wraps an entity, it is not one`;
 	}
 	let valueField: DescField | undefined;
@@ -490,9 +554,7 @@ function parseReferenceMessage(desc: DescMessage): RefShape | string {
 		if (field.oneof) {
 			return `reference message ${desc.typeName}: field "${field.name}" is a member of oneof "${field.oneof.name}"; a reference message is replaced whole and has no cases`;
 		}
-		const behavior = hasOption(field, fieldBehaviorExt)
-			? getOption(field, fieldBehaviorExt)
-			: undefined;
+		const behavior = fieldBehaviorOf(field);
 		if (behavior?.workspace) {
 			if (field.fieldKind !== 'scalar' || field.scalar !== ScalarType.STRING) {
 				return `reference message ${desc.typeName}: workspace field "${field.name}" must be a singular string`;
@@ -539,9 +601,7 @@ function validateReferenceMessages(schema: DescMessage): void {
 			if (typeof parsed === 'string') throw new Error(parsed);
 		} else {
 			for (const field of desc.fields) {
-				const behavior = hasOption(field, fieldBehaviorExt)
-					? getOption(field, fieldBehaviorExt)
-					: undefined;
+				const behavior = fieldBehaviorOf(field);
 				if (behavior?.workspace) {
 					throw new Error(
 						`field "${field.name}" is marked workspace, but ${desc.typeName} is not a reference message; the flag belongs inside a message declaring (syncplane.v1.reference)`,
@@ -569,9 +629,17 @@ function validateReferenceMessages(schema: DescMessage): void {
  * the field, the target message being an entity makes it one.
  */
 function entityKeyFields(desc: DescMessage): DescField[] | undefined {
-	if (!hasOption(desc, entityExt)) return undefined;
-	const names = getOption(desc, entityExt).keyFields;
-	if (names.length === 0) return undefined;
+	let keys = entityKeys.get(desc);
+	if (keys === undefined) {
+		keys = computeEntityKeyFields(desc) ?? null;
+		entityKeys.set(desc, keys);
+	}
+	return keys ?? undefined;
+}
+
+function computeEntityKeyFields(desc: DescMessage): DescField[] | undefined {
+	const names = entityOptionsOf(desc)?.keyFields;
+	if (!names || names.length === 0) return undefined;
 	const out: DescField[] = [];
 	for (const n of names) {
 		const f = desc.fields.find((ff) => ff.name === n);
@@ -632,11 +700,7 @@ export function projectRefs<D extends DescMessage>(
 	schema: D,
 	value: MessageShape<D>,
 ): MessageShape<D> {
-	const refs: [DescField, RefShape][] = [];
-	for (const field of schema.fields) {
-		const shape = refShape(field);
-		if (shape) refs.push([ field, shape ]);
-	}
+	const refs = refFieldsOf(schema);
 	if (refs.length === 0) return value;
 	const out = clone(schema, value);
 	const rec = out as unknown as Rec;
@@ -650,6 +714,20 @@ export function projectRefs<D extends DescMessage>(
 		}
 	}
 	return out;
+}
+
+/** A schema's reference fields with their shapes, in field order. */
+function refFieldsOf(schema: DescMessage): [DescField, RefShape][] {
+	let refs = schemaRefFields.get(schema);
+	if (refs === undefined) {
+		refs = [];
+		for (const field of schema.fields) {
+			const shape = refShape(field);
+			if (shape) refs.push([ field, shape ]);
+		}
+		schemaRefFields.set(schema, refs);
+	}
+	return refs;
 }
 
 /**
@@ -982,14 +1060,13 @@ function capitalizeFirst(s: string): string {
 // collaborative-text field (text implies opaque — the encoded document is one
 // atomic value merged by the auto-installed text merger).
 function isOpaque(field: DescField): boolean {
-	if (!hasOption(field, fieldBehaviorExt)) return false;
-	const b = getOption(field, fieldBehaviorExt);
-	return b.opaque || b.text;
+	const b = fieldBehaviorOf(field);
+	return b !== undefined && (b.opaque || b.text);
 }
 
 /** Whether a field carries (syncplane.v1.field_behavior).text. */
 export function isTextField(field: DescField): boolean {
-	return hasOption(field, fieldBehaviorExt) && getOption(field, fieldBehaviorExt).text;
+	return fieldBehaviorOf(field)?.text ?? false;
 }
 
 /**
@@ -1291,20 +1368,28 @@ function mergeScalarSetItem(
  * Resolves the identity fields of a keyed message list: the explicit key_field
  * behavior, else the element entity's key_fields. Returns [] for a non-message
  * list or when no identity can be determined. Mirror of lww.go keyFieldsFor.
+ *
+ * The returned array is shared with every other caller and must not be
+ * modified.
  */
 export function keyFieldsFor(field: DescField): DescField[] {
+	let fields = listKeyFields.get(field);
+	if (fields === undefined) {
+		fields = computeKeyFieldsFor(field);
+		listKeyFields.set(field, fields);
+	}
+	return fields;
+}
+
+function computeKeyFieldsFor(field: DescField): DescField[] {
 	const elem = field.fieldKind === 'list' && field.listKind === 'message'
 		? field.message
 		: undefined;
 	if (!elem) return [];
-	let names: string[] = [];
-	if (hasOption(field, fieldBehaviorExt)) {
-		const kf = getOption(field, fieldBehaviorExt).keyField;
-		if (kf.length > 0) names = kf;
-	}
-	if (names.length === 0 && hasOption(elem, entityExt)) {
-		names = getOption(elem, entityExt).keyFields;
-	}
+	let names: readonly string[] = [];
+	const kf = fieldBehaviorOf(field)?.keyField;
+	if (kf && kf.length > 0) names = kf;
+	if (names.length === 0) names = entityOptionsOf(elem)?.keyFields ?? [];
 	if (names.length === 0) return [];
 	const fields: DescField[] = [];
 	for (const n of names) {
@@ -1347,9 +1432,7 @@ export function collectTextFieldPaths(
 ): string[] {
 	const out: string[] = [];
 	for (const field of schema.fields) {
-		const behavior = hasOption(field, fieldBehaviorExt)
-			? getOption(field, fieldBehaviorExt)
-			: undefined;
+		const behavior = fieldBehaviorOf(field);
 		const memberOf = field.oneof?.name ?? oneof;
 		if (behavior?.text) {
 			if (field.fieldKind !== 'scalar' || field.scalar !== ScalarType.BYTES) {
@@ -1979,9 +2062,7 @@ function validateOneofs(schema: DescMessage): void {
 			);
 		}
 		if (field.fieldKind !== 'list' || field.listKind !== 'message') continue;
-		const behavior = hasOption(field, fieldBehaviorExt)
-			? getOption(field, fieldBehaviorExt)
-			: undefined;
+		const behavior = fieldBehaviorOf(field);
 		const identity = [
 			...(behavior?.keyField ?? []),
 			...(behavior?.orderField ? [ behavior.orderField ] : []),
@@ -2004,8 +2085,7 @@ function validateOneofs(schema: DescMessage): void {
  */
 function validateOrderFields(schema: DescMessage): void {
 	for (const field of schema.fields) {
-		if (!hasOption(field, fieldBehaviorExt)) continue;
-		const order = getOption(field, fieldBehaviorExt).orderField;
+		const order = fieldBehaviorOf(field)?.orderField;
 		if (!order) continue;
 		if (
 			field.fieldKind !== 'list' || field.listKind !== 'message'
@@ -2631,9 +2711,10 @@ export function maskFromInit(schema: DescMessage, init: object): string[] {
 				+ `explicit \`paths\` mask.`,
 		);
 	}
+	const byLocalName = localNameIndexOf(schema);
 	const paths: string[] = [];
 	for (const key of Object.keys(init)) {
-		const field = schema.fields.find((f) => f.localName === key);
+		const field = byLocalName.get(key);
 		if (!field) {
 			// A oneof is addressed in an init object by the group's own name, which
 			// is not a field — and the group is exactly the unit a mask names, so
@@ -2648,6 +2729,16 @@ export function maskFromInit(schema: DescMessage, init: object): string[] {
 		paths.push(field.name);
 	}
 	return paths;
+}
+
+/** A schema's fields indexed by their JS accessor name. */
+function localNameIndexOf(schema: DescMessage): Map<string, DescField> {
+	let index = fieldsByLocalName.get(schema);
+	if (index === undefined) {
+		index = new Map(schema.fields.map((f) => [ f.localName, f ]));
+		fieldsByLocalName.set(schema, index);
+	}
+	return index;
 }
 
 /**

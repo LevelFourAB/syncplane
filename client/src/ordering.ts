@@ -4,17 +4,10 @@
 // an add/clear). This module is the pure client layer: allocate `pos` keys
 // between neighbors, mint stable element ids, and sort by `pos` on read.
 
-import {
-	type DescField,
-	type DescMessage,
-	getOption,
-	hasOption,
-	type Message,
-} from '@bufbuild/protobuf';
+import { type DescField, type DescMessage, type Message } from '@bufbuild/protobuf';
 
 import { generateKeyBetween as fracBetween } from './fractional.js';
-import { field_behavior as fieldBehaviorExt } from './gen/syncplane/v1/options_pb.js';
-import { encodeItemKey, keyFieldsFor } from './mutations.js';
+import { encodeItemKey, fieldBehaviorOf, keyFieldsFor } from './mutations.js';
 
 const DIGITS = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
 
@@ -83,9 +76,7 @@ export function comparePos(posA: string, idA: string, posB: string, idB: string)
  * is not a movable (keyed message list with order_field) list. */
 export function orderFieldOf(field: DescField): string | undefined {
 	if (field.fieldKind !== 'list' || field.listKind !== 'message') return undefined;
-	if (!hasOption(field, fieldBehaviorExt)) return undefined;
-	const order = getOption(field, fieldBehaviorExt).orderField;
-	return order || undefined;
+	return fieldBehaviorOf(field)?.orderField || undefined;
 }
 
 /** Everything the sort needs about one movable list field, resolved from the schema. */

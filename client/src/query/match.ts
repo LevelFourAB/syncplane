@@ -4,13 +4,9 @@
 // half of engine/query/match.go; the evaluation half (the matcher and its
 // rank) lives in evaluate.ts with the rest of the evaluator.
 
-import { type DescField, type DescMessage, getOption, hasOption } from '@bufbuild/protobuf';
+import type { DescField, DescMessage } from '@bufbuild/protobuf';
 
-import {
-	entity as entityExt,
-	field_behavior as fieldBehaviorExt,
-} from '../gen/syncplane/v1/options_pb.js';
-import { isTextField } from '../mutations.js';
+import { entityOptionsOf, fieldBehaviorOf, isTextField } from '../mutations.js';
 import type { AnalyzeOptions } from '../search/index.js';
 import type { Path } from './ast.js';
 
@@ -53,11 +49,11 @@ export function searchDeclOf(schema: DescMessage): SearchDecl | undefined {
 function compileSearchDecl(schema: DescMessage): SearchDecl | undefined {
 	const paths: string[] = [];
 	for (const field of schema.fields) {
-		if (hasOption(field, fieldBehaviorExt) && getOption(field, fieldBehaviorExt).searchable) {
+		if (fieldBehaviorOf(field)?.searchable) {
 			paths.push(field.name);
 		}
 	}
-	const spec = hasOption(schema, entityExt) ? getOption(schema, entityExt).search : undefined;
+	const spec = entityOptionsOf(schema)?.search;
 	for (const f of spec?.field ?? []) paths.push(f.path);
 	if (paths.length === 0) {
 		if (spec) {
