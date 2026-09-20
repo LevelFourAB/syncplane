@@ -175,7 +175,18 @@ export type ReadOp =
 	 * is set by how many rows carry its terms, not by how many words it has.
 	 */
 	| { kind: 'search'; terms: string; limit: number; ranked?: true }
-	| { kind: 'get'; issueId: string };
+	| { kind: 'get'; issueId: string }
+	/**
+	 * The triage page with the counts a filter sidebar shows beside it:
+	 * project, priority and label. The plan is the same index as `triage`, but
+	 * a facet folds from every matching row, so the walk reads the whole match
+	 * set rather than stopping at the page.
+	 */
+	| { kind: 'triageFacets'; limit: number }
+	/** The board with state, assignee and label counts. */
+	| { kind: 'boardFacets'; projectId: string; limit: number }
+	/** No predicate at all: the sidebar over the whole entity. */
+	| { kind: 'allFacets'; limit: number };
 
 /**
  * One live query a bench holds open. The query shapes mirror ReadOp's, because
@@ -203,7 +214,9 @@ export type WatchSpec =
 	 * commit costs a comment watch from what crossing a reference adds.
 	 */
 	| { kind: 'comments'; limit: number }
-	| { kind: 'flat' };
+	| { kind: 'flat' }
+	/** The `triage` watch carrying the sidebar's facets, kept in step per commit. */
+	| { kind: 'triageFacets'; limit: number };
 
 /**
  * One open watch's deliveries. A callback fires only when the delivered page

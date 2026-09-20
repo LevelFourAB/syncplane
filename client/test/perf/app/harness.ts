@@ -332,6 +332,40 @@ async function runRead(op: ReadOp): Promise<ReadResult> {
 				limit: op.limit,
 			}) as typeof rows;
 			break;
+		case 'triageFacets':
+			rows = await c.query(IssueSchema, {
+				where: (i) => i.state.eq('open'),
+				orderBy: (i) => [ i.priority.desc() ],
+				limit: op.limit,
+				facets: {
+					project: (i) => i.project.id,
+					priority: (i) => i.priority,
+					labels: (i) => i.labels,
+				},
+			}) as typeof rows;
+			break;
+		case 'boardFacets':
+			rows = await c.query(IssueSchema, {
+				where: (i) => i.project.id.eq(op.projectId),
+				orderBy: (i) => [ i.updatedAtMs.desc() ],
+				limit: op.limit,
+				facets: {
+					state: (i) => i.state,
+					assignee: (i) => i.assignee.id,
+					labels: (i) => i.labels,
+				},
+			}) as typeof rows;
+			break;
+		case 'allFacets':
+			rows = await c.query(IssueSchema, {
+				orderBy: (i) => [ i.updatedAtMs.desc() ],
+				limit: op.limit,
+				facets: {
+					state: (i) => i.state,
+					project: (i) => i.project.id,
+				},
+			}) as typeof rows;
+			break;
 		case 'get': {
 			const row = await c.get(IssueSchema, op.issueId);
 			return {
@@ -652,6 +686,18 @@ const harness: BenchHarnessApi = {
 					break;
 				case 'flat':
 					view.handle = c.watch(FlatSchema, cb);
+					break;
+				case 'triageFacets':
+					view.handle = c.watchQuery(IssueSchema, {
+						where: (i) => i.state.eq('open'),
+						orderBy: (i) => [ i.priority.desc() ],
+						limit: spec.limit,
+						facets: {
+							project: (i) => i.project.id,
+							priority: (i) => i.priority,
+							labels: (i) => i.labels,
+						},
+					}, cb);
 					break;
 			}
 			watches.push(view);
