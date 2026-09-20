@@ -1,10 +1,13 @@
 import { safeRun } from '../report.js';
 import {
+	type GenerationOf,
+	type GenerationTracking,
 	INDEX_FIELD,
 	type IndexEntry,
 	type KVRead,
 	type KVStore,
 	type KVWrite,
+	nextGenerationToken,
 	positionsOf,
 } from './store.js';
 
@@ -34,9 +37,12 @@ export interface IDBKVStoreOptions {
  * runs readers under a shared lock and writers under an exclusive one (see
  * Mutex), so no commit can land between the transactions a logical read spans.
  */
-export class IDBKVStore implements KVStore {
+export class IDBKVStore implements KVStore, GenerationTracking {
 	/** Reason the connection went away, once it has; undefined while usable. */
 	private lost: string | undefined;
+
+	/** Installed by trackGenerations; undefined until then. */
+	private generationOf: GenerationOf | undefined;
 
 	private constructor(
 		private db: IDBDatabase,
@@ -116,7 +122,11 @@ export class IDBKVStore implements KVStore {
 
 	async write(): Promise<KVWrite> {
 		this.assertUsable();
-		return new IDBWrite(this.db, this.storeName);
+		return new IDBWrite(this.db, this.storeName, this.generationOf);
+	}
+
+	trackGenerations(generationOf: GenerationOf): void {
+		this.generationOf = generationOf;
 	}
 
 	async close(): Promise<void> {
@@ -571,6 +581,12 @@ class IDBWrite extends IDBRead implements KVWrite {
 	private pending = new Map<string, unknown>();
 	private deleted = new Set<string>();
 	private done = false;
+	/** Generation keys the buffered writes fall under; stamped on commit. */
+	private stampAt: Set<string> | undefined;
+
+	constructor(db: IDBDatabase, storeName: string, private generationOf?: GenerationOf) {
+		super(db, storeName);
+	}
 
 	override async get(key: string): Promise<unknown | undefined> {
 		if (this.deleted.has(key)) return undefined;
@@ -752,11 +768,22 @@ class IDBWrite extends IDBRead implements KVWrite {
 	async put(key: string, value: unknown): Promise<void> {
 		this.deleted.delete(key);
 		this.pending.set(key, value);
+		this.note(key);
 	}
 
 	async del(key: string): Promise<void> {
 		this.pending.delete(key);
 		this.deleted.add(key);
+		this.note(key);
+	}
+
+	/** Records the generation `key` belongs to, if any. Noted as the write is
+	 * buffered rather than gathered at commit, so a commit walks the keys it is
+	 * about to write and nothing else. */
+	private note(key: string): void {
+		const at = this.generationOf?.(key);
+		if (at === undefined) return;
+		(this.stampAt ??= new Set()).add(at);
 	}
 
 	async commit(): Promise<void> {
@@ -767,6 +794,15 @@ class IDBWrite extends IDBRead implements KVWrite {
 		const store = tx.objectStore(this.storeName);
 		for (const [ k, v ] of this.pending) store.put(v, k);
 		for (const k of this.deleted) store.delete(k);
+		if (this.stampAt !== undefined) {
+			const token = nextGenerationToken();
+			// A transaction that deleted the generation key keeps it deleted — a
+			// workspace purge takes the rows and their generation together, and an
+			// absent token already means "unknown" to every reader.
+			for (const at of this.stampAt) {
+				if (!this.deleted.has(at)) store.put(token, at);
+			}
+		}
 		await new Promise<void>((resolve, reject) => {
 			tx.oncomplete = () => resolve();
 			tx.onerror = () => reject(tx.error);
@@ -778,5 +814,6 @@ class IDBWrite extends IDBRead implements KVWrite {
 		this.done = true;
 		this.pending.clear();
 		this.deleted.clear();
+		this.stampAt = undefined;
 	}
 }

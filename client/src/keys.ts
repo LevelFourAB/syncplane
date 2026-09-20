@@ -189,8 +189,10 @@ export const FORMAT_VERSION = 1;
 
 /** Every workspace's confirmed rows of one entity — the cross-workspace scan. */
 export const confirmedPrefix = (entity: string): string => `c/${entity}/`;
+/** Root of the optimistic overlay keyspace. */
+export const OVERLAY_ROOT = 'o/';
 /** Every workspace's overlay rows of one entity. */
-export const overlayPrefix = (entity: string): string => `o/${entity}/`;
+export const overlayPrefix = (entity: string): string => `${OVERLAY_ROOT}${entity}/`;
 /** One workspace's confirmed rows of one entity. */
 export const confirmedWsPrefix = (entity: string, workspaceId: string): string =>
 	`c/${entity}/${wsSegment(workspaceId)}/`;
@@ -253,6 +255,46 @@ export const overlayTextRowPrefix = (
 	workspaceId: string,
 	key: string,
 ): string => `${overlayTextWsPrefix(entity, workspaceId)}${key}/`;
+/**
+ * The overlay generation of one entity and workspace: a token restamped by
+ * every committed transaction that writes or deletes anything under that pair's
+ * `o/` rows or `ot/` fragments, both of which move the bytes a local read sees.
+ *
+ * A reader that finds the token it read before knows the pair's overlay has not
+ * moved since — whichever tab wrote it, because the stamp rides in the writer's
+ * own transaction (see KVStore generation tracking). An ABSENT token means
+ * unknown, NOT unchanged: a store last written by a build that did not stamp
+ * carries none, and its overlay may be anything.
+ *
+ * It lives under the workspace's meta prefix so that purging a workspace takes
+ * it with the rows it describes.
+ */
+export const overlayGeneration = (entity: string, workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}ogen/${entity}`;
+
+/**
+ * The generation {@link overlayGeneration} names for the overlay row or text
+ * fragment at `key`, or undefined for every other key.
+ *
+ * The store is handed this one function for the whole keyspace rather than a
+ * list of pairs to watch, so it takes the key apart instead of being told which
+ * entity and workspace it belongs to.
+ */
+export const overlayGenerationFor = (key: string): string | undefined => {
+	const root = key.startsWith(OVERLAY_ROOT)
+		? OVERLAY_ROOT
+		: key.startsWith(OVERLAY_TEXT_ROOT)
+		? OVERLAY_TEXT_ROOT
+		: undefined;
+	if (root === undefined) return undefined;
+	const entityEnd = key.indexOf('/', root.length);
+	if (entityEnd === -1) return undefined;
+	const segmentEnd = key.indexOf('/', entityEnd + 1);
+	if (segmentEnd === -1) return undefined;
+	return `${META_WS_PREFIX}${key.slice(entityEnd + 1, segmentEnd)}/ogen/`
+		+ key.slice(root.length, entityEnd);
+};
+
 /** Every fragment logged for one field of one row — the unit a fold consumes. */
 export const overlayTextFieldPrefix = (
 	entity: string,

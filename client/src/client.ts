@@ -54,6 +54,7 @@ import {
 	metaLastMutationId,
 	metaPushedThrough,
 	metaWsPrefix,
+	overlayGenerationFor,
 	overlayKey,
 	type OverlayRecord,
 	overlayTextWsPrefix,
@@ -67,7 +68,12 @@ import {
 } from './keys.js';
 import { IDBKVStore } from './kv/idb.js';
 import { MemoryKVStore } from './kv/memory.js';
-import type { KVRead, KVStore } from './kv/store.js';
+import {
+	type GenerationTracking,
+	type KVRead,
+	type KVStore,
+	tracksGenerations,
+} from './kv/store.js';
 import {
 	applyTextStringsToCrud,
 	assertWritePolicy,
@@ -571,7 +577,14 @@ export interface SyncClientOptions<E extends readonly DescMessage[] = readonly D
 	 * anything out of it first) is the app's to do.
 	 */
 	storagePrefix?: string;
-	/** Defaults to IndexedDB in browsers, in-memory elsewhere. */
+	/**
+	 * Defaults to IndexedDB in browsers, in-memory elsewhere.
+	 *
+	 * A store that implements {@link GenerationTracking} lets local reads reuse
+	 * the optimistic overlay they read last; one that does not reads it back per
+	 * query, which costs more under a deep pending queue and is otherwise
+	 * indistinguishable.
+	 */
 	kvStore?: KVStore;
 	/** Generated schemas of all syncable entities. */
 	entities: E;
@@ -2368,11 +2381,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	private kv(): Promise<KVStore> {
-		this.kvPromise ??= this.opts.kvStore
+		this.kvPromise ??= (this.opts.kvStore
 			? Promise.resolve(this.opts.kvStore)
 			: typeof indexedDB !== 'undefined'
 			? IDBKVStore.open(this.storageNames.store)
-			: Promise.resolve(new MemoryKVStore());
+			: Promise.resolve(new MemoryKVStore())).then((store) => {
+				// What lets a local read reuse the overlay it read last time
+				// instead of walking the pending queue again (see readOverlay). A
+				// caller's own store need not keep generations; its readers scan.
+				if (tracksGenerations(store)) store.trackGenerations(overlayGenerationFor);
+				return store;
+			});
 		return this.kvPromise;
 	}
 

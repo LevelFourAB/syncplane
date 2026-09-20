@@ -1,4 +1,13 @@
-import { type IndexEntry, type KVRead, type KVStore, type KVWrite, positionsOf } from './store.js';
+import {
+	type GenerationOf,
+	type GenerationTracking,
+	type IndexEntry,
+	type KVRead,
+	type KVStore,
+	type KVWrite,
+	nextGenerationToken,
+	positionsOf,
+} from './store.js';
 
 /**
  * In-memory KVStore for tests and Node usage.
@@ -7,9 +16,11 @@ import { type IndexEntry, type KVRead, type KVStore, type KVWrite, positionsOf }
  * Writes buffer locally and apply atomically on commit. Single-writer:
  * concurrent write() calls queue.
  */
-export class MemoryKVStore implements KVStore {
+export class MemoryKVStore implements KVStore, GenerationTracking {
 	private map = new Map<string, unknown>();
 	private writeLock: Promise<void> = Promise.resolve();
+	/** Installed by trackGenerations; undefined until then. */
+	private generationOf: GenerationOf | undefined;
 
 	async read(): Promise<KVRead> {
 		// Map snapshot is O(1)-ish copy-on-write semantics are simulated by
@@ -23,7 +34,11 @@ export class MemoryKVStore implements KVStore {
 		const prev = this.writeLock;
 		this.writeLock = new Promise((resolve) => (unlock = resolve));
 		await prev;
-		return new MemoryWrite(this, new Map(this.map), unlock);
+		return new MemoryWrite(this, new Map(this.map), unlock, this.generationOf);
+	}
+
+	trackGenerations(generationOf: GenerationOf): void {
+		this.generationOf = generationOf;
 	}
 
 	async close(): Promise<void> {
@@ -144,26 +159,53 @@ class MemoryRead implements KVRead {
 
 class MemoryWrite extends MemoryRead implements KVWrite {
 	private done = false;
+	/** Generation keys this transaction's writes fall under; stamped on commit. */
+	private stampAt: Set<string> | undefined;
+	/** Keys this transaction deleted, tracked only while generations are, since
+	 * a deleted generation key must stay deleted (see commit). */
+	private dropped: Set<string> | undefined;
 
 	constructor(
 		private store: MemoryKVStore,
 		snapshot: Map<string, unknown>,
 		private unlock: () => void,
+		private generationOf?: GenerationOf,
 	) {
 		super(snapshot);
 	}
 
 	async put(key: string, value: unknown): Promise<void> {
 		this.snapshot.set(key, value);
+		this.dropped?.delete(key);
+		this.note(key);
 	}
 
 	async del(key: string): Promise<void> {
 		this.snapshot.delete(key);
+		if (this.generationOf !== undefined) (this.dropped ??= new Set()).add(key);
+		this.note(key);
+	}
+
+	/** Records the generation `key` belongs to, if any. */
+	private note(key: string): void {
+		const at = this.generationOf?.(key);
+		if (at === undefined) return;
+		(this.stampAt ??= new Set()).add(at);
 	}
 
 	async commit(): Promise<void> {
 		if (this.done) throw new Error('transaction already finished');
 		this.done = true;
+		if (this.stampAt !== undefined) {
+			const token = nextGenerationToken();
+			// A transaction that deleted the generation key keeps it deleted — a
+			// workspace purge takes the rows and their generation together, and an
+			// absent token already means "unknown" to every reader. The snapshot IS
+			// the commit here, so the stamp lands inside it.
+			for (const at of this.stampAt) {
+				if (this.dropped?.has(at) !== true) this.snapshot.set(at, token);
+			}
+		}
 		this.store.applyCommit(this.snapshot);
 		this.unlock();
 	}

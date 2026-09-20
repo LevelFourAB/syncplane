@@ -6,6 +6,7 @@ import {
 	confirmedPrefix,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
+	overlayGeneration,
 	overlayKey,
 	overlayPrefix,
 	type OverlayRecord,
@@ -17,7 +18,7 @@ import {
 	splitWsKey,
 	wsFromSegment,
 } from './keys.js';
-import type { KVRead } from './kv/store.js';
+import type { KVRead, KVWrite } from './kv/store.js';
 import {
 	type EntityDef,
 	type EntityRegistry,
@@ -25,6 +26,7 @@ import {
 	textFieldBytes,
 } from './mutations.js';
 import { sortOrderedFields } from './ordering.js';
+import { overlayCacheOf, type OverlayEntry } from './overlaycache.js';
 import type { Cond } from './query/ast.js';
 import { reportError } from './report.js';
 import {
@@ -78,6 +80,61 @@ export async function foldTextLog(
 		else list.push(v as Uint8Array);
 	}
 	return applyTextLog(registry, entity, workspaceId, key, fragments, bytes);
+}
+
+/**
+ * The overlay rows of one entity and workspace in key order, each carrying the
+ * merged view of its row — the optimistic bytes with the unacked text
+ * fragments folded in — and a local tombstone carrying none.
+ *
+ * Served from the client's cache whenever the store reports the same overlay
+ * generation the cached copy was taken under, which is one point read rather
+ * than a walk of the pending queue's worth of rows (see keys.overlayGeneration
+ * for what the token promises). A store that keeps no generation, and a
+ * transaction that can write — whose own uncommitted writes no committed token
+ * describes — read the rows from the store every time.
+ *
+ * Callers must not mutate the entries: a cached read hands the same objects to
+ * every reader that follows it.
+ */
+export async function readOverlay(
+	tx: KVRead,
+	registry: EntityRegistry,
+	entity: string,
+	workspaceId: string,
+): Promise<readonly OverlayEntry[]> {
+	const at = overlayGeneration(entity, workspaceId);
+	const cache = overlayCacheOf(registry);
+	const cacheable = typeof (tx as Partial<KVWrite>).put !== 'function';
+	// Read before the scan rather than after it: a token taken afterwards could
+	// label rows that predate it, which is the one mislabelling a later read
+	// cannot detect.
+	const generation = cacheable ? await tx.get(at) : undefined;
+	if (generation !== undefined) {
+		const hit = cache.get(at, generation);
+		if (hit !== undefined) return hit;
+	}
+	const prefix = overlayWsPrefix(entity, workspaceId);
+	const rows: OverlayEntry[] = [];
+	let bytes = 0;
+	for await (const [ k, v ] of tx.scan(prefix)) {
+		const key = k.slice(prefix.length);
+		const record = v as OverlayRecord;
+		if (record.del) {
+			rows.push({ key, bytes: undefined });
+			continue;
+		}
+		const folded = await foldTextLog(tx, registry, entity, workspaceId, key, record.v);
+		bytes += folded.length;
+		rows.push({ key, bytes: folded });
+	}
+	// Taken again: the rows are kept only under a token the store still reports,
+	// so a fill that straddled a commit is discarded instead of standing in for
+	// a generation it does not hold.
+	if (generation !== undefined && await tx.get(at) === generation) {
+		cache.put(at, generation, rows, bytes);
+	}
+	return rows;
 }
 
 /** The field segment of an `ot/` key, given the entity it was scanned under. */

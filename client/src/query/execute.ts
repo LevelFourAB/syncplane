@@ -56,7 +56,8 @@ import type { IndexEntry, KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
-import { decodeWholeRow, foldTextLog, type Row } from '../read.js';
+import type { OverlayEntry } from '../overlaycache.js';
+import { decodeWholeRow, foldTextLog, readOverlay, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
@@ -376,31 +377,19 @@ export async function queryByIndex<D extends DescMessage>(
 	// and it needs no view at all.
 	let overlayView: DescMessage | undefined;
 	let viewResolved = false;
-	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
 	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
-	for await (const [ k, v ] of tx.scan(oPrefix)) {
-		const key = k.slice(oPrefix.length);
-		shadowed.add(key);
-		const record = v as OverlayRecord;
-		if (record.del) continue; // a local tombstone: shadowed and gone
+	for (const entry of await readOverlay(tx, registry, def.name, workspaceId)) {
+		shadowed.add(entry.key);
+		if (entry.bytes === undefined) continue; // a local tombstone: shadowed and gone
 		if (!viewResolved) {
 			viewResolved = true;
 			overlayView = projectionForOverlay(schema, compiled);
 		}
-		const decoded = await decodeRow(
-			tx,
-			registry,
-			def,
-			schema,
-			workspaceId,
-			key,
-			record.v,
-			overlayView,
-		);
-		if (!matches(decoded.value, compiled.where, schema)) continue;
-		if (window && !window.within(decoded.value, key)) continue;
-		kept.push({ key, ...decoded });
+		const value = overlayValue(entry, schema, overlayView);
+		if (!matches(value, compiled.where, schema)) continue;
+		if (window && !window.within(value, entry.key)) continue;
+		kept.push({ key: entry.key, value, bytes: entry.bytes });
 	}
 	// Whether the count shortcut below can survive the overlay: a shadowed
 	// row's confirmed positions are still in the store's index — the overlay
@@ -1281,31 +1270,19 @@ async function querySearchIndex<D extends DescMessage>(
 	// built once a row turns up, because an empty pending queue needs none.
 	let overlayView: DescMessage | undefined;
 	let viewResolved = false;
-	const oPrefix = overlayWsPrefix(def.name, workspaceId);
 	const shadowed = new Set<string>();
 	const kept: { key: string; value: MessageShape<D>; bytes: Uint8Array }[] = [];
-	for await (const [ k, v ] of tx.scan(oPrefix)) {
-		const key = k.slice(oPrefix.length);
-		shadowed.add(key);
-		const record = v as OverlayRecord;
-		if (record.del) continue;
+	for (const entry of await readOverlay(tx, registry, def.name, workspaceId)) {
+		shadowed.add(entry.key);
+		if (entry.bytes === undefined) continue;
 		if (!viewResolved) {
 			viewResolved = true;
 			overlayView = projectionForOverlay(schema, compiled);
 		}
-		const decoded = await decodeRow(
-			tx,
-			registry,
-			def,
-			schema,
-			workspaceId,
-			key,
-			record.v,
-			overlayView,
-		);
-		if (!matches(decoded.value, compiled.where, schema)) continue;
-		if (window && !window.within(decoded.value, key)) continue;
-		kept.push({ key, ...decoded });
+		const value = overlayValue(entry, schema, overlayView);
+		if (!matches(value, compiled.where, schema)) continue;
+		if (window && !window.within(value, entry.key)) continue;
+		kept.push({ key: entry.key, value, bytes: entry.bytes });
 	}
 	const baseRecords = await tx.getMany(
 		kept.map((c) => confirmedKey(def.name, workspaceId, c.key)),
@@ -1912,6 +1889,50 @@ async function decodeRow<D extends DescMessage>(
 		: fromBinary(view, folded, { readUnknownFields: false }) as unknown as MessageShape<D>;
 	sortOrderedFields(schema, value);
 	return { value, bytes: folded };
+}
+
+/**
+ * An overlay row decoded the way a local read decides on it: through `view`,
+ * the projection covering the fields the query can look at, or whole when the
+ * read has no projection for it.
+ *
+ * The fold is already in the entry's bytes (see readOverlay), so this is the
+ * decode alone — and a PROJECTED result is kept on the entry, so a second read
+ * of the same query shape over an unchanged overlay decodes nothing at all.
+ * Held by descriptor, which projectionForOverlay hands out one of per (schema,
+ * field set), so two query shapes reading the same fields share the decode.
+ *
+ * A shared value is therefore only ever a projected one, and every use of it
+ * here reads it: matches, the page window and the row comparator, all of which
+ * leave it alone. A row that reaches the page is decoded whole again, from the
+ * same bytes, before it leaves the read.
+ */
+function overlayValue<D extends DescMessage>(
+	entry: OverlayEntry,
+	schema: D,
+	view: DescMessage | undefined,
+): MessageShape<D> {
+	const bytes = entry.bytes!;
+	// Without a projection the value IS what the read hands back, and a caller
+	// may do what it likes with it — so that one is decoded per read and only a
+	// projected value is ever shared.
+	if (view === undefined) {
+		const whole = fromBinary(schema, bytes);
+		sortOrderedFields(schema, whole);
+		return whole;
+	}
+	const held = entry.projections?.get(view);
+	if (held !== undefined) return held as MessageShape<D>;
+	// Retaining unknown fields would keep exactly the bytes a projection exists
+	// to skip; nothing re-encodes a projected value, so dropping them is free.
+	const value = fromBinary(view, bytes, {
+		readUnknownFields: false,
+	}) as unknown as MessageShape<D>;
+	// Before it is shared: the sort mutates the value it is given, and a second
+	// reader must find one already in the order the comparator expects.
+	sortOrderedFields(schema, value);
+	(entry.projections ??= new WeakMap()).set(view, value);
+	return value;
 }
 
 const matches = (value: unknown, cond: Cond | undefined, schema: DescMessage): boolean =>

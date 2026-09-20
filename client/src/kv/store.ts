@@ -61,6 +61,54 @@ export function positionsOf(value: unknown): readonly string[] {
 	return set.size === ix.length ? ix as string[] : [ ...set ];
 }
 
+/**
+ * Maps a written key to the key holding the generation it belongs to, or
+ * undefined when writing it changes no generation.
+ */
+export type GenerationOf = (key: string) => string | undefined;
+
+/**
+ * A store that stamps GENERATION tokens: every committed transaction that put
+ * or deleted a key the mapping names writes a fresh token at the key it
+ * returned, inside the same transaction as the writes themselves.
+ *
+ * A reader that finds the token it read before therefore knows nothing under
+ * those keys has committed since, whichever connection wrote it. The store
+ * neither reads the tokens back nor interprets the keyspaces involved — which
+ * keys share a generation is entirely the caller's mapping.
+ *
+ * Tokens are opaque and never repeat; ordering them says nothing. An absent
+ * token is not a generation, and a store that implements none of this — a
+ * caller's own KVStore — simply leaves every reader to the uncached path.
+ */
+export interface GenerationTracking {
+	/**
+	 * Installs the mapping for every transaction opened afterwards, replacing
+	 * any previous one.
+	 */
+	trackGenerations(generationOf: GenerationOf): void;
+}
+
+/** Whether `store` stamps generations, which is optional for a KVStore. */
+export function tracksGenerations(store: KVStore): store is KVStore & GenerationTracking {
+	return typeof (store as Partial<GenerationTracking>).trackGenerations === 'function';
+}
+
+const TOKEN_SALT = crypto.randomUUID();
+let tokenCounter = 0;
+
+/**
+ * A token distinct from every other this process mints, and — through the
+ * random salt — from those of every other connection to the same store.
+ *
+ * A counter alone would collide across tabs, which is the one comparison a
+ * generation exists to make: two tabs whose first commit each stamped `1` would
+ * each keep reading the other's writes as its own.
+ */
+export function nextGenerationToken(): string {
+	return `${TOKEN_SALT}:${++tokenCounter}`;
+}
+
 export interface KVStore {
 	/**
 	 * Open a read snapshot. Must be released. MemoryKVStore makes this an
