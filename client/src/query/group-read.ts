@@ -17,7 +17,7 @@ import type { KVRead } from '../kv/store.js';
 import type { EntityDef, EntityRegistry } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
 import { sortOrderedFields } from '../ordering.js';
-import { scanDecoded, scanMergedRows } from '../read.js';
+import { decodeWholeRow, scanDecoded, scanMergedRows, scanProjected } from '../read.js';
 import { compareRows, evalCond } from './evaluate.js';
 import {
 	groupByIndex,
@@ -34,6 +34,7 @@ import {
 	type GroupValue,
 	groupValuesOf,
 } from './group.js';
+import { projectionForGroup } from './projection.js';
 import type { PreparedGroupQuery, PreparedGroupRowsQuery } from './wire.js';
 
 /**
@@ -65,7 +66,12 @@ export async function readGroups<D extends DescMessage>(
 	);
 	if (indexed !== undefined) return indexed.groups;
 	const buckets = new GroupBuckets(compiled.distinct);
-	const rows = await scanDecoded(tx, registry, def, schema, workspaceId);
+	// The read answers with group values and counts, so no candidate is ever
+	// handed back and none has to be decoded a second time.
+	const view = projectionForGroup(schema, compiled);
+	const rows = view === undefined
+		? await scanDecoded(tx, registry, def, schema, workspaceId)
+		: (await scanProjected(tx, registry, def, schema, view, workspaceId)).rows;
 	for (const row of rows as { value: MessageShape<D> }[]) {
 		if (compiled.where && !evalCond(row.value, compiled.where, schema)) continue;
 		for (const value of groupValuesOf(row.value, compiled.by, schema)) buckets.add(value, 1);
@@ -108,9 +114,16 @@ export async function readRowGroups<D extends DescMessage>(
 	// perGroup rows, which is the cost an index walk exists to avoid and the
 	// reason it is worth declaring one.
 	const buckets = new Map<string, { value: GroupValue; rows: IndexedRow<MessageShape<D>>[] }>();
+	// Candidates carry only what the grouping, the predicate and the ordering
+	// read; each group's page is decoded again, whole, from the same bytes.
+	const view = projectionForGroup(schema, compiled);
 	const rows = await scanMergedRows(tx, registry, def.name, workspaceId);
 	for (const merged of rows) {
-		const value = fromBinary(schema, merged.v);
+		// Retaining unknown fields would keep exactly the bytes a projection
+		// exists to skip.
+		const value = view === undefined
+			? fromBinary(schema, merged.v)
+			: fromBinary(view, merged.v, { readUnknownFields: false }) as unknown as MessageShape<D>;
 		sortOrderedFields(schema, value);
 		if (compiled.where && !evalCond(value, compiled.where, schema)) continue;
 		const row: IndexedRow<MessageShape<D>> = {
@@ -136,9 +149,12 @@ export async function readRowGroups<D extends DescMessage>(
 			// order.
 			matched.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 		}
+		const page = matched.slice(0, compiled.perGroup);
 		return {
 			value: value.found ? value.value : undefined,
-			rows: matched.slice(0, compiled.perGroup),
+			rows: view === undefined
+				? page
+				: page.map((e) => ({ row: decodeWholeRow(schema, e.row, e.bytes), bytes: e.bytes })),
 			total: compiled.total === false ? undefined : matched.length,
 			hasMore: matched.length > compiled.perGroup,
 		};

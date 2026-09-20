@@ -21,8 +21,12 @@ import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
-import { groupByIndex, type IndexReport } from '../../src/query/execute.js';
-import { compileGroupQuery, type Group, type GroupQuery } from '../../src/query/index.js';
+import {
+	groupByIndex,
+	type IndexReport,
+	withIndexCandidateBudget,
+} from '../../src/query/execute.js';
+import { and, compileGroupQuery, type Group, type GroupQuery } from '../../src/query/index.js';
 import { prepareGroupQuery } from '../../src/query/wire.js';
 import {
 	defineSchema,
@@ -102,14 +106,18 @@ const SEED: Issue[] = [
 ];
 
 /** Plants rows as CONFIRMED state — the only state an index covers. */
-async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
+async function seedConfirmed(
+	kv: KVStore,
+	indexes: IndexCache,
+	rows: Issue[] = SEED,
+): Promise<void> {
 	const tx = await kv.write();
 	await tx.put(metaCursor(WS), new Uint8Array([ 1 ]));
 	await applyServerChanges(
 		tx,
 		registry,
 		WS,
-		SEED.map((row, i) =>
+		rows.map((row, i) =>
 			create(RowChangeSchema, {
 				entity: 'issue',
 				key: row.id,
@@ -123,10 +131,10 @@ async function seedConfirmed(kv: KVStore, indexes: IndexCache): Promise<void> {
 	await tx.commit();
 }
 
-async function clientWith(built: boolean, overlay?: Issue[], deletes?: string[]) {
+async function clientWith(built: boolean, overlay?: Issue[], deletes?: string[], rows?: Issue[]) {
 	const kv = new MemoryKVStore();
 	const indexes = new IndexCache(registry);
-	await seedConfirmed(kv, indexes);
+	await seedConfirmed(kv, indexes, rows);
 	if (built) {
 		const mutex = new ChainMutex();
 		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
@@ -151,9 +159,9 @@ const byCustom = { by: (i: { custom: unknown }) => i.custom };
 const shape = (groups: Group[]) => groups.map((g) => [ g.value, g.count ] as const);
 
 /** The two arms of one grouped read, which must be identical. */
-async function both(q: GroupQuery<Issue>, overlay?: Issue[], deletes?: string[]) {
-	const scanned = await clientWith(false, overlay, deletes);
-	const indexed = await clientWith(true, overlay, deletes);
+async function both(q: GroupQuery<Issue>, overlay?: Issue[], deletes?: string[], rows?: Issue[]) {
+	const scanned = await clientWith(false, overlay, deletes, rows);
+	const indexed = await clientWith(true, overlay, deletes, rows);
 	try {
 		return {
 			scanned: shape(await scanned.groupCount(IssueSchema, q as never)),
@@ -166,11 +174,115 @@ async function both(q: GroupQuery<Issue>, overlay?: Issue[], deletes?: string[])
 }
 
 /** Asserts the two arms agree, and returns what they agreed on. */
-async function agree(q: GroupQuery<Issue>, overlay?: Issue[], deletes?: string[]) {
-	const { scanned, indexed } = await both(q, overlay, deletes);
+async function agree(q: GroupQuery<Issue>, overlay?: Issue[], deletes?: string[], rows?: Issue[]) {
+	const { scanned, indexed } = await both(q, overlay, deletes, rows);
 	expect(indexed).toEqual(scanned);
 	return scanned;
 }
+
+// A grouped walk that has to read rows owes every row of every group, so the
+// choice between it and the scan is a size comparison made before the first
+// read — not a ceiling the walk discovers by spending the reads it then throws
+// away. These pin the two answers that comparison gives, and that a distinct
+// read, which stops at one row per group, is still walked under the ceiling.
+describe('pricing a residual walk against the scan', () => {
+	const CEILING = 3;
+
+	// Three states of very different size. A read bracketed to `m` walks a clear
+	// minority of the index; one spanning every state walks all of it.
+	const BULK: Issue[] = [ [ 'a', 2 ], [ 'm', 6 ], [ 'z', 32 ] ].flatMap(([ state, n ], group) =>
+		Array.from({ length: n as number }, (_, i) => ({
+			id: `${state as string}${i}`,
+			title: `t-${state as string}-${i}`,
+			state: state as string,
+			rank: group * 100 + i,
+			score: 0,
+			labels: [],
+			custom: {},
+		}))
+	);
+
+	/** What groupByIndex reports about one read of the bulk seed. */
+	async function receipt(q: GroupQuery<Issue>, distinct = false): Promise<IndexReport> {
+		const kv = new MemoryKVStore();
+		const indexes = new IndexCache(registry);
+		await seedConfirmed(kv, indexes, BULK);
+		const mutex = new ChainMutex();
+		await buildIndexes(kv, (fn) => mutex.run(fn), registry, indexes, WS);
+		const compiled = prepareGroupQuery(IssueSchema, compileGroupQuery(q as never, distinct));
+		const tx = await kv.read();
+		const report: IndexReport = { candidates: 0 };
+		try {
+			await groupByIndex(
+				tx,
+				registry,
+				registry.bySchema(IssueSchema),
+				IssueSchema,
+				indexes.for('issue'),
+				compiled,
+				compiled.multi,
+				WS,
+				report,
+			);
+		} finally {
+			tx.release();
+		}
+		return report;
+	}
+
+	it('walks past the ceiling when the range is a minority of the index', async () => {
+		const restore = withIndexCandidateBudget(CEILING);
+		try {
+			const q: GroupQuery<Issue> = {
+				by: (i) => i.rank,
+				where: (i) => and(i.state.eq('m'), i.title.startsWith('t')),
+			};
+			const report = await receipt(q);
+			expect(report.declined).toBeUndefined();
+			expect(report.index).toBe('by_state_rank');
+			expect(report.candidates).toBe(6);
+			expect(await agree(q, [], [], BULK)).toEqual(
+				[ 100, 101, 102, 103, 104, 105 ].map((rank) => [ rank, 1 ]),
+			);
+		} finally {
+			restore();
+		}
+	});
+
+	it('falls to the scan without reading a row when the range is the whole index', async () => {
+		const restore = withIndexCandidateBudget(CEILING);
+		try {
+			const q: GroupQuery<Issue> = { by: (i) => i.state, where: (i) => i.title.startsWith('t') };
+			const report = await receipt(q);
+			expect(report.declined).toBe('budget');
+			expect(report.candidates).toBe(0);
+			expect(await agree(q, [], [], BULK)).toEqual([ [ 'a', 2 ], [ 'm', 6 ], [ 'z', 32 ] ]);
+		} finally {
+			restore();
+		}
+	});
+
+	it('keeps a distinct read on the ceiling, which owes one row per group', async () => {
+		const restore = withIndexCandidateBudget(CEILING);
+		try {
+			const q: GroupQuery<Issue> = { by: (i) => i.state, where: (i) => i.title.startsWith('t') };
+			// Walked rather than priced out: the first group fits under the
+			// ceiling and the second is what ends the walk.
+			const report = await receipt(q, true);
+			expect(report.declined).toBe('budget');
+			expect(report.candidates).toBe(2);
+
+			const client = await clientWith(true, [], [], BULK);
+			try {
+				expect(await client.distinct(IssueSchema, q as never)).toEqual([ 'a', 'm', 'z' ]);
+			} finally {
+				await client.close();
+			}
+		} finally {
+			restore();
+		}
+	});
+});
 
 describe('grouped reads', () => {
 	it('counts by a leading indexed component', async () => {

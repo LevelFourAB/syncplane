@@ -271,6 +271,17 @@ function candidatesOf(from: number): number | undefined {
 	return recorded.slice(from).find((e) => e.type === 'query')?.candidates;
 }
 
+function groupResult(started: number, from: number, groups: number): ReadResult {
+	return {
+		ms: performance.now() - started,
+		rows: groups,
+		complete: true,
+		bounds: [],
+		path: pathOf(from),
+		candidates: candidatesOf(from),
+	};
+}
+
 async function runRead(op: ReadOp): Promise<ReadResult> {
 	const c = current();
 	const from = recorded.length;
@@ -366,6 +377,33 @@ async function runRead(op: ReadOp): Promise<ReadResult> {
 				},
 			}) as typeof rows;
 			break;
+		case 'groupProject': {
+			const groups = await c.groupCount(IssueSchema, {
+				by: (i) => i.project.id,
+				where: (i) => i.state.eq('open'),
+			});
+			return groupResult(started, from, groups.length);
+		}
+		case 'groupStateResidual': {
+			const groups = await c.groupCount(IssueSchema, {
+				by: (i) => i.state,
+				where: (i) => i.estimate.gt(2),
+			});
+			return groupResult(started, from, groups.length);
+		}
+		case 'distinctAssignee': {
+			const values = await c.distinct(IssueSchema, { by: (i) => i.assignee.id });
+			return groupResult(started, from, values.length);
+		}
+		case 'groupRowsResidual': {
+			const groups = await c.groupRows(IssueSchema, {
+				by: (i) => i.state,
+				where: (i) => i.estimate.gt(2),
+				orderBy: (i) => [ i.priority.desc() ],
+				perGroup: op.perGroup,
+			});
+			return groupResult(started, from, groups.length);
+		}
 		case 'get': {
 			const row = await c.get(IssueSchema, op.issueId);
 			return {

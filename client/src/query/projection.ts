@@ -1,12 +1,13 @@
 // Decoding a candidate row as only the fields the query can look at.
 //
 // A local read that cannot stop at its page — a facet fold, a predicate no
-// index brackets — decodes every candidate row, and most of what it decodes is
-// never read: a 400-byte string field and a nested message list cost string
-// decoding and object construction for a query whose whole question is two
-// scalars. The projection is a second descriptor for the same message, carrying
-// only the fields the compiled query can observe; protobuf-es skips everything
-// else with a length jump and no allocation.
+// index brackets, a grouped read's bucketing — decodes every candidate row,
+// and most of what it decodes is never read: a 400-byte string field and a
+// nested message list cost string decoding and object construction for a query
+// whose whole question is two scalars. The projection is a second descriptor
+// for the same message, carrying only the fields the compiled query can
+// observe; protobuf-es skips everything else with a length jump and no
+// allocation.
 //
 // The rule the correctness of that rests on: a path the projection does not
 // carry resolves as NOT FOUND on a projected row, which is a different answer
@@ -35,7 +36,8 @@ import {
 	FileDescriptorProtoSchema,
 } from '@bufbuild/protobuf/wkt';
 
-import type { CompiledQuery, Cond, Path } from './ast.js';
+import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
+import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
 
 /**
  * The descriptor a query's candidate rows may be decoded through: the entity's
@@ -66,8 +68,39 @@ export function projectionFor(
 	extra?: Iterable<Cond | undefined>,
 ): DescMessage | undefined {
 	if (compiled.limit === undefined) return undefined;
+	return assemble(schema, (keep) => collectQuery(schema, compiled, keep), extra);
+}
+
+/**
+ * The descriptor a GROUPED read's candidate rows may be decoded through: the
+ * grouping path, the predicate's paths and, for a grouped ROW read, the
+ * ordering's.
+ *
+ * Undefined means "decode whole rows", for {@link projectionFor}'s reasons
+ * except the one about `limit`: a grouped read's limit counts GROUPS, and every
+ * row behind them is read whatever it is. A grouped COUNT hands back no row at
+ * all, so nothing it decodes is ever decoded twice; a grouped row read decodes
+ * each group's page again, in full, from the bytes it came from.
+ *
+ * `extra` and the caching are {@link projectionFor}'s.
+ */
+export function projectionForGroup(
+	schema: DescMessage,
+	compiled: CompiledGroupQuery | CompiledGroupRowsQuery,
+	extra?: Iterable<Cond | undefined>,
+): DescMessage | undefined {
+	return assemble(schema, (keep) => collectGroup(schema, compiled, keep), extra);
+}
+
+/** The shared tail of both entry points: the extra predicates, the oneof rule,
+ * the pays-for-itself check and the cache. */
+function assemble(
+	schema: DescMessage,
+	collect: (keep: Set<string>) => boolean,
+	extra: Iterable<Cond | undefined> | undefined,
+): DescMessage | undefined {
 	const keep = new Set<string>();
-	if (!collectQuery(schema, compiled, keep)) return undefined;
+	if (!collect(keep)) return undefined;
 	for (const cond of extra ?? []) {
 		if (cond !== undefined && !collectCond(schema, cond, keep)) return undefined;
 	}
@@ -88,14 +121,35 @@ export function projectionFor(
  * them cannot be named. */
 function collectQuery(schema: DescMessage, q: CompiledQuery, keep: Set<string>): boolean {
 	if (q.where !== undefined && !collectCond(schema, q.where, keep)) return false;
-	for (const key of q.orderBy ?? []) {
+	if (!collectOrder(schema, q.orderBy, keep)) return false;
+	for (const facet of q.facets ?? []) {
+		if (!collectPath(schema, facet.by, keep)) return false;
+	}
+	return true;
+}
+
+/** collectQuery for a grouped read: the grouping path in place of the facets,
+ * and an ordering only a grouped ROW read carries. */
+function collectGroup(
+	schema: DescMessage,
+	q: CompiledGroupQuery | CompiledGroupRowsQuery,
+	keep: Set<string>,
+): boolean {
+	if (!collectPath(schema, q.by, keep)) return false;
+	if (q.where !== undefined && !collectCond(schema, q.where, keep)) return false;
+	return collectOrder(schema, 'orderBy' in q ? q.orderBy : undefined, keep);
+}
+
+function collectOrder(
+	schema: DescMessage,
+	orderBy: OrderKey[] | undefined,
+	keep: Set<string>,
+): boolean {
+	for (const key of orderBy ?? []) {
 		// A relevance rank is computed from the entity's search fields, which the
 		// order key does not name.
 		if (key.relevance) return false;
 		if (!collectPath(schema, key.path, keep)) return false;
-	}
-	for (const facet of q.facets ?? []) {
-		if (!collectPath(schema, facet.by, keep)) return false;
 	}
 	return true;
 }

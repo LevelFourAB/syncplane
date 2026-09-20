@@ -26,13 +26,19 @@ import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import type { CompiledQuery, Cond } from '../../src/query/ast.js';
 import {
 	and,
+	compileGroupQuery,
+	compileGroupRowsQuery,
 	compileQuery,
 	type FacetTable,
+	type Group,
+	type GroupQuery,
+	type GroupRowsQuery,
 	type Query,
+	type RowGroup,
 	type StringOps,
 } from '../../src/query/index.js';
-import { projectionFor } from '../../src/query/projection.js';
-import { prepareQuery } from '../../src/query/wire.js';
+import { projectionFor, projectionForGroup } from '../../src/query/projection.js';
+import { prepareGroupQuery, prepareGroupRowsQuery, prepareQuery } from '../../src/query/wire.js';
 import {
 	defineSchema,
 	entity,
@@ -237,6 +243,124 @@ describe('a query decoded through a projection', () => {
 		expect(rows.map((r) => r.key)).toEqual([ 't3' ]);
 		expect(rows[0]!.value.notes).toEqual([ 'note-t3', 'shared' ]);
 		expect(rows.facets).toEqual({ region: [ { value: 'us', count: 1, workspaceId: WS } ] });
+	});
+});
+
+describe('a grouped read decoded through a projection', () => {
+	/** Runs a grouped read on both arms and asserts they agree. */
+	async function onBothGroupArms<T>(fn: (client: SyncClient<never>) => Promise<T>): Promise<T> {
+		const scanned = await taskClient(false);
+		const indexed = await taskClient(true);
+		try {
+			const s = await fn(scanned);
+			expect(await fn(indexed)).toEqual(s);
+			return s;
+		} finally {
+			await scanned.close();
+			await indexed.close();
+		}
+	}
+
+	const counts = (groups: Group[]) => groups.map((g) => [ g.value, g.count ] as const);
+
+	it('counts by a path no index partitions', async () => {
+		// No index leads with `meta.region`, so both arms bucket a scan — the
+		// projection's only reader there, since a grouped count hands back no row.
+		const q: GroupQuery<Task> = {
+			by: (t) => t.meta.region,
+			where: (t) => t.state.eq('open'),
+		};
+		const groups = await onBothGroupArms((c) => c.groupCount(TaskSchema, q as never));
+		expect(counts(groups)).toEqual([ [ 'eu', 3 ], [ 'us', 1 ] ]);
+	});
+
+	it('counts under a residual the index range cannot express', async () => {
+		const q: GroupQuery<Task> = {
+			by: (t) => t.state,
+			where: (t) => t.meta.region.eq('eu'),
+		};
+		const groups = await onBothGroupArms((c) => c.groupCount(TaskSchema, q as never));
+		expect(counts(groups)).toEqual([ [ 'done', 1 ], [ 'open', 3 ] ]);
+	});
+
+	it('names the distinct values of a repeated path', async () => {
+		const values = await onBothGroupArms((c) =>
+			c.distinct(TaskSchema, { by: (t: Task) => t.labels } as never)
+		);
+		expect(values).toEqual([ 'bug', 'ui', undefined ]);
+	});
+
+	it('returns each group head whole', async () => {
+		const q: GroupRowsQuery<Task> = {
+			by: (t) => t.state,
+			where: (t) => t.meta.region.eq('eu'),
+			orderBy: (t) => [ t.rank.desc() ],
+			perGroup: 2,
+		};
+		const groups = await onBothGroupArms((c) =>
+			c.groupRows(TaskSchema, q as never)
+		) as unknown as RowGroup<Task>[];
+		expect(groups.map((g) => [ g.value, g.rows.map((r) => r.key), g.total, g.hasMore ])).toEqual([
+			[ 'done', [ 't5' ], 1, false ],
+			[ 'open', [ 't1', 't2' ], 3, true ],
+		]);
+		// The head rows are what the app receives, so nothing the projection
+		// dropped may be missing from them.
+		const open = groups.find((g) => g.value === 'open')!;
+		expect(open.rows.map((r) => r.value.body)).toEqual([ `${BODY}/t1`, `${BODY}/t2` ]);
+		expect(open.rows.map((r) => r.value.notes)).toEqual([
+			[ 'note-t1', 'shared' ],
+			[ 'note-t2', 'shared' ],
+		]);
+		expect(open.rows.map((r) => r.value.meta?.size)).toEqual([ 18, 14 ]);
+	});
+});
+
+describe('the projection a compiled grouped query gets', () => {
+	const ofGroup = (q: GroupQuery<Task>) =>
+		projectionForGroup(
+			TaskSchema,
+			prepareGroupQuery(TaskSchema, compileGroupQuery(q as never, false)),
+		);
+	const ofGroupRows = (q: GroupRowsQuery<Task>) =>
+		projectionForGroup(
+			TaskSchema,
+			prepareGroupRowsQuery(TaskSchema, compileGroupRowsQuery(q as never)),
+		);
+	const fields = (projected: ReturnType<typeof ofGroup>) =>
+		projected?.fields.map((f) => f.localName).sort();
+
+	it('holds the grouping path and the predicate paths', () => {
+		expect(fields(ofGroup({ by: (t) => t.meta.region, where: (t) => t.state.eq('open') })))
+			.toEqual([ 'meta', 'state' ]);
+	});
+
+	it('holds the ordering paths of a grouped row read', () => {
+		expect(fields(ofGroupRows({
+			by: (t) => t.state,
+			where: (t) => t.meta.region.eq('eu'),
+			orderBy: (t) => [ t.rank.desc() ],
+			perGroup: 2,
+		}))).toEqual([ 'meta', 'rank', 'state' ]);
+	});
+
+	it('projects a read that returns every group', () => {
+		// The rule a row query declines on: no limit means every match comes back
+		// and is decoded whole anyway. A grouped count hands back no row at all,
+		// so the projection pays whatever the limit is.
+		expect(ofGroup({ by: (t) => t.state })).toBeDefined();
+	});
+
+	it('declines a grouping path naming no field of the entity', () => {
+		expect(projectionForGroup(TaskSchema, { by: [ 'nope' ], distinct: false })).toBeUndefined();
+	});
+
+	it('declines a predicate whose paths cannot be enumerated', () => {
+		expect(projectionForGroup(TaskSchema, {
+			by: [ 'state' ],
+			distinct: false,
+			where: { kind: 'match', path: [], query: 'x' },
+		})).toBeUndefined();
 	});
 });
 

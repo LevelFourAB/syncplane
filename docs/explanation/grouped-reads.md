@@ -60,6 +60,8 @@ The index walk accounts for two conditions:
 
 If no suitable index exists, the query declines the skip-scan and falls back to bucketing a full scan. The scan represents the base definition, while the index serves as an optimization.
 
+On the client, a walk that has to read rows — because of a residual the range cannot express, or a fan-out past the partition — owes every row of every group, so the choice between the two is priced before the first read. The client counts the index range the walk would take against the whole index, walks the range when it covers a clear minority of the entity, and reports `declined: 'budget'` without reading a row when it does not. A `distinct` read is the exception: it stops at the first row of each group that survives the residual, so its cost is not the group's size and it keeps the standing candidate ceiling.
+
 ## Retrieving the head of a group
 
 The `groupRows` operation uses the same skip-scan walk. Within a group's sub-range, entries are already sorted by the index. A walk that stops after `perGroup + 1` rows retrieves the group page and determines whether more rows exist. This bounds the operation to `groups × perGroup` row reads regardless of group size.

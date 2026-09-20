@@ -186,7 +186,20 @@ export type ReadOp =
 	/** The board with state, assignee and label counts. */
 	| { kind: 'boardFacets'; projectId: string; limit: number }
 	/** No predicate at all: the sidebar over the whole entity. */
-	| { kind: 'allFacets'; limit: number };
+	| { kind: 'allFacets'; limit: number }
+	/**
+	 * Grouped reads. `rows` in the result is the number of groups. Each shape
+	 * is chosen for the path it takes: `groupProject` groups by a field no
+	 * index partitions, so it buckets a scan; `groupStateResidual` partitions
+	 * on the state index but carries a predicate the positions cannot settle,
+	 * so it reads every row of every group; `distinctAssignee` buckets a scan
+	 * for one value per row; `groupRowsResidual` takes the first rows of each
+	 * state under the same residual.
+	 */
+	| { kind: 'groupProject' }
+	| { kind: 'groupStateResidual' }
+	| { kind: 'distinctAssignee' }
+	| { kind: 'groupRowsResidual'; perGroup: number };
 
 /**
  * One live query a bench holds open. The query shapes mirror ReadOp's, because

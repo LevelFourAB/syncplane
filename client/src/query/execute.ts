@@ -69,7 +69,7 @@ import { GroupBuckets, groupValuesOf } from './group.js';
 import { IndexEncoder, upperBound } from './indexkey.js';
 import type { GroupPlan, IndexRange, QueryPlan } from './plan.js';
 import { planGroup, planGroupRows, planQuery } from './plan.js';
-import { projectionFor } from './projection.js';
+import { projectionFor, projectionForGroup } from './projection.js';
 import {
 	requiredMatchCond,
 	searchOverflowRange,
@@ -659,6 +659,18 @@ export async function groupByIndex<D extends DescMessage>(
 	let walked = 0;
 	let lo = prefix + (plan.range.lo ?? '');
 	let hi = plan.range.hi === undefined ? successorOf(prefix) : prefix + plan.range.hi;
+	// What the walk may read. A countable plan reads one row per group and a
+	// distinct one stops at the first row of each that survives the residual, so
+	// neither owes the group its size and the standing ceiling bounds them. Every
+	// other shape owes every row of every group, which the ceiling can only end
+	// halfway through — so it is priced against the whole index instead.
+	const ceiling = countable || compiled.distinct
+		? indexCandidateBudget
+		: await priceGroupWalk(tx, prefix, lo, hi);
+	if (ceiling === undefined) return decline(report, 'budget');
+	// Candidate rows are decoded as only the fields the read can look at; nothing
+	// it hands back is a row, so none is decoded twice.
+	const view = projectionForGroup(schema, compiled, [ plan.residual ]);
 	while (want === undefined || buckets.size < want) {
 		const at = await tx.indexSeek(lo, hi, plan.desc ? 'desc' : 'asc');
 		if (at === undefined) break;
@@ -683,13 +695,15 @@ export async function groupByIndex<D extends DescMessage>(
 			plan,
 			workspaceId,
 			rowPrefix,
+			ceiling,
+			view,
 		};
 		const got = countable
 			? await countGroup(args, group, from, until, at.key)
 			: await walkGroup(args, group, from, until, compiled.distinct);
 		if (got === undefined) return decline(report, 'budget', walked);
 		walked += got.walked;
-		if (walked > indexCandidateBudget) return decline(report, 'budget', walked);
+		if (walked > ceiling) return decline(report, 'budget', walked);
 		if (got.value !== undefined) buckets.add(got.value, got.count);
 		if (plan.desc) {
 			hi = prefix + group;
@@ -723,9 +737,15 @@ async function countGroup<D extends DescMessage>(
 ): Promise<GroupContribution | undefined> {
 	const count = await at.tx.indexCount(lo, hi);
 	if (count === 0) return { count: 0, walked: 1 };
-	const [ row ] = await readConfirmedMany(at.tx, at.registry, at.def, at.schema, at.workspaceId, [
-		nameKey.slice(at.rowPrefix.length),
-	]);
+	const [ row ] = await readConfirmedMany(
+		at.tx,
+		at.registry,
+		at.def,
+		at.schema,
+		at.workspaceId,
+		[ nameKey.slice(at.rowPrefix.length) ],
+		at.view,
+	);
 	if (row === undefined) return undefined;
 	const value = groupValueAt(row.row.value, at, group);
 	return value === undefined ? undefined : { value, count, walked: 2 };
@@ -751,7 +771,7 @@ async function walkGroup<D extends DescMessage>(
 	let walked = 0;
 	for await (const cKey of at.tx.indexScan(lo, hi)) {
 		walked++;
-		if (walked > indexCandidateBudget) return undefined;
+		if (walked > at.ceiling) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
 		const key = cKey.slice(at.rowPrefix.length);
 		// One row can hold several positions of a group when a component past the
@@ -771,6 +791,7 @@ async function walkGroup<D extends DescMessage>(
 			at.schema,
 			at.workspaceId,
 			batch,
+			at.view,
 		);
 		for (const entry of rows) {
 			if (entry === undefined) continue;
@@ -844,6 +865,17 @@ export async function groupRowsByIndex<D extends DescMessage>(
 	let walked = 0;
 	let lo = prefix + (plan.range.lo ?? '');
 	let hi = plan.range.hi === undefined ? successorOf(prefix) : prefix + plan.range.hi;
+	// A group reporting its total is walked to its end, and a residual can reject
+	// any row it reads, so either owes every row of every group; only a read
+	// bounded to `perGroup` rows is under the ceiling by construction. See
+	// priceGroupWalk for what the other two are priced against.
+	const ceiling = compiled.total !== false || plan.residual !== undefined
+		? await priceGroupWalk(tx, prefix, lo, hi)
+		: indexCandidateBudget;
+	if (ceiling === undefined) return decline(report, 'budget');
+	// Candidates carry only the fields the read looks at; each group's page is
+	// decoded again, whole, from the bytes it came from.
+	const view = projectionForGroup(schema, compiled, [ plan.residual ]);
 	while (want === undefined || groups.length < want) {
 		const at = await tx.indexSeek(lo, hi, plan.desc ? 'desc' : 'asc');
 		if (at === undefined) break;
@@ -868,11 +900,13 @@ export async function groupRowsByIndex<D extends DescMessage>(
 			plan,
 			workspaceId,
 			rowPrefix,
+			ceiling,
+			view,
 		};
 		const got = await walkGroupRows(args, compiled, group, from, until);
 		if (got === undefined) return decline(report, 'budget', walked);
 		walked += got.walked;
-		if (walked > indexCandidateBudget) return decline(report, 'budget', walked);
+		if (walked > ceiling) return decline(report, 'budget', walked);
 		if (got.group !== undefined) groups.push(got.group);
 		if (plan.desc) {
 			hi = prefix + group;
@@ -927,6 +961,7 @@ async function walkGroupRows<D extends DescMessage>(
 				at.schema,
 				at.workspaceId,
 				keys,
+				at.view,
 			)
 		) {
 			if (entry === undefined) continue;
@@ -938,7 +973,7 @@ async function walkGroupRows<D extends DescMessage>(
 	};
 	for await (const cKey of at.tx.indexScan(lo, hi)) {
 		walked++;
-		if (walked > indexCandidateBudget) return undefined;
+		if (walked > at.ceiling) return undefined;
 		if (!cKey.startsWith(at.rowPrefix)) continue;
 		batch.push(cKey.slice(at.rowPrefix.length));
 		// The walk reads ahead by a batch, and `total` only moves during a flush,
@@ -960,7 +995,11 @@ async function walkGroupRows<D extends DescMessage>(
 	return {
 		group: {
 			value: value.found ? value.value : undefined,
-			rows,
+			// The rows leaving here are the caller's, so a projected one is
+			// decoded again from the bytes it came from.
+			rows: at.view === undefined
+				? rows
+				: rows.map((e) => ({ row: decodeWholeRow(at.schema, e.row, e.bytes), bytes: e.bytes })),
 			total: wantTotal ? total : undefined,
 			hasMore: total > compiled.perGroup,
 		},
@@ -990,6 +1029,35 @@ interface GroupWalk<D extends DescMessage> {
 	/** KV-key prefix every confirmed row of this entity and workspace carries,
 	 * which is what a position's record key is stripped of. */
 	rowPrefix: string;
+	/** Index positions this walk may read before it gives up; see
+	 * priceGroupWalk. */
+	ceiling: number;
+	/** Descriptor the candidate rows are decoded through, or undefined for whole
+	 * rows; see query/projection.ts. */
+	view?: DescMessage;
+}
+
+/**
+ * How many index positions a grouped walk may read, or undefined to mean
+ * "decline before reading a row".
+ *
+ * A range within the standing budget is walked under it. One past it is priced
+ * against the whole index the way a faceted row query is (see
+ * FACET_RANGE_SHARE), and for the same reason: such a walk owes every row of
+ * every group, so a ceiling can only end it halfway, losing the reads it
+ * already spent to a scan of the entity. A range covering a clear minority of
+ * the index is the smaller read even unbounded; anything else is not.
+ */
+async function priceGroupWalk(
+	tx: KVRead,
+	prefix: string,
+	lo: string,
+	hi: string | undefined,
+): Promise<number | undefined> {
+	const ranged = await tx.indexCount(lo, hi);
+	if (ranged <= indexCandidateBudget) return indexCandidateBudget;
+	const whole = await tx.indexCount(prefix, successorOf(prefix));
+	return ranged * FACET_RANGE_SHARE > whole ? undefined : Infinity;
 }
 
 /**
