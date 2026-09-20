@@ -76,7 +76,6 @@ import {
 	projectionFor,
 	projectionForGroup,
 	projectionForOverlay,
-	projectionForSearchOverlay,
 } from './projection.js';
 import {
 	requiredMatchCond,
@@ -1277,9 +1276,9 @@ async function querySearchIndex<D extends DescMessage>(
 	// so its keys drop out of the candidate set and matching rows come back
 	// from here. Deciding that reads the predicate's fields and the declared
 	// search fields the match reads, which is what the projection carries; a
-	// row that survives is decoded whole again, because nothing downstream of
-	// here does it for a search result. The view is built once a row turns up,
-	// because an empty pending queue needs none.
+	// row that survives is decoded whole here rather than at the page, because
+	// the postings shortcut below hands these rows straight back. The view is
+	// built once a row turns up, because an empty pending queue needs none.
 	let overlayView: DescMessage | undefined;
 	let viewResolved = false;
 	const oPrefix = overlayWsPrefix(def.name, workspaceId);
@@ -1292,7 +1291,7 @@ async function querySearchIndex<D extends DescMessage>(
 		if (record.del) continue;
 		if (!viewResolved) {
 			viewResolved = true;
-			overlayView = projectionForSearchOverlay(schema, compiled);
+			overlayView = projectionForOverlay(schema, compiled);
 		}
 		const decoded = await decodeRow(
 			tx,
@@ -1450,6 +1449,12 @@ async function querySearchIndex<D extends DescMessage>(
 	for (const key of edited) all.add(key);
 
 	const keys = [ ...all ].filter((k) => !shadowed.has(k)).sort();
+	// Every candidate is re-read to be re-checked and ranked, and most of them
+	// are rejected or sorted past — so they are decoded as only the predicate's
+	// paths, the ordering's and the declared search fields the match and the
+	// rank read, and the ones that reach the page are decoded again, whole,
+	// from the same bytes.
+	const view = projectionFor(schema, compiled);
 	const confirmed: IndexedRow<MessageShape<D>>[] = [];
 	for (let at = 0; at < keys.length; at += READ_BATCH) {
 		for (
@@ -1460,6 +1465,7 @@ async function querySearchIndex<D extends DescMessage>(
 				schema,
 				workspaceId,
 				keys.slice(at, at + READ_BATCH),
+				view,
 			)
 		) {
 			// Every path that deletes a confirmed row deletes its search record
@@ -1484,19 +1490,27 @@ async function querySearchIndex<D extends DescMessage>(
 	} else {
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
+	// A projected candidate holds only what the query read, so the rows that
+	// leave here are decoded again from the bytes they came from. The overlay
+	// rows in the merge are already whole, and decode to the same value from
+	// the same bytes, so the page is put through it as one.
+	const page = (rows: IndexedRow<MessageShape<D>>[]): IndexedRow<MessageShape<D>>[] =>
+		view === undefined
+			? rows
+			: rows.map((e) => ({ row: decodeWholeRow(schema, e.row, e.bytes), bytes: e.bytes }));
 	const total = compiled.total !== false ? out.length : undefined;
 	const facets = compiled.facets === undefined
 		? {}
 		: { facets: facetsOf(out.map((e) => e.row), compiled.facets, schema) };
 	if (compiled.limit !== undefined && window?.backward) {
 		return out.length > compiled.limit
-			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true, ...facets }
-			: { rows: out, total, hasMore: false, ...facets };
+			? { rows: page(out.slice(out.length - compiled.limit)), total, hasMore: true, ...facets }
+			: { rows: page(out), total, hasMore: false, ...facets };
 	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
 	return {
-		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
+		rows: page(start !== 0 || end !== undefined ? out.slice(start, end) : out),
 		total,
 		hasMore: end !== undefined && out.length > end,
 		...facets,

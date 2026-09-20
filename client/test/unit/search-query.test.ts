@@ -481,6 +481,82 @@ describe('what a search reads to answer', () => {
 	}, [ 'a1', 'a5', 'bulk000' ]);
 });
 
+// A ranked match settles nothing early — every candidate has to be read and
+// scored — so both the candidate walk and the scan fallback read candidates
+// through a projection carrying the declared search fields, and decode the
+// page from the bytes those came from. The control for each case is the same
+// query with no limit, which returns every match and is therefore answered
+// from whole rows.
+describe('a ranked match page against its whole-row twin', () => {
+	const ranked = (limit?: number, query = 'milk'): Query<Article> => ({
+		where: (a) => a.match(query),
+		orderBy: (a) => [ a.relevance() ],
+		...(limit === undefined ? {} : { limit }),
+	});
+
+	const shape = (rows: RowSet<Article>) => ({
+		rows: rows.map((r) => ({ key: r.key, version: r.version, value: r.value })),
+		total: rows.total,
+	});
+
+	async function pageAndTwin(
+		built: boolean,
+		budget?: number,
+		overlay?: Article[],
+		query?: string,
+	) {
+		const restore = budget === undefined ? () => {} : withIndexCandidateBudget(budget);
+		const { client, queries } = await clientWith(built, overlay);
+		try {
+			const page = shape(await run(client, ranked(3, query)));
+			const receipt = queries.at(-1)!;
+			const twin = shape(await run(client, ranked(undefined, query)));
+			return {
+				page,
+				twin: { rows: twin.rows.slice(0, 3), total: twin.total },
+				receipt,
+			};
+		} finally {
+			await client.close();
+			restore();
+		}
+	}
+
+	it('the scan fallback returns the same rows, order, versions and total', async () => {
+		const { page, twin, receipt } = await pageAndTwin(false);
+		expect(receipt.path).toBe('scan');
+		expect(page).toEqual(twin);
+		// a2 carries the term with its title unset, so the page also pins that a
+		// projected row missing a search field ranks the way a whole one does.
+		expect(page.rows.map((r) => r.key)).toEqual([ 'a1', 'a2', 'a4' ]);
+	});
+
+	// The shape the term-postings walk gives up on: a term too wide for the
+	// budget, ranked, so the whole entity is scanned instead.
+	it('the scan the search budget falls back to returns the same rows', async () => {
+		const { page, twin, receipt } = await pageAndTwin(true, POSTINGS_BUDGET, undefined, 'common ');
+		expect(receipt.path).toBe('scan');
+		expect(page).toEqual(twin);
+		expect(page.total).toBe(101);
+	});
+
+	it('the candidate walk returns the same rows', async () => {
+		const { page, twin, receipt } = await pageAndTwin(true);
+		expect(receipt.path).toBe('index');
+		expect(receipt.index).toBe('__search');
+		expect(page).toEqual(twin);
+	});
+
+	it('an overlay row merges into the page the same way', async () => {
+		const overlay = [ row({ id: 'a7', title: 'milk first' }) ];
+		for (const built of [ false, true ]) {
+			const { page, twin } = await pageAndTwin(built, undefined, overlay);
+			expect(page).toEqual(twin);
+			expect(page.rows.map((r) => r.key)).toEqual([ 'a1', 'a7', 'a2' ]);
+		}
+	});
+});
+
 // The index covers CONFIRMED state, and an unacked collaborative-text edit
 // lands in the `ot/` log beside the row rather than in it — so a posting can
 // describe a document the query no longer sees, in either direction.
@@ -601,5 +677,32 @@ describe('a search over a collaborative-text field', () => {
 		const { scanned, indexed } = await bothWith([ [ 'r2', deleting('beta gamma', 0, 4) ] ]);
 		expect(indexed).toEqual(scanned);
 		expect(scanned).toEqual({ rows: [ 'r3' ], total: 1 });
+	});
+
+	// The projection a ranked page reads its candidates through carries the
+	// text field, and the document the rank scores is the folded one — so the
+	// page has to come back carrying the local edit, not the stored document.
+	it('a ranked page carries the folded document its whole-row twin does', async () => {
+		const ranked = (limit?: number) => ({
+			where: (a: { match(s: string): unknown }) => a.match('beta '),
+			orderBy: (a: { relevance(): unknown }) => [ a.relevance() ],
+			...(limit === undefined ? {} : { limit }),
+		});
+		const read = (client: SyncClient<never>, limit?: number) =>
+			client.query(TextArticleSchema, ranked(limit) as never) as unknown as Promise<
+				RowSet<{ id: string; body: Uint8Array }>
+			>;
+		const shape = (rows: RowSet<{ id: string; body: Uint8Array }>) =>
+			rows.map((r) => ({ key: r.key, version: r.version, value: r.value }));
+		for (const built of [ false, true ]) {
+			const client = await textClient(built, [ [ 'r1', inserting('alpha', 5, ' beta') ] ]);
+			try {
+				const page = shape(await read(client, 2));
+				expect(page).toEqual(shape(await read(client)).slice(0, 2));
+				expect(page.map((r) => r.key)).toEqual([ 'r2', 'r3' ]);
+			} finally {
+				await client.close();
+			}
+		}
 	});
 });

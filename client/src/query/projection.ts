@@ -13,8 +13,10 @@
 // carry resolves as NOT FOUND on a projected row, which is a different answer
 // from the one the whole row gives. So every path anything may resolve has to
 // be in here, and a query holding a construct whose paths cannot be enumerated
-// — a full-text match, an unrewritten reference hop — gets no projection at
-// all. Enumeration is over the FIRST segment of each path and the field it
+// — an unrewritten reference hop — gets no projection at all. A full-text
+// match and a relevance rank name no path either, but the paths they read are
+// fixed: the entity's search declaration, which such a query keeps.
+// Enumeration is over the FIRST segment of each path and the field it
 // names is kept whole, which is what makes a nested or repeated path safe
 // without walking into it.
 //
@@ -44,12 +46,18 @@ import { searchDeclOf } from './match.js';
  * The descriptor a query's candidate rows may be decoded through: the entity's
  * own, with every field no part of the query reads removed.
  *
+ * A `match` condition or a relevance ordering names no path of its own — both
+ * read the entity's search declaration — so a query carrying either gets the
+ * declared search fields as well, and with them those constructs resolve on a
+ * projected row like any other.
+ *
  * Undefined means "decode whole rows". That is the answer whenever the
  * projection cannot be shown to be safe or cannot pay:
  *
- * - the query reads something whose paths are not in the AST — a `match`
- *   condition or a relevance ordering (both read the entity's declared search
- *   fields), or a `rel` condition that was not rewritten to a row-local test;
+ * - the query reads something whose paths are not in the AST — a `rel`
+ *   condition that was not rewritten to a row-local test, or a match or
+ *   relevance key on an entity that declares no searchable field or declares
+ *   one this schema cannot resolve;
  * - a path starts at a segment that names no field of `schema`;
  * - the query has no `limit`, so every matching row is returned and would be
  *   decoded in full anyway;
@@ -69,7 +77,7 @@ export function projectionFor(
 	extra?: Iterable<Cond | undefined>,
 ): DescMessage | undefined {
 	if (compiled.limit === undefined) return undefined;
-	return assemble(schema, (keep) => collectQuery(schema, compiled, keep), extra);
+	return assembleQuery(schema, compiled, extra);
 }
 
 /**
@@ -91,31 +99,68 @@ export function projectionForOverlay(
 	compiled: CompiledQuery,
 	extra?: Iterable<Cond | undefined>,
 ): DescMessage | undefined {
-	return assemble(schema, (keep) => collectQuery(schema, compiled, keep), extra);
+	return assembleQuery(schema, compiled, extra);
 }
 
-/**
- * {@link projectionForOverlay} for a read served by the SEARCH index, whose
- * predicate carries the match that sent it there.
- *
- * A match condition and a relevance ordering name no paths of their own — they
- * read the entity's search declaration — so the declared fields are carried
- * too, and with them those constructs resolve on a projected row like any
- * other. An entity declaring no searchable field gets no projection; so does a
- * declaration naming a field this schema cannot resolve.
- */
-export function projectionForSearchOverlay(
+/** The field set both row entry points share: the query's own paths, plus the
+ * declared search fields when something in it reads them. */
+function assembleQuery(
 	schema: DescMessage,
 	compiled: CompiledQuery,
+	extra: Iterable<Cond | undefined> | undefined,
 ): DescMessage | undefined {
-	return assemble(schema, (keep) => {
-		const decl = searchDeclOf(schema);
-		if (decl === undefined) return false;
-		for (const field of decl.fields) {
-			if (!collectPath(schema, field.path, keep)) return false;
-		}
-		return collectQuery(schema, compiled, keep, true);
-	}, undefined);
+	// `extra` may be a one-shot iterator, and deciding searchability reads it
+	// before assemble does.
+	const conds = extra === undefined ? undefined : [ ...extra ];
+	const searchable = readsSearchFields(compiled, conds);
+	return assemble(
+		schema,
+		(keep) => {
+			if (searchable && !collectSearchFields(schema, keep)) return false;
+			return collectQuery(schema, compiled, keep, searchable);
+		},
+		conds,
+		searchable,
+	);
+}
+
+/** Adds the entity's declared search fields, which a match condition and a
+ * relevance rank read; false when it declares none or names one this schema
+ * cannot resolve. */
+function collectSearchFields(schema: DescMessage, keep: Set<string>): boolean {
+	const decl = searchDeclOf(schema);
+	if (decl === undefined) return false;
+	for (const field of decl.fields) {
+		if (!collectPath(schema, field.path, keep)) return false;
+	}
+	return true;
+}
+
+/** Whether anything in the query resolves through the entity's search
+ * declaration rather than through a path it names. */
+function readsSearchFields(
+	q: CompiledQuery,
+	extra: readonly (Cond | undefined)[] | undefined,
+): boolean {
+	for (const key of q.orderBy ?? []) {
+		if (key.relevance) return true;
+	}
+	if (q.where !== undefined && hasMatch(q.where)) return true;
+	return (extra ?? []).some((cond) => cond !== undefined && hasMatch(cond));
+}
+
+function hasMatch(cond: Cond): boolean {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return cond.conds.some(hasMatch);
+		case 'not':
+			return hasMatch(cond.cond);
+		case 'match':
+			return true;
+		default:
+			return false;
+	}
 }
 
 /**
@@ -145,11 +190,12 @@ function assemble(
 	schema: DescMessage,
 	collect: (keep: Set<string>) => boolean,
 	extra: Iterable<Cond | undefined> | undefined,
+	searchable = false,
 ): DescMessage | undefined {
 	const keep = new Set<string>();
 	if (!collect(keep)) return undefined;
 	for (const cond of extra ?? []) {
-		if (cond !== undefined && !collectCond(schema, cond, keep)) return undefined;
+		if (cond !== undefined && !collectCond(schema, cond, keep, searchable)) return undefined;
 	}
 	// A oneof reaches a decoded message as one property holding the active
 	// case, so a projection that kept some members and dropped others would

@@ -23,7 +23,6 @@ import { ChainMutex } from '../../src/mutex.js';
 import { buildIndexes } from '../../src/optimistic/index-build.js';
 import { IndexCache } from '../../src/optimistic/index-maintain.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
-import type { CompiledQuery, Cond } from '../../src/query/ast.js';
 import {
 	and,
 	compileGroupQuery,
@@ -488,20 +487,25 @@ describe('the projection a compiled query gets', () => {
 	});
 
 	it('declines a query whose paths cannot be enumerated', () => {
-		// A full-text match reads the entity's declared search fields, and a
-		// reference hop reads another entity's rows — neither is a path on this
+		// A reference hop reads another entity's rows, which is no path on this
 		// row that the AST names.
-		const compiled = (where: Cond): CompiledQuery => ({ where, limit: 2 });
-		expect(projectionFor(TaskSchema, compiled({ kind: 'match', path: [], query: 'x' })))
-			.toBeUndefined();
-		expect(projectionFor(
-			TaskSchema,
-			compiled({
+		expect(projectionFor(TaskSchema, {
+			where: {
 				kind: 'rel',
 				path: [ 'meta' ],
 				cond: { kind: 'present', path: [ 'id' ], op: 'isSet' },
-			}),
-		)).toBeUndefined();
+			},
+			limit: 2,
+		})).toBeUndefined();
+	});
+
+	it('declines a match on an entity declaring no search fields', () => {
+		// The declaration is what a match resolves through, so there is nothing
+		// to carry in its place.
+		expect(projectionFor(TaskSchema, {
+			where: { kind: 'match', path: [], query: 'x' },
+			limit: 2,
+		})).toBeUndefined();
 	});
 
 	it('declines a path naming no field of the entity', () => {
@@ -509,5 +513,63 @@ describe('the projection a compiled query gets', () => {
 			where: { kind: 'present', path: [ 'nope' ], op: 'isSet' },
 			limit: 2,
 		})).toBeUndefined();
+	});
+});
+
+// A match condition and a relevance ordering name no path of their own: both
+// resolve through the entity's search declaration, so a query holding either
+// carries the declared fields in place of a path.
+describe('the projection a search query gets', () => {
+	const post = entity('post', {
+		id: text().key(),
+		title: text().searchable(),
+		state: text().indexed(),
+		body: text(),
+		notes: list(text()),
+	}, {
+		search: { fields: [ 'body' ] },
+	});
+	const PostSchema = defineSchema(post).descMessage('post');
+	const fieldsOf = (q: Query<Infer<typeof post>>) =>
+		projectionFor(PostSchema, prepareQuery(PostSchema, compileQuery(q as never)))
+			?.fields.map((f) => f.localName).sort();
+
+	it('carries the declared search fields beside the paths the query names', () => {
+		expect(fieldsOf({
+			where: (p) => and(p.match('milk'), p.state.eq('live')),
+			orderBy: (p) => [ p.relevance() ],
+			limit: 2,
+		})).toEqual([ 'body', 'state', 'title' ]);
+	});
+
+	it('carries them for a relevance ordering with the match nested under it', () => {
+		expect(fieldsOf({
+			where: (p /* not */) => ({ kind: 'not', cond: p.match('milk') }),
+			limit: 2,
+		})).toEqual([ 'body', 'title' ]);
+	});
+
+	it('leaves a query reading neither alone', () => {
+		expect(fieldsOf({ where: (p) => p.state.eq('live'), limit: 2 })).toEqual([ 'state' ]);
+	});
+
+	it('declines when the search fields and the query cover every field', () => {
+		const memo = entity('memo', {
+			id: text().key(),
+			title: text().searchable(),
+			body: text().searchable(),
+		});
+		const MemoSchema = defineSchema(memo).descMessage('memo');
+		expect(projectionFor(
+			MemoSchema,
+			prepareQuery(
+				MemoSchema,
+				compileQuery({
+					where: (m: { match(s: string): unknown; id: { eq(v: string): unknown } }) =>
+						and(m.match('milk') as never, m.id.eq('m1') as never),
+					limit: 2,
+				} as never),
+			),
+		)).toBeUndefined();
 	});
 });
