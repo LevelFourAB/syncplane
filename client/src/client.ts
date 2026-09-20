@@ -60,6 +60,7 @@ import {
 	overlayWsPrefix,
 	PENDING_ROOT,
 	pendingPrefix,
+	searchIndexWsPrefix,
 	stagingWsRoot,
 	workspaceOfPendingKey,
 	wsFromSegment,
@@ -1895,8 +1896,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					for await (const [ k ] of tx.scan(overlayTextWsPrefix(entity, workspaceId))) {
 						doomed.push(k);
 					}
-					// The index positions ride on the confirmed rows above, so they
-					// are deleted with them and need nothing here.
+					// The value positions ride on the confirmed rows above and are
+					// deleted with them; the search positions are records of their own
+					// and are not.
+					for await (const [ k ] of tx.scan(searchIndexWsPrefix(entity, workspaceId))) {
+						doomed.push(k);
+					}
 					touched.entity(workspaceId, entity);
 				}
 				const kept = new Set([

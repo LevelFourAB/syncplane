@@ -48,7 +48,14 @@ import {
 import type { KVStore, KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import { upperBound } from '../query/indexkey.js';
-import { type CompiledIndex, type IndexCache, indexedRecord } from './index-maintain.js';
+import {
+	type CompiledIndex,
+	type IndexCache,
+	indexedRecord,
+	searchIndexOf,
+	searchPositions,
+	writeSearchRecord,
+} from './index-maintain.js';
 
 /**
  * Rows one transaction indexes. A build holds the store's write lock for the
@@ -263,7 +270,9 @@ async function buildEntity(
 					batch.push({ key, record: v as ConfirmedRecord });
 					if (batch.length >= BUILD_BATCH) break;
 				}
+				const search = searchIndexOf(compiled);
 				for (const { key, record } of batch) {
+					const value = fromBinary(def.schema, record.v);
 					// The row is REWRITTEN carrying the positions its current value
 					// encodes to, which is the whole of indexing it: positions are a
 					// field on the record, so there is no keyspace to add entries to.
@@ -275,16 +284,21 @@ async function buildEntity(
 					// writes the identical record and costs a repeated put.
 					await wtx.put(
 						prefix + key,
-						indexedRecord(
-							record,
-							compiled,
+						indexedRecord(record, compiled, entity, workspaceId, key, value, def.schema),
+					);
+					// Written rather than compared against what is stored: the walk is
+					// what MAKES the search record current, and the case that reaches
+					// here most often — an index declared but never built — has nothing
+					// stored to compare against.
+					if (search !== undefined) {
+						await writeSearchRecord(
+							wtx,
 							entity,
 							workspaceId,
 							key,
-							fromBinary(def.schema, record.v),
-							def.schema,
-						),
-					);
+							searchPositions(search, entity, workspaceId, key, value, def.schema),
+						);
+					}
 				}
 				const last = batch[batch.length - 1]?.key;
 				// The cursor commits WITH the rows it describes, so it can never

@@ -3,6 +3,7 @@
  * so `<ws>` is a segment inside the keys rather than the name of the database:
  *
  *   c/<entity>/<ws>/<key>        confirmed (server-acked) row bytes
+ *   x/<entity>/<ws>/<key>        the confirmed row's SEARCH-index positions
  *   o/<entity>/<ws>/<key>        optimistic overlay (value or local tombstone)
  *   ot/<entity>/<ws>/<key>/<field>/<id>
  *                                optimistic text log (one delta-state fragment
@@ -20,10 +21,22 @@
  * `c/<entity>/<ws>/` prefix. Workspace count is the unbounded dimension, so the
  * order that keeps the unbounded fan-out to one scan wins.
  *
- * Secondary indexes have NO keyspace of their own: a confirmed row carries the
- * positions it occupies as an array field, and the KV store maintains one
- * index over that field (see kv/store.ts INDEX_FIELD and indexPositionPrefix
- * below).
+ * Secondary-index positions are an array field on a record rather than a
+ * keyspace of their own, and the KV store maintains one index over that field
+ * across every record it holds (see kv/store.ts INDEX_FIELD and
+ * indexPositionPrefix below). They are split across two records per row:
+ *
+ * - VALUE-index positions ride on the confirmed row (`c/`, ConfirmedRecord.ix),
+ *   so indexing a row costs no record of its own.
+ * - SEARCH-index positions sit beside it in `x/` (SearchIndexRecord), keyed
+ *   identically so the two are one slice apart.
+ *
+ * The split is what keeps an ordinary field update off the search postings. A
+ * store rewrites every position of a record it puts, changed or not, and a
+ * searchable row holds one search position per distinct term — an order of
+ * magnitude more than its value positions — so folding the two together made a
+ * change to a state or a timestamp pay for the whole term set. See
+ * optimistic/index-maintain.ts for what fills them and what a writer owes.
  *
  * Reads resolve overlay-first and never touch the b/ staging keyspace, so a
  * bootstrap that has a snapshot to protect streams into b/ without disturbing
@@ -189,6 +202,19 @@ export const confirmedKey = (entity: string, workspaceId: string, key: string): 
 export const overlayKey = (entity: string, workspaceId: string, key: string): string =>
 	`${overlayWsPrefix(entity, workspaceId)}${key}`;
 
+/** Every workspace's search-index records of one entity — mirrors confirmedPrefix. */
+export const searchIndexPrefix = (entity: string): string => `x/${entity}/`;
+/** One workspace's search-index records of one entity. */
+export const searchIndexWsPrefix = (entity: string, workspaceId: string): string =>
+	`${searchIndexPrefix(entity)}${wsSegment(workspaceId)}/`;
+/**
+ * The search-index positions of the confirmed row at the matching `c/` key.
+ * The suffix after the prefix is the row key verbatim, exactly as it is under
+ * `c/`, so a search-index scan yields a key one slice away from the row's.
+ */
+export const searchIndexKey = (entity: string, workspaceId: string, key: string): string =>
+	`${searchIndexWsPrefix(entity, workspaceId)}${key}`;
+
 /**
  * The optimistic TEXT log: one delta-state fragment per local edit to one
  * collaborative-text field, appended rather than folded into the overlay row.
@@ -251,10 +277,16 @@ const textLogFieldOf = (segment: string): string =>
  * A secondary-index POSITION: `i/<fingerprint>/<entry>`, where the entry is the
  * encoded sort key (see query/indexkey.ts) and the fingerprint stands for the
  * (layout, entity, index, spec, workspace) the entry belongs to. Positions are
- * the elements of a confirmed row's INDEX_FIELD array, and the KV store's one
- * secondary index orders them — so position order within one prefix IS the row
- * order the index serves, and a bounded indexScan over that prefix reads the
- * slice a query names.
+ * the elements of a record's INDEX_FIELD array — the confirmed row's for a
+ * value index, the row's `x/` sibling for the search index — and the KV store's
+ * one secondary index orders them, so position order within one prefix IS the
+ * row order the index serves, and a bounded indexScan over that prefix reads
+ * the slice a query names.
+ *
+ * The prefix also decides which record a scan's keys belong to: every position
+ * under one prefix comes from one index, and an index's positions all live on
+ * the same kind of record. A caller therefore knows whether an indexScan hands
+ * it `c/` keys or `x/` keys from the prefix it asked for.
  *
  * They are not KV keys and the store never resolves one, and nothing anywhere
  * parses one back into its parts. What a position has to be is a string that
@@ -294,14 +326,27 @@ const textLogFieldOf = (segment: string): string =>
  */
 const INDEX_POSITION_ROOT = 'i/';
 
+/** Search-index record stored at x/ keys, beside the confirmed row it
+ * describes. Holds the row's search positions and nothing else, so a row
+ * rewrite that leaves its terms alone can leave this record alone too. */
+export interface SearchIndexRecord {
+	/** The search-index positions the row occupies (see indexPosition), which is
+	 * the KV store's INDEX_FIELD. Never empty: a row occupying none has no
+	 * record at all. */
+	ix: string[];
+}
+
 /**
  * Version of the position layout above. Purely client-local — it is not the
  * index spec hash, which is shared with the server — and bumping it makes every
  * stored position unreachable and every index-built marker written before the
  * bump read as unbuilt, so the background build re-walks and rewrites the rows.
- * Bump it for any change to how a position is composed.
+ * Bump it for any change to how a position is composed, and for any change to
+ * WHICH RECORD holds one: a scan resolves its keys by the record kind the
+ * prefix implies, so positions of the old kind have to become unreachable at
+ * the same moment.
  */
-const INDEX_POSITION_LAYOUT = 1;
+const INDEX_POSITION_LAYOUT = 2;
 
 /**
  * Prefixes already fingerprinted, keyed by the parts they were built from. A
@@ -547,9 +592,10 @@ export interface ConfirmedRecord {
 	/** Row version (workspace seq) as decimal string. */
 	ver: string;
 	/**
-	 * The secondary-index positions this row occupies (see indexPosition), which
-	 * is the KV store's INDEX_FIELD — the field name is what ties the two
-	 * together, so it cannot be renamed here alone.
+	 * The VALUE-index positions this row occupies (see indexPosition), which is
+	 * the KV store's INDEX_FIELD — the field name is what ties the two together,
+	 * so it cannot be renamed here alone. The row's search positions are not
+	 * here; they sit in its `x/` sibling (see SearchIndexRecord).
 	 *
 	 * Absent means the row occupies none, which is a legitimate state rather
 	 * than a broken one: an entity that declares no index never has any, and a

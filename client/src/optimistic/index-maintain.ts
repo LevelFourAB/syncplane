@@ -21,18 +21,33 @@
 //
 // WHERE THE POSITIONS LIVE, and what follows from it
 //
-// A row's positions are a field ON the row (ConfirmedRecord.ix), and the KV
-// store maintains one secondary index over that field for every backend it has
-// (see kv/store.ts INDEX_FIELD). Maintenance is therefore not a set of writes at
-// all — there is nothing to add or delete — it is a value computed from the row
-// and handed to the same put the row was going through anyway. Indexing a row
-// costs zero KV records.
+// Positions are a field on a record (INDEX_FIELD, see kv/store.ts), and the KV
+// store maintains one secondary index over that field for every backend it has.
+// Maintenance is therefore not a set of writes at all — there is nothing to add
+// or delete — it is a value computed from the row and handed to a put.
+//
+// A row splits its positions across two records:
+//
+// - VALUE-index positions ride on the confirmed row itself
+//   (ConfirmedRecord.ix), so they cost no KV record: the put they ride on was
+//   happening anyway.
+// - SEARCH-index positions sit in the row's `x/` sibling (SearchIndexRecord),
+//   written only when the term set actually changes.
+//
+// The second record is there because a store rewrites every position of a
+// record it puts, changed or not, and a searchable row holds one position per
+// distinct term — typically an order of magnitude more than its value
+// positions. Sharing one record made a change to any field pay for the whole
+// term set, and most updates leave the searchable text alone. The price is one
+// read and one put on the pull path for a row whose text DID change, and one
+// extra put per searchable row during a bootstrap or a build.
 //
 // That collapses most of what maintenance used to be:
 //
-// - A DELETE needs no index work. Dropping the record drops its positions with
-//   it, which is also what makes wiping confirmed state, dropping an entity and
-//   purging a workspace index-free operations.
+// - A DELETE drops the row's value positions with the record. Its `x/` sibling
+//   is a separate key and has to be deleted alongside — every path that removes
+//   a confirmed row removes both, or an orphaned search record would keep
+//   answering for a row that is gone.
 // - A REWRITE needs no knowledge of where the row used to be. The position list
 //   is replaced wholesale, so nothing has to reproduce the previous value's
 //   entries in order to remove them — no per-row pointer, no decode of the bytes
@@ -45,7 +60,10 @@
 // It also puts one obligation on every writer, which is the price of the layout:
 // a row's positions are only as good as the last write of that row. Rewriting a
 // confirmed record without recomputing them UNINDEXES the row rather than
-// leaving a stale entry behind. Two consequences worth stating outright:
+// leaving a stale entry behind — and leaving its `x/` sibling alone leaves the
+// search postings describing the PREVIOUS text, which is why a writer that can
+// change the searchable fields has to decide about both records. Two
+// consequences worth stating outright:
 //
 // - A staged bootstrap swap promotes rows carrying no positions, since giving
 //   them any means decoding the whole snapshot inside the transaction that
@@ -62,7 +80,12 @@
 
 import type { DescMessage } from '@bufbuild/protobuf';
 
-import { type ConfirmedRecord, indexPositionPrefix } from '../keys.js';
+import {
+	type ConfirmedRecord,
+	indexPositionPrefix,
+	searchIndexKey,
+	type SearchIndexRecord,
+} from '../keys.js';
 import type { KVWrite } from '../kv/store.js';
 import type { EntityRegistry } from '../mutations.js';
 import {
@@ -140,8 +163,9 @@ export function compileIndexes(schema: DescMessage, defs: {
 	const drop = subsumedBy(compiled.map((c) => c.encoder!.components));
 	const kept = compiled.filter((_, i) => !drop[i]!);
 	// The search index rides the same list: same markers, same build, same
-	// position layout. Compiled last so subsumption above stays about value
-	// indexes, which are the only ones with components to compare.
+	// position encoding — it differs only in the record its positions are
+	// stored on. Compiled last so subsumption above stays about value indexes,
+	// which are the only ones with components to compare.
 	try {
 		const decl = searchDeclOf(schema);
 		if (decl) {
@@ -198,7 +222,8 @@ function subsumedBy(lists: IndexComponent[][]): boolean[] {
 }
 
 /**
- * The positions one confirmed row occupies, given its decoded value.
+ * The VALUE-index positions one confirmed row occupies, given its decoded
+ * value. The search index is not among them — see searchPositions.
  *
  * The order is by index and then by fan-out element, which is what the encoders
  * produce and not a sorted order. Nothing depends on it: the store's index sorts
@@ -219,22 +244,78 @@ export function rowPositions(
 ): string[] {
 	const positions: string[] = [];
 	for (const idx of indexes) {
-		// An index over a repeated field yields one position per element — and
-		// the search index one per distinct term, bounded by its own cap — so
-		// the count is bounded by the data rather than by the number of indexes.
-		const entries = idx.search
-			? searchEntries(idx.search, value, key, schema)
-			: idx.encoder!.encode(value, key, schema);
+		if (idx.search) continue;
+		// An index over a repeated field yields one position per element, so the
+		// count is bounded by the data rather than by the number of indexes.
+		const entries = idx.encoder!.encode(value, key, schema);
 		const prefix = indexPositionPrefix(entity, idx.name, idx.specHash, workspaceId);
 		for (const encoded of entries) positions.push(prefix + encoded);
 	}
 	return positions;
 }
 
+/** The entity's search index among its compiled ones, or undefined when it
+ * declares no searchable field. */
+export function searchIndexOf(indexes: readonly CompiledIndex[]): CompiledIndex | undefined {
+	return indexes.find((idx) => idx.search !== undefined);
+}
+
 /**
- * `record` with its index positions recomputed from `value` — the one place a
- * confirmed row and its positions are tied together, so a writer cannot update
- * one and forget the other.
+ * The SEARCH-index positions one row occupies, given its decoded value — one
+ * per distinct term of its searchable fields, or the single overflow marker
+ * past the per-row term cap. Empty for a row whose searchable fields analyze to
+ * nothing, which is a row with no `x/` record.
+ */
+export function searchPositions(
+	idx: CompiledIndex,
+	entity: string,
+	workspaceId: string,
+	key: string,
+	value: unknown,
+	schema: DescMessage,
+): string[] {
+	const prefix = indexPositionPrefix(entity, idx.name, idx.specHash, workspaceId);
+	return searchEntries(idx.search!, value, key, schema).map((entry) => prefix + entry);
+}
+
+/**
+ * Whether two position lists hold the same positions, order aside.
+ *
+ * Both sides are duplicate-free (one entry per distinct term), so equal lengths
+ * plus containment is set equality. Order is not equality here because the
+ * entries come out in first-occurrence order: reordering a sentence changes the
+ * list without changing the postings it stands for.
+ */
+export function samePositions(a: readonly string[], b: readonly string[]): boolean {
+	if (a.length !== b.length) return false;
+	const set = new Set(a);
+	return b.every((p) => set.has(p));
+}
+
+/**
+ * Writes a row's search-index record, or deletes it when `positions` is empty.
+ *
+ * Unconditional: a caller holding the stored positions should compare them
+ * first (see samePositions), since the store rewrites every position of a
+ * record it puts.
+ */
+export async function writeSearchRecord(
+	tx: KVWrite,
+	entity: string,
+	workspaceId: string,
+	key: string,
+	positions: string[],
+): Promise<void> {
+	const k = searchIndexKey(entity, workspaceId, key);
+	if (positions.length === 0) await tx.del(k);
+	else await tx.put(k, { ix: positions } satisfies SearchIndexRecord);
+}
+
+/**
+ * `record` with its VALUE-index positions recomputed from `value` — the one
+ * place a confirmed row and those positions are tied together, so a writer
+ * cannot update one and forget the other. The row's search positions live in a
+ * record of their own and are not touched here (see writeSearchRecord).
  *
  * The list is REPLACED, never merged. That is what makes a rewrite self-cleaning
  * — the previous value's positions go with it, and so do any left behind by a

@@ -7,7 +7,7 @@
  * Beyond the key-ordered map, a store maintains ONE secondary index over a
  * materialized field of the values it holds — see INDEX_FIELD and indexScan.
  * That is the whole of the extra surface, and it is what lets a client keep
- * secondary indexes without spending a KV record per indexed position.
+ * secondary indexes without spending a KV record per indexed POSITION.
  */
 
 /**
@@ -26,9 +26,11 @@
  * is why this is stated rather than defended against.
  *
  * The backend maintains the index itself: IndexedDB with a `multiEntry` index
- * over the field, MemoryKVStore by walking its map. So a row's positions cost
- * no KV record of their own — they ride on a record that is written anyway,
- * which is the point (see optimistic/index-maintain.ts for what fills them).
+ * over the field, MemoryKVStore by walking its map. A whole position list
+ * therefore costs one record rather than one record per position — and a put
+ * rewrites every position on the record it writes, changed or not, which is
+ * what decides how a writer distributes positions across records (see
+ * optimistic/index-maintain.ts for what fills them).
  *
  * The corollary every writer has to respect: a value written WITHOUT the field
  * occupies no positions. There is no separate keyspace left holding them, so

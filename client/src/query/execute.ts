@@ -47,6 +47,9 @@ import {
 	overlayTextPrefix,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
+	searchIndexKey,
+	type SearchIndexRecord,
+	searchIndexWsPrefix,
 	splitOverlayTextSuffix,
 } from '../keys.js';
 import type { IndexEntry, KVRead } from '../kv/store.js';
@@ -1220,7 +1223,10 @@ async function querySearchIndex<D extends DescMessage>(
 	const edited = await textEditedRows(tx, registry, def.name, workspaceId);
 
 	const prefix = indexPositionPrefix(def.name, idx.name, idx.specHash, workspaceId);
-	const rowPrefix = confirmedWsPrefix(def.name, workspaceId);
+	// Search positions sit on the row's `x/` sibling, so an indexScan over this
+	// prefix answers with `x/` keys. The suffix is the row key either way, which
+	// is what every walk below slices off.
+	const entryPrefix = searchIndexWsPrefix(def.name, workspaceId);
 
 	const postings = await querySearchPostings(
 		tx,
@@ -1231,7 +1237,7 @@ async function querySearchIndex<D extends DescMessage>(
 		compiled,
 		workspaceId,
 		prefix,
-		rowPrefix,
+		entryPrefix,
 		shadowed,
 		edited,
 		overlayRows,
@@ -1262,11 +1268,11 @@ async function querySearchIndex<D extends DescMessage>(
 		const scanLo = prefix + lo;
 		const scanHi = hi === undefined ? successorOf(prefix) : prefix + hi;
 		let seen = 0;
-		for await (const cKey of tx.indexScan(scanLo, scanHi)) {
+		for await (const xKey of tx.indexScan(scanLo, scanHi)) {
 			if (++walked > indexCandidateBudget) return 'budget';
 			if (++seen > max) return 'wide';
-			if (!cKey.startsWith(rowPrefix)) continue;
-			keep(cKey.slice(rowPrefix.length));
+			if (!xKey.startsWith(entryPrefix)) continue;
+			keep(xKey.slice(entryPrefix.length));
 		}
 		return 'ok';
 	};
@@ -1351,9 +1357,9 @@ async function querySearchIndex<D extends DescMessage>(
 				keys.slice(at, at + READ_BATCH),
 			)
 		) {
-			// A position cannot outlive its row (they are one record); the guard
-			// stays because answering from a row that is not there would be
-			// silent and wrong.
+			// Every path that deletes a confirmed row deletes its search record
+			// in the same transaction; the guard stays because answering from a
+			// row that is not there would be silent and wrong.
 			if (entry === undefined) continue;
 			if (!matches(entry.row.value, compiled.where, schema)) continue;
 			if (window && !window.within(entry.row.value, entry.row.key)) continue;
@@ -1443,7 +1449,7 @@ async function querySearchPostings<D extends DescMessage>(
 	compiled: CompiledQuery,
 	workspaceId: string,
 	prefix: string,
-	rowPrefix: string,
+	entryPrefix: string,
 	shadowed: ReadonlySet<string>,
 	edited: ReadonlySet<string>,
 	overlayRows: readonly IndexedRow<MessageShape<D>>[],
@@ -1491,10 +1497,10 @@ async function querySearchPostings<D extends DescMessage>(
 	// an edited row is in `answered` — so nothing is counted twice.
 	const readWhole = new Set<string>();
 	const overflow = searchOverflowRange();
-	for await (const cKey of tx.indexScan(prefix + overflow.lo, prefix + overflow.hi)) {
+	for await (const xKey of tx.indexScan(prefix + overflow.lo, prefix + overflow.hi)) {
 		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
-		if (!cKey.startsWith(rowPrefix)) continue;
-		const key = cKey.slice(rowPrefix.length);
+		if (!xKey.startsWith(entryPrefix)) continue;
+		const key = xKey.slice(entryPrefix.length);
 		if (!shadowed.has(key)) readWhole.add(key);
 	}
 	for (const key of edited) if (!shadowed.has(key)) readWhole.add(key);
@@ -1508,10 +1514,10 @@ async function querySearchPostings<D extends DescMessage>(
 	// Whether a match exists past the ones taken — what hasMore rides on when
 	// the total is opted out and the walk therefore stops at the page.
 	let more = false;
-	for await (const cKey of tx.indexScan(lo, hi)) {
+	for await (const xKey of tx.indexScan(lo, hi)) {
 		if (++walked > indexCandidateBudget) return { kind: 'decline', reason: 'budget', walked };
-		if (!cKey.startsWith(rowPrefix)) continue;
-		const key = cKey.slice(rowPrefix.length);
+		if (!xKey.startsWith(entryPrefix)) continue;
+		const key = xKey.slice(entryPrefix.length);
 		if (answered.has(key)) continue;
 		if (budget !== undefined && pageKeys.length >= budget) {
 			more = true;
@@ -1551,15 +1557,17 @@ async function querySearchPostings<D extends DescMessage>(
 		// Each posting in the range is one distinct match, so the store counts
 		// the confirmed half of the total without walking it. Rows answered
 		// elsewhere keep their confirmed postings there — the overlay does not
-		// touch the confirmed record, and a text fragment lives beside it — so
+		// touch the search record, and a text fragment lives beside it — so
 		// each such position comes back out and the row is counted, if it still
 		// matches, from the rows read above.
 		let answeredInRange = 0;
 		if (answered.size > 0) {
 			const keys = [ ...answered ];
-			const records = await tx.getMany(keys.map((k) => confirmedKey(def.name, workspaceId, k)));
+			const records = await tx.getMany(
+				keys.map((k) => searchIndexKey(def.name, workspaceId, k)),
+			);
 			for (const record of records) {
-				for (const p of (record as ConfirmedRecord | undefined)?.ix ?? []) {
+				for (const p of (record as SearchIndexRecord | undefined)?.ix ?? []) {
 					if (p >= lo && (hi === undefined || p < hi)) answeredInRange++;
 				}
 			}

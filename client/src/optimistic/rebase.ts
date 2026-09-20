@@ -34,6 +34,9 @@ import {
 	overlayTextWsPrefix,
 	overlayWsPrefix,
 	pendingKey,
+	searchIndexKey,
+	type SearchIndexRecord,
+	searchIndexWsPrefix,
 	splitOverlayTextSuffix,
 	stagingKey,
 	stagingPrefix,
@@ -55,7 +58,15 @@ import { applyTextDeltas, TextDeltaUnusableError } from '../sync/textdelta.js';
 import { isFragment } from '../text/index.js';
 import { TouchSet } from '../touch.js';
 import { markIndexesBuilt } from './index-build.js';
-import { deletePrefixes, type IndexCache, indexedRecord } from './index-maintain.js';
+import {
+	deletePrefixes,
+	type IndexCache,
+	indexedRecord,
+	samePositions,
+	searchIndexOf,
+	searchPositions,
+	writeSearchRecord,
+} from './index-maintain.js';
 import { dropAcked, enqueuePending, readPending, writePushedThrough } from './queue.js';
 
 /**
@@ -503,11 +514,19 @@ export async function wipeConfirmedState(
 	await tx.del(metaAckedSeq(workspaceId));
 	// The built markers say the index covers the whole entity, which stops being
 	// true the moment the rows are gone, so they leave in the same transaction.
-	// The positions themselves need no sweep: they ride on the rows below.
+	// The value positions need no sweep of their own — they ride on the rows
+	// below — but the search records are keys beside them and do.
 	await deletePrefixes(tx, [ metaIndexPrefix(workspaceId) ]);
 	for (const entity of await syncableEntities(tx, registry)) {
-		for await (const [ k ] of tx.scan(confirmedWsPrefix(entity, workspaceId))) {
-			await tx.del(k);
+		for (
+			const prefix of [
+				confirmedWsPrefix(entity, workspaceId),
+				searchIndexWsPrefix(entity, workspaceId),
+			]
+		) {
+			for await (const [ k ] of tx.scan(prefix)) {
+				await tx.del(k);
+			}
 		}
 		touched.entity(workspaceId, entity);
 	}
@@ -527,8 +546,15 @@ export async function dropConfirmedEntities(
 	indexes?: IndexCache,
 ): Promise<void> {
 	for (const entity of entities) {
-		for await (const [ k ] of tx.scan(confirmedWsPrefix(entity, workspaceId))) {
-			await tx.del(k);
+		for (
+			const prefix of [
+				confirmedWsPrefix(entity, workspaceId),
+				searchIndexWsPrefix(entity, workspaceId),
+			]
+		) {
+			for await (const [ k ] of tx.scan(prefix)) {
+				await tx.del(k);
+			}
 		}
 		// Every marker of this entity goes, including ones naming a spec that
 		// has since changed — then the current specs are re-claimed, which they
@@ -583,15 +609,23 @@ export async function applyServerChanges(
 	indexes?: IndexCache,
 ): Promise<void> {
 	const syncable = await syncableEntities(tx, registry);
+	const storedSearch = await readSearchPositions(tx, syncable, workspaceId, changes, indexes);
 	for (const change of changes) {
 		if (!syncable.has(change.entity)) continue;
 		touched.row(workspaceId, change.entity, change.key);
 		const cKey = confirmedKey(change.entity, workspaceId, change.key);
 		const idx = indexes?.for(change.entity) ?? [];
+		const search = searchIndexOf(idx);
 		if (change.body.case === 'tombstone') {
-			// No index work: a row's positions are a field on it, so deleting the
-			// record takes them with it.
+			// The value positions are a field on the row, so the delete takes them
+			// with it — but the search record is a key of its own, and one left
+			// behind would keep answering term probes for a row that is gone.
+			// Deleted whether or not this build compiles a search index: another
+			// build's tab may have written it.
+			const xKey = searchIndexKey(change.entity, workspaceId, change.key);
 			await tx.del(cKey);
+			await tx.del(xKey);
+			storedSearch.delete(xKey);
 		} else if (change.body.case === 'value') {
 			const value = detached(
 				await applyTextDeltas(tx, registry, workspaceId, change, change.body.value),
@@ -602,19 +636,71 @@ export async function applyServerChanges(
 				// replaced, not amended — so this needs neither the bytes being
 				// overwritten nor a read to find them.
 				const def = registry.get(change.entity)!;
+				const decoded = fromBinary(def.schema, value);
 				record = indexedRecord(
 					record,
 					idx,
 					change.entity,
 					workspaceId,
 					change.key,
-					fromBinary(def.schema, value),
+					decoded,
 					def.schema,
 				);
+				if (search !== undefined) {
+					const xKey = searchIndexKey(change.entity, workspaceId, change.key);
+					const positions = searchPositions(
+						search,
+						change.entity,
+						workspaceId,
+						change.key,
+						decoded,
+						def.schema,
+					);
+					// Most updates leave the searchable text alone, and a put rewrites
+					// every position on the record — so the comparison buys back the
+					// whole term set on a change to a state, an assignee or a timestamp.
+					if (!samePositions(positions, storedSearch.get(xKey) ?? [])) {
+						await writeSearchRecord(tx, change.entity, workspaceId, change.key, positions);
+						if (positions.length === 0) storedSearch.delete(xKey);
+						else storedSearch.set(xKey, positions);
+					}
+				}
 			}
 			await tx.put(cKey, record);
 		}
 	}
+}
+
+/**
+ * The search positions currently stored for the rows `changes` rewrites, keyed
+ * by search-index key; a row with no record is absent.
+ *
+ * One pipelined getMany for the whole batch rather than a read per row: a pull
+ * applies hundreds of changes, and an awaited get ahead of each put would cost
+ * that many serialized round trips against the store.
+ */
+async function readSearchPositions(
+	tx: KVWrite,
+	syncable: ReadonlySet<string>,
+	workspaceId: string,
+	changes: readonly RowChange[],
+	indexes: IndexCache | undefined,
+): Promise<Map<string, string[]>> {
+	const stored = new Map<string, string[]>();
+	if (indexes === undefined) return stored;
+	const keys: string[] = [];
+	for (const change of changes) {
+		if (change.body.case !== 'value' || !syncable.has(change.entity)) continue;
+		if (searchIndexOf(indexes.for(change.entity)) === undefined) continue;
+		keys.push(searchIndexKey(change.entity, workspaceId, change.key));
+	}
+	if (keys.length === 0) return stored;
+	const records = await tx.getMany(keys);
+	for (let i = 0; i < keys.length; i++) {
+		const record = records[i] as SearchIndexRecord | undefined;
+		if (record !== undefined) stored.set(keys[i]!, record.ix);
+	}
+	return stored;
 }
 
 /**
@@ -627,9 +713,11 @@ export async function applyServerChanges(
  * absence.
  *
  * `index` decides whether the rows carry their secondary-index positions, which
- * costs a decode per row of an indexed entity; without it a chunk costs one put
- * per row and no schema work at all. The two destinations differ here — see
- * promoteStaged and applyBootstrapRows.
+ * costs a decode per row of an indexed entity and a second put per row of a
+ * SEARCHABLE one (its `x/` record); without it a chunk costs one put per row
+ * and no schema work at all. It also names the workspace the `x/` keys belong
+ * to, so only a destination that is confirmed state may pass it. The two
+ * destinations differ here — see promoteStaged and applyBootstrapRows.
  *
  * A bootstrap defines the client's state rather than advancing it, so there is
  * nothing for delta state to be relative to; a server that sent some is
@@ -662,21 +750,45 @@ async function writeSnapshotRows(
 		const k = keyFor(change.entity, change.key);
 		if (change.body.case === 'tombstone') {
 			await tx.del(k);
+			if (index !== undefined) {
+				await tx.del(searchIndexKey(change.entity, index.workspaceId, change.key));
+			}
 		} else if (change.body.case === 'value') {
 			const value = detached(change.body.value);
 			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
 			const compiled = index?.indexes.for(change.entity) ?? [];
 			if (compiled.length > 0) {
 				const def = registry.get(change.entity)!;
+				const decoded = fromBinary(def.schema, value);
 				record = indexedRecord(
 					record,
 					compiled,
 					change.entity,
 					index!.workspaceId,
 					change.key,
-					fromBinary(def.schema, value),
+					decoded,
 					def.schema,
 				);
+				const search = searchIndexOf(compiled);
+				if (search !== undefined) {
+					// Written without reading what is there: a snapshot defines the
+					// workspace rather than advancing it, so there is nothing a
+					// comparison could spare.
+					await writeSearchRecord(
+						tx,
+						change.entity,
+						index!.workspaceId,
+						change.key,
+						searchPositions(
+							search,
+							change.entity,
+							index!.workspaceId,
+							change.key,
+							decoded,
+							def.schema,
+						),
+					);
+				}
 			}
 			await tx.put(k, record);
 		}
@@ -776,9 +888,11 @@ export async function applyBootstrapRows(
  *
  * The staged record moves across VERBATIM, which is what keeps promotion at one
  * put and one delete per row with no schema work at all — and it is why the
- * promoted rows carry no index positions: a staged row has none, and giving it
- * some here would mean decoding every row of the snapshot inside the one
- * transaction the swap must commit before anything is readable. The caller
+ * promoted rows carry no index positions and get no `x/` record: a staged row
+ * has none, and giving it some here would mean decoding every row of the
+ * snapshot inside the one transaction the swap must commit before anything is
+ * readable. The preceding wipeConfirmedState has already removed the search
+ * records of the snapshot being replaced, so none is left over. The caller
  * leaves the indexes unbuilt instead — the state a query already handles by
  * scanning — and asks for a background build. See Coordinator.doBootstrap and
  * index-build.ts.
