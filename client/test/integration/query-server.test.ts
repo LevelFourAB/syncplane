@@ -417,3 +417,49 @@ describe('queryServer (push-down)', () => {
 		await cold.close();
 	});
 });
+
+describe('queryServer facets', () => {
+	it('answers the facets the local fold answers, over rows the client never synced', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws);
+		await writer.start();
+		await writer.mutate.put(WidgetSchema, { id: 'w1', count: 30, label: 'x', tags: [ 'a', 'b' ] });
+		await writer.mutate.put(WidgetSchema, { id: 'w2', count: 5, label: 'y' });
+		await writer.mutate.put(WidgetSchema, { id: 'w3', count: 20, label: 'y', tags: [ 'b' ] });
+		await writer.mutate.put(WidgetSchema, { id: 'w4', count: 20, label: 'a', tags: [ 'b', 'b' ] });
+		await writer.syncNow();
+
+		const reader = newClient(ws, {
+			subscriptions: [ subscription(WidgetSchema, (w) => w.count.gte(25)) ],
+		});
+		await reader.start();
+		await reader.syncNow();
+
+		const q = {
+			where: (w) => w.count.gte(10),
+			orderBy: (w) => [ w.count.desc(), w.label.asc() ],
+			limit: 1,
+			facets: { label: (w) => w.label, tag: (w) => w.tags },
+		} satisfies WidgetQuery;
+		const remote = await reader.queryServer(WidgetSchema, q);
+		expect(remote.map((r) => r.key)).toEqual([ 'w1' ]);
+		// The facets describe the match set the page was cut from, keyed to the
+		// workspace the read was made in — the shape the local fold produces.
+		expect(remote.facets).toEqual({
+			label: [
+				{ value: 'a', count: 1, workspaceId: ws },
+				{ value: 'x', count: 1, workspaceId: ws },
+				{ value: 'y', count: 1, workspaceId: ws },
+			],
+			tag: [
+				{ value: 'a', count: 1, workspaceId: ws },
+				{ value: 'b', count: 3, workspaceId: ws },
+			],
+		});
+		const local = await writer.query(WidgetSchema, q);
+		expect(remote.facets).toEqual(local.facets);
+
+		await writer.close();
+		await reader.close();
+	});
+});

@@ -1030,6 +1030,19 @@ type QueryRequest struct {
 	// themselves cost `per_group` of them — so a caller that shows no count
 	// leaves it false. Ignored without AGGREGATE_OP_ROWS.
 	PerGroupTotal bool `protobuf:"varint,13,opt,name=per_group_total,json=perGroupTotal,proto3" json:"per_group_total,omitempty"`
+	// Per-value counts of the match set, computed in the walk that answers the
+	// rows: one QueryFacet per axis, each naming a path, answered in
+	// QueryResponse.facets in the same order. A facet counts every row the
+	// predicate and the cursor bounds admit — the rows `rows` was cut from, not
+	// the page — so its counts sum to what the page's `total` would be, except
+	// on a repeated path, which counts per element (see group_by).
+	//
+	// Facets force the walk over every matching row rather than the page, so
+	// a request carrying one costs what an unlimited read of the predicate
+	// costs; the response stays a page. Rejected alongside group_by — a
+	// grouped read answers with groups already — and capped by the server's
+	// MaxQueryFacets.
+	Facets        []*QueryFacet `protobuf:"bytes,14,rep,name=facets,proto3" json:"facets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1148,6 +1161,13 @@ func (x *QueryRequest) GetPerGroupTotal() bool {
 	return false
 }
 
+func (x *QueryRequest) GetFacets() []*QueryFacet {
+	if x != nil {
+		return x.Facets
+	}
+	return nil
+}
+
 type QueryResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Value changes only (never tombstones), ordered by order_by with ties
@@ -1176,7 +1196,10 @@ type QueryResponse struct {
 	Groups []*QueryGroup `protobuf:"bytes,6,rep,name=groups,proto3" json:"groups,omitempty"`
 	// The groups of a request carrying `group_by` with AGGREGATE_OP_ROWS, in
 	// the same order; empty otherwise.
-	RowGroups     []*QueryRowGroup `protobuf:"bytes,7,rep,name=row_groups,json=rowGroups,proto3" json:"row_groups,omitempty"`
+	RowGroups []*QueryRowGroup `protobuf:"bytes,7,rep,name=row_groups,json=rowGroups,proto3" json:"row_groups,omitempty"`
+	// The facets of a request carrying `facets`, one per requested axis in
+	// request order, each echoing its path; empty otherwise.
+	Facets        []*QueryFacet `protobuf:"bytes,8,rep,name=facets,proto3" json:"facets,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1256,6 +1279,13 @@ func (x *QueryResponse) GetGroups() []*QueryGroup {
 func (x *QueryResponse) GetRowGroups() []*QueryRowGroup {
 	if x != nil {
 		return x.RowGroups
+	}
+	return nil
+}
+
+func (x *QueryResponse) GetFacets() []*QueryFacet {
+	if x != nil {
+		return x.Facets
 	}
 	return nil
 }
@@ -1975,7 +2005,7 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12!\n" +
 	"\fresume_token\x18\x02 \x01(\fR\vresumeToken\x1a\x05\n" +
 	"\x03EndB\x06\n" +
-	"\x04body\"\xb9\x03\n" +
+	"\x04body\"\xeb\x03\n" +
 	"\fQueryRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06entity\x18\x03 \x01(\tR\x06entity\x125\n" +
@@ -1989,7 +2019,8 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	" \x03(\tR\agroupBy\x127\n" +
 	"\taggregate\x18\v \x01(\x0e2\x19.syncplane.v1.AggregateOpR\taggregate\x12\x1b\n" +
 	"\tper_group\x18\f \x01(\rR\bperGroup\x12&\n" +
-	"\x0fper_group_total\x18\r \x01(\bR\rperGroupTotalJ\x04\b\x02\x10\x03R\tclient_id\"\xb0\x02\n" +
+	"\x0fper_group_total\x18\r \x01(\bR\rperGroupTotal\x120\n" +
+	"\x06facets\x18\x0e \x03(\v2\x18.syncplane.v1.QueryFacetR\x06facetsJ\x04\b\x02\x10\x03R\tclient_id\"\xe2\x02\n" +
 	"\rQueryResponse\x12+\n" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12'\n" +
 	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\x12!\n" +
@@ -1999,7 +2030,8 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x120\n" +
 	"\x06groups\x18\x06 \x03(\v2\x18.syncplane.v1.QueryGroupR\x06groups\x12:\n" +
 	"\n" +
-	"row_groups\x18\a \x03(\v2\x1b.syncplane.v1.QueryRowGroupR\trowGroups\"\x9d\x01\n" +
+	"row_groups\x18\a \x03(\v2\x1b.syncplane.v1.QueryRowGroupR\trowGroups\x120\n" +
+	"\x06facets\x18\b \x03(\v2\x18.syncplane.v1.QueryFacetR\x06facets\"\x9d\x01\n" +
 	"\rQueryRowGroup\x12.\n" +
 	"\x05value\x18\x01 \x01(\v2\x18.syncplane.v1.QueryValueR\x05value\x12+\n" +
 	"\x04rows\x18\x02 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12\x14\n" +
@@ -2087,9 +2119,10 @@ var file_syncplane_v1_service_proto_goTypes = []any{
 	(*Condition)(nil),               // 25: syncplane.v1.Condition
 	(*OrderKey)(nil),                // 26: syncplane.v1.OrderKey
 	(AggregateOp)(0),                // 27: syncplane.v1.AggregateOp
-	(*RowChange)(nil),               // 28: syncplane.v1.RowChange
-	(*QueryGroup)(nil),              // 29: syncplane.v1.QueryGroup
-	(*QueryValue)(nil),              // 30: syncplane.v1.QueryValue
+	(*QueryFacet)(nil),              // 28: syncplane.v1.QueryFacet
+	(*RowChange)(nil),               // 29: syncplane.v1.RowChange
+	(*QueryGroup)(nil),              // 30: syncplane.v1.QueryGroup
+	(*QueryValue)(nil),              // 31: syncplane.v1.QueryValue
 }
 var file_syncplane_v1_service_proto_depIdxs = []int32{
 	22, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
@@ -2107,32 +2140,34 @@ var file_syncplane_v1_service_proto_depIdxs = []int32{
 	25, // 12: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
 	26, // 13: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
 	27, // 14: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
-	28, // 15: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
-	29, // 16: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
-	14, // 17: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
-	30, // 18: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
-	28, // 19: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
-	23, // 20: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
-	15, // 21: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
-	1,  // 22: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
-	8,  // 23: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
-	17, // 24: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
-	28, // 25: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
-	3,  // 26: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
-	7,  // 27: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
-	9,  // 28: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
-	16, // 29: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
-	12, // 30: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
-	6,  // 31: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
-	8,  // 32: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
-	11, // 33: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
-	18, // 34: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
-	13, // 35: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
-	31, // [31:36] is the sub-list for method output_type
-	26, // [26:31] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	28, // 15: syncplane.v1.QueryRequest.facets:type_name -> syncplane.v1.QueryFacet
+	29, // 16: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
+	30, // 17: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
+	14, // 18: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
+	28, // 19: syncplane.v1.QueryResponse.facets:type_name -> syncplane.v1.QueryFacet
+	31, // 20: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
+	29, // 21: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
+	23, // 22: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
+	15, // 23: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
+	1,  // 24: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
+	8,  // 25: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
+	17, // 26: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
+	29, // 27: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
+	3,  // 28: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
+	7,  // 29: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
+	9,  // 30: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
+	16, // 31: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
+	12, // 32: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
+	6,  // 33: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
+	8,  // 34: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
+	11, // 35: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
+	18, // 36: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
+	13, // 37: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
+	33, // [33:38] is the sub-list for method output_type
+	28, // [28:33] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_service_proto_init() }

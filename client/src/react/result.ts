@@ -9,6 +9,7 @@
 // structural comparisons — the same contract withCoverage() documents.
 
 import { type Coverage, type ReadonlyRowSet, UNKNOWN, withCoverage } from '../coverage.js';
+import type { FacetGroup, FacetTable } from '../query/index.js';
 import type { Row } from '../read.js';
 
 /** Whether a watch-backed result has arrived, and why it will not. */
@@ -44,8 +45,12 @@ export interface WatchState {
 }
 
 /** A row set that also reports whether it has loaded (see WatchState). */
-export type WatchResult<T, Total extends number | undefined = number> =
-	& ReadonlyRowSet<T, Total>
+export type WatchResult<
+	T,
+	Total extends number | undefined = number,
+	Facets extends FacetTable | undefined = undefined,
+> =
+	& ReadonlyRowSet<T, Total, Facets>
 	& WatchState;
 
 /**
@@ -109,10 +114,26 @@ export function emptyResult<T>(
 	loading: boolean,
 	error: Error | undefined,
 	coverage: Coverage = UNKNOWN,
+	facets?: FacetTable,
 ): WatchResult<T> {
 	return Object.freeze(
-		withState(withCoverage<T>([], coverage) as ReadonlyRowSet<T>, loading, error),
+		withState(
+			withCoverage<T>([], coverage, facets === undefined ? {} : { facets }) as ReadonlyRowSet<T>,
+			loading,
+			error,
+		),
 	);
+}
+
+/**
+ * The facets of a result that has no rows yet: every axis the query named,
+ * each empty. A component indexing `facets.<axis>` then reads an empty list
+ * before the first delivery rather than a property of undefined.
+ */
+export function emptyFacets(axes: readonly string[]): FacetTable {
+	const out: Record<string, readonly FacetGroup[]> = {};
+	for (const axis of axes) out[axis] = [];
+	return out;
 }
 
 /** Normalizes whatever a failing subscription threw into an Error. */

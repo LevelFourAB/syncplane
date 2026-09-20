@@ -372,7 +372,79 @@ export interface Query<M> {
 	 * @defaultValue true
 	 */
 	total?: boolean;
+	/**
+	 * Per-value counts of the match set, folded from the same rows the result
+	 * is cut from — a filter sidebar next to the list it filters. Each key
+	 * names one axis; the result's `facets` carries one entry per key.
+	 *
+	 * The counts describe the rows the predicate and the cursor bounds admit,
+	 * whatever `offset`/`limit` show of them, so they sum to `total` — except
+	 * on a repeated path, which counts per element. A live query maintains
+	 * them from the rows a commit changed, so an axis costs no read of its own;
+	 * a one-shot query folds them in the walk that answers the rows, which on
+	 * an indexed page means every matching row is read rather than the page.
+	 *
+	 * Only values a row produces exist: a value no matching row holds is absent
+	 * rather than zero, and the rows holding none form a group of their own
+	 * with `value: undefined`. See {@link FacetAxis} for how a read spanning
+	 * workspaces keys its groups.
+	 *
+	 * @example
+	 * ```ts
+	 * const tasks = await db.task.query({
+	 * 	where: (t) => t.completed.eq(false),
+	 * 	facets: { area: (t) => t.area.id, status: (t) => t.status },
+	 * });
+	 * tasks.facets.area; // [{ value: 'a1', count: 4, workspaceId: 'team' }, …]
+	 * ```
+	 */
+	facets?: Record<string, FacetSpec<M>>;
 }
+
+/**
+ * One facet axis: the field to count by, and whether a read spanning
+ * workspaces keeps their groups apart.
+ */
+export interface FacetAxis<M> {
+	/** The field the match set is counted by, named without an operator; the
+	 * leaves a grouped read accepts (see {@link GroupKeyRef}). */
+	by: (w: QueryRef<M>) => GroupKeyRef;
+	/**
+	 * Whether each group is one workspace's — `{ value, count, workspaceId }`,
+	 * with the same value counted once per workspace holding it — or a value's
+	 * across every workspace the read spans, with no `workspaceId`.
+	 *
+	 * Per workspace is the safe reading for an id: a reference's key names a
+	 * row in ITS workspace, and two workspaces' rows sharing one are unrelated.
+	 * A value that means the same thing everywhere — an enum, a status string
+	 * — is what `false` is for. A read over one workspace keys the same either
+	 * way and reports that workspace.
+	 * @defaultValue true
+	 */
+	perWorkspace?: boolean;
+}
+
+/** A facet axis as written: the field alone, or an axis with its options. */
+export type FacetSpec<M> = ((w: QueryRef<M>) => GroupKeyRef) | FacetAxis<M>;
+
+/** One group of a facet: a value, how many matching rows hold it, and the
+ * workspace those rows are in when the axis keeps workspaces apart. */
+export interface FacetGroup {
+	/** The shared value, `undefined` for the rows holding none at the path. */
+	value: Scalar | undefined;
+	/** Matching rows holding the value; never 0, since a group exists only
+	 * because a row put it there. */
+	count: number;
+	/** The rows' workspace; absent on an axis with `perWorkspace: false`. */
+	workspaceId?: string;
+}
+
+/**
+ * The facets a result carries, keyed as the query keyed them. Each axis lists
+ * its groups in ascending value order with the no-value group last, ties
+ * between workspaces broken by workspace id.
+ */
+export type FacetTable = { readonly [axis: string]: readonly FacetGroup[] };
 
 /**
  * The field surfaces a grouping key may name: anything comparable, and a
@@ -501,3 +573,11 @@ export interface WorkspaceQuery<M> extends Omit<Query<M>, 'where' | 'after' | 'b
  * runtime types as `number`; guard the read where the flag can be false.
  */
 export type TotalOf<Q> = Q extends { total: false } ? undefined : number;
+
+/**
+ * What a result's `facets` is for a given query: one entry per axis the query
+ * named, `undefined` for a query naming none.
+ */
+export type FacetsOf<Q> = Q extends { facets: infer F extends object }
+	? { readonly [K in keyof F]: readonly FacetGroup[] }
+	: undefined;

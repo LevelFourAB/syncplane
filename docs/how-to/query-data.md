@@ -182,6 +182,62 @@ For lists of messages or to-many references, use `any()` to scope conditions to 
 
 Composite indexes over list fields fan out by storing one entry per element. When an equality filter pins the list element, the index supplies the remaining sort order, such as `{ key: [ { path: "labels" }, { path: "rank" desc: true } ] }`. Each index can contain only one list field.
 
+## Facets next to a list — a filter sidebar
+
+To display per-value counts beside the list they filter, pass `facets` in your query options. The counts fold from the matching rows that the query reads. A live query keeps the counts current from the rows changed by each commit without running a separate read.
+
+To add facets to a query:
+
+1. Define facet axes by passing field selectors to the `facets` option in `client.db.<entity>.query()`:
+
+   ```ts
+   const tasks = await client.db.task.query({
+   	where: (t) => t.completed.eq(false),
+   	orderBy: (t) => [ t.dueAt.asc() ],
+   	limit: 50,
+   	facets: { area: (t) => t.area.id, status: (t) => t.status },
+   });
+   tasks.facets.area;
+   // [{ value: 'a1', count: 4, workspaceId: 'team' }, { value: 'a7', count: 1, workspaceId: 'team' }]
+   ```
+
+2. Read the facet groups from `result.facets.<axisName>`. Each axis contains an array of `FacetGroup` objects sorted in ascending value order, with any missing values placed last.
+
+3. In React applications, pass `facets` to `useQuery` or `useQueryAll`:
+
+   ```tsx
+   function Sidebar() {
+   	const tasks = db.task.useQueryAll({
+   		where: (t) => t.completed.eq(false),
+   		facets: { area: (t) => t.area.id },
+   	}, { workspaces: followed });
+   	const areas = db.area.useRowsAll(
+   		tasks.facets.area.map((g) => ({
+   			workspaceId: g.workspaceId!,
+   			key: String(g.value),
+   		})),
+   	);
+   	// Render one filter entry per area, with its count beside the area's name.
+   }
+   ```
+
+   While the query loads, every axis in `facets` is present as an empty array.
+
+4. For rows not synced locally, pass `facets` to `queryServer`. The server folds facet counts during the walk that answers the page.
+
+When using facets:
+
+- Counts describe the match set, not the page. The counts sum to `total` regardless of `offset` or `limit`. When you provide cursor bounds (`after` or `before`), the counts cover only rows within those bounds.
+- Cross-workspace queries key groups by workspace and value by default. To count a value that is identical across workspaces (such as a status string) in a single bucket across workspaces, set `perWorkspace: false` on the axis:
+
+  ```ts
+  facets: { status: { by: (t) => t.status, perWorkspace: false } }
+  ```
+
+- A repeated field path counts once per element. Rows with no value for the field form a group with `value: undefined`. Values not held by any matching row are omitted rather than reported as zero. Join these counts against your domain values.
+- A one-shot query with facets reads every matching row rather than only the requested page. An index still narrows which rows are read.
+- For entities too large to hold as a list, or when you need counts without displaying rows, use grouped reads (`groupCount` or `distinct`). Grouped reads answer from an index without reading rows.
+
 ## Counting per value — badges, facets, dropdowns
 
 To calculate aggregation counts or extract unique values for badges, facet filters, and dropdown menus, use `groupCount` and `distinct`.

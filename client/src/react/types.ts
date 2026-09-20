@@ -11,7 +11,7 @@ import type {
 } from '../client.js';
 import type { EntityKey } from '../db.js';
 import type { PatchInit } from '../mutations.js';
-import type { GroupQuery, GroupRowsQuery, Query, TotalOf } from '../query/index.js';
+import type { FacetsOf, GroupQuery, GroupRowsQuery, Query, TotalOf } from '../query/index.js';
 import type { Row } from '../read.js';
 import type { Include } from '../refs.js';
 import type { RowRef, WatchWindow } from '../watch.js';
@@ -180,7 +180,7 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useQuery<const Q extends Query<MessageShape<D>>>(
 		query: Q,
 		opts?: UseQueryOptions,
-	): WatchResult<MessageShape<D>, TotalOf<Q>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>;
 	/**
 	 * `useQuery` that suspends until the first callback instead of reporting
 	 * `loading`. A separate hook rather than an option because the choice selects
@@ -191,7 +191,7 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useSuspenseQuery<const Q extends Query<MessageShape<D>>>(
 		query: Q,
 		opts?: UseQueryOptions,
-	): WatchResult<MessageShape<D>, TotalOf<Q>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>;
 	/**
 	 * `useQuery` across workspaces, as one subscription: every workspace the
 	 * client holds, or the set `opts.workspaces` names. Each row carries the
@@ -207,7 +207,7 @@ export interface ReactEntityApi<D extends DescMessage> {
 	useQueryAll<const Q extends QueryAcross<MessageShape<D>>>(
 		query: Q,
 		opts?: UseQueryAllOptions,
-	): WatchResult<MessageShape<D>, TotalOf<Q>>;
+	): WatchResult<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>;
 	/**
 	 * Live counted groups of the entity — a board column's badge, a facet
 	 * sidebar's numbers. Groups come back in ascending value order with the

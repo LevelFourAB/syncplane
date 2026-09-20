@@ -9,7 +9,7 @@
 // are exported as RESERVED_QUERY_NAMES so entity registration can warn about a
 // schema that hits one, instead of the field just disappearing from the DSL.
 
-import type { CmpOp, CompiledQuery, Cond, Path, Scalar, StrOp } from './ast.js';
+import type { CmpOp, CompiledFacet, CompiledQuery, Cond, Path, Scalar, StrOp } from './ast.js';
 import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
 import type { GroupQuery, GroupRowsQuery, Query, QueryRef, WorkspaceQuery } from './types.js';
 
@@ -144,6 +144,12 @@ export function compileQuery<M>(q: Query<M>): CompiledQuery {
 	if (q.after !== undefined) out.after = q.after;
 	if (q.before !== undefined) out.before = q.before;
 	if (q.total !== undefined) out.total = q.total;
+	if (q.facets !== undefined) {
+		out.facets = Object.entries(q.facets).map(([ name, spec ]): CompiledFacet => {
+			const axis = typeof spec === 'function' ? { by: spec } : spec;
+			return { name, by: pathOf(axis.by(ref)), perWorkspace: axis.perWorkspace ?? true };
+		});
+	}
 	return out;
 }
 

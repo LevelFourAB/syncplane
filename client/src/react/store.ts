@@ -23,14 +23,16 @@
 import { useCallback, useEffect, useRef, useSyncExternalStore } from 'react';
 
 import type { SyncClient } from '../client.js';
-import type { ReadonlyRowSet } from '../coverage.js';
+import { type ReadonlyRowSet, UNKNOWN } from '../coverage.js';
 import type { WatchHandle, WatchWindow } from '../watch.js';
-import { asError, emptyResult, type WatchResult, withState } from './result.js';
+import { asError, emptyFacets, emptyResult, type WatchResult, withState } from './result.js';
 
 /** Shared frozen sentinel returned before the first callback (and on the server). */
 const LOADING = emptyResult<unknown>(true, undefined) as WatchResult<never>;
 
-function loadingFor<T>(): WatchResult<T> {
+/** The loading placeholder; a query naming facets gets one carrying them. */
+function loadingFor<T>(facets?: readonly string[]): WatchResult<T> {
+	if (facets !== undefined) return emptyResult<T>(true, undefined, UNKNOWN, emptyFacets(facets));
 	return LOADING as unknown as WatchResult<T>;
 }
 
@@ -58,6 +60,9 @@ export interface WatchStoreParams<T> {
 	 * makes a scrolling window cost a slice rather than a read.
 	 */
 	window?: WatchWindow;
+	/** The facet axes the query named, so a placeholder result carries them
+	 * empty rather than not at all. */
+	facets?: readonly string[];
 }
 
 /**
@@ -73,16 +78,16 @@ export function useWatchStore<T>(params: WatchStoreParams<T>): WatchResult<T> {
 // --- default (empty-then-fill) -------------------------------------------------
 
 function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
-	const { identity, window } = params;
+	const { identity, window, facets } = params;
 	// Latest result for this hook; reset to LOADING when the subscription
 	// identity changes so a stale snapshot is never shown for a different query.
-	const cellRef = useRef<WatchResult<T>>(loadingFor<T>());
+	const cellRef = useRef<WatchResult<T>>(loadingFor<T>(facets));
 	const factoryRef = useRef(params.subscribe);
 	factoryRef.current = params.subscribe;
 	const identityRef = useRef(identity);
 	if (identityRef.current !== identity) {
 		identityRef.current = identity;
-		cellRef.current = loadingFor<T>();
+		cellRef.current = loadingFor<T>(facets);
 	}
 	// The live handle, so a window move reaches the watch without going through
 	// a resubscription.
@@ -106,7 +111,7 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 				const rows = cellRef.current;
 				cellRef.current = rows.length > 0
 					? withState(rows, false, asError(err))
-					: emptyResult<T>(false, asError(err), rows.coverage);
+					: emptyResult<T>(false, asError(err), rows.coverage, rows.facets);
 				notify();
 			};
 			let handle: WatchHandle;
@@ -120,7 +125,7 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 				// is the same "no rows will ever arrive" outcome as onError, and
 				// notifying here is safe: React tolerates a store that changes
 				// between render and subscribe.
-				cellRef.current = emptyResult<T>(false, asError(err));
+				cellRef.current = emptyResult<T>(false, asError(err), UNKNOWN, cellRef.current.facets);
 				notify();
 				return () => {};
 			}
@@ -129,7 +134,7 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 			return () => {
 				handle.close();
 				handleRef.current = undefined;
-				cellRef.current = loadingFor<T>();
+				cellRef.current = loadingFor<T>(facets);
 			};
 		},
 		// eslint-disable-next-line react-hooks/exhaustive-deps
@@ -143,7 +148,7 @@ function useDefaultWatch<T>(params: WatchStoreParams<T>): WatchResult<T> {
 	}, [ windowKey ]);
 
 	const getSnapshot = useCallback(() => cellRef.current, []);
-	const getServerSnapshot = useCallback(() => loadingFor<T>(), []);
+	const getServerSnapshot = useCallback(() => loadingFor<T>(facets), [ facets ]);
 	return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
 }
 

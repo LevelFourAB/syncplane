@@ -8,7 +8,7 @@ import {
 	refShape,
 	refTarget,
 } from '../mutations.js';
-import type { CompiledQuery, Cond, OrderKey, Path } from './ast.js';
+import type { CompiledFacet, CompiledQuery, Cond, OrderKey, Path } from './ast.js';
 import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
 import { searchDeclOf } from './match.js';
 
@@ -35,6 +35,12 @@ export function toWirePaths(schema: DescMessage, compiled: CompiledQuery): Compi
 	if (compiled.offset !== undefined) out.offset = compiled.offset;
 	if (compiled.after !== undefined) out.after = compiled.after;
 	if (compiled.before !== undefined) out.before = compiled.before;
+	if (compiled.facets !== undefined) {
+		out.facets = compiled.facets.map((f) => ({
+			...f,
+			by: f.protoBy ?? translatePath(messageScope(schema), f.by),
+		}));
+	}
 	return out;
 }
 
@@ -173,6 +179,16 @@ export function prepareQuery(
 	if (compiled.after !== undefined) out.after = compiled.after;
 	if (compiled.before !== undefined) out.before = compiled.before;
 	if (compiled.total !== undefined) out.total = compiled.total;
+	if (compiled.facets !== undefined) {
+		// The same leaves a grouped read accepts, checked the same way: a facet
+		// is a grouped read folded from the rows a query already walks.
+		out.facets = compiled.facets.map((f): CompiledFacet => {
+			const leaf = resolveLeafRef(schema, f.by, true);
+			if (leafKind(leaf) === 'list') requireComparableElement(f.by, leaf.field);
+			else requireComparable(f.by, leaf);
+			return { ...f, by: leaf.path, protoBy: leaf.protoPath };
+		});
+	}
 	if ((out.offset ?? 0) > 0 && (out.after !== undefined || out.before !== undefined)) {
 		// The two describe a page in incompatible terms — a rank and a position
 		// — so any resolution here would be an invention. Failing says which of

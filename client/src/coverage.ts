@@ -1,5 +1,6 @@
 import type { Subscription } from './gen/syncplane/v1/patch_pb.js';
 import type { QueryCursor } from './query/cursor.js';
+import type { FacetTable } from './query/types.js';
 import type { Row, WorkspaceScope } from './read.js';
 
 /**
@@ -76,8 +77,18 @@ export interface Coverage {
  * `JSON.stringify`, `Object.keys` and structural equality checks. The type is
  * the only thing that widened.
  */
-export type RowSet<T, Total extends number | undefined = number> = Row<T>[] & {
+export type RowSet<
+	T,
+	Total extends number | undefined = number,
+	Facets extends FacetTable | undefined = undefined,
+> = Row<T>[] & {
 	readonly coverage: Coverage;
+	/**
+	 * Per-value counts of the match set the rows were cut from, one entry per
+	 * axis the query's `facets` named; undefined for a query naming none. See
+	 * Query.facets for what the counts cover.
+	 */
+	readonly facets: Facets;
 	/**
 	 * Matching rows in the LOCAL store before the page was cut — what `length`
 	 * would have been without `offset`/`limit`, and what sizes a scroller over a
@@ -120,8 +131,13 @@ export const UNKNOWN: Coverage = Object.freeze({ complete: false, bounds: [] });
  * A readonly result array carrying its coverage and total — the shape the React
  * bridge hands to components, which must not mutate what they render.
  */
-export type ReadonlyRowSet<T, Total extends number | undefined = number> = readonly Row<T>[] & {
+export type ReadonlyRowSet<
+	T,
+	Total extends number | undefined = number,
+	Facets extends FacetTable | undefined = undefined,
+> = readonly Row<T>[] & {
 	readonly coverage: Coverage;
+	readonly facets: Facets;
 	readonly total: Total;
 	readonly startCursor?: QueryCursor;
 	readonly endCursor?: QueryCursor;
@@ -140,6 +156,9 @@ export type ReadonlyRowSet<T, Total extends number | undefined = number> = reado
  */
 export interface PageInfo {
 	total?: number | 'uncounted';
+	/** The facets folded from the match set; omitted by a read whose query
+	 * named none. */
+	facets?: FacetTable;
 	startCursor?: QueryCursor;
 	endCursor?: QueryCursor;
 	hasMore?: boolean;
@@ -164,6 +183,7 @@ export function withCoverage<T>(
 	return Object.defineProperties(rows, {
 		coverage: hidden(coverage),
 		total: hidden(page.total === 'uncounted' ? undefined : page.total ?? rows.length),
+		facets: hidden(page.facets),
 		startCursor: hidden(page.startCursor),
 		endCursor: hidden(page.endCursor),
 		hasMore: hidden(page.hasMore ?? false),

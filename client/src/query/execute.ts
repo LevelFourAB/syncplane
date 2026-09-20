@@ -57,6 +57,7 @@ import { foldTextLog, type Row } from '../read.js';
 import type { QueryDeclineReason } from '../sync/events.js';
 import type { CompiledQuery, Cond, PageWindow, Path } from './ast.js';
 import { compareRows, evalCond, type Matcher, matcherOf } from './evaluate.js';
+import { facetsOf, sameFacets } from './facet.js';
 import type {
 	CompiledGroupQuery,
 	CompiledGroupRowsQuery,
@@ -74,6 +75,7 @@ import {
 	searchPostingTerm,
 	searchTermRange,
 } from './searchindex.js';
+import type { FacetTable } from './types.js';
 
 /**
  * How many ROWS one query may read through an index. An index narrows the
@@ -192,6 +194,9 @@ export interface IndexedPage<T> {
 	/** Matches before the page was cut; see RowSet.total. Undefined exactly
 	 * when the query carried `total: false`. */
 	total: number | undefined;
+	/** The facets of the match set; see Query.facets. Absent when the query
+	 * named none. */
+	facets?: FacetTable;
 	/** Whether matches remain past the end `limit` counted from. */
 	hasMore: boolean;
 }
@@ -488,14 +493,19 @@ export async function queryByIndex<D extends DescMessage>(
 	// 1 for exactly that comparison.
 	const matched = out.length + beyond;
 	const total = wantTotal ? matched : undefined;
+	// `beyond` is 0 under facets — candidateBudget declines to settle early for
+	// them — so `out` is the whole match set the fold wants.
+	const facets = compiled.facets === undefined
+		? {}
+		: { facets: facetsOf(out.map((e) => e.row), compiled.facets, schema) };
 	if (compiled.limit !== undefined && window?.backward) {
 		// A backward page takes its limit from the END of the bounded range.
 		// `beyond` is always 0 here — candidateBudget declines to settle early
 		// for one — so `out` is the whole match set and the tail of it is the
 		// page.
 		return out.length > compiled.limit
-			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true }
-			: { rows: out, total, hasMore: false };
+			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true, ...facets }
+			: { rows: out, total, hasMore: false, ...facets };
 	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
@@ -503,6 +513,7 @@ export async function queryByIndex<D extends DescMessage>(
 		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
 		total,
 		hasMore: end !== undefined && matched > end,
+		...facets,
 	};
 }
 
@@ -1157,10 +1168,13 @@ async function querySearchIndex<D extends DescMessage>(
 		out.sort((a, b) => (a.row.key < b.row.key ? -1 : a.row.key > b.row.key ? 1 : 0));
 	}
 	const total = compiled.total !== false ? out.length : undefined;
+	const facets = compiled.facets === undefined
+		? {}
+		: { facets: facetsOf(out.map((e) => e.row), compiled.facets, schema) };
 	if (compiled.limit !== undefined && window?.backward) {
 		return out.length > compiled.limit
-			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true }
-			: { rows: out, total, hasMore: false };
+			? { rows: out.slice(out.length - compiled.limit), total, hasMore: true, ...facets }
+			: { rows: out, total, hasMore: false, ...facets };
 	}
 	const start = compiled.offset ?? 0;
 	const end = compiled.limit !== undefined ? start + compiled.limit : undefined;
@@ -1168,6 +1182,7 @@ async function querySearchIndex<D extends DescMessage>(
 		rows: start !== 0 || end !== undefined ? out.slice(start, end) : out,
 		total,
 		hasMore: end !== undefined && out.length > end,
+		...facets,
 	};
 }
 
@@ -1230,6 +1245,8 @@ async function querySearchPostings<D extends DescMessage>(
 ): Promise<Postings<MessageShape<D>>> {
 	if (compiled.where?.kind !== 'match') return { kind: 'unfit' };
 	if (matcher.terms.length !== 1) return { kind: 'unfit' };
+	// The shortcut exists to not read the rows a facet has to be folded from.
+	if (compiled.facets !== undefined) return { kind: 'unfit' };
 	if (compiled.orderBy !== undefined && compiled.orderBy.length > 0) return { kind: 'unfit' };
 	if (window !== undefined) return { kind: 'unfit' };
 
@@ -1462,6 +1479,9 @@ function candidateBudget(
 	window: PageWindow | undefined,
 ): number | undefined {
 	if (compiled.limit === undefined) return undefined;
+	// A facet is folded from every matching row, so the walk owes them all
+	// whatever the page shows; the plan still narrows which rows are read.
+	if (compiled.facets !== undefined) return undefined;
 	// A backward page wants the LAST matches of the range, so the first ones the
 	// ordered walk produces are exactly the wrong ones to settle on. The seek
 	// still narrows the range; only the early stop is off.
@@ -1544,13 +1564,17 @@ const matches = (value: unknown, cond: Cond | undefined, schema: DescMessage): b
  * Only reachable under the debug flag; see SyncClientOptions.debugVerifyIndexReads.
  */
 export function assertSameResult(
-	indexed: { rows: readonly Row<unknown>[]; total: number | undefined },
-	scanned: { rows: readonly Row<unknown>[]; total: number | undefined },
+	indexed: { rows: readonly Row<unknown>[]; total: number | undefined; facets?: FacetTable },
+	scanned: { rows: readonly Row<unknown>[]; total: number | undefined; facets?: FacetTable },
 	entity: string,
 ): void {
-	const describe = (page: { rows: readonly Row<unknown>[]; total: number | undefined }): string =>
-		`${page.rows.map((r) => `${r.workspaceId}/${r.key}@${r.version}`).join(', ')}] of ${page.total}`;
+	const describe = (
+		page: { rows: readonly Row<unknown>[]; total: number | undefined; facets?: FacetTable },
+	): string =>
+		`${page.rows.map((r) => `${r.workspaceId}/${r.key}@${r.version}`).join(', ')}] of ${page.total}`
+		+ (page.facets === undefined ? '' : ` facets ${JSON.stringify(page.facets, jsonScalar)}`);
 	const differs = indexed.total !== scanned.total
+		|| !sameFacets(indexed.facets, scanned.facets)
 		|| indexed.rows.length !== scanned.rows.length
 		|| indexed.rows.some((row, i) =>
 			row.key !== scanned.rows[i]!.key
@@ -1565,4 +1589,9 @@ export function assertSameResult(
 				+ 'An index is an optimization; the scan is the definition.',
 		);
 	}
+}
+
+/** JSON.stringify replacer for a facet value, which may be a bigint. */
+function jsonScalar(_key: string, value: unknown): unknown {
+	return typeof value === 'bigint' ? value.toString() : value;
 }

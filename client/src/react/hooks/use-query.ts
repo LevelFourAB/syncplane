@@ -1,6 +1,6 @@
 import type { DescMessage, MessageShape } from '@bufbuild/protobuf';
 import type { ReadonlyRowSet } from '../../coverage.js';
-import { compileQuery, type Query, type TotalOf } from '../../query/index.js';
+import { compileQuery, type FacetsOf, type Query, type TotalOf } from '../../query/index.js';
 import type { WatchHandle } from '../../watch.js';
 import { useSyncClient, useWorkspaceScope } from '../context.js';
 import type { WatchResult } from '../result.js';
@@ -27,7 +27,7 @@ export function useQueryHook<D extends DescMessage, const Q extends Query<Messag
 	query: Q,
 	opts?: UseQueryOptions,
 	suspense?: boolean,
-): WatchResult<MessageShape<D>, TotalOf<Q>> {
+): WatchResult<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>> {
 	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId);
 	const compiled = compileQuery(query);
@@ -60,5 +60,6 @@ export function useQueryHook<D extends DescMessage, const Q extends Query<Messag
 		client,
 		suspense,
 		window,
-	}) as WatchResult<MessageShape<D>, TotalOf<Q>>;
+		facets: compiled.facets?.map((f) => f.name),
+	}) as WatchResult<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>;
 }

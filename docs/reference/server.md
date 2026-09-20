@@ -98,6 +98,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. Exceeding this limit fails the write.                                 |
 | `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates. Exceeding this limit falls back to a table scan.                     |
 | `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                            |
+| `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                    |
 | `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                            |
 | `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                  |
 | `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                         |

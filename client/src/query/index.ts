@@ -1,5 +1,6 @@
 export type {
 	CmpOp,
+	CompiledFacet,
 	CompiledQuery,
 	Cond,
 	OrderKey,
@@ -26,6 +27,7 @@ export {
 	runQuery,
 	runQueryPage,
 } from './evaluate.js';
+export { FacetBuckets, facetsOf, sameFacets } from './facet.js';
 export type {
 	CompiledGroupQuery,
 	CompiledGroupRowsQuery,
@@ -74,6 +76,11 @@ export {
 } from './rel.js';
 export type {
 	BoolOps,
+	FacetAxis,
+	FacetGroup,
+	FacetsOf,
+	FacetSpec,
+	FacetTable,
 	FieldOps,
 	GroupKeyRef,
 	GroupQuery,

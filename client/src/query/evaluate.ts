@@ -52,7 +52,9 @@ import type { Row } from '../read.js';
 import { analyze, analyzeQuery, type QueryTerm } from '../search/index.js';
 import { plainTextOf } from '../text/index.js';
 import type { CompiledQuery, Cond, OrderKey, PageWindow, Path, Scalar } from './ast.js';
+import { facetsOf } from './facet.js';
 import { type SearchDecl, searchDeclOf } from './match.js';
+import type { FacetTable } from './types.js';
 
 interface Resolved {
 	found: boolean;
@@ -788,7 +790,7 @@ export function runQueryPage<T>(
 	q: CompiledQuery,
 	schema?: DescMessage,
 	window?: PageWindow,
-): { rows: Row<T>[]; total: number | undefined; hasMore: boolean } {
+): { rows: Row<T>[]; total: number | undefined; hasMore: boolean; facets?: FacetTable } {
 	let out = q.where
 		? rows.filter((r) => evalCond(r.value, q.where as Cond, schema))
 		: rows.slice();
@@ -798,7 +800,9 @@ export function runQueryPage<T>(
 		out = out.sort((a, b) => compareRows(a, b, orderBy, schema));
 	}
 	const total = q.total === false ? undefined : out.length;
-	return { ...pageOf(out, q, window), total };
+	// Folded over the match set, before the page is cut from it.
+	const facets = q.facets === undefined ? undefined : facetsOf(out, q.facets, schema);
+	return { ...pageOf(out, q, window), total, ...(facets === undefined ? {} : { facets }) };
 }
 
 /**

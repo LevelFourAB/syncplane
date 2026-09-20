@@ -94,6 +94,11 @@ export { and, CursorShapeError, not, or } from './query/index.js';
 export type {
 	CompiledQuery,
 	Cond,
+	FacetAxis,
+	FacetGroup,
+	FacetsOf,
+	FacetSpec,
+	FacetTable,
 	Group,
 	GroupKeyRef,
 	GroupQuery,

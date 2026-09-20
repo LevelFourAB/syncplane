@@ -40,7 +40,7 @@ import {
 	type Window,
 	WindowSchema,
 } from './gen/syncplane/v1/patch_pb.js';
-import { AggregateOp } from './gen/syncplane/v1/query_pb.js';
+import { AggregateOp, type QueryFacet } from './gen/syncplane/v1/query_pb.js';
 import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
 	compareWorkspaces,
@@ -125,6 +125,7 @@ import { readGroups, readRowGroups } from './query/group-read.js';
 import {
 	collectRels,
 	compileByWorkspace,
+	type CompiledFacet,
 	type CompiledQuery,
 	compileGroupQuery,
 	compileGroupRowsQuery,
@@ -132,6 +133,9 @@ import {
 	computeRelKeys,
 	type Cond,
 	evalCond,
+	type FacetGroup,
+	type FacetsOf,
+	type FacetTable,
 	type Group,
 	type GroupQuery,
 	type GroupRowsQuery,
@@ -885,7 +889,7 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	groupCount<D extends DescMessage>(
 		schema: D,
 		q: GroupQuery<MessageShape<D>>,
@@ -902,7 +906,7 @@ export interface Transaction<E extends readonly DescMessage[] = readonly DescMes
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: { include?: Include },
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(
@@ -1038,11 +1042,11 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	watch<D extends DescMessage>(
 		schema: D,
 		cb: WatchCallback<MessageShape<D>>,
@@ -1051,7 +1055,7 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	/**
@@ -1309,14 +1313,14 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		return this.client.queryIn(this.workspaceId, schema, q, opts);
 	}
 
 	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		return this.client.queryServerIn(this.workspaceId, schema, q);
 	}
 
@@ -1422,7 +1426,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle {
 		return this.client.registerWatch(
@@ -1597,6 +1601,8 @@ interface QueryPage<T> {
 	rows: Row<T>[];
 	total: number | undefined;
 	hasMore: boolean;
+	/** The facets of the match set, when the query named any. */
+	facets?: FacetTable;
 }
 
 /**
@@ -3808,7 +3814,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		return this.queryIn(this.defaultScope().workspaceId, schema, q, opts);
 	}
 
@@ -3828,7 +3834,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		q: Q,
 		opts?: QueryAllOptions,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		return this.queryIn(readScopeOf(schema, q, opts?.workspaces), schema, q, opts);
 	}
 
@@ -3844,7 +3850,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const named = typeof scope === 'object' ? scope : undefined;
@@ -3996,7 +4002,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		);
 		const info = pageInfoOf(cursors, def.name, page);
 		if (!opts?.include) {
-			return withCoverage(page.rows, coverage, info) as RowSet<MessageShape<D>, TotalOf<Q>>;
+			return withCoverage(page.rows, coverage, info) as RowSet<
+				MessageShape<D>,
+				TotalOf<Q>,
+				FacetsOf<Q>
+			>;
 		}
 		const hydrated = (await hydrate(
 			this.refClient(),
@@ -4007,7 +4017,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		)) as unknown as HydratedRow<MessageShape<D>>[];
 		return withCoverage(hydrated as unknown as Row<MessageShape<D>>[], coverage, info) as RowSet<
 			MessageShape<D>,
-			TotalOf<Q>
+			TotalOf<Q>,
+			FacetsOf<Q>
 		>;
 	}
 
@@ -4246,6 +4257,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			rows: planned.rows.map((entry) => entry.row),
 			total: planned.total,
 			hasMore: planned.hasMore,
+			...(planned.facets === undefined ? {} : { facets: planned.facets }),
 		};
 	}
 
@@ -4398,7 +4410,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	queryServer<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		return this.queryServerIn(this.defaultScope().workspaceId, schema, q);
 	}
 
@@ -4407,7 +4419,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		workspaceId: string,
 		schema: D,
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>> {
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
 		const compiled = prepareQuery(schema, compileQuery(q));
@@ -4424,6 +4436,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// two forms meet here and nowhere else.
 			after: compiled.after ? cursorToBytes(compiled.after) : new Uint8Array(0),
 			before: compiled.before ? cursorToBytes(compiled.before) : new Uint8Array(0),
+			facets: (wire.facets ?? []).map((f) => ({ path: f.by })),
 		});
 		// The query rode its own RPC, outside the sync cycle, so this is the only
 		// place its revision reaches the skew handshake.
@@ -4453,12 +4466,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// The wire carries no match count, so the default total is the page
 				// itself; an opt-out reports undefined like the local paths do.
 				...(compiled.total === false ? { total: 'uncounted' as const } : {}),
+				...(compiled.facets === undefined
+					? {}
+					: { facets: facetsFromProto(compiled.facets, resp.facets, workspaceId) }),
 				...(resp.startCursor.length > 0
 					? { startCursor: cursorFromBytes(resp.startCursor) }
 					: {}),
 				...(resp.endCursor.length > 0 ? { endCursor: cursorFromBytes(resp.endCursor) } : {}),
 			},
-		) as RowSet<MessageShape<D>, TotalOf<Q>>;
+		) as RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>;
 	}
 
 	/**
@@ -4468,7 +4484,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
@@ -4499,7 +4515,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	watchQueryAll<D extends DescMessage, const Q extends QueryAcross<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchQueryAllOptions,
 	): WatchHandle {
 		if (this.closed) return INERT_WATCH;
@@ -5446,6 +5462,32 @@ function admittedIn<T>(
 }
 
 /**
+ * The facets a server answered, keyed the way the query named them. The wire
+ * carries them in request order with no names, so the two lists are zipped;
+ * a server predating the field answers none, which reads as empty axes rather
+ * than as a missing table. The read is one workspace's, so an axis keeping
+ * workspaces apart reports that one on every group.
+ */
+function facetsFromProto(
+	facets: readonly CompiledFacet[],
+	answered: readonly QueryFacet[],
+	workspaceId: string,
+): FacetTable {
+	const out: Record<string, FacetGroup[]> = {};
+	facets.forEach((facet, i) => {
+		out[facet.name] = (answered[i]?.groups ?? []).map((g) => {
+			const group: FacetGroup = {
+				value: g.value === undefined ? undefined : scalarFromProto(g.value),
+				count: Number(g.count),
+			};
+			if (facet.perWorkspace) group.workspaceId = workspaceId;
+			return group;
+		});
+	});
+	return out;
+}
+
+/**
  * The page metadata a local read reports: what the evaluator already counted,
  * plus the positions of the first and last row so a caller can page on.
  *
@@ -5456,13 +5498,14 @@ function admittedIn<T>(
 function pageInfoOf<T>(
 	cursors: OrderCursors | undefined,
 	entity: string,
-	page: { rows: Row<T>[]; total: number | undefined; hasMore: boolean },
+	page: { rows: Row<T>[]; total: number | undefined; hasMore: boolean; facets?: FacetTable },
 ): PageInfo {
 	// Both paths leave total undefined exactly when the query opted out, which
 	// withCoverage must not confuse with "unpaged, report rows.length".
 	const total = page.total ?? 'uncounted';
+	const facets = page.facets === undefined ? {} : { facets: page.facets };
 	if (cursors === undefined || page.rows.length === 0) {
-		return { total, hasMore: page.hasMore };
+		return { total, hasMore: page.hasMore, ...facets };
 	}
 	const first = page.rows[0]!;
 	const last = page.rows[page.rows.length - 1]!;
@@ -5471,5 +5514,6 @@ function pageInfoOf<T>(
 		hasMore: page.hasMore,
 		startCursor: cursors.encode(entity, first.value, first.key),
 		endCursor: cursors.encode(entity, last.value, last.key),
+		...facets,
 	};
 }

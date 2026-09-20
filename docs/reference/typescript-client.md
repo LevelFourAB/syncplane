@@ -447,6 +447,7 @@ interface Query<M> {
 	after?: QueryCursor;
 	before?: QueryCursor;
 	total?: boolean; // default true; false skips match counting
+	facets?: Record<string, FacetSpec<M>>; // per-value counts of the match set
 }
 ```
 
@@ -461,6 +462,53 @@ const rows = await client.db.todo.query({
 	limit: 20,
 });
 ```
+
+### Facets
+
+The `facets` option computes per-value counts of the match set along specified axes:
+
+```ts
+interface FacetAxis<M> {
+	by: (w: QueryRef<M>) => GroupKeyRef;
+	perWorkspace?: boolean; // default true
+}
+
+type FacetSpec<M> = ((w: QueryRef<M>) => GroupKeyRef) | FacetAxis<M>;
+
+interface FacetGroup {
+	value: Scalar | undefined; // undefined for rows with no value at the path
+	count: number; // matching rows; never 0
+	workspaceId?: string; // absent when perWorkspace is false
+}
+```
+
+The following example queries tasks with facets:
+
+```ts
+const tasks = await client.db.task.query({
+	where: (t) => t.completed.eq(false),
+	facets: {
+		area: (t) => t.area.id,
+		status: { by: (t) => t.status, perWorkspace: false },
+	},
+});
+tasks.facets.status; // [{ value: 'open', count: 12 }, { value: 'blocked', count: 2 }]
+```
+
+Facet behavior rules:
+
+- **Methods**: `facets` is supported by `query`, `queryAll`, `queryServer`, `watchQuery`, `watchQueryAll`, and their React hooks (`useQuery`, `useSuspenseQuery`, `useQueryAll`).
+- **Result property**: The result's `facets` property contains an array of `FacetGroup` objects for each axis key specified in the query. `facets` is `undefined` when the query specifies no facet axes.
+- **Type inference**: The TypeScript type of `facets` matches the keys declared on the query. Accessing an undeclared axis key is a compile-time type error.
+- **Accepted fields**: `by` accepts any comparable scalar field or repeated scalar (`GroupKeyRef`). Specifying sub-messages, maps, raw bytes, or repeated message fields throws an error at query time.
+- **Count scope**: Counts include all rows admitted by `where` and cursor bounds (`after`, `before`), regardless of `offset` and `limit`. Counts sum to `total`, except on repeated scalar fields, which count once per element.
+- **Missing and empty values**: Values held by no matching rows are omitted rather than reported with a count of `0`. Rows with no value at the target path form a group with `value: undefined`.
+- **Group ordering**: Groups sort in ascending value order, placing the no-value group (`value: undefined`) last. For multi-workspace queries, ties between workspaces break by workspace ID ascending.
+- **Workspaces**: When `perWorkspace` is `true` (default), groups partition by workspace and include `workspaceId`. When `perWorkspace` is `false`, counts aggregate across all queried workspaces and omit `workspaceId`.
+- **Execution costs**:
+  - In one-shot queries (`query`, `queryAll`, `queryServer`), computing facets reads all matching rows rather than only the paged limit.
+  - In live queries (`watchQuery`, `watchQueryAll`, and hooks), counts update incrementally from changed rows on each commit without additional reads.
+- **Server limit**: Requests specifying more facet axes than the server limit `MaxQueryFacets` are rejected by the server.
 
 ### Paging: after and before
 
@@ -1186,7 +1234,7 @@ Coverage bounds:
 ### RowSet reference
 
 `RowSet<T>` is an array: `.map`, `.length`, spreads, and destructuring behave the same as on a standard array.
-The `coverage` property is non-enumerable, so `toEqual([])`, `Object.keys`, and `JSON.stringify` do not see it.
+The `coverage`, `total`, `facets`, `hasMore`, and cursor properties are non-enumerable, so `toEqual([])`, `Object.keys`, and `JSON.stringify` do not see them.
 
 ### Delivery order
 

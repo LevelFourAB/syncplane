@@ -31,6 +31,8 @@ import {
 	computeRelKeys,
 	diffRelKeys,
 	evalCond,
+	FacetBuckets,
+	type FacetTable,
 	type Group,
 	MAX_INDEX_PROBES,
 	type RelCond,
@@ -45,6 +47,7 @@ import {
 	rewriteWithKeys,
 	type RowGroup,
 	runQuery,
+	sameFacets,
 	sameRelKeys,
 	stubKeyTuples,
 	type TouchedTarget,
@@ -79,8 +82,12 @@ import type { TouchSet } from './touch.js';
  * array, for a consumer maintaining its own list. Ignoring it is always
  * correct; the array is the whole answer either way.
  */
-export type WatchCallback<T, Total extends number | undefined = number> = (
-	rows: RowSet<T, Total>,
+export type WatchCallback<
+	T,
+	Total extends number | undefined = number,
+	Facets extends FacetTable | undefined = undefined,
+> = (
+	rows: RowSet<T, Total, Facets>,
 	delta: WatchDelta<T>,
 ) => void;
 
@@ -310,6 +317,12 @@ interface ResultRow {
 interface MatchSet {
 	byId: Map<string, ResultRow>;
 	ordered: ResultRow[];
+	/**
+	 * The facet counts of `ordered`, kept in step with it: a row spliced in is
+	 * added, one spliced out removed, so a commit costs the rows it moved rather
+	 * than a fold over the set. Undefined for a query naming no facet.
+	 */
+	facets?: FacetBuckets;
 }
 
 interface Watcher {
@@ -410,6 +423,12 @@ interface Watcher {
 	 * leaves a scroller sized for a result that no longer exists.
 	 */
 	lastTotal?: number;
+	/**
+	 * Facets of the last emitted page, for the same reason as `lastTotal`: a
+	 * row past a full page changing its value on an axis moves nothing a
+	 * reader can see except these.
+	 */
+	lastFacets?: FacetTable;
 	/**
 	 * Coverage of the last emit. It rides on the result, so it moves the result:
 	 * an entity that finishes hydrating with no matching rows changes nothing
@@ -1435,7 +1454,7 @@ export class WatcherHub {
 		// Re-sorted rather than trusted from the index: the binary searches that
 		// maintain this set are sound against THIS comparator and no other.
 		ordered.sort(watcher.compare);
-		return { byId: new Map(ordered.map((r) => [ r.id, r ])), ordered };
+		return matchSetOf(watcher, ordered);
 	}
 
 	/**
@@ -1467,7 +1486,9 @@ export class WatcherHub {
 			&& sameCoverage(watcher.lastCoverage, coverage);
 		const end = windowEnd(watcher.window);
 		const total = watcher.matches.ordered.length;
-		const settled = memoized && total === watcher.lastTotal;
+		const facets = watcher.matches.facets?.result();
+		const settled = memoized && total === watcher.lastTotal
+			&& sameFacets(facets, watcher.lastFacets);
 		// The O(1) gate. `pending` has to be empty for it: a callback dropped by
 		// a newer dispatch leaves edits undelivered, and the consumer is behind
 		// by them however little this commit moved.
@@ -1523,18 +1544,28 @@ export class WatcherHub {
 			watcher.lastRows = rows;
 			watcher.lastCoverage = coverage;
 			watcher.lastTotal = total;
+			watcher.lastFacets = facets;
 			watcher.pending = [];
 			watcher.dirtyFrom = Infinity;
-			deliver(watcher, withCoverage(hydrated, coverage, pageInfo(watcher, rows, total, end)), delta);
+			deliver(
+				watcher,
+				withCoverage(hydrated, coverage, pageInfo(watcher, rows, total, end, facets)),
+				delta,
+			);
 			return;
 		}
 		watcher.lastWindow = window;
 		watcher.lastRows = rows;
 		watcher.lastCoverage = coverage;
 		watcher.lastTotal = total;
+		watcher.lastFacets = facets;
 		watcher.pending = [];
 		watcher.dirtyFrom = Infinity;
-		deliver(watcher, withCoverage(rows, coverage, pageInfo(watcher, rows, total, end)), delta);
+		deliver(
+			watcher,
+			withCoverage(rows, coverage, pageInfo(watcher, rows, total, end, facets)),
+			delta,
+		);
 	}
 
 	private scopeRows(scope: string): ScopeRows {
@@ -2102,6 +2133,7 @@ function applyDelta(
 			if (matches.ordered[at] !== prev) at = matches.ordered.indexOf(prev);
 			if (at >= 0) {
 				matches.ordered.splice(at, 1);
+				matches.facets?.add(prev.row, -1);
 				removedAt = at;
 				if (at < from) from = at;
 			}
@@ -2111,6 +2143,7 @@ function applyDelta(
 			insertedAt = lowerBound(matches.ordered, watcher.compare, next!);
 			matches.ordered.splice(insertedAt, 0, next!);
 			matches.byId.set(id, next!);
+			matches.facets?.add(next!.row, 1);
 			if (insertedAt < from) from = insertedAt;
 		}
 		// A row that left and re-entered at the same position was replaced, not
@@ -2179,7 +2212,18 @@ function buildMatches(watcher: Watcher, rows: readonly ResultRow[]): MatchSet {
 	if (watcher.query?.orderBy && watcher.query.orderBy.length > 0) {
 		ordered.sort(watcher.compare);
 	}
-	return { byId: new Map(ordered.map((r) => [ r.id, r ])), ordered };
+	return matchSetOf(watcher, ordered);
+}
+
+/** A match set over rows already filtered and in result order, with its
+ * facets folded when the query names any. */
+function matchSetOf(watcher: Watcher, ordered: ResultRow[]): MatchSet {
+	const set: MatchSet = { byId: new Map(ordered.map((r) => [ r.id, r ])), ordered };
+	if (watcher.query?.facets !== undefined) {
+		set.facets = new FacetBuckets(watcher.query.facets, watcher.schema);
+		for (const r of ordered) set.facets.add(r.row, 1);
+	}
+	return set;
 }
 
 /**
@@ -2333,6 +2377,7 @@ function pageInfo(
 	rows: readonly Row<unknown>[],
 	total: number,
 	end: number,
+	facets: FacetTable | undefined,
 ): PageInfo {
 	// The maintained match set makes the count free, but a query that opted out
 	// still gets undefined: what a watcher delivers must not depend on which
@@ -2340,6 +2385,7 @@ function pageInfo(
 	const info: PageInfo = {
 		total: watcher.query?.total === false ? 'uncounted' : total,
 		hasMore: end !== Infinity && total > end,
+		...(facets === undefined ? {} : { facets }),
 	};
 	if (watcher.cursors === undefined || rows.length === 0) return info;
 	const first = rows[0]!;

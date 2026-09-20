@@ -54,6 +54,26 @@ describe('createReactSync hooks', () => {
 		await client.close();
 	});
 
+	it('useQuery carries every facet axis empty while loading, then filled', async () => {
+		const client = newClient();
+		await client.mutate.put(TodoSchema, { id: 't1', title: 'one', completed: true });
+		await client.mutate.put(TodoSchema, { id: 't2', title: 'two' });
+		const { result } = renderHook(
+			() => db.todo.useQuery({ facets: { done: (t) => t.completed } }),
+			{ wrapper: providerWrapper(client) },
+		);
+		expect(result.current.loading).toBe(true);
+		expect(result.current.facets).toEqual({ done: [] });
+		await flush();
+		expect(result.current.facets).toEqual({
+			done: [
+				{ value: false, count: 1, workspaceId: 'ws1' },
+				{ value: true, count: 1, workspaceId: 'ws1' },
+			],
+		});
+		await client.close();
+	});
+
 	it('keeps the same rows reference across an unrelated re-render', async () => {
 		const client = newClient();
 		await client.mutate.put(TodoSchema, { id: 't1', title: 'one' });

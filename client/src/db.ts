@@ -20,6 +20,7 @@ import type { RowSet } from './coverage.js';
 import { newId } from './id.js';
 import type { EntityDef, EntityRegistry, PatchInit, TextInit } from './mutations.js';
 import type {
+	FacetsOf,
 	Group,
 	GroupQuery,
 	GroupRowsQuery,
@@ -104,7 +105,7 @@ export interface EntityApi<D extends DescMessage> {
 	query<const Q extends Query<MessageShape<D>>>(
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	/**
 	 * Runs the query AGAINST THE SERVER instead of the local store — the way to
 	 * reach rows partial sync did not bring down (search across everything, open
@@ -118,7 +119,7 @@ export interface EntityApi<D extends DescMessage> {
 	 */
 	queryServer<const Q extends Query<MessageShape<D>>>(
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	/**
 	 * Groups the matching rows by one path and counts each group — a board
 	 * column's badge, a facet sidebar's numbers.
@@ -175,7 +176,7 @@ export interface EntityApi<D extends DescMessage> {
 	watch(cb: WatchCallback<MessageShape<D>>, opts?: WatchOptions): WatchHandle;
 	watchQuery<const Q extends Query<MessageShape<D>>>(
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	/**
@@ -247,12 +248,12 @@ interface SchemaApi {
 		schema: D,
 		q: Q,
 		opts?: { include?: Include },
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	/** Absent on facades with no transport of their own (transactions). */
 	queryServer?<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-	): Promise<RowSet<MessageShape<D>, TotalOf<Q>>>;
+	): Promise<RowSet<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>>;
 	groupCount<D extends DescMessage>(
 		schema: D,
 		q: GroupQuery<MessageShape<D>>,
@@ -309,7 +310,7 @@ interface SchemaApi {
 	watchQuery<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
 		q: Q,
-		cb: WatchCallback<MessageShape<D>, TotalOf<Q>>,
+		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
 	resolveRef<D extends DescMessage>(

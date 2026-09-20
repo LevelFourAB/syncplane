@@ -365,6 +365,19 @@ message QueryRequest {
 	// themselves cost `per_group` of them — so a caller that shows no count
 	// leaves it false. Ignored without AGGREGATE_OP_ROWS.
 	bool per_group_total = 13;
+	// Per-value counts of the match set, computed in the walk that answers the
+	// rows: one QueryFacet per axis, each naming a path, answered in
+	// QueryResponse.facets in the same order. A facet counts every row the
+	// predicate and the cursor bounds admit — the rows `rows` was cut from, not
+	// the page — so its counts sum to what the page's `total` would be, except
+	// on a repeated path, which counts per element (see group_by).
+	//
+	// Facets force the walk over every matching row rather than the page, so
+	// a request carrying one costs what an unlimited read of the predicate
+	// costs; the response stays a page. Rejected alongside group_by — a
+	// grouped read answers with groups already — and capped by the server's
+	// MaxQueryFacets.
+	repeated QueryFacet facets = 14;
 
 	// Was client_id. Query is a read: it carries no idempotency and no
 	// watermark, and read filters key on workspace and entity, so the server
@@ -401,6 +414,9 @@ message QueryResponse {
 	// The groups of a request carrying `group_by` with AGGREGATE_OP_ROWS, in
 	// the same order; empty otherwise.
 	repeated QueryRowGroup row_groups = 7;
+	// The facets of a request carrying `facets`, one per requested axis in
+	// request order, each echoing its path; empty otherwise.
+	repeated QueryFacet facets = 8;
 }
 
 // QueryRowGroup is one group of a read that answers with rows: the value its

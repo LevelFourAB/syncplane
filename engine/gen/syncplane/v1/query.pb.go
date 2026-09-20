@@ -1307,6 +1307,68 @@ func (x *QueryGroup) GetCount() uint64 {
 	return 0
 }
 
+// QueryFacet is one axis of a row query's facets: on the request, the path
+// to count the match set by; on the response, that path echoed with the
+// groups it produced. Facets ride on QueryRequest.facets and come back in
+// QueryResponse.facets in the same order.
+type QueryFacet struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Path from the entity root, one field name per element, exactly as
+	// QueryRequest.group_by names one. The same leaves are accepted: a
+	// comparable scalar, or a repeated scalar, which counts per element.
+	Path []string `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
+	// The groups the match set produced at `path`, each with the number of
+	// matching rows holding that value, in ascending value order with the
+	// no-value group last — QueryResponse.groups' order. Empty on a request.
+	Groups        []*QueryGroup `protobuf:"bytes,2,rep,name=groups,proto3" json:"groups,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *QueryFacet) Reset() {
+	*x = QueryFacet{}
+	mi := &file_syncplane_v1_query_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *QueryFacet) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*QueryFacet) ProtoMessage() {}
+
+func (x *QueryFacet) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_query_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use QueryFacet.ProtoReflect.Descriptor instead.
+func (*QueryFacet) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *QueryFacet) GetPath() []string {
+	if x != nil {
+		return x.Path
+	}
+	return nil
+}
+
+func (x *QueryFacet) GetGroups() []*QueryGroup {
+	if x != nil {
+		return x.Groups
+	}
+	return nil
+}
+
 type OrderKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Path  []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
@@ -1325,7 +1387,7 @@ type OrderKey struct {
 
 func (x *OrderKey) Reset() {
 	*x = OrderKey{}
-	mi := &file_syncplane_v1_query_proto_msgTypes[12]
+	mi := &file_syncplane_v1_query_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1337,7 +1399,7 @@ func (x *OrderKey) String() string {
 func (*OrderKey) ProtoMessage() {}
 
 func (x *OrderKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_query_proto_msgTypes[12]
+	mi := &file_syncplane_v1_query_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1350,7 +1412,7 @@ func (x *OrderKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use OrderKey.ProtoReflect.Descriptor instead.
 func (*OrderKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *OrderKey) GetPath() []string {
@@ -1435,7 +1497,11 @@ const file_syncplane_v1_query_proto_rawDesc = "" +
 	"\n" +
 	"QueryGroup\x12.\n" +
 	"\x05value\x18\x01 \x01(\v2\x18.syncplane.v1.QueryValueR\x05value\x12\x14\n" +
-	"\x05count\x18\x02 \x01(\x04R\x05count\"g\n" +
+	"\x05count\x18\x02 \x01(\x04R\x05count\"R\n" +
+	"\n" +
+	"QueryFacet\x12\x12\n" +
+	"\x04path\x18\x01 \x03(\tR\x04path\x120\n" +
+	"\x06groups\x18\x02 \x03(\v2\x18.syncplane.v1.QueryGroupR\x06groups\"g\n" +
 	"\bOrderKey\x12\x12\n" +
 	"\x04path\x18\x01 \x03(\tR\x04path\x12)\n" +
 	"\x03dir\x18\x02 \x01(\x0e2\x17.syncplane.v1.DirectionR\x03dir\x12\x1c\n" +
@@ -1490,7 +1556,7 @@ func file_syncplane_v1_query_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_query_proto_enumTypes = make([]protoimpl.EnumInfo, 6)
-var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_syncplane_v1_query_proto_msgTypes = make([]protoimpl.MessageInfo, 14)
 var file_syncplane_v1_query_proto_goTypes = []any{
 	(CmpOp)(0),            // 0: syncplane.v1.CmpOp
 	(StrOp)(0),            // 1: syncplane.v1.StrOp
@@ -1510,7 +1576,8 @@ var file_syncplane_v1_query_proto_goTypes = []any{
 	(*ConditionList)(nil), // 15: syncplane.v1.ConditionList
 	(*Condition)(nil),     // 16: syncplane.v1.Condition
 	(*QueryGroup)(nil),    // 17: syncplane.v1.QueryGroup
-	(*OrderKey)(nil),      // 18: syncplane.v1.OrderKey
+	(*QueryFacet)(nil),    // 18: syncplane.v1.QueryFacet
+	(*OrderKey)(nil),      // 19: syncplane.v1.OrderKey
 }
 var file_syncplane_v1_query_proto_depIdxs = []int32{
 	0,  // 0: syncplane.v1.CmpCond.op:type_name -> syncplane.v1.CmpOp
@@ -1535,12 +1602,13 @@ var file_syncplane_v1_query_proto_depIdxs = []int32{
 	13, // 19: syncplane.v1.Condition.rel:type_name -> syncplane.v1.RelCond
 	14, // 20: syncplane.v1.Condition.match:type_name -> syncplane.v1.MatchCond
 	6,  // 21: syncplane.v1.QueryGroup.value:type_name -> syncplane.v1.QueryValue
-	4,  // 22: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
-	23, // [23:23] is the sub-list for method output_type
-	23, // [23:23] is the sub-list for method input_type
-	23, // [23:23] is the sub-list for extension type_name
-	23, // [23:23] is the sub-list for extension extendee
-	0,  // [0:23] is the sub-list for field type_name
+	17, // 22: syncplane.v1.QueryFacet.groups:type_name -> syncplane.v1.QueryGroup
+	4,  // 23: syncplane.v1.OrderKey.dir:type_name -> syncplane.v1.Direction
+	24, // [24:24] is the sub-list for method output_type
+	24, // [24:24] is the sub-list for method input_type
+	24, // [24:24] is the sub-list for extension type_name
+	24, // [24:24] is the sub-list for extension extendee
+	0,  // [0:24] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_query_proto_init() }
@@ -1574,7 +1642,7 @@ func file_syncplane_v1_query_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_query_proto_rawDesc), len(file_syncplane_v1_query_proto_rawDesc)),
 			NumEnums:      6,
-			NumMessages:   13,
+			NumMessages:   14,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

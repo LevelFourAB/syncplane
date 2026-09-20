@@ -201,8 +201,8 @@ export type Subscription = Message<"syncplane.v1.Subscription"> & {
    * Present-but-empty names no rows, which is different from absent (the
    * whole entity). Part of sub_hash, like a window: a changed set is
    * reconciled by a delta resync that reads only the rows named on either
-   * side. A key the caller may not read is withheld, never refused. Bounded by
-   * the server's MaxSubscriptionKeys.
+   * side. A key the caller may not read is withheld, never refused. Bounded
+   * by the server's MaxSubscriptionKeys.
    *
    * @generated from field: syncplane.v1.KeySet key_set = 5;
    */

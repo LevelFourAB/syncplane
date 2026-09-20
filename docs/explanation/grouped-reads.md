@@ -90,6 +90,27 @@ Grouped reads cannot merge overlay changes this cheaply. A shadowed row remains 
 
 For this reason, the client-side index walk declines when writes exist in the overlay and falls back to bucketing the merged local data. In the steady state without pending writes, the skip-scan executes normally. When writes are in flight, the read performs a scan bounded by the synced local dataset.
 
+## Facets: the same groups, folded from a list
+
+Facets calculate group counts across multiple axes alongside a row query without running separate grouped reads. When a list view includes a sidebar with counts for assignees, labels, and priorities, running independent `groupCount` queries requires a separate index walk for each axis. Facets fold counts directly from the rows the query matches for its result.
+
+Facets share their group definition with grouped reads. They use the same bucketing keys, the same per-element handling for repeated paths, the same no-value group, and the same sort order. Because both mechanisms share the same grouping logic, a facet and a `groupCount` query with the same predicate never produce conflicting counts.
+
+In a live query, the client maintains facet buckets incrementally from the rows a commit moved:
+
+- A row entering the match set increments the count for its group.
+- A row leaving the match set decrements the count for its group.
+- A row changing its field value decrements its previous group and increments its new group.
+- Any group whose count reaches zero is dropped.
+
+Because the watcher updates facet buckets per moved row, maintaining facets in a live query adds no read overhead beyond the cost of processing the commit's row deltas.
+
+The choice between a grouped read and a facet involves distinct trade-offs:
+
+- **Grouped reads:** A grouped read answers from an index without reading rows. It serves entities too large to hold in local memory and queries where no list of rows is retrieved.
+- **Facets:** A facet reads every matching row to extract field values. For a one-shot query, computing facets gives up the early stop an ordered index walk takes when a page is full. A live query pays nothing beyond the rows moved.
+- **Cross-workspace keying:** In cross-workspace queries, facets key groups by workspace ID in addition to the group value, unless an axis opts out. Grouped reads operate only within a single workspace.
+
 ## Related documentation
 
 - [Query data](../how-to/query-data.md) — Recipes for querying and counting data.

@@ -68,6 +68,19 @@ export interface OrderKey {
 	matchIn?: ReadonlyMap<string, Cond>;
 }
 
+/** One facet axis of a compiled query; see Query.facets. */
+export interface CompiledFacet {
+	/** The key the result reports the axis under. */
+	name: string;
+	/** The path the match set is counted by. */
+	by: Path;
+	/** Whether groups are keyed by workspace as well as by value. */
+	perWorkspace: boolean;
+	/** The path as PROTO field names, for the server push-down. Attached by
+	 * prepareQuery; never set by the DSL. */
+	protoBy?: Path;
+}
+
 /** A fully-materialized query, independent of the typed DSL. */
 export interface CompiledQuery {
 	where?: Cond;
@@ -77,6 +90,8 @@ export interface CompiledQuery {
 	after?: QueryCursor;
 	before?: QueryCursor;
 	total?: boolean;
+	/** The facet axes, in the order the query named them; absent for none. */
+	facets?: CompiledFacet[];
 }
 
 /**

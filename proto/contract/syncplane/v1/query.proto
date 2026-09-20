@@ -213,6 +213,21 @@ message QueryGroup {
 	uint64 count = 2;
 }
 
+// QueryFacet is one axis of a row query's facets: on the request, the path
+// to count the match set by; on the response, that path echoed with the
+// groups it produced. Facets ride on QueryRequest.facets and come back in
+// QueryResponse.facets in the same order.
+message QueryFacet {
+	// Path from the entity root, one field name per element, exactly as
+	// QueryRequest.group_by names one. The same leaves are accepted: a
+	// comparable scalar, or a repeated scalar, which counts per element.
+	repeated string path = 1;
+	// The groups the match set produced at `path`, each with the number of
+	// matching rows holding that value, in ascending value order with the
+	// no-value group last — QueryResponse.groups' order. Empty on a request.
+	repeated QueryGroup groups = 2;
+}
+
 message OrderKey {
 	repeated string path = 1;
 	Direction dir = 2;

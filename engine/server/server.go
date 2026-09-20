@@ -465,6 +465,10 @@ type Limits struct {
 	// Conditions selecting the same target rows share one pass, so the limit
 	// counts what a predicate WRITES rather than what it costs. Default 8.
 	MaxRelConditions int
+	// Maximum facet axes one Query may carry. Each axis costs a bucket per
+	// distinct value and a lookup per matching row, and a request carrying any
+	// walks every match rather than the page. Default 8.
+	MaxQueryFacets int
 	// Maximum target rows one matches() condition may select. It is the size of
 	// the membership test the condition collapses to, which the server builds
 	// and holds for the request, so an unbounded one turns a small request into
@@ -495,6 +499,13 @@ func (l Limits) maxRelConditions() int {
 		return 8
 	}
 	return l.MaxRelConditions
+}
+
+func (l Limits) maxQueryFacets() int {
+	if l.MaxQueryFacets <= 0 {
+		return 8
+	}
+	return l.MaxQueryFacets
 }
 
 func (l Limits) maxRelKeys() int {

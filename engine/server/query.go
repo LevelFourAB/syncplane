@@ -64,6 +64,10 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	facets, err := s.compileFacets(desc, msg, group != nil)
+	if err != nil {
+		return nil, err
+	}
 	order, err := query.CompileOrderWith(desc, msg.GetOrderBy(), predicate)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -152,6 +156,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		groups    []query.GroupCount
 		rowGroups []*rowGroup
 		more      bool
+		fold      *facetFold
 	)
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
@@ -195,7 +200,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 				limit, filtered, visible, emitter, s.limits)
 			return err
 		}
-		rows, more, err = queryRows(tx, info, pred, order, pg, visible, emitter, s.limits)
+		rows, more, fold, err = queryRowsFaceted(tx, info, pred, order, pg, visible, emitter, s.limits, facets)
 		return err
 	})
 	if err != nil {
@@ -237,6 +242,9 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	}
 	for _, r := range rows {
 		resp.Rows = append(resp.Rows, rowChange(r.row))
+	}
+	if fold != nil {
+		resp.Facets = fold.proto(msg.GetFacets())
 	}
 	if len(rows) > 0 {
 		first, last := rows[0], rows[len(rows)-1]
@@ -402,7 +410,34 @@ func queryRows(
 	emitter *rowEmitter,
 	limits Limits,
 ) (rows []qrow, more bool, err error) {
+	rows, more, _, err = queryRowsFaceted(tx, info, predicate, order, pg, visible, emitter, limits, nil)
+	return rows, more, err
+}
+
+// queryRowsFaceted is queryRows with the request's facets folded from the
+// same walk: every row the predicate and the page's bounds admit reaches the
+// fold, whether or not the page keeps it. The fold is nil when no facet was
+// asked for, and the walk is then exactly queryRows'.
+//
+// A facet costs the early stop an ordered index walk otherwise takes once the
+// page is full — the fold needs every match, so `want` never reports the page
+// settled — and nothing else: the index still narrows which rows are read, and
+// the heap still bounds what is retained.
+func queryRowsFaceted(
+	tx storage.ReadTx,
+	info *entityInfo,
+	predicate *query.Compiled,
+	order *query.Order,
+	pg page,
+	visible func(storage.Row) (bool, error),
+	emitter *rowEmitter,
+	limits Limits,
+	facets []*query.Group,
+) (rows []qrow, more bool, fold *facetFold, err error) {
 	h := &topK{order: order, cap: pg.retain(), unbounded: pg.limit <= 0, worstFirst: pg.backward}
+	if len(facets) > 0 {
+		fold = newFacetFold(facets)
+	}
 	consider := func(row storage.Row, pred *query.Compiled) error {
 		ok, err := visible(row)
 		if err != nil {
@@ -421,24 +456,35 @@ func queryRows(
 		if pg.bounded() && !pg.within(order.Cursor(decoded.ProtoReflect(), row.Key)) {
 			return nil
 		}
+		if fold != nil {
+			fold.add(decoded.ProtoReflect())
+		}
 		h.offer(qrow{row: row, msg: decoded})
 		return nil
+	}
+	want, discard := h.want, h.reset
+	if fold != nil {
+		want = func() int { return math.MaxInt }
+		discard = func() {
+			h.reset()
+			fold.reset()
+		}
 	}
 
 	// An index narrows which rows are considered; it never changes which of
 	// them match, so the rest of this function is identical either way — the
 	// same visibility check, the same decode, the same heap, the same sort. A
 	// declined plan, an unbuilt index, or an exhausted candidate budget all
-	// fall through to the scan below, and h.reset is how a decline hands the
-	// heap back empty: the scan re-offers every row the walk already offered,
-	// and the heap does not dedupe.
-	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, h.want, h.reset); err != nil {
-		return nil, false, err
+	// fall through to the scan below, and discard is how a decline hands the
+	// heap (and the fold) back empty: the scan re-offers every row the walk
+	// already offered, and neither dedupes.
+	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, want, discard); err != nil {
+		return nil, false, nil, err
 	} else if !served {
 		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
 			return consider(row, predicate)
 		}); err != nil {
-			return nil, false, err
+			return nil, false, nil, err
 		}
 	}
 
@@ -450,7 +496,7 @@ func queryRows(
 		)
 	})
 	rows, more = pg.trim(rows)
-	return rows, more, nil
+	return rows, more, fold, nil
 }
 
 // trim cuts the retained rows down to the page and reports whether any were
