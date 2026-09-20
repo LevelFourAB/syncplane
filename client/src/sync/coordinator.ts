@@ -1405,7 +1405,7 @@ export class Coordinator {
 							const head = queues.get(lone.workspaceId)?.[0];
 							if (
 								state && head
-								&& this.countHeadFailure(state, head, `rpc ${err.code}`, lone.count === 1)
+								&& this.countHeadFailure(state, head, `rpc\u0000${err.code}`, lone.count === 1)
 							) {
 								await this.deadLetter(lone.workspaceId, head, err.rawMessage);
 								return false;

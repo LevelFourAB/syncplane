@@ -602,7 +602,7 @@ var _ = Describe("CompareStringsUTF16", func() {
 	It("orders astral characters below later BMP characters", func() {
 		// U+1D11E (surrogate pair, first unit 0xD834) vs U+FFFD: UTF-16 says
 		// the astral char is smaller; UTF-8 byte order says the opposite.
-		Expect(query.CompareStringsUTF16("\U0001D11E", "�")).To(Equal(-1))
+		Expect(query.CompareStringsUTF16("\U0001D11E", "\ufffd")).To(Equal(-1))
 	})
 })
 

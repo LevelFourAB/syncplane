@@ -1036,7 +1036,7 @@
 					],
 					"op": "CMP_OP_GT",
 					"value": {
-						"stringValue": "�"
+						"stringValue": "\ufffd"
 					}
 				}
 			},
@@ -1054,7 +1054,7 @@
 					],
 					"op": "CMP_OP_LT",
 					"value": {
-						"stringValue": "�"
+						"stringValue": "\ufffd"
 					}
 				}
 			},
@@ -4006,7 +4006,7 @@
 		{
 			"name": "astral strings order by UTF-16 code unit",
 			"a": {
-				"label": "�"
+				"label": "\ufffd"
 			},
 			"b": {
 				"label": "𝄞"
@@ -4649,7 +4649,7 @@
 				{
 					"key": "r2",
 					"row": {
-						"label": "�"
+						"label": "\ufffd"
 					}
 				},
 				{

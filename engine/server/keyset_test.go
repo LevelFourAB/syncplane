@@ -346,7 +346,7 @@ var _ = Describe("Key-set subscriptions", func() {
 
 		It("refuses a key that no row could have", func() {
 			invalid(keySub("w1", ""))
-			invalid(keySub("w1w2"))
+			invalid(keySub("w1\x1fw2"))
 		})
 
 		It("refuses a set above MaxSubscriptionKeys", func() {
