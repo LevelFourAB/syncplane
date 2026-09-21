@@ -6,96 +6,77 @@ import "google/protobuf/duration.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
 
-// PresenceService carries the state that only matters while someone is
-// connected: cursors, selections, "who is viewing this", typing indicators, a
-// token stream in flight. None of it is durable, none of it is replayed, and
-// none of it touches the mutation log.
+// Manages ephemeral presence state and broadcast messaging for active
+// connections.
 //
-// Keeping it off the log is the point. A workspace's log is server-linearized,
-// so a cursor routed through it would burn a sequence number, drag every
-// subscriber's cursor forward, be stored until GC collected it, and serialize
-// against real writes in the same partition. The dividing test is "would a
-// reader arriving later want this?" — if yes it is a row, and it belongs in
-// SyncService.
+// Presence state includes transient data such as cursors, selections, typing
+// indicators, and active viewers. This data is not durable, is not stored in
+// the mutation log, and is not replayed to later readers.
 //
-// The surface is two RPCs rather than one channel because the browser
-// ConnectRPC subset has neither client-streaming nor bidi: Publish is unary and
-// Watch is server-streaming. Watch is also deliberately separate from
-// SyncService.Subscribe. Subscribe's scope set is fixed for the life of the
-// stream, and room membership changes every time a user opens a document —
-// folding rooms into it would force a data-stream reopen, and its catch-up,
-// on every navigation. Reopening Watch costs nothing comparable: there is no
-// cursor, no backlog, and a joiner wants a fresh snapshot anyway.
+// The service provides two RPCs:
+// - `Watch` streams presence snapshots and real-time updates to a subscriber.
+// - `Publish` sends presence updates, broadcast messages, and departure notices
+//   from a publisher.
 service PresenceService {
-	// Watch streams the rooms of one session: a snapshot of each topic on join,
-	// then participant updates, departures and broadcast messages as they
-	// happen. The topic set is fixed for the life of the stream; changing it is
-	// a close and reopen.
+	// Streams presence updates and broadcast messages for a fixed set of
+	// topics.
 	//
-	// Delivery is at-most-once and unordered across topics. A frame the server
-	// could not hand over — a slow reader, a bus that dropped it — is gone, and
-	// nothing replays it. Presence heals anyway: every record is re-announced
-	// periodically by the node holding its session's stream, so a lost update
-	// is corrected within one announce interval. A broadcast message has no
-	// such backstop; an app that cannot lose one must write a row.
+	// The stream first sends a `RoomSnapshot` for each watched topic, followed
+	// by participant updates, departures, and broadcast messages as they
+	// occur. The set of watched topics is fixed for the lifetime of the
+	// stream. To change topics, close and reopen the stream.
+	//
+	// Delivery is at-most-once and unordered across topics. Dropped presence
+	// updates are corrected by periodic re-announcements, but dropped
+	// broadcast messages are not replayed.
 	rpc Watch(WatchRequest) returns (stream WatchResponse);
-	// Publish writes this session's soft state, sends broadcast messages, and
-	// announces departures. It is unary, so a publisher needs no stream — only
-	// a receiver does.
+	// Publishes presence state updates, broadcast messages, or departure
+	// notices for a session.
 	//
-	// The caller's identity is stamped by the server from the request
-	// principal. Nothing in the payload names who is publishing, because a
-	// client-asserted subject would make presence an impersonation channel.
+	// The server assigns the participant identity from the request principal.
+	// The request payload cannot specify or override the sender identity.
 	rpc Publish(PublishRequest) returns (PublishResponse);
 }
 
-// Topic addresses one room. It is scoped to a workspace — there are no
-// cross-workspace rooms — and is either anchored to a row or not.
+// Addresses one room. Scoped to a workspace and is either anchored to a
+// row or not.
 //
-// An ANCHORED topic (entity and key both set) inherits that row's read
-// permission: a caller is admitted only if the app's ReadFilter would let them
-// read the row. That is what keeps room membership from being a second
-// authorization surface an app has to remember to guard, and it is why a
-// cursor room on a document needs no policy of its own.
+// An anchored topic (entity and key both set) inherits that row's read
+// permission: a caller is admitted only if the app's ReadFilter would let
+// them read the row.
 //
-// An UNANCHORED topic (entity and key both empty) is gated on workspace access
-// alone, plus the app's own room hook if it installs one.
+// An unanchored topic (entity and key both empty) is gated on workspace
+// access alone plus the app's own room hook when it installs one.
 message Topic {
+	// The identifier of the workspace containing the room.
 	string workspace_id = 1;
-	// Names the room within the workspace. Free-form, subject to the room-name
-	// rule (see docs/reference/naming.md); two callers naming the same string
-	// are in the same room.
+	// Names the room within the workspace. Free-form, but subject to the
+	// room-name rule in docs/reference/naming.md; two callers naming the
+	// same string are in the same room.
 	string name = 2;
-	// The anchor's entity, or empty for an unanchored topic. Both entity and
-	// key must be set together.
+	// The entity name of the anchor row, or empty if the topic is unanchored.
+	// Set together with `key`.
 	string entity = 3;
-	// The anchor's row key. Both entity and key must be set together.
+	// The row key of the anchor row, or empty if the topic is unanchored. Set
+	// together with `entity`.
 	string key = 4;
 }
 
-// PresenceUpdate is one session's soft state in one room.
+// Contains a session's transient state within a single room.
 message PresenceUpdate {
-	// App-defined, opaque to the engine, and capped by MaxPresenceStateBytes.
-	// Empty is valid and means "here, with nothing to say" — the participant
-	// still appears in the room.
+	// The application-defined state payload, opaque to the engine, and
+	// capped by the server's `MaxPresenceStateBytes` limit, which defaults
+	// to 4 KiB. An empty state indicates presence with no additional
+	// payload.
 	bytes state = 1;
-	// Orders two deliveries of the same session's state in the same topic.
-	// Minted by the publisher and monotonic per (session, topic); a
-	// re-announcement carries the revision the state was first published with.
-	// A recipient keeps the highest it has seen, so the bus may reorder or
-	// re-deliver without the roster flickering.
-	//
-	// Revisions from different sessions are never compared, and the engine
-	// never mints one.
+	// The monotonic revision number assigned by the publisher for this session
+	// and topic. Recipients discard updates with a lower revision than the
+	// highest revision received.
 	uint64 revision = 2;
-	// The workspace sequence the state was authored against, as the publisher
-	// last saw it.
-	//
-	// Rooms are not synchronized with the data stream: a peer's cursor can name
-	// a row, or a position inside a collaborative-text field, that the
-	// recipient has not pulled yet. Carrying the authoring position is what
-	// lets a recipient tell "I am behind" from "this cursor is nonsense" and
-	// hold the state until it catches up. 0 means the publisher did not say.
+	// The workspace sequence number that the publisher was at when authoring
+	// this state. If 0, the publisher did not specify a sequence number.
+	// Recipients use this value to determine whether their local data stream
+	// needs to catch up.
 	uint64 seq = 3;
 }
 
@@ -108,6 +89,7 @@ message Participant {
 	// Who is publishing, taken from the request principal at publish time.
 	// Empty when the publisher was unauthenticated. Never client-supplied.
 	string subject = 2;
+	// The participant's transient presence state within the room.
 	PresenceUpdate presence = 3;
 }
 
@@ -146,7 +128,9 @@ message RoomMessage {
 // topics, too many fronted sessions, an oversize payload — fails the whole RPC
 // with resource_exhausted instead, because the stream never opens.
 message TopicDropped {
+	// Specifies the reason why a topic was dropped from a watch stream.
 	enum Reason {
+		// Default value. The reason is unspecified.
 		REASON_UNSPECIFIED = 0;
 		// The join gate refused this caller, permanently: workspace access was
 		// revoked, the anchor row is no longer readable, or the app's room hook
@@ -156,11 +140,14 @@ message TopicDropped {
 		// a permission hook that could not decide). Reopen with backoff.
 		REASON_ERROR = 2;
 	}
+	// The reason why the topic was dropped.
 	Reason reason = 1;
 	// Human-readable detail for logs. Never parse it; branch on reason.
 	string message = 2;
 }
 
+// Request to watch presence updates and broadcast messages for a set of
+// topics.
 message WatchRequest {
 	// Identifies the watching session, and is the session a Publish on this
 	// account writes as. Minted by the client, per tab: it is what a departure
@@ -197,6 +184,7 @@ message WatchResponse {
 	// The topic this frame is about. Unset only on a heartbeat.
 	Topic topic = 1;
 
+	// The event payload received for the topic.
 	oneof body {
 		// The roster of this topic at join time. Sent once per topic, before
 		// any other frame for it; a client replaces whatever it held.
@@ -223,8 +211,10 @@ message WatchResponse {
 
 // PublishItem is one write to one room.
 message PublishItem {
+	// The topic to publish to.
 	Topic topic = 1;
 
+	// The update, message, or departure notice to publish.
 	oneof body {
 		// Replace this session's state in the topic. Wholly replaces the
 		// previous state — there is no field mask and no merge, because soft
@@ -240,6 +230,8 @@ message PublishItem {
 	}
 }
 
+// Request to publish presence updates, broadcast messages, or departure
+// notices for a session.
 message PublishRequest {
 	// The publishing session, as named on this account's Watch stream. A
 	// session bound to a different principal is rejected.
@@ -250,6 +242,7 @@ message PublishRequest {
 	repeated PublishItem items = 2;
 }
 
+// Response containing publication timing parameters for the session.
 message PublishResponse {
 	// How often a publisher holding no Watch stream must re-publish to keep its
 	// records alive, and the interval the serving node re-announces on.

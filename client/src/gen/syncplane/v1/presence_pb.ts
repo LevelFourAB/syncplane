@@ -15,45 +15,46 @@ export const file_syncplane_v1_presence: GenFile = /*@__PURE__*/
   fileDesc("ChtzeW5jcGxhbmUvdjEvcHJlc2VuY2UucHJvdG8SDHN5bmNwbGFuZS52MSJICgVUb3BpYxIUCgx3b3Jrc3BhY2VfaWQYASABKAkSDAoEbmFtZRgCIAEoCRIOCgZlbnRpdHkYAyABKAkSCwoDa2V5GAQgASgJIj4KDlByZXNlbmNlVXBkYXRlEg0KBXN0YXRlGAEgASgMEhAKCHJldmlzaW9uGAIgASgEEgsKA3NlcRgDIAEoBCJiCgtQYXJ0aWNpcGFudBISCgpzZXNzaW9uX2lkGAEgASgJEg8KB3N1YmplY3QYAiABKAkSLgoIcHJlc2VuY2UYAyABKAsyHC5zeW5jcGxhbmUudjEuUHJlc2VuY2VVcGRhdGUiUgoMUm9vbVNuYXBzaG90Ei8KDHBhcnRpY2lwYW50cxgBIAMoCzIZLnN5bmNwbGFuZS52MS5QYXJ0aWNpcGFudBIRCgl0cnVuY2F0ZWQYAiABKAgiUQoLUm9vbU1lc3NhZ2USGQoRc2VuZGVyX3Nlc3Npb25faWQYASABKAkSFgoOc2VuZGVyX3N1YmplY3QYAiABKAkSDwoHcGF5bG9hZBgDIAEoDCKhAQoMVG9waWNEcm9wcGVkEjEKBnJlYXNvbhgBIAEoDjIhLnN5bmNwbGFuZS52MS5Ub3BpY0Ryb3BwZWQuUmVhc29uEg8KB21lc3NhZ2UYAiABKAkiTQoGUmVhc29uEhYKElJFQVNPTl9VTlNQRUNJRklFRBAAEhkKFVJFQVNPTl9BQ0NFU1NfUkVWT0tFRBABEhAKDFJFQVNPTl9FUlJPUhACInMKDFdhdGNoUmVxdWVzdBISCgpzZXNzaW9uX2lkGAEgASgJEiMKBnRvcGljcxgCIAMoCzITLnN5bmNwbGFuZS52MS5Ub3BpYxINCgVsaW1pdBgDIAEoDRIbChNmcm9udGVkX3Nlc3Npb25faWRzGAQgAygJIpsCCg1XYXRjaFJlc3BvbnNlEiIKBXRvcGljGAEgASgLMhMuc3luY3BsYW5lLnYxLlRvcGljEi4KCHNuYXBzaG90GAIgASgLMhouc3luY3BsYW5lLnYxLlJvb21TbmFwc2hvdEgAEiwKB3VwZGF0ZWQYAyABKAsyGS5zeW5jcGxhbmUudjEuUGFydGljaXBhbnRIABIOCgRsZWZ0GAQgASgJSAASLAoHbWVzc2FnZRgFIAEoCzIZLnN5bmNwbGFuZS52MS5Sb29tTWVzc2FnZUgAEi0KB2Ryb3BwZWQYBiABKAsyGi5zeW5jcGxhbmUudjEuVG9waWNEcm9wcGVkSAASEwoJaGVhcnRiZWF0GAcgASgISABCBgoEYm9keSKPAQoLUHVibGlzaEl0ZW0SIgoFdG9waWMYASABKAsyEy5zeW5jcGxhbmUudjEuVG9waWMSMAoIcHJlc2VuY2UYAiABKAsyHC5zeW5jcGxhbmUudjEuUHJlc2VuY2VVcGRhdGVIABIRCgdtZXNzYWdlGAMgASgMSAASDwoFbGVhdmUYBCABKAhIAEIGCgRib2R5Ik4KDlB1Ymxpc2hSZXF1ZXN0EhIKCnNlc3Npb25faWQYASABKAkSKAoFaXRlbXMYAiADKAsyGS5zeW5jcGxhbmUudjEuUHVibGlzaEl0ZW0iRwoPUHVibGlzaFJlc3BvbnNlEjQKEWFubm91bmNlX2ludGVydmFsGAEgASgLMhkuZ29vZ2xlLnByb3RvYnVmLkR1cmF0aW9uMp0BCg9QcmVzZW5jZVNlcnZpY2USQgoFV2F0Y2gSGi5zeW5jcGxhbmUudjEuV2F0Y2hSZXF1ZXN0Ghsuc3luY3BsYW5lLnYxLldhdGNoUmVzcG9uc2UwARJGCgdQdWJsaXNoEhwuc3luY3BsYW5lLnYxLlB1Ymxpc2hSZXF1ZXN0Gh0uc3luY3BsYW5lLnYxLlB1Ymxpc2hSZXNwb25zZUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_duration]);
 
 /**
- * Topic addresses one room. It is scoped to a workspace — there are no
- * cross-workspace rooms — and is either anchored to a row or not.
+ * Addresses one room. Scoped to a workspace and is either anchored to a
+ * row or not.
  *
- * An ANCHORED topic (entity and key both set) inherits that row's read
- * permission: a caller is admitted only if the app's ReadFilter would let them
- * read the row. That is what keeps room membership from being a second
- * authorization surface an app has to remember to guard, and it is why a
- * cursor room on a document needs no policy of its own.
+ * An anchored topic (entity and key both set) inherits that row's read
+ * permission: a caller is admitted only if the app's ReadFilter would let
+ * them read the row.
  *
- * An UNANCHORED topic (entity and key both empty) is gated on workspace access
- * alone, plus the app's own room hook if it installs one.
+ * An unanchored topic (entity and key both empty) is gated on workspace
+ * access alone plus the app's own room hook when it installs one.
  *
  * @generated from message syncplane.v1.Topic
  */
 export type Topic = Message<"syncplane.v1.Topic"> & {
   /**
+   * The identifier of the workspace containing the room.
+   *
    * @generated from field: string workspace_id = 1;
    */
   workspaceId: string;
 
   /**
-   * Names the room within the workspace. Free-form, subject to the room-name
-   * rule (see docs/reference/naming.md); two callers naming the same string
-   * are in the same room.
+   * Names the room within the workspace. Free-form, but subject to the
+   * room-name rule in docs/reference/naming.md; two callers naming the
+   * same string are in the same room.
    *
    * @generated from field: string name = 2;
    */
   name: string;
 
   /**
-   * The anchor's entity, or empty for an unanchored topic. Both entity and
-   * key must be set together.
+   * The entity name of the anchor row, or empty if the topic is unanchored.
+   * Set together with `key`.
    *
    * @generated from field: string entity = 3;
    */
   entity: string;
 
   /**
-   * The anchor's row key. Both entity and key must be set together.
+   * The row key of the anchor row, or empty if the topic is unanchored. Set
+   * together with `entity`.
    *
    * @generated from field: string key = 4;
    */
@@ -68,43 +69,35 @@ export const TopicSchema: GenMessage<Topic> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_presence, 0);
 
 /**
- * PresenceUpdate is one session's soft state in one room.
+ * Contains a session's transient state within a single room.
  *
  * @generated from message syncplane.v1.PresenceUpdate
  */
 export type PresenceUpdate = Message<"syncplane.v1.PresenceUpdate"> & {
   /**
-   * App-defined, opaque to the engine, and capped by MaxPresenceStateBytes.
-   * Empty is valid and means "here, with nothing to say" — the participant
-   * still appears in the room.
+   * The application-defined state payload, opaque to the engine, and
+   * capped by the server's `MaxPresenceStateBytes` limit, which defaults
+   * to 4 KiB. An empty state indicates presence with no additional
+   * payload.
    *
    * @generated from field: bytes state = 1;
    */
   state: Uint8Array;
 
   /**
-   * Orders two deliveries of the same session's state in the same topic.
-   * Minted by the publisher and monotonic per (session, topic); a
-   * re-announcement carries the revision the state was first published with.
-   * A recipient keeps the highest it has seen, so the bus may reorder or
-   * re-deliver without the roster flickering.
-   *
-   * Revisions from different sessions are never compared, and the engine
-   * never mints one.
+   * The monotonic revision number assigned by the publisher for this session
+   * and topic. Recipients discard updates with a lower revision than the
+   * highest revision received.
    *
    * @generated from field: uint64 revision = 2;
    */
   revision: bigint;
 
   /**
-   * The workspace sequence the state was authored against, as the publisher
-   * last saw it.
-   *
-   * Rooms are not synchronized with the data stream: a peer's cursor can name
-   * a row, or a position inside a collaborative-text field, that the
-   * recipient has not pulled yet. Carrying the authoring position is what
-   * lets a recipient tell "I am behind" from "this cursor is nonsense" and
-   * hold the state until it catches up. 0 means the publisher did not say.
+   * The workspace sequence number that the publisher was at when authoring
+   * this state. If 0, the publisher did not specify a sequence number.
+   * Recipients use this value to determine whether their local data stream
+   * needs to catch up.
    *
    * @generated from field: uint64 seq = 3;
    */
@@ -142,6 +135,8 @@ export type Participant = Message<"syncplane.v1.Participant"> & {
   subject: string;
 
   /**
+   * The participant's transient presence state within the room.
+   *
    * @generated from field: syncplane.v1.PresenceUpdate presence = 3;
    */
   presence?: PresenceUpdate | undefined;
@@ -239,6 +234,8 @@ export const RoomMessageSchema: GenMessage<RoomMessage> = /*@__PURE__*/
  */
 export type TopicDropped = Message<"syncplane.v1.TopicDropped"> & {
   /**
+   * The reason why the topic was dropped.
+   *
    * @generated from field: syncplane.v1.TopicDropped.Reason reason = 1;
    */
   reason: TopicDropped_Reason;
@@ -259,10 +256,14 @@ export const TopicDroppedSchema: GenMessage<TopicDropped> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_presence, 5);
 
 /**
+ * Specifies the reason why a topic was dropped from a watch stream.
+ *
  * @generated from enum syncplane.v1.TopicDropped.Reason
  */
 export enum TopicDropped_Reason {
   /**
+   * Default value. The reason is unspecified.
+   *
    * @generated from enum value: REASON_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
@@ -292,6 +293,9 @@ export const TopicDropped_ReasonSchema: GenEnum<TopicDropped_Reason> = /*@__PURE
   enumDesc(file_syncplane_v1_presence, 5, 0);
 
 /**
+ * Request to watch presence updates and broadcast messages for a set of
+ * topics.
+ *
  * @generated from message syncplane.v1.WatchRequest
  */
 export type WatchRequest = Message<"syncplane.v1.WatchRequest"> & {
@@ -365,6 +369,8 @@ export type WatchResponse = Message<"syncplane.v1.WatchResponse"> & {
   topic?: Topic | undefined;
 
   /**
+   * The event payload received for the topic.
+   *
    * @generated from oneof syncplane.v1.WatchResponse.body
    */
   body: {
@@ -440,11 +446,15 @@ export const WatchResponseSchema: GenMessage<WatchResponse> = /*@__PURE__*/
  */
 export type PublishItem = Message<"syncplane.v1.PublishItem"> & {
   /**
+   * The topic to publish to.
+   *
    * @generated from field: syncplane.v1.Topic topic = 1;
    */
   topic?: Topic | undefined;
 
   /**
+   * The update, message, or departure notice to publish.
+   *
    * @generated from oneof syncplane.v1.PublishItem.body
    */
   body: {
@@ -487,6 +497,9 @@ export const PublishItemSchema: GenMessage<PublishItem> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_presence, 8);
 
 /**
+ * Request to publish presence updates, broadcast messages, or departure
+ * notices for a session.
+ *
  * @generated from message syncplane.v1.PublishRequest
  */
 export type PublishRequest = Message<"syncplane.v1.PublishRequest"> & {
@@ -516,6 +529,8 @@ export const PublishRequestSchema: GenMessage<PublishRequest> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_presence, 9);
 
 /**
+ * Response containing publication timing parameters for the session.
+ *
  * @generated from message syncplane.v1.PublishResponse
  */
 export type PublishResponse = Message<"syncplane.v1.PublishResponse"> & {
@@ -546,42 +561,33 @@ export const PublishResponseSchema: GenMessage<PublishResponse> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_presence, 10);
 
 /**
- * PresenceService carries the state that only matters while someone is
- * connected: cursors, selections, "who is viewing this", typing indicators, a
- * token stream in flight. None of it is durable, none of it is replayed, and
- * none of it touches the mutation log.
+ * Manages ephemeral presence state and broadcast messaging for active
+ * connections.
  *
- * Keeping it off the log is the point. A workspace's log is server-linearized,
- * so a cursor routed through it would burn a sequence number, drag every
- * subscriber's cursor forward, be stored until GC collected it, and serialize
- * against real writes in the same partition. The dividing test is "would a
- * reader arriving later want this?" — if yes it is a row, and it belongs in
- * SyncService.
+ * Presence state includes transient data such as cursors, selections, typing
+ * indicators, and active viewers. This data is not durable, is not stored in
+ * the mutation log, and is not replayed to later readers.
  *
- * The surface is two RPCs rather than one channel because the browser
- * ConnectRPC subset has neither client-streaming nor bidi: Publish is unary and
- * Watch is server-streaming. Watch is also deliberately separate from
- * SyncService.Subscribe. Subscribe's scope set is fixed for the life of the
- * stream, and room membership changes every time a user opens a document —
- * folding rooms into it would force a data-stream reopen, and its catch-up,
- * on every navigation. Reopening Watch costs nothing comparable: there is no
- * cursor, no backlog, and a joiner wants a fresh snapshot anyway.
+ * The service provides two RPCs:
+ * - `Watch` streams presence snapshots and real-time updates to a subscriber.
+ * - `Publish` sends presence updates, broadcast messages, and departure notices
+ *   from a publisher.
  *
  * @generated from service syncplane.v1.PresenceService
  */
 export const PresenceService: GenService<{
   /**
-   * Watch streams the rooms of one session: a snapshot of each topic on join,
-   * then participant updates, departures and broadcast messages as they
-   * happen. The topic set is fixed for the life of the stream; changing it is
-   * a close and reopen.
+   * Streams presence updates and broadcast messages for a fixed set of
+   * topics.
    *
-   * Delivery is at-most-once and unordered across topics. A frame the server
-   * could not hand over — a slow reader, a bus that dropped it — is gone, and
-   * nothing replays it. Presence heals anyway: every record is re-announced
-   * periodically by the node holding its session's stream, so a lost update
-   * is corrected within one announce interval. A broadcast message has no
-   * such backstop; an app that cannot lose one must write a row.
+   * The stream first sends a `RoomSnapshot` for each watched topic, followed
+   * by participant updates, departures, and broadcast messages as they
+   * occur. The set of watched topics is fixed for the lifetime of the
+   * stream. To change topics, close and reopen the stream.
+   *
+   * Delivery is at-most-once and unordered across topics. Dropped presence
+   * updates are corrected by periodic re-announcements, but dropped
+   * broadcast messages are not replayed.
    *
    * @generated from rpc syncplane.v1.PresenceService.Watch
    */
@@ -591,13 +597,11 @@ export const PresenceService: GenService<{
     output: typeof WatchResponseSchema;
   },
   /**
-   * Publish writes this session's soft state, sends broadcast messages, and
-   * announces departures. It is unary, so a publisher needs no stream — only
-   * a receiver does.
+   * Publishes presence state updates, broadcast messages, or departure
+   * notices for a session.
    *
-   * The caller's identity is stamped by the server from the request
-   * principal. Nothing in the payload names who is publishing, because a
-   * client-asserted subject would make presence an impersonation channel.
+   * The server assigns the participant identity from the request principal.
+   * The request payload cannot specify or override the sender identity.
    *
    * @generated from rpc syncplane.v1.PresenceService.Publish
    */

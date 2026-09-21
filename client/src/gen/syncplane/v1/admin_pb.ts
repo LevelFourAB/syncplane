@@ -13,30 +13,39 @@ export const file_syncplane_v1_admin: GenFile = /*@__PURE__*/
   fileDesc("ChhzeW5jcGxhbmUvdjEvYWRtaW4ucHJvdG8SDHN5bmNwbGFuZS52MSJUCg9SZWdpc3RlclJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhYKDmRlc2NyaXB0b3Jfc2V0GAIgASgMEhkKEWV4cGVjdGVkX3JldmlzaW9uGAMgASgJImgKEFJlZ2lzdGVyUmVzcG9uc2USEAoIcmV2aXNpb24YASABKAkSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLlJlZ2lzdGVyU3RhdHVzEhQKDGVudGl0eV9uYW1lcxgDIAMoCSIiChBHZXRTY2hlbWFSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJMChFHZXRTY2hlbWFSZXNwb25zZRIWCg5kZXNjcmlwdG9yX3NldBgBIAEoDBIQCghyZXZpc2lvbhgCIAEoCRINCgVmb3VuZBgDIAEoCCqKAQoOUmVnaXN0ZXJTdGF0dXMSHwobUkVHSVNURVJfU1RBVFVTX1VOU1BFQ0lGSUVEEAASGwoXUkVHSVNURVJfU1RBVFVTX0NSRUFURUQQARIbChdSRUdJU1RFUl9TVEFUVVNfVVBEQVRFRBACEh0KGVJFR0lTVEVSX1NUQVRVU19VTkNIQU5HRUQQAzKnAQoMQWRtaW5TZXJ2aWNlEkkKCFJlZ2lzdGVyEh0uc3luY3BsYW5lLnYxLlJlZ2lzdGVyUmVxdWVzdBoeLnN5bmNwbGFuZS52MS5SZWdpc3RlclJlc3BvbnNlEkwKCUdldFNjaGVtYRIeLnN5bmNwbGFuZS52MS5HZXRTY2hlbWFSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLkdldFNjaGVtYVJlc3BvbnNlQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM");
 
 /**
+ * Request message for registering or updating an application schema.
+ *
  * @generated from message syncplane.v1.RegisterRequest
  */
 export type RegisterRequest = Message<"syncplane.v1.RegisterRequest"> & {
   /**
-   * App identity: a routing + storage-partition key (NOT encoded in the proto
-   * package, so two apps may both define sync.dynamic.Todo without
-   * collision).
+   * The application identifier used as a routing and storage partition key.
+   *
+   * This value is not encoded in the Protocol Buffer package, allowing
+   * different applications to define the same message names without
+   * collision. Required.
    *
    * @generated from field: string app_id = 1;
    */
   appId: string;
 
   /**
-   * Serialized google.protobuf.FileDescriptorSet, self-contained (bundles
-   * descriptor.proto + syncplane/v1/options.proto + the synthesized entity
-   * files).
+   * The serialized `google.protobuf.FileDescriptorSet` for the application.
+   *
+   * Must be self-contained, bundling `descriptor.proto`,
+   * `syncplane/v1/options.proto`, and the synthesized entity files, such as
+   * the output of `defineSchema(...).toBinary()`. Required.
    *
    * @generated from field: bytes descriptor_set = 2;
    */
   descriptorSet: Uint8Array;
 
   /**
-   * Optional optimistic-concurrency guard: if set, registration is rejected
-   * with failed_precondition unless it equals the app's current revision.
+   * An optional optimistic-concurrency guard revision.
+   *
+   * If set, the server rejects the registration with `FAILED_PRECONDITION`
+   * unless this value matches the application's current revision. If empty,
+   * the server does not check the revision.
    *
    * @generated from field: string expected_revision = 3;
    */
@@ -51,24 +60,30 @@ export const RegisterRequestSchema: GenMessage<RegisterRequest> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_admin, 0);
 
 /**
+ * Response message returned after a schema registration request.
+ *
  * @generated from message syncplane.v1.RegisterResponse
  */
 export type RegisterResponse = Message<"syncplane.v1.RegisterResponse"> & {
   /**
-   * The app's schema revision after registration (a stable hash of the
-   * canonical descriptor-set bytes); clients see this as SchemaRevision.
+   * The application's schema revision after registration.
+   *
+   * This is a stable hash of the canonical descriptor set bytes. Clients
+   * observe this value as `SchemaRevision`.
    *
    * @generated from field: string revision = 1;
    */
   revision: string;
 
   /**
+   * The outcome of the registration request.
+   *
    * @generated from field: syncplane.v1.RegisterStatus status = 2;
    */
   status: RegisterStatus;
 
   /**
-   * The entity wire names registered for this app, sorted.
+   * The sorted list of entity wire names registered for this application.
    *
    * @generated from field: repeated string entity_names = 3;
    */
@@ -83,10 +98,14 @@ export const RegisterResponseSchema: GenMessage<RegisterResponse> = /*@__PURE__*
   messageDesc(file_syncplane_v1_admin, 1);
 
 /**
+ * Request message for retrieving an application schema.
+ *
  * @generated from message syncplane.v1.GetSchemaRequest
  */
 export type GetSchemaRequest = Message<"syncplane.v1.GetSchemaRequest"> & {
   /**
+   * The application identifier whose schema you want to retrieve. Required.
+   *
    * @generated from field: string app_id = 1;
    */
   appId: string;
@@ -100,23 +119,36 @@ export const GetSchemaRequestSchema: GenMessage<GetSchemaRequest> = /*@__PURE__*
   messageDesc(file_syncplane_v1_admin, 2);
 
 /**
+ * Response message containing the requested application schema.
+ *
  * @generated from message syncplane.v1.GetSchemaResponse
  */
 export type GetSchemaResponse = Message<"syncplane.v1.GetSchemaResponse"> & {
   /**
-   * The app's serialized FileDescriptorSet, as registered. Empty
-   * descriptor_set with found=false when the app is unknown.
+   * The application's serialized `google.protobuf.FileDescriptorSet`, as
+   * registered.
+   *
+   * This field is empty if `found` is `false`.
    *
    * @generated from field: bytes descriptor_set = 1;
    */
   descriptorSet: Uint8Array;
 
   /**
+   * The schema revision string of the registered application.
+   *
+   * This field is empty if `found` is `false`.
+   *
    * @generated from field: string revision = 2;
    */
   revision: string;
 
   /**
+   * Whether the application schema was found.
+   *
+   * Set to `true` if the application exists and schema descriptors are
+   * returned, or `false` if the application is unknown.
+   *
    * @generated from field: bool found = 3;
    */
   found: boolean;
@@ -130,30 +162,35 @@ export const GetSchemaResponseSchema: GenMessage<GetSchemaResponse> = /*@__PURE_
   messageDesc(file_syncplane_v1_admin, 3);
 
 /**
+ * The result status of a schema registration request.
+ *
  * @generated from enum syncplane.v1.RegisterStatus
  */
 export enum RegisterStatus {
   /**
+   * Default unspecified status. Do not use.
+   *
    * @generated from enum value: REGISTER_STATUS_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * A new app was registered.
+   * Indicates that a new application was registered.
    *
    * @generated from enum value: REGISTER_STATUS_CREATED = 1;
    */
   CREATED = 1,
 
   /**
-   * An existing app's schema was additively evolved.
+   * Indicates that an existing application's schema was additively updated.
    *
    * @generated from enum value: REGISTER_STATUS_UPDATED = 2;
    */
   UPDATED = 2,
 
   /**
-   * The submitted schema was identical to the registered one; a no-op.
+   * Indicates that the submitted schema was identical to the registered
+   * schema, resulting in no changes.
    *
    * @generated from enum value: REGISTER_STATUS_UNCHANGED = 3;
    */
@@ -167,21 +204,32 @@ export const RegisterStatusSchema: GenEnum<RegisterStatus> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_admin, 0);
 
 /**
- * AdminService is the trusted, server-side control plane for runtime schema
- * registration. It is intentionally separate from SyncService: it is mounted
- * on its own handler so it can bind to a private interface, off the public
- * sync surface browsers reach. Every call is gated by a RegisterAuthorizer
- * (deny-by-default); a built-in TokenAuthorizer checks a bearer token.
+ * Manages runtime schema registration on a trusted server-side control plane.
+ *
+ * This service is separate from `SyncService` so that you can bind it to a
+ * private interface instead of the public synchronization surface that
+ * browsers access. Every call requires authorization through a
+ * `RegisterAuthorizer` (deny-by-default), such as the built-in
+ * `TokenAuthorizer` that checks a bearer token.
  *
  * @generated from service syncplane.v1.AdminService
  */
 export const AdminService: GenService<{
   /**
-   * Register ingests an app's serialized google.protobuf.FileDescriptorSet
-   * (the bytes the TS schema builder's defineSchema(...).toBinary()
-   * produces), persists it, and registers/evolves that app's entities so they
-   * serve full CRUD sync. Idempotent: an identical set is UNCHANGED, an
-   * additive evolution is UPDATED, a conflicting change is rejected.
+   * Registers or evolves an application's schema to serve full CRUD
+   * synchronization.
+   *
+   * Takes a serialized `google.protobuf.FileDescriptorSet`, persists it,
+   * and updates the application entities. This operation is idempotent:
+   * - Registering an app that was not registered before returns
+   *   `REGISTER_STATUS_CREATED`.
+   * - Submitting an additive evolution returns `REGISTER_STATUS_UPDATED`.
+   * - Submitting an identical schema returns `REGISTER_STATUS_UNCHANGED`.
+   *
+   * The server rejects conflicting schema changes. If
+   * `expected_revision` is set and does not match the application's
+   * current revision, the server rejects the call with
+   * `FAILED_PRECONDITION`.
    *
    * @generated from rpc syncplane.v1.AdminService.Register
    */
@@ -191,9 +239,12 @@ export const AdminService: GenService<{
     output: typeof RegisterResponseSchema;
   },
   /**
-   * GetSchema returns an app's persisted descriptor set — "the server ships
-   * its schema", so a client can rebuild its descriptors from the server
-   * instead of importing the schema bundle.
+   * Retrieves the persisted descriptor set for an application.
+   *
+   * Clients can use this descriptor set to rebuild descriptors directly from
+   * the server instead of importing a schema bundle. If the application is
+   * unknown, the server returns a response with `found` set to `false` and
+   * an empty `descriptor_set`.
    *
    * @generated from rpc syncplane.v1.AdminService.GetSchema
    */

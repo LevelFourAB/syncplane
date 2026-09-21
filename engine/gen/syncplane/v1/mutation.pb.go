@@ -23,13 +23,19 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Specifies the type of CRUD write operation to perform.
 type CrudOp int32
 
 const (
+	// Default value. This value is unused and reserved to catch uninitialized
+	// fields.
 	CrudOp_CRUD_OP_UNSPECIFIED CrudOp = 0
-	CrudOp_CRUD_OP_PUT         CrudOp = 1
-	CrudOp_CRUD_OP_PATCH       CrudOp = 2
-	CrudOp_CRUD_OP_DELETE      CrudOp = 3
+	// Creates or replaces an entire entity.
+	CrudOp_CRUD_OP_PUT CrudOp = 1
+	// Updates specific fields in an entity using a field mask.
+	CrudOp_CRUD_OP_PATCH CrudOp = 2
+	// Deletes an entity by its key.
+	CrudOp_CRUD_OP_DELETE CrudOp = 3
 )
 
 // Enum value maps for CrudOp.
@@ -75,15 +81,19 @@ func (CrudOp) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_mutation_proto_rawDescGZIP(), []int{0}
 }
 
-// Mutation is the envelope for a single client-originated write.
+// Encloses a single client-originated write operation.
 type Mutation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Stable identifier for the originating client (device/tab).
+	// Identifies the originating client, such as a device or browser tab. Use
+	// a stable identifier across requests from the same client.
 	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
-	// Per-client monotonically increasing id, starting at 1. The server tracks
-	// the last applied id per client for idempotency and gap detection.
+	// Tracks sequence order with a monotonically increasing ID for the client,
+	// starting at 1. The server tracks the last applied ID per client for
+	// idempotency and gap detection.
 	MutationId uint64 `protobuf:"varint,2,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
-	// Extensible payload: future variants (e.g. CRDT deltas) get new branches.
+	// Contains the mutation payload. Future payload variants, such as
+	// conflict-free replicated data type (CRDT) deltas, add new branches to
+	// this union.
 	//
 	// Types that are valid to be assigned to Payload:
 	//
@@ -178,14 +188,17 @@ type isMutation_Payload interface {
 }
 
 type Mutation_Crud struct {
+	// Applies a single CRUD write operation against an entity.
 	Crud *CrudMutation `protobuf:"bytes,3,opt,name=crud,proto3,oneof"`
 }
 
 type Mutation_Custom struct {
+	// Applies a named custom mutator registered on the server.
 	Custom *CustomMutation `protobuf:"bytes,4,opt,name=custom,proto3,oneof"`
 }
 
 type Mutation_Batch struct {
+	// Applies multiple CRUD write operations as one atomic transaction.
 	Batch *BatchMutation `protobuf:"bytes,5,opt,name=batch,proto3,oneof"`
 }
 
@@ -195,42 +208,52 @@ func (*Mutation_Custom) isMutation_Payload() {}
 
 func (*Mutation_Batch) isMutation_Payload() {}
 
-// CrudMutation is a generated CRUD write against a registered entity.
-// Because the server linearizes mutations per workspace, applying PATCH
-// field masks in sequence order yields per-field LWW semantics without
-// per-field timestamps.
+// Represents a generated CRUD write operation against a registered entity.
+//
+// Because the server linearizes mutations per workspace, applying `PATCH`
+// field masks in sequence order provides per-field last-write-wins (LWW)
+// semantics without per-field timestamps.
 type CrudMutation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Entity name as declared via EntityOptions.
+	// Names the target entity as declared in `EntityOptions`.
 	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
-	// Row key (derived from EntityOptions.key_fields).
+	// Specifies the row key, derived from `EntityOptions.key_fields`.
 	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
-	Op  CrudOp `protobuf:"varint,3,opt,name=op,proto3,enum=syncplane.v1.CrudOp" json:"op,omitempty"`
-	// Serialized entity message. Empty for DELETE. For PATCH only the fields
-	// named in field_mask are read.
+	// Specifies the CRUD operation type to execute.
+	Op CrudOp `protobuf:"varint,3,opt,name=op,proto3,enum=syncplane.v1.CrudOp" json:"op,omitempty"`
+	// Contains the serialized entity message. Leave this field empty for
+	// `CRUD_OP_DELETE`. For `CRUD_OP_PATCH`, the server reads only the fields
+	// named in `field_mask`.
 	//
-	// One exception to "this is a whole value": a collaborative-text field
-	// (FieldBehavior.text) named outright by a PATCH mask may carry a
-	// delta-state fragment instead of a whole document — only what the writer
-	// holds beyond the state the server last confirmed to it. The server
-	// unfolds it through the same merge, so the stored row and everything read
-	// out of it are unaffected. A fragment the server cannot apply is rejected
-	// with `text_full_state_required` and the client re-sends the whole
-	// document; full state is always accepted, so nothing has to negotiate.
-	// Anywhere else — a PUT, a field the mask does not name — delta state is
-	// refused, because the value would be copied through without merging.
+	// As an exception to full-value serialization, a collaborative-text field
+	// (`FieldBehavior.text`) named directly in a `PATCH` field mask may carry
+	// a delta-state fragment instead of the complete document. This fragment
+	// contains only the changes you hold beyond the state that the server last
+	// confirmed to you. The server unfolds the fragment through the merge
+	// process without altering stored row reads. If the server cannot apply
+	// the fragment, it rejects the mutation with `text_full_state_required`,
+	// and your client must resend the complete document. The server always
+	// accepts full state. The server rejects delta state in all other cases,
+	// including `CRUD_OP_PUT` or fields omitted from `field_mask`, because
+	// values in those operations copy directly without merging.
 	Value []byte `protobuf:"bytes,4,opt,name=value,proto3" json:"value,omitempty"`
-	// PATCH only: the set of fields to merge. This mask IS the LWW mechanism.
+	// Lists the fields to merge for a `CRUD_OP_PATCH` operation. This mask
+	// serves as the last-write-wins (LWW) mechanism. Unset for other
+	// operations.
 	FieldMask *fieldmaskpb.FieldMask `protobuf:"bytes,5,opt,name=field_mask,json=fieldMask,proto3" json:"field_mask,omitempty"`
-	// Optional compare-and-swap guard. When set, the server applies this
-	// mutation only if the target row's current version equals this value,
-	// otherwise it rejects with `conflict` (an ack: the client rolls the
-	// optimistic edit back and fires onMutationRejected). The version is the
-	// workspace sequence that last wrote the row (RowChange.version, surfaced
-	// client-side as Row.version); an absent or deleted row reads as version 0,
-	// so expected_version = 0 means "apply only if the row does not exist".
-	// Opt-in escape from silent per-field LWW for the cases where a concurrent
-	// edit must be noticed rather than merged.
+	// Sets an optional compare-and-swap guard. When set, the server applies
+	// this mutation only if the target row's current version matches this
+	// value. If the versions do not match, the server rejects the mutation
+	// with `conflict`. On rejection, the client rolls back the optimistic edit
+	// and triggers `onMutationRejected`.
+	//
+	// The version corresponds to the workspace sequence that last wrote the
+	// row (`RowChange.version`, exposed on the client as `Row.version`). An
+	// absent or deleted row has a version of `0`, so setting
+	// `expected_version` to `0` means apply only if the row does not exist.
+	// Use this field to opt out of silent per-field last-write-wins (LWW)
+	// resolution when you need to detect concurrent edits instead of merging
+	// them.
 	ExpectedVersion *uint64 `protobuf:"varint,6,opt,name=expected_version,json=expectedVersion,proto3,oneof" json:"expected_version,omitempty"`
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
@@ -308,16 +331,21 @@ func (x *CrudMutation) GetExpectedVersion() uint64 {
 	return 0
 }
 
-// BatchMutation applies several CRUD writes as one atomic unit. The whole
-// batch shares the envelope's single mutation_id and one workspace sequence,
-// applies inside one server savepoint, and commits all-or-nothing: any
-// sub-mutation rejected rolls the entire batch back and yields one rejection.
-// Sub-mutations apply in order, so a later op observes earlier ops in the
-// same batch (e.g. PATCH after PUT of the same key). A batch must be
-// non-empty.
+// Applies multiple CRUD write operations as one atomic unit.
+//
+// The entire batch shares the single `mutation_id` of the envelope and a
+// single workspace sequence. The server applies operations inside one
+// savepoint and commits them all or nothing. If the server rejects any
+// sub-mutation, it rolls back the entire batch and returns a single rejection.
+//
+// Sub-mutations apply in order, so a later operation observes earlier
+// operations in the same batch, for example a `CRUD_OP_PATCH` after a
+// `CRUD_OP_PUT` on the same key. A batch must not be empty.
 type BatchMutation struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Mutations     []*CrudMutation        `protobuf:"bytes,1,rep,name=mutations,proto3" json:"mutations,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Contains the ordered list of CRUD mutations to execute atomically. This
+	// list must not be empty.
+	Mutations     []*CrudMutation `protobuf:"bytes,1,rep,name=mutations,proto3" json:"mutations,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -359,13 +387,15 @@ func (x *BatchMutation) GetMutations() []*CrudMutation {
 	return nil
 }
 
-// CustomMutation invokes a named server-registered mutator. Clients may run
-// a best-effort local mirror for optimism; the server is authoritative and
-// divergence self-heals on rebase.
+// Invokes a named mutator registered on the server. Clients may run a
+// best-effort local mirror for optimistic updates. The server remains
+// authoritative, and any divergence resolves during a rebase.
 type CustomMutation struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	Args          *anypb.Any             `protobuf:"bytes,2,opt,name=args,proto3" json:"args,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Specifies the registered name of the custom mutator to invoke.
+	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	// Contains the serialized arguments for the custom mutator.
+	Args          *anypb.Any `protobuf:"bytes,2,opt,name=args,proto3" json:"args,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

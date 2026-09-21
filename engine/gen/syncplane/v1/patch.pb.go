@@ -34,9 +34,18 @@ const (
 // cleared in RowChange.value, so a row whose document dwarfs its other fields
 // no longer re-ships the document on every unrelated write.
 type FieldDelta struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Field         string                 `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
-	Fragment      []byte                 `protobuf:"bytes,2,opt,name=fragment,proto3" json:"fragment,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The dotted path of the document. This path is the Protocol Buffers path
+	// for a field on a singular chain. When the path crosses a keyed message
+	// list or map, the element key is inserted into the path, such as
+	// `notes.<key>.body`. This format matches a `PATCH` field mask, with one
+	// entry per element.
+	Field string `protobuf:"bytes,1,opt,name=field,proto3" json:"field,omitempty"`
+	// The text delta-state fragment in format version `0x02` to apply to the
+	// confirmed bytes of the field. An empty value indicates that the field
+	// did not change over the span and you keep the existing state. The field
+	// is always cleared in `RowChange.value`.
+	Fragment      []byte `protobuf:"bytes,2,opt,name=fragment,proto3" json:"fragment,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -90,12 +99,16 @@ func (x *FieldDelta) GetFragment() []byte {
 // fields named in text_deltas, which the recipient reconstructs from state it
 // already holds.
 type RowChange struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
-	Key    string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name of the entity for this row.
+	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	// The key that identifies this row within the entity.
+	Key string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
 	// Workspace sequence number assigned to the mutation that last wrote this
 	// row. Monotonic per workspace.
 	Version uint64 `protobuf:"varint,3,opt,name=version,proto3" json:"version,omitempty"`
+	// The row content or deletion status.
+	//
 	// Types that are valid to be assigned to Body:
 	//
 	//	*RowChange_Value
@@ -216,10 +229,11 @@ func (*RowChange_Value) isRowChange_Body() {}
 
 func (*RowChange_Tombstone) isRowChange_Body() {}
 
-// Patch is an ordered set of row changes to apply to confirmed state.
+// Represents an ordered set of row changes to apply to confirmed state.
 type Patch struct {
-	state   protoimpl.MessageState `protogen:"open.v1"`
-	Changes []*RowChange           `protobuf:"bytes,1,rep,name=changes,proto3" json:"changes,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The ordered list of row changes to apply.
+	Changes []*RowChange `protobuf:"bytes,1,rep,name=changes,proto3" json:"changes,omitempty"`
 	// Entities whose entire confirmed state the client must drop BEFORE
 	// applying changes. Sent when an entity leaves the subscription set during
 	// a delta resync — one name instead of a tombstone per row.
@@ -275,17 +289,19 @@ func (x *Patch) GetDropEntities() []string {
 // Subscription scopes what a client syncs. An empty subscription list means
 // full sync; a subscription without a predicate covers the whole entity.
 type Subscription struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name of the entity to synchronize.
+	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
 	// Rows of the entity matching this predicate sync; absent = whole entity.
 	Predicate *Condition `protobuf:"bytes,2,opt,name=predicate,proto3" json:"predicate,omitempty"`
-	// Reference paths to follow from matched rows, expanding the synced set to
-	// a bounded-depth forward/reverse closure (key point-lookups forward,
-	// predicate scans reverse). Empty ⇒ today's static per-entity scope.
-	// Deliberately EXCLUDED from sub_hash: a follow-spec change is reconciled
-	// by the closure diff (Cursor.closure), not a base-scope delta resync.
-	// Every closure member is still subject to the same read filter as a base
-	// row — following a ref is never a permission-escalation path.
+	// Reference paths to follow from matched rows. Following references
+	// expands the synchronized set to a bounded-depth forward or reverse
+	// closure, using key point-lookups forward and predicate scans in reverse.
+	// When unset, synchronization remains scoped to the base entity. Changes
+	// to this field are excluded from `sub_hash` and are reconciled through
+	// closure diffs (`Cursor.closure`) rather than a base-scope delta
+	// resynchronization. Every closure member remains subject to the same read
+	// filter as a base row; following a reference never escalates permissions.
 	Follow *FollowSpec `protobuf:"bytes,3,opt,name=follow,proto3" json:"follow,omitempty"`
 	// Bounds the synced set to the first `limit` rows of this subscription's
 	// predicate match under `order_by` — so the working set is a policy choice
@@ -379,8 +395,10 @@ func (x *Subscription) GetKeySet() *KeySet {
 // meaning and duplicates are folded, so two sets with the same members hash
 // alike.
 type KeySet struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Keys          []string               `protobuf:"bytes,1,rep,name=keys,proto3" json:"keys,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The list of row keys. Key order does not matter and duplicate keys are
+	// folded.
+	Keys          []string `protobuf:"bytes,1,rep,name=keys,proto3" json:"keys,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -504,8 +522,9 @@ func (x *Window) GetByRecency() bool {
 // emitter resolves direction from the ref graph). Used by both query-time
 // hydration (include) and reference-following subscriptions (follow).
 type RefPath struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Segments      []string               `protobuf:"bytes,1,rep,name=segments,proto3" json:"segments,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The ordered list of relation segments to traverse.
+	Segments      []string `protobuf:"bytes,1,rep,name=segments,proto3" json:"segments,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -547,13 +566,16 @@ func (x *RefPath) GetSegments() []string {
 	return nil
 }
 
-// FollowSpec is one shared shape driving include (client-local hydration) and
-// follow (subscription scope). It is a set of ref paths walked to a bounded
-// depth. depth 0 is treated as 1 (follow each path one hop).
+// Specifies reference paths to follow to a bounded depth. This message
+// configures client-local hydration (`include`) and subscription scoping
+// (`follow`). A `depth` of `0` is treated as `1` (one hop along each path).
 type FollowSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Paths         []*RefPath             `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
-	Depth         uint32                 `protobuf:"varint,2,opt,name=depth,proto3" json:"depth,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The reference paths to traverse.
+	Paths []*RefPath `protobuf:"bytes,1,rep,name=paths,proto3" json:"paths,omitempty"`
+	// The maximum number of hops to traverse along each path. A value of `0`
+	// is treated as `1` (one hop along each path).
+	Depth         uint32 `protobuf:"varint,2,opt,name=depth,proto3" json:"depth,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }

@@ -13,9 +13,11 @@ export const file_syncplane_v1_query: GenFile = /*@__PURE__*/
   fileDesc("ChhzeW5jcGxhbmUvdjEvcXVlcnkucHJvdG8SDHN5bmNwbGFuZS52MSKFAQoKUXVlcnlWYWx1ZRIWCgxzdHJpbmdfdmFsdWUYASABKAlIABIWCgxkb3VibGVfdmFsdWUYAiABKAFIABITCglpbnRfdmFsdWUYAyABKBJIABIUCgp1aW50X3ZhbHVlGAQgASgESAASFAoKYm9vbF92YWx1ZRgFIAEoCEgAQgYKBGtpbmQiYQoHQ21wQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLkNtcE9wEicKBXZhbHVlGAMgASgLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiQAoGSW5Db25kEgwKBHBhdGgYASADKAkSKAoGdmFsdWVzGAIgAygLMhguc3luY3BsYW5lLnYxLlF1ZXJ5VmFsdWUiRwoHU3RyQ29uZBIMCgRwYXRoGAEgAygJEh8KAm9wGAIgASgOMhMuc3luY3BsYW5lLnYxLlN0ck9wEg0KBXZhbHVlGAMgASgJImIKB1JlcENvbmQSDAoEcGF0aBgBIAMoCRIfCgJvcBgCIAEoDjITLnN5bmNwbGFuZS52MS5SZXBPcBIoCgZ2YWx1ZXMYAyADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlWYWx1ZSJACgtQcmVzZW50Q29uZBIMCgRwYXRoGAEgAygJEiMKAm9wGAIgASgOMhcuc3luY3BsYW5lLnYxLlByZXNlbnRPcCJBCgpFeGlzdHNDb25kEgwKBHBhdGgYASADKAkSJQoEY29uZBgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24iPgoHUmVsQ29uZBIMCgRwYXRoGAEgAygJEiUKBGNvbmQYAiABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uIhoKCU1hdGNoQ29uZBINCgVxdWVyeRgBIAEoCSI3Cg1Db25kaXRpb25MaXN0EiYKBWNvbmRzGAEgAygLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiLSAwoJQ29uZGl0aW9uEiQKA2NtcBgBIAEoCzIVLnN5bmNwbGFuZS52MS5DbXBDb25kSAASIgoCaW4YAiABKAsyFC5zeW5jcGxhbmUudjEuSW5Db25kSAASJAoDc3RyGAMgASgLMhUuc3luY3BsYW5lLnYxLlN0ckNvbmRIABIkCgNyZXAYBCABKAsyFS5zeW5jcGxhbmUudjEuUmVwQ29uZEgAEiwKB3ByZXNlbnQYBSABKAsyGS5zeW5jcGxhbmUudjEuUHJlc2VudENvbmRIABIqCgNhbmQYBiABKAsyGy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uTGlzdEgAEikKAm9yGAcgASgLMhsuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkxpc3RIABImCgNub3QYCCABKAsyFy5zeW5jcGxhbmUudjEuQ29uZGl0aW9uSAASKgoGZXhpc3RzGAkgASgLMhguc3luY3BsYW5lLnYxLkV4aXN0c0NvbmRIABIkCgNyZWwYCiABKAsyFS5zeW5jcGxhbmUudjEuUmVsQ29uZEgAEigKBW1hdGNoGAsgASgLMhcuc3luY3BsYW5lLnYxLk1hdGNoQ29uZEgAQgYKBGtpbmQiRAoKUXVlcnlHcm91cBInCgV2YWx1ZRgBIAEoCzIYLnN5bmNwbGFuZS52MS5RdWVyeVZhbHVlEg0KBWNvdW50GAIgASgEIkQKClF1ZXJ5RmFjZXQSDAoEcGF0aBgBIAMoCRIoCgZncm91cHMYAiADKAsyGC5zeW5jcGxhbmUudjEuUXVlcnlHcm91cCJRCghPcmRlcktleRIMCgRwYXRoGAEgAygJEiQKA2RpchgCIAEoDjIXLnN5bmNwbGFuZS52MS5EaXJlY3Rpb24SEQoJcmVsZXZhbmNlGAMgASgIKnwKBUNtcE9wEhYKEkNNUF9PUF9VTlNQRUNJRklFRBAAEg0KCUNNUF9PUF9FURABEg4KCkNNUF9PUF9ORVEQAhINCglDTVBfT1BfR1QQAxIOCgpDTVBfT1BfR1RFEAQSDQoJQ01QX09QX0xUEAUSDgoKQ01QX09QX0xURRAGKmIKBVN0ck9wEhYKElNUUl9PUF9VTlNQRUNJRklFRBAAEhYKElNUUl9PUF9TVEFSVFNfV0lUSBABEhQKEFNUUl9PUF9FTkRTX1dJVEgQAhITCg9TVFJfT1BfQ09OVEFJTlMQAypsCgVSZXBPcBIWChJSRVBfT1BfVU5TUEVDSUZJRUQQABIOCgpSRVBfT1BfSEFTEAESEgoOUkVQX09QX0hBU19BTlkQAhISCg5SRVBfT1BfSEFTX0FMTBADEhMKD1JFUF9PUF9JU19FTVBUWRAEKlkKCVByZXNlbnRPcBIaChZQUkVTRU5UX09QX1VOU1BFQ0lGSUVEEAASFQoRUFJFU0VOVF9PUF9JU19TRVQQARIZChVQUkVTRU5UX09QX0lTX05PVF9TRVQQAipNCglEaXJlY3Rpb24SGQoVRElSRUNUSU9OX1VOU1BFQ0lGSUVEEAASEQoNRElSRUNUSU9OX0FTQxABEhIKDkRJUkVDVElPTl9ERVNDEAIqdQoLQWdncmVnYXRlT3ASHAoYQUdHUkVHQVRFX09QX1VOU1BFQ0lGSUVEEAASFgoSQUdHUkVHQVRFX09QX0NPVU5UEAESGQoVQUdHUkVHQVRFX09QX0RJU1RJTkNUEAISFQoRQUdHUkVHQVRFX09QX1JPV1MQA0JGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z");
 
 /**
- * QueryValue is a scalar literal in a condition. The branch preserves the
- * client-side kind: JS numbers travel as doubles, JS bigints as
- * sint64/uint64, so evaluation coercion rules match on both sides.
+ * Holds a scalar literal value in a condition.
+ *
+ * The selected branch preserves the client-side type so evaluation coercion
+ * rules match on both sides. JavaScript numbers travel as `double_value`, and
+ * JavaScript bigints travel as `int_value` or `uint_value`.
  *
  * @generated from message syncplane.v1.QueryValue
  */
@@ -43,7 +45,7 @@ export type QueryValue = Message<"syncplane.v1.QueryValue"> & {
     case: "intValue";
   } | {
     /**
-     * Used for bigints above the int64 range.
+     * Holds a JavaScript bigint that exceeds the `int64` range.
      *
      * @generated from field: uint64 uint_value = 4;
      */
@@ -142,11 +144,13 @@ export const StrCondSchema: GenMessage<StrCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 3);
 
 /**
- * RepCond asks about a repeated field as a whole. Membership (HAS, HAS_ANY,
- * HAS_ALL) compares ELEMENTS, so it needs comparable ones: a repeated scalar,
- * or a repeated single-key reference, which both sides rewrite to an
- * ExistsCond over the target's key field before evaluating. Membership in a
- * repeated message list is spelled with ExistsCond instead.
+ * Evaluates conditions against a repeated field as a whole.
+ *
+ * Membership operators (`HAS`, `HAS_ANY`, and `HAS_ALL`) compare elements. The
+ * field must contain comparable elements: a repeated scalar or a repeated
+ * single-key reference. Both sides rewrite a repeated single-key reference to
+ * an `ExistsCond` over the target field's key before evaluating it. To test
+ * membership in a repeated message list, use `ExistsCond` instead.
  *
  * @generated from message syncplane.v1.RepCond
  */
@@ -162,7 +166,10 @@ export type RepCond = Message<"syncplane.v1.RepCond"> & {
   op: RepOp;
 
   /**
-   * HAS reads values[0]; HAS_ANY/HAS_ALL read all; IS_EMPTY reads none.
+   * Specifies the literal values to compare against the repeated field.
+   *
+   * `HAS` reads `values[0]`. `HAS_ANY` and `HAS_ALL` read all values in the
+   * list. `IS_EMPTY` reads no values.
    *
    * @generated from field: repeated syncplane.v1.QueryValue values = 3;
    */
@@ -199,47 +206,52 @@ export const PresentCondSchema: GenMessage<PresentCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 5);
 
 /**
- * ExistsCond matches a row when AT LEAST ONE element of a collection satisfies
- * `cond`. It is the only way to ask about the contents of message elements, and
- * the only condition whose sub-paths are relative to something other than the
- * row: `cond`'s paths resolve against the ELEMENT, so ["assignees"] + ["id"]
- * reads "some assignee's id".
+ * Matches a row when at least one element of a collection satisfies `cond`.
  *
- * The element scope is explicit for a reason. Distributing the quantifier over
- * each condition instead — reading a bare path as "some element" — makes
- * and(items.sku == "A", items.qty > 3) mean "some item has sku A AND some
- * (possibly other) item has qty > 3", and once the conditions are separate
- * terms nothing records that they were meant to describe the same element.
+ * This condition is the only way to query the contents of message elements. It
+ * is also the only condition whose subpaths are relative to an element rather
+ * than the row: paths in `cond` resolve against the element itself. For
+ * example, a `path` of `["assignees"]` combined with a `cond` path of `["id"]`
+ * evaluates as 'some assignee's id'.
  *
- * Two collections have elements this way:
+ * The element scope is explicit to preserve correlation between conditions.
+ * Distributing the quantifier across separate conditions—reading a bare path
+ * as 'some element'—would make `and(items.sku == "A", items.qty > 3)` mean
+ * 'some item has SKU A and some (possibly different) item has quantity > 3'.
+ * Once conditions are split, they no longer record that they apply to the same
+ * element.
  *
- *   - a repeated MESSAGE field, whose element is the message; and
- *   - a MAP, whose element is the ENTRY. The entry's two sides are addressed as
- *     `key` and `value` — the same two names an index component's `*` selector
- *     uses — so ["custom"] + and(key == "priority", value.number == 5) reads
- *     "some custom field named priority holds 5", and a sub-condition on
- *     `value` alone reads "SOME custom field holds 5" without saying which.
+ * Two types of collections support element queries:
+ * - A repeated message field, where the element is the message.
+ * - A map, where the element is an entry. An entry uses the field names `key`
+ *   and `value`, matching the index component `*` selector. For example,
+ *   `["custom"]` with `and(key == "priority", value.number == 5)` means 'some
+ *   custom field named priority holds 5'. A subcondition on `value` alone means
+ *   'some custom field holds 5'.
  *
- * The map form is what answers "which field holds X" across keys, where
- * addressing one entry by key (["custom", "priority", "number"]) answers "does
- * THIS field hold X". Note that it is a predicate and not a projection: it says
- * that some entry matched, never which one — an app that needs the name reads
- * it off the row's map.
+ * The map form evaluates queries across keys (such as 'which field holds X').
+ * Addressing an entry directly by key (`["custom", "priority", "number"]`)
+ * answers 'does this specific field hold X'. This condition is a predicate,
+ * not a projection: it indicates whether an entry matched, but does not return
+ * which entry matched. If your application needs the key name, read it from
+ * the map on the row.
  *
  * @generated from message syncplane.v1.ExistsCond
  */
 export type ExistsCond = Message<"syncplane.v1.ExistsCond"> & {
   /**
-   * Path to a repeated message field or a map, from the row.
+   * Specifies the path from the row to a repeated message field or a map.
    *
    * @generated from field: repeated string path = 1;
    */
   path: string[];
 
   /**
-   * Evaluated against each element — each map ENTRY, for a map — with paths
-   * relative to it. An empty collection makes this false, like every
-   * condition on a missing value.
+   * Defines the condition to evaluate against each element, or against each
+   * entry in a map.
+   *
+   * Paths in this condition are relative to the element. Evaluates to
+   * `false` if the collection is empty.
    *
    * @generated from field: syncplane.v1.Condition cond = 2;
    */
@@ -254,23 +266,24 @@ export const ExistsCondSchema: GenMessage<ExistsCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 6);
 
 /**
- * RelCond matches a row when at least one row referenced through the ref
- * field at `path` exists and satisfies `cond` — a one-hop semi-join. `path`
- * names a forward reference field of the row's entity (singular or repeated);
- * `cond`'s paths are relative to the TARGET entity's row, the same scoping
- * precedent ExistsCond set. An unset to-one ref, an orphaned stub and a
- * tombstoned target all contribute nothing, so the condition is false for
- * them.
+ * Matches a row when at least one referenced row at `path` exists and
+ * satisfies `cond`.
  *
- * There is no target-entity field: both sides derive the target from their
- * ref graph, so the wire cannot claim a target the schema does not give the
- * field. A `rel` whose path is not a reference field is rejected in
- * validation, like every other malformed path. Nesting a rel inside a rel or
- * inside an exists is rejected too — one hop, scoped to the row.
+ * This operation performs a one-hop semi-join. The `path` field names a
+ * forward reference field on the entity, which can be singular or repeated.
+ * Paths in `cond` are relative to the target entity's row. The condition
+ * evaluates to `false` for unset to-one references, orphaned stubs, and
+ * tombstoned targets.
  *
- * Both evaluators run it as a two-phase rewrite: the inner condition selects
- * the matching target keys, and the node collapses to a membership test on
- * the stored ref stubs. The rewrite never appears on the wire.
+ * The schema derives the target entity from the reference graph, so this
+ * message has no target entity field. Validation rejects a `RelCond` if `path`
+ * does not name a reference field, or if `RelCond` is nested inside another
+ * `RelCond` or `ExistsCond`.
+ *
+ * Both evaluators execute this condition as a two-phase rewrite: the inner
+ * condition selects matching target keys, and the node collapses to a
+ * membership test on the stored reference stubs. This rewrite does not appear
+ * on the wire.
  *
  * @generated from message syncplane.v1.RelCond
  */
@@ -294,21 +307,24 @@ export const RelCondSchema: GenMessage<RelCond> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 7);
 
 /**
- * MatchCond matches a row when its entity's declared search fields (see
- * syncplane.v1.SearchSpec) contain every term of `query`. The query is
- * analyzed by the entity's analyzer — the same pipeline that analyzes the
- * fields — and the final term matches as a prefix when the query ends inside
- * it, which is what makes search-as-you-type work without a separate mode.
- * Terms are conjunctive, each satisfiable by any searchable field. A query
- * that yields no terms (empty, or separators only) matches every row.
+ * Matches a row when the entity's declared search fields contain every term in
+ * `query`.
  *
- * It is a predicate, not a mode: it composes under and/or/not like any other
- * condition, and matching rows come back in the query's declared order. Rank
- * by how well rows match by ordering on OrderKey.relevance.
+ * The entity's analyzer analyzes the query using the same pipeline used for
+ * search fields. If the query ends inside the final term, that term matches as
+ * a prefix to support search-as-you-type. Terms are conjunctive, and any
+ * searchable field can satisfy a term. A query that produces no terms (for
+ * example, an empty string or separators only) matches every row.
  *
- * Rejected on an entity that declares no search fields, inside any() (its
- * scope is the row, not an element), and inside a rel condition's target
- * scope unless the TARGET entity declares search.
+ * This condition is a predicate. You can combine it with `and`, `or`, and
+ * `not` conditions. Matching rows return in the query's declared order. To
+ * rank rows by match quality, order by `OrderKey.relevance`.
+ *
+ * Validation rejects this condition in the following cases:
+ * - The entity declares no search fields (see `syncplane.v1.SearchSpec`).
+ * - Used inside `any()`, because the scope is the row rather than an element.
+ * - Used inside the target scope of a `RelCond`, unless the target entity
+ *   declares search fields.
  *
  * @generated from message syncplane.v1.MatchCond
  */
@@ -427,22 +443,28 @@ export const ConditionSchema: GenMessage<Condition> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 10);
 
 /**
- * QueryGroup is one group of a grouped read: the value its rows share at the
- * grouping path, and what the aggregate computed over them.
+ * Represents a single group from a grouped read.
+ *
+ * Contains the value shared by rows at the grouping path and the result of the
+ * aggregate computation for that group.
  *
  * @generated from message syncplane.v1.QueryGroup
  */
 export type QueryGroup = Message<"syncplane.v1.QueryGroup"> & {
   /**
-   * The shared value, absent for the group of rows that hold no value at the
-   * path — a group of its own, ordered last.
+   * Shared value for rows in this group.
+   *
+   * This field is unset for the group of rows that have no value at the
+   * path. That group forms its own distinct group and orders last.
    *
    * @generated from field: syncplane.v1.QueryValue value = 1;
    */
   value?: QueryValue | undefined;
 
   /**
-   * Matching rows in the group; 0 under AGGREGATE_OP_DISTINCT.
+   * Number of matching rows in the group.
+   *
+   * This value is `0` when using `AGGREGATE_OP_DISTINCT`.
    *
    * @generated from field: uint64 count = 2;
    */
@@ -457,27 +479,33 @@ export const QueryGroupSchema: GenMessage<QueryGroup> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_query, 11);
 
 /**
- * QueryFacet is one axis of a row query's facets: on the request, the path
- * to count the match set by; on the response, that path echoed with the
- * groups it produced. Facets ride on QueryRequest.facets and come back in
- * QueryResponse.facets in the same order.
+ * Defines one facet axis for a row query.
+ *
+ * In a request, `QueryFacet` specifies the path used to group and count
+ * matches. In a response, it echoes the path along with the resulting groups.
+ * Facets are supplied in `QueryRequest.facets` and returned in
+ * `QueryResponse.facets` in the same order.
  *
  * @generated from message syncplane.v1.QueryFacet
  */
 export type QueryFacet = Message<"syncplane.v1.QueryFacet"> & {
   /**
-   * Path from the entity root, one field name per element, exactly as
-   * QueryRequest.group_by names one. The same leaves are accepted: a
-   * comparable scalar, or a repeated scalar, which counts per element.
+   * Path from the entity root, specified as one field name per element.
+   *
+   * Matches the format of `QueryRequest.group_by`. Supported leaf fields
+   * include comparable scalars and repeated scalars. Repeated scalars count
+   * once per element.
    *
    * @generated from field: repeated string path = 1;
    */
   path: string[];
 
   /**
-   * The groups the match set produced at `path`, each with the number of
-   * matching rows holding that value, in ascending value order with the
-   * no-value group last — QueryResponse.groups' order. Empty on a request.
+   * Groups produced by the match set at `path`.
+   *
+   * Each group contains the count of matching rows that hold that value.
+   * Groups are ordered by value in ascending order, with the group for unset
+   * values placed last. This field is empty in a request.
    *
    * @generated from field: repeated syncplane.v1.QueryGroup groups = 2;
    */
@@ -506,13 +534,14 @@ export type OrderKey = Message<"syncplane.v1.OrderKey"> & {
   dir: Direction;
 
   /**
-   * Order by how well each row satisfies the predicate's match condition
-   * instead of by a field: ascending is best match first. Requires `path`
-   * empty and the predicate to contain exactly one match condition — the
-   * rank is that condition's, computed the same way on both sides from the
-   * row alone, so it never depends on what else is in the store. Rows that
-   * rank equally fall through to the next key and finally the row key, like
-   * any other ordering.
+   * Orders rows by how well each row satisfies the predicate's match
+   * condition rather than by a field value.
+   *
+   * When `true`, ascending order places the best match first. Using this
+   * option requires `path` to be empty and the query predicate to contain
+   * exactly one match condition. The relevance rank is computed from the row
+   * alone, without depending on other store contents. Rows with equal rank
+   * fall through to subsequent order keys and ultimately the row key.
    *
    * @generated from field: bool relevance = 3;
    */
@@ -692,7 +721,7 @@ export const DirectionSchema: GenEnum<Direction> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_query, 4);
 
 /**
- * AggregateOp is what a grouped read computes for each group it finds.
+ * Defines the aggregate operation computed for each group in a grouped read.
  *
  * @generated from enum syncplane.v1.AggregateOp
  */
@@ -703,24 +732,26 @@ export enum AggregateOp {
   UNSPECIFIED = 0,
 
   /**
-   * The number of matching rows in each group.
+   * Counts the number of matching rows in each group.
    *
    * @generated from enum value: AGGREGATE_OP_COUNT = 1;
    */
   COUNT = 1,
 
   /**
-   * The group values alone. No row is read, so no count is reported.
+   * Returns the distinct group values without reading rows or reporting
+   * counts.
    *
    * @generated from enum value: AGGREGATE_OP_DISTINCT = 2;
    */
   DISTINCT = 2,
 
   /**
-   * The first rows of each group, in order_by order — a board column's
-   * preview, the top item of every project. Answered in
-   * QueryResponse.row_groups rather than in `groups`, since a group of rows
-   * is a different shape from a group of numbers.
+   * Returns the first rows of each group in `order_by` order, such as a
+   * board column preview or the top item of each project.
+   *
+   * Results return in `QueryResponse.row_groups` rather than `groups`
+   * because row groups have a different shape from numeric counts.
    *
    * @generated from enum value: AGGREGATE_OP_ROWS = 3;
    */

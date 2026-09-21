@@ -15,45 +15,55 @@ export const file_syncplane_v1_mutation: GenFile = /*@__PURE__*/
   fileDesc("ChtzeW5jcGxhbmUvdjEvbXV0YXRpb24ucHJvdG8SDHN5bmNwbGFuZS52MSLHAQoITXV0YXRpb24SEQoJY2xpZW50X2lkGAEgASgJEhMKC211dGF0aW9uX2lkGAIgASgEEioKBGNydWQYAyABKAsyGi5zeW5jcGxhbmUudjEuQ3J1ZE11dGF0aW9uSAASLgoGY3VzdG9tGAQgASgLMhwuc3luY3BsYW5lLnYxLkN1c3RvbU11dGF0aW9uSAASLAoFYmF0Y2gYBSABKAsyGy5zeW5jcGxhbmUudjEuQmF0Y2hNdXRhdGlvbkgAQgkKB3BheWxvYWQiwAEKDENydWRNdXRhdGlvbhIOCgZlbnRpdHkYASABKAkSCwoDa2V5GAIgASgJEiAKAm9wGAMgASgOMhQuc3luY3BsYW5lLnYxLkNydWRPcBINCgV2YWx1ZRgEIAEoDBIuCgpmaWVsZF9tYXNrGAUgASgLMhouZ29vZ2xlLnByb3RvYnVmLkZpZWxkTWFzaxIdChBleHBlY3RlZF92ZXJzaW9uGAYgASgESACIAQFCEwoRX2V4cGVjdGVkX3ZlcnNpb24iPgoNQmF0Y2hNdXRhdGlvbhItCgltdXRhdGlvbnMYASADKAsyGi5zeW5jcGxhbmUudjEuQ3J1ZE11dGF0aW9uIkIKDkN1c3RvbU11dGF0aW9uEgwKBG5hbWUYASABKAkSIgoEYXJncxgCIAEoCzIULmdvb2dsZS5wcm90b2J1Zi5BbnkqWQoGQ3J1ZE9wEhcKE0NSVURfT1BfVU5TUEVDSUZJRUQQABIPCgtDUlVEX09QX1BVVBABEhEKDUNSVURfT1BfUEFUQ0gQAhISCg5DUlVEX09QX0RFTEVURRADQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_any, file_google_protobuf_field_mask]);
 
 /**
- * Mutation is the envelope for a single client-originated write.
+ * Encloses a single client-originated write operation.
  *
  * @generated from message syncplane.v1.Mutation
  */
 export type Mutation = Message<"syncplane.v1.Mutation"> & {
   /**
-   * Stable identifier for the originating client (device/tab).
+   * Identifies the originating client, such as a device or browser tab. Use
+   * a stable identifier across requests from the same client.
    *
    * @generated from field: string client_id = 1;
    */
   clientId: string;
 
   /**
-   * Per-client monotonically increasing id, starting at 1. The server tracks
-   * the last applied id per client for idempotency and gap detection.
+   * Tracks sequence order with a monotonically increasing ID for the client,
+   * starting at 1. The server tracks the last applied ID per client for
+   * idempotency and gap detection.
    *
    * @generated from field: uint64 mutation_id = 2;
    */
   mutationId: bigint;
 
   /**
-   * Extensible payload: future variants (e.g. CRDT deltas) get new branches.
+   * Contains the mutation payload. Future payload variants, such as
+   * conflict-free replicated data type (CRDT) deltas, add new branches to
+   * this union.
    *
    * @generated from oneof syncplane.v1.Mutation.payload
    */
   payload: {
     /**
+     * Applies a single CRUD write operation against an entity.
+     *
      * @generated from field: syncplane.v1.CrudMutation crud = 3;
      */
     value: CrudMutation;
     case: "crud";
   } | {
     /**
+     * Applies a named custom mutator registered on the server.
+     *
      * @generated from field: syncplane.v1.CustomMutation custom = 4;
      */
     value: CustomMutation;
     case: "custom";
   } | {
     /**
+     * Applies multiple CRUD write operations as one atomic transaction.
+     *
      * @generated from field: syncplane.v1.BatchMutation batch = 5;
      */
     value: BatchMutation;
@@ -69,69 +79,80 @@ export const MutationSchema: GenMessage<Mutation> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_mutation, 0);
 
 /**
- * CrudMutation is a generated CRUD write against a registered entity.
- * Because the server linearizes mutations per workspace, applying PATCH
- * field masks in sequence order yields per-field LWW semantics without
- * per-field timestamps.
+ * Represents a generated CRUD write operation against a registered entity.
+ *
+ * Because the server linearizes mutations per workspace, applying `PATCH`
+ * field masks in sequence order provides per-field last-write-wins (LWW)
+ * semantics without per-field timestamps.
  *
  * @generated from message syncplane.v1.CrudMutation
  */
 export type CrudMutation = Message<"syncplane.v1.CrudMutation"> & {
   /**
-   * Entity name as declared via EntityOptions.
+   * Names the target entity as declared in `EntityOptions`.
    *
    * @generated from field: string entity = 1;
    */
   entity: string;
 
   /**
-   * Row key (derived from EntityOptions.key_fields).
+   * Specifies the row key, derived from `EntityOptions.key_fields`.
    *
    * @generated from field: string key = 2;
    */
   key: string;
 
   /**
+   * Specifies the CRUD operation type to execute.
+   *
    * @generated from field: syncplane.v1.CrudOp op = 3;
    */
   op: CrudOp;
 
   /**
-   * Serialized entity message. Empty for DELETE. For PATCH only the fields
-   * named in field_mask are read.
+   * Contains the serialized entity message. Leave this field empty for
+   * `CRUD_OP_DELETE`. For `CRUD_OP_PATCH`, the server reads only the fields
+   * named in `field_mask`.
    *
-   * One exception to "this is a whole value": a collaborative-text field
-   * (FieldBehavior.text) named outright by a PATCH mask may carry a
-   * delta-state fragment instead of a whole document — only what the writer
-   * holds beyond the state the server last confirmed to it. The server
-   * unfolds it through the same merge, so the stored row and everything read
-   * out of it are unaffected. A fragment the server cannot apply is rejected
-   * with `text_full_state_required` and the client re-sends the whole
-   * document; full state is always accepted, so nothing has to negotiate.
-   * Anywhere else — a PUT, a field the mask does not name — delta state is
-   * refused, because the value would be copied through without merging.
+   * As an exception to full-value serialization, a collaborative-text field
+   * (`FieldBehavior.text`) named directly in a `PATCH` field mask may carry
+   * a delta-state fragment instead of the complete document. This fragment
+   * contains only the changes you hold beyond the state that the server last
+   * confirmed to you. The server unfolds the fragment through the merge
+   * process without altering stored row reads. If the server cannot apply
+   * the fragment, it rejects the mutation with `text_full_state_required`,
+   * and your client must resend the complete document. The server always
+   * accepts full state. The server rejects delta state in all other cases,
+   * including `CRUD_OP_PUT` or fields omitted from `field_mask`, because
+   * values in those operations copy directly without merging.
    *
    * @generated from field: bytes value = 4;
    */
   value: Uint8Array;
 
   /**
-   * PATCH only: the set of fields to merge. This mask IS the LWW mechanism.
+   * Lists the fields to merge for a `CRUD_OP_PATCH` operation. This mask
+   * serves as the last-write-wins (LWW) mechanism. Unset for other
+   * operations.
    *
    * @generated from field: google.protobuf.FieldMask field_mask = 5;
    */
   fieldMask?: FieldMask | undefined;
 
   /**
-   * Optional compare-and-swap guard. When set, the server applies this
-   * mutation only if the target row's current version equals this value,
-   * otherwise it rejects with `conflict` (an ack: the client rolls the
-   * optimistic edit back and fires onMutationRejected). The version is the
-   * workspace sequence that last wrote the row (RowChange.version, surfaced
-   * client-side as Row.version); an absent or deleted row reads as version 0,
-   * so expected_version = 0 means "apply only if the row does not exist".
-   * Opt-in escape from silent per-field LWW for the cases where a concurrent
-   * edit must be noticed rather than merged.
+   * Sets an optional compare-and-swap guard. When set, the server applies
+   * this mutation only if the target row's current version matches this
+   * value. If the versions do not match, the server rejects the mutation
+   * with `conflict`. On rejection, the client rolls back the optimistic edit
+   * and triggers `onMutationRejected`.
+   *
+   * The version corresponds to the workspace sequence that last wrote the
+   * row (`RowChange.version`, exposed on the client as `Row.version`). An
+   * absent or deleted row has a version of `0`, so setting
+   * `expected_version` to `0` means apply only if the row does not exist.
+   * Use this field to opt out of silent per-field last-write-wins (LWW)
+   * resolution when you need to detect concurrent edits instead of merging
+   * them.
    *
    * @generated from field: optional uint64 expected_version = 6;
    */
@@ -146,18 +167,24 @@ export const CrudMutationSchema: GenMessage<CrudMutation> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_mutation, 1);
 
 /**
- * BatchMutation applies several CRUD writes as one atomic unit. The whole
- * batch shares the envelope's single mutation_id and one workspace sequence,
- * applies inside one server savepoint, and commits all-or-nothing: any
- * sub-mutation rejected rolls the entire batch back and yields one rejection.
- * Sub-mutations apply in order, so a later op observes earlier ops in the
- * same batch (e.g. PATCH after PUT of the same key). A batch must be
- * non-empty.
+ * Applies multiple CRUD write operations as one atomic unit.
+ *
+ * The entire batch shares the single `mutation_id` of the envelope and a
+ * single workspace sequence. The server applies operations inside one
+ * savepoint and commits them all or nothing. If the server rejects any
+ * sub-mutation, it rolls back the entire batch and returns a single rejection.
+ *
+ * Sub-mutations apply in order, so a later operation observes earlier
+ * operations in the same batch, for example a `CRUD_OP_PATCH` after a
+ * `CRUD_OP_PUT` on the same key. A batch must not be empty.
  *
  * @generated from message syncplane.v1.BatchMutation
  */
 export type BatchMutation = Message<"syncplane.v1.BatchMutation"> & {
   /**
+   * Contains the ordered list of CRUD mutations to execute atomically. This
+   * list must not be empty.
+   *
    * @generated from field: repeated syncplane.v1.CrudMutation mutations = 1;
    */
   mutations: CrudMutation[];
@@ -171,19 +198,23 @@ export const BatchMutationSchema: GenMessage<BatchMutation> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_mutation, 2);
 
 /**
- * CustomMutation invokes a named server-registered mutator. Clients may run
- * a best-effort local mirror for optimism; the server is authoritative and
- * divergence self-heals on rebase.
+ * Invokes a named mutator registered on the server. Clients may run a
+ * best-effort local mirror for optimistic updates. The server remains
+ * authoritative, and any divergence resolves during a rebase.
  *
  * @generated from message syncplane.v1.CustomMutation
  */
 export type CustomMutation = Message<"syncplane.v1.CustomMutation"> & {
   /**
+   * Specifies the registered name of the custom mutator to invoke.
+   *
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
+   * Contains the serialized arguments for the custom mutator.
+   *
    * @generated from field: google.protobuf.Any args = 2;
    */
   args?: Any | undefined;
@@ -197,25 +228,36 @@ export const CustomMutationSchema: GenMessage<CustomMutation> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_mutation, 3);
 
 /**
+ * Specifies the type of CRUD write operation to perform.
+ *
  * @generated from enum syncplane.v1.CrudOp
  */
 export enum CrudOp {
   /**
+   * Default value. This value is unused and reserved to catch uninitialized
+   * fields.
+   *
    * @generated from enum value: CRUD_OP_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
+   * Creates or replaces an entire entity.
+   *
    * @generated from enum value: CRUD_OP_PUT = 1;
    */
   PUT = 1,
 
   /**
+   * Updates specific fields in an entity using a field mask.
+   *
    * @generated from enum value: CRUD_OP_PATCH = 2;
    */
   PATCH = 2,
 
   /**
+   * Deletes an entity by its key.
+   *
    * @generated from enum value: CRUD_OP_DELETE = 3;
    */
   DELETE = 3,

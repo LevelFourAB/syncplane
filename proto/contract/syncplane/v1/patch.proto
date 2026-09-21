@@ -19,7 +19,16 @@ option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;sy
 // cleared in RowChange.value, so a row whose document dwarfs its other fields
 // no longer re-ships the document on every unrelated write.
 message FieldDelta {
+	// The dotted path of the document. This path is the Protocol Buffers path
+	// for a field on a singular chain. When the path crosses a keyed message
+	// list or map, the element key is inserted into the path, such as
+	// `notes.<key>.body`. This format matches a `PATCH` field mask, with one
+	// entry per element.
 	string field = 1;
+	// The text delta-state fragment in format version `0x02` to apply to the
+	// confirmed bytes of the field. An empty value indicates that the field
+	// did not change over the span and you keep the existing state. The field
+	// is always cleared in `RowChange.value`.
 	bytes fragment = 2;
 }
 
@@ -28,11 +37,14 @@ message FieldDelta {
 // fields named in text_deltas, which the recipient reconstructs from state it
 // already holds.
 message RowChange {
+	// The name of the entity for this row.
 	string entity = 1;
+	// The key that identifies this row within the entity.
 	string key = 2;
 	// Workspace sequence number assigned to the mutation that last wrote this
 	// row. Monotonic per workspace.
 	uint64 version = 3;
+	// The row content or deletion status.
 	oneof body {
 		// Serialized entity message. Full merged snapshot, EXCEPT that every
 		// field named in text_deltas is cleared.
@@ -51,8 +63,9 @@ message RowChange {
 	repeated FieldDelta text_deltas = 6;
 }
 
-// Patch is an ordered set of row changes to apply to confirmed state.
+// Represents an ordered set of row changes to apply to confirmed state.
 message Patch {
+	// The ordered list of row changes to apply.
 	repeated RowChange changes = 1;
 	// Entities whose entire confirmed state the client must drop BEFORE
 	// applying changes. Sent when an entity leaves the subscription set during
@@ -63,16 +76,18 @@ message Patch {
 // Subscription scopes what a client syncs. An empty subscription list means
 // full sync; a subscription without a predicate covers the whole entity.
 message Subscription {
+	// The name of the entity to synchronize.
 	string entity = 1;
 	// Rows of the entity matching this predicate sync; absent = whole entity.
 	Condition predicate = 2;
-	// Reference paths to follow from matched rows, expanding the synced set to
-	// a bounded-depth forward/reverse closure (key point-lookups forward,
-	// predicate scans reverse). Empty ⇒ today's static per-entity scope.
-	// Deliberately EXCLUDED from sub_hash: a follow-spec change is reconciled
-	// by the closure diff (Cursor.closure), not a base-scope delta resync.
-	// Every closure member is still subject to the same read filter as a base
-	// row — following a ref is never a permission-escalation path.
+	// Reference paths to follow from matched rows. Following references
+	// expands the synchronized set to a bounded-depth forward or reverse
+	// closure, using key point-lookups forward and predicate scans in reverse.
+	// When unset, synchronization remains scoped to the base entity. Changes
+	// to this field are excluded from `sub_hash` and are reconciled through
+	// closure diffs (`Cursor.closure`) rather than a base-scope delta
+	// resynchronization. Every closure member remains subject to the same read
+	// filter as a base row; following a reference never escalates permissions.
 	FollowSpec follow = 3;
 	// Bounds the synced set to the first `limit` rows of this subscription's
 	// predicate match under `order_by` — so the working set is a policy choice
@@ -99,6 +114,8 @@ message Subscription {
 // meaning and duplicates are folded, so two sets with the same members hash
 // alike.
 message KeySet {
+	// The list of row keys. Key order does not matter and duplicate keys are
+	// folded.
 	repeated string keys = 1;
 }
 
@@ -130,13 +147,17 @@ message Window {
 // emitter resolves direction from the ref graph). Used by both query-time
 // hydration (include) and reference-following subscriptions (follow).
 message RefPath {
+	// The ordered list of relation segments to traverse.
 	repeated string segments = 1;
 }
 
-// FollowSpec is one shared shape driving include (client-local hydration) and
-// follow (subscription scope). It is a set of ref paths walked to a bounded
-// depth. depth 0 is treated as 1 (follow each path one hop).
+// Specifies reference paths to follow to a bounded depth. This message
+// configures client-local hydration (`include`) and subscription scoping
+// (`follow`). A `depth` of `0` is treated as `1` (one hop along each path).
 message FollowSpec {
+	// The reference paths to traverse.
 	repeated RefPath paths = 1;
+	// The maximum number of hops to traverse along each path. A value of `0`
+	// is treated as `1` (one hop along each path).
 	uint32 depth = 2;
 }

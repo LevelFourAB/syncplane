@@ -41,15 +41,27 @@ const (
 
 // AdminServiceClient is a client for the syncplane.v1.AdminService service.
 type AdminServiceClient interface {
-	// Register ingests an app's serialized google.protobuf.FileDescriptorSet
-	// (the bytes the TS schema builder's defineSchema(...).toBinary()
-	// produces), persists it, and registers/evolves that app's entities so they
-	// serve full CRUD sync. Idempotent: an identical set is UNCHANGED, an
-	// additive evolution is UPDATED, a conflicting change is rejected.
+	// Registers or evolves an application's schema to serve full CRUD
+	// synchronization.
+	//
+	// Takes a serialized `google.protobuf.FileDescriptorSet`, persists it,
+	// and updates the application entities. This operation is idempotent:
+	//   - Registering an app that was not registered before returns
+	//     `REGISTER_STATUS_CREATED`.
+	//   - Submitting an additive evolution returns `REGISTER_STATUS_UPDATED`.
+	//   - Submitting an identical schema returns `REGISTER_STATUS_UNCHANGED`.
+	//
+	// The server rejects conflicting schema changes. If
+	// `expected_revision` is set and does not match the application's
+	// current revision, the server rejects the call with
+	// `FAILED_PRECONDITION`.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
-	// GetSchema returns an app's persisted descriptor set — "the server ships
-	// its schema", so a client can rebuild its descriptors from the server
-	// instead of importing the schema bundle.
+	// Retrieves the persisted descriptor set for an application.
+	//
+	// Clients can use this descriptor set to rebuild descriptors directly from
+	// the server instead of importing a schema bundle. If the application is
+	// unknown, the server returns a response with `found` set to `false` and
+	// an empty `descriptor_set`.
 	GetSchema(context.Context, *connect.Request[v1.GetSchemaRequest]) (*connect.Response[v1.GetSchemaResponse], error)
 }
 
@@ -97,15 +109,27 @@ func (c *adminServiceClient) GetSchema(ctx context.Context, req *connect.Request
 
 // AdminServiceHandler is an implementation of the syncplane.v1.AdminService service.
 type AdminServiceHandler interface {
-	// Register ingests an app's serialized google.protobuf.FileDescriptorSet
-	// (the bytes the TS schema builder's defineSchema(...).toBinary()
-	// produces), persists it, and registers/evolves that app's entities so they
-	// serve full CRUD sync. Idempotent: an identical set is UNCHANGED, an
-	// additive evolution is UPDATED, a conflicting change is rejected.
+	// Registers or evolves an application's schema to serve full CRUD
+	// synchronization.
+	//
+	// Takes a serialized `google.protobuf.FileDescriptorSet`, persists it,
+	// and updates the application entities. This operation is idempotent:
+	//   - Registering an app that was not registered before returns
+	//     `REGISTER_STATUS_CREATED`.
+	//   - Submitting an additive evolution returns `REGISTER_STATUS_UPDATED`.
+	//   - Submitting an identical schema returns `REGISTER_STATUS_UNCHANGED`.
+	//
+	// The server rejects conflicting schema changes. If
+	// `expected_revision` is set and does not match the application's
+	// current revision, the server rejects the call with
+	// `FAILED_PRECONDITION`.
 	Register(context.Context, *connect.Request[v1.RegisterRequest]) (*connect.Response[v1.RegisterResponse], error)
-	// GetSchema returns an app's persisted descriptor set — "the server ships
-	// its schema", so a client can rebuild its descriptors from the server
-	// instead of importing the schema bundle.
+	// Retrieves the persisted descriptor set for an application.
+	//
+	// Clients can use this descriptor set to rebuild descriptors directly from
+	// the server instead of importing a schema bundle. If the application is
+	// unknown, the server returns a response with `found` set to `false` and
+	// an empty `descriptor_set`.
 	GetSchema(context.Context, *connect.Request[v1.GetSchemaRequest]) (*connect.Response[v1.GetSchemaResponse], error)
 }
 

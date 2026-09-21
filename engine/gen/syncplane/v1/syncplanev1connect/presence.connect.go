@@ -41,25 +41,23 @@ const (
 
 // PresenceServiceClient is a client for the syncplane.v1.PresenceService service.
 type PresenceServiceClient interface {
-	// Watch streams the rooms of one session: a snapshot of each topic on join,
-	// then participant updates, departures and broadcast messages as they
-	// happen. The topic set is fixed for the life of the stream; changing it is
-	// a close and reopen.
+	// Streams presence updates and broadcast messages for a fixed set of
+	// topics.
 	//
-	// Delivery is at-most-once and unordered across topics. A frame the server
-	// could not hand over — a slow reader, a bus that dropped it — is gone, and
-	// nothing replays it. Presence heals anyway: every record is re-announced
-	// periodically by the node holding its session's stream, so a lost update
-	// is corrected within one announce interval. A broadcast message has no
-	// such backstop; an app that cannot lose one must write a row.
+	// The stream first sends a `RoomSnapshot` for each watched topic, followed
+	// by participant updates, departures, and broadcast messages as they
+	// occur. The set of watched topics is fixed for the lifetime of the
+	// stream. To change topics, close and reopen the stream.
+	//
+	// Delivery is at-most-once and unordered across topics. Dropped presence
+	// updates are corrected by periodic re-announcements, but dropped
+	// broadcast messages are not replayed.
 	Watch(context.Context, *connect.Request[v1.WatchRequest]) (*connect.ServerStreamForClient[v1.WatchResponse], error)
-	// Publish writes this session's soft state, sends broadcast messages, and
-	// announces departures. It is unary, so a publisher needs no stream — only
-	// a receiver does.
+	// Publishes presence state updates, broadcast messages, or departure
+	// notices for a session.
 	//
-	// The caller's identity is stamped by the server from the request
-	// principal. Nothing in the payload names who is publishing, because a
-	// client-asserted subject would make presence an impersonation channel.
+	// The server assigns the participant identity from the request principal.
+	// The request payload cannot specify or override the sender identity.
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
 }
 
@@ -107,25 +105,23 @@ func (c *presenceServiceClient) Publish(ctx context.Context, req *connect.Reques
 
 // PresenceServiceHandler is an implementation of the syncplane.v1.PresenceService service.
 type PresenceServiceHandler interface {
-	// Watch streams the rooms of one session: a snapshot of each topic on join,
-	// then participant updates, departures and broadcast messages as they
-	// happen. The topic set is fixed for the life of the stream; changing it is
-	// a close and reopen.
+	// Streams presence updates and broadcast messages for a fixed set of
+	// topics.
 	//
-	// Delivery is at-most-once and unordered across topics. A frame the server
-	// could not hand over — a slow reader, a bus that dropped it — is gone, and
-	// nothing replays it. Presence heals anyway: every record is re-announced
-	// periodically by the node holding its session's stream, so a lost update
-	// is corrected within one announce interval. A broadcast message has no
-	// such backstop; an app that cannot lose one must write a row.
+	// The stream first sends a `RoomSnapshot` for each watched topic, followed
+	// by participant updates, departures, and broadcast messages as they
+	// occur. The set of watched topics is fixed for the lifetime of the
+	// stream. To change topics, close and reopen the stream.
+	//
+	// Delivery is at-most-once and unordered across topics. Dropped presence
+	// updates are corrected by periodic re-announcements, but dropped
+	// broadcast messages are not replayed.
 	Watch(context.Context, *connect.Request[v1.WatchRequest], *connect.ServerStream[v1.WatchResponse]) error
-	// Publish writes this session's soft state, sends broadcast messages, and
-	// announces departures. It is unary, so a publisher needs no stream — only
-	// a receiver does.
+	// Publishes presence state updates, broadcast messages, or departure
+	// notices for a session.
 	//
-	// The caller's identity is stamped by the server from the request
-	// principal. Nothing in the payload names who is publishing, because a
-	// client-asserted subject would make presence an impersonation channel.
+	// The server assigns the participant identity from the request principal.
+	// The request payload cannot specify or override the sender identity.
 	Publish(context.Context, *connect.Request[v1.PublishRequest]) (*connect.Response[v1.PublishResponse], error)
 }
 

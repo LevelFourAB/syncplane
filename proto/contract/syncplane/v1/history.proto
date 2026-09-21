@@ -8,22 +8,25 @@ import "syncplane/v1/options.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
 
-// FieldHistory is one recorded field change: what a row's changed fields held
-// BEFORE an editing session, appended by the server whenever a write of an
-// entity carrying (syncplane.v1.entity).history moves one of them.
+// Records the state of a row's changed fields before an editing session began.
 //
-// A session is one actor's run of writes to one row, folded into a single
-// record for as long as it stays open (server.WithHistorySession). A row edited
-// once has a record describing that write; a row typed into for a minute has
-// one record describing the minute. See seq/through_seq.
+// The server appends a record whenever a write to an entity configured with
+// `(syncplane.v1.entity).history` modifies one of its fields.
 //
-// Every source entity's records land in this one entity, so `prior` is bytes
-// rather than a typed message: decode it as the source entity type.
+// A session is one actor's run of writes to a single row, folded into one
+// record while the session remains open through `server.WithHistorySession`. A
+// row edited once produces a record for that single write. A row edited
+// continuously for a minute produces one record that covers that minute. For
+// details on sequence ranges, see `seq` and `through_seq`.
 //
-// The engine registers it automatically, and only once some entity opts in. It
-// is server_only, so no client ever syncs it; read it through the Query RPC
-// (queryServer in the TypeScript client), which reaches every registered entity
-// whether or not it syncs.
+// Records for all source entities store their changes in this message type.
+// The `prior` field contains serialized bytes rather than a typed message. To
+// read `prior`, decode it as the source entity type.
+//
+// The engine registers `FieldHistory` automatically when an entity opts in.
+// The entity is `server_only`, so clients do not sync it directly. To read
+// records, call the `Query` RPC (or `queryServer` in the TypeScript client),
+// which queries any registered entity.
 message FieldHistory {
 	option (syncplane.v1.entity) = {
 		name: "syncplane_field_history"
@@ -42,100 +45,128 @@ message FieldHistory {
 		}
 	};
 
-	// The entity whose row changed, as its wire name.
+	// The wire name of the entity whose row changed.
 	string source_entity = 1;
-	// The row key that changed, in the source entity's keyspace.
+	// The key of the row that changed, in the source entity keyspace.
 	string source_key = 2;
-	// The workspace sequence this record's before-state precedes: `prior` is
-	// what the masked fields held immediately before the write at `seq`.
+	// The workspace sequence number of the write that opened the session.
 	//
-	// It is the sequence of the write that OPENED the session (see
-	// through_seq). A record is first written at that same sequence, so a
-	// change-feed reader sees the record beside the write that triggered it.
-	// Later writes folded into the session rewrite the record where it stands,
-	// at their own sequence, leaving this field alone: a record's storage
-	// version therefore runs ahead of its `seq` once anything has folded in.
+	// The `prior` field holds what the masked fields contained immediately
+	// before the write at `seq`. The server writes the initial record at this
+	// sequence number, allowing a change-feed reader to observe the record
+	// alongside the write that triggered it.
+	//
+	// When subsequent writes fold into an open session, the server rewrites
+	// the record in place at their sequence numbers but does not change `seq`.
+	// Once additional writes fold into the record, the storage version of the
+	// record runs ahead of `seq`. For the end of the session range, see
+	// `through_seq`.
 	uint64 seq = 3;
-	// The sequence of the LAST write folded into this record, equal to `seq`
-	// until a second one folds in. The record describes the span
-	// [seq, through_seq]: `prior` is the state before it began, and no other
-	// record of this actor's session covers a sequence inside it.
+	// The workspace sequence number of the last write folded into this record.
 	//
-	// Two spans of one row may OVERLAP in a multi-node deployment, where which
-	// record a write folds into is tracked per node: a node that did not see
-	// the session's earlier writes opens a record of its own, and a node that
-	// did may then fold a later write into the earlier record, around it.
-	// Restoring from either is unaffected — a record's `prior` and `mask`
-	// describe the state before its own `seq` whatever else the span contains.
+	// This value equals `seq` until a second write folds into the session. The
+	// record covers the inclusive range `[seq, through_seq]`. The `prior`
+	// field reflects the state before the range began, and no other record for
+	// this actor session covers a sequence number within this range.
+	//
+	// In a multi-node deployment, record spans for the same row can overlap
+	// because nodes track open sessions independently. A node that did not
+	// process earlier writes opens a new record. A node that did process
+	// earlier writes can later fold a write into the earlier record.
+	// Overlapping spans do not affect restoration: `prior` and `mask` always
+	// describe the row state before `seq`.
 	uint64 through_seq = 4;
-	// How many writes folded into this record, counting the one that opened it.
-	// Always at least one.
+	// The number of writes folded into this record, including the write that
+	// opened the session.
+	//
+	// This count is always at least 1.
 	uint32 writes = 5;
-	// The row did not exist when the session began: this record marks its
-	// creation. `mask` and `prior` are empty, and a restore built from it
-	// patches nothing — render it as "created" rather than as a restorable
-	// state.
+	// Indicates that the row did not exist when the session began, marking its
+	// creation.
 	//
-	// It ABSORBS the rest of its session: nothing later gives a field an
-	// earlier value than "absent", so a write that folds in advances only
-	// through_seq and writes.
+	// When `true`, `mask` and `prior` are empty, and restoring from this
+	// record patches nothing. Display this record as "created" rather than as
+	// a restorable state.
 	//
-	// Only the engine sets it. A history filter may redact or drop a record but
-	// not restate this field, and the write fails if it does.
+	// A creation record absorbs the rest of its session. Because no subsequent
+	// write can produce an earlier field value than "absent", writes that fold
+	// in advance only `through_seq` and `writes`.
+	//
+	// Only the engine sets this field. A history filter can redact or drop a
+	// record, but it cannot modify `row_created`. The write fails if a filter
+	// modifies this field.
 	bool row_created = 6;
-	// The fields this session CHANGED, as dotted proto paths into the source
-	// entity — the mask to hand back to a PATCH to restore them, and the mask
-	// `prior` is populated under. It is the UNION over the session: a write
-	// that folds in contributes the fields no earlier write in the session
-	// already covered. A contributed path may be an ANCESTOR of a recorded one
-	// ("settings" over "settings.color"), and then it replaces it — the wider
-	// path names the whole subtree, and `prior` keeps the value the narrower
-	// one recorded.
+	// The fields changed during this session, formatted as dotted Protocol
+	// Buffers paths into the source entity.
 	//
-	// It names only fields whose stored value the write actually moved: a PATCH
-	// narrows its effective mask, a PUT the entity's capture set, and a write
-	// that moved nothing produces no record at all. Narrowing is per top-level
-	// field, the granularity the engine's per-field LWW resolves at (a oneof
-	// counts as one field, named by its group), so two masked paths under one
-	// field stand or fall together.
+	// Use this field mask when sending a `PATCH` request to restore the
+	// fields. The `prior` payload contains values for these paths.
 	//
-	// It is empty on a row_created record, and a history filter that redacts
-	// every path empties it on any record: read row_created to tell a creation
-	// from a redaction.
+	// The mask represents the union of changes across the session:
+	// - A write folded into the session adds fields that no earlier write
+	//   covered.
+	// - If a new path is an ancestor of an existing path (for example,
+	//   `settings` over `settings.color`), the ancestor path replaces the
+	//   narrower path. The wider path names the entire subtree, and `prior`
+	//   retains the value recorded by the narrower path.
+	//
+	// The mask includes only fields whose stored values actually changed. A
+	// `PATCH` request narrows its effective mask, and a `PUT` request narrows
+	// the capture set of the entity. A write that changes nothing creates no
+	// history record. Narrowing applies per top-level field, matching the
+	// granularity of the engine's last-write-wins (LWW) conflict resolution. A
+	// `oneof` counts as a single field named by its group name, so multiple
+	// masked paths within one field succeed or fail together.
+	//
+	// This field is empty when `row_created` is `true`. A history filter that
+	// redacts every path also empties this mask. To distinguish a row creation
+	// from a redacted record, check `row_created`.
 	google.protobuf.FieldMask mask = 7;
-	// The source entity message, serialized, carrying its key fields plus the
-	// masked fields as they stood before the write — and nothing else.
+	// Serialized bytes of the source entity message before the write occurred.
 	//
-	// Restore from it by decoding it as the source entity type and PATCHing the
-	// result under `mask`. Empty on a row_created record.
+	// The payload contains the entity key fields and the fields listed in
+	// `mask`, with all other fields omitted. To restore the row state, decode
+	// this payload as the source entity type and send a `PATCH` request using
+	// `mask`. This field is empty when `row_created` is `true`.
 	//
-	// A collaborative-text field holds a PLAIN-STRING VALUE rather than a
-	// document: the text the field read as, tagged so a reader can tell the two
-	// forms apart. Read it with the plain-text read path, which takes either
-	// (text.PlainText in Go, plainTextOf from the TypeScript client); the
-	// document decoder refuses it. Restoring resolves it into edits against the
-	// live document under the restoring writer's own identity, which is why the
-	// text is recorded rather than the document — the identity belongs to
-	// whoever restores, not to the server that captured.
+	// Collaborative-text fields contain plain-string values rather than full
+	// documents. The string stores the text as read at capture time, tagged so
+	// a reader can distinguish plain text from a document. Read these fields
+	// using the plain-text helper (`text.PlainText` in Go or `plainTextOf` in
+	// TypeScript); the document decoder rejects them. During a restore, the
+	// engine converts the text into edits against the live document under the
+	// identity of the writer performing the restore. The server records plain
+	// text rather than the original document so that the edits reflect the
+	// restorer's identity instead of the capture server.
 	//
-	// Marks do not survive a restore. A restored span is re-inserted text, so
-	// formatting anchored to the old runs is not reapplied.
+	// Marks do not survive a restore. Restoring re-inserts text as new
+	// content, so formatting anchored to earlier runs is not reapplied.
 	bytes prior = 8;
-	// Who made the write, copied from the row's actor at capture time (see the
-	// engine's storage.Actor). actor_subject is the verified caller, empty when
-	// no authenticated caller made the write. actor_system is the label a write
-	// made under the engine's trusted bypass gave itself — an operator's label,
-	// never an identity — and is empty exactly when a caller made the write.
-	// Both set means a bypass ran under that caller's request.
+	// The verified caller identity that performed the write.
 	//
-	// One session belongs to one actor — a write by anyone else opens its own
-	// record rather than folding — so this attributes the whole span, not only
-	// the write that opened it.
+	// The engine copies this value from `storage.Actor` at capture time. This
+	// field is empty when unauthenticated callers perform writes. If both
+	// `actor_subject` and `actor_system` are set, a trusted bypass ran during
+	// a request by that caller.
+	//
+	// Each session belongs to a single actor. A write by any other actor opens
+	// a new record instead of folding into the current session. This field
+	// attributes the entire session span, not just the write that opened it.
 	string actor_subject = 9;
+	// The operator label of a write executed under the engine's trusted
+	// bypass.
+	//
+	// This value is an operator label rather than a caller identity. It is
+	// empty when an authenticated or unauthenticated caller performs the write
+	// directly. When both `actor_system` and `actor_subject` are set, the
+	// bypass ran during a request on behalf of that caller.
 	string actor_system = 12;
-	// Server wall clock when the session OPENED, for display. It is NOT an
-	// ordering: only `seq` orders writes, and two records may share a clock
-	// reading. Folding a later write in leaves it alone, so it stays the moment
-	// the recorded before-state stopped being true.
+	// The server wall-clock time when the session opened, intended for
+	// display.
+	//
+	// This timestamp does not define the ordering of writes; use `seq` to
+	// order records. Two records can share the same timestamp. Folding
+	// subsequent writes into the session does not update `recorded_at`,
+	// preserving the moment when the recorded before-state was modified.
 	google.protobuf.Timestamp recorded_at = 13;
 }

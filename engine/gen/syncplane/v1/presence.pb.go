@@ -22,9 +22,11 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// Specifies the reason why a topic was dropped from a watch stream.
 type TopicDropped_Reason int32
 
 const (
+	// Default value. The reason is unspecified.
 	TopicDropped_REASON_UNSPECIFIED TopicDropped_Reason = 0
 	// The join gate refused this caller, permanently: workspace access was
 	// revoked, the anchor row is no longer readable, or the app's room hook
@@ -76,28 +78,28 @@ func (TopicDropped_Reason) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_presence_proto_rawDescGZIP(), []int{5, 0}
 }
 
-// Topic addresses one room. It is scoped to a workspace — there are no
-// cross-workspace rooms — and is either anchored to a row or not.
+// Addresses one room. Scoped to a workspace and is either anchored to a
+// row or not.
 //
-// An ANCHORED topic (entity and key both set) inherits that row's read
-// permission: a caller is admitted only if the app's ReadFilter would let them
-// read the row. That is what keeps room membership from being a second
-// authorization surface an app has to remember to guard, and it is why a
-// cursor room on a document needs no policy of its own.
+// An anchored topic (entity and key both set) inherits that row's read
+// permission: a caller is admitted only if the app's ReadFilter would let
+// them read the row.
 //
-// An UNANCHORED topic (entity and key both empty) is gated on workspace access
-// alone, plus the app's own room hook if it installs one.
+// An unanchored topic (entity and key both empty) is gated on workspace
+// access alone plus the app's own room hook when it installs one.
 type Topic struct {
-	state       protoimpl.MessageState `protogen:"open.v1"`
-	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
-	// Names the room within the workspace. Free-form, subject to the room-name
-	// rule (see docs/reference/naming.md); two callers naming the same string
-	// are in the same room.
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The identifier of the workspace containing the room.
+	WorkspaceId string `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
+	// Names the room within the workspace. Free-form, but subject to the
+	// room-name rule in docs/reference/naming.md; two callers naming the
+	// same string are in the same room.
 	Name string `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
-	// The anchor's entity, or empty for an unanchored topic. Both entity and
-	// key must be set together.
+	// The entity name of the anchor row, or empty if the topic is unanchored.
+	// Set together with `key`.
 	Entity string `protobuf:"bytes,3,opt,name=entity,proto3" json:"entity,omitempty"`
-	// The anchor's row key. Both entity and key must be set together.
+	// The row key of the anchor row, or empty if the topic is unanchored. Set
+	// together with `entity`.
 	Key           string `protobuf:"bytes,4,opt,name=key,proto3" json:"key,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -161,30 +163,22 @@ func (x *Topic) GetKey() string {
 	return ""
 }
 
-// PresenceUpdate is one session's soft state in one room.
+// Contains a session's transient state within a single room.
 type PresenceUpdate struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// App-defined, opaque to the engine, and capped by MaxPresenceStateBytes.
-	// Empty is valid and means "here, with nothing to say" — the participant
-	// still appears in the room.
+	// The application-defined state payload, opaque to the engine, and
+	// capped by the server's `MaxPresenceStateBytes` limit, which defaults
+	// to 4 KiB. An empty state indicates presence with no additional
+	// payload.
 	State []byte `protobuf:"bytes,1,opt,name=state,proto3" json:"state,omitempty"`
-	// Orders two deliveries of the same session's state in the same topic.
-	// Minted by the publisher and monotonic per (session, topic); a
-	// re-announcement carries the revision the state was first published with.
-	// A recipient keeps the highest it has seen, so the bus may reorder or
-	// re-deliver without the roster flickering.
-	//
-	// Revisions from different sessions are never compared, and the engine
-	// never mints one.
+	// The monotonic revision number assigned by the publisher for this session
+	// and topic. Recipients discard updates with a lower revision than the
+	// highest revision received.
 	Revision uint64 `protobuf:"varint,2,opt,name=revision,proto3" json:"revision,omitempty"`
-	// The workspace sequence the state was authored against, as the publisher
-	// last saw it.
-	//
-	// Rooms are not synchronized with the data stream: a peer's cursor can name
-	// a row, or a position inside a collaborative-text field, that the
-	// recipient has not pulled yet. Carrying the authoring position is what
-	// lets a recipient tell "I am behind" from "this cursor is nonsense" and
-	// hold the state until it catches up. 0 means the publisher did not say.
+	// The workspace sequence number that the publisher was at when authoring
+	// this state. If 0, the publisher did not specify a sequence number.
+	// Recipients use this value to determine whether their local data stream
+	// needs to catch up.
 	Seq           uint64 `protobuf:"varint,3,opt,name=seq,proto3" json:"seq,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -250,7 +244,8 @@ type Participant struct {
 	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// Who is publishing, taken from the request principal at publish time.
 	// Empty when the publisher was unauthenticated. Never client-supplied.
-	Subject       string          `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	Subject string `protobuf:"bytes,2,opt,name=subject,proto3" json:"subject,omitempty"`
+	// The participant's transient presence state within the room.
 	Presence      *PresenceUpdate `protobuf:"bytes,3,opt,name=presence,proto3" json:"presence,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -443,8 +438,9 @@ func (x *RoomMessage) GetPayload() []byte {
 // topics, too many fronted sessions, an oversize payload — fails the whole RPC
 // with resource_exhausted instead, because the stream never opens.
 type TopicDropped struct {
-	state  protoimpl.MessageState `protogen:"open.v1"`
-	Reason TopicDropped_Reason    `protobuf:"varint,1,opt,name=reason,proto3,enum=syncplane.v1.TopicDropped_Reason" json:"reason,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The reason why the topic was dropped.
+	Reason TopicDropped_Reason `protobuf:"varint,1,opt,name=reason,proto3,enum=syncplane.v1.TopicDropped_Reason" json:"reason,omitempty"`
 	// Human-readable detail for logs. Never parse it; branch on reason.
 	Message       string `protobuf:"bytes,2,opt,name=message,proto3" json:"message,omitempty"`
 	unknownFields protoimpl.UnknownFields
@@ -495,6 +491,8 @@ func (x *TopicDropped) GetMessage() string {
 	return ""
 }
 
+// Request to watch presence updates and broadcast messages for a set of
+// topics.
 type WatchRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Identifies the watching session, and is the session a Publish on this
@@ -592,6 +590,8 @@ type WatchResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The topic this frame is about. Unset only on a heartbeat.
 	Topic *Topic `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	// The event payload received for the topic.
+	//
 	// Types that are valid to be assigned to Body:
 	//
 	//	*WatchResponse_Snapshot
@@ -760,7 +760,10 @@ func (*WatchResponse_Heartbeat) isWatchResponse_Body() {}
 // PublishItem is one write to one room.
 type PublishItem struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	Topic *Topic                 `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	// The topic to publish to.
+	Topic *Topic `protobuf:"bytes,1,opt,name=topic,proto3" json:"topic,omitempty"`
+	// The update, message, or departure notice to publish.
+	//
 	// Types that are valid to be assigned to Body:
 	//
 	//	*PublishItem_Presence
@@ -872,6 +875,8 @@ func (*PublishItem_Message) isPublishItem_Body() {}
 
 func (*PublishItem_Leave) isPublishItem_Body() {}
 
+// Request to publish presence updates, broadcast messages, or departure
+// notices for a session.
 type PublishRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The publishing session, as named on this account's Watch stream. A
@@ -929,6 +934,7 @@ func (x *PublishRequest) GetItems() []*PublishItem {
 	return nil
 }
 
+// Response containing publication timing parameters for the session.
 type PublishResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// How often a publisher holding no Watch stream must re-publish to keep its

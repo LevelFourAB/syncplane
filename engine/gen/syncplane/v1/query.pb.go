@@ -287,19 +287,21 @@ func (Direction) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{4}
 }
 
-// AggregateOp is what a grouped read computes for each group it finds.
+// Defines the aggregate operation computed for each group in a grouped read.
 type AggregateOp int32
 
 const (
 	AggregateOp_AGGREGATE_OP_UNSPECIFIED AggregateOp = 0
-	// The number of matching rows in each group.
+	// Counts the number of matching rows in each group.
 	AggregateOp_AGGREGATE_OP_COUNT AggregateOp = 1
-	// The group values alone. No row is read, so no count is reported.
+	// Returns the distinct group values without reading rows or reporting
+	// counts.
 	AggregateOp_AGGREGATE_OP_DISTINCT AggregateOp = 2
-	// The first rows of each group, in order_by order — a board column's
-	// preview, the top item of every project. Answered in
-	// QueryResponse.row_groups rather than in `groups`, since a group of rows
-	// is a different shape from a group of numbers.
+	// Returns the first rows of each group in `order_by` order, such as a
+	// board column preview or the top item of each project.
+	//
+	// Results return in `QueryResponse.row_groups` rather than `groups`
+	// because row groups have a different shape from numeric counts.
 	AggregateOp_AGGREGATE_OP_ROWS AggregateOp = 3
 )
 
@@ -346,9 +348,11 @@ func (AggregateOp) EnumDescriptor() ([]byte, []int) {
 	return file_syncplane_v1_query_proto_rawDescGZIP(), []int{5}
 }
 
-// QueryValue is a scalar literal in a condition. The branch preserves the
-// client-side kind: JS numbers travel as doubles, JS bigints as
-// sint64/uint64, so evaluation coercion rules match on both sides.
+// Holds a scalar literal value in a condition.
+//
+// The selected branch preserves the client-side type so evaluation coercion
+// rules match on both sides. JavaScript numbers travel as `double_value`, and
+// JavaScript bigints travel as `int_value` or `uint_value`.
 type QueryValue struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Kind:
@@ -462,7 +466,7 @@ type QueryValue_IntValue struct {
 }
 
 type QueryValue_UintValue struct {
-	// Used for bigints above the int64 range.
+	// Holds a JavaScript bigint that exceeds the `int64` range.
 	UintValue uint64 `protobuf:"varint,4,opt,name=uint_value,json=uintValue,proto3,oneof"`
 }
 
@@ -652,16 +656,21 @@ func (x *StrCond) GetValue() string {
 	return ""
 }
 
-// RepCond asks about a repeated field as a whole. Membership (HAS, HAS_ANY,
-// HAS_ALL) compares ELEMENTS, so it needs comparable ones: a repeated scalar,
-// or a repeated single-key reference, which both sides rewrite to an
-// ExistsCond over the target's key field before evaluating. Membership in a
-// repeated message list is spelled with ExistsCond instead.
+// Evaluates conditions against a repeated field as a whole.
+//
+// Membership operators (`HAS`, `HAS_ANY`, and `HAS_ALL`) compare elements. The
+// field must contain comparable elements: a repeated scalar or a repeated
+// single-key reference. Both sides rewrite a repeated single-key reference to
+// an `ExistsCond` over the target field's key before evaluating it. To test
+// membership in a repeated message list, use `ExistsCond` instead.
 type RepCond struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Path  []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
 	Op    RepOp                  `protobuf:"varint,2,opt,name=op,proto3,enum=syncplane.v1.RepOp" json:"op,omitempty"`
-	// HAS reads values[0]; HAS_ANY/HAS_ALL read all; IS_EMPTY reads none.
+	// Specifies the literal values to compare against the repeated field.
+	//
+	// `HAS` reads `values[0]`. `HAS_ANY` and `HAS_ALL` read all values in the
+	// list. `IS_EMPTY` reads no values.
 	Values        []*QueryValue `protobuf:"bytes,3,rep,name=values,proto3" json:"values,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -770,39 +779,44 @@ func (x *PresentCond) GetOp() PresentOp {
 	return PresentOp_PRESENT_OP_UNSPECIFIED
 }
 
-// ExistsCond matches a row when AT LEAST ONE element of a collection satisfies
-// `cond`. It is the only way to ask about the contents of message elements, and
-// the only condition whose sub-paths are relative to something other than the
-// row: `cond`'s paths resolve against the ELEMENT, so ["assignees"] + ["id"]
-// reads "some assignee's id".
+// Matches a row when at least one element of a collection satisfies `cond`.
 //
-// The element scope is explicit for a reason. Distributing the quantifier over
-// each condition instead — reading a bare path as "some element" — makes
-// and(items.sku == "A", items.qty > 3) mean "some item has sku A AND some
-// (possibly other) item has qty > 3", and once the conditions are separate
-// terms nothing records that they were meant to describe the same element.
+// This condition is the only way to query the contents of message elements. It
+// is also the only condition whose subpaths are relative to an element rather
+// than the row: paths in `cond` resolve against the element itself. For
+// example, a `path` of `["assignees"]` combined with a `cond` path of `["id"]`
+// evaluates as 'some assignee's id'.
 //
-// Two collections have elements this way:
+// The element scope is explicit to preserve correlation between conditions.
+// Distributing the quantifier across separate conditions—reading a bare path
+// as 'some element'—would make `and(items.sku == "A", items.qty > 3)` mean
+// 'some item has SKU A and some (possibly different) item has quantity > 3'.
+// Once conditions are split, they no longer record that they apply to the same
+// element.
 //
-//   - a repeated MESSAGE field, whose element is the message; and
-//   - a MAP, whose element is the ENTRY. The entry's two sides are addressed as
-//     `key` and `value` — the same two names an index component's `*` selector
-//     uses — so ["custom"] + and(key == "priority", value.number == 5) reads
-//     "some custom field named priority holds 5", and a sub-condition on
-//     `value` alone reads "SOME custom field holds 5" without saying which.
+// Two types of collections support element queries:
+//   - A repeated message field, where the element is the message.
+//   - A map, where the element is an entry. An entry uses the field names `key`
+//     and `value`, matching the index component `*` selector. For example,
+//     `["custom"]` with `and(key == "priority", value.number == 5)` means 'some
+//     custom field named priority holds 5'. A subcondition on `value` alone means
+//     'some custom field holds 5'.
 //
-// The map form is what answers "which field holds X" across keys, where
-// addressing one entry by key (["custom", "priority", "number"]) answers "does
-// THIS field hold X". Note that it is a predicate and not a projection: it says
-// that some entry matched, never which one — an app that needs the name reads
-// it off the row's map.
+// The map form evaluates queries across keys (such as 'which field holds X').
+// Addressing an entry directly by key (`["custom", "priority", "number"]`)
+// answers 'does this specific field hold X'. This condition is a predicate,
+// not a projection: it indicates whether an entry matched, but does not return
+// which entry matched. If your application needs the key name, read it from
+// the map on the row.
 type ExistsCond struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Path to a repeated message field or a map, from the row.
+	// Specifies the path from the row to a repeated message field or a map.
 	Path []string `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
-	// Evaluated against each element — each map ENTRY, for a map — with paths
-	// relative to it. An empty collection makes this false, like every
-	// condition on a missing value.
+	// Defines the condition to evaluate against each element, or against each
+	// entry in a map.
+	//
+	// Paths in this condition are relative to the element. Evaluates to
+	// `false` if the collection is empty.
 	Cond          *Condition `protobuf:"bytes,2,opt,name=cond,proto3" json:"cond,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -852,23 +866,24 @@ func (x *ExistsCond) GetCond() *Condition {
 	return nil
 }
 
-// RelCond matches a row when at least one row referenced through the ref
-// field at `path` exists and satisfies `cond` — a one-hop semi-join. `path`
-// names a forward reference field of the row's entity (singular or repeated);
-// `cond`'s paths are relative to the TARGET entity's row, the same scoping
-// precedent ExistsCond set. An unset to-one ref, an orphaned stub and a
-// tombstoned target all contribute nothing, so the condition is false for
-// them.
+// Matches a row when at least one referenced row at `path` exists and
+// satisfies `cond`.
 //
-// There is no target-entity field: both sides derive the target from their
-// ref graph, so the wire cannot claim a target the schema does not give the
-// field. A `rel` whose path is not a reference field is rejected in
-// validation, like every other malformed path. Nesting a rel inside a rel or
-// inside an exists is rejected too — one hop, scoped to the row.
+// This operation performs a one-hop semi-join. The `path` field names a
+// forward reference field on the entity, which can be singular or repeated.
+// Paths in `cond` are relative to the target entity's row. The condition
+// evaluates to `false` for unset to-one references, orphaned stubs, and
+// tombstoned targets.
 //
-// Both evaluators run it as a two-phase rewrite: the inner condition selects
-// the matching target keys, and the node collapses to a membership test on
-// the stored ref stubs. The rewrite never appears on the wire.
+// The schema derives the target entity from the reference graph, so this
+// message has no target entity field. Validation rejects a `RelCond` if `path`
+// does not name a reference field, or if `RelCond` is nested inside another
+// `RelCond` or `ExistsCond`.
+//
+// Both evaluators execute this condition as a two-phase rewrite: the inner
+// condition selects matching target keys, and the node collapses to a
+// membership test on the stored reference stubs. This rewrite does not appear
+// on the wire.
 type RelCond struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Path          []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
@@ -921,21 +936,24 @@ func (x *RelCond) GetCond() *Condition {
 	return nil
 }
 
-// MatchCond matches a row when its entity's declared search fields (see
-// syncplane.v1.SearchSpec) contain every term of `query`. The query is
-// analyzed by the entity's analyzer — the same pipeline that analyzes the
-// fields — and the final term matches as a prefix when the query ends inside
-// it, which is what makes search-as-you-type work without a separate mode.
-// Terms are conjunctive, each satisfiable by any searchable field. A query
-// that yields no terms (empty, or separators only) matches every row.
+// Matches a row when the entity's declared search fields contain every term in
+// `query`.
 //
-// It is a predicate, not a mode: it composes under and/or/not like any other
-// condition, and matching rows come back in the query's declared order. Rank
-// by how well rows match by ordering on OrderKey.relevance.
+// The entity's analyzer analyzes the query using the same pipeline used for
+// search fields. If the query ends inside the final term, that term matches as
+// a prefix to support search-as-you-type. Terms are conjunctive, and any
+// searchable field can satisfy a term. A query that produces no terms (for
+// example, an empty string or separators only) matches every row.
 //
-// Rejected on an entity that declares no search fields, inside any() (its
-// scope is the row, not an element), and inside a rel condition's target
-// scope unless the TARGET entity declares search.
+// This condition is a predicate. You can combine it with `and`, `or`, and
+// `not` conditions. Matching rows return in the query's declared order. To
+// rank rows by match quality, order by `OrderKey.relevance`.
+//
+// Validation rejects this condition in the following cases:
+//   - The entity declares no search fields (see `syncplane.v1.SearchSpec`).
+//   - Used inside `any()`, because the scope is the row rather than an element.
+//   - Used inside the target scope of a `RelCond`, unless the target entity
+//     declares search fields.
 type MatchCond struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Query         string                 `protobuf:"bytes,1,opt,name=query,proto3" json:"query,omitempty"`
@@ -1250,14 +1268,20 @@ func (*Condition_Rel) isCondition_Kind() {}
 
 func (*Condition_Match) isCondition_Kind() {}
 
-// QueryGroup is one group of a grouped read: the value its rows share at the
-// grouping path, and what the aggregate computed over them.
+// Represents a single group from a grouped read.
+//
+// Contains the value shared by rows at the grouping path and the result of the
+// aggregate computation for that group.
 type QueryGroup struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The shared value, absent for the group of rows that hold no value at the
-	// path — a group of its own, ordered last.
+	// Shared value for rows in this group.
+	//
+	// This field is unset for the group of rows that have no value at the
+	// path. That group forms its own distinct group and orders last.
 	Value *QueryValue `protobuf:"bytes,1,opt,name=value,proto3" json:"value,omitempty"`
-	// Matching rows in the group; 0 under AGGREGATE_OP_DISTINCT.
+	// Number of matching rows in the group.
+	//
+	// This value is `0` when using `AGGREGATE_OP_DISTINCT`.
 	Count         uint64 `protobuf:"varint,2,opt,name=count,proto3" json:"count,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1307,19 +1331,25 @@ func (x *QueryGroup) GetCount() uint64 {
 	return 0
 }
 
-// QueryFacet is one axis of a row query's facets: on the request, the path
-// to count the match set by; on the response, that path echoed with the
-// groups it produced. Facets ride on QueryRequest.facets and come back in
-// QueryResponse.facets in the same order.
+// Defines one facet axis for a row query.
+//
+// In a request, `QueryFacet` specifies the path used to group and count
+// matches. In a response, it echoes the path along with the resulting groups.
+// Facets are supplied in `QueryRequest.facets` and returned in
+// `QueryResponse.facets` in the same order.
 type QueryFacet struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Path from the entity root, one field name per element, exactly as
-	// QueryRequest.group_by names one. The same leaves are accepted: a
-	// comparable scalar, or a repeated scalar, which counts per element.
+	// Path from the entity root, specified as one field name per element.
+	//
+	// Matches the format of `QueryRequest.group_by`. Supported leaf fields
+	// include comparable scalars and repeated scalars. Repeated scalars count
+	// once per element.
 	Path []string `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
-	// The groups the match set produced at `path`, each with the number of
-	// matching rows holding that value, in ascending value order with the
-	// no-value group last — QueryResponse.groups' order. Empty on a request.
+	// Groups produced by the match set at `path`.
+	//
+	// Each group contains the count of matching rows that hold that value.
+	// Groups are ordered by value in ascending order, with the group for unset
+	// values placed last. This field is empty in a request.
 	Groups        []*QueryGroup `protobuf:"bytes,2,rep,name=groups,proto3" json:"groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1373,13 +1403,14 @@ type OrderKey struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Path  []string               `protobuf:"bytes,1,rep,name=path,proto3" json:"path,omitempty"`
 	Dir   Direction              `protobuf:"varint,2,opt,name=dir,proto3,enum=syncplane.v1.Direction" json:"dir,omitempty"`
-	// Order by how well each row satisfies the predicate's match condition
-	// instead of by a field: ascending is best match first. Requires `path`
-	// empty and the predicate to contain exactly one match condition — the
-	// rank is that condition's, computed the same way on both sides from the
-	// row alone, so it never depends on what else is in the store. Rows that
-	// rank equally fall through to the next key and finally the row key, like
-	// any other ordering.
+	// Orders rows by how well each row satisfies the predicate's match
+	// condition rather than by a field value.
+	//
+	// When `true`, ascending order places the best match first. Using this
+	// option requires `path` to be empty and the query predicate to contain
+	// exactly one match condition. The relevance rank is computed from the row
+	// alone, without depending on other store contents. Rows with equal rank
+	// fall through to subsequent order keys and ultimately the row key.
 	Relevance     bool `protobuf:"varint,3,opt,name=relevance,proto3" json:"relevance,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache

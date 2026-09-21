@@ -32,11 +32,22 @@ export const file_syncplane_v1_patch: GenFile = /*@__PURE__*/
  */
 export type FieldDelta = Message<"syncplane.v1.FieldDelta"> & {
   /**
+   * The dotted path of the document. This path is the Protocol Buffers path
+   * for a field on a singular chain. When the path crosses a keyed message
+   * list or map, the element key is inserted into the path, such as
+   * `notes.<key>.body`. This format matches a `PATCH` field mask, with one
+   * entry per element.
+   *
    * @generated from field: string field = 1;
    */
   field: string;
 
   /**
+   * The text delta-state fragment in format version `0x02` to apply to the
+   * confirmed bytes of the field. An empty value indicates that the field
+   * did not change over the span and you keep the existing state. The field
+   * is always cleared in `RowChange.value`.
+   *
    * @generated from field: bytes fragment = 2;
    */
   fragment: Uint8Array;
@@ -59,11 +70,15 @@ export const FieldDeltaSchema: GenMessage<FieldDelta> = /*@__PURE__*/
  */
 export type RowChange = Message<"syncplane.v1.RowChange"> & {
   /**
+   * The name of the entity for this row.
+   *
    * @generated from field: string entity = 1;
    */
   entity: string;
 
   /**
+   * The key that identifies this row within the entity.
+   *
    * @generated from field: string key = 2;
    */
   key: string;
@@ -77,6 +92,8 @@ export type RowChange = Message<"syncplane.v1.RowChange"> & {
   version: bigint;
 
   /**
+   * The row content or deletion status.
+   *
    * @generated from oneof syncplane.v1.RowChange.body
    */
   body: {
@@ -121,12 +138,14 @@ export const RowChangeSchema: GenMessage<RowChange> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_patch, 1);
 
 /**
- * Patch is an ordered set of row changes to apply to confirmed state.
+ * Represents an ordered set of row changes to apply to confirmed state.
  *
  * @generated from message syncplane.v1.Patch
  */
 export type Patch = Message<"syncplane.v1.Patch"> & {
   /**
+   * The ordered list of row changes to apply.
+   *
    * @generated from field: repeated syncplane.v1.RowChange changes = 1;
    */
   changes: RowChange[];
@@ -156,6 +175,8 @@ export const PatchSchema: GenMessage<Patch> = /*@__PURE__*/
  */
 export type Subscription = Message<"syncplane.v1.Subscription"> & {
   /**
+   * The name of the entity to synchronize.
+   *
    * @generated from field: string entity = 1;
    */
   entity: string;
@@ -168,13 +189,14 @@ export type Subscription = Message<"syncplane.v1.Subscription"> & {
   predicate?: Condition | undefined;
 
   /**
-   * Reference paths to follow from matched rows, expanding the synced set to
-   * a bounded-depth forward/reverse closure (key point-lookups forward,
-   * predicate scans reverse). Empty ⇒ today's static per-entity scope.
-   * Deliberately EXCLUDED from sub_hash: a follow-spec change is reconciled
-   * by the closure diff (Cursor.closure), not a base-scope delta resync.
-   * Every closure member is still subject to the same read filter as a base
-   * row — following a ref is never a permission-escalation path.
+   * Reference paths to follow from matched rows. Following references
+   * expands the synchronized set to a bounded-depth forward or reverse
+   * closure, using key point-lookups forward and predicate scans in reverse.
+   * When unset, synchronization remains scoped to the base entity. Changes
+   * to this field are excluded from `sub_hash` and are reconciled through
+   * closure diffs (`Cursor.closure`) rather than a base-scope delta
+   * resynchronization. Every closure member remains subject to the same read
+   * filter as a base row; following a reference never escalates permissions.
    *
    * @generated from field: syncplane.v1.FollowSpec follow = 3;
    */
@@ -226,6 +248,9 @@ export const SubscriptionSchema: GenMessage<Subscription> = /*@__PURE__*/
  */
 export type KeySet = Message<"syncplane.v1.KeySet"> & {
   /**
+   * The list of row keys. Key order does not matter and duplicate keys are
+   * folded.
+   *
    * @generated from field: repeated string keys = 1;
    */
   keys: string[];
@@ -296,6 +321,8 @@ export const WindowSchema: GenMessage<Window> = /*@__PURE__*/
  */
 export type RefPath = Message<"syncplane.v1.RefPath"> & {
   /**
+   * The ordered list of relation segments to traverse.
+   *
    * @generated from field: repeated string segments = 1;
    */
   segments: string[];
@@ -309,19 +336,24 @@ export const RefPathSchema: GenMessage<RefPath> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_patch, 6);
 
 /**
- * FollowSpec is one shared shape driving include (client-local hydration) and
- * follow (subscription scope). It is a set of ref paths walked to a bounded
- * depth. depth 0 is treated as 1 (follow each path one hop).
+ * Specifies reference paths to follow to a bounded depth. This message
+ * configures client-local hydration (`include`) and subscription scoping
+ * (`follow`). A `depth` of `0` is treated as `1` (one hop along each path).
  *
  * @generated from message syncplane.v1.FollowSpec
  */
 export type FollowSpec = Message<"syncplane.v1.FollowSpec"> & {
   /**
+   * The reference paths to traverse.
+   *
    * @generated from field: repeated syncplane.v1.RefPath paths = 1;
    */
   paths: RefPath[];
 
   /**
+   * The maximum number of hops to traverse along each path. A value of `0`
+   * is treated as `1` (one hop along each path).
+   *
    * @generated from field: uint32 depth = 2;
    */
   depth: number;

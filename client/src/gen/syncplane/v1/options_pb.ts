@@ -15,111 +15,115 @@ export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
   fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLUAQoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIKmYKDERlbGV0ZVBvbGljeRIdChlERUxFVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTREVMRVRFX1BPTElDWV9BTExPVxABEh4KGkRFTEVURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqZgoMQ3JlYXRlUG9saWN5Eh0KGUNSRUFURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNDUkVBVEVfUE9MSUNZX0FMTE9XEAESHgoaQ1JFQVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxVcGRhdGVQb2xpY3kSHQoZVVBEQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE1VQREFURV9QT0xJQ1lfQUxMT1cQARIeChpVUERBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
 
 /**
- * EntityOptions declares a message as a syncable entity.
+ * Declares a message as a syncable entity.
  *
  * @generated from message syncplane.v1.EntityOptions
  */
 export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
   /**
-   * Logical entity name used on the wire and in storage (e.g. "todo").
+   * The logical entity name used on the wire and in storage, for example
+   * `"todo"`.
    *
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
-   * Field names (in order) whose values form the row key.
+   * The field names whose values form the row key, in order.
    *
    * @generated from field: repeated string key_fields = 2;
    */
   keyFields: string[];
 
   /**
-   * Composite secondary indexes over this entity's fields. Declare one when a
-   * single indexed field is not enough — specifically when a query FILTERS on
-   * one field and ORDERS by another, which a single-field index can only
-   * serve by walking the sort order and re-checking every candidate.
+   * Composite secondary indexes over the fields of this entity.
    *
-   * An index is invisible: nothing in a request or response names one, and a
-   * query returns the same rows in the same order whether or not one served
-   * it. Adding or removing one is never a breaking change, and losing the
-   * stored entries costs a rebuild rather than correctness.
+   * Declare a composite index when a query filters on one field and orders
+   * by another. A single-field index serves that query only by scanning the
+   * sort order and rechecking candidate rows.
    *
-   * The cost is on writes: every write to this entity re-encodes and
-   * re-stores the row's position in EVERY index declared here.
+   * Secondary indexes do not change request or response payloads, and
+   * queries return identical rows in identical order with or without an
+   * index. Adding or removing an index is not a breaking change.
+   *
+   * Writes to this entity re-encode and update the row position in every
+   * declared index.
    *
    * @generated from field: repeated syncplane.v1.IndexSpec index = 3;
    */
   index: IndexSpec[];
 
   /**
-   * Who may DELETE rows of this entity. Unset allows anyone the app's
-   * permission policy admits, which is the behaviour of every other entity.
+   * Specifies who can delete rows of this entity.
+   *
+   * When unset, any caller admitted by the application permission policy can
+   * delete rows.
    *
    * @generated from field: syncplane.v1.DeletePolicy delete_policy = 4;
    */
   deletePolicy: DeletePolicy;
 
   /**
-   * Keep this entity's rows on the server only: they are never bootstrapped,
-   * pulled or streamed to a client, and a client that names the entity in a
-   * subscription or a mutation is refused rather than served nothing.
+   * Specifies whether rows of this entity stay on the server only.
    *
-   * It is NOT a permission, and subscriptions are not a substitute for it: an
-   * empty subscription list means full sync, and full sync is ABSORBING
-   * across the tabs that share one local store, so one tab that never narrows
-   * its subscriptions pulls the entity into storage every sibling tab reads.
+   * When `true`, rows are never bootstrapped, pulled, or streamed to
+   * clients. Client mutations and subscriptions that name this entity fail.
    *
-   * Server-side reads are unaffected: the Query RPC, the in-process view and
-   * query APIs, and mutators all still reach the entity. Server-only means
-   * "does not sync", not "cannot be read".
+   * Server-side reads, including the `Query` RPC, in-process view APIs, and
+   * mutators, can still access the entity.
    *
    * @generated from field: bool server_only = 5;
    */
   serverOnly: boolean;
 
   /**
-   * Record an append-only history of this entity's field changes. See
-   * HistoryOptions.
+   * Configures append-only history tracking for field changes on this
+   * entity.
+   *
+   * See `HistoryOptions`.
    *
    * @generated from field: syncplane.v1.HistoryOptions history = 6;
    */
   history?: HistoryOptions | undefined;
 
   /**
-   * Who may CREATE rows of this entity. Unset allows anyone the app's
-   * permission policy admits.
+   * Specifies who can create rows of this entity.
    *
-   * A write counts as a create when it provably cannot land on an existing
-   * row: a PUT asserting expected_version 0. A PUT that asserts no version is
-   * create-or-update and must satisfy this AND update_policy.
+   * When unset, any caller admitted by the application permission policy can
+   * create rows.
+   *
+   * A write counts as a create when it provably cannot target an existing
+   * row, such as a `PUT` request asserting `expected_version = 0`. A `PUT`
+   * request that asserts no version is a create-or-update operation and must
+   * satisfy both `create_policy` and `update_policy`.
    *
    * @generated from field: syncplane.v1.CreatePolicy create_policy = 7;
    */
   createPolicy: CreatePolicy;
 
   /**
-   * Who may UPDATE rows of this entity in place. Unset allows anyone the
-   * app's permission policy admits.
+   * Specifies who can update existing rows of this entity.
    *
-   * It covers every PATCH (which never upserts) and every PUT that could land
-   * on an existing row. A caller that only means to create a row on an entity
-   * restricting updates must say so by asserting expected_version 0 —
-   * otherwise the write is refused, because an unguarded PUT would replace a
-   * row if one were there.
+   * When unset, any caller admitted by the application permission policy can
+   * update rows.
    *
-   * Collaborative-text fields are edited by PATCH, so an entity carrying one
-   * needs updates allowed for its text to be editable by clients at all.
+   * This policy applies to every `PATCH` request and every `PUT` request
+   * that could overwrite an existing row. To create a row on an entity that
+   * restricts updates, set `expected_version = 0`.
+   *
+   * Collaborative text fields are edited using `PATCH`, so client editing
+   * requires permission under this policy.
    *
    * @generated from field: syncplane.v1.UpdatePolicy update_policy = 8;
    */
   updatePolicy: UpdatePolicy;
 
   /**
-   * Full-text search over this entity's fields. See SearchSpec. An entity
-   * may also mark fields (syncplane.v1.field_behavior).searchable instead of
-   * (or as well as) declaring this; the marked fields come first, in field
-   * order, followed by the fields declared here.
+   * Configures full-text search over the fields of this entity.
+   *
+   * Fields marked with `(syncplane.v1.field_behavior).searchable` are
+   * indexed first in field order, followed by the fields declared in this
+   * search specification. See `SearchSpec`.
    *
    * @generated from field: syncplane.v1.SearchSpec search = 9;
    */
@@ -134,35 +138,20 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 0);
 
 /**
- * HistoryOptions opts an entity into server-side field history: a PUT or PATCH
- * that changes one of the fields marked (syncplane.v1.field_behavior).history
- * records what those fields held BEFORE the write, as a
- * syncplane.v1.FieldHistory row. Which fields is always explicit — an entity
- * that opts in and marks none is rejected at registration.
+ * Enables server-side field history tracking for an entity.
  *
- * Changes are recorded, not writes. The server compares the stored row with the
- * one replacing it and records only the fields that actually moved: a write
- * that stores a field's current value again records nothing for it, and a write
- * that changes nothing records nothing at all.
+ * When enabled, any `PUT` or `PATCH` operation that changes a field marked
+ * with `(syncplane.v1.field_behavior).history` records the previous values in
+ * a `syncplane.v1.FieldHistory` row. You must explicitly mark at least one
+ * field with history behavior.
  *
- * Sessions are recorded, not keystrokes. Successive writes to one row by one
- * actor fold into a single record holding the state before the FIRST of them,
- * for as long as the session stays open (server.WithHistorySession, five
- * minutes by default). The states in between are not recorded: history answers
- * "what did this hold before that editing session", not "replay the session".
+ * The server records changed fields only, not identical writes. Consecutive
+ * writes to the same row by the same actor within an open session fold into a
+ * single record holding the state before the first write in the session.
  *
- * Capture is on the server's write path, so every write is covered whatever
- * made it — a client push, a mutator, a connector, a trusted write.
- *
- * The history entity is server_only, so none of it ever syncs; read it with the
- * Query RPC (the TypeScript client's queryServer). Restoring a value is an
- * ordinary PATCH of the recorded mask — see the "Restore a field to a previous
- * value" how-to.
- *
- * It records field changes, not row lifecycle. A DELETE is not captured and
- * purges the row's records, so a removal that has to be recoverable or
- * attributable is modelled as a field instead — see the "Recover a deleted row"
- * how-to.
+ * The resulting history entity is `server_only` and does not sync to clients.
+ * Query history through the `Query` RPC. Deleting a row purges its history
+ * records.
  *
  * @generated from message syncplane.v1.HistoryOptions
  */
@@ -177,45 +166,70 @@ export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
 
 /**
- * ReferenceOptions declares a message as a REFERENCE MESSAGE: the stored shape
- * of a typed reference that may point into another workspace.
+ * Declares a message as a reference message: the stored shape of a typed
+ * reference that can cross workspace boundaries.
  *
  * A field whose message type is an entity is already a reference, and it
- * resolves inside the holder's workspace because a stored stub carries only the
- * target's key fields. A reference message wraps that stub together with the
- * workspace it lives in:
+ * resolves inside the holder's workspace because a stored stub carries
+ * only the target's key fields. A reference message wraps that stub
+ * together with the workspace it lives in:
  *
- * 	message PersonRef {
- * 	  option (syncplane.v1.reference) = {};
- * 	  string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
- * 	  Person person = 2;
- * 	}
- * 	message Task {
- * 	  PersonRef assignee = 2;
- * 	  repeated PersonRef watchers = 3;
- * 	}
+ * ```protobuf
+ * message PersonRef {
+ *   option (syncplane.v1.reference) = {};
+ *   string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+ *   Person person = 2;
+ * }
+ * message Task {
+ *   PersonRef assignee = 2;
+ *   repeated PersonRef watchers = 3;
+ * }
+ * ```
  *
- * A field of a reference message type is a reference like any other: it gets
- * the forward accessor, the reverse relation on the target, the follow segment
- * and the derived index, and its target is the entity the embedded field
- * names. The message must carry exactly one singular entity-typed field and at
- * most one string field marked (syncplane.v1.field_behavior).workspace, and
- * nothing else; whether the holder field is repeated says whether the
- * reference is to-many. An empty or absent workspace value means the holder's
- * own workspace, so a reference message without the workspace field is a
- * same-workspace reference with an explicit stored shape.
+ * A field of a reference message type is a reference like any other: it
+ * gets the forward accessor, the reverse relation on the target, the
+ * follow segment, and the derived index, and its target is the entity the
+ * embedded field names. The message holds the entity field (or the oneof
+ * of entity fields) and the workspace field and nothing else; any other
+ * field is rejected at registration. Specifically, it must carry exactly
+ * one singular entity-typed field — or a oneof whose members are all
+ * singular entity-typed fields, making it a polymorphic reference — and
+ * at most one string field marked
+ * `(syncplane.v1.field_behavior).workspace` outside any oneof. An empty or
+ * unset workspace value means the holder's own workspace, so a reference
+ * message without the workspace field is a same-workspace reference with
+ * an explicit stored shape.
+ *
+ * ```protobuf
+ * message OwnerRef {
+ *   option (syncplane.v1.reference) = {};
+ *   string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+ *   oneof owner {
+ *     Person person = 2;
+ *     Team team = 3;
+ *   }
+ * }
+ * ```
+ *
+ * Each member of the oneof is a case with its own reverse relation on its
+ * target and its own derived index that a query names as `owner.person`,
+ * and a stored value holds at most one case. A oneof of references on the
+ * holder itself is polymorphic too, named by the oneof; its members may be
+ * entity-typed fields, reference messages, and plain fields alike, where
+ * only the references are cases.
  *
  * A reference message is replaced whole on every write: a PATCH mask that
  * names one names the whole message, so the workspace and the key never
- * split. A repeated reference message merges as a set, each element
- * identified by its workspace and key together, so a PATCH adds or removes
- * one element without touching the others; an element that names no
- * workspace and one that names the holder's own are two elements.
+ * split. A repeated reference message merges as a set whose elements are
+ * identified by workspace and key and case together, so a PATCH adds or
+ * removes one element without touching the others. An element naming no
+ * workspace and one naming the holder's own workspace are two elements,
+ * even though they resolve to the same row.
  *
  * Reading is client-local: a client resolves each stub in the workspace it
  * names, from the workspaces it holds. The server evaluates `matches()`,
- * `include` and `follow` inside the request's workspace only, so a stub that
- * names another workspace resolves to nothing there.
+ * `include`, and `follow` inside the request's workspace only, so a stub
+ * that names another workspace resolves to nothing there.
  *
  * @generated from message syncplane.v1.ReferenceOptions
  */
@@ -230,15 +244,16 @@ export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*
   messageDesc(file_syncplane_v1_options, 2);
 
 /**
- * SearchField is one field full-text search reads.
+ * Specifies a single field read during full-text search.
  *
  * @generated from message syncplane.v1.SearchField
  */
 export type SearchField = Message<"syncplane.v1.SearchField"> & {
   /**
-   * Dotted proto field path (e.g. "title", "details.summary") to a singular
-   * string or collaborative-text field. A collaborative-text field is
-   * searched as its visible plain string.
+   * The dotted field path to a singular string or collaborative text field,
+   * for example `"title"` or `"details.summary"`.
+   *
+   * Collaborative text fields are searched as their plain-text value.
    *
    * @generated from field: string path = 1;
    */
@@ -253,38 +268,38 @@ export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 3);
 
 /**
- * SearchSpec declares full-text search over an entity: which fields a match
- * condition reads, in importance order, and how their text is analyzed.
+ * Configures full-text search over an entity, specifying searchable fields in
+ * order of importance and text analysis settings.
  *
- * Fields are listed most important first. Relevance ranks a row whose terms
- * all sit in one earlier field ahead of a row that spreads them over later
- * ones, so "title before body" is declared by putting title first.
+ * Fields are evaluated in the order listed, with earlier fields ranked higher
+ * during relevance scoring.
  *
- * Analysis is the deterministic pipeline both sides implement identically
- * (engine/search in Go, client/src/search in TS): Unicode normalization,
- * lowercasing, a diacritic fold unless keep_diacritics is set, and
- * segmentation with CJK bigrams. The same pipeline analyzes queries, so a
- * match means "these terms, whatever the case, width or accents".
+ * Text analysis applies Unicode normalization, lowercasing, diacritic folding
+ * (unless `keep_diacritics` is `true`), and segmentation with CJK bigrams to
+ * both content and search queries.
  *
- * Matching is a predicate like any other: a match condition returns the same
- * rows locally and on the server, ordered identically, with or without a
- * search index behind it.
+ * Search matching behaves identically locally and on the server, returning
+ * identical rows and sort order with or without a search index.
  *
  * @generated from message syncplane.v1.SearchSpec
  */
 export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
   /**
-   * At least one field, most important first, counting any
-   * (syncplane.v1.field_behavior).searchable marks ahead of these. A path
-   * may appear once across both surfaces.
+   * The fields to search, ordered from most important to least important.
+   *
+   * Fields marked with `(syncplane.v1.field_behavior).searchable` are
+   * evaluated before the fields listed here. A field path may appear only
+   * once across both definitions.
    *
    * @generated from field: repeated syncplane.v1.SearchField field = 1;
    */
   field: SearchField[];
 
   /**
-   * Keep diacritics significant: "café" and "cafe" analyze to distinct
-   * terms. The default folds them together.
+   * Preserves diacritical marks during text analysis.
+   *
+   * When `true`, words such as "café" and "cafe" analyze to distinct terms.
+   * Defaults to `false`, which folds diacritics together.
    *
    * @generated from field: bool keep_diacritics = 2;
    */
@@ -299,24 +314,27 @@ export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 4);
 
 /**
- * IndexKey is one component of an index, in the order it sorts.
+ * Specifies one field component of an index and its sort order.
  *
  * @generated from message syncplane.v1.IndexKey
  */
 export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
   /**
-   * Dotted proto field path, e.g. "settings.size". A path ending at a
-   * single-key reference extends to that reference's key field, so an index
-   * and a query on the same reference agree.
+   * The dotted field path for this index component, for example
+   * `"settings.size"`.
+   *
+   * A path ending at a single-key reference extends to that reference's key
+   * field.
    *
    * @generated from field: string path = 1;
    */
   path: string;
 
   /**
-   * Sort this component descending. Missing and NaN values sort last whatever
-   * this says — the index reproduces the query ordering exactly, and there
-   * they rank ahead of the direction.
+   * Sorts this index component in descending order.
+   *
+   * When `false`, sorts ascending. Missing and `NaN` values always sort last
+   * regardless of this setting.
    *
    * @generated from field: bool desc = 2;
    */
@@ -331,24 +349,25 @@ export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 5);
 
 /**
- * IndexSpec is one declared secondary index: a name unique within the entity,
- * and the components it sorts by.
+ * Defines a secondary index for an entity.
  *
  * @generated from message syncplane.v1.IndexSpec
  */
 export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
   /**
-   * Unique within the entity. Names beginning "__" are reserved for indexes
-   * the engine derives for itself (one per reference field).
+   * The index name, unique within the entity.
+   *
+   * Names beginning with `__` are reserved for engine-derived indexes.
    *
    * @generated from field: string name = 1;
    */
   name: string;
 
   /**
-   * At least one component, in sort order. A query is servable when its
-   * equality terms are a PREFIX of this list and its ordering is what follows
-   * them — the classic rule, and the reason component order matters.
+   * The ordered key components that make up the index.
+   *
+   * A query can use this index when its equality filters match a prefix of
+   * these components and its sort order matches the subsequent components.
    *
    * @generated from field: repeated syncplane.v1.IndexKey key = 2;
    */
@@ -363,132 +382,121 @@ export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 6);
 
 /**
- * FieldBehavior tunes how a field participates in merges and queries.
+ * Configures merge, indexing, and authorization behavior for a field.
  *
  * @generated from message syncplane.v1.FieldBehavior
  */
 export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
   /**
-   * Replaced whole, never merged structurally. Escape hatch for CRDT blobs
-   * AND for any list/field you want treated as one atomic value (e.g. an
-   * order-sensitive or duplicate-bearing list that should not
-   * set/keyed-merge).
+   * Specifies that the field is replaced as a whole value rather than merged
+   * structurally.
+   *
+   * Use this for Conflict-free Replicated Data Type (CRDT) blobs or any list
+   * or field that must be treated as a single atomic value, such as
+   * order-sensitive or duplicate-bearing lists.
    *
    * @generated from field: bool opaque = 1;
    */
   opaque: boolean;
 
   /**
-   * List-of-message identity field(s); composite allowed. Empty + element is
-   * a registered entity => reuse its EntityOptions.key_fields. Ignored for
-   * maps (keyed by map key) and scalar lists (keyed by value).
+   * Specifies the identity field names for elements in a list of messages.
+   *
+   * Supports composite keys. When empty and the element type is a registered
+   * entity, defaults to `EntityOptions.key_fields`. Ignored for maps (which
+   * are keyed by map key) and scalar lists (which are keyed by value).
    *
    * @generated from field: repeated string key_field = 2;
    */
   keyField: string[];
 
   /**
-   * Names the position field on the element that orders this keyed list
-   * (movable list). The framework manages it as a fractional index. Requires
-   * a keyed message list.
+   * Names the position field on list elements used to order a keyed list.
+   *
+   * The framework manages this field as a fractional index to support
+   * movable list elements. Requires a keyed message list.
    *
    * @generated from field: string order_field = 3;
    */
   orderField: string;
 
   /**
-   * Collaborative text: the field holds an encoded convergent text document
-   * (engine/text in Go, client/src/text in TS) with Peritext-style marks and
-   * anchors. Requires a singular bytes field; implies opaque; the engine
-   * auto-installs the text merger so concurrent PATCHes merge without
-   * interleaving. Incompatible with key_field/order_field.
+   * Specifies that the field stores collaborative text with convergent
+   * editing, marks, and anchors.
    *
-   * The field's path may cross keyed message lists and message-valued maps,
-   * in which case each element holds its own document, addressed by its
-   * instance path ("notes.<key>.body"). Refused inside a oneof or an unkeyed
-   * repeated element: those units are replaced whole, so the merger could
-   * never run.
+   * Requires a singular `bytes` field and implies `opaque = true`. The
+   * engine automatically merges concurrent `PATCH` operations without
+   * interleaving characters. Incompatible with `key_field` and
+   * `order_field`.
+   *
+   * The field path may traverse keyed message lists and message-valued maps,
+   * giving each element its own document. This option cannot be used inside
+   * a `oneof` or an unkeyed repeated element.
    *
    * @generated from field: bool text = 4;
    */
   text: boolean;
 
   /**
-   * Maintain a single-component secondary index over this field, so filtering
-   * or ordering by it costs O(result) instead of a scan of the entity.
+   * Maintains a single-field secondary index over this field to speed up
+   * filtering and ordering.
    *
-   * This is the surface to reach for first: it says "this field is worth
-   * looking up by" without coupling the schema to any particular query. What
-   * it cannot do at O(limit) is serve a filter on one field combined with an
-   * ordering by ANOTHER — a sorted key-value store has no posting lists to
-   * intersect, so that degrades to walking the sort order and re-checking the
-   * predicate per candidate. Declare an EntityOptions.index when that shape
-   * is the hot one.
-   *
-   * Rejected on a text field: every keystroke changes the value, so the entry
-   * would be rewritten with it. Searching text is what SearchSpec is for.
+   * To filter by one field and order by a different field, declare an index
+   * in `EntityOptions.index` instead. This option is not supported on
+   * collaborative text fields; use `SearchSpec` for text search.
    *
    * @generated from field: bool indexed = 5;
    */
   indexed: boolean;
 
   /**
-   * Record this field in the entity's history (see EntityOptions.history).
+   * Includes this field in append-only history tracking.
    *
-   * Capture is EXPLICIT: an entity that opts in records the fields marked
-   * here and nothing else, and one that marks none is rejected at
-   * registration. There is no "capture everything" default — what a field
-   * costs to record varies by orders of magnitude, a collaborative-text field
-   * recording its whole document on every write that touches it.
-   *
-   * Key fields are never recorded in a history row's mask however they are
-   * marked: a PATCH may not change one, so a restore built from a mask naming
-   * one would be refused. The prior value still carries them, so a decoded
-   * history entry always says which row it belongs to.
-   *
-   * A oneof is captured as a GROUP, the only unit a mask may name it in, so
-   * marking any member marks the whole oneof.
-   *
-   * Ignored on an entity that has not opted in.
+   * Key fields are never recorded in a history row's mask however they
+   * are marked, because a PATCH may not change one and a restore built
+   * from a mask naming one would be refused. The prior value still
+   * carries them, so a decoded history entry always says which row it
+   * belongs to. Marking any member of a `oneof` tracks the entire
+   * `oneof` group. Ignored if the entity does not enable
+   * `EntityOptions.history`.
    *
    * @generated from field: bool history = 6;
    */
   history: boolean;
 
   /**
-   * Include this field in the entity's full-text search, ahead of any
-   * fields the entity's SearchSpec declares (marked fields count as most
-   * important, in field order). Requires a singular string or
-   * collaborative-text field. See SearchSpec for what search means.
+   * Includes this field in full-text search.
+   *
+   * Fields marked with this option are evaluated before fields listed in
+   * `EntityOptions.search`, in field declaration order. Requires a singular
+   * string or collaborative text field. See `SearchSpec`.
    *
    * @generated from field: bool searchable = 7;
    */
   searchable: boolean;
 
   /**
-   * Who may write this field. Unset allows anyone the app's permission policy
-   * admits, which is the behaviour of every other field. See FieldWritePolicy
-   * for what a restricted field does to a PUT and to a PATCH.
+   * Specifies who can write this field.
    *
-   * Declared on top-level fields only: a mask path is matched by its first
-   * segment, so protecting `settings` protects everything under it, and one
-   * leaf of a message a client may otherwise replace cannot be singled out.
+   * When unset, any caller admitted by the application permission policy can
+   * write the field.
    *
-   * A oneof is protected as a GROUP, the only unit a mask may name it in, so
-   * marking any member marks the whole oneof. A key field may not be marked —
-   * a PATCH can never move one and a PUT that changed one would address a
-   * different row — and is rejected at registration.
+   * Apply this option to top-level fields only. Protecting a message field
+   * protects all fields within it. Marking any member of a `oneof` protects
+   * the entire `oneof` group. Key fields cannot be marked with a write
+   * policy. See `FieldWritePolicy`.
    *
    * @generated from field: syncplane.v1.FieldWritePolicy write_policy = 8;
    */
   writePolicy: FieldWritePolicy;
 
   /**
-   * Inside a reference message (see ReferenceOptions), the string field that
-   * names the workspace the referenced row lives in. Empty means the holder's
-   * own workspace. Valid on a singular string field of a message carrying
-   * (syncplane.v1.reference), at most once per message; rejected anywhere
-   * else at registration.
+   * Identifies the workspace field within a reference message.
+   *
+   * Marks a singular string field in a message with
+   * `(syncplane.v1.reference)` that stores the target workspace identifier.
+   * An empty value defaults to the holder's workspace. Each reference
+   * message can contain at most one workspace field. See `ReferenceOptions`.
    *
    * @generated from field: bool workspace = 9;
    */
@@ -503,39 +511,37 @@ export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 7);
 
 /**
- * DeletePolicy says which callers may DELETE rows of an entity. The engine
- * enforces it before the app's permission policy runs, on every path that
- * authorizes a write, so a schema states the rule once instead of every
- * deployment restating it in a hook where a missing branch fails open.
+ * Specifies which callers can delete rows of an entity.
  *
- * It governs the DELETE primitive, not deletion as an outcome: a custom
- * mutator's rows are covered by the verdict on its invocation rather than
- * authorized one by one, so an app that wants a client-initiated delete of a
- * protected entity writes a mutator, puts the cascade handling and the checks
- * it needs in the body, and authorizes the invocation by name.
+ * The engine enforces this policy before applying the application permission
+ * policy.
+ *
+ * This policy applies directly to `DELETE` primitives. To allow
+ * client-initiated deletions of protected entities, implement a custom mutator
+ * with the required checks and authorize the mutator invocation by name.
  *
  * @generated from enum syncplane.v1.DeletePolicy
  */
 export enum DeletePolicy {
   /**
-   * Any caller the permission policy admits may delete.
+   * Allows any caller admitted by the permission policy to delete rows.
    *
    * @generated from enum value: DELETE_POLICY_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * Same as unset, for schemas that prefer to say so.
+   * Explicitly allows any caller admitted by the permission policy to delete
+   * rows.
    *
    * @generated from enum value: DELETE_POLICY_ALLOW = 1;
    */
   ALLOW = 1,
 
   /**
-   * Only writes made under the engine's Trusted bypass may delete — a
-   * connector, a migration, a cron job. Everything holding a caller to
-   * authorize is refused, including the in-process API, which is deliberately
-   * held to the same policy as a sync client.
+   * Restricts deletion to writes made under the trusted bypass, such as
+   * connectors, migrations, or scheduled background jobs. Standard callers
+   * and in-process APIs are denied.
    *
    * @generated from enum value: DELETE_POLICY_TRUSTED_ONLY = 2;
    */
@@ -549,36 +555,37 @@ export const DeletePolicySchema: GenEnum<DeletePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 0);
 
 /**
- * CreatePolicy says which callers may create rows of an entity. Like
- * DeletePolicy it is enforced before the app's permission policy, on every path
- * that authorizes a write.
+ * Specifies which callers can create rows of an entity.
  *
- * Which writes it governs is decided from the write alone, without reading the
- * row: a PUT asserting expected_version 0 is a create, and a PUT asserting no
- * version is create-or-update and must satisfy this and UpdatePolicy both.
+ * The engine enforces this policy before applying the application permission
+ * policy.
+ *
+ * A `PUT` request asserting `expected_version = 0` is treated as a create
+ * operation. A `PUT` request asserting no version is a create-or-update
+ * operation and must satisfy both `CreatePolicy` and `UpdatePolicy`.
  *
  * @generated from enum syncplane.v1.CreatePolicy
  */
 export enum CreatePolicy {
   /**
-   * Any caller the permission policy admits may create.
+   * Allows any caller admitted by the permission policy to create rows.
    *
    * @generated from enum value: CREATE_POLICY_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * Same as unset, for schemas that prefer to say so.
+   * Explicitly allows any caller admitted by the permission policy to create
+   * rows.
    *
    * @generated from enum value: CREATE_POLICY_ALLOW = 1;
    */
   ALLOW = 1,
 
   /**
-   * Only writes made under the engine's Trusted bypass may create — a
-   * connector, a migration, a cron job. Everything holding a caller to
-   * authorize is refused, including the in-process API, which is deliberately
-   * held to the same policy as a sync client.
+   * Restricts creation to writes made under the trusted bypass, such as
+   * connectors, migrations, or scheduled background jobs. Standard callers
+   * and in-process APIs are denied.
    *
    * @generated from enum value: CREATE_POLICY_TRUSTED_ONLY = 2;
    */
@@ -592,39 +599,38 @@ export const CreatePolicySchema: GenEnum<CreatePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 1);
 
 /**
- * UpdatePolicy says which callers may modify existing rows of an entity. Like
- * DeletePolicy it is enforced before the app's permission policy, on every path
- * that authorizes a write.
+ * Specifies which callers can modify existing rows of an entity.
  *
- * It governs the PATCH and PUT primitives, not modification as an outcome: a
- * custom mutator's rows are covered by the verdict on its invocation rather
- * than authorized one by one, so an app that wants a client-initiated edit of a
- * protected entity — an author editing their own comment, say — writes a
- * mutator, checks ownership in the body, and authorizes the invocation by name.
- * Row-level rules are what a schema enum cannot express.
+ * The engine enforces this policy before applying the application permission
+ * policy.
+ *
+ * This policy applies directly to `PATCH` and `PUT` primitives. To allow
+ * client-initiated updates of protected entities based on row-level rules such
+ * as ownership, implement a custom mutator with the required checks and
+ * authorize the mutator invocation by name.
  *
  * @generated from enum syncplane.v1.UpdatePolicy
  */
 export enum UpdatePolicy {
   /**
-   * Any caller the permission policy admits may update.
+   * Allows any caller admitted by the permission policy to update rows.
    *
    * @generated from enum value: UPDATE_POLICY_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * Same as unset, for schemas that prefer to say so.
+   * Explicitly allows any caller admitted by the permission policy to update
+   * rows.
    *
    * @generated from enum value: UPDATE_POLICY_ALLOW = 1;
    */
   ALLOW = 1,
 
   /**
-   * Only writes made under the engine's Trusted bypass may update — a
-   * connector, a migration, a cron job. Everything holding a caller to
-   * authorize is refused, including the in-process API, which is deliberately
-   * held to the same policy as a sync client.
+   * Restricts updates to writes made under the trusted bypass, such as
+   * connectors, migrations, or scheduled background jobs. Standard callers
+   * and in-process APIs are denied.
    *
    * @generated from enum value: UPDATE_POLICY_TRUSTED_ONLY = 2;
    */
@@ -638,53 +644,46 @@ export const UpdatePolicySchema: GenEnum<UpdatePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 2);
 
 /**
- * FieldWritePolicy says which callers may write ONE field of an entity, where
- * CreatePolicy, UpdatePolicy and DeletePolicy speak for the whole row. Reach
- * for it when a field is the server's to own — a status a workflow advances, a
- * counter an effect maintains, an owner stamped at creation — while the rest of
- * the row stays client-writable.
+ * Specifies which callers can write a specific field of an entity.
  *
- * The two write primitives are governed differently, because they say different
- * things. A PATCH names its fields, so a mask reaching a protected field is a
- * request to do the forbidden thing and is REFUSED. A PUT names none: it
- * carries the whole row because that is the only shape it has, so a protected
- * field silently keeps the value the server already stored (the zero value when
- * the row is new) and the rest of the write lands. Refusing the PUT instead
- * would reject an honest read-modify-write whenever the client's copy of a
- * field it never meant to touch had gone stale.
+ * This policy applies at the field level, while `CreatePolicy`,
+ * `UpdatePolicy`, and `DeletePolicy` apply to whole rows. Use it when specific
+ * fields must be modified only by the server while the rest of the row remains
+ * client-writable.
  *
- * Like the entity policies, it governs the PUT and PATCH primitives rather than
- * modification as an outcome: a custom mutator's rows are covered by the
- * verdict on its invocation, so an app that wants a client-initiated change to
- * a protected field writes a mutator, checks what it needs in the body, and
- * authorizes the invocation by name.
+ * The engine handles write operations as follows:
+ * - A `PATCH` request whose field mask includes a protected field fails.
+ * - A `PUT` request silently preserves the server value for protected fields
+ *   (or the zero value for new rows) and applies the remaining fields.
  *
- * Per-caller rules are what a schema enum cannot express — "the owner may
- * reassign, a viewer may not" belongs in the server's FieldPermissions hook,
- * which adds fields to this set for one caller and can never take one away.
+ * To allow client-initiated changes to protected fields, use a custom mutator
+ * with appropriate checks and authorize the mutator invocation by name.
+ * Dynamic per-caller permissions belong in the server `FieldPermissions` hook.
  *
  * @generated from enum syncplane.v1.FieldWritePolicy
  */
 export enum FieldWritePolicy {
   /**
-   * Any caller the permission policy admits may write the field.
+   * Allows any caller admitted by the permission policy to write the field.
    *
    * @generated from enum value: FIELD_WRITE_POLICY_UNSPECIFIED = 0;
    */
   UNSPECIFIED = 0,
 
   /**
-   * Same as unset, for schemas that prefer to say so.
+   * Explicitly allows any caller admitted by the permission policy to write
+   * the field.
    *
    * @generated from enum value: FIELD_WRITE_POLICY_ALLOW = 1;
    */
   ALLOW = 1,
 
   /**
-   * Only writes made under the engine's Trusted bypass may change the field —
-   * a connector, a migration, an effect, a cron job. Everything holding a
-   * caller to authorize is refused or carried over, including the in-process
-   * API, which is deliberately held to the same policy as a sync client.
+   * Only writes made under the engine's Trusted bypass may change the
+   * field — a connector, a migration, an effect, a cron job. A PATCH
+   * naming the field is refused, while a PUT carries the stored value
+   * over and the rest of the write lands. The in-process API is
+   * deliberately held to the same policy as a sync client.
    *
    * @generated from enum value: FIELD_WRITE_POLICY_TRUSTED_ONLY = 2;
    */
@@ -698,7 +697,8 @@ export const FieldWritePolicySchema: GenEnum<FieldWritePolicy> = /*@__PURE__*/
   enumDesc(file_syncplane_v1_options, 3);
 
 /**
- * Field numbers 50100/50101/50102 are unregistered; fine for internal use.
+ * Field numbers 50100, 50101 and 50102 are unregistered; fine for
+ * internal use.
  *
  * @generated from extension: syncplane.v1.EntityOptions entity = 50100;
  */
@@ -706,12 +706,18 @@ export const entity: GenExtension<MessageOptions, EntityOptions> = /*@__PURE__*/
   extDesc(file_syncplane_v1_options, 0);
 
 /**
+ * Message option that configures reference message options for
+ * cross-workspace references.
+ *
  * @generated from extension: syncplane.v1.ReferenceOptions reference = 50102;
  */
 export const reference: GenExtension<MessageOptions, ReferenceOptions> = /*@__PURE__*/
   extDesc(file_syncplane_v1_options, 1);
 
 /**
+ * Field option that configures field-level merge, indexing, and
+ * authorization behavior.
+ *
  * @generated from extension: syncplane.v1.FieldBehavior field_behavior = 50101;
  */
 export const field_behavior: GenExtension<FieldOptions, FieldBehavior> = /*@__PURE__*/
