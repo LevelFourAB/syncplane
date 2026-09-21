@@ -661,6 +661,7 @@ Behavior rules:
 - A stub resolves in the holder's workspace, unless it is a [workspace-qualified reference](#workspace-qualified-references) naming another one.
 - Nested `matches` calls, `matches` inside `any()`, `matches` in subscription predicates, and `matches` on non-reference message fields throw an error at query compilation.
 - `matches` names the reference field itself. On a workspace-qualified reference, `t.assignee.user.matches(...)` throws: the entity field inside the wrapper knows nothing of the workspace stored beside it.
+- On a [polymorphic reference](#polymorphic-references), `matches` must name a single case (for example, `t.parent.client.matches(...)`, `m.owner.owner.client.matches(...)`, or `m.mentions.owner.client.matches(...)`). Calling `matches` on the `oneof` group or wrapper message throws an error because cases target different entities.
 - Reverse relations do not support `matches`.
 - See [what a live matches costs](../explanation/relational-queries.md#what-a-live-matches-costs).
 
@@ -946,6 +947,58 @@ Resolution rules:
 - Watchers that hydrate or cross such a reference re-fire on a commit to the target entity in any workspace.
 - `queryServer`, server-side `include`, and `follow` resolve inside one workspace: a stub naming another workspace matches nothing there.
 - A reference message is replaced whole on every write. A `workspaceRefList` merges as a set: an `update` that adds or removes elements writes only those, identified by `workspaceId` and key together, so concurrent adds and removes from different clients all land. Wrap each reference in a `keyedList` element when an element must carry more than the reference.
+
+### Polymorphic references
+
+A **polymorphic reference** targets one of several possible entities. In `.proto` schemas, declare a polymorphic reference as a `oneof` of reference fields on the holder entity, or as a reference message containing a `oneof` alongside an optional workspace field. See [proto options](proto-options.md#polymorphic-references). Because the TypeScript schema builder does not support `oneof` declarations, declare polymorphic references in `.proto` files.
+
+```proto
+message Task {
+	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
+	string id = 1;
+	oneof parent {
+		Client client = 2;
+		AreaRef area = 3;
+	}
+}
+```
+
+The `oneof` defines the relation name, and each reference member defines a **case**:
+
+```ts
+// Write and switch the case: the mask names the group, as for any oneof.
+await client.db.task.mutate.put({
+	id: 't1',
+	parent: { case: 'client', value: { id: 'c1' } },
+});
+await client.db.task.mutate.patch('t1', {
+	parent: { case: 'area', value: { area: { id: 'a1' } } },
+});
+
+// Resolve whichever case the row holds; the row type is the union of the targets.
+const parent = await client.db.task.refs.parent.load(task); // Row<Client | Area> | undefined
+if (parent?.value.$typeName === 'example.v1.Client') { /* … */ }
+
+// Hydrate and follow by the oneof's name.
+await client.db.task.query({}, { include: { parent: true } });
+subscription(TaskSchema, undefined, { include: { parent: true } });
+
+// Query one case.
+await client.db.task.query({
+	where: (t) => t.parent.client.matches((c) => c.name.eq('Acme')),
+});
+await client.db.task.query({ where: (t) => t.parent.client.id.eq('c1') });
+await client.db.task.query({ where: (t) => t.parent.area.isSet() });
+```
+
+Rules:
+
+- **Relation accessors**: The forward accessor uses the `oneof` group name on the holder (`refs.parent`, `include: { parent }`) or the field name on a reference message (`refs.owner`). Individual cases do not expose separate accessors on the holder.
+- **Reverse relations**: Every case target receives an inverse relation accessor (`client.db.client.refs.tasks(client)` and `client.db.area.refs.tasks(area)`). When a source entity links to a target through multiple relations or cases, names use `<plural(source)>By<Relation>`, or `<plural(source)>By<Relation><Case>` if two cases in the same relation share a target entity.
+- **Resolution**: `refs.<relation>.load()` and `include` resolve the active case stored on the row within that case's target entity and designated workspace. In to-many polymorphic references, each element resolves its own case, allowing the list to contain rows from different entities.
+- **Include options**: Specifying list options (`$where`, `$orderBy`, `$limit`, `$offset`) on a polymorphic list relation throws an error because the options target a single entity type, but the relation resolves to multiple entity types.
+- **Set merging**: Repeated polymorphic reference messages merge as a set keyed by `<workspace>/<case>/<key>`. Mutation updates add or remove only the modified elements.
+- **Type inference**: TypeScript types resolve a reference message containing a `oneof` of message fields (with or without `workspaceId`) to the union of its case message types.
 
 ## Undo and redo
 

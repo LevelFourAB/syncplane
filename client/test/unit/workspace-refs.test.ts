@@ -165,12 +165,12 @@ describe('workspace-qualified reference graph', () => {
 	const registry = new EntityRegistry([ TaskSchema, UserSchema ]);
 
 	it('surfaces a reference message field as a forward ref with its stored shape', () => {
-		const fwd = registry.forwardRef('task', 'assignee')!;
+		const fwd = registry.forwardCasesOf('task', 'assignee')[0]!;
 		expect(fwd.targetEntity).toBe('user');
 		expect(fwd.repeated).toBe(false);
 		expect(fwd.shape.valueField?.localName).toBe('user');
 		expect(fwd.shape.workspaceField?.localName).toBe('workspaceId');
-		expect(registry.forwardRef('task', 'watchers')?.repeated).toBe(true);
+		expect(registry.forwardCasesOf('task', 'watchers')[0]?.repeated).toBe(true);
 	});
 
 	it('derives the reverse relations on the target as for any reference', () => {
@@ -628,11 +628,11 @@ describe('workspace-qualified references in the schema builder', () => {
 
 	it('synthesizes a reference message the registry reads as a qualified ref', () => {
 		const registry = new EntityRegistry(defineSchema(person, task).descMessages());
-		const fwd = registry.forwardRef('bTask', 'assignee')!;
+		const fwd = registry.forwardCasesOf('bTask', 'assignee')[0]!;
 		expect(fwd.targetEntity).toBe('person');
 		expect(fwd.shape.valueField?.localName).toBe('value');
 		expect(fwd.shape.workspaceField?.localName).toBe('workspaceId');
-		expect(registry.forwardRef('bTask', 'watchers')?.repeated).toBe(true);
+		expect(registry.forwardCasesOf('bTask', 'watchers')[0]?.repeated).toBe(true);
 		expect(registry.reverseRefsOf('person').map((r) => r.name).sort()).toEqual([
 			'bTasksByAssignee',
 			'bTasksByWatchers',

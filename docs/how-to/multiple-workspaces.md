@@ -162,6 +162,8 @@ A reference resolves in the workspace of the row that holds it. To let a row nam
 
 The server resolves `matches()`, `include`, and `follow` inside the request's workspace only, so `queryServer` and a `follow` spec never see a stub that names another workspace. Use local reads for those. For the full rules, see [References](../reference/proto-options.md#references).
 
+To reference one of several entity types, declare the target as a `oneof` beside the workspace field. The stored value records both the workspace and the active case. For more information, see [Polymorphic references](../reference/proto-options.md#polymorphic-references).
+
 ## Adding and removing
 
 To add or remove workspaces dynamically on an active client:

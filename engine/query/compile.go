@@ -363,8 +363,8 @@ func compileExists(desc protoreflect.MessageDescriptor, c *syncplanev1.ExistsCon
 	// A reference element stores only the target's key fields, so the same rule
 	// that stops a path descending through a reference stops a sub-condition
 	// reaching past one: those fields are simply not there to match.
-	if r := lww.RefOf(leaf); r != nil {
-		if err := requireRefKeyPaths(c.GetPath(), r, c.GetCond()); err != nil {
+	if refs := lww.RefsOf(leaf); len(refs) > 0 {
+		if err := requireRefKeyPaths(c.GetPath(), refs, c.GetCond()); err != nil {
 			return nil, err
 		}
 	}
@@ -406,20 +406,40 @@ func requireEntryPaths(
 }
 
 // requireRefKeyPaths rejects a sub-condition that addresses anything but the
-// reference's key fields. Without it such a condition compiles and then matches
-// nothing, since a stored reference element carries the key fields alone.
-func requireRefKeyPaths(path []string, ref *lww.Ref, cond *syncplanev1.Condition) error {
+// reference's key fields — of any case, for a polymorphic reference message.
+// Without it such a condition compiles and then matches nothing, since a
+// stored reference element carries the key fields alone.
+func requireRefKeyPaths(path []string, refs []*lww.Ref, cond *syncplanev1.Condition) error {
 	return walkSubPaths(cond, func(sub []string) error {
-		if len(sub) == 1 && ref.Addressable(sub[0]) {
-			return nil
-		}
-		// A reference message keeps the key one level down, under its entity field.
-		if ref.Value != nil && len(sub) == 2 && sub[0] == string(ref.Value.Name()) && isKeyField(ref.KeyFields, sub[1]) {
-			return nil
+		for _, ref := range refs {
+			if len(sub) == 1 && ref.Addressable(sub[0]) {
+				return nil
+			}
+			// A reference message keeps the key one level down, under its entity field.
+			if ref.Value != nil && len(sub) == 2 && sub[0] == string(ref.Value.Name()) && isKeyField(ref.KeyFields, sub[1]) {
+				return nil
+			}
 		}
 		return fmt.Errorf("path %v: an element of a reference list holds only %s, so any() cannot ask about %q",
-			path, refHolds(ref), strings.Join(sub, "."))
+			path, refsHold(refs), strings.Join(sub, "."))
 	})
+}
+
+// refsHold is refHolds over the cases of a reference: what one stored value
+// of it carries, whichever case it holds.
+func refsHold(refs []*lww.Ref) string {
+	if len(refs) == 1 {
+		return refHolds(refs[0])
+	}
+	names := make([]string, len(refs))
+	for i, r := range refs {
+		names[i] = fmt.Sprintf("%q", r.Value.Name())
+	}
+	cases := "one of its case fields " + strings.Join(names, ", ")
+	if refs[0].Workspace == nil {
+		return cases
+	}
+	return fmt.Sprintf("%s and workspace field %q", cases, refs[0].Workspace.Name())
 }
 
 // refAddressable names the fields a path may descend into through a reference,

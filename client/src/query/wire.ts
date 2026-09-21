@@ -6,7 +6,7 @@ import {
 	refKeyPath,
 	type RefShape,
 	refShape,
-	refTarget,
+	refShapes,
 } from '../mutations.js';
 import type { CompiledFacet, CompiledQuery, Cond, OrderKey, Path } from './ast.js';
 import type { CompiledGroupQuery, CompiledGroupRowsQuery } from './group.js';
@@ -94,14 +94,15 @@ function translateCond(scope: CondScope, cond: Cond): Cond {
 		case 'rel': {
 			// The sub-condition's paths are relative to the TARGET row, so they
 			// translate against the target schema rather than this one.
-			const leaf = translatePathLeaf(scope, cond.path);
-			const target = refTarget(leaf.field);
-			if (!target) {
-				throw new Error(
-					`query path ${cond.path.join('.')}: matches() needs a reference field`,
-				);
+			if (scope.kind !== 'message') {
+				throw new Error(`query path ${cond.path.join('.')}: matches() cannot nest inside any()`);
 			}
-			return { kind: 'rel', path: leaf.path, cond: translateCond(messageScope(target), cond.cond) };
+			const leaf = resolveRelLeaf(scope.schema, cond.path);
+			return {
+				kind: 'rel',
+				path: leaf.protoPath,
+				cond: translateCond(messageScope(leaf.shape.targetSchema), cond.cond),
+			};
 		}
 		case 'match':
 			// Entity-level: no path to translate.
@@ -405,8 +406,8 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 				// its entity field, plus a workspace, for a reference message — so
 				// the same rule that stops a path descending through a reference
 				// stops a sub-condition reaching past one: those fields are not there.
-				const shape = refShape(leaf.field);
-				if (shape) requireRefKeyPaths(cond.path, shape, cond.cond);
+				const shapes = refShapes(leaf.field);
+				if (shapes.length > 0) requireRefKeyPaths(cond.path, shapes, cond.cond);
 			}
 			return { kind: 'exists', path: leaf.path, cond: prepareCond(element, cond.cond) };
 		}
@@ -423,33 +424,14 @@ function prepareCond(scope: CondScope, cond: Cond): Cond {
 						+ 'the semi-join is one hop',
 				);
 			}
-			const leaf = resolveInScope(scope, cond.path, false);
-			const target = leaf.keyed || leaf.entryKey ? undefined : refTarget(leaf.field);
-			if (!target || refKeyFields(leaf.field).length === 0) {
-				throw new Error(
-					`query path ${cond.path.join('.')}: matches() needs a reference field, got ${
-						describeLeaf(leaf)
-					}; a message field is only a reference when its target declares (syncplane.v1.entity)`,
-				);
-			}
-			// The entity field inside a reference message is itself entity-typed,
-			// so it resolves as a plain reference — one that knows nothing of the
-			// workspace stored beside it. Only the enclosing field carries the
-			// whole stored shape.
-			if (cond.path.length > 1) {
-				const parent = resolveInScope(scope, cond.path.slice(0, -1), false);
-				if (!parent.keyed && !parent.entryKey && refTarget(parent.field)) {
-					throw new Error(
-						`query path ${cond.path.join('.')}: matches() names the reference field itself; "${
-							cond.path.at(-1)
-						}" is the entity field inside reference "${cond.path.at(-2)}"`,
-					);
-				}
-			}
+			const leaf = resolveRelLeaf(scope.schema, cond.path);
 			return {
 				kind: 'rel',
 				path: leaf.path,
-				cond: prepareCond({ kind: 'message', schema: target, nested: 'relation' }, cond.cond),
+				cond: prepareCond(
+					{ kind: 'message', schema: leaf.shape.targetSchema, nested: 'relation' },
+					cond.cond,
+				),
 			};
 		}
 		case 'present':
@@ -664,20 +646,23 @@ function refAddressableHint(shape: RefShape): string {
 
 /**
  * Rejects an any() sub-condition that addresses anything but the reference's
- * key fields. Without it such a condition prepares cleanly and then matches
- * nothing, since a stored reference element carries the key fields alone.
+ * key fields — of any case, for a polymorphic reference message. Without it
+ * such a condition prepares cleanly and then matches nothing, since a stored
+ * reference element carries the key fields alone.
  */
-function requireRefKeyPaths(path: Path, shape: RefShape, cond: Cond): void {
+function requireRefKeyPaths(path: Path, shapes: RefShape[], cond: Cond): void {
 	const check = (sub: Path): void => {
-		if (sub.length === 1 && refAddressable(shape, sub[0]!)) return;
-		// A reference message keeps the key one level down, under its entity field.
-		if (
-			shape.valueField && sub.length === 2 && sub[0] === shape.valueField.localName
-			&& shape.keyFields.some((kf) => kf.localName === sub[1])
-		) return;
+		for (const shape of shapes) {
+			if (sub.length === 1 && refAddressable(shape, sub[0]!)) return;
+			// A reference message keeps the key one level down, under its entity field.
+			if (
+				shape.valueField && sub.length === 2 && sub[0] === shape.valueField.localName
+				&& shape.keyFields.some((kf) => kf.localName === sub[1])
+			) return;
+		}
 		throw new Error(
 			`query path ${path.join('.')}: an element of a reference list holds only ${
-				refHolds(shape)
+				refsHold(shapes)
 			}, so any() cannot ask about "${sub.join('.')}"`,
 		);
 	};
@@ -692,11 +677,144 @@ function requireRefKeyPaths(path: Path, shape: RefShape, cond: Cond): void {
 			return;
 		case 'and':
 		case 'or':
-			for (const c of cond.conds) requireRefKeyPaths(path, shape, c);
+			for (const c of cond.conds) requireRefKeyPaths(path, shapes, c);
 			return;
 		case 'not':
-			requireRefKeyPaths(path, shape, cond.cond);
+			requireRefKeyPaths(path, shapes, cond.cond);
 	}
+}
+
+/** refHolds over the cases of a reference: what one stored value of it carries, whichever case it holds. */
+function refsHold(shapes: RefShape[]): string {
+	if (shapes.length === 1) return refHolds(shapes[0]!);
+	const cases = `one of its case fields ${
+		shapes.map((s) => `"${s.valueField!.localName}"`).join(', ')
+	}`;
+	const ws = shapes[0]!.workspaceField;
+	return ws ? `${cases} and workspace field "${ws.localName}"` : cases;
+}
+
+/**
+ * The reference a matches() path names: the stored field, the case of it the
+ * path crosses, and both spellings of the path — the accessor form the local
+ * evaluator resolves against, and the proto form the wire carries.
+ *
+ * A case of a polymorphic reference message is named by one more segment than
+ * the field — `owner.owner.project` from the builder, `owner.project` once the
+ * group is stripped — which no ordinary path resolution reaches: the field may
+ * be a list, and the case an entity-typed field a path could not otherwise
+ * descend into. So the path is walked here segment by segment, consuming a
+ * oneof group where the builder wrote one, and allowing the one descent
+ * through a list that a case makes.
+ */
+export interface RelLeaf {
+	/** localName path to the stored field, group-stripped. */
+	fieldPath: Path;
+	/** localName path the condition carries: fieldPath, plus the case for a case inside a reference message. */
+	path: Path;
+	/** `path` as proto field names, the form the wire speaks. */
+	protoPath: Path;
+	/** The stored field — for a case inside a reference message, the message field every case shares. */
+	field: DescField;
+	/** The case the condition crosses. */
+	shape: RefShape;
+}
+
+export function resolveRelLeaf(schema: DescMessage, path: Path): RelLeaf {
+	const fields: DescField[] = [];
+	const out: string[] = [];
+	const protoOut: string[] = [];
+	let desc: DescMessage | undefined = schema;
+	let group: DescOneof | undefined;
+	for (let i = 0; i < path.length; i++) {
+		const seg = path[i]!;
+		if (desc === undefined) {
+			throw new Error(
+				`query path ${path.join('.')}: "${
+					path[i - 1]
+				}" is not a message field, cannot descend into "${seg}"`,
+			);
+		}
+		const field: DescField | undefined = desc.fields.find((f) => f.localName === seg);
+		if (!field) {
+			const oneof = group ? undefined : desc.oneofs.find((o) => o.localName === seg);
+			if (oneof && i < path.length - 1) {
+				group = oneof;
+				continue;
+			}
+			throw new Error(`query path ${path.join('.')}: ${desc.typeName} has no field "${seg}"`);
+		}
+		if (group && field.oneof?.localName !== group.localName) {
+			throw new Error(
+				`query path ${path.join('.')}: "${seg}" is not a member of oneof "${group.name}"`,
+			);
+		}
+		group = undefined;
+		fields.push(field);
+		out.push(seg);
+		protoOut.push(field.name);
+		if (i === path.length - 1) break;
+		if (field.fieldKind === 'message') {
+			desc = field.message;
+		} else if (
+			field.fieldKind === 'list' && field.listKind === 'message' && refShapes(field).length > 1
+		) {
+			// The one descent through a list: into the element of a repeated
+			// polymorphic reference message, to name the case.
+			desc = field.message;
+		} else {
+			desc = undefined;
+		}
+	}
+	const leaf = fields.at(-1);
+	if (!leaf) throw new Error('query path is empty');
+	const parent = fields.at(-2);
+	if (parent) {
+		const enclosing = refShapes(parent);
+		const shape = enclosing.find((s) => s.valueField === leaf);
+		if (enclosing.length > 1 && shape) {
+			return { fieldPath: out.slice(0, -1), path: out, protoPath: protoOut, field: parent, shape };
+		}
+		if (enclosing.length > 1) {
+			throw new Error(
+				`query path ${
+					path.join('.')
+				}: "${leaf.localName}" is not a case of polymorphic reference "${parent.localName}"; its cases are ${
+					enclosing.map((s) => s.valueField!.localName).join(', ')
+				}`,
+			);
+		}
+		// The entity field inside a reference message is itself entity-typed,
+		// so it resolves as a plain reference — one that knows nothing of the
+		// workspace stored beside it. Only the enclosing field carries the
+		// whole stored shape.
+		if (enclosing.length === 1 && enclosing[0]!.valueField === leaf) {
+			throw new Error(
+				`query path ${
+					path.join('.')
+				}: matches() names the reference field itself; "${leaf.localName}" is the entity field inside reference "${parent.localName}"`,
+			);
+		}
+	}
+	const shapes = refShapes(leaf);
+	if (shapes.length > 1) {
+		throw new Error(
+			`query path ${
+				path.join('.')
+			}: matches() must name one case of polymorphic reference "${leaf.localName}", whose cases have different targets: ${
+				shapes.map((s) => [ ...out, s.valueField!.oneof!.localName, s.valueField!.localName ].join('.'))
+					.join(', ')
+			}`,
+		);
+	}
+	if (shapes.length === 0 || (leaf.fieldKind !== 'message' && leaf.fieldKind !== 'list')) {
+		throw new Error(
+			`query path ${
+				path.join('.')
+			}: matches() needs a reference field, got field "${leaf.name}" of ${leaf.parent.typeName}; a message field is only a reference when its target declares (syncplane.v1.entity)`,
+		);
+	}
+	return { fieldPath: out, path: out, protoPath: protoOut, field: leaf, shape: shapes[0]! };
 }
 
 /** Names the way to ask about elements the operator cannot compare, which

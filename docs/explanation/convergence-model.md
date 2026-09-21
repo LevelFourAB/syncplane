@@ -78,11 +78,16 @@ concurrent write to an unrelated field (such as `label`) does not affect the
 group. When two writers modify the oneof group concurrently, the last write to
 arrive wins the entire group rather than combining values.
 
-This design makes the group **atomic**. A message inside a oneof is replaced as
-a whole, and mask paths cannot descend into it. For this reason, schema
-registration rejects types that require permanent presence inside a oneof,
-including key fields, keyed-list identities, collaborative-text fields, and
-references (see [proto options](../reference/proto-options.md#what-a-oneof-cannot-hold)).
+This design makes the group **atomic**. A message inside a oneof is replaced
+as a whole, and mask paths cannot descend into it. For this reason, schema
+registration rejects types that require structural merging or permanent
+presence inside a oneof, including key fields, keyed-list identities, and
+collaborative-text fields (see
+[proto options](../reference/proto-options.md#what-a-oneof-cannot-hold)). A
+reference may be a oneof member because a stored stub is replaced whole anyway.
+A oneof of references declares a
+[polymorphic reference](../reference/proto-options.md#polymorphic-references),
+where the group is the relation and each member is a case a row can hold.
 
 Reads operate differently because reading individual members carries no
 ambiguity. You can address a member directly in queries, orderings, and indexes,

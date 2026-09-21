@@ -1036,7 +1036,7 @@
 					],
 					"op": "CMP_OP_GT",
 					"value": {
-						"stringValue": "\ufffd"
+						"stringValue": "�"
 					}
 				}
 			},
@@ -1054,7 +1054,7 @@
 					],
 					"op": "CMP_OP_LT",
 					"value": {
-						"stringValue": "\ufffd"
+						"stringValue": "�"
 					}
 				}
 			},
@@ -4006,7 +4006,7 @@
 		{
 			"name": "astral strings order by UTF-16 code unit",
 			"a": {
-				"label": "\ufffd"
+				"label": "�"
 			},
 			"b": {
 				"label": "𝄞"
@@ -4649,7 +4649,7 @@
 				{
 					"key": "r2",
 					"row": {
-						"label": "\ufffd"
+						"label": "�"
 					}
 				},
 				{
@@ -5921,6 +5921,422 @@
 			},
 			"want": [
 				"i2"
+			]
+		},
+		{
+			"name": "rel through a case of a oneof on the holder matches the rows holding that case",
+			"type": "oneof_ref",
+			"context": {
+				"project": [
+					{
+						"id": "p1",
+						"name": "Alpha"
+					},
+					{
+						"id": "p2",
+						"name": "Beta"
+					}
+				],
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "p1",
+						"name": "Same key as a project"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "r-p1",
+					"row": {
+						"id": "r-p1",
+						"project": {
+							"id": "p1"
+						}
+					}
+				},
+				{
+					"key": "r-u1",
+					"row": {
+						"id": "r-u1",
+						"user": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "r-up1",
+					"row": {
+						"id": "r-up1",
+						"user": {
+							"id": "p1"
+						}
+					}
+				},
+				{
+					"key": "r-none",
+					"row": {
+						"id": "r-none"
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"project"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Alpha"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"r-p1"
+			]
+		},
+		{
+			"name": "rel through a case of a oneof on the holder under not admits the other cases and the unset row",
+			"type": "oneof_ref",
+			"context": {
+				"project": [
+					{
+						"id": "p1",
+						"name": "Alpha"
+					},
+					{
+						"id": "p2",
+						"name": "Beta"
+					}
+				],
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "p1",
+						"name": "Same key as a project"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "r-p1",
+					"row": {
+						"id": "r-p1",
+						"project": {
+							"id": "p1"
+						}
+					}
+				},
+				{
+					"key": "r-u1",
+					"row": {
+						"id": "r-u1",
+						"user": {
+							"id": "u1"
+						}
+					}
+				},
+				{
+					"key": "r-none",
+					"row": {
+						"id": "r-none"
+					}
+				}
+			],
+			"cond": {
+				"not": {
+					"rel": {
+						"path": [
+							"project"
+						],
+						"cond": {
+							"cmp": {
+								"path": [
+									"name"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"stringValue": "Alpha"
+								}
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"r-u1",
+				"r-none"
+			]
+		},
+		{
+			"name": "rel through a case inside a polymorphic reference message matches that case alone",
+			"type": "memo",
+			"context": {
+				"project": [
+					{
+						"id": "p1",
+						"name": "Alpha"
+					},
+					{
+						"id": "p2",
+						"name": "Beta"
+					}
+				],
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "p1",
+						"name": "Same key as a project"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "m-p1",
+					"row": {
+						"id": "m-p1",
+						"owner": {
+							"project": {
+								"id": "p1"
+							}
+						}
+					}
+				},
+				{
+					"key": "m-u1",
+					"row": {
+						"id": "m-u1",
+						"owner": {
+							"user": {
+								"id": "u1"
+							}
+						}
+					}
+				},
+				{
+					"key": "m-up1",
+					"row": {
+						"id": "m-up1",
+						"owner": {
+							"user": {
+								"id": "p1"
+							}
+						}
+					}
+				},
+				{
+					"key": "m-none",
+					"row": {
+						"id": "m-none",
+						"owner": {}
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"owner",
+						"user"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Maya"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"m-u1"
+			]
+		},
+		{
+			"name": "rel through a case of a repeated polymorphic reference message matches when some element holds it",
+			"type": "memo",
+			"context": {
+				"project": [
+					{
+						"id": "p1",
+						"name": "Alpha"
+					},
+					{
+						"id": "p2",
+						"name": "Beta"
+					}
+				],
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "p1",
+						"name": "Same key as a project"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "m-mixed",
+					"row": {
+						"id": "m-mixed",
+						"mentions": [
+							{
+								"user": {
+									"id": "u1"
+								}
+							},
+							{
+								"project": {
+									"id": "p2"
+								}
+							}
+						]
+					}
+				},
+				{
+					"key": "m-users",
+					"row": {
+						"id": "m-users",
+						"mentions": [
+							{
+								"user": {
+									"id": "u1"
+								}
+							},
+							{
+								"user": {
+									"id": "p1"
+								}
+							}
+						]
+					}
+				},
+				{
+					"key": "m-empty",
+					"row": {
+						"id": "m-empty"
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"mentions",
+						"project"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Beta"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"m-mixed"
+			]
+		},
+		{
+			"name": "rel through the reference-message case of a mixed oneof on the holder",
+			"type": "attachment",
+			"context": {
+				"project": [
+					{
+						"id": "p1",
+						"name": "Alpha"
+					},
+					{
+						"id": "p2",
+						"name": "Beta"
+					}
+				],
+				"user": [
+					{
+						"id": "u1",
+						"name": "Maya"
+					},
+					{
+						"id": "p1",
+						"name": "Same key as a project"
+					}
+				]
+			},
+			"rows": [
+				{
+					"key": "a-p1",
+					"row": {
+						"id": "a-p1",
+						"project": {
+							"id": "p1"
+						}
+					}
+				},
+				{
+					"key": "a-u1",
+					"row": {
+						"id": "a-u1",
+						"user": {
+							"user": {
+								"id": "u1"
+							}
+						}
+					}
+				},
+				{
+					"key": "a-label",
+					"row": {
+						"id": "a-label",
+						"label": "loose"
+					}
+				}
+			],
+			"cond": {
+				"rel": {
+					"path": [
+						"user"
+					],
+					"cond": {
+						"cmp": {
+							"path": [
+								"name"
+							],
+							"op": "CMP_OP_EQ",
+							"value": {
+								"stringValue": "Maya"
+							}
+						}
+					}
+				}
+			},
+			"want": [
+				"a-u1"
 			]
 		}
 	]

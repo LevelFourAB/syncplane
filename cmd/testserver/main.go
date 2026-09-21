@@ -86,6 +86,10 @@ func main() {
 			// tests verify a stub naming another workspace round-trips, and
 			// that the server's follow and matches() stay inside one workspace.
 			&testdatav1.Task{},
+			// Polymorphic references: a oneof of targets on the holder
+			// (OneofRefEntity), inside a reference message (Memo's OwnerRef) and
+			// a holder oneof mixing both with a plain member (Attachment).
+			&testdatav1.OneofRefEntity{}, &testdatav1.Memo{}, &testdatav1.Attachment{},
 			// Historied opts into field history (and carries a collaborative
 			// text field), which also brings the engine's server-only history
 			// entity into the catalog: integration tests read it back through

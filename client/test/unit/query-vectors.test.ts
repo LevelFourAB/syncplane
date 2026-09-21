@@ -13,16 +13,20 @@ import { describe, expect, it } from 'vitest';
 
 import type { DescMessage, Message } from '@bufbuild/protobuf';
 import {
+	AttachmentSchema,
 	IssueSchema,
 	KeyedTextEntitySchema,
+	MemoSchema,
+	OneofRefEntitySchema,
 	PairSchema,
 	ProjectSchema,
 	UserSchema,
 	WidgetSchema,
 } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
+import { refStub } from '../../src/mutations.js';
 import type { Cond } from '../../src/query/ast.js';
-import { compareRows, evalCond, runQuery } from '../../src/query/evaluate.js';
+import { compareRows, evalCond, resolvePath, runQuery } from '../../src/query/evaluate.js';
 import { condFromProto, condToProto, orderKeyFromProto } from '../../src/query/proto.js';
 import {
 	collectRels,
@@ -48,6 +52,12 @@ const schemaFor = (type?: string) =>
 		? IssueSchema
 		: type === 'keyed_text'
 		? KeyedTextEntitySchema
+		: type === 'oneof_ref'
+		? OneofRefEntitySchema
+		: type === 'memo'
+		? MemoSchema
+		: type === 'attachment'
+		? AttachmentSchema
 		: WidgetSchema;
 
 interface CompareCase {
@@ -166,11 +176,15 @@ describe('queryeval conformance vectors', () => {
 						case 'not':
 							return !definition(row, cond.cond);
 						case 'rel': {
+							// The stored values sit at the node's field path — read
+							// through the holder's oneof where the field is a member of
+							// one — and each answers to the case the node crosses.
 							const node = byCond.get(cond)!;
-							const rec = row as unknown as Record<string, unknown>;
-							let at: unknown = rec;
-							for (const seg of cond.path) at = (at as Record<string, unknown>)?.[seg];
-							const stubs = at === undefined ? [] : Array.isArray(at) ? at : [ at ];
+							const { found, value: at } = resolvePath(row, node.fieldPath, schema);
+							const values = !found || at === undefined ? [] : Array.isArray(at) ? at : [ at ];
+							const stubs = values
+								.map((v) => refStub(node.shape, v as Message))
+								.filter((v): v is Message => v !== undefined);
 							const targets = context.get(node.targetSchema.typeName) ?? [];
 							return stubs.some((stub) => {
 								const target = targets.find((t) =>

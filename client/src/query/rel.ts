@@ -21,7 +21,6 @@ import {
 	refKeyPath,
 	refQualified,
 	type RefShape,
-	refShape,
 	refStub,
 } from '../mutations.js';
 import type { CompiledIndex } from '../optimistic/index-maintain.js';
@@ -33,9 +32,9 @@ import {
 	type WorkspaceScope,
 } from '../read.js';
 import type { Cond, Path, Scalar } from './ast.js';
-import { evalCond, scalarKey } from './evaluate.js';
+import { evalCond, resolvePath, scalarKey } from './evaluate.js';
 import { queryByIndex } from './execute.js';
-import { resolveLeafRef } from './wire.js';
+import { resolveRelLeaf } from './wire.js';
 
 /**
  * An entity's compiled secondary indexes, as the client's index cache answers
@@ -53,8 +52,12 @@ export type RelCond = Extract<Cond, { kind: 'rel' }>;
  */
 export interface RelNode {
 	cond: RelCond;
-	/** The forward reference field the path ends at. */
+	/** The forward reference field the path ends at — for a case inside a reference message, the message field. */
 	field: DescField;
+	/** The holder entity's schema, which `fieldPath` resolves against. */
+	holderSchema: DescMessage;
+	/** localName path to `field`: the condition's path, shortened by the case segment when it names a case. */
+	fieldPath: Path;
 	/** The target entity's message schema. */
 	targetSchema: DescMessage;
 	/** The target's key fields — the values a stored stub carries. */
@@ -94,20 +97,16 @@ export function collectRels(schema: DescMessage, cond: Cond | undefined): RelNod
 	const walk = (c: Cond): void => {
 		switch (c.kind) {
 			case 'rel': {
-				const leaf = resolveLeafRef(schema, c.path, false);
-				const shape = refShape(leaf.field);
-				if (!shape) {
-					throw new Error(
-						`query path ${c.path.join('.')}: matches() needs a reference field`,
-					);
-				}
+				const leaf = resolveRelLeaf(schema, c.path);
 				out.push({
 					cond: c,
 					field: leaf.field,
-					targetSchema: shape.targetSchema,
-					keyFields: shape.keyFields,
+					holderSchema: schema,
+					fieldPath: leaf.fieldPath,
+					targetSchema: leaf.shape.targetSchema,
+					keyFields: leaf.shape.keyFields,
 					repeated: leaf.field.fieldKind === 'list',
-					shape,
+					shape: leaf.shape,
 				});
 				return;
 			}
@@ -173,12 +172,12 @@ function membershipOf(node: RelNode, targets: readonly Scalar[][]): Cond {
 
 /** Prefixes a stub-relative path for the node's arity; see membershipOf. */
 function stubPathOf(node: RelNode): (sub: Path) => Path {
-	return (sub) => node.repeated ? sub : [ ...node.cond.path, ...sub ];
+	return (sub) => node.repeated ? sub : [ ...node.fieldPath, ...sub ];
 }
 
 /** Wraps a stub-relative condition in the exists a repeated ref needs. */
 function wrapStub(node: RelNode, cond: Cond): Cond {
-	return node.repeated ? { kind: 'exists', path: node.cond.path, cond } : cond;
+	return node.repeated ? { kind: 'exists', path: node.fieldPath, cond } : cond;
 }
 
 /**
@@ -473,12 +472,8 @@ export function relTupleKey(tuple: readonly Scalar[]): string | undefined {
  * returns is what that produced, for the same target.
  */
 export function stubKeyTuples(node: RelNode, row: unknown): Scalar[][] {
-	let at: unknown = row;
-	for (const segment of node.cond.path) {
-		if (at === undefined || at === null) return [];
-		at = (at as Record<string, unknown>)[segment];
-	}
-	if (at === undefined || at === null) return [];
+	const { found, value: at } = resolvePath(row, node.fieldPath, node.holderSchema);
+	if (!found || at === undefined || at === null) return [];
 	const values = node.repeated ? at as unknown[] : [ at ];
 	const out: Scalar[][] = [];
 	for (const value of values) {

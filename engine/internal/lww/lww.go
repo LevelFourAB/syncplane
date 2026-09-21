@@ -13,8 +13,11 @@
 // means for its siblings, and the two answers ("b survives" / "the group is
 // empty") are both defensible. Naming the group asks the question the data can
 // answer. The cost is that a message inside a oneof merges atomically, which is
-// also why nothing below a oneof may be keyed, text or a reference (registration
-// refuses those — see engine/server).
+// also why nothing below a oneof may be keyed or text (registration refuses
+// those — see engine/server). A reference may be a oneof member: a stored stub
+// is replaced whole anyway, and a oneof of references is how a POLYMORPHIC
+// reference — one row pointing at one of several entities — is declared (see
+// RefsOf).
 package lww
 
 import (
@@ -198,7 +201,7 @@ func mergeItem(
 	case fd.IsMap():
 		return mergeMapItem(dst, src, fd, itemKey, rest, prefix+fieldSeg+".", itemInstPrefix, m)
 	case IsRefMessageField(fd):
-		return mergeRefSetItem(dst, src, fd, RefOf(fd), itemKey)
+		return mergeRefSetItem(dst, src, fd, itemKey)
 	case fd.Kind() == protoreflect.MessageKind:
 		keyFields := keyFieldsFor(fd)
 		if len(keyFields) == 0 {
@@ -309,12 +312,12 @@ func mergeKeyedListItem(
 // element => ensure present once, src lacks it => remove every copy. A sub-path
 // below the element is not an error but addresses the element, the same way a
 // sub-path into a singular reference message names the whole message.
-func mergeRefSetItem(dst, src protoreflect.Message, fd protoreflect.FieldDescriptor, ref *Ref, itemKey string) error {
+func mergeRefSetItem(dst, src protoreflect.Message, fd protoreflect.FieldDescriptor, itemKey string) error {
 	sl := src.Get(fd).List()
 	var srcElem protoreflect.Value
 	found := false
 	for i := 0; i < sl.Len(); i++ {
-		if ref.ItemKey(sl.Get(i).Message()) == itemKey {
+		if RefItemKey(fd, sl.Get(i).Message()) == itemKey {
 			srcElem = sl.Get(i)
 			found = true
 			break
@@ -323,7 +326,7 @@ func mergeRefSetItem(dst, src protoreflect.Message, fd protoreflect.FieldDescrip
 	dl := dst.Mutable(fd).List()
 	kept := make([]protoreflect.Value, 0, dl.Len()+1)
 	for i := 0; i < dl.Len(); i++ {
-		if ref.ItemKey(dl.Get(i).Message()) != itemKey {
+		if RefItemKey(fd, dl.Get(i).Message()) != itemKey {
 			kept = append(kept, dl.Get(i))
 		}
 	}
@@ -515,8 +518,8 @@ func keyFieldsFor(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 	return fields
 }
 
-// Ref describes one typed reference field: the entity it points at, and where
-// inside the stored value the target's key and workspace sit.
+// Ref describes one typed reference to ONE entity: the entity it points at,
+// and where inside the stored value the target's key and workspace sit.
 //
 // Two stored shapes make a reference. An ENTITY-TYPED field — a singular or
 // repeated message field whose (element) message carries
@@ -527,6 +530,14 @@ func keyFieldsFor(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 // declares one, the target's workspace in Workspace. Consumers address the key
 // through KeyPath and the stub through Stub, so the two shapes differ in
 // nothing else.
+//
+// A POLYMORPHIC reference — one stored value that points at one of several
+// entities — is a oneof of references, and each member is its own Ref, a
+// CASE of it. The oneof sits either on the holder (Group is set, and Field is
+// the member) or inside a reference message (Value is a member of the
+// message's oneof, and Field is the message field every case shares). A case
+// holds a value only while it is the active one, which every accessor here
+// already reports: Field is absent, or Stub finds nothing.
 type Ref struct {
 	// Field is the reference field itself, singular or repeated.
 	Field protoreflect.FieldDescriptor
@@ -540,24 +551,43 @@ type Ref struct {
 	// Workspace is the reference message's workspace field, or nil when every
 	// stored value resolves in the holder's own workspace.
 	Workspace protoreflect.FieldDescriptor
+	// Group is the holder's oneof Field is a member of, or nil.
+	Group protoreflect.OneofDescriptor
 }
 
-// RefOf classifies fd as a typed reference, or returns nil when it is not one:
-// a non-message field, a map, or a message that is neither an entity nor a
-// well-formed reference message. A reference message that breaks its rules
-// (see CheckReferenceMessage) is not a reference either — registration reports
-// it, and everything else sees an ordinary sub-message.
+// RefOf classifies fd as a typed reference to one entity, or returns nil when
+// it is not one: a non-message field, a map, a message that is neither an
+// entity nor a well-formed reference message, or a reference message whose
+// target is a oneof of entities — a polymorphic reference has no single
+// target, and RefsOf reports its cases. A reference message that breaks its
+// rules (see CheckReferenceMessage) is not a reference either — registration
+// reports it, and everything else sees an ordinary sub-message.
 func RefOf(fd protoreflect.FieldDescriptor) *Ref {
+	refs := RefsOf(fd)
+	if len(refs) != 1 {
+		return nil
+	}
+	return refs[0]
+}
+
+// RefsOf classifies fd as a typed reference and reports every case it can
+// hold: nil when fd is not a reference, one Ref for a reference to one
+// entity, and one per entity-typed member of the oneof for a reference
+// message whose target is a oneof. A member of a oneof on the holder is
+// classified on its own, with Group set; the other members of that oneof are
+// its sibling cases.
+func RefsOf(fd protoreflect.FieldDescriptor) []*Ref {
 	if fd == nil || fd.Kind() != protoreflect.MessageKind || fd.IsMap() {
 		return nil
 	}
 	elem := fd.Message()
+	group := OneofOf(fd)
 	// The reference declaration wins over an entity declaration on the same
 	// message: such a message is refused at registration, and until then it
 	// must not pass for an entity-typed stub.
 	if referenceOptions(elem) == nil {
 		if kf := entityKeyFields(elem); kf != nil {
-			return &Ref{Field: fd, Target: elem, KeyFields: kf}
+			return []*Ref{{Field: fd, Target: elem, KeyFields: kf, Group: group}}
 		}
 		return nil
 	}
@@ -565,13 +595,56 @@ func RefOf(fd protoreflect.FieldDescriptor) *Ref {
 	if err != nil {
 		return nil
 	}
-	return &Ref{
-		Field:     fd,
-		Target:    shape.value.Message(),
-		KeyFields: shape.keyFields,
-		Value:     shape.value,
-		Workspace: shape.workspace,
+	refs := make([]*Ref, 0, len(shape.values))
+	for _, v := range shape.values {
+		refs = append(refs, &Ref{
+			Field:     fd,
+			Target:    v.field.Message(),
+			KeyFields: v.keyFields,
+			Value:     v.field,
+			Workspace: shape.workspace,
+			Group:     group,
+		})
 	}
+	return refs
+}
+
+// Polymorphic reports whether this reference is one case of several: its
+// Field is a member of a oneof on the holder, or its Value a member of the
+// oneof inside a reference message.
+func (r *Ref) Polymorphic() bool {
+	return r.Group != nil || r.InnerCase()
+}
+
+// InnerCase reports whether the case is decided inside the stored value —
+// the reference message's oneof — rather than by which holder field is set.
+// Such cases share Field, and are told apart by Value.
+func (r *Ref) InnerCase() bool {
+	return r.Value != nil && OneofOf(r.Value) != nil
+}
+
+// CaseName is the proto name of the field that decides this case — Field for
+// a member of the holder's oneof, Value for a member of a reference message's
+// oneof — or "" for a reference to one entity.
+func (r *Ref) CaseName() string {
+	switch {
+	case r.Group != nil:
+		return string(r.Field.Name())
+	case r.InnerCase():
+		return string(r.Value.Name())
+	}
+	return ""
+}
+
+// CaseJSONName is CaseName in the accessor form a client spells it in.
+func (r *Ref) CaseJSONName() string {
+	switch {
+	case r.Group != nil:
+		return r.Field.JSONName()
+	case r.InnerCase():
+		return r.Value.JSONName()
+	}
+	return ""
 }
 
 // Qualified reports whether stored values may name a workspace other than the
@@ -632,8 +705,15 @@ func (r *Ref) WorkspaceOf(value protoreflect.Message) string {
 // they resolve to the same row. A reference without a workspace field renders
 // the key alone, exactly as an element of a repeated entity-typed reference.
 //
+// A case of a polymorphic reference message puts its name between the
+// workspace and the key, so two cases naming the same key are two elements;
+// the workspace part is present whenever the message declares one, and the
+// case part whenever the message's target is a oneof.
+//
 // Callers render every element through this, and the merge decodes with it;
-// a segment produced any other way addresses no element.
+// a segment produced any other way addresses no element. An element of a
+// polymorphic reference message is rendered by RefItemKey, which picks the
+// case the value holds.
 func (r *Ref) ItemKey(value protoreflect.Message) string {
 	// Get, not Stub: a value holding no stub still needs an identity, and Get
 	// hands back the zero message where Stub reports nothing.
@@ -641,15 +721,44 @@ func (r *Ref) ItemKey(value protoreflect.Message) string {
 	if r.Value != nil {
 		stub = value.Get(r.Value).Message()
 	}
-	if r.Workspace == nil {
+	if r.Workspace == nil && !r.InnerCase() {
 		return encodeItemKey(stub, r.KeyFields)
 	}
-	parts := make([]string, 0, len(r.KeyFields)+1)
-	parts = append(parts, escapeKeySegment(value.Get(r.Workspace).String(), true))
+	parts := make([]string, 0, len(r.KeyFields)+2)
+	if r.Workspace != nil {
+		parts = append(parts, escapeKeySegment(value.Get(r.Workspace).String(), true))
+	}
+	if r.InnerCase() {
+		parts = append(parts, escapeKeySegment(string(r.Value.Name()), true))
+	}
 	for _, kf := range r.KeyFields {
 		parts = append(parts, escapeKeySegment(scalarKeyString(kf, stub.Get(kf)), true))
 	}
 	return strings.Join(parts, "/")
+}
+
+// RefItemKey renders one stored value of a repeated reference message field
+// as the mask segment that addresses it (see Ref.ItemKey), whichever case the
+// value holds. A value of a polymorphic reference message that holds no case
+// renders its workspace, an empty case and no key. Panics when fd is not a
+// reference message field.
+func RefItemKey(fd protoreflect.FieldDescriptor, value protoreflect.Message) string {
+	refs := RefsOf(fd)
+	if len(refs) == 0 || refs[0].Value == nil {
+		panic(fmt.Sprintf("lww: %s is not a reference message field", fd.FullName()))
+	}
+	for _, r := range refs {
+		if len(refs) == 1 || value.Has(r.Value) {
+			return r.ItemKey(value)
+		}
+	}
+	// No case set: the shape ItemKey renders, with the case and the key both
+	// empty, so the segment still has every part a decoder expects to split.
+	r := refs[0]
+	if r.Workspace == nil {
+		return "/"
+	}
+	return escapeKeySegment(value.Get(r.Workspace).String(), true) + "//"
 }
 
 // ResolvesIn reports whether a stored reference value points into workspace,
@@ -693,9 +802,9 @@ func (r *Ref) AddressableNames() []string {
 }
 
 // RefKeyFields returns the key fields of the entity a reference field targets
-// (see RefOf), or nil when fd is not a reference. The fields are the TARGET's:
-// on a reference message they sit under Ref.Value, not on the stored value
-// itself — address them through Ref.KeyPath.
+// (see RefOf), or nil when fd is not a reference to one entity. The fields
+// are the TARGET's: on a reference message they sit under Ref.Value, not on
+// the stored value itself — address them through Ref.KeyPath.
 func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescriptor {
 	if r := RefOf(fd); r != nil {
 		return r.KeyFields
@@ -703,9 +812,10 @@ func RefKeyFields(fd protoreflect.FieldDescriptor) []protoreflect.FieldDescripto
 	return nil
 }
 
-// IsRef reports whether fd is a first-class typed reference (see RefOf).
+// IsRef reports whether fd is a first-class typed reference (see RefsOf),
+// to one entity or to one of several.
 func IsRef(fd protoreflect.FieldDescriptor) bool {
-	return RefOf(fd) != nil
+	return len(RefsOf(fd)) > 0
 }
 
 // IsRefMessageField reports whether fd is a reference whose stored shape is a
@@ -713,8 +823,8 @@ func IsRef(fd protoreflect.FieldDescriptor) bool {
 // singular field is replaced whole on every write, a repeated one merges per
 // element with the whole element as the identity (see Ref.ItemKey).
 func IsRefMessageField(fd protoreflect.FieldDescriptor) bool {
-	r := RefOf(fd)
-	return r != nil && r.Value != nil
+	refs := RefsOf(fd)
+	return len(refs) > 0 && refs[0].Value != nil
 }
 
 // IsReferenceMessage reports whether md declares (syncplane.v1.reference),
@@ -724,11 +834,12 @@ func IsReferenceMessage(md protoreflect.MessageDescriptor) bool {
 }
 
 // CheckReferenceMessage validates the shape of a message declaring
-// (syncplane.v1.reference): not itself an entity, exactly one singular
-// entity-typed field, at most one singular string field marked
-// (syncplane.v1.field_behavior).workspace, and no other fields. A message
-// that declares nothing passes unless one of its fields is marked workspace,
-// which only a reference message may carry.
+// (syncplane.v1.reference): not itself an entity; its target named by
+// exactly one singular entity-typed field, or by a oneof whose members are
+// all singular entity-typed fields; at most one singular string field marked
+// (syncplane.v1.field_behavior).workspace, outside any oneof; and no other
+// fields. A message that declares nothing passes unless one of its fields is
+// marked workspace, which only a reference message may carry.
 func CheckReferenceMessage(md protoreflect.MessageDescriptor) error {
 	if referenceOptions(md) == nil {
 		fields := md.Fields()
@@ -743,27 +854,37 @@ func CheckReferenceMessage(md protoreflect.MessageDescriptor) error {
 	return err
 }
 
-// referenceShape is the parsed form of a reference message.
+// referenceShape is the parsed form of a reference message: the entity-typed
+// field naming its target, or — when the target is a oneof — one entry per
+// member, in declaration order.
 type referenceShape struct {
-	value     protoreflect.FieldDescriptor
+	values    []referenceValue
 	workspace protoreflect.FieldDescriptor
+}
+
+// referenceValue is one entity-typed field of a reference message and the
+// key fields of the entity it names.
+type referenceValue struct {
+	field     protoreflect.FieldDescriptor
 	keyFields []protoreflect.FieldDescriptor
 }
 
-// referenceShapeOf reads a reference message's two fields, or reports how the
+// referenceShapeOf reads a reference message's fields, or reports how the
 // message breaks the rules CheckReferenceMessage states.
 func referenceShapeOf(md protoreflect.MessageDescriptor) (referenceShape, error) {
 	var shape referenceShape
 	if entityOptions(md) != nil {
 		return shape, fmt.Errorf("reference message %s is also an entity; a reference message wraps an entity, it is not one", md.FullName())
 	}
+	var group protoreflect.OneofDescriptor
 	fields := md.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		if od := OneofOf(fd); od != nil {
-			return shape, fmt.Errorf("reference message %s: field %q is a member of oneof %q; a reference message is replaced whole and has no cases", md.FullName(), fd.Name(), od.Name())
-		}
+		od := OneofOf(fd)
 		if fieldBehavior(fd).GetWorkspace() {
+			if od != nil {
+				return shape, fmt.Errorf("reference message %s: workspace field %q is a member of oneof %q; the workspace names where every case resolves, so it sits beside the oneof", md.FullName(), fd.Name(), od.Name())
+			}
 			if fd.Kind() != protoreflect.StringKind || fd.IsList() {
 				return shape, fmt.Errorf("reference message %s: workspace field %q must be a singular string", md.FullName(), fd.Name())
 			}
@@ -775,16 +896,20 @@ func referenceShapeOf(md protoreflect.MessageDescriptor) (referenceShape, error)
 		}
 		if fd.Kind() == protoreflect.MessageKind && !fd.IsList() && !fd.IsMap() {
 			if kf := entityKeyFields(fd.Message()); kf != nil {
-				if shape.value != nil {
-					return shape, fmt.Errorf("reference message %s: fields %q and %q are both entity-typed; a reference names one target", md.FullName(), shape.value.Name(), fd.Name())
+				// Several entity-typed fields name one target each only as the
+				// members of ONE oneof: the stored value then holds exactly one
+				// case, which is what makes it a reference rather than several.
+				if len(shape.values) > 0 && (od == nil || od != group) {
+					return shape, fmt.Errorf("reference message %s: fields %q and %q are both entity-typed; a reference names one target, or one of several as the members of a single oneof", md.FullName(), shape.values[0].field.Name(), fd.Name())
 				}
-				shape.value, shape.keyFields = fd, kf
+				group = od
+				shape.values = append(shape.values, referenceValue{field: fd, keyFields: kf})
 				continue
 			}
 		}
 		return shape, fmt.Errorf("reference message %s: field %q is neither the entity field nor a workspace field; a reference message holds exactly those", md.FullName(), fd.Name())
 	}
-	if shape.value == nil {
+	if len(shape.values) == 0 {
 		return shape, fmt.Errorf("reference message %s has no entity-typed field to name its target", md.FullName())
 	}
 	return shape, nil

@@ -100,6 +100,7 @@ import {
 	type PatchInit,
 	protectedFieldOf,
 	refQualified,
+	refSegmentOf,
 	takeTextStrings,
 	textFieldBytes,
 	textFieldInit,
@@ -5513,7 +5514,7 @@ function relCoverageRefs(
 	if (nodes.length === 0) return undefined;
 	return nodes.map((node) => ({
 		targetEntity: registry.bySchema(node.targetSchema).name,
-		...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+		...(node.fieldPath.length === 1 ? { refLocalName: refSegmentOf(node.field) } : {}),
 		...(refQualified(node.shape) ? { crossWorkspace: true } : {}),
 	}));
 }

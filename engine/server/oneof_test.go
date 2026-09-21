@@ -44,12 +44,13 @@ var _ = Describe("Oneofs", func() {
 				`text field "holder.body" is inside oneof "which"`)))
 		})
 
-		It("rejects a reference inside a oneof", func() {
+		// A oneof of references is a polymorphic reference; its own rules are
+		// pinned in polyrefs_test.go.
+		It("accepts a reference inside a oneof", func() {
 			_, err := server.New(newTestStore(),
 				server.WithEntities(&testdatav1.Project{}, &testdatav1.User{},
 					&testdatav1.OneofRefEntity{}))
-			Expect(err).To(MatchError(ContainSubstring(
-				`reference field "project" is a member of oneof "target"`)))
+			Expect(err).NotTo(HaveOccurred())
 		})
 
 		It("rejects a keyed-list identity inside the element's oneof", func() {

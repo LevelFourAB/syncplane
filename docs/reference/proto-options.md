@@ -210,9 +210,9 @@ message Issue {
 Rules for every reference:
 
 - The target must be a registered entity whose key fields sit outside any oneof.
-- A reference field cannot be a member of a oneof.
 - A query path may descend through a reference into its key fields only. A comparison on the reference itself compares its key (single-key targets only); `matches()` crosses to the live target row.
 - The engine maintains one secondary index per reference field, named `__ref_<field>`, over the stored target key.
+- A reference may be a member of a oneof; the oneof is then a [polymorphic reference](#polymorphic-references).
 
 ### `(syncplane.v1.reference)` — workspace-qualified references
 
@@ -237,7 +237,7 @@ A field of a reference message type is a reference like any other: it gets the f
 
 | Rule            | Detail                                                                                                                                                                                                                                                                                                                                                                        |
 | --------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Shape           | Exactly one singular entity-typed field, at most one singular `string` field marked `workspace`, and no other fields. The message is not itself an entity, and no field sits in a oneof. Registration rejects anything else.                                                                                                                                                  |
+| Shape           | Exactly one singular entity-typed field — or a oneof whose members are all singular entity-typed fields, see [polymorphic references](#polymorphic-references) — at most one singular `string` field marked `workspace` outside any oneof, and no other fields. The message is not itself an entity. Registration rejects anything else.                                      |
 | Cardinality     | The holder field decides: `PersonRef assignee` is to-one, `repeated PersonRef watchers` is to-many. Each element names its own workspace.                                                                                                                                                                                                                                     |
 | Workspace value | An empty or absent workspace means the holder's own workspace, so a reference message without the workspace field is a same-workspace reference with an explicit stored shape. Existing schemas keep their meaning. A value that fails the [workspace-id rule](naming.md#workspace-ids) is refused as `invalid_argument`.                                                     |
 | Stored value    | The workspace field as written, and the embedded stub projected down to the target's key fields.                                                                                                                                                                                                                                                                              |
@@ -260,6 +260,51 @@ message Task {
 ```
 
 The TypeScript schema builder declares the same shape with `schema.workspaceRef(() => person)` and `schema.workspaceRefList(() => person)`; see the [TypeScript client reference](typescript-client.md#workspace-qualified-references).
+
+### Polymorphic references
+
+A **polymorphic reference** points to one of several target entities. Declare a polymorphic reference as a oneof of references in one of two locations:
+
+```proto
+// On the holder: each member is an entity-typed field or a reference message.
+message Task {
+	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
+	string id = 1;
+	oneof parent {
+		Client client = 2;
+		AreaRef area = 3; // a reference message, so this case may name another workspace
+		string label = 4; // a plain member, not a reference
+	}
+}
+
+// Inside a reference message: the target is a oneof beside the workspace.
+message OwnerRef {
+	option (syncplane.v1.reference) = {};
+	string workspace_id = 1 [(syncplane.v1.field_behavior) = { workspace: true }];
+	oneof owner {
+		Client client = 2;
+		Area area = 3;
+	}
+}
+message Memo {
+	option (syncplane.v1.entity) = { name: "memo" key_fields: [ "id" ] };
+	string id = 1;
+	OwnerRef owner = 2;
+	repeated OwnerRef mentions = 3;
+}
+```
+
+Each reference member is a **case** of the relation. A row holds at most one case. Inactive cases evaluate as unset references.
+
+| Rule              | Detail                                                                                                                                                                                                                                                                                                                                                                                          |
+| ----------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Relation name     | The name of the oneof on the holder (`parent`), or the field name of a reference message (`owner`). This name is the forward accessor and the segment used by `follow` and `include`. A case has no relation name of its own.                                                                                                                                                                   |
+| Cases             | A oneof on the holder can mix entity-typed fields, reference messages, and plain fields. Only the references are cases. A oneof inside a reference message must contain singular entity-typed fields only. A polymorphic reference message cannot be a member of a oneof on the holder.                                                                                                         |
+| Reverse relations | One per case, on that case's target entity (for example, `tasks` on `Client` and `Area`). When a source entity reaches a target through multiple relations or cases, the engine names the relation `<plural(source)>By<Relation>` (for example, `memosByOwner`, `memosByMentions`). If two cases of the same relation share a target, the engine names it `<plural(source)>By<Relation><Case>`. |
+| Indexes           | One derived index per case: `__ref_<field>` for a member of the holder's oneof, and `__ref_<field>.<case>` for a case inside a reference message.                                                                                                                                                                                                                                               |
+| Query paths       | A comparison names the case: `client.id` on the holder, or `owner.client.id` inside a reference message. `matches()` also names the case (`client` or `owner.client`), never the oneof or reference message. Query a case of a repeated reference message through the list: `mentions.client`.                                                                                                  |
+| Merge             | The holder's oneof replaces as a whole when a `PATCH` mask names the group. A polymorphic reference message also replaces as a whole. A repeated reference message merges as a set with element identity `<workspace>/<case>/<key>`. Two elements with the same key under different cases remain distinct.                                                                                      |
+| Workspaces        | In a reference message, `workspace_id` sets the workspace for all cases. In a holder oneof, each reference message case specifies its own workspace. All [workspace-qualified reference rules](#syncplanev1reference--workspace-qualified-references) apply per case.                                                                                                                           |
 
 ## Protected fields
 
@@ -433,15 +478,14 @@ const anyText = { where: (w) => w.choice.choiceText.isSet() }; // which case is 
 
 Because oneofs replace as a single unit, schema registration rejects the following definitions inside a oneof:
 
-| Type inside a oneof                              | Reason rejected                                                          |
-| ------------------------------------------------ | ------------------------------------------------------------------------ |
-| Entity `key_field`                               | The row key would change when another variant is written.                |
-| List `key_field` or `order_field`                | List elements would collide on zero values when variants switch.         |
-| `text` field (directly or nested)                | The group replaces as a whole, preventing CRDT merge execution.          |
-| Field with a registered custom merger            | The merger cannot execute on paths bypassed by group replacement.        |
-| Reference field (message type that is an entity) | References require fixed fields for relation graphs and query push-down. |
+| Type inside a oneof                   | Reason rejected                                                   |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| Entity `key_field`                    | The row key would change when another variant is written.         |
+| List `key_field` or `order_field`     | List elements would collide on zero values when variants switch.  |
+| `text` field (directly or nested)     | The group replaces as a whole, preventing CRDT merge execution.   |
+| Field with a registered custom merger | The merger cannot execute on paths bypassed by group replacement. |
 
-Polymorphic targets (such as `oneof target { Project p = 1; User u = 2; }`) are not supported.
+References are allowed inside a oneof: a stored stub is replaced as a whole, and a oneof of references forms a [polymorphic reference](#polymorphic-references).
 
 ## Maps and user-defined fields
 

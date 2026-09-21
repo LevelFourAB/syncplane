@@ -29,7 +29,7 @@ import type {
 	Scalar,
 	TotalOf,
 } from './query/index.js';
-import type { RefTargetOf } from './query/types.js';
+import type { CaseValues, RefTargetOf } from './query/types.js';
 import type { Row } from './read.js';
 import type { Include } from './refs.js';
 import type { TextHandle } from './text/handle.js';
@@ -66,22 +66,42 @@ export type ForwardRefAccessor = {
 };
 export type ReverseRelAccessor = (target: Message, q?: Query<Message>) => Promise<Row<Message>[]>;
 
-/** Field names of M whose type is a message — the ones that can be refs. */
+/**
+ * Field names of M whose type is a message — the ones that can be refs — and
+ * the oneof groups holding a message case, which is how a polymorphic
+ * reference on the holder is declared.
+ */
 type MessageFieldKeys<M> = {
 	[K in Exclude<keyof M, '$typeName' | '$unknown'>]: [NonNullable<M[K]>] extends
 		[{ $typeName: string }] ? K
 		: [NonNullable<M[K]>] extends [ReadonlyArray<infer E>]
 			? ([E] extends [{ $typeName: string }] ? K : never)
+		: [NonNullable<M[K]>] extends [{ case: string | undefined }]
+			? ([CaseValues<NonNullable<M[K]>>] extends [never] ? never
+				: [Extract<CaseValues<NonNullable<M[K]>>, { $typeName: string }>] extends [never] ? never
+				: K)
 		: never;
 }[Exclude<keyof M, '$typeName' | '$unknown'>];
 
 /**
  * A to-one ref resolves to one row (or none); a to-many ref to a list. A
- * reference message resolves to the entity it wraps — see RefTargetOf.
+ * reference message resolves to the entity it wraps — see RefTargetOf. A
+ * oneof of references resolves to whichever case the row holds, so its row
+ * type is the union of the cases' targets.
  */
 type TypedForwardRef<V, H> = [NonNullable<V>] extends [ReadonlyArray<infer E>]
 	? { load(holder: H): Promise<Row<RefTargetOf<E>>[]> }
+	: [NonNullable<V>] extends [{ case: string | undefined }] ? {
+			load(
+				holder: H,
+			): Promise<
+				Row<RefTargetsOf<Extract<CaseValues<NonNullable<V>>, { $typeName: string }>>> | undefined
+			>;
+		}
 	: { load(holder: H): Promise<Row<RefTargetOf<NonNullable<V>>> | undefined> };
+
+/** RefTargetOf distributed over a union of case values. */
+type RefTargetsOf<U> = U extends unknown ? RefTargetOf<U> : never;
 
 export type EntityRefs<D extends DescMessage = DescMessage> =
 	& {
@@ -486,8 +506,10 @@ export function buildEntityApis<E extends readonly DescMessage[]>(
 function buildRefs(schema: DescMessage, client: SchemaApi, registry: EntityRegistry): EntityRefs {
 	const def = registry.bySchema(schema);
 	const refs: Record<string, ForwardRefAccessor | ReverseRelAccessor> = {};
+	// The cases of a polymorphic relation share one accessor, so one entry
+	// serves them all; resolution picks the case the row holds.
 	for (const fwd of registry.forwardRefsOf(def.name)) {
-		refs[fwd.localName] = {
+		refs[fwd.localName] ??= {
 			load: (holder) =>
 				client.resolveRef(schema, fwd.localName, holder as MessageShape<typeof schema>),
 		};

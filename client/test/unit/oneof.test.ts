@@ -231,9 +231,11 @@ describe('oneof registration', () => {
 			.toThrow(/text field is inside oneof "which"/);
 	});
 
-	it('rejects a reference inside a oneof', () => {
-		expect(() => new EntityRegistry([ ProjectSchema, UserSchema, OneofRefEntitySchema ]))
-			.toThrow(/reference field is a member of oneof "target"/);
+	// A oneof of references is a polymorphic reference; its own rules are
+	// pinned in polyrefs.test.ts.
+	it('accepts a reference inside a oneof', () => {
+		expect(() => new EntityRegistry([ ProjectSchema, UserSchema, OneofRefEntitySchema ])).not
+			.toThrow();
 	});
 
 	it("rejects a keyed-list identity inside the element's oneof", () => {

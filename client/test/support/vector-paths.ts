@@ -13,7 +13,7 @@
 import type { DescField, DescMessage } from '@bufbuild/protobuf';
 
 import type { Cond, Path } from '../../src/query/ast.js';
-import { localPathOf, resolveLeafRef } from '../../src/query/wire.js';
+import { localPathOf, resolveLeafRef, resolveRelLeaf } from '../../src/query/wire.js';
 
 /**
  * Rewrites a vector condition's proto-name paths as localNames.
@@ -45,18 +45,13 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 		}
 		case 'rel': {
 			// The sub-condition is scoped to the TARGET row, so it translates
-			// against the target schema — the same rule prepareQuery applies.
-			const path = localPathOf(schema, cond.path);
-			const { field } = resolveLeafRef(schema, path, false);
-			const target = field.fieldKind === 'message'
-				? field.message
-				: field.fieldKind === 'list' && field.listKind === 'message'
-				? field.message
-				: undefined;
-			if (!target) {
-				throw new Error(`vector path ${cond.path.join('.')} is not a reference field`);
-			}
-			return { kind: 'rel', path, cond: toLocalNames(target, cond.cond) };
+			// against the target schema — the same rule prepareQuery applies. A
+			// rel path may name a case inside a repeated polymorphic reference
+			// message, which localPathOf cannot descend into, so it translates
+			// field by field here and resolves as a rel path.
+			const path = relLocalPath(schema, cond.path);
+			const { shape } = resolveRelLeaf(schema, path);
+			return { kind: 'rel', path, cond: toLocalNames(shape.targetSchema, cond.cond) };
 		}
 		case 'match':
 			// Entity-level: no path to translate.
@@ -67,6 +62,20 @@ export function toLocalNames(schema: DescMessage, cond: Cond): Cond {
 		case 'not':
 			return { ...cond, cond: toLocalNames(schema, cond.cond) };
 	}
+}
+
+/** A rel path's proto names as localNames, descending through message fields and message lists alike. */
+function relLocalPath(schema: DescMessage, path: Path): Path {
+	let desc: DescMessage | undefined = schema;
+	return path.map((seg) => {
+		const field = desc?.fields.find((f) => f.name === seg);
+		if (!field) throw new Error(`vector path ${path.join('.')}: no field "${seg}"`);
+		desc =
+			field.fieldKind === 'message' || (field.fieldKind === 'list' && field.listKind === 'message')
+				? field.message
+				: undefined;
+		return field.localName;
+	});
 }
 
 /** toLocalNames inside a map ENTRY scope. */

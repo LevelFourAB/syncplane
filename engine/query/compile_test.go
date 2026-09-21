@@ -46,6 +46,12 @@ func msgForType(typ string) proto.Message {
 		return &testdatav1.Glossary{}
 	case "keyed_text":
 		return &testdatav1.KeyedTextEntity{}
+	case "oneof_ref":
+		return &testdatav1.OneofRefEntity{}
+	case "memo":
+		return &testdatav1.Memo{}
+	case "attachment":
+		return &testdatav1.Attachment{}
 	default:
 		return &testdatav1.Widget{}
 	}
@@ -650,7 +656,14 @@ func evalRelDefinition(
 		node := nodes[0]
 		inner, err := query.Compile(node.Target, node.Cond.GetCond())
 		Expect(err).NotTo(HaveOccurred())
-		for _, stub := range stubsAt(row, kind.Rel.GetPath()) {
+		// The stored values sit at the node's field path, and each answers to
+		// the case the node crosses: a value holding another case, or none, is
+		// a stub pointing nowhere.
+		for _, value := range stubsAt(row, node.Path) {
+			stub, ok := node.Ref.Stub(value)
+			if !ok {
+				continue
+			}
 			target := lookupByKey(context[node.Target.FullName()], node.KeyFields, stub)
 			if target != nil && inner.Eval(target.ProtoReflect()) {
 				return true
@@ -664,34 +677,37 @@ func evalRelDefinition(
 	}
 }
 
-// stubsAt resolves the ref stubs a rel path names on one row: the stored stub
-// of a set to-one ref, every element of a repeated one, nothing when unset.
+// stubsAt resolves the stored reference values a field path names on one row:
+// the value of a set to-one field, every element of a repeated one, nothing
+// when unset.
 func stubsAt(row protoreflect.Message, path []string) []protoreflect.Message {
-	cur := row
-	for i, seg := range path {
-		fd := cur.Descriptor().Fields().ByName(protoreflect.Name(seg))
+	var out []protoreflect.Message
+	var walk func(cur protoreflect.Message, path []string)
+	walk = func(cur protoreflect.Message, path []string) {
+		fd := cur.Descriptor().Fields().ByName(protoreflect.Name(path[0]))
 		Expect(fd).NotTo(BeNil())
-		if i < len(path)-1 {
-			if !cur.Has(fd) {
-				return nil
-			}
-			cur = cur.Get(fd).Message()
-			continue
-		}
 		if fd.IsList() {
 			list := cur.Get(fd).List()
-			out := make([]protoreflect.Message, 0, list.Len())
 			for j := 0; j < list.Len(); j++ {
-				out = append(out, list.Get(j).Message())
+				if len(path) == 1 {
+					out = append(out, list.Get(j).Message())
+				} else {
+					walk(list.Get(j).Message(), path[1:])
+				}
 			}
-			return out
+			return
 		}
 		if !cur.Has(fd) {
-			return nil
+			return
 		}
-		return []protoreflect.Message{cur.Get(fd).Message()}
+		if len(path) == 1 {
+			out = append(out, cur.Get(fd).Message())
+			return
+		}
+		walk(cur.Get(fd).Message(), path[1:])
 	}
-	return nil
+	walk(row, path)
+	return out
 }
 
 // lookupByKey finds the context row whose key fields all equal the stub's —

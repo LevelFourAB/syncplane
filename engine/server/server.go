@@ -136,9 +136,16 @@ const (
 	fieldIndexPrefix = reservedIndexPrefix + "field_"
 )
 
-// refIndexName is the index over one reference field's stored target key.
-func refIndexName(fd protoreflect.FieldDescriptor) string {
-	return refIndexPrefix + string(fd.Name())
+// refIndexName is the index over one reference's stored target key. A case
+// of a polymorphic reference message shares its field with its sibling cases
+// and is told apart by the case's own name — joined with a dot, which no
+// field name contains, so it cannot spell another field's index.
+func refIndexName(ref *lww.Ref) string {
+	name := refIndexPrefix + string(ref.Field.Name())
+	if ref.InnerCase() {
+		name += "." + string(ref.Value.Name())
+	}
+	return name
 }
 
 // textField is one collaborative-text field: its dotted proto path and the
@@ -1314,31 +1321,33 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// a registered entity, or a reference message wrapping one. Detection and
 	// the target's key fields come from the target message's own
 	// (syncplane.v1.entity) options, so registration order does not matter (the
-	// option is on the type, not on the catalog).
+	// option is on the type, not on the catalog). A polymorphic reference
+	// contributes one entry per case: each case has its own target, its own
+	// index and its own reverse relation, and a case that is not the active one
+	// holds nothing, which is what every consumer already handles for an unset
+	// reference.
 	fields := desc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		ref := lww.RefOf(fd)
-		if ref == nil {
+		refs := lww.RefsOf(fd)
+		if len(refs) == 0 {
 			continue
 		}
-		kf := ref.KeyFields
-		if ref.Value != nil {
+		if refs[0].Value != nil {
 			if b := protoopts.FieldBehavior(fd); len(b.GetKeyField()) > 0 || b.GetOrderField() != "" {
 				return nil, fmt.Errorf("server: entity %q reference field %q: a reference message list has no per-element identity, so key_field and order_field do not apply", info.name, fd.Name())
 			}
 		}
-		// Polymorphic targets ("oneof target { Project p = 1; User u = 2; }")
-		// are a reasonable thing to want, but the reference graph addresses a
-		// ref by a field that is always in the same place: accessor naming,
-		// include/follow segments and the reverse pushdown all key off it. A
-		// member that is only sometimes present needs its own design pass, so
-		// it is refused here rather than half-supported.
-		if od := lww.OneofOf(fd); od != nil {
-			return nil, fmt.Errorf("server: entity %q reference field %q is a member of oneof %q; "+
-				"references inside a oneof are not supported", info.name, fd.Name(), od.Name())
+		// A oneof member is one case of the holder's oneof; a member that is
+		// itself a oneof of targets would be cases inside a case, which the
+		// reference graph has no name for.
+		if od := lww.OneofOf(fd); od != nil && len(refs) > 1 {
+			return nil, fmt.Errorf("server: entity %q reference field %q is a member of oneof %q and names one of several targets itself; "+
+				"declare the targets as members of %q instead", info.name, fd.Name(), od.Name(), od.Name())
 		}
-		info.refFields = append(info.refFields, refField{fd: fd, keyFields: kf, ref: ref})
+		for _, ref := range refs {
+			info.refFields = append(info.refFields, refField{fd: fd, keyFields: ref.KeyFields, ref: ref})
+		}
 	}
 	if err := validateListIdentities(desc, info.name); err != nil {
 		return nil, err
@@ -1836,10 +1845,11 @@ func entityMeta(info *entityInfo) EntityMeta {
 	}
 }
 
-// RefKeyFields classifies a field as a typed reference: it returns the target
-// entity's key fields when fd is a reference (a message field whose target
-// message carries (syncplane.v1.entity), or a reference message wrapping one),
-// else nil. The fields are the target's own; on a reference message they sit
+// RefKeyFields classifies a field as a typed reference to one entity: it
+// returns the target entity's key fields when fd is a reference (a message
+// field whose target message carries (syncplane.v1.entity), or a reference
+// message wrapping one), else nil — also for a polymorphic reference message,
+// which has one key set per case. The fields are the target's own; on a reference message they sit
 // under Reference.Value rather than on the stored value — see RefOf. It is a
 // thin re-export of lww.RefKeyFields so the admin form renderer can
 // distinguish scalar / sub-message / reference fields without importing
@@ -1864,7 +1874,9 @@ type Reference struct {
 	Workspace protoreflect.FieldDescriptor
 }
 
-// RefOf describes fd as a typed reference, or returns nil when it is not one.
+// RefOf describes fd as a typed reference to one entity, or returns nil when
+// it is not one — including a polymorphic reference message, whose target is
+// a oneof of entities and so has no single shape to describe.
 func RefOf(fd protoreflect.FieldDescriptor) *Reference {
 	r := lww.RefOf(fd)
 	if r == nil {

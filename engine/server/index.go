@@ -59,6 +59,10 @@ import (
 // A to-many reference stores a LIST of target keys, so its row takes one
 // position per element — the components fan out over the list together, which
 // keeps a composite key's parts belonging to the same element.
+//
+// A polymorphic reference gets one index per case, keyed by that case's target
+// key: a reverse hop asks about one target entity, and the case pointing at
+// it is the only one whose entries can answer.
 func buildRefIndexes(info *entityInfo) error {
 	desc := info.msgType.Descriptor()
 	for _, rf := range info.refFields {
@@ -79,7 +83,7 @@ func buildRefIndexes(info *entityInfo) error {
 			return fmt.Errorf("reference field %q: %w", rf.fd.Name(), err)
 		}
 		info.indexes = append(info.indexes, compiledIndex{
-			name:     refIndexName(rf.fd),
+			name:     refIndexName(rf.ref),
 			specHash: query.SpecHash(comps),
 			encoder:  enc,
 		})

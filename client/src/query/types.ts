@@ -70,7 +70,29 @@ export interface RepeatedScalarOps<E extends Scalar> {
  * stub, so only its key fields are addressable, and `any((a) => a.id.eq(…))` is
  * the list counterpart of `w.project.id.eq(…)`.
  */
-export interface RepeatedMessageOps<E> {
+export type RepeatedMessageOps<E> = RepeatedMessageListOps<E> & OneofGroups<E>;
+
+/**
+ * The oneof groups of a repeated field's element, offered on the field
+ * itself so that a case of a repeated polymorphic reference message can be
+ * named — `m.mentions.owner.user.matches(…)` asks whether SOME element holds
+ * the user case and names a matching user. Nothing else is reachable this
+ * way: any other question about an element goes through `any()`.
+ */
+export type OneofGroups<E> = {
+	[K in OneofKeys<E>]: NonNullable<E[K]> extends { case: string | undefined }
+		? OneofRef<NonNullable<E[K]>>
+		: never;
+};
+
+/** Keys of E whose value is a oneof group. */
+type OneofKeys<E> = {
+	[K in Exclude<keyof E, '$typeName' | '$unknown'>]: [NonNullable<E[K]>] extends
+		[{ case: string | undefined }] ? K
+		: never;
+}[Exclude<keyof E, '$typeName' | '$unknown'>];
+
+export interface RepeatedMessageListOps<E> {
 	any(cond: (element: MsgRef<E>) => Cond): Cond;
 	isEmpty(): Cond;
 	/**
@@ -256,11 +278,32 @@ export type FieldOps<V> = [NonNullable<V>] extends [string] ? StringOps
  * message whose workspace field has another name is typed as the wrapper
  * itself here, while resolving to the target at runtime; name the field
  * `workspace_id` to get the target's type.
+ *
+ * A polymorphic reference message — the wrapper whose target is a oneof — is
+ * recognized the same way: exactly one oneof group, alone or beside
+ * `workspaceId`, whose cases all hold messages. It resolves to the union of
+ * those messages, so a row loaded through it is told apart by `$typeName`.
  */
-export type RefTargetOf<V> = MessageKeys<V> extends infer K ? [K] extends [never] ? V
+export type RefTargetOf<V> = MessageKeys<V> extends infer K
+	? [K] extends [never] ? OneofWrapperTarget<V>
 	: IsSingleKey<K> extends true ? WrapperTarget<V, K & keyof V>
 	: V
 	: V;
+
+/** The union of a polymorphic wrapper's case messages, or V itself when V is not that shape. */
+type OneofWrapperTarget<V> = OneofKeys<V> extends infer K ? [K] extends [never] ? V
+	: IsSingleKey<K> extends true ? OneofCaseTarget<V, K & keyof V>
+	: V
+	: V;
+
+type OneofCaseTarget<V, K extends keyof V> =
+	[Exclude<keyof V, K | '$typeName' | '$unknown' | 'workspaceId'>] extends [never]
+		? [CaseValues<NonNullable<V[K]>>] extends [{ $typeName: string }] ? CaseValues<NonNullable<V[K]>>
+		: V
+		: V;
+
+/** The value types a oneof group's cases hold, as a union. */
+export type CaseValues<G> = G extends { case: string; value: infer Val } ? Val : never;
 
 /** V's inner type when the fields beside its one message field K are nothing or a string `workspaceId`. */
 type WrapperTarget<V, K extends keyof V> = [Exclude<keyof V, K | '$typeName' | '$unknown'>] extends

@@ -11,7 +11,7 @@ import {
 import { debugVerifyTouchesEnv } from './env.js';
 import { compareWorkspaces, wsSegment } from './keys.js';
 import type { KVRead, KVStore } from './kv/store.js';
-import { type EntityRegistry, refQualified } from './mutations.js';
+import { type EntityRegistry, refQualified, refSegmentOf } from './mutations.js';
 import type { Mutex } from './mutex.js';
 import type { CompiledIndex } from './optimistic/index-maintain.js';
 import { sortOrderedFields } from './ordering.js';
@@ -1929,15 +1929,21 @@ export class WatcherHub {
 			if (!spec) return;
 			for (const [ relation, nested ] of Object.entries(spec)) {
 				if (relation.startsWith('$')) continue;
-				const fwd = this.registry.forwardRef(from, relation);
-				const rev = fwd ? undefined : this.registry.reverseRef(from, relation);
-				const next = fwd?.targetEntity ?? rev?.sourceEntity;
-				if (next === undefined) continue;
-				entities.add(next);
-				const shape = fwd?.shape ?? rev?.shape;
-				const nextAnywhere = fromAnywhere || (shape !== undefined && refQualified(shape));
-				if (nextAnywhere) anywhere.add(next);
-				if (typeof nested === 'object' && nested !== null) walk(next, nested, nextAnywhere);
+				// A polymorphic relation reaches one entity per case, and each of
+				// them may carry the nested tree on.
+				const cases = this.registry.forwardCasesOf(from, relation);
+				const rev = cases.length > 0 ? undefined : this.registry.reverseRef(from, relation);
+				const hops = cases.length > 0
+					? cases.map((c) => ({ next: c.targetEntity, shape: c.shape }))
+					: rev
+					? [ { next: rev.sourceEntity, shape: rev.shape } ]
+					: [];
+				for (const { next, shape } of hops) {
+					entities.add(next);
+					const nextAnywhere = fromAnywhere || refQualified(shape);
+					if (nextAnywhere) anywhere.add(next);
+					if (typeof nested === 'object' && nested !== null) walk(next, nested, nextAnywhere);
+				}
 			}
 		};
 		walk(entity, include, false);
@@ -1971,7 +1977,7 @@ export class WatcherHub {
 			if (qualified) anywhere.add(target);
 			coverage.push({
 				targetEntity: target,
-				...(node.cond.path.length === 1 ? { refLocalName: node.cond.path[0] } : {}),
+				...(node.fieldPath.length === 1 ? { refLocalName: refSegmentOf(node.field) } : {}),
 				...(qualified ? { crossWorkspace: true } : {}),
 			});
 		}

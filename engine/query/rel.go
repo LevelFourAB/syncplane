@@ -2,6 +2,7 @@ package query
 
 import (
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
@@ -41,8 +42,13 @@ type RelNode struct {
 	// Cond is the rel condition's own message inside the predicate tree —
 	// the identity a rewrite replaces (see RewriteRels).
 	Cond *syncplanev1.RelCond
-	// Field is the resolved forward reference field the path ends at.
+	// Field is the resolved forward reference field the path ends at — or,
+	// for a case of a polymorphic reference message, the message field the
+	// case sits in.
 	Field protoreflect.FieldDescriptor
+	// Path is the wire path to Field: the condition's own path, shortened by
+	// the case segment when the condition names a case.
+	Path []string
 	// Target is the referenced entity's message descriptor.
 	Target protoreflect.MessageDescriptor
 	// KeyFields are the target's key fields, the values a stored stub carries.
@@ -102,26 +108,14 @@ func extractRels(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 }
 
 // resolveRel validates one rel condition: the path ends at a forward reference
-// field, the inner condition compiles against the target row, and no rel nests
-// inside it.
+// field — or at one case of a polymorphic reference message, which a matches
+// must name since its cases have different targets — the inner condition
+// compiles against the target row, and no rel nests inside it.
 func resolveRel(desc protoreflect.MessageDescriptor, c *syncplanev1.RelCond) (*RelNode, error) {
-	fields, err := resolveFields(desc, c.GetPath())
+	path := c.GetPath()
+	leaf, ref, err := resolveRelRef(desc, path)
 	if err != nil {
 		return nil, err
-	}
-	leaf := pathLeaf(fields)
-	ref := lww.RefOf(leaf)
-	if ref == nil {
-		return nil, fmt.Errorf("path %v: matches needs a reference field, got %s",
-			c.GetPath(), describeLeaf(fields[len(fields)-1]))
-	}
-	// The entity field inside a reference message is itself entity-typed, so
-	// it resolves as a plain reference — one that knows nothing of the
-	// workspace stored beside it. Only the enclosing field carries the whole
-	// stored shape.
-	if n := len(fields); n > 1 && lww.RefOf(fields[n-2].fd) != nil {
-		return nil, fmt.Errorf("path %v: matches names the reference field itself; %q is the entity field inside reference %q",
-			c.GetPath(), leaf.Name(), fields[n-2].fd.Name())
 	}
 	if c.GetCond() == nil {
 		return nil, fmt.Errorf("path %v: matches needs a condition over the target entity", c.GetPath())
@@ -132,7 +126,71 @@ func resolveRel(desc protoreflect.MessageDescriptor, c *syncplanev1.RelCond) (*R
 	if _, err := Compile(ref.Target, c.GetCond()); err != nil {
 		return nil, fmt.Errorf("path %v: %w", c.GetPath(), err)
 	}
-	return &RelNode{Cond: c, Field: leaf, Target: ref.Target, KeyFields: ref.KeyFields, Ref: ref}, nil
+	if ref.InnerCase() {
+		path = path[:len(path)-1]
+	}
+	return &RelNode{Cond: c, Field: leaf, Path: path, Target: ref.Target, KeyFields: ref.KeyFields, Ref: ref}, nil
+}
+
+// resolveRelRef finds the reference a matches path names: the stored field
+// and the one case of it the path crosses.
+//
+// A case of a polymorphic reference message is named by one more segment than
+// the field — `owner.user` — which no ordinary path resolution reaches, since
+// the field may be a list and the case an entity-typed field the path could
+// not otherwise descend into. So the field is resolved from the path minus its
+// last segment first, and the case looked up on the message.
+func resolveRelRef(desc protoreflect.MessageDescriptor, path []string) (protoreflect.FieldDescriptor, *lww.Ref, error) {
+	if n := len(path); n > 1 {
+		if fields, err := resolveFields(desc, path[:n-1]); err == nil {
+			field := pathLeaf(fields)
+			cases := lww.RefsOf(field)
+			if len(cases) > 1 {
+				for _, r := range cases {
+					if string(r.Value.Name()) == path[n-1] {
+						return field, r, nil
+					}
+				}
+				return nil, nil, fmt.Errorf("path %v: %q is not a case of polymorphic reference %q; its cases are %s",
+					path, path[n-1], field.Name(), strings.Join(caseNames(cases), ", "))
+			}
+			if len(cases) == 1 && cases[0].Value != nil && string(cases[0].Value.Name()) == path[n-1] {
+				// The entity field inside a reference message to one entity
+				// resolves as a plain reference on its own — one that knows
+				// nothing of the workspace stored beside it. Only the enclosing
+				// field carries the whole stored shape.
+				return nil, nil, fmt.Errorf("path %v: matches names the reference field itself; %q is the entity field inside reference %q",
+					path, path[n-1], field.Name())
+			}
+		}
+	}
+	fields, err := resolveFields(desc, path)
+	if err != nil {
+		return nil, nil, err
+	}
+	leaf := pathLeaf(fields)
+	if ref := lww.RefOf(leaf); ref != nil {
+		return leaf, ref, nil
+	}
+	if cases := lww.RefsOf(leaf); len(cases) > 1 {
+		names := make([]string, len(cases))
+		for i, name := range caseNames(cases) {
+			names[i] = strings.Join(append(append([]string{}, path...), name), ".")
+		}
+		return nil, nil, fmt.Errorf("path %v: matches must name one case of polymorphic reference %q, whose cases have different targets: %s",
+			path, leaf.Name(), strings.Join(names, ", "))
+	}
+	return nil, nil, fmt.Errorf("path %v: matches needs a reference field, got %s",
+		path, describeLeaf(fields[len(fields)-1]))
+}
+
+// caseNames lists the case fields of a polymorphic reference message.
+func caseNames(cases []*lww.Ref) []string {
+	names := make([]string, len(cases))
+	for i, r := range cases {
+		names[i] = string(r.Value.Name())
+	}
+	return names
 }
 
 // hasRel reports whether any rel condition appears anywhere in the tree,
@@ -183,7 +241,7 @@ func hasRel(cond *syncplanev1.Condition) bool {
 // stub pointing into another workspace matches nothing here (see
 // ReferenceOptions).
 func RelReplacement(node *RelNode, targets [][]*syncplanev1.QueryValue, workspace string) *syncplanev1.Condition {
-	path := node.Cond.GetPath()
+	path := node.Path
 	// Inside an exists the element is the scope, so a stub-relative path stands
 	// on its own; for a singular ref it hangs off the field path.
 	at := func(sub []string) []string {

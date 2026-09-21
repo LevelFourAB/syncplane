@@ -66,10 +66,10 @@ import {
 const fieldBehaviors = new WeakMap<DescField, FieldBehavior | null>();
 const entityOptions = new WeakMap<DescMessage, EntityOptions | null>();
 const referenceMessages = new WeakMap<DescMessage, boolean>();
-const refShapes = new WeakMap<DescField, RefShape | null>();
+const refShapeLists = new WeakMap<DescField, RefShape[]>();
 const entityKeys = new WeakMap<DescMessage, DescField[] | null>();
 const listKeyFields = new WeakMap<DescField, DescField[]>();
-const schemaRefFields = new WeakMap<DescMessage, [DescField, RefShape][]>();
+const schemaRefFields = new WeakMap<DescMessage, [DescField, RefShape[]][]>();
 const fieldsByLocalName = new WeakMap<DescMessage, Map<string, DescField>>();
 
 /**
@@ -368,6 +368,14 @@ function indexesOf(
  * workspace under `workspaceField`. Consumers address the key through
  * {@link refKeyPath} and the stub through {@link refStub}, so the two shapes
  * differ in nothing else.
+ *
+ * A POLYMORPHIC reference — one stored value that points at one of several
+ * entities — is a oneof of references, and each member is its own shape, a
+ * CASE of it. The oneof sits either on the holder (`group` is set, and the
+ * field is the member) or inside a reference message (`valueField` is a member
+ * of the message's oneof, and every case shares the field). A case holds a
+ * value only while it is the active one, which {@link refStub} already
+ * reports.
  */
 export interface RefShape {
 	/** The referenced entity's message schema. */
@@ -380,12 +388,22 @@ export interface RefShape {
 	valueField?: DescField;
 	/** A reference message's workspace field; undefined when every value resolves in the holder's workspace. */
 	workspaceField?: DescField;
+	/** The holder's oneof the reference field is a member of. */
+	group?: DescOneof;
+	/**
+	 * The accessor of the field that decides this case — the holder's member
+	 * for a oneof on the holder, the reference message's member for a oneof
+	 * inside it. Undefined for a reference to one entity.
+	 */
+	caseLocalName?: string;
 }
 
 /**
- * Classifies a field as a typed reference, or returns undefined when it is not
- * one: a scalar, a map, or a message that is neither an entity nor a
- * well-formed reference message. A malformed reference message is not a
+ * Classifies a field as a typed reference to one entity, or returns undefined
+ * when it is not one: a scalar, a map, a message that is neither an entity nor
+ * a well-formed reference message, or a reference message whose target is a
+ * oneof of entities — a polymorphic reference has no single target, and
+ * {@link refShapes} reports its cases. A malformed reference message is not a
  * reference either — registration reports it, and everything else sees an
  * ordinary sub-message.
  *
@@ -393,46 +411,123 @@ export interface RefShape {
  * modified.
  */
 export function refShape(field: DescField): RefShape | undefined {
-	let shape = refShapes.get(field);
-	if (shape === undefined) {
-		shape = computeRefShape(field) ?? null;
-		refShapes.set(field, shape);
-	}
-	return shape ?? undefined;
+	const shapes = refShapes(field);
+	return shapes.length === 1 ? shapes[0] : undefined;
 }
 
-function computeRefShape(field: DescField): RefShape | undefined {
+/**
+ * Classifies a field as a typed reference and reports every case it can hold:
+ * empty when the field is not a reference, one shape for a reference to one
+ * entity, and one per entity-typed member of the oneof for a reference message
+ * whose target is a oneof. A member of a oneof on the holder is classified on
+ * its own, with `group` set; the other members of that oneof are its sibling
+ * cases. Mirrors lww.RefsOf.
+ *
+ * The returned shapes are shared with every other caller and must not be
+ * modified.
+ */
+export function refShapes(field: DescField): RefShape[] {
+	let shapes = refShapeLists.get(field);
+	if (shapes === undefined) {
+		shapes = computeRefShapes(field);
+		refShapeLists.set(field, shapes);
+	}
+	return shapes;
+}
+
+function computeRefShapes(field: DescField): RefShape[] {
 	const elem = field.fieldKind === 'message'
 		? field.message
 		: field.fieldKind === 'list' && field.listKind === 'message'
 		? field.message
 		: undefined;
-	if (!elem) return undefined;
+	if (!elem) return [];
+	const group = field.oneof;
+	const caseOf = group ? { group, caseLocalName: field.localName } : {};
 	// The reference declaration wins over an entity declaration on the same
 	// message: such a message is refused at registration, and until then it
-	// must not pass for an entity-typed stub. Mirrors lww.RefOf.
+	// must not pass for an entity-typed stub. Mirrors lww.RefsOf.
 	if (!isReferenceMessage(elem)) {
 		const keyFields = entityKeyFields(elem);
-		return keyFields ? { targetSchema: elem, keyFields } : undefined;
+		return keyFields ? [ { targetSchema: elem, keyFields, ...caseOf } ] : [];
 	}
 	const parsed = parseReferenceMessage(elem);
-	if (typeof parsed === 'string') return undefined;
-	return parsed;
+	if (typeof parsed === 'string') return [];
+	return parsed.map((shape) => ({ ...shape, ...caseOf }));
+}
+
+/** Whether a shape is one case of several (see {@link RefShape}). */
+export function refPolymorphic(shape: RefShape): boolean {
+	return shape.group !== undefined || refInnerCase(shape);
+}
+
+/**
+ * Whether the case is decided inside the stored value — the reference
+ * message's oneof — rather than by which holder field is set. Such cases
+ * share the holder field and are told apart by `valueField`.
+ */
+export function refInnerCase(shape: RefShape): boolean {
+	return shape.valueField?.oneof !== undefined;
+}
+
+/**
+ * The relation accessor a reference field is reached by: the holder's oneof
+ * when the field is a member of one — the property the message shape has, and
+ * the one name its cases share — else the field's own.
+ */
+export function refSegmentOf(field: DescField): string {
+	return field.oneof?.localName ?? field.localName;
+}
+
+/**
+ * A field's value read the way the message shape stores it: a oneof member
+ * sits under its group as `{ case, value }`, present only while it is the
+ * active case; any other field is its own property.
+ */
+export function fieldValueOf(rec: Rec, field: DescField): unknown {
+	if (field.oneof) {
+		const group = rec[field.oneof.localName] as { case?: string; value?: unknown } | undefined;
+		return group?.case === field.localName ? group.value : undefined;
+	}
+	return rec[field.localName];
+}
+
+/**
+ * The query-builder path to one case of a reference, in accessor names: the
+ * field through the oneofs on the way — the holder's for a member of one, the
+ * reference message's for a case inside it. A reference to one entity is its
+ * field alone.
+ */
+export function refCasePath(field: DescField, shape: RefShape): string[] {
+	const path = field.oneof ? [ field.oneof.localName, field.localName ] : [ field.localName ];
+	if (shape.valueField?.oneof) {
+		path.push(shape.valueField.oneof.localName, shape.valueField.localName);
+	}
+	return path;
+}
+
+/** Writes a field's value the way {@link fieldValueOf} reads it. */
+function setFieldValue(rec: Rec, field: DescField, value: unknown): void {
+	if (field.oneof) {
+		rec[field.oneof.localName] = { case: field.localName, value };
+		return;
+	}
+	rec[field.localName] = value;
 }
 
 /**
  * Key fields of the entity targeted by a reference field, or [] when the field
- * is not a reference. The fields are the TARGET's: on a reference message they
- * sit under the entity field, not on the stored value — address them through
- * {@link refKeyPath}.
+ * is not a reference to one entity. The fields are the TARGET's: on a
+ * reference message they sit under the entity field, not on the stored value —
+ * address them through {@link refKeyPath}.
  */
 export function refKeyFields(field: DescField): DescField[] {
 	return refShape(field)?.keyFields ?? [];
 }
 
-/** Whether a field is a first-class typed reference (see refShape). */
+/** Whether a field is a first-class typed reference (see refShapes), to one entity or to one of several. */
 export function isRef(field: DescField): boolean {
-	return refShape(field) !== undefined;
+	return refShapes(field).length > 0;
 }
 
 /**
@@ -442,7 +537,7 @@ export function isRef(field: DescField): boolean {
  * whole element as the identity (see {@link refItemKey}).
  */
 export function isRefMessageField(field: DescField): boolean {
-	return refShape(field)?.valueField !== undefined;
+	return refShapes(field)[0]?.valueField !== undefined;
 }
 
 /**
@@ -454,19 +549,54 @@ export function isRefMessageField(field: DescField): boolean {
  * workspace and one naming the holder's own are two elements even though they
  * resolve to the same row. A reference without a workspace field renders the
  * key alone, exactly as an element of a repeated entity-typed reference.
- * Mirror of lww.Ref.ItemKey, byte for byte.
+ *
+ * A case of a polymorphic reference message puts its name between the
+ * workspace and the key, so two cases naming the same key are two elements;
+ * the workspace part is present whenever the message declares one, and the
+ * case part whenever the message's target is a oneof. Mirror of
+ * lww.Ref.ItemKey, byte for byte; an element of a polymorphic reference
+ * message is rendered by {@link refItemKeyOf}, which picks the case the value
+ * holds.
  */
 export function refItemKey(shape: RefShape, value: Message): string {
 	const stub = (refStub(shape, value) ?? create(shape.targetSchema)) as unknown as Rec;
-	if (shape.workspaceField === undefined) {
+	const inner = refInnerCase(shape);
+	if (shape.workspaceField === undefined && !inner) {
 		return encodeItemKey(stub as unknown as Message, shape.keyFields);
 	}
-	const ws = (value as unknown as Rec)[shape.workspaceField.localName];
-	const parts = [ escapeKeySegment(typeof ws === 'string' ? ws : '', true) ];
+	const parts: string[] = [];
+	if (shape.workspaceField !== undefined) {
+		const ws = (value as unknown as Rec)[shape.workspaceField.localName];
+		parts.push(escapeKeySegment(typeof ws === 'string' ? ws : '', true));
+	}
+	if (inner) parts.push(escapeKeySegment(shape.valueField!.name, true));
 	for (const kf of shape.keyFields) {
 		parts.push(escapeKeySegment(keyComponent(kf, stub[kf.localName]), true));
 	}
 	return parts.join('/');
+}
+
+/**
+ * Renders one stored value of a repeated reference message field as the mask
+ * segment that addresses it (see {@link refItemKey}), whichever case the value
+ * holds. A value of a polymorphic reference message that holds no case renders
+ * its workspace, an empty case and no key. Mirror of lww.RefItemKey, byte for
+ * byte. Throws when the field is not a reference message field.
+ */
+export function refItemKeyOf(field: DescField, value: Message): string {
+	const shapes = refShapes(field);
+	if (shapes.length === 0 || shapes[0]!.valueField === undefined) {
+		throw new Error(`${field.parent.typeName}.${field.name} is not a reference message field`);
+	}
+	for (const shape of shapes) {
+		if (shapes.length === 1 || refStub(shape, value) !== undefined) return refItemKey(shape, value);
+	}
+	// No case set: the shape refItemKey renders, with the case and the key
+	// both empty, so the segment still has every part a decoder expects.
+	const shape = shapes[0]!;
+	if (shape.workspaceField === undefined) return '/';
+	const ws = (value as unknown as Rec)[shape.workspaceField.localName];
+	return escapeKeySegment(typeof ws === 'string' ? ws : '', true) + '//';
 }
 
 /** The target entity's message schema of a reference field, or undefined. */
@@ -501,7 +631,7 @@ export function refKeyPath(shape: RefShape, keyField: DescField): string[] {
  */
 export function refStub(shape: RefShape, value: Message): Message | undefined {
 	if (shape.valueField === undefined) return value;
-	const inner = (value as unknown as Rec)[shape.valueField.localName];
+	const inner = fieldValueOf(value as unknown as Rec, shape.valueField);
 	return inner === undefined || inner === null ? undefined : inner as Message;
 }
 
@@ -537,25 +667,26 @@ export function isReferenceMessage(desc: DescMessage): boolean {
 }
 
 /**
- * Reads a reference message's two fields, or returns the reason it breaks the
- * rules: not itself an entity, exactly one singular entity-typed field, at most
- * one singular string field marked workspace, no other fields, nothing inside
- * a oneof. Mirrors the engine's registration check.
+ * Reads a reference message's fields — one shape per entity-typed field, in
+ * declaration order — or returns the reason it breaks the rules: not itself an
+ * entity; its target named by exactly one singular entity-typed field, or by a
+ * oneof whose members are all singular entity-typed fields; at most one
+ * singular string field marked workspace, outside any oneof; no other fields.
+ * Mirrors the engine's registration check.
  */
-function parseReferenceMessage(desc: DescMessage): RefShape | string {
+function parseReferenceMessage(desc: DescMessage): RefShape[] | string {
 	if (entityOptionsOf(desc)) {
 		return `reference message ${desc.typeName} is also an entity; a reference message wraps an entity, it is not one`;
 	}
-	let valueField: DescField | undefined;
-	let targetSchema: DescMessage | undefined;
-	let keyFields: DescField[] | undefined;
+	const values: { field: DescField; keyFields: DescField[] }[] = [];
+	let group: DescOneof | undefined;
 	let workspaceField: DescField | undefined;
 	for (const field of desc.fields) {
-		if (field.oneof) {
-			return `reference message ${desc.typeName}: field "${field.name}" is a member of oneof "${field.oneof.name}"; a reference message is replaced whole and has no cases`;
-		}
 		const behavior = fieldBehaviorOf(field);
 		if (behavior?.workspace) {
+			if (field.oneof) {
+				return `reference message ${desc.typeName}: workspace field "${field.name}" is a member of oneof "${field.oneof.name}"; the workspace names where every case resolves, so it sits beside the oneof`;
+			}
 			if (field.fieldKind !== 'scalar' || field.scalar !== ScalarType.STRING) {
 				return `reference message ${desc.typeName}: workspace field "${field.name}" must be a singular string`;
 			}
@@ -568,21 +699,32 @@ function parseReferenceMessage(desc: DescMessage): RefShape | string {
 		if (field.fieldKind === 'message') {
 			const kf = entityKeyFields(field.message);
 			if (kf) {
-				if (valueField) {
-					return `reference message ${desc.typeName}: fields "${valueField.name}" and "${field.name}" are both entity-typed; a reference names one target`;
+				// Several entity-typed fields name one target each only as the
+				// members of ONE oneof: the stored value then holds exactly one
+				// case, which is what makes it a reference rather than several.
+				if (values.length > 0 && (!field.oneof || field.oneof !== group)) {
+					return `reference message ${desc.typeName}: fields "${
+						values[0]!.field.name
+					}" and "${field.name}" are both entity-typed; a reference names one target, or one of several as the members of a single oneof`;
 				}
-				valueField = field;
-				targetSchema = field.message;
-				keyFields = kf;
+				group = field.oneof;
+				values.push({ field, keyFields: kf });
 				continue;
 			}
 		}
 		return `reference message ${desc.typeName}: field "${field.name}" is neither the entity field nor a workspace field; a reference message holds exactly those`;
 	}
-	if (!valueField || !targetSchema || !keyFields) {
+	if (values.length === 0) {
 		return `reference message ${desc.typeName} has no entity-typed field to name its target`;
 	}
-	return { targetSchema, keyFields, refSchema: desc, valueField, workspaceField };
+	return values.map(({ field, keyFields }) => ({
+		targetSchema: field.message as DescMessage,
+		keyFields,
+		refSchema: desc,
+		valueField: field,
+		workspaceField,
+		...(field.oneof ? { caseLocalName: field.localName } : {}),
+	}));
 }
 
 /**
@@ -652,12 +794,21 @@ function computeEntityKeyFields(desc: DescMessage): DescField[] | undefined {
 	return out;
 }
 
-/** A forward reference: a ref field of one entity pointing at another. */
+/**
+ * A forward reference: a ref field of one entity pointing at another, or one
+ * CASE of a polymorphic one. The cases of one relation share a `localName` —
+ * the relation accessor, which for a oneof on the holder is the oneof's — and
+ * differ in `caseName`; a holder row takes at most one of them.
+ */
 export interface ForwardRef {
-	/** Proto field name (wire form). */
+	/** Proto field name of the stored field (wire form). */
 	fieldName: string;
-	/** JS accessor name on the holder's message shape. */
+	/** The relation accessor: the holder's oneof for a member of one, else the field's own. */
 	localName: string;
+	/** The accessor of the field deciding this case; undefined for a reference to one entity. */
+	caseName?: string;
+	/** The stored field. */
+	field: DescField;
 	targetEntity: string;
 	targetSchema: DescMessage;
 	/** To-many (repeated) when true; to-one otherwise. */
@@ -670,17 +821,28 @@ export interface ForwardRef {
 
 /**
  * A reverse relation: the inverse of a forward ref, surfaced on the TARGET
- * entity. Its name is the pluralized source entity when a single field of that
- * source targets here, else `<plural(source)>By<Field>` (issuesByAssignee).
+ * entity. Its name is the pluralized source entity when a single reference of
+ * that source targets here, else `<plural(source)>By<Relation>`
+ * (issuesByAssignee), and `<plural(source)>By<Relation><Case>` where two
+ * cases of one relation share the target.
  */
 export interface ReverseRef {
 	name: string;
 	sourceEntity: string;
 	sourceSchema: DescMessage;
-	/** The forward ref field this reverses (JS accessor name). */
+	/** The forward relation this reverses (its accessor). */
 	viaField: string;
-	/** The forward ref field this reverses (proto name). */
+	/** The stored field this reverses (proto name). */
 	viaFieldName: string;
+	/** The stored field this reverses. */
+	holderField: DescField;
+	/**
+	 * The query-builder path to the case this reverses, in accessor names: the
+	 * field, through the oneofs on the way — `[ 'parent', 'client' ]` for a
+	 * member of the holder's oneof, `[ 'owner', 'owner', 'project' ]` for a
+	 * case inside a reference message.
+	 */
+	viaPath: string[];
 	repeated: boolean;
 	/** The forward reference's stored shape. */
 	shape: RefShape;
@@ -704,26 +866,26 @@ export function projectRefs<D extends DescMessage>(
 	if (refs.length === 0) return value;
 	const out = clone(schema, value);
 	const rec = out as unknown as Rec;
-	for (const [ field, shape ] of refs) {
+	for (const [ field, shapes ] of refs) {
 		if (field.fieldKind === 'list') {
 			const list = rec[field.localName] as Message[] | undefined;
-			if (list) rec[field.localName] = list.map((e) => projectValue(shape, e));
+			if (list) rec[field.localName] = list.map((e) => projectValue(shapes, e));
 		} else {
-			const stub = rec[field.localName] as Message | undefined;
-			if (stub !== undefined) rec[field.localName] = projectValue(shape, stub);
+			const stub = fieldValueOf(rec, field) as Message | undefined;
+			if (stub !== undefined) setFieldValue(rec, field, projectValue(shapes, stub));
 		}
 	}
 	return out;
 }
 
 /** A schema's reference fields with their shapes, in field order. */
-function refFieldsOf(schema: DescMessage): [DescField, RefShape][] {
+function refFieldsOf(schema: DescMessage): [DescField, RefShape[]][] {
 	let refs = schemaRefFields.get(schema);
 	if (refs === undefined) {
 		refs = [];
 		for (const field of schema.fields) {
-			const shape = refShape(field);
-			if (shape) refs.push([ field, shape ]);
+			const shapes = refShapes(field);
+			if (shapes.length > 0) refs.push([ field, shapes ]);
 		}
 		schemaRefFields.set(schema, refs);
 	}
@@ -733,24 +895,27 @@ function refFieldsOf(schema: DescMessage): [DescField, RefShape][] {
 /**
  * One stored reference value projected down: the target stub keeps only its
  * key fields, and a reference message keeps its workspace around the projected
- * stub.
+ * stub — of the case it holds, for a polymorphic one.
  */
-function projectValue(shape: RefShape, value: Message): Message {
-	if (shape.valueField === undefined || shape.refSchema === undefined) {
-		return projectStub(shape.targetSchema, value, shape.keyFields);
+function projectValue(shapes: RefShape[], value: Message): Message {
+	const first = shapes[0]!;
+	if (first.valueField === undefined || first.refSchema === undefined) {
+		return projectStub(first.targetSchema, value, first.keyFields);
 	}
-	const fresh = create(shape.refSchema) as unknown as Rec;
+	const fresh = create(first.refSchema) as unknown as Rec;
 	const rec = value as unknown as Rec;
-	if (shape.workspaceField) {
-		const ws = rec[shape.workspaceField.localName];
+	if (first.workspaceField) {
+		const ws = rec[first.workspaceField.localName];
 		if (typeof ws === 'string' && ws !== '') {
 			validateWorkspaceId(ws);
-			fresh[shape.workspaceField.localName] = ws;
+			fresh[first.workspaceField.localName] = ws;
 		}
 	}
-	const inner = rec[shape.valueField.localName] as Message | undefined;
-	if (inner !== undefined && inner !== null) {
-		fresh[shape.valueField.localName] = projectStub(shape.targetSchema, inner, shape.keyFields);
+	for (const shape of shapes) {
+		const inner = refStub(shape, value);
+		if (inner !== undefined) {
+			setFieldValue(fresh, shape.valueField!, projectStub(shape.targetSchema, inner, shape.keyFields));
+		}
 	}
 	return fresh as unknown as Message;
 }
@@ -867,9 +1032,13 @@ export class EntityRegistry {
 		return this.reverseRefs.get(entity) ?? [];
 	}
 
-	/** Looks up a forward ref of an entity by its JS accessor (localName). */
-	forwardRef(entity: string, localName: string): ForwardRef | undefined {
-		return this.forwardRefs.get(entity)?.find((r) => r.localName === localName);
+	/**
+	 * The cases of a forward relation of an entity, by its accessor
+	 * (localName): one for a reference to one entity, one per case for a
+	 * polymorphic one, empty when the entity has no such relation.
+	 */
+	forwardCasesOf(entity: string, localName: string): ForwardRef[] {
+		return this.forwardRefs.get(entity)?.filter((r) => r.localName === localName) ?? [];
 	}
 
 	/** Looks up a reverse relation on a target entity by its name. */
@@ -896,23 +1065,25 @@ export class EntityRegistry {
 			const fields = [ ...def.schema.fields ].sort((a, b) => (a.name < b.name ? -1 : 1));
 			const fwd: ForwardRef[] = [];
 			for (const field of fields) {
-				const shape = refShape(field);
-				if (!shape) continue;
-				const targetDef = this.byType.get(shape.targetSchema.typeName);
-				// A ref whose target entity is not registered in this client cannot
-				// be resolved or followed locally, so it is omitted from the graph
-				// (it is not exposed as an accessor). Projection still applies — that
-				// reads the target's own (syncplane.v1.entity) options, not the registry.
-				if (!targetDef) continue;
-				fwd.push({
-					fieldName: field.name,
-					localName: field.localName,
-					targetEntity: targetDef.name,
-					targetSchema: shape.targetSchema,
-					repeated: field.fieldKind === 'list',
-					keyArity: shape.keyFields.length,
-					shape,
-				});
+				for (const shape of refShapes(field)) {
+					const targetDef = this.byType.get(shape.targetSchema.typeName);
+					// A ref whose target entity is not registered in this client cannot
+					// be resolved or followed locally, so it is omitted from the graph
+					// (it is not exposed as an accessor). Projection still applies — that
+					// reads the target's own (syncplane.v1.entity) options, not the registry.
+					if (!targetDef) continue;
+					fwd.push({
+						fieldName: field.name,
+						localName: refSegmentOf(field),
+						...(shape.caseLocalName !== undefined ? { caseName: shape.caseLocalName } : {}),
+						field,
+						targetEntity: targetDef.name,
+						targetSchema: shape.targetSchema,
+						repeated: field.fieldKind === 'list',
+						keyArity: shape.keyFields.length,
+						shape,
+					});
+				}
 			}
 			this.forwardRefs.set(name, fwd);
 		}
@@ -926,10 +1097,14 @@ export class EntityRegistry {
 			}
 			for (const [ target, group ] of byTarget) {
 				const single = group.length === 1;
+				const perRelation = new Map<string, number>();
+				for (const r of group) perRelation.set(r.localName, (perRelation.get(r.localName) ?? 0) + 1);
 				for (const r of group) {
-					const relName = single
-						? pluralize(source)
-						: `${pluralize(source)}By${capitalizeFirst(r.localName)}`;
+					let relName = pluralize(source);
+					if (!single) {
+						relName += `By${capitalizeFirst(r.localName)}`;
+						if ((perRelation.get(r.localName) ?? 0) > 1) relName += capitalizeFirst(r.caseName ?? '');
+					}
 					const list = this.reverseRefs.get(target) ?? [];
 					if (list.some((x) => x.name === relName)) {
 						throw new Error(
@@ -952,6 +1127,8 @@ export class EntityRegistry {
 						sourceSchema,
 						viaField: r.localName,
 						viaFieldName: r.fieldName,
+						holderField: r.field,
+						viaPath: refCasePath(r.field, r.shape),
 						repeated: r.repeated,
 						shape: r.shape,
 					});
@@ -1213,9 +1390,8 @@ function mergeItem(
 		return;
 	}
 	if (field.fieldKind === 'list' && field.listKind === 'message') {
-		const shape = refShape(field);
-		if (shape?.valueField !== undefined) {
-			mergeRefSetItem(dst, src, field, shape, itemKey);
+		if (isRefMessageField(field)) {
+			mergeRefSetItem(dst, src, field, itemKey);
 			return;
 		}
 		const keyFields = keyFieldsFor(field);
@@ -1244,13 +1420,12 @@ function mergeRefSetItem(
 	dst: Rec,
 	src: Rec,
 	field: MessageListField,
-	shape: RefShape,
 	itemKey: string,
 ): void {
 	const srcList = (src[field.localName] as Message[] | undefined) ?? [];
-	const srcElem = srcList.find((e) => refItemKey(shape, e) === itemKey);
+	const srcElem = srcList.find((e) => refItemKeyOf(field, e) === itemKey);
 	const dstList = (dst[field.localName] as Message[] | undefined) ?? [];
-	const kept = dstList.filter((e) => refItemKey(shape, e) !== itemKey);
+	const kept = dstList.filter((e) => refItemKeyOf(field, e) !== itemKey);
 	if (srcElem !== undefined) kept.push(clone(field.message, srcElem));
 	dst[field.localName] = kept;
 }
@@ -2049,16 +2224,22 @@ export function mergeTextFieldsInto(
  * A oneof is one field — masks name the group and the whole group is replaced —
  * so nothing below one is ever addressed on its own. Anything that needs a
  * field to be reliably THERE breaks under that: an identity that vanishes when
- * a sibling case wins is not an identity, and a reference the graph addresses
- * by a fixed accessor cannot be sometimes-absent. Mirrors the engine's
- * registration checks (text fields are caught by collectTextFieldPaths).
+ * a sibling case wins is not an identity. A reference may be a member: a
+ * stored stub is replaced whole anyway, and a oneof of references is how a
+ * polymorphic reference is declared (see {@link refShapes}). Mirrors the
+ * engine's registration checks (text fields are caught by
+ * collectTextFieldPaths).
  */
 function validateOneofs(schema: DescMessage): void {
 	for (const field of schema.fields) {
-		if (field.oneof && isRef(field)) {
+		// A oneof member is one case of the holder's oneof; a member that is
+		// itself a oneof of targets would be cases inside a case, which the
+		// reference graph has no name for.
+		if (field.oneof && refShapes(field).length > 1) {
 			throw new Error(
 				`${schema.typeName}.${field.name}: reference field is a member of oneof `
-					+ `"${field.oneof.name}"; references inside a oneof are not supported`,
+					+ `"${field.oneof.name}" and names one of several targets itself; `
+					+ `declare the targets as members of "${field.oneof.name}" instead`,
 			);
 		}
 		if (field.fieldKind !== 'list' || field.listKind !== 'message') continue;
@@ -2457,10 +2638,9 @@ export function expandCollectionMask(
 		if (field.fieldKind === 'map') {
 			out.push(...expandMap(field, seg, priorRec, nextRec));
 		} else if (field.listKind === 'message') {
-			const shape = refShape(field);
 			const keyFields = keyFieldsFor(field);
-			if (shape?.valueField !== undefined) {
-				out.push(...expandRefSet(field, seg, shape, priorRec, nextRec));
+			if (isRefMessageField(field)) {
+				out.push(...expandRefSet(field, seg, priorRec, nextRec));
 			} else if (keyFields.length === 0) {
 				out.push(path); // non-keyed message list → whole-replace
 			} else {
@@ -2639,12 +2819,13 @@ function hasTextDescendant(desc: DescMessage): boolean {
 function expandRefSet(
 	field: MessageListField,
 	seg: string,
-	shape: RefShape,
 	prior: Rec,
 	next: Rec,
 ): string[] {
 	const keysOf = (rec: Rec): Set<string> =>
-		new Set(((rec[field.localName] as Message[] | undefined) ?? []).map((e) => refItemKey(shape, e)));
+		new Set(
+			((rec[field.localName] as Message[] | undefined) ?? []).map((e) => refItemKeyOf(field, e)),
+		);
 	const pKeys = keysOf(prior);
 	const nKeys = keysOf(next);
 	const out: string[] = [];

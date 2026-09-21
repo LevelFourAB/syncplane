@@ -159,10 +159,17 @@ func closureSetRows(cs *syncplanecursorv1.ClosureSet) closureRows {
 
 // ---- reference graph (server mirror of EntityRegistry.buildRefGraph) ----
 
-// forwardRefRel is a forward reference relation surfaced on the source entity,
-// named by the field's JSON (camelCase) accessor — the RefPath segment.
+// forwardRefRel is one forward reference relation surfaced on the source
+// entity, or one CASE of a polymorphic one: what a holder row reaches through
+// one stored reference, named by the RefPath segment a client spells the
+// relation as — the field's JSON (camelCase) accessor, or the oneof's for a
+// oneof of references on the holder. The cases of one segment share a
+// localName and differ in caseName; a holder row takes at most one of them.
 type forwardRefRel struct {
-	localName    string
+	localName string
+	// caseName is the accessor of the field that decides this case, for a
+	// case of a polymorphic relation; "" for a relation to one entity.
+	caseName     string
 	fd           protoreflect.FieldDescriptor
 	targetEntity string
 	keyFields    []protoreflect.FieldDescriptor // target entity's key fields
@@ -172,7 +179,8 @@ type forwardRefRel struct {
 }
 
 // reverseRefRel is the inverse, surfaced on the target entity, auto-named
-// pluralized-source (or <plural(source)>By<Field> when ambiguous).
+// pluralized-source (or <plural(source)>By<Segment>, and further By<Case>,
+// when ambiguous).
 type reverseRefRel struct {
 	name         string
 	sourceEntity string
@@ -182,17 +190,23 @@ type reverseRefRel struct {
 }
 
 type refGraph struct {
-	forward map[string]map[string]*forwardRefRel // entity -> localName -> rel
-	reverse map[string]map[string]*reverseRefRel // entity -> relName  -> rel
+	// forward holds the cases of every forward relation, one per target it
+	// can reach: a single entry for a relation to one entity, one per case for
+	// a polymorphic one, in accessor order.
+	forward map[string]map[string][]*forwardRefRel // entity -> localName -> cases
+	reverse map[string]map[string]*reverseRefRel   // entity -> relName  -> rel
 }
 
-func (g *refGraph) forwardBy(entity, seg string) *forwardRefRel { return g.forward[entity][seg] }
-func (g *refGraph) reverseBy(entity, seg string) *reverseRefRel { return g.reverse[entity][seg] }
+// forwardBy returns the cases of a forward relation, or nil when the segment
+// names none on the entity.
+func (g *refGraph) forwardBy(entity, seg string) []*forwardRefRel { return g.forward[entity][seg] }
+func (g *refGraph) reverseBy(entity, seg string) *reverseRefRel   { return g.reverse[entity][seg] }
 
 // buildRefGraph mirrors client EntityRegistry.buildRefGraph exactly: forward
 // refs keyed by source, reverse relations derived and auto-named, names sorted
 // for determinism, a clash is a hard error. A ref whose target entity is not
-// registered here is omitted (cannot be followed locally).
+// registered here is omitted (cannot be followed locally); a polymorphic
+// relation keeps the cases whose targets are.
 //
 // The two halves share ONE segment namespace per entity — that is what a
 // RefPath segment, an include key and client.db.<entity>.refs all resolve
@@ -200,12 +214,12 @@ func (g *refGraph) reverseBy(entity, seg string) *reverseRefRel { return g.rever
 // reverse names and the entity's forward ref fields.
 func (c *catalog) buildRefGraph() (*refGraph, error) {
 	g := &refGraph{
-		forward: map[string]map[string]*forwardRefRel{},
+		forward: map[string]map[string][]*forwardRefRel{},
 		reverse: map[string]map[string]*reverseRefRel{},
 	}
 	for _, name := range c.entityNames() {
 		info := c.entities[name]
-		fwd := map[string]*forwardRefRel{}
+		fwd := map[string][]*forwardRefRel{}
 		fields := info.msgType.Descriptor().Fields()
 		// Sort by proto field name, matching the client's deterministic order.
 		ordered := make([]protoreflect.FieldDescriptor, 0, fields.Len())
@@ -214,26 +228,27 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		}
 		sort.Slice(ordered, func(i, j int) bool { return ordered[i].Name() < ordered[j].Name() })
 		for _, fd := range ordered {
-			ref := lww.RefOf(fd)
-			if ref == nil {
-				continue
-			}
-			target := c.byType[ref.Target.FullName()]
-			if target == nil {
-				continue // target entity not registered here; not followable
-			}
-			fwd[fd.JSONName()] = &forwardRefRel{
-				localName:    fd.JSONName(),
-				fd:           fd,
-				targetEntity: target.name,
-				keyFields:    ref.KeyFields,
-				ref:          ref,
+			for _, ref := range lww.RefsOf(fd) {
+				target := c.byType[ref.Target.FullName()]
+				if target == nil {
+					continue // target entity not registered here; not followable
+				}
+				seg := refSegmentName(ref)
+				fwd[seg] = append(fwd[seg], &forwardRefRel{
+					localName:    seg,
+					caseName:     ref.CaseJSONName(),
+					fd:           fd,
+					targetEntity: target.name,
+					keyFields:    ref.KeyFields,
+					ref:          ref,
+				})
 			}
 		}
 		g.forward[name] = fwd
 	}
-	// Reverse relations: group a source's forward refs by target; a single
-	// field to a target ⇒ pluralized source, multiple ⇒ disambiguated.
+	// Reverse relations: group a source's forward cases by target; a single
+	// case to a target ⇒ pluralized source, multiple ⇒ disambiguated by
+	// segment, and by case too where two cases of one segment share a target.
 	for _, source := range c.entityNames() {
 		byTarget := map[string][]*forwardRefRel{}
 		// Iterate in deterministic (localName) order for stable naming.
@@ -243,15 +258,23 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		}
 		sort.Strings(locals)
 		for _, ln := range locals {
-			r := g.forward[source][ln]
-			byTarget[r.targetEntity] = append(byTarget[r.targetEntity], r)
+			for _, r := range g.forward[source][ln] {
+				byTarget[r.targetEntity] = append(byTarget[r.targetEntity], r)
+			}
 		}
 		for target, group := range byTarget {
 			single := len(group) == 1
+			perSegment := map[string]int{}
+			for _, r := range group {
+				perSegment[r.localName]++
+			}
 			for _, r := range group {
 				relName := pluralizeEntity(source)
 				if !single {
-					relName = pluralizeEntity(source) + "By" + capitalizeFirst(r.localName)
+					relName += "By" + capitalizeFirst(r.localName)
+					if perSegment[r.localName] > 1 {
+						relName += capitalizeFirst(r.caseName)
+					}
 				}
 				if g.reverse[target] == nil {
 					g.reverse[target] = map[string]*reverseRefRel{}
@@ -278,6 +301,44 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		}
 	}
 	return g, nil
+}
+
+// refSegmentName is the RefPath segment a reference is followed by: the
+// holder's oneof when the reference is a member of one — the accessor the
+// client's message shape has, and the one name its cases share — else the
+// field's own accessor.
+func refSegmentName(ref *lww.Ref) string {
+	if ref.Group != nil {
+		return protoCamelCase(string(ref.Group.Name()))
+	}
+	return ref.Field.JSONName()
+}
+
+// protoCamelCase mirrors the client's accessor derivation for a oneof
+// (protobuf-es protoCamelCase, the JSON-name rule): an underscore is dropped
+// and capitalizes the next letter; a digit ends the capitalization.
+func protoCamelCase(name string) string {
+	b := make([]byte, 0, len(name))
+	capNext := false
+	for i := 0; i < len(name); i++ {
+		c := name[i]
+		switch {
+		case c == '_':
+			capNext = true
+		case c >= '0' && c <= '9':
+			b = append(b, c)
+			capNext = false
+		default:
+			if capNext {
+				capNext = false
+				if c >= 'a' && c <= 'z' {
+					c -= 'a' - 'A'
+				}
+			}
+			b = append(b, c)
+		}
+	}
+	return string(b)
 }
 
 // refGraphLazy builds the reference graph once, after all entities are
@@ -385,12 +446,14 @@ func (g *refGraph) followEntitiesOf(subs []*syncplanev1.Subscription, maxDepth i
 					for _, seg := range path.GetSegments() {
 						step := map[string]bool{}
 						for c := range cur {
-							to, err := g.segmentTarget(c, seg)
+							tos, err := g.segmentTargets(c, seg)
 							if err != nil {
 								return nil, err
 							}
-							out[to] = true
-							step[to] = true
+							for _, to := range tos {
+								out[to] = true
+								step[to] = true
+							}
 						}
 						cur = step
 					}
@@ -405,16 +468,21 @@ func (g *refGraph) followEntitiesOf(subs []*syncplanev1.Subscription, maxDepth i
 	return out, nil
 }
 
-// segmentTarget resolves one path segment from an entity to the entity it
-// lands on (forward target or reverse source).
-func (g *refGraph) segmentTarget(entity, seg string) (string, error) {
-	if fr := g.forwardBy(entity, seg); fr != nil {
-		return fr.targetEntity, nil
+// segmentTargets resolves one path segment from an entity to the entities it
+// can land on: a forward relation's target, one per case for a polymorphic
+// one, or a reverse relation's source.
+func (g *refGraph) segmentTargets(entity, seg string) ([]string, error) {
+	if cases := g.forwardBy(entity, seg); cases != nil {
+		out := make([]string, 0, len(cases))
+		for _, fr := range cases {
+			out = append(out, fr.targetEntity)
+		}
+		return out, nil
 	}
 	if rr := g.reverseBy(entity, seg); rr != nil {
-		return rr.sourceEntity, nil
+		return []string{rr.sourceEntity}, nil
 	}
-	return "", errUnknownSegment(g, entity, seg)
+	return nil, errUnknownSegment(g, entity, seg)
 }
 
 // buildClosure recomputes the follow closure for this request against current
@@ -672,9 +740,9 @@ func (e *rowEmitter) walkPath(tx storage.ReadTx, g *refGraph, holders []frontier
 			return nil
 		}
 		for i, h := range current {
-			if t := targets[i]; t.entity != "" {
-				for _, key := range t.keys {
-					r, ok := rows[closureKey{t.entity, key}]
+			if t := targets[i]; t.forward {
+				for _, ck := range t.rows {
+					r, ok := rows[ck]
 					if !ok {
 						continue // orphan, tombstone, quarantined or read-filtered
 					}
@@ -706,12 +774,13 @@ type resolved struct {
 	front frontierRow
 }
 
-// forwardTargets names the rows one holder's forward ref points at: the entity
-// they live in, and their keys in the ref field's order. A zero entity marks a
+// forwardTargets names the rows one holder's forward ref points at, in the
+// ref field's order — each with the entity it lives in, since the cases of a
+// polymorphic relation reach different entities. forward is false for a
 // holder that takes the segment's REVERSE direction instead.
 type forwardTargets struct {
-	entity string
-	keys   []string
+	forward bool
+	rows    []closureKey
 }
 
 // followForward resolves the forward hop of one segment for every holder that
@@ -740,26 +809,32 @@ func (e *rowEmitter) followForward(tx storage.ReadTx, g *refGraph, holders []fro
 	byEntity := map[string][]string{}
 	queued := map[closureKey]bool{}
 	for i, h := range holders {
-		fr := g.forwardBy(h.entity, seg)
-		if fr == nil {
+		cases := g.forwardBy(h.entity, seg)
+		if cases == nil {
 			if g.reverseBy(h.entity, seg) == nil {
 				return nil, nil, errUnknownSegment(g, h.entity, seg)
 			}
 			continue
 		}
-		targetInfo := e.srv.catalogPtr().entities[fr.targetEntity]
-		if _, known := byEntity[fr.targetEntity]; !known {
-			entities = append(entities, fr.targetEntity)
-			byEntity[fr.targetEntity] = nil
-		}
-		targets[i] = forwardTargets{entity: fr.targetEntity, keys: forwardTargetKeys(h.msg, fr, targetInfo, e.ws)}
-		for _, key := range targets[i].keys {
-			ck := closureKey{fr.targetEntity, key}
-			if queued[ck] {
-				continue
+		targets[i].forward = true
+		// A holder takes at most one case of a polymorphic relation, but a
+		// repeated reference message holds one case PER ELEMENT, so every case
+		// is read and the keys keep the field's element order within a case.
+		for _, fr := range cases {
+			targetInfo := e.srv.catalogPtr().entities[fr.targetEntity]
+			if _, known := byEntity[fr.targetEntity]; !known {
+				entities = append(entities, fr.targetEntity)
+				byEntity[fr.targetEntity] = nil
 			}
-			queued[ck] = true
-			byEntity[fr.targetEntity] = append(byEntity[fr.targetEntity], key)
+			for _, key := range forwardTargetKeys(h.msg, fr, targetInfo, e.ws) {
+				ck := closureKey{fr.targetEntity, key}
+				targets[i].rows = append(targets[i].rows, ck)
+				if queued[ck] {
+					continue
+				}
+				queued[ck] = true
+				byEntity[fr.targetEntity] = append(byEntity[fr.targetEntity], key)
+			}
 		}
 	}
 	rows := map[closureKey]resolved{}
@@ -941,7 +1016,7 @@ func (e *rowEmitter) followReverseIndexed(
 		// multi-entry index. Until there is one, scan.
 		return decline()
 	}
-	ci := sourceInfo.indexByName(refIndexName(rr.viaField))
+	ci := sourceInfo.indexByName(refIndexName(rr.via))
 	if ci == nil {
 		return decline()
 	}
@@ -1128,30 +1203,35 @@ func (e *rowEmitter) resolveHops(subs []*syncplanev1.Subscription) (closureHops,
 				})
 				continue
 			}
-			fr := g.forwardBy(sub.GetEntity(), segs[0])
+			cases := g.forwardBy(sub.GetEntity(), segs[0])
 			// A segment that names nothing at all is an error buildClosure is
 			// the right place to raise.
-			if fr == nil {
+			if cases == nil {
 				return closureHops{}, false, nil
 			}
-			// A to-many ref stores several target keys in one row, and the
-			// probe reads one entry per row (see followReverseIndexed). A
-			// workspace-qualified ref is decided by its value's workspace too,
-			// which the index does not carry.
-			if fr.fd.IsList() || fr.ref.Qualified() {
-				return closureHops{}, false, nil
+			// Each case of a polymorphic relation is its own hop: it reaches its
+			// own target entity through its own index, and a holder that takes
+			// another case holds nothing for it, exactly like an unset field.
+			for _, fr := range cases {
+				// A to-many ref stores several target keys in one row, and the
+				// probe reads one entry per row (see followReverseIndexed). A
+				// workspace-qualified ref is decided by its value's workspace too,
+				// which the index does not carry.
+				if fr.fd.IsList() || fr.ref.Qualified() {
+					return closureHops{}, false, nil
+				}
+				targetInfo, ok := e.srv.catalogPtr().entities[fr.targetEntity]
+				if !ok {
+					return closureHops{}, false, nil
+				}
+				hops.forward = append(hops.forward, forwardHop{
+					fr:         fr,
+					seedInfo:   seedInfo,
+					targetInfo: targetInfo,
+					seedPred:   pred,
+					windowed:   sub.GetWindow() != nil,
+				})
 			}
-			targetInfo, ok := e.srv.catalogPtr().entities[fr.targetEntity]
-			if !ok {
-				return closureHops{}, false, nil
-			}
-			hops.forward = append(hops.forward, forwardHop{
-				fr:         fr,
-				seedInfo:   seedInfo,
-				targetInfo: targetInfo,
-				seedPred:   pred,
-				windowed:   sub.GetWindow() != nil,
-			})
 		}
 	}
 	hops.markSole()
@@ -1529,7 +1609,7 @@ func (m *closureMaint) anySeedPointsAt(hop *forwardHop, key string, msg protoref
 	if limits.DisableIndexes {
 		return false, errMaintenanceDeclined
 	}
-	ci := hop.seedInfo.indexByName(refIndexName(hop.fr.fd))
+	ci := hop.seedInfo.indexByName(refIndexName(hop.fr.ref))
 	if ci == nil {
 		return false, errMaintenanceDeclined
 	}

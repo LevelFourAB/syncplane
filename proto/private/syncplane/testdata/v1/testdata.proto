@@ -269,11 +269,10 @@ message VariantElement {
 	string label = 3;
 }
 
-// A reference inside a oneof. Polymorphic targets are a real modelling wish,
-// but the reference graph (accessor naming, include/follow, reverse pushdown)
-// addresses a ref by a stable field of the row; a member that is only
-// sometimes there needs its own design pass, so it is refused rather than
-// half-supported.
+// A polymorphic reference declared on the holder: a oneof whose members are
+// entity-typed, so one row points at a project or at a user. The relation is
+// followed by the oneof's name (target); each member is a case with its own
+// derived index and reverse relation (oneofRefs on Project and on User).
 message OneofRefEntity {
 	option (syncplane.v1.entity) = {
 		name: "oneof_ref"
@@ -472,6 +471,53 @@ message Task {
 	UserRef assignee = 3;
 	repeated UserRef watchers = 4;
 	string state = 5;
+}
+
+// Polymorphic reference fixtures. OwnerRef is a reference message whose
+// target is a oneof: one stored value names a project or a user, in the
+// workspace it records. Memo holds it to-one (owner) and to-many (mentions);
+// the reverse relations land on Project and User as memosByOwner and
+// memosByMentions.
+message OwnerRef {
+	option (syncplane.v1.reference) = {
+	};
+
+	string workspace_id = 1
+		[(syncplane.v1.field_behavior) = { workspace: true }];
+	oneof owner {
+		Project project = 2;
+		User user = 3;
+	}
+}
+
+message Memo {
+	option (syncplane.v1.entity) = {
+		name: "memo"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	OwnerRef owner = 2;
+	repeated OwnerRef mentions = 3;
+	string body = 4;
+}
+
+// A oneof on the holder mixing an entity-typed reference, a workspace-qualified
+// reference message and a plain member: the two references are the cases of
+// the parent relation, and the label is not a reference at all.
+message Attachment {
+	option (syncplane.v1.entity) = {
+		name: "attachment"
+		key_fields: [ "id" ]
+	};
+
+	string id = 1;
+	oneof parent {
+		Project project = 2;
+		UserRef user = 3;
+		string label = 4;
+	}
+	string name = 5;
 }
 
 message Settings {

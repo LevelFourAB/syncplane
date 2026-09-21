@@ -76,6 +76,15 @@ A `matches()` through a reverse relation is also unnecessary in most cases. For
 example, you can phrase "projects with an open issue" from the side holding the
 reference, where the semi-join already works.
 
+A polymorphic reference contains cases that point to different target entities.
+Because each case has a different target, `matches()` names a specific case (such
+as `owner.person`) rather than the `oneof`. The inner condition compiles
+against that target entity, and the pre-pass queries that target alone. If
+`matches()` named the `oneof`, the engine would need to run a pre-pass for every
+case and generate a membership test that tracks which case each stub holds.
+Naming an individual case keeps each relational node scoped to a single target
+and preserves row-locality after the rewrite.
+
 ## Local answers, partial data, and `follow`
 
 A server evaluates `matches()` against all authoritative data. A local client

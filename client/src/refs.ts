@@ -17,10 +17,10 @@ import type { DescMessage, Message } from '@bufbuild/protobuf';
 
 import {
 	type EntityRegistry,
+	fieldValueOf,
 	type ForwardRef,
 	keyOf,
 	refQualified,
-	type RefShape,
 	refStub,
 	refWorkspaceOf,
 	type ReverseRef,
@@ -115,40 +115,53 @@ export interface HydratedRow<T = unknown> extends Row<T> {
 type Rec = Record<string, unknown>;
 
 /**
- * Resolves a forward reference of a holder row to its live target(s). To-one
+ * The stored values a holder row carries for one case of a forward relation:
+ * none for an unset field or an inactive case, one for a to-one, one per
+ * element for a to-many. A polymorphic reference message's elements are read
+ * by every case, and each element answers to the one it holds (see refStub).
+ */
+function storedValues(holder: Message, fwd: ForwardRef): Message[] {
+	const at = fieldValueOf(holder as unknown as Rec, fwd.field);
+	if (at === undefined || at === null) return [];
+	return Array.isArray(at) ? at as Message[] : [ at as Message ];
+}
+
+/**
+ * Resolves a forward relation of a holder row to its live target(s). To-one
  * returns the target row or undefined (unset/orphan); to-many returns the rows
- * that resolve (orphans dropped).
+ * that resolve (orphans dropped). A polymorphic relation resolves the case the
+ * row holds, in that case's target entity.
  */
 export async function loadForward(
 	client: RefClient,
 	registry: EntityRegistry,
 	sourceEntity: string,
 	workspaceId: string,
-	fieldLocalName: string,
+	relation: string,
 	holder: Message,
 ): Promise<Row<Message> | Row<Message>[] | undefined> {
-	const ref = registry.forwardRef(sourceEntity, fieldLocalName);
-	if (!ref) throw new Error(`entity "${sourceEntity}" has no reference field "${fieldLocalName}"`);
-	const targetDef = registry.get(ref.targetEntity)!;
-	const rec = holder as unknown as Rec;
-	const resolve = async (value: Message): Promise<Row<Message> | undefined> => {
-		const stub = refStub(ref.shape, value);
+	const cases = registry.forwardCasesOf(sourceEntity, relation);
+	if (cases.length === 0) {
+		throw new Error(`entity "${sourceEntity}" has no reference field "${relation}"`);
+	}
+	const resolve = async (fwd: ForwardRef, value: Message): Promise<Row<Message> | undefined> => {
+		const stub = refStub(fwd.shape, value);
 		if (stub === undefined) return undefined;
 		const rows = await client.getRows(
-			ref.targetSchema,
-			refWorkspaceOf(ref.shape, value, workspaceId),
-			[ keyOf(targetDef, stub) ],
+			fwd.targetSchema,
+			refWorkspaceOf(fwd.shape, value, workspaceId),
+			[ keyOf(registry.get(fwd.targetEntity)!, stub) ],
 		);
 		return rows[0];
 	};
-	if (ref.repeated) {
-		const values = (rec[fieldLocalName] as Message[] | undefined) ?? [];
-		const resolved = await Promise.all(values.map(resolve));
-		return resolved.filter((r): r is Row<Message> => r !== undefined);
+	const resolved: (Row<Message> | undefined)[] = [];
+	for (const fwd of cases) {
+		resolved.push(
+			...await Promise.all(storedValues(holder, fwd).map((value) => resolve(fwd, value))),
+		);
 	}
-	const value = rec[fieldLocalName] as Message | undefined;
-	if (value === undefined) return undefined;
-	return resolve(value);
+	const rows = resolved.filter((r): r is Row<Message> => r !== undefined);
+	return cases[0]!.repeated ? rows : rows[0];
 }
 
 /**
@@ -184,7 +197,6 @@ export async function resolveReverse(
 	const rev = registry.reverseRef(targetEntity, relationName);
 	if (!rev) throw new Error(`entity "${targetEntity}" has no reverse relation "${relationName}"`);
 	const targetDef = registry.get(targetEntity)!;
-	const viaLocal = rev.viaField;
 	const qualified = refQualified(rev.shape);
 	const run = (query: Query<Message>) =>
 		qualified
@@ -196,8 +208,8 @@ export async function resolveReverse(
 	if (pushKey) {
 		const keyFieldLocal = targetDef.keyFields[0]!.localName;
 		const keyValue = (target as unknown as Rec)[keyFieldLocal];
-		where = ((s: Record<string, { eq(v: unknown): ReturnType<typeof and> }>) => {
-			const pred = s[viaLocal]!.eq(keyValue);
+		where = ((s: Rec) => {
+			const pred = viaRef(s, rev).eq(keyValue);
 			return q?.where ? and(pred, q.where(s as never)) : pred;
 		}) as never;
 	}
@@ -212,7 +224,7 @@ export async function resolveReverse(
 	const holderKey = keyOf(targetDef, target);
 	const candidates = await run({ where, orderBy: q?.orderBy });
 	const matched = candidates.filter((row) =>
-		refPointsAt(row.value, viaLocal, rev.shape, targetDef, holderKey, workspaceId, row.workspaceId)
+		refPointsAt(row.value, rev, targetDef, holderKey, workspaceId, row.workspaceId)
 	);
 	const offset = q?.offset ?? 0;
 	return q?.limit === undefined ? matched.slice(offset) : matched.slice(offset, offset + q.limit);
@@ -226,15 +238,25 @@ export async function resolveReverse(
  */
 function refPointsAt(
 	source: Message,
-	viaLocal: string,
-	shape: RefShape,
+	rev: ReverseRef,
 	targetDef: Parameters<typeof keyOf>[0],
 	holderKey: string,
 	targetWorkspace: string,
 	holderWorkspace: string,
 ): boolean {
-	return pointedKeys(source, viaLocal, shape, targetDef, targetWorkspace, holderWorkspace)
+	return pointedKeys(source, rev, targetDef, targetWorkspace, holderWorkspace)
 		.includes(holderKey);
+}
+
+/**
+ * The query-builder reference to the case a reverse relation reverses: the
+ * builder walked along the relation's viaPath — through the holder's oneof, or
+ * into the reference message's — to the field the pushdown compares.
+ */
+function viaRef(s: Rec, rev: ReverseRef): { eq(v: unknown): Cond; in(v: unknown[]): Cond } {
+	let at: unknown = s;
+	for (const seg of rev.viaPath) at = (at as Rec)[seg];
+	return at as { eq(v: unknown): Cond; in(v: unknown[]): Cond };
 }
 
 /**
@@ -294,8 +316,9 @@ function memoized(client: RefClient): RefClient {
 	};
 }
 
-/** A stored stub reduced to what reads it back: its target's workspace and key. */
+/** A stored stub reduced to what reads it back: the case it holds, its target's workspace and key. */
 interface Want {
+	target: ForwardRef;
 	workspaceId: string;
 	key: string;
 }
@@ -361,8 +384,8 @@ async function attachRelations(
 				throw new Error(`include: option "${relation}" applies to a relation, not the tree root`);
 			}
 			const node = parseNode(relation, value);
-			const fwd = registry.forwardRef(entity, relation);
-			if (fwd) return attachForward(client, registry, fwd, relation, holders, node);
+			const cases = registry.forwardCasesOf(entity, relation);
+			if (cases.length > 0) return attachForward(client, registry, cases, relation, holders, node);
 			const rev = registry.reverseRef(entity, relation);
 			if (rev) return attachReverse(client, registry, entity, rev, relation, holders, node);
 			throw new Error(
@@ -373,88 +396,141 @@ async function attachRelations(
 }
 
 /**
- * Resolves a forward relation for all holders in one batched read per workspace
- * its stubs point into, whatever the holder count. A target named by several
- * holders — or twice by one repeated ref — is read once and `shared` hands every
- * holder the same hydrated object. Options are evaluated in memory over the
- * resolved rows: a batched read is not a query to push them into.
+ * Resolves a forward relation for all holders in one batched read per target
+ * entity and workspace its stubs point into, whatever the holder count. A
+ * target named by several holders — or twice by one repeated ref — is read once
+ * and `shared` hands every holder the same hydrated object. Options are
+ * evaluated in memory over the resolved rows: a batched read is not a query to
+ * push them into.
+ *
+ * A polymorphic relation arrives as its cases. Each holder's stored values are
+ * read by every case and answer to the one they hold, so a to-one row resolves
+ * in whichever target entity its case names, and a to-many row's elements may
+ * each resolve in a different one. Options on a polymorphic list relation are
+ * refused: the cases resolve to rows of different entities, and a condition or
+ * an ordering is written against one.
  */
 async function attachForward(
 	client: RefClient,
 	registry: EntityRegistry,
-	fwd: ForwardRef,
+	cases: ForwardRef[],
 	relation: string,
 	holders: HydratedRow[],
 	node: RelationNode,
 ): Promise<void> {
-	if (!fwd.repeated && node.hasOptions) {
+	const repeated = cases[0]!.repeated;
+	if (!repeated && node.hasOptions) {
 		throw new Error(
 			`include: relation "${relation}" resolves to one row; `
 				+ `$where/$orderBy/$limit/$offset need a list relation`,
 		);
 	}
-	const targetDef = registry.get(fwd.targetEntity)!;
-	const opts = node.hasOptions ? prepareNodeOptions(fwd.targetSchema, node) : undefined;
+	if (cases.length > 1 && node.hasOptions) {
+		throw new Error(
+			`include: relation "${relation}" resolves to rows of ${
+				cases.map((c) => `"${c.targetEntity}"`).join(' or ')
+			}; $where/$orderBy/$limit/$offset need a relation to one entity`,
+		);
+	}
+	const opts = node.hasOptions ? prepareNodeOptions(cases[0]!.targetSchema, node) : undefined;
 	const shared: SharedRows = new Map();
 
 	// Every stub of every holder, in holder order and — for a repeated ref — in
 	// element order, so the resolved rows scatter back positionally. An unset
 	// stub keeps its slot rather than collapsing the list it sits in.
 	const wanted: (Want | undefined)[][] = holders.map((holder) => {
-		const rec = holder.value as unknown as Rec;
-		const want = (value: Message): Want | undefined => {
-			const stub = refStub(fwd.shape, value);
-			if (stub === undefined) return undefined;
-			return {
-				workspaceId: refWorkspaceOf(fwd.shape, value, holder.workspaceId),
-				key: keyOf(targetDef, stub),
-			};
-		};
-		if (fwd.repeated) return ((rec[relation] as Message[] | undefined) ?? []).map(want);
-		const value = rec[relation] as Message | undefined;
-		return [ value === undefined ? undefined : want(value) ];
+		const out: (Want | undefined)[] = [];
+		for (const fwd of cases) {
+			const targetDef = registry.get(fwd.targetEntity)!;
+			for (const value of storedValues(holder.value as Message, fwd)) {
+				const stub = refStub(fwd.shape, value);
+				// A to-one polymorphic message with no case set keeps its one
+				// slot; an element of a to-many one that holds no case is a
+				// stub pointing nowhere, like any orphan.
+				if (stub === undefined) {
+					if (!repeated) out.push(undefined);
+					continue;
+				}
+				out.push({
+					target: fwd,
+					workspaceId: refWorkspaceOf(fwd.shape, value, holder.workspaceId),
+					key: keyOf(targetDef, stub),
+				});
+			}
+		}
+		if (!repeated && out.length === 0) out.push(undefined);
+		return out;
 	});
 
-	// One read per workspace the stubs name — the holder's own for an
-	// entity-typed stub, another for every workspace a qualified reference
-	// points into.
-	const keysByWs = new Map<string, string[]>();
+	// One read per target entity and workspace the stubs name — the holder's
+	// own for an entity-typed stub, another for every workspace a qualified
+	// reference points into.
+	const keysByRead = new Map<string, string[]>();
 	const slots = new Map<string, Map<string, number>>();
+	const readOf = (w: Want): string => `${w.target.targetSchema.typeName}\u0000${w.workspaceId}`;
 	for (const list of wanted) {
 		for (const w of list) {
 			if (w === undefined) continue;
-			let keys = keysByWs.get(w.workspaceId);
+			const read = readOf(w);
+			let keys = keysByRead.get(read);
 			if (keys === undefined) {
-				keysByWs.set(w.workspaceId, keys = []);
-				slots.set(w.workspaceId, new Map());
+				keysByRead.set(read, keys = []);
+				slots.set(read, new Map());
 			}
-			const index = slots.get(w.workspaceId)!;
+			const index = slots.get(read)!;
 			if (!index.has(w.key)) index.set(w.key, keys.push(w.key) - 1);
 		}
 	}
-	const rowsByWs = new Map<string, (Row<Message> | undefined)[]>();
-	await Promise.all([ ...keysByWs.entries() ].map(async ([ workspaceId, keys ]) => {
-		rowsByWs.set(workspaceId, await client.getRows(fwd.targetSchema, workspaceId, keys));
+	const rowsByRead = new Map<string, (Row<Message> | undefined)[]>();
+	const reads = new Map<string, Want>();
+	for (const list of wanted) {
+		for (const w of list) if (w !== undefined && !reads.has(readOf(w))) reads.set(readOf(w), w);
+	}
+	await Promise.all([ ...reads.entries() ].map(async ([ read, w ]) => {
+		rowsByRead.set(
+			read,
+			await client.getRows(w.target.targetSchema, w.workspaceId, keysByRead.get(read)!),
+		);
 	}));
 	const resolved = (w: Want | undefined): Row<Message> | undefined => {
 		if (w === undefined) return undefined;
-		return rowsByWs.get(w.workspaceId)![slots.get(w.workspaceId)!.get(w.key)!];
+		return rowsByRead.get(readOf(w))![slots.get(readOf(w))!.get(w.key)!];
 	};
 
 	holders.forEach((holder, i) => {
 		const list = wanted[i]!;
-		if (fwd.repeated) {
+		if (repeated) {
 			let rows = list.map(resolved).filter((r): r is Row<Message> => r !== undefined);
-			if (opts) rows = applyOptions(rows, opts, fwd.targetSchema);
+			if (opts) rows = applyOptions(rows, opts, cases[0]!.targetSchema);
 			holder.refs[relation] = rows.map((row) => sharedHydrated(shared, row));
 		} else {
-			const row = resolved(list[0]);
+			const row = list.map(resolved).find((r) => r !== undefined);
 			holder.refs[relation] = row === undefined ? undefined : sharedHydrated(shared, row);
 		}
 	});
 	if (node.nested) {
-		await attachRelations(client, registry, fwd.targetEntity, sharedValues(shared), node.nested);
+		// The nested tree is resolved against each target entity the rows
+		// belong to: a case's rows continue through that entity's relations.
+		const byEntity = new Map<string, HydratedRow[]>();
+		for (const row of sharedValues(shared)) {
+			const entity = registry.bySchema(schemaOf(cases, row)).name;
+			let group = byEntity.get(entity);
+			if (group === undefined) byEntity.set(entity, group = []);
+			group.push(row);
+		}
+		await Promise.all(
+			[ ...byEntity.entries() ].map(([ entity, rows ]) =>
+				attachRelations(client, registry, entity, rows, node.nested!)
+			),
+		);
 	}
+}
+
+/** The schema of a resolved target row, from the case that read it. */
+function schemaOf(cases: ForwardRef[], row: Row<unknown>): DescMessage {
+	if (cases.length === 1) return cases[0]!.targetSchema;
+	const typeName = (row.value as Message).$typeName;
+	return cases.find((c) => c.targetSchema.typeName === typeName)!.targetSchema;
 }
 
 /**
@@ -479,7 +555,6 @@ async function attachReverse(
 	node: RelationNode,
 ): Promise<void> {
 	const targetDef = registry.get(targetEntity)!;
-	const viaLocal = rev.viaField;
 	const shared: SharedRows = new Map();
 
 	const byWs = new Map<string, HydratedRow[]>();
@@ -518,21 +593,14 @@ async function attachReverse(
 		if (!rev.repeated && targetDef.keyFields.length === 1) {
 			const keyFieldLocal = targetDef.keyFields[0]!.localName;
 			const values = [ ...new Set(group.map((h) => (h.value as unknown as Rec)[keyFieldLocal])) ];
-			where = (s: Record<string, { in(v: unknown[]): Cond }>) => {
-				const pred = s[viaLocal]!.in(values);
+			where = (s: Rec) => {
+				const pred = viaRef(s, rev).in(values);
 				return node.where ? and(pred, node.where(s)) : pred;
 			};
 		}
 		const rows = await run({ where: where as never, orderBy: node.orderBy });
 		for (const row of rows) {
-			const keys = pointedKeys(
-				row.value,
-				viaLocal,
-				rev.shape,
-				targetDef,
-				workspaceId,
-				row.workspaceId,
-			);
+			const keys = pointedKeys(row.value, rev, targetDef, workspaceId, row.workspaceId);
 			for (const k of keys) add(k, row);
 		}
 
@@ -557,20 +625,19 @@ async function attachReverse(
  */
 function pointedKeys(
 	source: Message,
-	viaLocal: string,
-	shape: RefShape,
+	rev: ReverseRef,
 	targetDef: Parameters<typeof keyOf>[0],
 	targetWorkspace: string,
 	holderWorkspace: string,
 ): string[] {
-	const field = (source as unknown as Rec)[viaLocal];
+	const field = fieldValueOf(source as unknown as Rec, rev.holderField);
 	if (field === undefined || field === null) return [];
 	const values = Array.isArray(field) ? field as Message[] : [ field as Message ];
 	const out = new Set<string>();
 	for (const value of values) {
-		const stub = refStub(shape, value);
+		const stub = refStub(rev.shape, value);
 		if (stub === undefined) continue;
-		if (refWorkspaceOf(shape, value, holderWorkspace) !== targetWorkspace) continue;
+		if (refWorkspaceOf(rev.shape, value, holderWorkspace) !== targetWorkspace) continue;
 		out.add(keyOf(targetDef, stub));
 	}
 	return [ ...out ];

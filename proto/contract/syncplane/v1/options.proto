@@ -221,19 +221,38 @@ enum FieldWritePolicy {
 // A field of a reference message type is a reference like any other: it gets
 // the forward accessor, the reverse relation on the target, the follow segment
 // and the derived index, and its target is the entity the embedded field
-// names. The message must carry exactly one singular entity-typed field and at
-// most one string field marked (syncplane.v1.field_behavior).workspace, and
+// names. The message must carry exactly one singular entity-typed field — or a
+// oneof whose members are all singular entity-typed fields, which makes it a
+// POLYMORPHIC reference naming one of several targets — and at most one string
+// field marked (syncplane.v1.field_behavior).workspace outside any oneof, and
 // nothing else; whether the holder field is repeated says whether the
 // reference is to-many. An empty or absent workspace value means the holder's
 // own workspace, so a reference message without the workspace field is a
 // same-workspace reference with an explicit stored shape.
 //
+//	message OwnerRef {
+//	  option (syncplane.v1.reference) = {};
+//	  string workspace_id = 1 [(syncplane.v1.field_behavior).workspace = true];
+//	  oneof owner {
+//	    Person person = 2;
+//	    Team team = 3;
+//	  }
+//	}
+//
+// Each member of the oneof is a CASE: it has its own reverse relation on its
+// target and its own derived index, a query names it (`owner.person`), and a
+// stored value holds at most one. A oneof of references on the holder itself
+// is a polymorphic reference too, named by the oneof, and its members may be
+// entity-typed fields, reference messages and plain fields alike; only the
+// references are cases.
+//
 // A reference message is replaced whole on every write: a PATCH mask that
 // names one names the whole message, so the workspace and the key never
 // split. A repeated reference message merges as a set, each element
-// identified by its workspace and key together, so a PATCH adds or removes
-// one element without touching the others; an element that names no
-// workspace and one that names the holder's own are two elements.
+// identified by its workspace and key together — and by its case, for a
+// polymorphic one — so a PATCH adds or removes one element without touching
+// the others; an element that names no workspace and one that names the
+// holder's own are two elements.
 //
 // Reading is client-local: a client resolves each stub in the workspace it
 // names, from the workspaces it holds. The server evaluates `matches()`,
