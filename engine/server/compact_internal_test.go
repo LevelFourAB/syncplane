@@ -116,7 +116,7 @@ func TestCompactTextResweepsOnlyWhenTheThresholdDrops(t *testing.T) {
 
 	due := func(minPurged int) bool {
 		t.Helper()
-		ids, err := store.ListCompactableWorkspaceIDs(ctx, minPurged, "", 10)
+		ids, err := store.ListCompactableWorkspaceIDs(ctx, minPurged, storage.Range{}, 10)
 		if err != nil {
 			t.Fatalf("listing compactable: %v", err)
 		}
@@ -179,7 +179,7 @@ func TestCompactTextEndsABatchOnTheByteCap(t *testing.T) {
 		t.Fatalf("batches = %d, want %d — two rows per batch plus the one that finds the window empty",
 			store.writes, want)
 	}
-	ids, err := base.ListCompactableWorkspaceIDs(ctx, 1, "", 10)
+	ids, err := base.ListCompactableWorkspaceIDs(ctx, 1, storage.Range{}, 10)
 	if err != nil {
 		t.Fatalf("listing compactable: %v", err)
 	}
@@ -248,7 +248,7 @@ func TestCompactTextResumesInsideAVersionGroupLargerThanTheBatch(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("reading mark: %v", err)
 	}
-	ids, err := base.ListCompactableWorkspaceIDs(ctx, 1, "", 10)
+	ids, err := base.ListCompactableWorkspaceIDs(ctx, 1, storage.Range{}, 10)
 	if err != nil {
 		t.Fatalf("listing compactable: %v", err)
 	}

@@ -39,20 +39,6 @@ var _ = storagetest.Conformance("postgres", func() storage.Adapter {
 	return open()
 })
 
-// A namespaced store must satisfy the full adapter contract too.
-var _ = storagetest.Conformance("postgres (namespaced)", func() storage.Adapter {
-	return open(pgstore.WithNamespace("app1"))
-})
-
-// One root store, two derived namespaces sharing its pool. cleanup owns the
-// real Close — derived stores' Close is a no-op.
-var _ = storagetest.ConformanceNamespaced("postgres", func() (storage.Adapter, storage.Adapter, func()) {
-	root := open()
-	return root.Namespace("a"), root.Namespace("b"), func() {
-		Expect(root.Close()).To(Succeed())
-	}
-})
-
 // The replica pointed at the primary itself: always fresh, so the routing and
 // read contracts are exercised without a second database. The fake-lagging
 // specs in replica_test.go cover the stale side.
@@ -75,13 +61,6 @@ var _ = storagetest.CursorState("postgres", func() storage.Adapter {
 	return open()
 })
 
-var _ = storagetest.CursorStateNamespaced("postgres", func() (storage.Adapter, storage.Adapter, func()) {
-	root := open()
-	return root.Namespace("a"), root.Namespace("b"), func() {
-		Expect(root.Close()).To(Succeed())
-	}
-})
-
 // Two opens of one database stand in for two server nodes sharing a lease
 // space — the deployment the leases exist for.
 var _ = storagetest.Leases("postgres", func() (storage.Adapter, storage.Adapter, func()) {
@@ -96,11 +75,8 @@ var _ = storagetest.Leases("postgres", func() (storage.Adapter, storage.Adapter,
 	}
 })
 
-var _ = storagetest.LeasesNamespaced("postgres", func() (storage.Adapter, storage.Adapter, func()) {
-	root := open()
-	return root.Namespace("a"), root.Namespace("b"), func() {
-		Expect(root.Close()).To(Succeed())
-	}
+var _ = storagetest.Catalog("postgres", func() storage.Adapter {
+	return open()
 })
 
 var _ = Describe("Postgres leases", func() {
@@ -235,7 +211,7 @@ var _ = Describe("Postgres migrations", func() {
 		}
 		rows.Close()
 		Expect(rows.Err()).NotTo(HaveOccurred())
-		Expect(applied).To(Equal([]int{1, 2, 3, 4, 5, 6, 7}), "every migration, each recorded exactly once")
+		Expect(applied).To(Equal([]int{1}), "every migration, each recorded exactly once")
 	})
 
 	Describe("a ledger ahead of this binary", func() {
@@ -332,20 +308,23 @@ var _ = Describe("Postgres migrations", func() {
 			Expect(tables).To(BeZero())
 		})
 
-		It("refuses a database the deploy step has not finished migrating", func() {
-			// Half a ledger: the state between two steps of a deploy, and the
-			// one a bare Open would silently complete on the node's behalf.
+		It("refuses a database whose ledger the deploy step has not filled", func() {
+			// An empty ledger: the state between a deploy step creating it and
+			// applying the first migration, and the one a bare Open would
+			// silently complete on the node's behalf.
 			dsn := pgtest.DSN()
-			stmts, err := pgstore.Statements()
-			Expect(err).NotTo(HaveOccurred())
 			conn, err := pgx.Connect(ctx, dsn)
 			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() { Expect(conn.Close(ctx)).To(Succeed()) })
-			_, err = conn.Exec(ctx, stmts[0].SQL)
+			_, err = conn.Exec(ctx, `CREATE TABLE schema_migrations (
+				version    INTEGER PRIMARY KEY,
+				applied_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+				additive   BOOLEAN NOT NULL DEFAULT TRUE
+			)`)
 			Expect(err).NotTo(HaveOccurred())
 
 			_, err = pgstore.Open(ctx, dsn, pgstore.WithoutMigrations())
-			Expect(err).To(MatchError(ContainSubstring("database schema at version 1")))
+			Expect(err).To(MatchError(ContainSubstring("database schema at version 0")))
 		})
 
 		It("boots as a role that cannot change the schema", func() {

@@ -392,6 +392,94 @@ var _ = Describe("Registry", func() {
 		})
 	})
 
+	Describe("the workspace prefix", func() {
+		// What lets several applications share one bus: each registry puts its
+		// own prefix on the workspace id of every topic it publishes and
+		// subscribes to, and takes it off again on the way back, so neither
+		// the bus nor the registry's callers ever see the other's.
+		var (
+			shared *presence.Local
+			a, b   *presence.Registry
+		)
+
+		newRegistry := func(prefix string) *presence.Registry {
+			r := presence.NewRegistry(shared, presence.Options{
+				Announce:        announce,
+				MaxParticipants: 3,
+				Now:             clk.now,
+				WorkspacePrefix: prefix,
+			})
+			DeferCleanup(r.Close)
+			return r
+		}
+
+		BeforeEach(func() {
+			shared = presence.NewLocal()
+			a, b = newRegistry("app-a/"), newRegistry("app-b/")
+		})
+
+		It("publishes topics to the bus under the prefix", func() {
+			events, cancel := shared.Subscribe(presence.Topic{WorkspaceID: "app-a/ws", Name: "cursors"})
+			DeferCleanup(cancel)
+
+			w := a.Open("s1")
+			DeferCleanup(w.Close)
+			_, _, err := w.Join(topic)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(a.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindMessage,
+				Participant: presence.Participant{SessionID: "s1"},
+				Payload:     []byte("hello"),
+			})).To(Succeed())
+
+			var got presence.Event
+			Eventually(events).Should(Receive(&got))
+			Expect(got.Topic.WorkspaceID).To(Equal("app-a/ws"))
+		})
+
+		It("hands its own watchers the topic they joined", func() {
+			w := a.Open("s1")
+			DeferCleanup(w.Close)
+			_, _, err := w.Join(topic)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(a.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindMessage,
+				Participant: presence.Participant{SessionID: "s1"},
+				Payload:     []byte("hello"),
+			})).To(Succeed())
+
+			var got presence.Event
+			Eventually(w.Events()).Should(Receive(&got))
+			Expect(got.Topic).To(Equal(topic), "a watcher never sees the prefix")
+		})
+
+		It("keeps two prefixes of one workspace id apart", func() {
+			wa := a.Open("s1")
+			DeferCleanup(wa.Close)
+			_, _, err := wa.Join(topic)
+			Expect(err).NotTo(HaveOccurred())
+
+			wb := b.Open("s2")
+			DeferCleanup(wb.Close)
+			_, _, err = wb.Join(topic)
+			Expect(err).NotTo(HaveOccurred())
+
+			Expect(b.Publish(ctx, presence.Event{
+				Topic:       topic,
+				Kind:        presence.KindMessage,
+				Participant: presence.Participant{SessionID: "s2"},
+				Payload:     []byte("for b only"),
+			})).To(Succeed())
+
+			Eventually(wb.Events()).Should(Receive())
+			Consistently(wa.Events(), "100ms").ShouldNot(Receive(),
+				"the other application's room must stay invisible")
+		})
+	})
+
 	Describe("teardown", func() {
 		It("closes a stream's channel and stops delivering to it", func() {
 			w := open("s1")

@@ -11,10 +11,8 @@ import (
 )
 
 // plainAdapter satisfies storage.Adapter by embedding; the capability specs
-// never touch the data path, so only Namespace is implemented.
+// never touch the data path, so nothing is implemented.
 type plainAdapter struct{ storage.Adapter }
-
-func (a *plainAdapter) Namespace(string) storage.Adapter { return a }
 
 // providerAdapter is plainAdapter plus cursorstate.Provider — the shape of
 // sqlitestore and pgstore, reduced to the capability under test.
@@ -22,8 +20,6 @@ type providerAdapter struct {
 	plainAdapter
 	cs cursorstate.Store
 }
-
-func (a *providerAdapter) Namespace(string) storage.Adapter { return a }
 
 func (a *providerAdapter) CursorStateStore() cursorstate.Store { return a.cs }
 
@@ -35,8 +31,6 @@ type leaseAdapter struct {
 	locker lease.Locker
 }
 
-func (a *leaseAdapter) Namespace(string) storage.Adapter { return a }
-
 func (a *leaseAdapter) Leases() lease.Locker { return a.locker }
 
 // replicaAdapter is plainAdapter plus storage.ReplicaProvider.
@@ -44,8 +38,6 @@ type replicaAdapter struct {
 	plainAdapter
 	rr storage.ReplicaReader
 }
-
-func (a *replicaAdapter) Namespace(string) storage.Adapter { return a }
 
 func (a *replicaAdapter) ReplicaReader() storage.ReplicaReader { return a.rr }
 
@@ -58,16 +50,6 @@ var _ = Describe("Capability discovery", func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		p, ok := storage.As[cursorstate.Provider](wrapped)
-		Expect(ok).To(BeTrue())
-		Expect(p.CursorStateStore()).To(BeIdenticalTo(inner.cs))
-	})
-
-	It("keeps the capability visible on a namespaced view", func() {
-		inner := &providerAdapter{cs: &fakeCursorStore{}}
-		wrapped, err := otelstore.Wrap(inner)
-		Expect(err).NotTo(HaveOccurred())
-
-		p, ok := storage.As[cursorstate.Provider](wrapped.Namespace("app"))
 		Expect(ok).To(BeTrue())
 		Expect(p.CursorStateStore()).To(BeIdenticalTo(inner.cs))
 	})
@@ -104,14 +86,14 @@ var _ = Describe("Capability discovery", func() {
 		Expect(p.ReplicaReader()).To(BeIdenticalTo(inner.rr))
 	})
 
-	It("keeps storage.ReplicaProvider visible on a namespaced view and through a chain", func() {
+	It("keeps storage.ReplicaProvider visible through a chain", func() {
 		inner := &replicaAdapter{rr: &fakeReplicaReader{}}
 		once, err := otelstore.Wrap(inner)
 		Expect(err).NotTo(HaveOccurred())
 		twice, err := otelstore.Wrap(once)
 		Expect(err).NotTo(HaveOccurred())
 
-		p, ok := storage.As[storage.ReplicaProvider](twice.Namespace("app"))
+		p, ok := storage.As[storage.ReplicaProvider](twice)
 		Expect(ok).To(BeTrue())
 		Expect(p.ReplicaReader()).To(BeIdenticalTo(inner.rr))
 	})

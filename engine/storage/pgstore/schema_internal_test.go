@@ -24,7 +24,7 @@ var _ = Describe("Baseline schema", func() {
 
 	It("partitions the workspace-scoped tables and nothing else", func() {
 		ddl := baselineSchema(layout{partitions: 4})
-		Expect(strings.Count(ddl, "PARTITION BY HASH (namespace, workspace_id)")).
+		Expect(strings.Count(ddl, "PARTITION BY HASH (workspace_id)")).
 			To(Equal(len(partitionedTables)))
 		for _, table := range partitionedTables {
 			Expect(strings.Count(ddl, "PARTITION OF "+table+" ")).To(Equal(4),
@@ -44,7 +44,6 @@ var _ = Describe("Baseline schema", func() {
 var _ = Describe("Migration scripts", func() {
 	It("creates the ledger in the first script only, and records every step", func() {
 		Expect(migrationSQL(1, layout{})).To(ContainSubstring("CREATE TABLE IF NOT EXISTS schema_migrations"))
-		Expect(migrationSQL(2, layout{})).NotTo(ContainSubstring("CREATE TABLE IF NOT EXISTS schema_migrations"))
 		for version := 1; version <= len(migrations); version++ {
 			want := "INSERT INTO schema_migrations (version, additive) VALUES (" + strconv.Itoa(version) + ", "
 			Expect(migrationSQL(version, layout{})).To(ContainSubstring(want))

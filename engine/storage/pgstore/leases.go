@@ -16,35 +16,23 @@ import (
 // out of one space, so a server constructed on this store dedups its
 // background work across the deployment with no configuration.
 //
-// Every lease of a Store and its namespaces is held on one dedicated
-// connection, dialled on the first TryAcquire. A node that crashes or loses
+// Every lease of a Store is held on one dedicated connection, dialled on the
+// first TryAcquire. A node that crashes or loses
 // that connection releases everything it held at once, with no TTL to wait
 // out, and is never told its leases are gone — so leased work stays
 // idempotent. TryAcquire returns the underlying error when the session cannot
 // be dialled or the lock statement fails.
 //
-// Lock keys are 64-bit hashes of (schema, namespace, role, workspace).
-// The schema keeps deployments that share one database server but live in
-// separate schemas out of each other's lease space; a hash collision within
-// one space makes two pairs exclude each other, which costs deferred work and
-// never correctness.
+// Lock keys are 64-bit hashes of (schema, role, workspace). The schema keeps
+// deployments that share one database server but live in separate schemas out
+// of each other's lease space; a hash collision within one space makes two
+// pairs exclude each other, which costs deferred work and never correctness.
 func (s *Store) Leases() lease.Locker {
-	return &pgLocker{l: s.leases, ns: s.ns}
+	return s.leases
 }
 
-// pgLocker is one namespace's view of the store-wide lease space.
-type pgLocker struct {
-	l  *pgLeases
-	ns string
-}
-
-func (p *pgLocker) TryAcquire(ctx context.Context, role, workspaceID string) (func(), bool, error) {
-	return p.l.tryAcquire(ctx, p.ns, role, workspaceID)
-}
-
-// pgLeases owns the dedicated lock session, shared by every namespace view of
-// one root Store. The connection is opened on first use and replaced on
-// failure; locks acquired on a session that has since been replaced are gone
+// pgLeases owns the dedicated lock session of one Store. The connection is
+// opened on first use and replaced on failure; locks acquired on a session that has since been replaced are gone
 // server-side, which is why releases carry the generation they were acquired
 // under.
 type pgLeases struct {
@@ -65,13 +53,13 @@ func newPgLeases(cfg *pgx.ConnConfig) *pgLeases {
 // cancelled by the time its lease is given back.
 const releaseTimeout = 5 * time.Second
 
-func (l *pgLeases) tryAcquire(ctx context.Context, ns, role, ws string) (func(), bool, error) {
+func (l *pgLeases) TryAcquire(ctx context.Context, role, ws string) (func(), bool, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if err := l.ensureConnLocked(ctx); err != nil {
 		return nil, false, err
 	}
-	key := leaseLockKey(l.schema, ns, role, ws)
+	key := leaseLockKey(l.schema, role, ws)
 	var got bool
 	if err := l.conn.QueryRow(ctx, `SELECT pg_try_advisory_lock($1)`, key).Scan(&got); err != nil {
 		// The session is not trustworthy anymore; close it so whatever it
@@ -150,12 +138,10 @@ func (l *pgLeases) close() {
 // scheme as workspaceLockKey — FNV-64a, salted, NUL-separated — with the
 // session's schema folded in, because advisory locks are server-global while
 // everything else about a deployment is scoped by its search_path.
-func leaseLockKey(schema, ns, role, ws string) int64 {
+func leaseLockKey(schema, role, ws string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("syncplane:lease\x00"))
 	_, _ = h.Write([]byte(schema))
-	_, _ = h.Write([]byte{0})
-	_, _ = h.Write([]byte(ns))
 	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(role))
 	_, _ = h.Write([]byte{0})

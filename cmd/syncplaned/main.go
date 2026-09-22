@@ -144,9 +144,9 @@ func main() {
 	}
 	defer store.Close()
 
-	// Wrapped once at the root: the Manager namespaces this adapter per app and
-	// the wrapper carries through Namespace, so every app is instrumented by
-	// this single call.
+	// Wrapped once at the root: the Manager partitions this adapter per app
+	// with a workspace-id prefix, which forwards to what it wraps, so every app
+	// is instrumented by this single call.
 	observed, err := otelstore.Wrap(store)
 	if err != nil {
 		clilog.Fatal(logger, "instrument store", err)
@@ -169,9 +169,9 @@ func main() {
 	// already carries LISTEN/NOTIFY, so there is nothing further to configure
 	// and no reason to make the operator ask for either.
 	//
-	// Per app rather than shared: workspace ids are namespaced per app, so two
-	// apps that both have a workspace "team" would otherwise wake each other's
-	// clients and serve each other's rooms.
+	// One of each for every hosted app: each app's server prefixes the
+	// workspace ids it puts on them, so two apps that both have a workspace
+	// "team" stay apart without a fan-out apiece.
 	if postgres {
 		// One transport for both: they carry different payloads on different
 		// channels, but a LISTEN connection can hold both subscriptions and a
@@ -192,12 +192,10 @@ func main() {
 			clilog.Fatal(logger, "open presence bus", err)
 		}
 		defer bus.Close()
-		managerOpts = append(managerOpts, server.WithAppOptions(func(appID string) []server.Option {
-			return []server.Option{
-				server.WithNotifier(notifier.Namespace(appID)),
-				server.WithPresenceBus(bus.Namespace(appID)),
-			}
-		}))
+		managerOpts = append(managerOpts, server.WithServerOptions(
+			server.WithNotifier(notifier),
+			server.WithPresenceBus(bus),
+		))
 	}
 
 	mgr, err := server.NewManager(context.Background(), observed, managerOpts...)

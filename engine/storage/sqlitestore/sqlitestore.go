@@ -38,8 +38,8 @@
 // Never open the same database file twice in one process: two writer pools
 // each holding their own connection contend for the one write lock, so a write
 // that outlives the other pool's busy_timeout fails with SQLITE_BUSY. To serve
-// several apps from one file, open one Store and derive per-app views with
-// Namespace.
+// several apps from one file, open one Store and partition it with
+// prefixstore.
 //
 // Tuning: the defaults suit a server rather than an embedded library, and each
 // has an Option to move it — WithCacheSize (page cache, charged per
@@ -93,7 +93,6 @@ const baselineVersion = 1
 // databases diverge. Structural evolution appends to migrations below.
 const schema = `
 CREATE TABLE workspaces (
-	namespace           TEXT NOT NULL DEFAULT '',
 	workspace_id        TEXT NOT NULL,
 	last_seq            INTEGER NOT NULL DEFAULT 0,
 	tombstone_horizon   INTEGER NOT NULL DEFAULT 0,
@@ -103,16 +102,29 @@ CREATE TABLE workspaces (
 	-- The field-delta log's pruned-through watermark: a span reaching below it
 	-- cannot be trusted and falls back to full state.
 	field_delta_horizon INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id)
+	-- The opaque fingerprint of the index declarations this workspace's entries
+	-- are fully built under (see ListStaleIndexWorkspaceIDs). Empty is "never
+	-- built", which is what makes a fresh workspace stale to the first pass.
+	index_build_mark    TEXT NOT NULL DEFAULT '',
+	-- How far the text-compaction sweep has considered rows in ScanChanges
+	-- order, and the minPurged threshold it did so under (see
+	-- ListCompactableWorkspaceIDs). Zero is "never swept".
+	text_compact_seq        INTEGER NOT NULL DEFAULT 0,
+	text_compact_entity     TEXT NOT NULL DEFAULT '',
+	text_compact_key        TEXT NOT NULL DEFAULT '',
+	text_compact_min_purged INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (workspace_id)
 );
 
 CREATE TABLE rows (
-	namespace     TEXT NOT NULL DEFAULT '',
 	workspace_id  TEXT NOT NULL,
 	entity        TEXT NOT NULL,
 	key           TEXT NOT NULL,
 	value         BLOB,
 	version       INTEGER NOT NULL,
+	-- The sequence that created the row (see storage.Row.CreatedVersion):
+	-- stamped on insert, kept on every overwrite.
+	created_version INTEGER NOT NULL DEFAULT 0,
 	deleted       INTEGER NOT NULL DEFAULT 0,
 	updated_at    INTEGER NOT NULL DEFAULT 0,
 	-- Write attribution (see storage.Actor), two columns rather than one
@@ -120,15 +132,15 @@ CREATE TABLE rows (
 	-- without parsing, and so the empty string keeps its ordinary meaning.
 	actor_subject TEXT NOT NULL DEFAULT '',
 	actor_system  TEXT NOT NULL DEFAULT '',
-	PRIMARY KEY (namespace, workspace_id, entity, key)
+	PRIMARY KEY (workspace_id, entity, key)
 );
 -- What ScanChanges pages the whole workspace by.
-CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version);
+CREATE INDEX rows_by_version ON rows (workspace_id, version);
 -- Partial, because deleted = 1 is the only collectable state, which keeps the
 -- GC index proportional to the dead rows rather than the live ones. Without
 -- it every pass range-scans the workspace: the primary key narrows to the
 -- workspace but not to the collectable subset.
-CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted = 1;
+CREATE INDEX rows_gc ON rows (workspace_id, updated_at) WHERE deleted = 1;
 -- Backs ScanEntityByVersionDesc. A recency window asks for ONE entity's newest
 -- live rows, and rows_by_version orders by version across every entity, so
 -- serving it from there means reading and discarding the other entities' rows.
@@ -137,27 +149,29 @@ CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted
 -- order matches aheadByRecency's tie-break (version descending, key ascending)
 -- so a page boundary lands where the in-memory top-K would have put it.
 CREATE INDEX rows_by_entity_version
-	ON rows (namespace, workspace_id, entity, version DESC, key) WHERE deleted = 0;
+	ON rows (workspace_id, entity, version DESC, key) WHERE deleted = 0;
 
 CREATE TABLE clients (
-	namespace        TEXT NOT NULL DEFAULT '',
 	workspace_id     TEXT NOT NULL,
 	client_id        TEXT NOT NULL,
 	last_mutation_id INTEGER NOT NULL DEFAULT 0,
 	updated_at       INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, client_id)
+	-- Verdicts on refused mutations, so a retry that follows a lost push
+	-- response is answered with the rejection instead of a bare ack. NULL until
+	-- a client has had something refused, which is the common case.
+	rejections       BLOB,
+	PRIMARY KEY (workspace_id, client_id)
 );
-CREATE INDEX clients_gc ON clients (namespace, workspace_id, updated_at);
+CREATE INDEX clients_gc ON clients (workspace_id, updated_at);
 
--- The server-global runtime schema catalog. app_id is the partition (no
--- namespace or workspace columns): one engine hosts multiple apps, each
--- registering a self-contained FileDescriptorSet the engine reloads and
--- re-registers on boot.
-CREATE TABLE schemas (
-	app_id         TEXT PRIMARY KEY,
-	descriptor_set BLOB NOT NULL,
-	revision       TEXT NOT NULL,
-	updated_at     INTEGER NOT NULL DEFAULT 0
+-- The server-global catalog (see storage.Catalog): opaque payloads keyed by id
+-- and belonging to no workspace, which is how a multi-app host persists each
+-- application's registered FileDescriptorSet and reloads it on boot.
+CREATE TABLE catalog (
+	id         TEXT PRIMARY KEY,
+	payload    BLOB NOT NULL,
+	revision   TEXT NOT NULL,
+	updated_at INTEGER NOT NULL DEFAULT 0
 );
 
 -- The collaborative-text delta log — one row per (text field, write) holding
@@ -166,7 +180,6 @@ CREATE TABLE schemas (
 -- one field, seq > cursor) is a range scan of its tail. frag is empty for a
 -- gap marker (see WriteTx.PutFieldDelta).
 CREATE TABLE field_deltas (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	entity       TEXT NOT NULL,
 	key          TEXT NOT NULL,
@@ -174,38 +187,36 @@ CREATE TABLE field_deltas (
 	seq          INTEGER NOT NULL,
 	frag         BLOB NOT NULL,
 	updated_at   INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, entity, key, field, seq)
+	PRIMARY KEY (workspace_id, entity, key, field, seq)
 );
-CREATE INDEX field_deltas_gc ON field_deltas (namespace, workspace_id, updated_at);
+CREATE INDEX field_deltas_gc ON field_deltas (workspace_id, updated_at);
 
 -- Collaborative-text compaction floors — one row per text field whose
 -- tombstones have been purged, holding the version vector the document held at
 -- the purge. Read on every write to such a field, so it is keyed the way the
 -- row is.
 CREATE TABLE text_floors (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	entity       TEXT NOT NULL,
 	key          TEXT NOT NULL,
 	field        TEXT NOT NULL,
 	vv           BLOB NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, entity, key, field)
+	PRIMARY KEY (workspace_id, entity, key, field)
 );
 
 -- The idempotency ledger for trusted writes — one row per claimed key, holding
 -- the sequence the original write took and the caller's recorded result.
 CREATE TABLE idempotency (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	key          TEXT NOT NULL,
 	seq          INTEGER NOT NULL,
 	result       BLOB NOT NULL,
 	updated_at   INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, key)
+	PRIMARY KEY (workspace_id, key)
 );
 -- Backs the retention sweep, which is a range scan of one workspace's expired
 -- keys rather than of all of them.
-CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
+CREATE INDEX idempotency_gc ON idempotency (workspace_id, updated_at);
 
 -- Secondary index entries. WITHOUT ROWID with a covering primary key, so a
 -- range scan of one index reads the b-tree it is already ordered by and never
@@ -217,29 +228,27 @@ CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at)
 -- name claim the same one, while an entry carries a bare row key that only
 -- identifies a row within its own entity.
 CREATE TABLE index_entries (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	entity       TEXT NOT NULL,
 	idx          TEXT NOT NULL,
 	k            BLOB NOT NULL,
 	key          TEXT NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, entity, idx, k, key)
+	PRIMARY KEY (workspace_id, entity, idx, k, key)
 ) WITHOUT ROWID;
 -- What makes the write path affordable: entries are replaced per row and
 -- deleted per row, and both need "every entry this row holds" without knowing
 -- which indexes those are.
 CREATE INDEX index_entries_by_row
-	ON index_entries (namespace, workspace_id, entity, key);
+	ON index_entries (workspace_id, entity, key);
 -- Per-index build state: whether the entries cover the whole entity yet. Keyed
 -- like the entries, so one readiness flag never spans two entities' sets.
 CREATE TABLE index_state (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	entity       TEXT NOT NULL,
 	idx          TEXT NOT NULL,
 	spec_hash    TEXT NOT NULL,
 	ready        INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, entity, idx)
+	PRIMARY KEY (workspace_id, entity, idx)
 );
 
 -- Effect-consumer state — how far each consumer has acted on the change feed,
@@ -247,30 +256,40 @@ CREATE TABLE index_state (
 -- storage.ConsumerPosition). Both are written by the SAME transaction, which is
 -- what makes a crash redeliver a change instead of skipping it.
 CREATE TABLE consumer_positions (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	consumer     TEXT NOT NULL,
 	seq          INTEGER NOT NULL DEFAULT 0,
 	entity       TEXT NOT NULL DEFAULT '',
 	key          TEXT NOT NULL DEFAULT '',
 	updated_at   INTEGER NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, consumer)
+	PRIMARY KEY (workspace_id, consumer)
 );
 -- Backs the staleness sweep, which is a range scan of one workspace's expired
 -- consumers rather than of every consumer.
 CREATE INDEX consumer_positions_gc
-	ON consumer_positions (namespace, workspace_id, updated_at);
+	ON consumer_positions (workspace_id, updated_at);
 -- No GC index of its own: shadows are only ever deleted per row, or wholesale
--- with their consumer, and the primary key's (namespace, workspace_id,
+-- with their consumer, and the primary key's (workspace_id,
 -- consumer) prefix is the range scan for that.
 CREATE TABLE consumer_shadows (
-	namespace    TEXT NOT NULL DEFAULT '',
 	workspace_id TEXT NOT NULL,
 	consumer     TEXT NOT NULL,
 	entity       TEXT NOT NULL,
 	key          TEXT NOT NULL,
 	snapshot     BLOB NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
+	PRIMARY KEY (workspace_id, consumer, entity, key)
+);
+
+-- Cursor-state entries: the membership sets of issued pull cursors, keyed by
+-- the (id, gen) reference the cursor carries. See cursorstate.go for the
+-- pruning that keeps the table bounded.
+CREATE TABLE cursor_state (
+	workspace_id TEXT NOT NULL,
+	id           INTEGER NOT NULL,
+	gen          INTEGER NOT NULL,
+	state        BLOB NOT NULL,
+	written_at   INTEGER NOT NULL,
+	PRIMARY KEY (workspace_id, id, gen)
 );
 `
 
@@ -279,66 +298,25 @@ CREATE TABLE consumer_shadows (
 // bumped inside that transaction. A structural change appends here and leaves
 // schema alone, so a database in the field reaches the new shape by the same
 // steps a fresh one skips.
-var migrations = []string{
-	// Verdicts on refused mutations, so a retry that follows a lost push
-	// response is answered with the rejection instead of a bare ack. NULL until
-	// a client has had something refused, which is the common case.
-	`ALTER TABLE clients ADD COLUMN rejections BLOB;`,
-	// Cursor-state entries: the membership sets of issued pull cursors, keyed
-	// by the (id, gen) reference the cursor carries. See cursorstate.go for
-	// the pruning that keeps the table bounded.
-	`CREATE TABLE cursor_state (
-		namespace    TEXT NOT NULL DEFAULT '',
-		workspace_id TEXT NOT NULL,
-		id           INTEGER NOT NULL,
-		gen          INTEGER NOT NULL,
-		state        BLOB NOT NULL,
-		written_at   INTEGER NOT NULL,
-		PRIMARY KEY (namespace, workspace_id, id, gen)
-	);`,
-	// The index-build mark: the opaque fingerprint of the index declarations a
-	// workspace's entries are fully built under (see
-	// ListStaleIndexWorkspaceIDs). Empty is "never built", which is what the
-	// backfill leaves behind and what makes every existing workspace stale to
-	// the first pass after the upgrade.
-	`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT NOT NULL DEFAULT '';`,
-	// The text-compaction mark: how far the sweep has considered rows in
-	// ScanChanges order, and the minPurged threshold it did so under (see
-	// ListCompactableWorkspaceIDs). Zero is "never swept", so the first pass
-	// after the upgrade starts every workspace from the beginning — which is
-	// what compaction did on every pass before the sweep existed.
-	`ALTER TABLE workspaces ADD COLUMN text_compact_seq INTEGER NOT NULL DEFAULT 0;
-	 ALTER TABLE workspaces ADD COLUMN text_compact_entity TEXT NOT NULL DEFAULT '';
-	 ALTER TABLE workspaces ADD COLUMN text_compact_key TEXT NOT NULL DEFAULT '';
-	 ALTER TABLE workspaces ADD COLUMN text_compact_min_purged INTEGER NOT NULL DEFAULT 0;`,
-	// The sequence that created each row (see storage.Row.CreatedVersion):
-	// stamped on insert, kept on every overwrite. The 0 default is "unknown",
-	// which pre-existing rows keep — the pull path treats unknown
-	// conservatively, so a backfill is neither needed nor possible (the
-	// creating sequence of an existing row is not recorded anywhere).
-	`ALTER TABLE rows ADD COLUMN created_version INTEGER NOT NULL DEFAULT 0;`,
-}
+//
+// Empty while the baseline above is the only shape this lineage has had.
+var migrations []string
 
-// Store implements storage.Adapter. Stores derived via Namespace share the
-// underlying pools; only the Store returned by Open owns (and closes) them.
-// read and write are the same handle for an in-memory database.
+// Store implements storage.Adapter. read and write are the same handle for an
+// in-memory database.
 type Store struct {
 	read  *sql.DB
 	write *sql.DB
-	// Prepared statements per pool, shared by every derived namespace because
-	// the pools are. readStmts and writeStmts are the same cache exactly when
-	// read and write are the same handle.
+	// Prepared statements per pool. readStmts and writeStmts are the same
+	// cache exactly when read and write are the same handle.
 	readStmts  *stmtCache
 	writeStmts *stmtCache
-	ns         string
-	owner      bool
-	// leases backs the lease.Provider implementation (see leases.go), shared
-	// by every derived namespace so they lease out of one space.
+	// leases backs the lease.Provider implementation (see leases.go).
 	leases *lease.Local
 
-	// The maintenance loop, owned by the Store Open returned: stop asks it to
-	// return and done reports that it has. Both are nil on a derived store and
-	// when WithOptimizeInterval disabled the loop.
+	// The maintenance loop: stop asks it to return and done reports that it
+	// has. Both are nil when
+	// WithOptimizeInterval disabled the loop.
 	stop     chan struct{}
 	done     chan struct{}
 	stopOnce sync.Once
@@ -348,7 +326,6 @@ type Store struct {
 type Option func(*config)
 
 type config struct {
-	ns               string
 	cacheSize        int64
 	mmapSize         int64
 	readConns        int
@@ -404,14 +381,6 @@ func defaultConfig() config {
 	}
 }
 
-// WithNamespace scopes the store to an app namespace. Namespaces partition
-// workspaces, rows and client watermarks within one database file; the
-// default is "". Equivalent to Open(path).Namespace(ns) but spares the
-// intermediate store.
-func WithNamespace(ns string) Option {
-	return func(c *config) { c.ns = ns }
-}
-
 // WithCacheSize sets SQLite's page cache in bytes. It is charged per
 // connection, so the store's worst case is this times one writer plus every
 // reader connection — raise it together with, not independently of,
@@ -464,7 +433,7 @@ func WithOptimizeInterval(d time.Duration) Option {
 // ":memory:" only for single-connection tests; prefer a temp file.
 //
 // Open a given file at most once per process: see the package comment. Use
-// Namespace to multiplex apps over one Store.
+// prefixstore to multiplex several applications over one Store.
 //
 // An empty path is created at the current schema; an existing database is
 // brought up to it. A database that is not a syncplane store, or belongs to a
@@ -537,7 +506,7 @@ func Open(path string, opts ...Option) (*Store, error) {
 	s := &Store{
 		read: read, write: write,
 		readStmts: readStmts, writeStmts: writeStmts,
-		ns: cfg.ns, owner: true, leases: lease.NewLocal(),
+		leases: lease.NewLocal(),
 	}
 	// Creating the schema creates indexes, which is one of the moments SQLite
 	// names for re-analysis; it is also the only pass a short-lived process
@@ -638,18 +607,6 @@ func isMemory(path string) bool {
 	return path == ":memory:" || strings.Contains(path, ":memory:") || strings.Contains(path, "mode=memory")
 }
 
-// Namespace returns a view of the store scoped to the given app namespace,
-// sharing the underlying database handle. Close on a derived store is a
-// no-op — the Store returned by Open owns the handle and must outlive every
-// derived store. The server-global schema catalog is shared across namespaces.
-func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{
-		read: s.read, write: s.write,
-		readStmts: s.readStmts, writeStmts: s.writeStmts,
-		ns: ns, leases: s.leases,
-	}
-}
-
 // migrate brings a database up to baselineVersion+len(migrations), creating the
 // baseline first if it is empty. A fresh database runs the same migrations an
 // existing one does, so the two end at the same shape.
@@ -748,12 +705,8 @@ func applyBaseline(db *sql.DB) error {
 	return nil
 }
 
-// Close stops the maintenance loop and closes the database handle if this
-// store owns it (came from Open); on a Namespace-derived store it is a no-op.
+// Close stops the maintenance loop and closes the database handle.
 func (s *Store) Close() error {
-	if !s.owner {
-		return nil
-	}
 	if s.stop != nil {
 		// Once: a second Close must not close a closed channel. It waits for
 		// the loop to return before the pools go, so a pass in flight cannot
@@ -800,7 +753,7 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer tx.Rollback()
-	return fn(readOnlyTx{&sqliteTx{tx: tx, stmts: s.readStmts, ns: s.ns, ws: workspaceID}})
+	return fn(readOnlyTx{&sqliteTx{tx: tx, stmts: s.readStmts, ws: workspaceID}})
 }
 
 func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
@@ -816,16 +769,17 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	st := &sqliteTx{tx: tx, stmts: s.writeStmts, ns: s.ns, ws: workspaceID}
+	st := &sqliteTx{tx: tx, stmts: s.writeStmts, ws: workspaceID}
 	if err := fn(st); err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
-func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
+func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]string, error) {
+	where, args := rangeWhere("workspace_id", rng)
 	rows, err := s.read.QueryContext(ctx,
-		`SELECT workspace_id FROM workspaces WHERE namespace = ? ORDER BY workspace_id`, s.ns)
+		`SELECT workspace_id FROM workspaces WHERE `+where+` ORDER BY workspace_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -844,20 +798,20 @@ func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
 // ListCollectableWorkspaceIDs answers "which workspaces hold something this
 // pass would reclaim" as a single query: the workspace scan is in primary-key
 // order, and each row probes the _gc indexes of the four collectable tables on
-// their own (namespace, workspace_id, updated_at) prefix. Each probe stops at
+// their own (workspace_id, updated_at) prefix. Each probe stops at
 // the first match, so a workspace with nothing collectable costs four index
 // descents and no transaction at all.
 //
 // The entity purges are the exception. Live rows of an aging entity are found
-// on rows_by_entity_version's (namespace, workspace_id, entity) prefix with
+// on rows_by_entity_version's (workspace_id, entity) prefix with
 // updated_at left as a filter, so a workspace whose entity has no expired row
 // reads that entity's entries to say so — the same range PurgeEntityRows walks
 // to delete them, read instead of written.
-func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, after string, limit int) ([]string, error) {
+func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
 	}
-	where, args := collectableWhere(s.ns, after, cutoffs)
+	where, args := collectableWhere(rng, cutoffs)
 	args = append(args, limit)
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT w.workspace_id FROM workspaces w WHERE `+where+
@@ -881,14 +835,16 @@ func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage
 // column. There is no index for it — a btree cannot serve `<>` — and none is
 // wanted: the scan is one row per workspace, which is what replaces the point
 // read per (workspace × entity × index) the pass did to learn the same thing.
-func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error) {
+func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark string, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
 	}
+	where, args := rangeWhere("workspace_id", rng)
+	args = append(args, mark, limit)
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT workspace_id FROM workspaces
-		 WHERE namespace = ? AND workspace_id > ? AND index_build_mark <> ?
-		 ORDER BY workspace_id LIMIT ?`, s.ns, after, mark, limit)
+		 WHERE `+where+` AND index_build_mark <> ?
+		 ORDER BY workspace_id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -914,17 +870,19 @@ func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after stri
 // an index, for the same reason — the predicate compares two columns to each
 // other, which no btree serves — and against the same alternative, which was
 // scanning every text-bearing entity of every workspace to find out.
-func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error) {
+func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
 	}
+	where, args := rangeWhere("workspace_id", rng)
+	args = append(args, minPurged, limit)
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT workspace_id FROM workspaces
-		 WHERE namespace = ? AND workspace_id > ?
+		 WHERE `+where+`
 		   AND (text_compact_seq < field_delta_horizon
 		        OR (text_compact_seq = field_delta_horizon AND text_compact_entity <> '')
 		        OR text_compact_min_purged > ?)
-		 ORDER BY workspace_id LIMIT ?`, s.ns, after, minPurged, limit)
+		 ORDER BY workspace_id LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -950,8 +908,8 @@ func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, 
 // A zero cutoff drops its probe rather than comparing against what UnixMilli()
 // makes of it — the same distinction purgeWhere draws, and here it is the
 // difference between "keep this kind forever" and "collect all of it".
-func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []any) {
-	args := []any{ns, after}
+func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []any) {
+	where, args := rangeWhere("w.workspace_id", rng)
 	next := func(v any) string {
 		args = append(args, v)
 		return "?"
@@ -959,7 +917,7 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 	var probes []string
 	exists := func(body string) { probes = append(probes, "EXISTS (SELECT 1 FROM "+body+")") }
 	scoped := func(table string) string {
-		return table + " t WHERE t.namespace = w.namespace AND t.workspace_id = w.workspace_id"
+		return table + " t WHERE t.workspace_id = w.workspace_id"
 	}
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
@@ -983,7 +941,6 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 		exists(scoped("rows") + " AND t.deleted = 0 AND t.entity = " + next(e.Entity) +
 			" AND t.updated_at < " + next(e.Before.UnixMilli()))
 	}
-	where := "w.namespace = ? AND w.workspace_id > ?"
 	if len(probes) == 0 {
 		// A pass that would collect nothing has no workspaces to visit. Said
 		// here rather than left to an empty OR, which reads as TRUE and would
@@ -995,8 +952,8 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 
 // ListPendingWorkspaceIDs answers "which workspaces owe this consumer work" as
 // a single indexed query: the workspace scan is in primary-key order, and each
-// row probes consumer_positions on its own primary key prefix (namespace,
-// workspace_id, consumer). A workspace with no position row for the consumer is
+// row probes consumer_positions on its own primary key prefix (workspace_id,
+// consumer). A workspace with no position row for the consumer is
 // pending by the LEFT JOIN — a first run has acted on nothing.
 //
 // The cost is one probe per workspace, which is a scan the engine runs once per
@@ -1008,24 +965,25 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 // sub-position inside a same-sequence group, so the group has changes after it
 // even when the sequence has reached the head. Only a clean boundary — the
 // cursor a drained pass records — means caught up.
-func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error) {
+func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer string, rng storage.Range, limit int) ([]string, error) {
 	if consumer == "" {
 		return nil, fmt.Errorf("sqlitestore: consumer name is required")
 	}
 	if limit <= 0 {
 		return nil, fmt.Errorf("sqlitestore: limit must be positive, got %d", limit)
 	}
+	where, args := rangeWhere("w.workspace_id", rng)
+	args = append([]any{consumer}, append(args, limit)...)
 	rows, err := s.read.QueryContext(ctx,
 		`SELECT w.workspace_id
 		 FROM workspaces w
 		 LEFT JOIN consumer_positions p
-		   ON p.namespace = w.namespace
-		   AND p.workspace_id = w.workspace_id
+		   ON p.workspace_id = w.workspace_id
 		   AND p.consumer = ?
-		 WHERE w.namespace = ? AND w.workspace_id > ?
+		 WHERE `+where+`
 		   AND (p.seq IS NULL OR p.seq < w.last_seq OR p.entity <> '' OR p.key <> '')
 		 ORDER BY w.workspace_id
-		 LIMIT ?`, consumer, s.ns, after, limit)
+		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1041,46 +999,59 @@ func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer, after str
 	return ids, rows.Err()
 }
 
-// PutAppSchema upserts an app's descriptor set into the server-global schema
-// catalog. It runs on the writer connection (the catalog is shared across
-// namespaces, so the namespace view is irrelevant here).
-func (s *Store) PutAppSchema(ctx context.Context, appID string, set []byte, revision string) error {
+// PutCatalogEntry upserts an entry into the server-global catalog. It runs on
+// the writer connection.
+func (s *Store) PutCatalogEntry(ctx context.Context, id string, payload []byte, revision string) error {
 	_, err := s.write.ExecContext(ctx,
-		`INSERT INTO schemas (app_id, descriptor_set, revision, updated_at)
+		`INSERT INTO catalog (id, payload, revision, updated_at)
 		 VALUES (?, ?, ?, ?)
-		 ON CONFLICT (app_id)
-		 DO UPDATE SET descriptor_set = excluded.descriptor_set,
+		 ON CONFLICT (id)
+		 DO UPDATE SET payload = excluded.payload,
 		               revision = excluded.revision, updated_at = excluded.updated_at`,
-		appID, set, revision, time.Now().UnixMilli(),
+		id, payload, revision, time.Now().UnixMilli(),
 	)
 	return err
 }
 
-func (s *Store) ListAppSchemas(ctx context.Context) ([]storage.AppSchema, error) {
+func (s *Store) ListCatalogEntries(ctx context.Context) ([]storage.CatalogEntry, error) {
 	rows, err := s.read.QueryContext(ctx,
-		`SELECT app_id, descriptor_set, revision, updated_at FROM schemas ORDER BY app_id`)
+		`SELECT id, payload, revision, updated_at FROM catalog ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []storage.AppSchema
+	var out []storage.CatalogEntry
 	for rows.Next() {
 		var (
-			a       storage.AppSchema
+			e       storage.CatalogEntry
 			updated int64
 		)
-		if err := rows.Scan(&a.AppID, &a.DescriptorSet, &a.Revision, &updated); err != nil {
+		if err := rows.Scan(&e.ID, &e.Payload, &e.Revision, &updated); err != nil {
 			return nil, err
 		}
-		a.UpdatedAt = time.UnixMilli(updated)
-		out = append(out, a)
+		e.UpdatedAt = time.UnixMilli(updated)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteAppSchema(ctx context.Context, appID string) error {
-	_, err := s.write.ExecContext(ctx, `DELETE FROM schemas WHERE app_id = ?`, appID)
+func (s *Store) DeleteCatalogEntry(ctx context.Context, id string) error {
+	_, err := s.write.ExecContext(ctx, `DELETE FROM catalog WHERE id = ?`, id)
 	return err
+}
+
+// rangeWhere renders rng as a predicate on col, with its arguments. The upper
+// bound is left out when the range has none rather than compared against a
+// sentinel, so a scan that owns the whole table plans as one that has no bound
+// at all.
+func rangeWhere(col string, rng storage.Range) (string, []any) {
+	where := col + " > ?"
+	args := []any{rng.After}
+	if rng.Before != "" {
+		where += " AND " + col + " < ?"
+		args = append(args, rng.Before)
+	}
+	return where, args
 }
 
 type sqliteTx struct {
@@ -1093,7 +1064,6 @@ type sqliteTx struct {
 	// scanning holds the SQL texts whose result set a scanRows call still has
 	// open, so a nested statement does not step a machine mid-scan.
 	scanning map[string]struct{}
-	ns       string
 	ws       string
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
@@ -1116,8 +1086,8 @@ func (t *sqliteTx) register() error {
 		return nil
 	}
 	if _, err := t.exec(
-		`INSERT INTO workspaces (namespace, workspace_id, store_epoch) VALUES (?, ?, random()) ON CONFLICT DO NOTHING`,
-		t.ns, t.ws,
+		`INSERT INTO workspaces (workspace_id, store_epoch) VALUES (?, random()) ON CONFLICT DO NOTHING`,
+		t.ws,
 	); err != nil {
 		return err
 	}
@@ -1128,7 +1098,7 @@ func (t *sqliteTx) register() error {
 func (t *sqliteTx) CurrentSeq() (uint64, error) {
 	var seq uint64
 	err := t.queryRow(
-		`SELECT last_seq FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
+		`SELECT last_seq FROM workspaces WHERE workspace_id = ?`, t.ws,
 	).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1141,7 +1111,7 @@ func (t *sqliteTx) StoreEpoch() (uint64, error) {
 	// the unsigned epoch. The value is opaque — only equality matters.
 	var epoch int64
 	err := t.queryRow(
-		`SELECT store_epoch FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
+		`SELECT store_epoch FROM workspaces WHERE workspace_id = ?`, t.ws,
 	).Scan(&epoch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1152,7 +1122,7 @@ func (t *sqliteTx) StoreEpoch() (uint64, error) {
 func (t *sqliteTx) TombstoneHorizon() (uint64, error) {
 	var h uint64
 	err := t.queryRow(
-		`SELECT tombstone_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
+		`SELECT tombstone_horizon FROM workspaces WHERE workspace_id = ?`, t.ws,
 	).Scan(&h)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1165,8 +1135,8 @@ func (t *sqliteTx) GetRow(entity, key string) (storage.Row, error) {
 	var deleted int
 	err := t.queryRow(
 		`SELECT value, version, created_version, deleted, actor_subject, actor_system FROM rows
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, entity, key,
+		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
+		t.ws, entity, key,
 	).Scan(&row.Value, &row.Version, &row.CreatedVersion, &deleted,
 		&row.Actor.Subject, &row.Actor.System)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -1220,9 +1190,9 @@ func (t *sqliteTx) readRowsByKey(entity string, keys []string) (map[string]stora
 	var sb strings.Builder
 	sb.WriteString(
 		`SELECT key, value, version, created_version, deleted, actor_subject, actor_system FROM rows
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key IN (`)
+		 WHERE workspace_id = ? AND entity = ? AND key IN (`)
 	args := make([]any, 0, len(keys)+3)
-	args = append(args, t.ns, t.ws, entity)
+	args = append(args, t.ws, entity)
 	for i, key := range keys {
 		if i > 0 {
 			sb.WriteByte(',')
@@ -1261,9 +1231,9 @@ func (t *sqliteTx) ScanEntityAfter(entity, afterKey string, limit int, fn func(s
 	}
 	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
+		 WHERE workspace_id = ? AND entity = ? AND deleted = 0 AND key > ?
 		 ORDER BY key LIMIT ?`,
-		[]any{t.ns, t.ws, entity, afterKey, limit},
+		[]any{t.ws, entity, afterKey, limit},
 		func(rows *sql.Rows) error {
 			r := storage.Row{Entity: entity}
 			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
@@ -1283,9 +1253,9 @@ func (t *sqliteTx) ScanEntityByVersionDesc(entity string, limit int, fn func(sto
 	// LIMIT instead of sorting the entity.
 	return t.scanRows(
 		`SELECT key, value, version, created_version, actor_subject, actor_system FROM rows
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND deleted = 0
+		 WHERE workspace_id = ? AND entity = ? AND deleted = 0
 		 ORDER BY version DESC, key LIMIT ?`,
-		[]any{t.ns, t.ws, entity, limit},
+		[]any{t.ws, entity, limit},
 		func(rows *sql.Rows) error {
 			r := storage.Row{Entity: entity}
 			if err := rows.Scan(&r.Key, &r.Value, &r.Version, &r.CreatedVersion,
@@ -1311,20 +1281,20 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 		// Clean version boundary: everything strictly past afterSeq.
 		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
-			 WHERE namespace = ? AND workspace_id = ? AND version > ?
+			 WHERE workspace_id = ? AND version > ?
 			 ORDER BY version, entity, key LIMIT ?`
-		args = []any{t.ns, t.ws, afterSeq, limit}
+		args = []any{t.ws, afterSeq, limit}
 	} else {
 		// Resume inside a same-version group: past afterSeq, plus the rest of
 		// the split group whose (entity, key) sorts after (afterEntity, afterKey).
 		text = `SELECT entity, key, value, version, created_version, deleted,
 			        actor_subject, actor_system FROM rows
-			 WHERE namespace = ? AND workspace_id = ? AND (
+			 WHERE workspace_id = ? AND (
 			   version > ?
 			   OR (version = ? AND (entity > ? OR (entity = ? AND key > ?)))
 			 )
 			 ORDER BY version, entity, key LIMIT ?`
-		args = []any{t.ns, t.ws, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit}
+		args = []any{t.ws, afterSeq, afterSeq, afterEntity, afterEntity, afterKey, limit}
 	}
 	return t.scanRows(text, args, func(rows *sql.Rows) error {
 		var r storage.Row
@@ -1344,8 +1314,8 @@ func (t *sqliteTx) ScanChanges(afterSeq uint64, afterEntity, afterKey string, li
 func (t *sqliteTx) ClientLastMutationID(clientID string) (uint64, error) {
 	var id uint64
 	err := t.queryRow(
-		`SELECT last_mutation_id FROM clients WHERE namespace = ? AND workspace_id = ? AND client_id = ?`,
-		t.ns, t.ws, clientID,
+		`SELECT last_mutation_id FROM clients WHERE workspace_id = ? AND client_id = ?`,
+		t.ws, clientID,
 	).Scan(&id)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1356,8 +1326,8 @@ func (t *sqliteTx) ClientLastMutationID(clientID string) (uint64, error) {
 func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection, error) {
 	var blob []byte
 	err := t.queryRow(
-		`SELECT rejections FROM clients WHERE namespace = ? AND workspace_id = ? AND client_id = ?`,
-		t.ns, t.ws, clientID,
+		`SELECT rejections FROM clients WHERE workspace_id = ? AND client_id = ?`,
+		t.ws, clientID,
 	).Scan(&blob)
 	if errors.Is(err, sql.ErrNoRows) || len(blob) == 0 {
 		return nil, nil
@@ -1375,8 +1345,8 @@ func (t *sqliteTx) ClientRejections(clientID string) ([]storage.ClientRejection,
 func (t *sqliteTx) IdempotencyRecord(key string) (storage.IdempotencyRecord, bool, error) {
 	var rec storage.IdempotencyRecord
 	err := t.queryRow(
-		`SELECT seq, result FROM idempotency WHERE namespace = ? AND workspace_id = ? AND key = ?`,
-		t.ns, t.ws, key,
+		`SELECT seq, result FROM idempotency WHERE workspace_id = ? AND key = ?`,
+		t.ws, key,
 	).Scan(&rec.Seq, &rec.Result)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.IdempotencyRecord{}, false, nil
@@ -1401,19 +1371,19 @@ func (t *sqliteTx) PutIdempotencyRecord(key string, rec storage.IdempotencyRecor
 		result = []byte{}
 	}
 	_, err := t.exec(
-		`INSERT INTO idempotency (namespace, workspace_id, key, seq, result, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, key)
+		`INSERT INTO idempotency (workspace_id, key, seq, result, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, key)
 		 DO UPDATE SET seq = excluded.seq, result = excluded.result, updated_at = excluded.updated_at`,
-		t.ns, t.ws, key, rec.Seq, result, time.Now().UnixMilli(),
+		t.ws, key, rec.Seq, result, time.Now().UnixMilli(),
 	)
 	return err
 }
 
 func (t *sqliteTx) CollectIdempotencyKeys(cutoff time.Time) (int, error) {
 	res, err := t.exec(
-		`DELETE FROM idempotency WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
-		t.ns, t.ws, cutoff.UnixMilli(),
+		`DELETE FROM idempotency WHERE workspace_id = ? AND updated_at < ?`,
+		t.ws, cutoff.UnixMilli(),
 	)
 	if err != nil {
 		return 0, err
@@ -1427,8 +1397,8 @@ func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, 
 	var updated int64
 	err := t.queryRow(
 		`SELECT seq, entity, key, updated_at FROM consumer_positions
-		 WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
-		t.ns, t.ws, consumer,
+		 WHERE workspace_id = ? AND consumer = ?`,
+		t.ws, consumer,
 	).Scan(&pos.Seq, &pos.Entity, &pos.Key, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.ConsumerPosition{}, false, nil
@@ -1443,8 +1413,8 @@ func (t *sqliteTx) ConsumerPosition(consumer string) (storage.ConsumerPosition, 
 func (t *sqliteTx) ListConsumerPositions() ([]storage.ConsumerPosition, error) {
 	rows, err := t.query(
 		`SELECT consumer, seq, entity, key, updated_at FROM consumer_positions
-		 WHERE namespace = ? AND workspace_id = ? ORDER BY consumer`,
-		t.ns, t.ws,
+		 WHERE workspace_id = ? ORDER BY consumer`,
+		t.ws,
 	)
 	if err != nil {
 		return nil, err
@@ -1470,12 +1440,12 @@ func (t *sqliteTx) SetConsumerPosition(consumer string, p storage.ConsumerPositi
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO consumer_positions (namespace, workspace_id, consumer, seq, entity, key, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, consumer)
+		`INSERT INTO consumer_positions (workspace_id, consumer, seq, entity, key, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, consumer)
 		 DO UPDATE SET seq = excluded.seq, entity = excluded.entity,
 		               key = excluded.key, updated_at = excluded.updated_at`,
-		t.ns, t.ws, consumer, p.Seq, p.Entity, p.Key, time.Now().UnixMilli(),
+		t.ws, consumer, p.Seq, p.Entity, p.Key, time.Now().UnixMilli(),
 	)
 	return err
 }
@@ -1484,8 +1454,8 @@ func (t *sqliteTx) ConsumerShadow(consumer, entity, key string) ([]byte, error) 
 	var snapshot []byte
 	err := t.queryRow(
 		`SELECT snapshot FROM consumer_shadows
-		 WHERE namespace = ? AND workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, consumer, entity, key,
+		 WHERE workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
+		t.ws, consumer, entity, key,
 	).Scan(&snapshot)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1506,11 +1476,11 @@ func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []by
 		snapshot = []byte{}
 	}
 	_, err := t.exec(
-		`INSERT INTO consumer_shadows (namespace, workspace_id, consumer, entity, key, snapshot)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, consumer, entity, key)
+		`INSERT INTO consumer_shadows (workspace_id, consumer, entity, key, snapshot)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, consumer, entity, key)
 		 DO UPDATE SET snapshot = excluded.snapshot`,
-		t.ns, t.ws, consumer, entity, key, snapshot,
+		t.ws, consumer, entity, key, snapshot,
 	)
 	return err
 }
@@ -1518,22 +1488,22 @@ func (t *sqliteTx) PutConsumerShadow(consumer, entity, key string, snapshot []by
 func (t *sqliteTx) DeleteConsumerShadow(consumer, entity, key string) error {
 	_, err := t.exec(
 		`DELETE FROM consumer_shadows
-		 WHERE namespace = ? AND workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, consumer, entity, key,
+		 WHERE workspace_id = ? AND consumer = ? AND entity = ? AND key = ?`,
+		t.ws, consumer, entity, key,
 	)
 	return err
 }
 
 func (t *sqliteTx) DeleteConsumer(consumer string) error {
 	if _, err := t.exec(
-		`DELETE FROM consumer_shadows WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
-		t.ns, t.ws, consumer,
+		`DELETE FROM consumer_shadows WHERE workspace_id = ? AND consumer = ?`,
+		t.ws, consumer,
 	); err != nil {
 		return err
 	}
 	_, err := t.exec(
-		`DELETE FROM consumer_positions WHERE namespace = ? AND workspace_id = ? AND consumer = ?`,
-		t.ns, t.ws, consumer,
+		`DELETE FROM consumer_positions WHERE workspace_id = ? AND consumer = ?`,
+		t.ws, consumer,
 	)
 	return err
 }
@@ -1544,18 +1514,18 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 	// with nothing left to identify them by.
 	if _, err := t.exec(
 		`DELETE FROM consumer_shadows
-		 WHERE namespace = ? AND workspace_id = ? AND consumer IN (
+		 WHERE workspace_id = ? AND consumer IN (
 		     SELECT consumer FROM consumer_positions
-		     WHERE namespace = ? AND workspace_id = ? AND updated_at < ? AND seq < ?
+		     WHERE workspace_id = ? AND updated_at < ? AND seq < ?
 		 )`,
-		t.ns, t.ws, t.ns, t.ws, cutoff.UnixMilli(), belowSeq,
+		t.ws, t.ws, cutoff.UnixMilli(), belowSeq,
 	); err != nil {
 		return 0, err
 	}
 	res, err := t.exec(
 		`DELETE FROM consumer_positions
-		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ? AND seq < ?`,
-		t.ns, t.ws, cutoff.UnixMilli(), belowSeq,
+		 WHERE workspace_id = ? AND updated_at < ? AND seq < ?`,
+		t.ws, cutoff.UnixMilli(), belowSeq,
 	)
 	if err != nil {
 		return 0, err
@@ -1567,7 +1537,7 @@ func (t *sqliteTx) CollectIdleConsumers(cutoff time.Time, belowSeq uint64) (int,
 func (t *sqliteTx) FieldDeltaHorizon() (uint64, error) {
 	var horizon uint64
 	err := t.queryRow(
-		`SELECT field_delta_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
+		`SELECT field_delta_horizon FROM workspaces WHERE workspace_id = ?`, t.ws,
 	).Scan(&horizon)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1587,9 +1557,9 @@ func (t *sqliteTx) FieldDeltas(entity, key, field string, afterSeq uint64) ([][]
 	}
 	rows, err := t.query(
 		`SELECT frag FROM field_deltas
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ? AND seq > ?
+		 WHERE workspace_id = ? AND entity = ? AND key = ? AND field = ? AND seq > ?
 		 ORDER BY seq`,
-		t.ns, t.ws, entity, key, field, afterSeq,
+		t.ws, entity, key, field, afterSeq,
 	)
 	if err != nil {
 		return nil, false, err
@@ -1616,8 +1586,8 @@ func (t *sqliteTx) TextFloor(entity, key, field string) ([]byte, error) {
 	var vv []byte
 	err := t.queryRow(
 		`SELECT vv FROM text_floors
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
-		t.ns, t.ws, entity, key, field,
+		 WHERE workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
+		t.ws, entity, key, field,
 	).Scan(&vv)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -1632,17 +1602,17 @@ func (t *sqliteTx) PutTextFloor(entity, key, field string, vv []byte) error {
 	if len(vv) == 0 {
 		_, err := t.exec(
 			`DELETE FROM text_floors
-			 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
-			t.ns, t.ws, entity, key, field,
+			 WHERE workspace_id = ? AND entity = ? AND key = ? AND field = ?`,
+			t.ws, entity, key, field,
 		)
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO text_floors (namespace, workspace_id, entity, key, field, vv)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, entity, key, field)
+		`INSERT INTO text_floors (workspace_id, entity, key, field, vv)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, key, field)
 		 DO UPDATE SET vv = excluded.vv`,
-		t.ns, t.ws, entity, key, field, vv,
+		t.ws, entity, key, field, vv,
 	)
 	return err
 }
@@ -1662,8 +1632,8 @@ func (t *sqliteTx) ScanIndex(
 	// so the predicate is built to match what was given. k is a BLOB, which
 	// SQLite compares with memcmp — the bytewise order the entry encoding is
 	// built for, and the reason this must never become a TEXT column.
-	where := `namespace = ? AND workspace_id = ? AND entity = ? AND idx = ?`
-	args := []any{t.ns, t.ws, entity, index}
+	where := `workspace_id = ? AND entity = ? AND idx = ?`
+	args := []any{t.ws, entity, index}
 	if lo != nil {
 		where += ` AND k >= ?`
 		args = append(args, lo)
@@ -1702,8 +1672,8 @@ func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
 	)
 	err := t.queryRow(
 		`SELECT spec_hash, ready FROM index_state
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND idx = ?`,
-		t.ns, t.ws, entity, index,
+		 WHERE workspace_id = ? AND entity = ? AND idx = ?`,
+		t.ws, entity, index,
 	).Scan(&specHash, &ready)
 	if errors.Is(err, sql.ErrNoRows) {
 		// An index nothing has built yet, which is the normal state right
@@ -1718,11 +1688,11 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO index_state (namespace, workspace_id, entity, idx, spec_hash, ready)
-		 VALUES (?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, entity, idx)
+		`INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, idx)
 		 DO UPDATE SET spec_hash = excluded.spec_hash, ready = excluded.ready`,
-		t.ns, t.ws, entity, index, specHash, boolToInt(ready),
+		t.ws, entity, index, specHash, boolToInt(ready),
 	)
 	return err
 }
@@ -1734,8 +1704,8 @@ func (t *sqliteTx) SetIndexState(entity, index, specHash string, ready bool) err
 // iterates.
 func (t *sqliteTx) SetIndexBuildMark(mark string) error {
 	_, err := t.exec(
-		`UPDATE workspaces SET index_build_mark = ? WHERE namespace = ? AND workspace_id = ?`,
-		mark, t.ns, t.ws,
+		`UPDATE workspaces SET index_build_mark = ? WHERE workspace_id = ?`,
+		mark, t.ws,
 	)
 	return err
 }
@@ -1748,8 +1718,8 @@ func (t *sqliteTx) SetTextCompactMark(mark storage.TextCompactMark) error {
 		`UPDATE workspaces
 		    SET text_compact_seq = ?, text_compact_entity = ?, text_compact_key = ?,
 		        text_compact_min_purged = ?
-		  WHERE namespace = ? AND workspace_id = ?`,
-		int64(mark.Seq), mark.Entity, mark.Key, mark.MinPurged, t.ns, t.ws,
+		  WHERE workspace_id = ?`,
+		int64(mark.Seq), mark.Entity, mark.Key, mark.MinPurged, t.ws,
 	)
 	return err
 }
@@ -1759,8 +1729,8 @@ func (t *sqliteTx) TextCompactMark() (storage.TextCompactMark, error) {
 	var seq int64
 	err := t.queryRow(
 		`SELECT text_compact_seq, text_compact_entity, text_compact_key, text_compact_min_purged
-		   FROM workspaces WHERE namespace = ? AND workspace_id = ?`,
-		t.ns, t.ws,
+		   FROM workspaces WHERE workspace_id = ?`,
+		t.ws,
 	).Scan(&seq, &m.Entity, &m.Key, &m.MinPurged)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storage.TextCompactMark{}, nil
@@ -1807,8 +1777,8 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 		}
 		if _, err := t.exec(
 			`DELETE FROM index_entries
-			 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND idx = ? AND k = ? AND key = ?`,
-			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
+			 WHERE workspace_id = ? AND entity = ? AND idx = ? AND k = ? AND key = ?`,
+			t.ws, entity, e.idx, []byte(e.k), key,
 		); err != nil {
 			return err
 		}
@@ -1818,9 +1788,9 @@ func (t *sqliteTx) PutIndexEntries(entity, key string, entries []storage.IndexEn
 			continue
 		}
 		if _, err := t.exec(
-			`INSERT INTO index_entries (namespace, workspace_id, entity, idx, k, key)
-			 VALUES (?, ?, ?, ?, ?, ?)`,
-			t.ns, t.ws, entity, e.idx, []byte(e.k), key,
+			`INSERT INTO index_entries (workspace_id, entity, idx, k, key)
+			 VALUES (?, ?, ?, ?, ?)`,
+			t.ws, entity, e.idx, []byte(e.k), key,
 		); err != nil {
 			return err
 		}
@@ -1840,8 +1810,8 @@ type rowIndexEntry struct {
 func (t *sqliteTx) rowIndexEntries(entity, key string) (map[rowIndexEntry]struct{}, error) {
 	rows, err := t.query(
 		`SELECT idx, k FROM index_entries
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, entity, key,
+		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
+		t.ws, entity, key,
 	)
 	if err != nil {
 		return nil, err
@@ -1867,8 +1837,8 @@ func (t *sqliteTx) DeleteIndexEntries(entity, key string) error {
 	// workspace.
 	_, err := t.exec(
 		`DELETE FROM index_entries
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key = ?`,
-		t.ns, t.ws, entity, key,
+		 WHERE workspace_id = ? AND entity = ? AND key = ?`,
+		t.ws, entity, key,
 	)
 	return err
 }
@@ -1883,11 +1853,11 @@ func (t *sqliteTx) PutFieldDelta(entity, key, field string, seq uint64, frag []b
 		frag = []byte{}
 	}
 	_, err := t.exec(
-		`INSERT INTO field_deltas (namespace, workspace_id, entity, key, field, seq, frag, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, entity, key, field, seq)
+		`INSERT INTO field_deltas (workspace_id, entity, key, field, seq, frag, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, key, field, seq)
 		 DO UPDATE SET frag = excluded.frag, updated_at = excluded.updated_at`,
-		t.ns, t.ws, entity, key, field, seq, frag, time.Now().UnixMilli(),
+		t.ws, entity, key, field, seq, frag, time.Now().UnixMilli(),
 	)
 	return err
 }
@@ -1897,16 +1867,16 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 	var maxPruned uint64
 	err := t.queryRow(
 		`SELECT COALESCE(MAX(seq), 0) FROM field_deltas
-		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
-		t.ns, t.ws, cutoffMillis,
+		 WHERE workspace_id = ? AND updated_at < ?`,
+		t.ws, cutoffMillis,
 	).Scan(&maxPruned)
 	if err != nil {
 		return 0, err
 	}
 	if maxPruned > 0 {
 		if _, err := t.exec(
-			`DELETE FROM field_deltas WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
-			t.ns, t.ws, cutoffMillis,
+			`DELETE FROM field_deltas WHERE workspace_id = ? AND updated_at < ?`,
+			t.ws, cutoffMillis,
 		); err != nil {
 			return 0, err
 		}
@@ -1914,15 +1884,15 @@ func (t *sqliteTx) PruneFieldDeltas(cutoff time.Time) (uint64, error) {
 		// newer one, exactly as CollectTombstones does.
 		if _, err := t.exec(
 			`UPDATE workspaces SET field_delta_horizon = MAX(field_delta_horizon, ?)
-			 WHERE namespace = ? AND workspace_id = ?`,
-			maxPruned, t.ns, t.ws,
+			 WHERE workspace_id = ?`,
+			maxPruned, t.ws,
 		); err != nil {
 			return 0, err
 		}
 	}
 	var horizon uint64
 	err = t.queryRow(
-		`SELECT field_delta_horizon FROM workspaces WHERE namespace = ? AND workspace_id = ?`, t.ns, t.ws,
+		`SELECT field_delta_horizon FROM workspaces WHERE workspace_id = ?`, t.ws,
 	).Scan(&horizon)
 	if errors.Is(err, sql.ErrNoRows) {
 		return 0, nil
@@ -1938,8 +1908,8 @@ func (t *sqliteTx) NextSeq() (uint64, error) {
 	var seq uint64
 	err := t.queryRow(
 		`UPDATE workspaces SET last_seq = last_seq + 1
-		 WHERE namespace = ? AND workspace_id = ? RETURNING last_seq`,
-		t.ns, t.ws,
+		 WHERE workspace_id = ? RETURNING last_seq`,
+		t.ws,
 	).Scan(&seq)
 	return seq, err
 }
@@ -1951,15 +1921,15 @@ func (t *sqliteTx) PutRow(entity, key string, value []byte, version uint64, acto
 	// created_version stays out of the conflict SET: the stored value is the
 	// key's original creation, which every overwrite keeps (see storage.Row).
 	_, err := t.exec(
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, entity, key)
+		 VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, key)
 		 DO UPDATE SET value = excluded.value, version = excluded.version, deleted = 0,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, value, version, version, time.Now().UnixMilli(),
+		t.ws, entity, key, value, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
@@ -1970,15 +1940,15 @@ func (t *sqliteTx) DeleteRow(entity, key string, version uint64, actor storage.A
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO rows (namespace, workspace_id, entity, key, value, version, created_version, deleted, updated_at,
+		`INSERT INTO rows (workspace_id, entity, key, value, version, created_version, deleted, updated_at,
 		                   actor_subject, actor_system)
-		 VALUES (?, ?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, entity, key)
+		 VALUES (?, ?, ?, NULL, ?, ?, 1, ?, ?, ?)
+		 ON CONFLICT (workspace_id, entity, key)
 		 DO UPDATE SET value = NULL, version = excluded.version, deleted = 1,
 		               updated_at = excluded.updated_at,
 		               actor_subject = excluded.actor_subject,
 		               actor_system = excluded.actor_system`,
-		t.ns, t.ws, entity, key, version, version, time.Now().UnixMilli(),
+		t.ws, entity, key, version, version, time.Now().UnixMilli(),
 		actor.Subject, actor.System,
 	)
 	return err
@@ -1997,11 +1967,11 @@ func (t *sqliteTx) SetClientLastMutationID(clientID string, mutationID uint64) e
 		return err
 	}
 	_, err := t.exec(
-		`INSERT INTO clients (namespace, workspace_id, client_id, last_mutation_id, updated_at)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, client_id)
+		`INSERT INTO clients (workspace_id, client_id, last_mutation_id, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, client_id)
 		 DO UPDATE SET last_mutation_id = excluded.last_mutation_id, updated_at = excluded.updated_at`,
-		t.ns, t.ws, clientID, mutationID, time.Now().UnixMilli(),
+		t.ws, clientID, mutationID, time.Now().UnixMilli(),
 	)
 	return err
 }
@@ -2018,11 +1988,11 @@ func (t *sqliteTx) SetClientRejections(clientID string, recs []storage.ClientRej
 		}
 	}
 	_, err := t.exec(
-		`INSERT INTO clients (namespace, workspace_id, client_id, rejections, updated_at)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT (namespace, workspace_id, client_id)
+		`INSERT INTO clients (workspace_id, client_id, rejections, updated_at)
+		 VALUES (?, ?, ?, ?)
+		 ON CONFLICT (workspace_id, client_id)
 		 DO UPDATE SET rejections = excluded.rejections, updated_at = excluded.updated_at`,
-		t.ns, t.ws, clientID, blob, time.Now().UnixMilli(),
+		t.ws, clientID, blob, time.Now().UnixMilli(),
 	)
 	return err
 }
@@ -2061,16 +2031,16 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 	var maxDeleted uint64
 	err := t.queryRow(
 		`SELECT COALESCE(MAX(version), 0) FROM rows
-		 WHERE namespace = ? AND workspace_id = ? AND deleted = 1 AND updated_at < ?`,
-		t.ns, t.ws, cutoffMillis,
+		 WHERE workspace_id = ? AND deleted = 1 AND updated_at < ?`,
+		t.ws, cutoffMillis,
 	).Scan(&maxDeleted)
 	if err != nil {
 		return 0, err
 	}
 	if maxDeleted > 0 {
 		if _, err := t.exec(
-			`DELETE FROM rows WHERE namespace = ? AND workspace_id = ? AND deleted = 1 AND updated_at < ?`,
-			t.ns, t.ws, cutoffMillis,
+			`DELETE FROM rows WHERE workspace_id = ? AND deleted = 1 AND updated_at < ?`,
+			t.ws, cutoffMillis,
 		); err != nil {
 			return 0, err
 		}
@@ -2078,8 +2048,8 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 		// after a newer one.
 		if _, err := t.exec(
 			`UPDATE workspaces SET tombstone_horizon = MAX(tombstone_horizon, ?)
-			 WHERE namespace = ? AND workspace_id = ?`,
-			maxDeleted, t.ns, t.ws,
+			 WHERE workspace_id = ?`,
+			maxDeleted, t.ws,
 		); err != nil {
 			return 0, err
 		}
@@ -2106,24 +2076,24 @@ func (t *sqliteTx) CollectTombstones(cutoff time.Time) (uint64, error) {
 // exactly emptied the selection costs one more no-op call, which is cheaper than
 // probing for a next row on every chunk.
 func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, limit int) (int, bool, error) {
-	where, args := purgeWhere(t.ns, t.ws, entity, keyPrefix, before)
+	where, args := purgeWhere(t.ws, entity, keyPrefix, before)
 	selected, rowsWhere := where, where
 	rowsArgs := args
 	if limit > 0 {
 		selected = where + " ORDER BY key LIMIT ?"
 		args = append(args, limit)
-		// The outer predicate repeats the (namespace, workspace, entity) keys the
+		// The outer predicate repeats the (workspace, entity) keys the
 		// subquery already applies; the subquery is what narrows the delete.
-		rowsWhere = `namespace = ? AND workspace_id = ? AND entity = ? AND key IN (
+		rowsWhere = `workspace_id = ? AND entity = ? AND key IN (
 		   SELECT key FROM rows WHERE ` + selected + `)`
-		rowsArgs = append([]any{t.ns, t.ws, entity}, args...)
+		rowsArgs = append([]any{t.ws, entity}, args...)
 	}
 	if _, err := t.exec(
 		`DELETE FROM index_entries
-		 WHERE namespace = ? AND workspace_id = ? AND entity = ? AND key IN (
+		 WHERE workspace_id = ? AND entity = ? AND key IN (
 		   SELECT key FROM rows WHERE `+selected+`
 		 )`,
-		append([]any{t.ns, t.ws, entity}, args...)...,
+		append([]any{t.ws, entity}, args...)...,
 	); err != nil {
 		return 0, false, err
 	}
@@ -2139,9 +2109,9 @@ func (t *sqliteTx) PurgeEntityRows(entity, keyPrefix string, before time.Time, l
 // narrowings are optional: an empty prefix bounds nothing, and a zero `before`
 // means no age bound at all — which is NOT what its UnixMilli() would say, so
 // the branch is load-bearing rather than an optimization.
-func purgeWhere(ns, ws, entity, keyPrefix string, before time.Time) (string, []any) {
-	where := "namespace = ? AND workspace_id = ? AND entity = ?"
-	args := []any{ns, ws, entity}
+func purgeWhere(ws, entity, keyPrefix string, before time.Time) (string, []any) {
+	where := "workspace_id = ? AND entity = ?"
+	args := []any{ws, entity}
 	if keyPrefix != "" {
 		hi, bounded := prefixUpperBound(keyPrefix)
 		where += " AND key >= ?"
@@ -2182,8 +2152,8 @@ func (t *sqliteTx) ExpireClientRejections(cutoff time.Time) (int, error) {
 	// measures idleness by, and expiring verdicts is not client activity.
 	res, err := t.exec(
 		`UPDATE clients SET rejections = NULL
-		 WHERE namespace = ? AND workspace_id = ? AND updated_at < ? AND rejections IS NOT NULL`,
-		t.ns, t.ws, cutoff.UnixMilli(),
+		 WHERE workspace_id = ? AND updated_at < ? AND rejections IS NOT NULL`,
+		t.ws, cutoff.UnixMilli(),
 	)
 	if err != nil {
 		return 0, err
@@ -2194,8 +2164,8 @@ func (t *sqliteTx) ExpireClientRejections(cutoff time.Time) (int, error) {
 
 func (t *sqliteTx) CollectIdleClients(cutoff time.Time) (int, error) {
 	res, err := t.exec(
-		`DELETE FROM clients WHERE namespace = ? AND workspace_id = ? AND updated_at < ?`,
-		t.ns, t.ws, cutoff.UnixMilli(),
+		`DELETE FROM clients WHERE workspace_id = ? AND updated_at < ?`,
+		t.ws, cutoff.UnixMilli(),
 	)
 	if err != nil {
 		return 0, err

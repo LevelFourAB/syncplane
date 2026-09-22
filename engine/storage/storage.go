@@ -91,24 +91,23 @@
 //   - Work queries (ListPendingWorkspaceIDs, ListCollectableWorkspaceIDs,
 //     ListStaleIndexWorkspaceIDs, ListCompactableWorkspaceIDs) answer "which
 //     workspaces owe this background pass work" from outside any workspace
-//     transaction, paged by id. They are what keeps a deployment's maintenance
-//     floor proportional to the work waiting rather than to the number of
-//     workspaces that exist, so an adapter answering one by iterating
-//     workspaces itself has implemented the signature and not the point. Each
-//     may be optimistic and none may be short.
+//     transaction, paged by id within a Range. They are what keeps a
+//     deployment's maintenance floor proportional to the work waiting rather
+//     than to the number of workspaces that exist, so an adapter answering one
+//     by iterating workspaces itself has implemented the signature and not the
+//     point. Each may be optimistic and none may be short.
 //
-// The conformance suite in storagetest encodes this contract; run it (and
-// storagetest.ConformanceNamespaced for multi-tenant adapters) against any
-// new implementation.
+// The conformance suite in storagetest encodes this contract; run it against
+// any new implementation.
 //
 // Two implementations ship: sqlitestore (the default, single-writer, one
 // process) and pgstore (PostgreSQL, several nodes over one database, different
 // workspaces committing concurrently).
 //
 // Adapters may additionally implement the optional capability interfaces
-// cursorstate.Provider and lease.Provider (both shipped adapters do) and
-// ReplicaProvider (pgstore, when a read replica is configured) — all resolved
-// by servers through storage.As, so wrapping adapters stay transparent by
+// Catalog, cursorstate.Provider and lease.Provider (all three shipped by both
+// adapters) and ReplicaProvider (pgstore, when a read replica is configured) —
+// all resolved through storage.As, so wrapping adapters stay transparent by
 // implementing Unwrap.
 package storage
 
@@ -179,16 +178,35 @@ type Actor struct {
 	System string
 }
 
-// AppSchema is a persisted runtime schema registration: the serialized
-// google.protobuf.FileDescriptorSet an app registered, keyed by app id. It
-// lives in a server-global catalog (no workspace/namespace partition — app_id
-// is the partition) so the engine can reload and re-register every app's
-// entities on boot before serving.
-type AppSchema struct {
-	AppID         string
-	DescriptorSet []byte
-	Revision      string
-	UpdatedAt     time.Time
+// CatalogEntry is one entry of the server-global catalog: an opaque payload
+// stored under an id, with the revision label the writer gave it.
+type CatalogEntry struct {
+	ID       string
+	Payload  []byte
+	Revision string
+	// UpdatedAt is when the entry was last written. Writes ignore whatever it
+	// holds — the adapter stamps its own clock — and reads populate it.
+	UpdatedAt time.Time
+}
+
+// Catalog is the optional capability of adapters that can persist state
+// belonging to no workspace: one flat keyspace, shared by every workspace in
+// the store and readable before any of them is served. Resolve it through As.
+//
+// The engine's multi-app host keeps each hosted application's registered
+// schema here, which is what lets it re-register their entities on boot. An
+// adapter that does not implement it can back a Server but not a Manager.
+//
+// Entries are few and small, and every read is a full listing, so an adapter
+// needs no index beyond the id.
+type Catalog interface {
+	// PutCatalogEntry stores payload under id, replacing whatever was there.
+	PutCatalogEntry(ctx context.Context, id string, payload []byte, revision string) error
+	// ListCatalogEntries returns every entry, ordered by id.
+	ListCatalogEntries(ctx context.Context) ([]CatalogEntry, error)
+	// DeleteCatalogEntry removes the entry under id. Removing one that is not
+	// there is not an error.
+	DeleteCatalogEntry(ctx context.Context, id string) error
 }
 
 // IdempotencyRecord is the durable outcome of a trusted write that ran under an
@@ -253,25 +271,28 @@ type ConsumerPosition struct {
 	UpdatedAt time.Time
 }
 
-// Adapter is the storage seam. Per-workspace data access happens inside a
-// transaction scoped to a single workspace; the schema catalog and Namespace
-// derivation are server-global.
-type Adapter interface {
-	// Namespace returns a view of the adapter scoped to an app namespace,
-	// partitioning workspaces, rows and client watermarks within one backing
-	// store. The server-global schema catalog (PutAppSchema and friends) is
-	// shared across namespaces. The default namespace is "". Close on a derived
-	// view is a no-op — the root adapter owns the handle.
-	Namespace(ns string) Adapter
-	// PutAppSchema upserts an app's registered descriptor set and revision in
-	// the server-global schema catalog (keyed by appID).
-	PutAppSchema(ctx context.Context, appID string, set []byte, revision string) error
-	// ListAppSchemas returns every persisted app schema, ordered by app id.
-	ListAppSchemas(ctx context.Context) ([]AppSchema, error)
-	// DeleteAppSchema removes an app's persisted schema. Removing a missing app
-	// is not an error.
-	DeleteAppSchema(ctx context.Context, appID string) error
+// Range bounds a scan of workspace ids. Both ends are EXCLUSIVE and compared
+// bytewise, as workspace ids are everywhere else: an empty After starts at the
+// first id, an empty Before runs past the last, and the zero Range is every
+// workspace.
+//
+// It is what keeps a background pass proportional to the workspaces it owns
+// rather than to the workspaces that exist. A server hosting one group out of
+// many holds a contiguous run of ids (see prefixstore) and bounds every scan
+// to it; a server that owns the whole store passes the zero Range and the
+// bound costs nothing.
+type Range struct {
+	After  string
+	Before string
+}
 
+// Adapter is the storage seam. Every method is scoped to one workspace, or
+// enumerates workspaces; an adapter needs no notion of who groups them.
+//
+// A deployment that hosts several applications over one adapter partitions
+// them by workspace id (see prefixstore), so an adapter has one flat workspace
+// space and nothing above it.
+type Adapter interface {
 	// WithReadTx runs fn inside a read-only snapshot of the workspace. fn is
 	// invoked AT MOST ONCE: it may stream results out as it reads, and the
 	// adapter must never retry it. A failed read tx returns the error.
@@ -299,18 +320,18 @@ type Adapter interface {
 	// eager registration lets any caller mint permanent workspaces that every
 	// background pass then iterates forever.
 	WithWriteTx(ctx context.Context, workspaceID string, fn func(WriteTx) error) error
-	// ListWorkspaceIDs returns the ids of all workspaces that hold persisted
-	// state, i.e. those some write transaction has actually written to.
+	// ListWorkspaceIDs returns the ids of the workspaces in rng that hold
+	// persisted state, i.e. those some write transaction has actually written
+	// to.
 	//
 	// Unpaged, and therefore for enumeration rather than for finding work: a
 	// background pass asks one of the work queries below instead, so that its
 	// cost tracks what is waiting rather than what exists.
-	ListWorkspaceIDs(ctx context.Context) ([]string, error)
-	// ListPendingWorkspaceIDs returns up to limit ids of workspaces where the
-	// named consumer has changes it has not acted on, ordered by id and starting
-	// strictly after `after` ("" from the start). A limit of zero or less is an
-	// error rather than "unlimited": the caller pages precisely because the
-	// answer can be every workspace.
+	ListWorkspaceIDs(ctx context.Context, rng Range) ([]string, error)
+	// ListPendingWorkspaceIDs returns up to limit ids of workspaces in rng where
+	// the named consumer has changes it has not acted on, ordered by id. A limit
+	// of zero or less is an error rather than "unlimited": the caller pages
+	// precisely because the answer can be every workspace.
 	//
 	// A workspace is pending when the consumer holds no position there (it has
 	// acted on nothing), when its position's sequence is below the workspace's
@@ -333,12 +354,11 @@ type Adapter interface {
 	// one call may miss a workspace that became pending shortly before it; the
 	// workspace must appear once the view reaches that moment — for the polling
 	// consumers this serves, a later call rather than not at all.
-	ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error)
-	// ListCollectableWorkspaceIDs returns up to limit ids of workspaces holding
-	// something a garbage-collection pass at these cutoffs would reclaim,
-	// ordered by id and starting strictly after `after` ("" from the start). A
-	// limit of zero or less is an error, as it is for ListPendingWorkspaceIDs
-	// and for the same reason.
+	ListPendingWorkspaceIDs(ctx context.Context, consumer string, rng Range, limit int) ([]string, error)
+	// ListCollectableWorkspaceIDs returns up to limit ids of workspaces in rng
+	// holding something a garbage-collection pass at these cutoffs would
+	// reclaim, ordered by id. A limit of zero or less is an error, as it is for
+	// ListPendingWorkspaceIDs and for the same reason.
 	//
 	// It exists so that a maintenance pass costs one query rather than a write
 	// transaction against every workspace that exists — on an adapter that takes
@@ -351,11 +371,10 @@ type Adapter interface {
 	// that is never reclaimed. Adapters may answer from a bounded-staleness read
 	// view on the same terms as ListPendingWorkspaceIDs, since a workspace that
 	// only just became collectable is due on the next pass, not this one.
-	ListCollectableWorkspaceIDs(ctx context.Context, cutoffs GCCutoffs, after string, limit int) ([]string, error)
-	// ListStaleIndexWorkspaceIDs returns up to limit ids of workspaces whose
-	// recorded index-build mark differs from mark, ordered by id and starting
-	// strictly after `after` ("" from the start). A limit of zero or less is an
-	// error.
+	ListCollectableWorkspaceIDs(ctx context.Context, cutoffs GCCutoffs, rng Range, limit int) ([]string, error)
+	// ListStaleIndexWorkspaceIDs returns up to limit ids of workspaces in rng
+	// whose recorded index-build mark differs from mark, ordered by id. A limit
+	// of zero or less is an error.
 	//
 	// A workspace that has never been marked differs from every mark, so a fresh
 	// one is always returned. The engine derives the mark from the fingerprints
@@ -366,11 +385,10 @@ type Adapter interface {
 	// workspaces and a handful of indexes apiece that is six figures of point
 	// reads per interval per node to establish that nothing has changed, against
 	// one indexed query that usually returns nothing.
-	ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error)
-	// ListCompactableWorkspaceIDs returns up to limit ids of workspaces whose
-	// text-compaction sweep has rows left to consider at this minPurged
-	// threshold, ordered by id and starting strictly after `after` ("" from the
-	// start). A limit of zero or less is an error.
+	ListStaleIndexWorkspaceIDs(ctx context.Context, mark string, rng Range, limit int) ([]string, error)
+	// ListCompactableWorkspaceIDs returns up to limit ids of workspaces in rng
+	// whose text-compaction sweep has rows left to consider at this minPurged
+	// threshold, ordered by id. A limit of zero or less is an error.
 	//
 	// A workspace qualifies when its recorded mark sits below the field-delta
 	// horizon — the sweep has not yet considered every row the delta prune has
@@ -390,7 +408,7 @@ type Adapter interface {
 	// The answer may be OPTIMISTIC — a returned workspace whose remaining rows
 	// all fail the threshold costs one sweep that rewrites nothing — but never
 	// short, on the same terms as the two work queries above.
-	ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error)
+	ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, rng Range, limit int) ([]string, error)
 	Close() error
 }
 

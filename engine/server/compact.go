@@ -209,7 +209,7 @@ func (s *Server) compactAllText(ctx context.Context) (err error) {
 	minPurged := s.compact.minPurged
 	var errs []error
 	for after := ""; ; {
-		ids, lerr := s.store.ListCompactableWorkspaceIDs(ctx, minPurged, after, maintenancePage)
+		ids, lerr := s.store.ListCompactableWorkspaceIDs(ctx, minPurged, storage.Range{After: after}, maintenancePage)
 		if lerr != nil {
 			return errors.Join(append(errs, lerr)...)
 		}

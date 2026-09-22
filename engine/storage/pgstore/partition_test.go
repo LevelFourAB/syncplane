@@ -83,10 +83,10 @@ var _ = Describe("Postgres partitioning", func() {
 		Expect(partitionCounts(dsn)).To(BeEmpty())
 	})
 
-	It("keys the partitions by namespace and workspace, hashed", func() {
+	It("keys the partitions by workspace, hashed", func() {
 		// The key is what makes every statement in the adapter prune to one
-		// partition: all of them bind both columns to equality, and none of
-		// them can move a row across the boundary.
+		// partition: all of them bind the column to equality, and none of them
+		// can move a row across the boundary.
 		dsn := pgtest.DSN()
 		store, err := pgstore.Open(ctx, dsn, pgstore.WithPartitions(2))
 		Expect(err).NotTo(HaveOccurred())
@@ -105,7 +105,7 @@ var _ = Describe("Postgres partitioning", func() {
 				 WHERE p.partrelid = to_regclass($1)
 				 GROUP BY p.partstrat`, table).Scan(&strategy, &columns)).To(Succeed())
 			Expect(strategy).To(Equal("h"), "%s must be hash-partitioned", table)
-			Expect(columns).To(Equal([]string{"namespace", "workspace_id"}), "partition key of %s", table)
+			Expect(columns).To(Equal([]string{"workspace_id"}), "partition key of %s", table)
 		}
 	})
 

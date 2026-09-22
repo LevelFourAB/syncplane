@@ -45,8 +45,8 @@ func (c *cursorStateStore) Get(ctx context.Context, workspaceID string, ref curs
 	var state []byte
 	err := c.s.pool.QueryRow(ctx, `
 		SELECT state FROM cursor_state
-		WHERE namespace = $1 AND workspace_id = $2 AND id = $3 AND gen = $4`,
-		c.s.ns, workspaceID, int64(ref.ID), int64(ref.Gen)).Scan(&state)
+		WHERE workspace_id = $1 AND id = $2 AND gen = $3`,
+		workspaceID, int64(ref.ID), int64(ref.Gen)).Scan(&state)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, cursorstate.ErrNotFound
 	}
@@ -60,10 +60,10 @@ func (c *cursorStateStore) Put(ctx context.Context, workspaceID string, ref curs
 	// ON CONFLICT DO NOTHING: a Put over an existing ref is a retry carrying
 	// the same bytes, so either copy serves.
 	if _, err := c.s.pool.Exec(ctx, `
-		INSERT INTO cursor_state (namespace, workspace_id, id, gen, state)
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (namespace, workspace_id, id, gen) DO NOTHING`,
-		c.s.ns, workspaceID, int64(ref.ID), int64(ref.Gen), state); err != nil {
+		INSERT INTO cursor_state (workspace_id, id, gen, state)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (workspace_id, id, gen) DO NOTHING`,
+		workspaceID, int64(ref.ID), int64(ref.Gen), state); err != nil {
 		return fmt.Errorf("pgstore: cursor state: %w", err)
 	}
 	// Pruning failures surface as Put failures even though the entry landed:
@@ -71,18 +71,18 @@ func (c *cursorStateStore) Put(ctx context.Context, workspaceID string, ref curs
 	// sees a put_failure instead of a silently growing table.
 	if _, err := c.s.pool.Exec(ctx, `
 		DELETE FROM cursor_state
-		WHERE namespace = $1 AND workspace_id = $2 AND id = $3 AND (written_at, gen) NOT IN (
+		WHERE workspace_id = $1 AND id = $2 AND (written_at, gen) NOT IN (
 			SELECT written_at, gen FROM cursor_state
-			WHERE namespace = $1 AND workspace_id = $2 AND id = $3
-			ORDER BY written_at DESC, gen DESC LIMIT $4
+			WHERE workspace_id = $1 AND id = $2
+			ORDER BY written_at DESC, gen DESC LIMIT $3
 		)`,
-		c.s.ns, workspaceID, int64(ref.ID), cursorStateKeepPerLineage); err != nil {
+		workspaceID, int64(ref.ID), cursorStateKeepPerLineage); err != nil {
 		return fmt.Errorf("pgstore: cursor state: prune lineage: %w", err)
 	}
 	if _, err := c.s.pool.Exec(ctx, `
 		DELETE FROM cursor_state
-		WHERE namespace = $1 AND workspace_id = $2 AND written_at < now() - make_interval(secs => $3)`,
-		c.s.ns, workspaceID, cursorStateRetention.Seconds()); err != nil {
+		WHERE workspace_id = $1 AND written_at < now() - make_interval(secs => $2)`,
+		workspaceID, cursorStateRetention.Seconds()); err != nil {
 		return fmt.Errorf("pgstore: cursor state: prune aged: %w", err)
 	}
 	return nil

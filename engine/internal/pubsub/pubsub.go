@@ -85,10 +85,19 @@ type Activity interface {
 // the chain implements Activity — which leaves periodic sweeping the only way
 // to find work.
 func SubscribeActivity(n Notifier) (ids <-chan string, cancel func(), ok bool) {
+	a, ok := activityOf(n)
+	if !ok {
+		return nil, nil, false
+	}
+	ids, cancel = a.SubscribeActivity()
+	return ids, cancel, true
+}
+
+// activityOf finds the Activity in n's wrapper chain without subscribing.
+func activityOf(n Notifier) (Activity, bool) {
 	for n != nil {
 		if a, is := n.(Activity); is {
-			ch, cancel := a.SubscribeActivity()
-			return ch, cancel, true
+			return a, true
 		}
 		u, is := n.(interface{ Unwrap() Notifier })
 		if !is {
@@ -96,7 +105,7 @@ func SubscribeActivity(n Notifier) (ids <-chan string, cancel func(), ok bool) {
 		}
 		n = u.Unwrap()
 	}
-	return nil, nil, false
+	return nil, false
 }
 
 // Local is an in-process Notifier.

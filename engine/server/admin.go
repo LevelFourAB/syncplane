@@ -9,6 +9,7 @@ import (
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 )
 
 // adminService implements syncplanev1connect.AdminServiceHandler on top of a
@@ -29,8 +30,8 @@ func (a *adminService) Register(
 	req *connect.Request[syncplanev1.RegisterRequest],
 ) (*connect.Response[syncplanev1.RegisterResponse], error) {
 	appID := req.Msg.GetAppId()
-	if appID == "" {
-		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("app_id is required"))
+	if err := naming.ValidateAppID(appID); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
 	// Trust gate first: deny-by-default, never touch state for an unauthorized
 	// caller.
@@ -71,7 +72,7 @@ func (a *adminService) GetSchema(
 	if appID == "" {
 		return nil, connect.NewError(connect.CodeInvalidArgument, errors.New("app_id is required"))
 	}
-	schemas, err := a.mgr.root.ListAppSchemas(ctx)
+	schemas, err := a.mgr.ListAppSchemas(ctx)
 	if err != nil {
 		return nil, connect.NewError(connect.CodeInternal, err)
 	}

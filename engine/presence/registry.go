@@ -6,6 +6,8 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 )
 
 // DefaultAnnounce is the interval a Registry re-announces its own records on,
@@ -45,6 +47,20 @@ type Options struct {
 	// Now reads the current time, and is the only clock a Registry consults.
 	// Nil takes time.Now.
 	Now func() time.Time
+	// WorkspacePrefix partitions this Registry's share of a shared Bus: it is
+	// prepended to every topic's workspace id on the way to the bus and
+	// removed from every event taken off it, and an event whose topic does not
+	// carry it is dropped. Empty — the default — is a Registry that owns the
+	// whole bus.
+	//
+	// It is how a host serving several applications over one bus keeps rooms
+	// with the same workspace id apart, so that the bus itself needs no notion
+	// of an application. The prefix must end in a separator no workspace id
+	// can contain.
+	//
+	// Topics are bare on every other side of the Registry: what a caller
+	// joins, publishes and reads off a Watch is the topic it named.
+	WorkspacePrefix string
 }
 
 func (o Options) withDefaults() Options {
@@ -274,6 +290,7 @@ func (r *Registry) Publish(ctx context.Context, ev Event) error {
 	if closed {
 		return ErrClosed
 	}
+	ev.Topic = r.scoped(ev.Topic)
 	return r.bus.Publish(ctx, ev)
 }
 
@@ -325,6 +342,7 @@ func (r *Registry) Sweep(ctx context.Context) {
 	// as a roster one participant short, until the bus recovers and the next
 	// sweep fills it back in.
 	for _, ev := range announce {
+		ev.Topic = r.scoped(ev.Topic)
 		_ = r.bus.Publish(ctx, ev)
 	}
 }
@@ -360,7 +378,7 @@ func (r *Registry) roomLocked(topic Topic) *room {
 	if rm, ok := r.rooms[topic]; ok {
 		return rm
 	}
-	events, cancel := r.bus.Subscribe(topic)
+	events, cancel := r.bus.Subscribe(r.scoped(topic))
 	rm := &room{
 		topic:        topic,
 		participants: make(map[string]*record),
@@ -392,10 +410,36 @@ func (r *Registry) dropWatcherLocked(topic Topic, w *Watch) {
 
 // forward drains one room's bus subscription into the Registry until the
 // subscription is cancelled.
+//
+// Unscoping here rather than in a wrapper around the Bus is what makes
+// WorkspacePrefix free: this goroutine already exists, so the prefix costs a
+// field assignment instead of a channel hop per room.
 func (r *Registry) forward(events <-chan Event) {
 	for ev := range events {
+		topic, mine := r.unscoped(ev.Topic)
+		if !mine {
+			continue
+		}
+		ev.Topic = topic
 		r.apply(ev)
 	}
+}
+
+// scoped renders a topic as the bus carries it.
+func (r *Registry) scoped(topic Topic) Topic {
+	topic.WorkspaceID = r.opts.WorkspacePrefix + topic.WorkspaceID
+	return topic
+}
+
+// unscoped renders a topic from the bus as this Registry's callers know it,
+// reporting false for a topic belonging to another share of the bus.
+func (r *Registry) unscoped(topic Topic) (Topic, bool) {
+	ws, mine := naming.CutWorkspacePrefix(topic.WorkspaceID, r.opts.WorkspacePrefix)
+	if !mine {
+		return Topic{}, false
+	}
+	topic.WorkspaceID = ws
+	return topic, true
 }
 
 // apply folds one event into the node's state and hands it to the local

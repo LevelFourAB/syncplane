@@ -149,7 +149,7 @@ func (s *Server) buildAllIndexes(ctx context.Context) error {
 	mark := s.catalogPtr().indexBuildMark()
 	var errs []error
 	for after := ""; ; {
-		ids, err := s.store.ListStaleIndexWorkspaceIDs(ctx, mark, after, maintenancePage)
+		ids, err := s.store.ListStaleIndexWorkspaceIDs(ctx, mark, storage.Range{After: after}, maintenancePage)
 		if err != nil {
 			return errors.Join(append(errs, err)...)
 		}

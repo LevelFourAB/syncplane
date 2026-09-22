@@ -47,6 +47,10 @@ const (
 	// 8000-byte ceiling on a Postgres NOTIFY payload — past which pgnotify drops
 	// the notification instead of waking the workspace's clients.
 	MaxWorkspaceIDBytes = 128
+	// MaxAppIDBytes caps an application id. A multi-app host prefixes every
+	// workspace id with the app's (see server.Manager), so the two budgets add
+	// up wherever a workspace id is stored.
+	MaxAppIDBytes = 64
 	// MaxActorSubjectBytes caps the subject recorded as a write's actor. The
 	// subject is stored on every row and repeated in every field-history record,
 	// so it is a per-row cost. 256 holds a UUID, an email address or a
@@ -150,6 +154,46 @@ func ValidateWorkspaceID(id string) error {
 		}
 	}
 	return nil
+}
+
+// ValidateAppID checks an application id, which a multi-app host both routes
+// by and prefixes workspace ids with. It takes the workspace-id alphabet, and
+// for the same reasons — a shorter id, so that the pair still fits everywhere
+// one workspace id used to.
+//
+// `/` above all: the host joins an app id and a workspace id with it, so an id
+// holding one would let two applications land on the same stored workspace.
+func ValidateAppID(id string) error {
+	if id == "" {
+		return fmt.Errorf("app id is empty")
+	}
+	if len(id) > MaxAppIDBytes {
+		return fmt.Errorf("app id %q is %d bytes, the limit is %d", id, len(id), MaxAppIDBytes)
+	}
+	for i := 0; i < len(id); i++ {
+		c := id[i]
+		switch {
+		case c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9':
+		case (c == '_' || c == '-' || c == ':') && i > 0:
+		default:
+			return fmt.Errorf(
+				"app id %q is not valid: use letters, digits, `_`, `-` and `:`, starting with a letter or digit",
+				id)
+		}
+	}
+	return nil
+}
+
+// CutWorkspacePrefix removes a partition prefix from a workspace id and
+// reports whether the id belongs to that partition. An id that does not begin
+// with prefix, or that is the prefix alone, belongs to none and reports false.
+// An empty prefix owns every id and returns it unchanged.
+func CutWorkspacePrefix(id, prefix string) (string, bool) {
+	if prefix == "" {
+		return id, true
+	}
+	ws, found := strings.CutPrefix(id, prefix)
+	return ws, found && ws != ""
 }
 
 // ValidateKeyFieldKind checks that a field may form (part of) a row key. Key

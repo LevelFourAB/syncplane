@@ -38,7 +38,7 @@
   Index entries are derived and disposable. `IndexState` returns the spec fingerprint and a boolean indicating whether the index build finished. A missing index returns `("", false, nil)`.
 - **`ScanEntityByVersionDesc`.** Yields live rows for an entity ordered by version descending, breaking ties by row key ascending.
 - **`SetIndexBuildMark`.** Updates the workspace with an opaque string mark representing the index declaration fingerprint. The operation updates existing workspace records and must not insert a record if the workspace does not exist.
-- **Work queries.** `ListPendingWorkspaceIDs`, `ListCollectableWorkspaceIDs`, `ListStaleIndexWorkspaceIDs`, and `ListCompactableWorkspaceIDs` page results by workspace ID using an exclusive cursor, treat a limit `<= 0` as an error, and may return false positives but never false negatives:
+- **Work queries.** `ListPendingWorkspaceIDs`, `ListCollectableWorkspaceIDs`, `ListStaleIndexWorkspaceIDs`, and `ListCompactableWorkspaceIDs` page results by workspace ID within a `storage.Range`, treat a limit `<= 0` as an error, and may return false positives but never false negatives:
   - `ListPendingWorkspaceIDs`: Returns workspaces with pending consumer work. A workspace is pending if it has no recorded position for the consumer, if its position sequence is behind the head sequence, or if its position names an entity or key sub-position.
   - `ListCollectableWorkspaceIDs`: Returns workspaces containing data older than the specified absolute timestamp cutoffs. A cutoff timestamp of zero means unbounded retention and matches no records for that collection category.
   - `ListStaleIndexWorkspaceIDs`: Returns workspaces whose index build mark does not match the specified mark, including workspaces with no recorded mark.
@@ -49,18 +49,38 @@
 The `storagetest` package provides test suites to verify adapter implementations:
 
 - `storagetest.Conformance`: Verifies core contract invariants.
-- `storagetest.ConformanceNamespaced`: Verifies contract invariants under namespacing.
+- `storagetest.Catalog`: Verifies the optional `storage.Catalog` capability.
 
 Key test expectations:
 
 - **Byte order:** Keys compare bytewise using standard byte comparison (`<` in Go). Collation must not use locale-specific rules. The test suite evaluates key sets containing ASCII and non-ASCII characters (`A Z _ a z é`) where locale ordering diverges from byte ordering.
 - **Re-entrant reads:** Callbacks during scans may execute read queries against the active transaction across batch boundaries.
 
-## Namespaces
+## Workspace ranges
 
-An adapter partitions workspaces, rows, and client watermarks by namespace to allow multiple applications to share a single database.
+Every workspace-list query takes a `storage.Range`. Both ends are exclusive and compared bytewise, an empty end is unbounded, and the zero value selects every workspace:
 
-Adapters provide namespace support through `root.Namespace(id)` and the `WithNamespace(id)` option. Calling `Close` on a namespaced store instance is a no-op because the root store owns the database handle.
+```go
+type Range struct {
+	After  string
+	Before string
+}
+```
+
+An adapter holds one flat space of workspaces and has no concept above it. A host that serves several applications from one database partitions them by workspace-ID prefix with `prefixstore.Wrap(adapter, "<appID>/")`, which prefixes every ID crossing the seam and narrows every range to the prefix. See [Host multiple apps in one process](../how-to/host-multiple-apps.md).
+
+## Catalog (optional)
+
+An adapter can implement `storage.Catalog` to persist state that belongs to no workspace: opaque payloads keyed by ID, in one flat keyspace shared by every workspace in the store.
+
+`server.Manager` keeps each hosted application's registered schema there and reloads it at boot, so an adapter without a catalog can back a `server.Server` but not a `server.Manager`. Both built-in adapters implement it.
+
+Properties:
+
+- Entries are few and small. Every read is a full listing, ordered by ID.
+- `DeleteCatalogEntry` on a missing ID is not an error.
+- A prefixed view from `prefixstore` does not expose the catalog: it belongs to no partition.
+- Test suite: `storagetest.Catalog`.
 
 ## Cursor state (optional)
 
@@ -71,7 +91,7 @@ Properties:
 - Entries are immutable.
 - Entries may be evicted. A cache miss causes the client to re-bootstrap.
 - Implementations must not run `Get` or `Put` inside their own transaction API, because the server calls them while holding an open read snapshot on the adapter.
-- Test suites: `storagetest.CursorState` and `storagetest.CursorStateNamespaced`.
+- Test suite: `storagetest.CursorState`.
 
 ## Leases (optional)
 
@@ -82,7 +102,7 @@ Properties:
 - Leases provide work deduplication, not safety. Callers treat locker errors by proceeding without a lease.
 - `sqlitestore` implements process-local locking.
 - `pgstore` implements session-level advisory locks over a dedicated connection, releasing locks when the connection closes without waiting for a time-to-live (TTL) expiration.
-- Test suites: `storagetest.Leases` and `storagetest.LeasesNamespaced`.
+- Test suite: `storagetest.Leases`.
 
 ## Read replicas (optional)
 
@@ -143,14 +163,13 @@ Fixed SQLite settings:
 
 Pass configuration options as `Option` values to `Open`, `Migrate`, and `Statements`. Options that do not apply to `Migrate` or `Statements` are ignored. A zero or empty value selects the default.
 
-| Option                   | Default            | Description                                                                                                                                                                                              |
-| ------------------------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `WithNamespace(ns)`      | `""`               | App namespace for rows, workspaces, and watermarks. Equivalent to `Open(...).Namespace(ns)`.                                                                                                             |
-| `WithMaxConns(n)`        | pgx default or DSN | Connection pool size, bounding concurrent write operations.                                                                                                                                              |
-| `WithReadReplica(dsn)`   | No replica         | Connection string for a hot standby pool exposed as `storage.ReplicaProvider`. `Open` fails if the standby schema version does not match the binary schema version.                                      |
-| `WithReplicaMaxConns(n)` | pgx default or DSN | Connection pool size for the read replica pool, bounding concurrent replica reads.                                                                                                                       |
-| `WithPartitions(n)`      | Unpartitioned      | Hash-partitions `rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows` by `(namespace, workspace_id)`. Must be a power of two up to 1024. Applied only when creating the schema. |
-| `WithoutMigrations()`    | Migrate at boot    | Disables automatic migration during `Open`. `Open` verifies the schema matches the binary version without executing DDL or acquiring migration advisory locks.                                           |
+| Option                   | Default            | Description                                                                                                                                                                                 |
+| ------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `WithMaxConns(n)`        | pgx default or DSN | Connection pool size, bounding concurrent write operations.                                                                                                                                 |
+| `WithReadReplica(dsn)`   | No replica         | Connection string for a hot standby pool exposed as `storage.ReplicaProvider`. `Open` fails if the standby schema version does not match the binary schema version.                         |
+| `WithReplicaMaxConns(n)` | pgx default or DSN | Connection pool size for the read replica pool, bounding concurrent replica reads.                                                                                                          |
+| `WithPartitions(n)`      | Unpartitioned      | Hash-partitions `rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows` by `workspace_id`. Must be a power of two up to 1024. Applied only when creating the schema. |
+| `WithoutMigrations()`    | Migrate at boot    | Disables automatic migration during `Open`. `Open` verifies the schema matches the binary version without executing DDL or acquiring migration advisory locks.                              |
 
 Migration functions:
 
@@ -169,7 +188,7 @@ Each sync node opens the following database connections:
 | --------------------- | --------------------------------------------------------------------------------------------- |
 | `WithMaxConns`        | The `pgstore` primary pool. A write holds one connection while waiting on its workspace lock. |
 | `WithReplicaMaxConns` | The replica pool against the standby. Used only with `WithReadReplica`.                       |
-| 1                     | The lease session, dialed on first use and shared by all application namespaces.              |
+| 1                     | The lease session, dialed on first use and shared by every application on the node.           |
 | 1                     | The `pglisten` `LISTEN` connection, kept open for the process lifetime.                       |
 | 1                     | The `pglisten` publisher connection, dialed on the first notification.                        |
 

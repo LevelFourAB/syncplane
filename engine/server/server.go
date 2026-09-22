@@ -693,6 +693,10 @@ type Server struct {
 	perms    Permissions
 	authn    Authenticator
 	notifier pubsub.Notifier
+	// wsPrefix is this server's share of the workspace-id space, empty unless
+	// a Manager hosts it. New applies it to the notifier and the room
+	// registry; storage arrives already prefixed (see prefixstore).
+	wsPrefix string
 	// presenceBus fans room events out to the other nodes; rooms is this node's
 	// view built on top of it, and roomSweep is the goroutine driving the
 	// registry's announce-and-expire pass. See engine/presence.
@@ -828,6 +832,11 @@ func WithPermissions(p Permissions) Option {
 // A replacement should also implement pubsub.Activity, or SubscribeActivity
 // stops answering and per-workspace background consumers fall back to sweeping
 // on a timer to notice work another node's writes created.
+//
+// One notifier may be shared by every app a Manager hosts: the server prefixes
+// the ids it publishes and subscribes to with its own share of the
+// workspace-id space, so two apps that both have a workspace "team" do not
+// wake each other's clients.
 func WithNotifier(n pubsub.Notifier) Option {
 	return func(s *Server) error { s.notifier = n; return nil }
 }
@@ -837,9 +846,10 @@ func WithNotifier(n pubsub.Notifier) Option {
 // reaches only this process, so a multi-node deployment that leaves it in place
 // shows each client the participants its own node happens to be serving.
 //
-// engine/presence/pgpresence is one over Postgres LISTEN/NOTIFY. A bus is
-// per-app in the same way a notifier is: workspace ids are namespaced per app,
-// so a Manager hosting several must give each its own namespaced view.
+// engine/presence/pgpresence is one over Postgres LISTEN/NOTIFY. One bus may
+// be shared by every app a Manager hosts, on the same terms as a notifier: the
+// room registry prefixes the topics it puts on the bus with the server's own
+// share of the workspace-id space.
 func WithPresenceBus(b presence.Bus) Option {
 	return func(s *Server) error {
 		if b != nil {
@@ -1075,6 +1085,9 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 		byType:    make(map[protoreflect.FullName]*entityInfo),
 		schemaRev: s.baseSchemaRev,
 	})
+	// The prefix goes on first, below every other wrapper, so that everything
+	// in this server deals in the bare workspace ids its callers use.
+	s.notifier = pubsub.Prefixed(s.notifier, s.wsPrefix)
 	// Counters on both sides of the coalescing wrapper, so the difference
 	// between them is exactly what coalescing absorbed. Inner goes on first so
 	// it sits below the wrapper and sees only what got through.
@@ -1085,6 +1098,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	s.rooms = presence.NewRegistry(s.presenceBus, presence.Options{
 		Announce:        s.roomAnnounce,
 		MaxParticipants: s.limits.MaxParticipantsPerRoom,
+		WorkspacePrefix: s.wsPrefix,
 	})
 	s.roomSessions = newSessionBindings()
 	s.roomAnchors = newAnchorCache(s.heartbeat)
@@ -1775,7 +1789,7 @@ func fieldIsOpaque(fd protoreflect.FieldDescriptor) bool {
 // just-written workspace appears on a later call, so poll rather than assume
 // one call is exhaustive.
 func (s *Server) WorkspaceIDs(ctx context.Context) ([]string, error) {
-	return s.store.ListWorkspaceIDs(ctx)
+	return s.store.ListWorkspaceIDs(ctx, storage.Range{})
 }
 
 // EntityKey derives the wire entity name and row key from a registered

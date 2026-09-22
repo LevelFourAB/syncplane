@@ -24,8 +24,8 @@
 //
 // # Write mutual exclusion
 //
-// WithWriteTx takes pg_advisory_xact_lock over a hash of (namespace,
-// workspace_id) as its FIRST statement, before invoking fn. The contract
+// WithWriteTx takes pg_advisory_xact_lock over a hash of the workspace id as
+// its FIRST statement, before invoking fn. The contract
 // demands exclusion for the whole of fn including the reads it makes before
 // its first write (the push path reads a client watermark, then writes it
 // back), and row locks cannot give that: lazy registration means a workspace's
@@ -136,18 +136,14 @@ import (
 // error rather than spin.
 const maxWriteAttempts = 10
 
-// Store implements storage.Adapter. Stores derived via Namespace share the
-// pool; only the Store returned by Open owns (and closes) it.
+// Store implements storage.Adapter.
 type Store struct {
 	pool *pgxpool.Pool
 	// replica is the read-replica pool, nil unless Open was given
 	// WithReadReplica. Only replica.go's reads and the workspace-list queries
 	// touch it.
 	replica *pgxpool.Pool
-	ns      string
-	owner   bool
-	// leases backs the lease.Provider implementation (see leases.go), shared
-	// by every derived namespace so they lease out of one space.
+	// leases backs the lease.Provider implementation (see leases.go).
 	leases *pgLeases
 }
 
@@ -155,7 +151,6 @@ type Store struct {
 type Option func(*config)
 
 type config struct {
-	ns              string
 	maxConns        int32
 	replicaDSN      string
 	replicaMaxConns int32
@@ -175,13 +170,6 @@ func newConfig(opts []Option) (config, error) {
 			maxPartitions, p)
 	}
 	return cfg, nil
-}
-
-// WithNamespace scopes the store to an app namespace. Namespaces partition
-// workspaces, rows and client watermarks within one database; the default is
-// "". Equivalent to Open(...).Namespace(ns) but spares the intermediate store.
-func WithNamespace(ns string) Option {
-	return func(c *config) { c.ns = ns }
 }
 
 // WithMaxConns caps the connection pool. A write transaction holds a connection
@@ -214,8 +202,8 @@ func WithReplicaMaxConns(n int32) Option {
 	return func(c *config) { c.replicaMaxConns = n }
 }
 
-// WithPartitions hash-partitions the workspace-scoped tables by (namespace,
-// workspace_id) with the given modulus.
+// WithPartitions hash-partitions the workspace-scoped tables by workspace_id
+// with the given modulus.
 //
 // The tables are rows, field_deltas, idempotency, index_entries and
 // consumer_shadows. The modulus must be a power of two up to 1024; zero, the
@@ -256,7 +244,7 @@ func WithoutMigrations() Option {
 //
 // Several processes may Open the same database concurrently: migration is
 // serialized by an advisory lock, which is the difference from sqlitestore's
-// "never open the same file twice". Use Namespace to multiplex apps over one
+// "never open the same file twice". Use prefixstore to multiplex apps over one
 // database.
 func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	cfg, err := newConfig(opts)
@@ -299,23 +287,11 @@ func Open(ctx context.Context, dsn string, opts ...Option) (*Store, error) {
 	}
 	// The lease session dials lazily, on the first TryAcquire, so a
 	// deployment that never leases never pays the connection.
-	return &Store{pool: pool, replica: replica, ns: cfg.ns, owner: true, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
+	return &Store{pool: pool, replica: replica, leases: newPgLeases(poolCfg.ConnConfig.Copy())}, nil
 }
 
-// Namespace returns a view of the store scoped to the given app namespace,
-// sharing the pool. Close on a derived store is a no-op — the Store returned by
-// Open owns the pool and must outlive every derived store. The server-global
-// schema catalog is shared across namespaces.
-func (s *Store) Namespace(ns string) storage.Adapter {
-	return &Store{pool: s.pool, replica: s.replica, ns: ns, leases: s.leases}
-}
-
-// Close closes the pool if this store owns it (came from Open); on a
-// Namespace-derived store it is a no-op.
+// Close closes the pools and the lease session.
 func (s *Store) Close() error {
-	if !s.owner {
-		return nil
-	}
 	s.leases.close()
 	if s.replica != nil {
 		s.replica.Close()
@@ -324,15 +300,12 @@ func (s *Store) Close() error {
 	return nil
 }
 
-// workspaceLockKey hashes (namespace, workspace_id) into the advisory-lock
-// keyspace. The salt keeps syncplane's locks clear of any other application
-// taking advisory locks on the same database; the separator keeps ("a", "bc")
-// and ("ab", "c") apart.
-func workspaceLockKey(ns, ws string) int64 {
+// workspaceLockKey hashes a workspace id into the advisory-lock keyspace. The
+// salt keeps syncplane's locks clear of any other application taking advisory
+// locks on the same database.
+func workspaceLockKey(ws string) int64 {
 	h := fnv.New64a()
 	_, _ = h.Write([]byte("syncplane:workspace\x00"))
-	_, _ = h.Write([]byte(ns))
-	_, _ = h.Write([]byte{0})
 	_, _ = h.Write([]byte(ws))
 	return int64(h.Sum64())
 }
@@ -357,7 +330,7 @@ func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(stor
 		return err
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ns: s.ns, ws: workspaceID}})
+	return fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ws: workspaceID}})
 }
 
 func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
@@ -397,14 +370,14 @@ func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(stora
 	// does not need the workspace to exist yet. It releases on commit or
 	// rollback.
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`,
-		workspaceLockKey(s.ns, workspaceID)); err != nil {
+		workspaceLockKey(workspaceID)); err != nil {
 		return err
 	}
 	// The workspaces row is NOT created here: pgTx.register mints it on the
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	ptx := &pgTx{tx: tx, ctx: ctx, ns: s.ns, ws: workspaceID}
+	ptx := &pgTx{tx: tx, ctx: ctx, ws: workspaceID}
 	if err := fn(ptx); err != nil {
 		return err
 	}
@@ -440,22 +413,24 @@ func isRetryable(err error) bool {
 	return false
 }
 
-func (s *Store) ListWorkspaceIDs(ctx context.Context) ([]string, error) {
+func (s *Store) ListWorkspaceIDs(ctx context.Context, rng storage.Range) ([]string, error) {
 	// The replica may answer: every caller is a periodic re-poll, and the
 	// contract licenses a bounded-staleness view. A replica failure retries
 	// on the primary rather than surfacing — the list is how background
 	// passes find work, and a lagging replica must not stall them.
 	if s.replica != nil {
-		if ids, err := s.listWorkspaceIDs(ctx, s.replica); err == nil {
+		if ids, err := s.listWorkspaceIDs(ctx, s.replica, rng); err == nil {
 			return ids, nil
 		}
 	}
-	return s.listWorkspaceIDs(ctx, s.pool)
+	return s.listWorkspaceIDs(ctx, s.pool, rng)
 }
 
-func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool) ([]string, error) {
+func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool, rng storage.Range) ([]string, error) {
+	var args []any
+	where := rangeWhere("workspace_id", rng, argAppender(&args))
 	rows, err := pool.Query(ctx,
-		`SELECT workspace_id FROM workspaces WHERE namespace = $1 ORDER BY workspace_id`, s.ns)
+		`SELECT workspace_id FROM workspaces WHERE `+where+` ORDER BY workspace_id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -474,14 +449,14 @@ func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool) ([]str
 // ListCollectableWorkspaceIDs answers "which workspaces hold something this
 // pass would reclaim" as a single query: the workspace scan is in primary-key
 // order, and every candidate table is reached through its _gc index on
-// (namespace, workspace_id, updated_at) — correlated per workspace or hashed
+// (workspace_id, updated_at) — correlated per workspace or hashed
 // once, whichever the planner costs lower. Either way a workspace with nothing
 // collectable costs index reads and no transaction, where a pass without this
 // took the workspace's advisory lock and ran six DELETEs to learn the same
 // thing.
 //
 // The entity purges are the exception. Live rows of an aging entity are found
-// on rows_by_entity_version's (namespace, workspace_id, entity) prefix with
+// on rows_by_entity_version's (workspace_id, entity) prefix with
 // updated_at left as a filter, so a workspace whose entity has no expired row
 // reads that entity's entries to say so — the same range PurgeEntityRows walks
 // to delete them, read instead of written.
@@ -490,11 +465,11 @@ func (s *Store) listWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool) ([]str
 // queries: a lagging replica would keep returning workspaces a pass has just
 // collected, and each of those costs the write transaction this query exists to
 // avoid. Its cost is one query a minute, so there is nothing to offload.
-func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, after string, limit int) ([]string, error) {
+func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage.GCCutoffs, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
 	}
-	where, args := collectableWhere(s.ns, after, cutoffs)
+	where, args := collectableWhere(rng, cutoffs)
 	args = append(args, int64(limit))
 	rows, err := s.pool.Query(ctx,
 		fmt.Sprintf(`SELECT w.workspace_id FROM workspaces w WHERE %s
@@ -515,21 +490,19 @@ func (s *Store) ListCollectableWorkspaceIDs(ctx context.Context, cutoffs storage
 }
 
 // collectableWhere builds ListCollectableWorkspaceIDs' predicate, numbering
-// placeholders from $1 (namespace) and $2 (after).
+// placeholders in the order it appends their arguments.
 //
 // A zero cutoff drops its probe rather than comparing against what UnixMilli()
 // makes of it — the same distinction purgeWhere draws, and here it is the
 // difference between "keep this kind forever" and "collect all of it".
-func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []any) {
-	args := []any{ns, after}
-	next := func(v any) string {
-		args = append(args, v)
-		return fmt.Sprintf("$%d", len(args))
-	}
+func collectableWhere(rng storage.Range, cutoffs storage.GCCutoffs) (string, []any) {
+	var args []any
+	next := argAppender(&args)
+	where := rangeWhere("w.workspace_id", rng, next)
 	var probes []string
 	exists := func(body string) { probes = append(probes, "EXISTS (SELECT 1 FROM "+body+")") }
 	scoped := func(table string) string {
-		return table + " t WHERE t.namespace = w.namespace AND t.workspace_id = w.workspace_id"
+		return table + " t WHERE t.workspace_id = w.workspace_id"
 	}
 	if !cutoffs.Tombstones.IsZero() {
 		at := cutoffs.Tombstones.UnixMilli()
@@ -553,7 +526,6 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 		exists(scoped("rows") + " AND NOT t.deleted AND t.entity = " + next(e.Entity) +
 			" AND t.updated_at < " + next(e.Before.UnixMilli()))
 	}
-	where := "w.namespace = $1 AND w.workspace_id > $2"
 	if len(probes) == 0 {
 		// A pass that would collect nothing has no workspaces to visit. Said
 		// here rather than left to an empty OR, which reads as TRUE and would
@@ -571,14 +543,18 @@ func collectableWhere(ns, after string, cutoffs storage.GCCutoffs) (string, []an
 // On the primary, for ListCollectableWorkspaceIDs' reason: a lagging replica
 // would re-select workspaces whose mark is already written, and each of those
 // costs a lease and a write transaction.
-func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after string, limit int) ([]string, error) {
+func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark string, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
 	}
+	var args []any
+	next := argAppender(&args)
+	where := rangeWhere("workspace_id", rng, next)
+	markArg, limitArg := next(mark), next(int64(limit))
 	rows, err := s.pool.Query(ctx,
 		`SELECT workspace_id FROM workspaces
-		 WHERE namespace = $1 AND workspace_id > $2 AND index_build_mark <> $3
-		 ORDER BY workspace_id LIMIT $4`, s.ns, after, mark, int64(limit))
+		 WHERE `+where+` AND index_build_mark <> `+markArg+`
+		 ORDER BY workspace_id LIMIT `+limitArg, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -605,17 +581,21 @@ func (s *Store) ListStaleIndexWorkspaceIDs(ctx context.Context, mark, after stri
 // for the same reason that query is — a lagging replica re-selects workspaces
 // whose mark is already written, and each costs a lease and a write
 // transaction.
-func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, after string, limit int) ([]string, error) {
+func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, rng storage.Range, limit int) ([]string, error) {
 	if limit <= 0 {
 		return nil, fmt.Errorf("pgstore: limit must be positive, got %d", limit)
 	}
+	var args []any
+	next := argAppender(&args)
+	where := rangeWhere("workspace_id", rng, next)
+	purgedArg, limitArg := next(int32(minPurged)), next(int64(limit))
 	rows, err := s.pool.Query(ctx,
 		`SELECT workspace_id FROM workspaces
-		 WHERE namespace = $1 AND workspace_id > $2
+		 WHERE `+where+`
 		   AND (text_compact_seq < field_delta_horizon
 		        OR (text_compact_seq = field_delta_horizon AND text_compact_entity <> '')
-		        OR text_compact_min_purged > $3)
-		 ORDER BY workspace_id LIMIT $4`, s.ns, after, int32(minPurged), int64(limit))
+		        OR text_compact_min_purged > `+purgedArg+`)
+		 ORDER BY workspace_id LIMIT `+limitArg, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -633,15 +613,15 @@ func (s *Store) ListCompactableWorkspaceIDs(ctx context.Context, minPurged int, 
 
 // ListPendingWorkspaceIDs answers "which workspaces owe this consumer work" as
 // a single indexed query: the workspace scan is in primary-key order, and each
-// row probes consumer_positions on its own primary key prefix (namespace,
-// workspace_id, consumer). A workspace with no position row for the consumer is
+// row probes consumer_positions on its own primary key prefix (workspace_id,
+// consumer). A workspace with no position row for the consumer is
 // pending by the LEFT JOIN — a first run has acted on nothing.
 //
 // A non-empty entity or key is pending whatever the sequence says: that is a
 // sub-position inside a same-sequence group, so the group has changes after it
 // even when the sequence has reached the head. Only a clean boundary — the
 // cursor a drained pass records — means caught up.
-func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer, after string, limit int) ([]string, error) {
+func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer string, rng storage.Range, limit int) ([]string, error) {
 	if consumer == "" {
 		return nil, fmt.Errorf("pgstore: consumer name is required")
 	}
@@ -651,25 +631,29 @@ func (s *Store) ListPendingWorkspaceIDs(ctx context.Context, consumer, after str
 	// Replica-first with a primary retry, as in ListWorkspaceIDs and for the
 	// same reason: a polling consumer tolerates staleness, not a stall.
 	if s.replica != nil {
-		if ids, err := s.listPendingWorkspaceIDs(ctx, s.replica, consumer, after, limit); err == nil {
+		if ids, err := s.listPendingWorkspaceIDs(ctx, s.replica, consumer, rng, limit); err == nil {
 			return ids, nil
 		}
 	}
-	return s.listPendingWorkspaceIDs(ctx, s.pool, consumer, after, limit)
+	return s.listPendingWorkspaceIDs(ctx, s.pool, consumer, rng, limit)
 }
 
-func (s *Store) listPendingWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool, consumer, after string, limit int) ([]string, error) {
+func (s *Store) listPendingWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool, consumer string, rng storage.Range, limit int) ([]string, error) {
+	var args []any
+	next := argAppender(&args)
+	consumerArg := next(consumer)
+	where := rangeWhere("w.workspace_id", rng, next)
+	limitArg := next(int64(limit))
 	rows, err := pool.Query(ctx,
 		`SELECT w.workspace_id
 		 FROM workspaces w
 		 LEFT JOIN consumer_positions p
-		   ON p.namespace = w.namespace
-		   AND p.workspace_id = w.workspace_id
-		   AND p.consumer = $1
-		 WHERE w.namespace = $2 AND w.workspace_id > $3
+		   ON p.workspace_id = w.workspace_id
+		   AND p.consumer = `+consumerArg+`
+		 WHERE `+where+`
 		   AND (p.seq IS NULL OR p.seq < w.last_seq OR p.entity <> '' OR p.key <> '')
 		 ORDER BY w.workspace_id
-		 LIMIT $4`, consumer, s.ns, after, int64(limit))
+		 LIMIT `+limitArg, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -685,45 +669,66 @@ func (s *Store) listPendingWorkspaceIDs(ctx context.Context, pool *pgxpool.Pool,
 	return ids, rows.Err()
 }
 
-// PutAppSchema upserts an app's descriptor set into the server-global schema
-// catalog (the namespace view is irrelevant here — app_id is the partition).
-func (s *Store) PutAppSchema(ctx context.Context, appID string, set []byte, revision string) error {
+// PutCatalogEntry upserts an entry into the server-global catalog.
+func (s *Store) PutCatalogEntry(ctx context.Context, id string, payload []byte, revision string) error {
 	_, err := s.pool.Exec(ctx,
-		`INSERT INTO schemas (app_id, descriptor_set, revision, updated_at)
+		`INSERT INTO catalog (id, payload, revision, updated_at)
 		 VALUES ($1, $2, $3, $4)
-		 ON CONFLICT (app_id)
-		 DO UPDATE SET descriptor_set = excluded.descriptor_set,
+		 ON CONFLICT (id)
+		 DO UPDATE SET payload = excluded.payload,
 		               revision = excluded.revision, updated_at = excluded.updated_at`,
-		appID, set, revision, time.Now().UnixMilli(),
+		id, payload, revision, time.Now().UnixMilli(),
 	)
 	return err
 }
 
-func (s *Store) ListAppSchemas(ctx context.Context) ([]storage.AppSchema, error) {
+func (s *Store) ListCatalogEntries(ctx context.Context) ([]storage.CatalogEntry, error) {
 	rows, err := s.pool.Query(ctx,
-		`SELECT app_id, descriptor_set, revision, updated_at FROM schemas ORDER BY app_id`)
+		`SELECT id, payload, revision, updated_at FROM catalog ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []storage.AppSchema
+	var out []storage.CatalogEntry
 	for rows.Next() {
 		var (
-			a       storage.AppSchema
+			e       storage.CatalogEntry
 			updated int64
 		)
-		if err := rows.Scan(&a.AppID, &a.DescriptorSet, &a.Revision, &updated); err != nil {
+		if err := rows.Scan(&e.ID, &e.Payload, &e.Revision, &updated); err != nil {
 			return nil, err
 		}
-		a.UpdatedAt = time.UnixMilli(updated)
-		out = append(out, a)
+		e.UpdatedAt = time.UnixMilli(updated)
+		out = append(out, e)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteAppSchema(ctx context.Context, appID string) error {
-	_, err := s.pool.Exec(ctx, `DELETE FROM schemas WHERE app_id = $1`, appID)
+func (s *Store) DeleteCatalogEntry(ctx context.Context, id string) error {
+	_, err := s.pool.Exec(ctx, `DELETE FROM catalog WHERE id = $1`, id)
 	return err
+}
+
+// argAppender returns the placeholder-minting closure the workspace-list
+// queries share: it appends an argument and names it by its position, so a
+// predicate assembled out of optional parts numbers itself.
+func argAppender(args *[]any) func(any) string {
+	return func(v any) string {
+		*args = append(*args, v)
+		return fmt.Sprintf("$%d", len(*args))
+	}
+}
+
+// rangeWhere renders rng as a predicate on col, appending its arguments through
+// next. The upper bound is left out when the range has none rather than
+// compared against a sentinel, so a scan that owns the whole table plans as one
+// that has no bound at all.
+func rangeWhere(col string, rng storage.Range, next func(any) string) string {
+	where := col + " > " + next(rng.After)
+	if rng.Before != "" {
+		where += " AND " + col + " < " + next(rng.Before)
+	}
+	return where
 }
 
 // newStoreEpoch mints the random identity a workspace's first write stamps on

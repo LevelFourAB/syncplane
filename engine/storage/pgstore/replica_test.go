@@ -149,11 +149,11 @@ var _ = Describe("Postgres read replica", func() {
 
 		// ws2 exists only on the primary; a replica-served list may omit it,
 		// which is the bounded staleness the contract licenses.
-		ids, err := store.ListWorkspaceIDs(ctx)
+		ids, err := store.ListWorkspaceIDs(ctx, storage.Range{})
 		Expect(err).NotTo(HaveOccurred())
 		Expect(ids).To(Equal([]string{"ws1"}))
 
-		pending, err := store.ListPendingWorkspaceIDs(ctx, "c", "", 10)
+		pending, err := store.ListPendingWorkspaceIDs(ctx, "c", storage.Range{}, 10)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(pending).To(Equal([]string{"ws1"}))
 	})

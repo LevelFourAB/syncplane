@@ -83,8 +83,8 @@ func (r replicaReader) WithReadTxMinSeq(ctx context.Context, workspaceID string,
 		// against a fresher snapshot than the transaction's own.
 		var seq int64
 		err := tx.QueryRow(ctx,
-			`SELECT last_seq FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
-			s.ns, workspaceID).Scan(&seq)
+			`SELECT last_seq FROM workspaces WHERE workspace_id = $1`,
+			workspaceID).Scan(&seq)
 		switch {
 		case errors.Is(err, pgx.ErrNoRows):
 			seq = 0
@@ -98,7 +98,7 @@ func (r replicaReader) WithReadTxMinSeq(ctx context.Context, workspaceID string,
 		}
 	}
 	defer func() { _ = tx.Rollback(ctx) }()
-	return storage.ReadRouteReplica, fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ns: s.ns, ws: workspaceID}})
+	return storage.ReadRouteReplica, fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ws: workspaceID}})
 }
 
 func (r replicaReader) WithReadTxAnchored(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {
@@ -108,8 +108,8 @@ func (r replicaReader) WithReadTxAnchored(ctx context.Context, workspaceID strin
 	// primary one statement rather than a held connection.
 	var seq int64
 	err := s.pool.QueryRow(ctx,
-		`SELECT last_seq FROM workspaces WHERE namespace = $1 AND workspace_id = $2`,
-		s.ns, workspaceID).Scan(&seq)
+		`SELECT last_seq FROM workspaces WHERE workspace_id = $1`,
+		workspaceID).Scan(&seq)
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		seq = 0

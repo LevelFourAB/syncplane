@@ -9,15 +9,30 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/prefixstore"
 )
 
 // Manager hosts multiple apps on one engine, mapping each app to its own
-// *Server over its own storage namespace. App identity is purely a routing +
-// storage-partition concern (it is NOT encoded in the proto package), so two
-// apps may both define sync.dynamic.Todo without colliding — they live in
-// distinct *Server instances over distinct data partitions.
+// *Server over its own partition of the root adapter's workspaces. App
+// identity is purely a routing + storage-partition concern (it is NOT encoded
+// in the proto package), so two apps may both define sync.dynamic.Todo without
+// colliding — they live in distinct *Server instances over distinct data
+// partitions.
+//
+// The partition is a workspace-id prefix, "<appID>/", and it reaches every
+// plane an app's server sits on: storage through prefixstore, the change
+// notifier through the server itself, and the presence bus through its room
+// registry. None of those knows what an app is, which is why one storage
+// adapter, one notifier and one bus can be shared by every hosted app and
+// still keep them apart. App ids are restricted (see naming.ValidateAppID) so
+// that no two of them can produce the same prefixed id.
+//
+// An app's own code — its permission hooks, its effects, its clients — deals
+// in bare workspace ids throughout.
 //
 // The public sync surface is routed by a leading "/<appID>" path segment (see
 // SyncHandler); the trusted admin surface (AdminHandler) is mounted separately
@@ -29,12 +44,12 @@ import (
 // The two option seams follow that split:
 //
 //   - WithServerOptions carries what every app has in common — one
-//     Authenticator, limits, the notifier, the logger. The authenticator runs
+//     Authenticator, limits, the notifier, the presence bus, the logger. The authenticator runs
 //     on the app's own handler, so a request is authenticated exactly once,
 //     after routing, and its Principal reaches that app's permission hooks.
 //   - WithAppOptions carries what differs per app, which in practice means
 //     Permissions. A policy needs to know WHICH app it is answering for —
-//     workspace ids are namespaced per app, so "workspace team" in one app is
+//     each app has its own workspace space, so "workspace team" in one app is
 //     unrelated data from "workspace team" in another — and hooks are not
 //     handed an app id. Closing over the app id at construction is how a
 //     policy gets it.
@@ -52,7 +67,10 @@ import (
 // Nothing forces this: an app with no policy inherits AllowAll, which admits
 // every caller into every workspace of that app (see AllowAll).
 type Manager struct {
-	root       storage.Adapter
+	root storage.Adapter
+	// catalog is where the registered schemas persist, resolved from root at
+	// construction; NewManager fails without one.
+	catalog    storage.Catalog
 	authorizer RegisterAuthorizer
 	opts       []Option
 	appOpts    func(appID string) []Option
@@ -90,7 +108,7 @@ func WithRegisterAuthorizer(a RegisterAuthorizer) ManagerOption {
 
 // WithServerOptions sets the server Options applied to every app's *Server
 // (authenticator, limits, notifier, heartbeat, ...). Per-app schema and storage
-// namespace are managed by the Manager and must not be set here.
+// partition are managed by the Manager and must not be set here.
 //
 // Use it for what the collection shares. Anything that must differ per app —
 // Permissions above all — belongs in WithAppOptions, which is applied after
@@ -105,9 +123,9 @@ func WithServerOptions(opts ...Option) ManagerOption {
 // WithServerOptions ones — so a per-app Permissions overrides a shared one.
 //
 // This is the seam for policies that must be bound to an app: hooks receive a
-// principal and a workspace id but no app id, and workspace ids are namespaced
-// per app, so a policy that cannot tell the apps apart cannot decide membership
-// for them. Closing over appID here gives it that context once, rather than per
+// principal and a workspace id but no app id, and each app has its own
+// workspace space, so a policy that cannot tell the apps apart cannot decide
+// membership for them. Closing over appID here gives it that context once, rather than per
 // request.
 //
 // fn must be safe for concurrent use — apps are created lazily, on whichever
@@ -119,9 +137,9 @@ func WithAppOptions(fn func(appID string) []Option) ManagerOption {
 	return func(m *Manager) { m.appOpts = fn }
 }
 
-// NewManager builds a Manager over a namespaceable root adapter and reloads
-// every persisted app schema, re-registering its entities BEFORE returning, so
-// a restart leaves all previously-registered apps immediately syncable. A
+// NewManager builds a Manager over a root adapter and reloads every persisted
+// app schema, re-registering its entities BEFORE returning, so a restart
+// leaves all previously-registered apps immediately syncable. A
 // persisted schema that fails to re-register aborts startup (the stored bytes
 // were valid when first accepted, so a failure signals real corruption or a
 // binary downgrade) — and takes the apps reloaded before it down with it,
@@ -129,16 +147,24 @@ func WithAppOptions(fn func(appID string) []Option) ManagerOption {
 //
 // The Manager owns the app servers it creates; close it (and then the root
 // adapter) at shutdown. See Close.
+//
+// root must implement storage.Catalog, which is where the registered schemas
+// persist; an adapter without one can back a Server but not a Manager.
 func NewManager(ctx context.Context, root storage.Adapter, opts ...ManagerOption) (*Manager, error) {
+	catalog, ok := storage.As[storage.Catalog](root)
+	if !ok {
+		return nil, fmt.Errorf("server: manager: adapter cannot persist app schemas (no storage.Catalog)")
+	}
 	m := &Manager{
 		root:       root,
+		catalog:    catalog,
 		authorizer: DenyAll{},
 		apps:       map[string]*hostedApp{},
 	}
 	for _, opt := range opts {
 		opt(m)
 	}
-	schemas, err := root.ListAppSchemas(ctx)
+	schemas, err := m.ListAppSchemas(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("server: manager boot: list app schemas: %w", err)
 	}
@@ -163,7 +189,7 @@ func NewManager(ctx context.Context, root storage.Adapter, opts ...ManagerOption
 }
 
 // appServer returns the app's *Server, creating it (over the app's storage
-// namespace, with the shared options plus this app's own) on first use. It
+// partition, with the shared options plus this app's own) on first use. It
 // fails when those options do not build a server — a bad per-app declaration
 // from WithAppOptions is only discovered here, when that app is first hosted.
 func (m *Manager) appServer(appID string) (*Server, error) {
@@ -190,7 +216,12 @@ func (m *Manager) host(appID string) (*hostedApp, error) {
 	if m.closed {
 		return nil, fmt.Errorf("server: app %q: manager is closed", appID)
 	}
-	srv, err := New(m.root.Namespace(appID), m.optionsFor(appID)...)
+	if err := naming.ValidateAppID(appID); err != nil {
+		return nil, fmt.Errorf("server: %w", err)
+	}
+	prefix := appPrefix(appID)
+	opts := append([]Option{withWorkspacePrefix(prefix)}, m.optionsFor(appID)...)
+	srv, err := New(prefixstore.Wrap(m.root, prefix), opts...)
 	if err != nil {
 		return nil, fmt.Errorf("server: app %q: %w", appID, err)
 	}
@@ -289,12 +320,47 @@ func (m *Manager) App(appID string) *Server {
 	return app.srv
 }
 
+// AppSchema is one app's persisted registration: the serialized
+// google.protobuf.FileDescriptorSet it registered, the revision the engine
+// derived from it, and when it was last written.
+type AppSchema struct {
+	AppID         string
+	DescriptorSet []byte
+	Revision      string
+	UpdatedAt     time.Time
+}
+
 // ListAppSchemas returns every persisted app schema (app id + revision +
-// descriptor set), ordered by app id. It passes through to the root adapter —
-// the same call NewManager makes at boot — so the admin UI can list apps and
-// their schema revision without re-deriving anything.
-func (m *Manager) ListAppSchemas(ctx context.Context) ([]storage.AppSchema, error) {
-	return m.root.ListAppSchemas(ctx)
+// descriptor set), ordered by app id. It reads the adapter's catalog — the
+// same call NewManager makes at boot — so the admin UI can list apps and their
+// schema revision without re-deriving anything.
+func (m *Manager) ListAppSchemas(ctx context.Context) ([]AppSchema, error) {
+	entries, err := m.catalog.ListCatalogEntries(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]AppSchema, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, AppSchema{
+			AppID:         e.ID,
+			DescriptorSet: e.Payload,
+			Revision:      e.Revision,
+			UpdatedAt:     e.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+// appPrefix is the workspace-id prefix an app's data lives under. The
+// separator is outside the workspace-id and app-id alphabets, so no pair of
+// ids can spell another pair's prefixed id.
+func appPrefix(appID string) string { return appID + "/" }
+
+// withWorkspacePrefix scopes a server's notifier and room registry to one
+// prefix of the workspace-id space. Only a Manager sets it, together with the
+// matching prefixstore view: a server built directly owns the whole space.
+func withWorkspacePrefix(prefix string) Option {
+	return func(s *Server) error { s.wsPrefix = prefix; return nil }
 }
 
 // RegisterStatus reports how a registration changed the app's schema.
@@ -354,7 +420,7 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte) (Manag
 		} else {
 			status = RegisterUpdated
 		}
-		if err := m.root.PutAppSchema(ctx, appID, set, r.Revision); err != nil {
+		if err := m.catalog.PutCatalogEntry(ctx, appID, set, r.Revision); err != nil {
 			return ManagerRegisterResult{}, fmt.Errorf("server: persist app schema: %w", err)
 		}
 		srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema registered",

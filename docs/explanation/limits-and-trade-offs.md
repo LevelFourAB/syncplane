@@ -196,11 +196,11 @@ For single-node capacity guidelines and multi-node setup, see [Scale envelope](#
 
 One process, one SQLite file (a single writer across every app on the host), and an in-process change notifier: apps do not contend for anything but that writer, and a workspace write path is short. This configuration is sized for internal tools with tens of apps and human-paced write rates.
 
-This setup stops fitting when sustained writes saturate the single writer, or when you need more than one node. You can migrate to [`pgstore`](../reference/storage-adapter.md#adapters) plus a shared notifier with `WithNotifier`. (Clients on other nodes otherwise converge by polling, correctly but with poll latency.) Nothing above the storage seam changes when that happens; `Manager`, namespaces, and authentication wiring are unaffected. See [Run more than one node](../how-to/run-multiple-nodes.md).
+This setup stops fitting when sustained writes saturate the single writer, or when you need more than one node. You can migrate to [`pgstore`](../reference/storage-adapter.md#adapters) plus a shared notifier with `WithNotifier`. (Clients on other nodes otherwise converge by polling, correctly but with poll latency.) Nothing above the storage seam changes when that happens; `Manager`, app partitioning, and authentication wiring are unaffected. See [Run more than one node](../how-to/run-multiple-nodes.md).
 
 ## `app_id` is a coarser partition than `workspace_id`
 
-When using a `Manager`, each application runs as an isolated `*Server` instance with its own storage namespace and entity catalog. The `workspace_id` parameter partitions data within an individual application. Two applications can declare identical entity schemas without namespace collisions.
+When using a `Manager`, each application runs as an isolated `*Server` instance with its own prefix of the workspace-ID space and its own entity catalog. The `workspace_id` parameter partitions data within an individual application. Two applications can declare identical entity schemas without colliding.
 
 Application identity is used for routing and storage segregation only; it is not encoded in protobuf package names. Application registration (`RegisterAuthorizer`) is trusted.
 

@@ -90,21 +90,22 @@ To run multiple nodes in Go, replace the default SQLite store and in-process tra
 
 ## Hosting multiple applications
 
-If you host multiple applications with `server.Manager`, derive a namespaced notifier for each application so workspaces with identical names do not notify the wrong clients:
+If you host multiple applications with `server.Manager`, pass one notifier and one presence bus for all of them:
 
 ```go
 mgr, err := server.NewManager(ctx, store,
-	server.WithAppOptions(func(appID string) []server.Option {
-		return []server.Option{server.WithNotifier(notifier.Namespace(appID))}
-	}),
+	server.WithServerOptions(
+		server.WithNotifier(notifier),
+		server.WithPresenceBus(bus),
+	),
 )
 ```
 
-`server.Manager` automatically namespaces the store per application. Only the notifier requires explicit namespacing.
+`server.Manager` partitions the store, the notifier and the bus itself: each application's server prefixes the workspace IDs it puts on them, so workspaces with identical names in different applications never reach each other.
 
 ## Running multiple nodes with syncplaned
 
-If you run the standalone `syncplaned` host binary, pass a PostgreSQL connection URI to the `-db` flag. `syncplaned` automatically selects `pgstore` and namespaces `pgnotify` per application:
+If you run the standalone `syncplaned` host binary, pass a PostgreSQL connection URI to the `-db` flag. `syncplaned` automatically selects `pgstore`, `pgnotify` and `pgpresence`:
 
 ```sh
 syncplaned -db postgres://user:pass@host/syncplane   # Postgres, multi-node ready
@@ -119,7 +120,7 @@ syncplaned -db postgres://user:pass@host/syncplane \
 
 ## Isolating deployments on a shared database
 
-If multiple deployments (such as staging and production) share a PostgreSQL database, isolate their channels, schemas, and namespaces:
+If multiple deployments (such as staging and production) share a PostgreSQL database, isolate their channels and schemas:
 
 1. **Configure separate notification channels.**
    Pass `WithChannel` to assign unique notification channels:
@@ -138,9 +139,9 @@ If multiple deployments (such as staging and production) share a PostgreSQL data
    PostgreSQL advisory locks are scoped to the database. Leases hash the schema name to stay isolated, but shared databases still contend on:
 
    - The migration lock (a fixed key), which causes deployments to take turns migrating at startup.
-   - The per-workspace write lock (keyed by namespace and workspace ID), which serializes writes when both deployment namespace and workspace names match.
+   - The per-workspace write lock (keyed by workspace ID), which serializes writes when two deployments use the same workspace names.
 
-   To eliminate lock contention, use separate databases or assign distinct namespaces to each deployment.
+   To eliminate lock contention, use separate databases or separate schemas.
 
 ## Verifying the setup
 

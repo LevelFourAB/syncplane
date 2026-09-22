@@ -24,31 +24,33 @@ type fakeGCStore struct {
 	collected []string
 }
 
-func (f *fakeGCStore) ListWorkspaceIDs(context.Context) ([]string, error) { return f.ids, nil }
-func (f *fakeGCStore) Close() error                                       { return nil }
+func (f *fakeGCStore) ListWorkspaceIDs(context.Context, storage.Range) ([]string, error) {
+	return f.ids, nil
+}
+func (f *fakeGCStore) Close() error { return nil }
 
 // The background passes reach every workspace this fake holds, so both work
 // queries answer the whole list. Paging it for real is what lets a test assert
 // that a pass covers more workspaces than one page carries.
-func (f *fakeGCStore) ListCollectableWorkspaceIDs(_ context.Context, _ storage.GCCutoffs, after string, limit int) ([]string, error) {
-	return pageIDs(f.ids, after, limit), nil
+func (f *fakeGCStore) ListCollectableWorkspaceIDs(_ context.Context, _ storage.GCCutoffs, rng storage.Range, limit int) ([]string, error) {
+	return pageIDs(f.ids, rng, limit), nil
 }
 
-func (f *fakeGCStore) ListStaleIndexWorkspaceIDs(_ context.Context, _, after string, limit int) ([]string, error) {
-	return pageIDs(f.ids, after, limit), nil
+func (f *fakeGCStore) ListStaleIndexWorkspaceIDs(_ context.Context, _ string, rng storage.Range, limit int) ([]string, error) {
+	return pageIDs(f.ids, rng, limit), nil
 }
 
-func (f *fakeGCStore) ListCompactableWorkspaceIDs(_ context.Context, _ int, after string, limit int) ([]string, error) {
-	return pageIDs(f.ids, after, limit), nil
+func (f *fakeGCStore) ListCompactableWorkspaceIDs(_ context.Context, _ int, rng storage.Range, limit int) ([]string, error) {
+	return pageIDs(f.ids, rng, limit), nil
 }
 
-// pageIDs is the paging every work query owes its caller: ids strictly after
-// `after`, in order, at most limit of them. ids is assumed sorted, as an
-// adapter's ORDER BY makes it.
-func pageIDs(ids []string, after string, limit int) []string {
+// pageIDs is the paging every work query owes its caller: the ids inside rng,
+// in order, at most limit of them. ids is assumed sorted, as an adapter's
+// ORDER BY makes it.
+func pageIDs(ids []string, rng storage.Range, limit int) []string {
 	var out []string
 	for _, id := range ids {
-		if id <= after {
+		if id <= rng.After || (rng.Before != "" && id >= rng.Before) {
 			continue
 		}
 		if len(out) == limit {
@@ -61,16 +63,9 @@ func pageIDs(ids []string, after string, limit int) []string {
 
 // GC sweeps every workspace, not a consumer's pending ones, so this fake never
 // answers it.
-func (f *fakeGCStore) ListPendingWorkspaceIDs(context.Context, string, string, int) ([]string, error) {
+func (f *fakeGCStore) ListPendingWorkspaceIDs(context.Context, string, storage.Range, int) ([]string, error) {
 	return nil, errors.New("unused")
 }
-
-func (f *fakeGCStore) Namespace(string) storage.Adapter { return f }
-func (f *fakeGCStore) PutAppSchema(context.Context, string, []byte, string) error {
-	return errors.New("unused")
-}
-func (f *fakeGCStore) ListAppSchemas(context.Context) ([]storage.AppSchema, error) { return nil, nil }
-func (f *fakeGCStore) DeleteAppSchema(context.Context, string) error               { return nil }
 
 func (f *fakeGCStore) WithReadTx(context.Context, string, func(storage.ReadTx) error) error {
 	return errors.New("unused")

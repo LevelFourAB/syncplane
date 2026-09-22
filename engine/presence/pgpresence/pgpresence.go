@@ -38,7 +38,7 @@
 //
 // The transport underneath is engine/pglisten: one connection parked on the
 // channel, one issuing pg_notify, and the reconnect loop over both. What
-// arrives feeds a presence.Local per namespace.
+// arrives feeds a presence.Local.
 //
 // Open dials its own transport. A deployment that also runs pgnotify passes
 // both a shared one instead, halving the connections either would open alone:
@@ -48,20 +48,16 @@
 //	defer link.Close()
 //	bus, err := pgpresence.New(ctx, link)
 //
-// # Namespaces
+// # Hosting several applications
 //
-// Every payload carries the app namespace alongside the topic, and each
-// namespace gets its own presence.Local. server.Manager shares one bus across
-// every app it hosts, and workspace ids are namespaced per app — so without
-// this, two apps that both have a workspace "team" would serve each other's
-// rooms. Derive a per-app view with Namespace and hand it to that app's server:
+// One bus serves every app a server.Manager hosts. Each app's room registry
+// prefixes the workspace id of every topic it puts on the bus with its own
+// share of the id space, so two apps that both have a workspace "team" do not
+// serve each other's rooms and this package needs no notion of an app:
 //
 //	b, err := pgpresence.Open(ctx, dsn)
 //	...
-//	server.NewManager(ctx, root,
-//		server.WithAppOptions(func(appID string) []server.Option {
-//			return []server.Option{server.WithPresenceBus(b.Namespace(appID))}
-//		}))
+//	server.NewManager(ctx, root, server.WithServerOptions(server.WithPresenceBus(b)))
 package pgpresence
 
 import (
@@ -79,7 +75,7 @@ import (
 )
 
 // DefaultChannel is the LISTEN/NOTIFY channel used unless WithChannel says
-// otherwise. One channel carries every namespace and every topic; the payload's
+// otherwise. One channel carries every topic of every app on it; the payload's
 // routing prefix separates them.
 //
 // It differs from pgnotify's channel so the two can share one transport: a
@@ -88,27 +84,20 @@ import (
 const DefaultChannel = "syncplane_presence"
 
 // publishQueue bounds what is waiting to reach the database. State folds per
-// (namespace, topic, session), so it is sized by active PARTICIPANTS rather
-// than by publish rate; only broadcasts accumulate.
+// (topic, session), so it is sized by active PARTICIPANTS rather than by
+// publish rate; only broadcasts accumulate.
 const publishQueue = 4096
 
 // fieldSep separates the routing prefix's fields. Every field it separates —
-// the namespace, the workspace id, the room name, the anchor entity and key —
-// is validated to exclude ASCII control characters, so it cannot appear inside
-// one. See engine/internal/naming.
+// the workspace id, the room name, the anchor entity and key — is validated to
+// exclude ASCII control characters, so it cannot appear inside one, and an app
+// prefix on the workspace id is built from the same alphabet. See
+// engine/internal/naming.
 const fieldSep = "\x1f"
 
-// Bus is a presence.Bus backed by LISTEN/NOTIFY. The value returned by Open or
-// New owns the publisher goroutine; values from Namespace are views sharing it.
+// Bus is a presence.Bus backed by LISTEN/NOTIFY. It holds the transport, the
+// publisher goroutine and the node-local fan-out.
 type Bus struct {
-	core  *core
-	ns    string
-	owner bool
-}
-
-// core is the state every namespace view shares: the transport, the publisher
-// goroutine, and one presence.Local per namespace.
-type core struct {
 	link    *pglisten.Conn
 	channel string
 	logger  *slog.Logger
@@ -122,21 +111,16 @@ type core struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	locals map[string]*presence.Local
-	// subs counts live subscriptions per (namespace, topic), so the listener
-	// can discard an event for a room this node serves nobody in before
-	// decoding its body. Reference-counted because several streams of one room
-	// share a key and the last cancel is what retires it.
-	subs   map[nsTopic]int
+	mu    sync.Mutex
+	local *presence.Local
+	// subs counts live subscriptions per topic, so the listener can discard an
+	// event for a room this node serves nobody in before decoding its body.
+	// Reference-counted because several streams of one room share a topic and
+	// the last cancel is what retires it.
+	subs   map[presence.Topic]int
 	closed bool
 
 	q queue
-}
-
-type nsTopic struct {
-	ns    string
-	topic presence.Topic
 }
 
 // Option configures Open and New.
@@ -217,33 +201,33 @@ func start(ctx context.Context, link *pglisten.Conn, cfg config, ownsLink bool) 
 	}
 
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	c := &core{
+	b := &Bus{
 		link:     link,
 		channel:  cfg.channel,
 		logger:   cfg.logger,
 		ownsLink: ownsLink,
 		nodeID:   hex.EncodeToString(node[:]),
 		cancel:   cancel,
-		locals:   make(map[string]*presence.Local),
-		subs:     make(map[nsTopic]int),
+		local:    presence.NewLocal(),
+		subs:     make(map[presence.Topic]int),
 	}
-	c.q.init()
+	b.q.init()
 
-	if err := link.Listen(ctx, cfg.channel, listener{core: c}); err != nil {
+	if err := link.Listen(ctx, cfg.channel, listener{b: b}); err != nil {
 		cancel()
 		return nil, fmt.Errorf("pgpresence: %w", err)
 	}
 
-	c.wg.Add(1)
-	go func() { defer c.wg.Done(); c.publishLoop(runCtx) }()
+	b.wg.Add(1)
+	go func() { defer b.wg.Done(); b.publishLoop(runCtx) }()
 
-	return &Bus{core: c, owner: true}, nil
+	return b, nil
 }
 
 // listener routes the transport's callbacks into the bus.
-type listener struct{ core *core }
+type listener struct{ b *Bus }
 
-func (l listener) Notification(payload string) { l.core.deliver(payload) }
+func (l listener) Notification(payload string) { l.b.deliver(payload) }
 
 // Reconnected does nothing, and there is nothing it could do: a poke is
 // content-free and can be re-sent from nothing, while a presence event WAS the
@@ -253,36 +237,22 @@ func (l listener) Notification(payload string) { l.core.deliver(payload) }
 // during the gap entirely.
 func (l listener) Reconnected() {}
 
-// Namespace returns a view of the bus scoped to one app namespace, sharing the
-// transport. Close on a derived view is a no-op — the value returned by Open or
-// New owns the fan-out and must outlive every view.
-//
-// The namespace travels in the routing prefix, so it must not contain
-// U+001F; one that does is refused at Publish rather than here.
-func (b *Bus) Namespace(ns string) *Bus {
-	return &Bus{core: b.core, ns: ns}
-}
-
-// Close stops publishing and delivery. It is idempotent, and a no-op on a
-// Namespace-derived view. A bus from Open closes its transport; one from New
-// leaves the caller's alone.
+// Close stops publishing and delivery. It is idempotent. A bus from Open
+// closes its transport; one from New leaves the caller's alone.
 func (b *Bus) Close() error {
-	if !b.owner {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
 		return nil
 	}
-	b.core.mu.Lock()
-	if b.core.closed {
-		b.core.mu.Unlock()
-		return nil
-	}
-	b.core.closed = true
-	b.core.mu.Unlock()
+	b.closed = true
+	b.mu.Unlock()
 
-	b.core.cancel()
-	b.core.q.wake()
-	b.core.wg.Wait()
-	if b.core.ownsLink {
-		return b.core.link.Close()
+	b.cancel()
+	b.q.wake()
+	b.wg.Wait()
+	if b.ownsLink {
+		return b.link.Close()
 	}
 	return nil
 }
@@ -290,21 +260,18 @@ func (b *Bus) Close() error {
 // Publish fans the event out to this node's subscribers and queues it for the
 // others.
 //
-// It returns an error only when the event cannot be carried at all — a
-// namespace that would corrupt the routing prefix, or a payload past what a
-// NOTIFY can hold — and then it is delivered nowhere, so a publisher never has
-// to reason about a partial send. Everything else is best-effort by contract.
+// It returns an error only when the event cannot be carried at all — a payload
+// past what a NOTIFY can hold — and then it is delivered nowhere, so a
+// publisher never has to reason about a partial send. Everything else is
+// best-effort by contract.
 func (b *Bus) Publish(_ context.Context, ev presence.Event) error {
-	if strings.Contains(b.ns, fieldSep) {
-		return fmt.Errorf("pgpresence: namespace %q contains the field separator \\u001f", b.ns)
-	}
 	// Sized before anything is delivered, so an event that cannot reach the
 	// other nodes does not reach this one's subscribers either.
 	body, err := encodeBody(ev)
 	if err != nil {
 		return err
 	}
-	line := b.core.nodeID + fieldSep + b.ns + fieldSep + routingPrefix(ev.Topic) + fieldSep + body
+	line := b.nodeID + fieldSep + routingPrefix(ev.Topic) + fieldSep + body
 	if len(line) > pglisten.MaxPayload {
 		return fmt.Errorf("pgpresence: event is %d bytes, over the %d the NOTIFY payload can carry",
 			len(line), pglisten.MaxPayload)
@@ -312,69 +279,55 @@ func (b *Bus) Publish(_ context.Context, ev presence.Event) error {
 
 	// Local first, and synchronously: same-node watchers must not wait on a
 	// database round trip to see a cursor move on their own node.
-	b.core.localFor(b.ns).Publish(context.Background(), ev)
-	b.core.q.push(b.ns, ev, line)
+	b.local.Publish(context.Background(), ev)
+	b.q.push(ev, line)
 	return nil
 }
 
 // Subscribe returns this topic's event channel and its teardown.
 func (b *Bus) Subscribe(topic presence.Topic) (<-chan presence.Event, func()) {
-	ch, cancel := b.core.localFor(b.ns).Subscribe(topic)
-	key := nsTopic{ns: b.ns, topic: topic}
-	b.core.track(key, 1)
+	ch, cancel := b.local.Subscribe(topic)
+	b.track(topic, 1)
 	var once sync.Once
 	return ch, func() {
 		cancel()
 		// The contract requires cancel to survive being called twice, and the
 		// reference count must not go negative when it is.
-		once.Do(func() { b.core.track(key, -1) })
+		once.Do(func() { b.track(topic, -1) })
 	}
 }
 
-// localFor returns the namespace's fan-out, creating it on first use.
-func (c *core) localFor(ns string) *presence.Local {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	l, ok := c.locals[ns]
-	if !ok {
-		l = presence.NewLocal()
-		c.locals[ns] = l
-	}
-	return l
-}
-
-// lookup returns the namespace's fan-out without creating one. Incoming events
-// go through this so another node's namespaces — apps this process does not
-// host — cannot grow the map, and so a bus closed while its transport keeps
+// fanout returns the node-local fan-out, or nil once the bus is closed.
+// Incoming events go through it so that a bus closed while its transport keeps
 // running stops delivering.
-func (c *core) lookup(ns string) *presence.Local {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+func (b *Bus) fanout() *presence.Local {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.closed {
 		return nil
 	}
-	return c.locals[ns]
+	return b.local
 }
 
-func (c *core) track(key nsTopic, delta int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := c.subs[key] + delta
-	if n <= 0 {
-		delete(c.subs, key)
+func (b *Bus) track(key presence.Topic, delta int) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	count := b.subs[key] + delta
+	if count <= 0 {
+		delete(b.subs, key)
 		return
 	}
-	c.subs[key] = n
+	b.subs[key] = count
 }
 
 // serves reports whether anything on this node subscribes to the topic. The
 // listener asks before decoding a body, which is what keeps a node's cost
 // proportional to the rooms it serves rather than to every room in the
 // deployment.
-func (c *core) serves(key nsTopic) bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return c.subs[key] > 0
+func (b *Bus) serves(topic presence.Topic) bool {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.subs[topic] > 0
 }
 
 // body is the wire form of an event, less the routing prefix that carries its
@@ -413,23 +366,23 @@ func routingPrefix(t presence.Topic) string {
 	return t.WorkspaceID + fieldSep + t.Name + fieldSep + t.Entity + fieldSep + t.Key
 }
 
-// decode splits one notification back into the node that sent it, its
-// namespace, its topic and its event.
-func decode(payload string) (node, ns string, ev presence.Event, err error) {
-	parts := strings.SplitN(payload, fieldSep, 7)
-	if len(parts) != 7 {
-		return "", "", presence.Event{}, fmt.Errorf("payload has %d fields, want 7", len(parts))
+// decode splits one notification back into the node that sent it, its topic
+// and its event.
+func decode(payload string) (node string, ev presence.Event, err error) {
+	parts := strings.SplitN(payload, fieldSep, 6)
+	if len(parts) != 6 {
+		return "", presence.Event{}, fmt.Errorf("payload has %d fields, want 6", len(parts))
 	}
 	var b body
-	if err := json.Unmarshal([]byte(parts[6]), &b); err != nil {
-		return "", "", presence.Event{}, err
+	if err := json.Unmarshal([]byte(parts[5]), &b); err != nil {
+		return "", presence.Event{}, err
 	}
-	return parts[0], parts[1], presence.Event{
+	return parts[0], presence.Event{
 		Topic: presence.Topic{
-			WorkspaceID: parts[2],
-			Name:        parts[3],
-			Entity:      parts[4],
-			Key:         parts[5],
+			WorkspaceID: parts[1],
+			Name:        parts[2],
+			Entity:      parts[3],
+			Key:         parts[4],
 		},
 		Kind: presence.Kind(b.Kind),
 		Participant: presence.Participant{
@@ -446,45 +399,45 @@ func decode(payload string) (node, ns string, ev presence.Event, err error) {
 // publishLoop drains the queue onto the database. Publishing happens here
 // rather than in Publish so that Publish never blocks on the network — the
 // local fan-out has already happened by the time an entry lands here.
-func (c *core) publishLoop(ctx context.Context) {
+func (b *Bus) publishLoop(ctx context.Context) {
 	for {
-		item, ok := c.q.pop(ctx)
+		item, ok := b.q.pop(ctx)
 		if !ok {
 			return
 		}
-		if err := c.link.Publish(ctx, c.channel, item.line); err != nil {
+		if err := b.link.Publish(ctx, b.channel, item.line); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			// Best-effort: this node's own subscribers were served before the
 			// entry queued, and a lost presence record is re-announced within
 			// one announce interval.
-			c.logger.Warn("pgpresence: publish failed", "topic", item.topic.String(), "error", err)
+			b.logger.Warn("pgpresence: publish failed", "topic", item.topic.String(), "error", err)
 		}
 	}
 }
 
 // deliver routes one received notification, dropping it as early as the payload
 // allows.
-func (c *core) deliver(payload string) {
+func (b *Bus) deliver(payload string) {
 	// The node id is the first field, so this node's own events are discarded
 	// before anything is decoded. Every event passes through here twice on a
 	// single-node deployment, which is the common case.
-	if node, _, found := strings.Cut(payload, fieldSep); found && node == c.nodeID {
+	if node, _, found := strings.Cut(payload, fieldSep); found && node == b.nodeID {
 		return
 	}
-	node, ns, ev, err := decode(payload)
+	node, ev, err := decode(payload)
 	if err != nil {
-		c.logger.Warn("pgpresence: undecodable event", "error", err)
+		b.logger.Warn("pgpresence: undecodable event", "error", err)
 		return
 	}
-	if node == c.nodeID {
+	if node == b.nodeID {
 		return
 	}
-	if !c.serves(nsTopic{ns: ns, topic: ev.Topic}) {
+	if !b.serves(ev.Topic) {
 		return
 	}
-	if local := c.lookup(ns); local != nil {
+	if local := b.fanout(); local != nil {
 		_ = local.Publish(context.Background(), ev)
 	}
 }
@@ -492,7 +445,6 @@ func (c *core) deliver(payload string) {
 // queued is one entry waiting for the database: what it takes to coalesce and
 // log it, plus the line already rendered so the publish loop only does I/O.
 type queued struct {
-	ns      string
 	topic   presence.Topic
 	session string
 	kind    presence.Kind
@@ -501,13 +453,12 @@ type queued struct {
 
 // pendingKey identifies the queued state of one session in one room.
 type pendingKey struct {
-	ns      string
 	topic   presence.Topic
 	session string
 }
 
-// queue is the publish backlog: a FIFO in which STATE folds per (namespace,
-// topic, session) and nothing else does.
+// queue is the publish backlog: a FIFO in which STATE folds per (topic,
+// session) and nothing else does.
 //
 // Folding is what bounds it. State is last-writer-wins, so a second update from
 // a session whose first has not been published yet buys nothing — which means
@@ -530,10 +481,9 @@ func (q *queue) init() {
 	q.signal = make(chan struct{}, 1)
 }
 
-func (q *queue) push(ns string, ev presence.Event, line string) {
-	key := pendingKey{ns: ns, topic: ev.Topic, session: ev.Participant.SessionID}
+func (q *queue) push(ev presence.Event, line string) {
+	key := pendingKey{topic: ev.Topic, session: ev.Participant.SessionID}
 	item := &queued{
-		ns:      ns,
 		topic:   ev.Topic,
 		session: ev.Participant.SessionID,
 		kind:    ev.Kind,
@@ -589,7 +539,7 @@ func (q *queue) pop(ctx context.Context) (queued, bool) {
 			} else {
 				q.items = q.items[1:]
 			}
-			key := pendingKey{ns: item.ns, topic: item.topic, session: item.session}
+			key := pendingKey{topic: item.topic, session: item.session}
 			if item.kind == presence.KindState && q.pending[key] == item {
 				delete(q.pending, key)
 			}

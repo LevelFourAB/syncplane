@@ -144,16 +144,20 @@ var _ = Describe("pgpresence", func() {
 			"the publisher's own event must not come back off the channel")
 	})
 
-	It("keeps namespaces apart on one channel", func() {
+	It("keeps prefixed workspaces apart on one channel", func() {
+		// One bus serves every app a Manager hosts, and each app's registry
+		// prefixes the workspace id of the topics it puts on the bus — so two
+		// apps sharing a workspace name must not share a room.
 		nodeA, nodeB := twoNodes()
-		t := topic("cursors")
-		hit, _ := nodeB.Namespace("app-a").Subscribe(t)
-		miss, _ := nodeB.Namespace("app-b").Subscribe(t)
+		inA, inB := topic("cursors"), topic("cursors")
+		inA.WorkspaceID = "app-a/" + inA.WorkspaceID
+		inB.WorkspaceID = "app-b/" + inB.WorkspaceID
+		hit, _ := nodeB.Subscribe(inA)
+		miss, _ := nodeB.Subscribe(inB)
 
-		Expect(nodeA.Namespace("app-a").Publish(ctx, state(t, "s1", 1, ""))).To(Succeed())
+		Expect(nodeA.Publish(ctx, state(inA, "s1", 1, ""))).To(Succeed())
 		Eventually(hit, 5*time.Second).Should(Receive())
-		Consistently(miss, "500ms").ShouldNot(Receive(),
-			"workspace ids are namespaced per app, so two apps sharing a workspace name must not share a room")
+		Consistently(miss, "500ms").ShouldNot(Receive())
 	})
 
 	It("keeps anchored topics apart across nodes", func() {
@@ -193,12 +197,6 @@ var _ = Describe("pgpresence", func() {
 		var got presence.Event
 		Eventually(ch, 5*time.Second).Should(Receive(&got))
 		Expect(got.Participant.State).To(HaveLen(4 << 10))
-	})
-
-	It("refuses a namespace that would corrupt the routing prefix", func() {
-		bus := newBus()
-		err := bus.Namespace("a\x1fb").Publish(ctx, state(topic("x"), "s1", 1, ""))
-		Expect(err).To(MatchError(ContainSubstring("field separator")))
 	})
 
 	It("delivers on a transport it did not open", func() {
@@ -273,16 +271,5 @@ var _ = Describe("pgpresence", func() {
 		b := newBus()
 		Expect(b.Close()).To(Succeed())
 		Expect(b.Close()).To(Succeed())
-	})
-
-	It("makes Close on a namespace view a no-op", func() {
-		b := newBus()
-		view := b.Namespace("app")
-		Expect(view.Close()).To(Succeed())
-
-		t := topic("still-alive")
-		ch, _ := view.Subscribe(t)
-		Expect(view.Publish(ctx, state(t, "s1", 1, ""))).To(Succeed())
-		Eventually(ch).Should(Receive(), "the owner outlives its views; closing one must not stop the transport")
 	})
 })

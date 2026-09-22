@@ -542,7 +542,7 @@ func (s *Server) collectAllGarbage(ctx context.Context) (err error) {
 	var errs []error
 	visited := 0
 	for after := ""; ; {
-		ids, lerr := s.store.ListCollectableWorkspaceIDs(ctx, cutoffs, after, maintenancePage)
+		ids, lerr := s.store.ListCollectableWorkspaceIDs(ctx, cutoffs, storage.Range{After: after}, maintenancePage)
 		if lerr != nil {
 			return errors.Join(append(errs, lerr)...)
 		}

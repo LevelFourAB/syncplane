@@ -15,7 +15,7 @@ Before you begin, ensure you have:
 
 If you are setting up a new database, configure hash partitioning for tenant tables:
 
-1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows` by `(namespace, workspace_id)`.
+1. Configure 32 hash partitions by passing `pgstore.WithPartitions(32)` in Go or `-db-partitions 32` to `syncplaned`. This partitions `rows`, `field_deltas`, `idempotency`, `index_entries`, and `consumer_shadows` by `workspace_id`.
 2. Configure this setting during initial database creation. Schema migrations apply the partition layout when creating tables. You cannot partition an existing database that already contains data. The modulus must be a power of two.
 3. Set up a scheduled job to run `ANALYZE` on partitioned parent tables. Autovacuum does not analyze partitioned parent tables automatically.
 

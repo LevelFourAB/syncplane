@@ -29,9 +29,9 @@
 //
 // The transport underneath is engine/pglisten: one connection parked on the
 // channel, one issuing pg_notify, and the reconnect loop over both. What
-// arrives feeds a pubsub.Local per namespace, which already implements the
-// per-workspace fan-out, the coalescing send buffer and the Activity extension
-// — so this package adds a wire format and inherits the semantics.
+// arrives feeds a pubsub.Local, which already implements the per-workspace
+// fan-out, the coalescing send buffer and the Activity extension — so this
+// package adds a wire format and inherits the semantics.
 //
 // Open dials its own transport. A deployment that also runs pgpresence passes
 // both a shared one instead, halving the connections either would open alone:
@@ -41,21 +41,16 @@
 //	defer link.Close()
 //	notifier, err := pgnotify.New(ctx, link)
 //
-// # Namespaces
+// # Hosting several applications
 //
-// Every payload carries the app namespace alongside the workspace id, and each
-// namespace gets its own pubsub.Local. server.Manager shares one notifier
-// across every app it hosts, and workspace ids are namespaced per app — so
-// without this, two apps that both have a workspace "team" would wake each
-// other's clients. Derive a per-app view with Namespace and hand it to that
-// app's server:
+// One notifier serves every app a server.Manager hosts. Each app's server
+// prefixes the workspace ids it publishes and subscribes to with its own share
+// of the id space, so two apps that both have a workspace "team" do not wake
+// each other's clients and this package needs no notion of an app:
 //
 //	n, err := pgnotify.Open(ctx, dsn)
 //	...
-//	server.NewManager(ctx, root,
-//		server.WithAppOptions(func(appID string) []server.Option {
-//			return []server.Option{server.WithNotifier(n.Namespace(appID))}
-//		}))
+//	server.NewManager(ctx, root, server.WithServerOptions(server.WithNotifier(n)))
 //
 // # Composition
 //
@@ -69,6 +64,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
 
 	"github.com/levelfourab/syncplane/engine/internal/pubsub"
@@ -76,26 +72,17 @@ import (
 )
 
 // DefaultChannel is the LISTEN/NOTIFY channel used unless WithChannel says
-// otherwise. One channel carries every namespace; the payload separates them.
+// otherwise. One channel carries every workspace of every app on it.
 const DefaultChannel = "syncplane_poke"
 
 // publishQueue bounds what is waiting to reach the database. It holds at most
-// one entry per (namespace, workspace) — see queue — so it is sized by active
-// workspaces rather than by write rate.
+// one entry per workspace — see queue — so it is sized by active workspaces
+// rather than by write rate.
 const publishQueue = 4096
 
-// Notifier is a pubsub.Notifier backed by LISTEN/NOTIFY. The value returned by
-// Open or New owns the publisher goroutine; values from Namespace are views
-// sharing it.
+// Notifier is a pubsub.Notifier backed by LISTEN/NOTIFY. It holds the
+// transport, the publisher goroutine and the node-local fan-out.
 type Notifier struct {
-	core  *core
-	ns    string
-	owner bool
-}
-
-// core is the state every namespace view shares: the transport, the publisher
-// goroutine, and one pubsub.Local per namespace.
-type core struct {
 	link    *pglisten.Conn
 	channel string
 	logger  *slog.Logger
@@ -106,18 +93,16 @@ type core struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 
-	mu     sync.Mutex
-	locals map[string]*pubsub.Local
+	mu    sync.Mutex
+	local *pubsub.Local
 	// subs counts live per-workspace subscriptions, so a reconnect knows which
 	// workspaces to re-poke. Reference-counted because several streams of one
 	// workspace share a key and the last cancel is what retires it.
-	subs   map[nsWorkspace]int
+	subs   map[string]int
 	closed bool
 
 	q queue
 }
-
-type nsWorkspace struct{ ns, ws string }
 
 // Option configures Open and New.
 type Option func(*config)
@@ -191,66 +176,55 @@ func New(ctx context.Context, link *pglisten.Conn, opts ...Option) (*Notifier, e
 // start registers the channel and brings the publisher goroutine up.
 func start(ctx context.Context, link *pglisten.Conn, cfg config, ownsLink bool) (*Notifier, error) {
 	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	c := &core{
+	n := &Notifier{
 		link:     link,
 		channel:  cfg.channel,
 		logger:   cfg.logger,
 		ownsLink: ownsLink,
 		cancel:   cancel,
-		locals:   make(map[string]*pubsub.Local),
-		subs:     make(map[nsWorkspace]int),
+		local:    pubsub.NewLocal(),
+		subs:     make(map[string]int),
 	}
-	c.q.init()
+	n.q.init()
 
-	if err := link.Listen(ctx, cfg.channel, listener{core: c}); err != nil {
+	if err := link.Listen(ctx, cfg.channel, listener{n: n}); err != nil {
 		cancel()
 		return nil, fmt.Errorf("pgnotify: %w", err)
 	}
 
-	c.wg.Add(1)
-	go func() { defer c.wg.Done(); c.publishLoop(runCtx) }()
+	n.wg.Add(1)
+	go func() { defer n.wg.Done(); n.publishLoop(runCtx) }()
 
-	return &Notifier{core: c, owner: true}, nil
+	return n, nil
 }
 
 // listener routes the transport's callbacks into the notifier.
-type listener struct{ core *core }
+type listener struct{ n *Notifier }
 
-func (l listener) Notification(payload string) { l.core.deliver(payload) }
+func (l listener) Notification(payload string) { l.n.deliver(payload) }
 
 // Reconnected re-pokes every workspace someone is watching. Nothing replays
 // what the gap swallowed, and a poke is content-free — so re-sending one costs
 // a wasted pull at worst, where leaving it out costs those clients a poll
 // interval.
-func (l listener) Reconnected() { l.core.repoke() }
+func (l listener) Reconnected() { l.n.repoke() }
 
-// Namespace returns a view of the notifier scoped to one app namespace, sharing
-// the transport. Close on a derived view is a no-op — the value returned by
-// Open or New owns the fan-out and must outlive every view.
-func (n *Notifier) Namespace(ns string) *Notifier {
-	return &Notifier{core: n.core, ns: ns}
-}
-
-// Close stops publishing and delivery. It is idempotent, and a no-op on a
-// Namespace-derived view. A notifier from Open closes its transport; one from
-// New leaves the caller's alone.
+// Close stops publishing and delivery. It is idempotent. A notifier from Open
+// closes its transport; one from New leaves the caller's alone.
 func (n *Notifier) Close() error {
-	if !n.owner {
+	n.mu.Lock()
+	if n.closed {
+		n.mu.Unlock()
 		return nil
 	}
-	n.core.mu.Lock()
-	if n.core.closed {
-		n.core.mu.Unlock()
-		return nil
-	}
-	n.core.closed = true
-	n.core.mu.Unlock()
+	n.closed = true
+	n.mu.Unlock()
 
-	n.core.cancel()
-	n.core.q.wake()
-	n.core.wg.Wait()
-	if n.core.ownsLink {
-		return n.core.link.Close()
+	n.cancel()
+	n.q.wake()
+	n.wg.Wait()
+	if n.ownsLink {
+		return n.link.Close()
 	}
 	return nil
 }
@@ -258,31 +232,29 @@ func (n *Notifier) Close() error {
 func (n *Notifier) Notify(workspaceID string) {
 	// Local first, and synchronously: same-node subscribers must not wait on a
 	// database round trip to learn about a write their own node just took.
-	n.core.localFor(n.ns).Notify(workspaceID)
-	n.core.q.push(nsWorkspace{ns: n.ns, ws: workspaceID})
+	n.local.Notify(workspaceID)
+	n.q.push(workspaceID)
 }
 
 func (n *Notifier) Subscribe(workspaceID string) (<-chan struct{}, func()) {
-	ch, cancel := n.core.localFor(n.ns).Subscribe(workspaceID)
-	key := nsWorkspace{ns: n.ns, ws: workspaceID}
-	n.core.track(key, 1)
+	ch, cancel := n.local.Subscribe(workspaceID)
+	n.track(workspaceID, 1)
 	var once sync.Once
 	return ch, func() {
 		cancel()
 		// The contract requires cancel to survive being called twice, and the
 		// reference count must not go negative when it is.
-		once.Do(func() { n.core.track(key, -1) })
+		once.Do(func() { n.track(workspaceID, -1) })
 	}
 }
 
 func (n *Notifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
-	set := n.core.localFor(n.ns).SubscribeSet(workspaceIDs)
-	keys := make([]nsWorkspace, len(workspaceIDs))
-	for i, ws := range workspaceIDs {
-		keys[i] = nsWorkspace{ns: n.ns, ws: ws}
-		n.core.track(keys[i], 1)
+	set := n.local.SubscribeSet(workspaceIDs)
+	keys := slices.Clone(workspaceIDs)
+	for _, ws := range keys {
+		n.track(ws, 1)
 	}
-	return &trackedSet{Set: set, core: n.core, keys: keys}
+	return &trackedSet{Set: set, n: n, keys: keys}
 }
 
 // trackedSet holds each member's reconnect re-poke registration for the life
@@ -290,8 +262,8 @@ func (n *Notifier) SubscribeSet(workspaceIDs []string) pubsub.Set {
 // reference counts must not go negative when it is.
 type trackedSet struct {
 	pubsub.Set
-	core *core
-	keys []nsWorkspace
+	n    *Notifier
+	keys []string
 	once sync.Once
 }
 
@@ -299,13 +271,13 @@ func (s *trackedSet) Close() {
 	s.Set.Close()
 	s.once.Do(func() {
 		for _, key := range s.keys {
-			s.core.track(key, -1)
+			s.n.track(key, -1)
 		}
 	})
 }
 
-// SubscribeActivity reports every workspace of this namespace that sees a
-// notify, local or remote. It is the same stream pubsub.Local serves, which is
+// SubscribeActivity reports every workspace that sees a notify, local or
+// remote. It is the same stream pubsub.Local serves, which is
 // what makes workspace discovery work across nodes: a workspace first written
 // on another node arrives here as a notification rather than waiting for a
 // consumer's next sweep.
@@ -314,60 +286,47 @@ func (s *trackedSet) Close() {
 // not announced — nothing re-derives what was missed — so a consumer keeps its
 // periodic sweep as the backstop the contract already asks for.
 func (n *Notifier) SubscribeActivity() (<-chan string, func()) {
-	return n.core.localFor(n.ns).SubscribeActivity()
+	return n.local.SubscribeActivity()
 }
 
-// localFor returns the namespace's fan-out, creating it on first use.
-func (c *core) localFor(ns string) *pubsub.Local {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	l, ok := c.locals[ns]
-	if !ok {
-		l = pubsub.NewLocal()
-		c.locals[ns] = l
-	}
-	return l
-}
-
-// lookup returns the namespace's fan-out without creating one. Incoming
-// notifications go through this so another node's namespaces — apps this
-// process does not host — cannot grow the map, and so a notifier closed while
-// its transport keeps running stops delivering.
-func (c *core) lookup(ns string) *pubsub.Local {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.closed {
+// fanout returns the node-local fan-out, or nil once the notifier is closed.
+// Incoming notifications go through it so that a notifier closed while its
+// transport keeps running stops delivering.
+func (n *Notifier) fanout() *pubsub.Local {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if n.closed {
 		return nil
 	}
-	return c.locals[ns]
+	return n.local
 }
 
-func (c *core) track(key nsWorkspace, delta int) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	n := c.subs[key] + delta
-	if n <= 0 {
-		delete(c.subs, key)
+func (n *Notifier) track(key string, delta int) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	count := n.subs[key] + delta
+	if count <= 0 {
+		delete(n.subs, key)
 		return
 	}
-	c.subs[key] = n
+	n.subs[key] = count
 }
 
 // subscribed snapshots the live subscriptions for a reconnect re-poke.
-func (c *core) subscribed() []nsWorkspace {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]nsWorkspace, 0, len(c.subs))
-	for k := range c.subs {
+func (n *Notifier) subscribed() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	out := make([]string, 0, len(n.subs))
+	for k := range n.subs {
 		out = append(out, k)
 	}
 	return out
 }
 
-// payload is the wire form of a notification. The namespace travels with the
-// workspace id because one notifier serves every app in the process.
+// payload is the wire form of a notification. The workspace id is whatever the
+// publisher passed, prefix included when a host partitions one notifier
+// between several applications.
 type payload struct {
-	NS string `json:"ns"`
 	WS string `json:"ws"`
 	// More carries the rest of a batched publish — see nextBatch. A decoder
 	// from before this field existed ignores it and still delivers the head
@@ -376,22 +335,20 @@ type payload struct {
 	More []payload `json:"more,omitempty"`
 }
 
-// deliver routes one received notification to its namespace's fan-out.
-func (c *core) deliver(raw string) {
+// deliver routes one received notification to the node-local fan-out.
+func (n *Notifier) deliver(raw string) {
 	var p payload
 	if err := json.Unmarshal([]byte(raw), &p); err != nil {
-		c.logger.Warn("pgnotify: undecodable notification", "error", err)
+		n.logger.Warn("pgnotify: undecodable notification", "error", err)
 		return
 	}
-	c.notifyLocal(p.NS, p.WS)
-	for _, m := range p.More {
-		c.notifyLocal(m.NS, m.WS)
+	local := n.fanout()
+	if local == nil {
+		return
 	}
-}
-
-func (c *core) notifyLocal(ns, ws string) {
-	if local := c.lookup(ns); local != nil {
-		local.Notify(ws)
+	local.Notify(p.WS)
+	for _, m := range p.More {
+		local.Notify(m.WS)
 	}
 }
 
@@ -399,22 +356,22 @@ func (c *core) notifyLocal(ns, ws string) {
 // rather than in Notify so that Notify never blocks on the network — it is
 // called from write paths, and the local fan-out has already happened by the
 // time an entry lands here.
-func (c *core) publishLoop(ctx context.Context) {
+func (n *Notifier) publishLoop(ctx context.Context) {
 	for {
-		body, ok := c.nextBatch(ctx)
+		body, ok := n.nextBatch(ctx)
 		if !ok {
 			return
 		}
 		if body == "" {
 			continue
 		}
-		if err := c.link.Publish(ctx, c.channel, body); err != nil {
+		if err := n.link.Publish(ctx, n.channel, body); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
 			// Best-effort: subscribers on other nodes fall back to polling, and
 			// this node's own subscribers were served before the entry queued.
-			c.logger.Warn("pgnotify: publish failed", "error", err)
+			n.logger.Warn("pgnotify: publish failed", "error", err)
 		}
 	}
 }
@@ -432,22 +389,22 @@ func (c *core) publishLoop(ctx context.Context) {
 //
 // It returns ok=false once ctx is done. An empty body with ok=true is a key
 // whose id alone overflows a NOTIFY, dropped as the licensed failure.
-func (c *core) nextBatch(ctx context.Context) (string, bool) {
-	key, ok := c.q.pop(ctx)
+func (n *Notifier) nextBatch(ctx context.Context) (string, bool) {
+	key, ok := n.q.pop(ctx)
 	if !ok {
 		return "", false
 	}
-	head := payload{NS: key.ns, WS: key.ws}
+	head := payload{WS: key}
 	body, err := json.Marshal(head)
 	if err != nil {
-		c.logger.Error("pgnotify: encode notification", "error", err)
+		n.logger.Error("pgnotify: encode notification", "error", err)
 		return "", true
 	}
 	if len(body) > pglisten.MaxPayload {
 		// A workspace id long enough to hit this is pathological, and the
 		// alternative to skipping it is failing a write path over a poke.
-		c.logger.Warn("pgnotify: notification exceeds the NOTIFY payload limit; dropping",
-			"workspace", key.ws, "bytes", len(body))
+		n.logger.Warn("pgnotify: notification exceeds the NOTIFY payload limit; dropping",
+			"workspace", key, "bytes", len(body))
 		return "", true
 	}
 	// size tracks the encoded batch exactly without re-marshaling it per
@@ -458,9 +415,9 @@ func (c *core) nextBatch(ctx context.Context) (string, bool) {
 	size := len(body)
 	for {
 		var entry []byte
-		next, ok := c.q.popIf(func(k nsWorkspace) bool {
+		next, ok := n.q.popIf(func(ws string) bool {
 			var err error
-			entry, err = json.Marshal(payload{NS: k.ns, WS: k.ws})
+			entry, err = json.Marshal(payload{WS: ws})
 			if err != nil {
 				return false
 			}
@@ -477,14 +434,14 @@ func (c *core) nextBatch(ctx context.Context) (string, bool) {
 		if len(head.More) == 0 {
 			size += 9
 		}
-		head.More = append(head.More, payload{NS: next.ns, WS: next.ws})
+		head.More = append(head.More, payload{WS: next})
 	}
 	if len(head.More) == 0 {
 		return string(body), true
 	}
 	batched, err := json.Marshal(head)
 	if err != nil {
-		c.logger.Error("pgnotify: encode notification", "error", err)
+		n.logger.Error("pgnotify: encode notification", "error", err)
 		return "", true
 	}
 	return string(batched), true
@@ -492,16 +449,18 @@ func (c *core) nextBatch(ctx context.Context) (string, bool) {
 
 // repoke signals every workspace with a live subscription, after a reconnect
 // has left a hole in the stream.
-func (c *core) repoke() {
-	for _, key := range c.subscribed() {
-		if local := c.lookup(key.ns); local != nil {
-			local.Notify(key.ws)
-		}
+func (n *Notifier) repoke() {
+	local := n.fanout()
+	if local == nil {
+		return
+	}
+	for _, ws := range n.subscribed() {
+		local.Notify(ws)
 	}
 }
 
 // queue is the publish backlog: a FIFO holding at most ONE entry per
-// (namespace, workspace).
+// workspace.
 //
 // The de-duplication is what bounds it. A notification says "look at this
 // workspace" rather than carrying a change, so the second entry for a workspace
@@ -510,19 +469,19 @@ func (c *core) repoke() {
 // Mirrors the same reasoning in pubsub.Local's activity queue.
 type queue struct {
 	mu      sync.Mutex
-	items   []nsWorkspace
-	pending map[nsWorkspace]struct{}
+	items   []string
+	pending map[string]struct{}
 	// signal carries "the queue is no longer empty", coalesced into one slot:
 	// the queue itself is the state, this is only the poke.
 	signal chan struct{}
 }
 
 func (q *queue) init() {
-	q.pending = make(map[nsWorkspace]struct{})
+	q.pending = make(map[string]struct{})
 	q.signal = make(chan struct{}, 1)
 }
 
-func (q *queue) push(key nsWorkspace) {
+func (q *queue) push(key string) {
 	q.mu.Lock()
 	if _, waiting := q.pending[key]; waiting {
 		q.mu.Unlock()
@@ -550,15 +509,15 @@ func (q *queue) wake() {
 // popIf pops the head entry if accept approves it, without blocking. It
 // returns ok=false when the queue is empty or the head was refused; a refused
 // head stays queued and leads the next batch.
-func (q *queue) popIf(accept func(nsWorkspace) bool) (nsWorkspace, bool) {
+func (q *queue) popIf(accept func(string) bool) (string, bool) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	if len(q.items) == 0 {
-		return nsWorkspace{}, false
+		return "", false
 	}
 	key := q.items[0]
 	if !accept(key) {
-		return nsWorkspace{}, false
+		return "", false
 	}
 	if len(q.items) == 1 {
 		q.items = nil
@@ -570,7 +529,7 @@ func (q *queue) popIf(accept func(nsWorkspace) bool) (nsWorkspace, bool) {
 }
 
 // pop blocks until an entry is available, returning ok=false once ctx is done.
-func (q *queue) pop(ctx context.Context) (nsWorkspace, bool) {
+func (q *queue) pop(ctx context.Context) (string, bool) {
 	for {
 		q.mu.Lock()
 		if len(q.items) > 0 {
@@ -590,7 +549,7 @@ func (q *queue) pop(ctx context.Context) (nsWorkspace, bool) {
 
 		select {
 		case <-ctx.Done():
-			return nsWorkspace{}, false
+			return "", false
 		case <-q.signal:
 		}
 	}

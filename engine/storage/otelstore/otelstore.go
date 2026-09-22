@@ -15,9 +15,9 @@
 //	…
 //	srv, err := server.New(instrumented, …)
 //
-// Wrap once, at the root. A Manager namespaces the root adapter per app and
-// the wrapper carries through Namespace, so every app is instrumented by the
-// single call — wrapping again per app would double-count.
+// Wrap once, at the root. A Manager partitions the root adapter per app with
+// prefixstore, which forwards to what it wraps, so one call at the root
+// instruments every app — wrapping again per app would double-count.
 package otelstore
 
 import (
@@ -95,13 +95,6 @@ type metrics struct {
 type store struct {
 	storage.Adapter
 	mx *metrics
-}
-
-// Namespace keeps the wrapper on the namespaced child, so a Manager hosting
-// many apps over one root adapter instruments all of them from the single
-// Wrap at the root.
-func (s *store) Namespace(name string) storage.Adapter {
-	return &store{Adapter: s.Adapter.Namespace(name), mx: s.mx}
 }
 
 // Unwrap returns the wrapped adapter. Embedding promotes only the methods of

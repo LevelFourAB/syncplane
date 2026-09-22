@@ -109,18 +109,18 @@ var _ = Describe("pgnotify", func() {
 		Eventually(ids, 5*time.Second).Should(Receive(Equal("ws-created-elsewhere")))
 	})
 
-	It("keeps namespaces apart across nodes", func() {
-		// One notifier serves every app a Manager hosts, and workspace ids are
-		// namespaced per app — so "team" in app1 and "team" in app2 are
-		// unrelated and must not wake each other.
+	It("keeps prefixed workspaces apart across nodes", func() {
+		// One notifier serves every app a Manager hosts, and each app's server
+		// prefixes the ids it publishes — so "team" in app1 and "team" in app2
+		// arrive here as two ids and must not wake each other.
 		nodeA, nodeB := twoNodes()
-		target, _ := nodeB.Namespace("app1").Subscribe("team")
-		other, _ := nodeB.Namespace("app2").Subscribe("team")
+		target, _ := nodeB.Subscribe("app1/team")
+		other, _ := nodeB.Subscribe("app2/team")
 
-		nodeA.Namespace("app1").Notify("team")
+		nodeA.Notify("app1/team")
 		Eventually(target, 5*time.Second).Should(Receive())
 		Consistently(other, "300ms").ShouldNot(Receive(),
-			"a poke must not cross the app namespace boundary")
+			"a poke must not cross the app boundary")
 	})
 
 	It("delivers to a subscriber on the publishing node without a round trip", func() {

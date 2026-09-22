@@ -60,7 +60,7 @@ func TestBuildAllIndexesVisitsOnlyStaleWorkspaces(t *testing.T) {
 	// What the pass recorded is the running catalog's mark, so a declaration
 	// change — which moves it, see TestIndexBuildMarkTracksDeclarations — brings
 	// the workspace back.
-	ids, err := store.ListStaleIndexWorkspaceIDs(ctx, s.catalogPtr().indexBuildMark()+"x", "", 10)
+	ids, err := store.ListStaleIndexWorkspaceIDs(ctx, s.catalogPtr().indexBuildMark()+"x", storage.Range{}, 10)
 	if err != nil {
 		t.Fatalf("listing stale: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestBuildIndexesLeavesReRegisteredIndexUnready(t *testing.T) {
 			t.Fatalf("index %q was untouched by the re-registration and should be ready", name)
 		}
 	}
-	ids, err := store.ListStaleIndexWorkspaceIDs(ctx, srv.catalogPtr().indexBuildMark(), "", 10)
+	ids, err := store.ListStaleIndexWorkspaceIDs(ctx, srv.catalogPtr().indexBuildMark(), storage.Range{}, 10)
 	if err != nil {
 		t.Fatalf("listing stale: %v", err)
 	}

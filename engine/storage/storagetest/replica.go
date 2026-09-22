@@ -141,22 +141,5 @@ func Replica(name string, newAdapter func() storage.Adapter) bool {
 			Expect(route).To(BeElementOf(routes))
 		})
 
-		It("keeps namespaces apart", func() {
-			nsA := adapter.Namespace("a")
-			nsB := adapter.Namespace("b")
-			put(nsA, "ws1", "k1", "from-a")
-
-			pb, ok := storage.As[storage.ReplicaProvider](nsB)
-			Expect(ok).To(BeTrue())
-			rb := pb.ReplicaReader()
-			Expect(rb).NotTo(BeNil(), "a derived namespace keeps the capability")
-
-			_, err := rb.WithReadTxAnchored(ctx, "ws1", func(tx storage.ReadTx) error {
-				_, err := tx.GetRow("widget", "k1")
-				Expect(err).To(MatchError(storage.ErrNotFound))
-				return nil
-			})
-			Expect(err).NotTo(HaveOccurred())
-		})
 	})
 }

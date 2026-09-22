@@ -47,8 +47,9 @@ wire contract:
 
 `engine/`: `server/` (RPC handlers, registration, permissions, partial sync, GC,
 change feed, trusted writes), `storage/` (the `storage.Adapter` seam;
-`sqlitestore/` is the single-process default and `pgstore/` the multi-node
-PostgreSQL one), `query/` (compiler + evaluator behind
+`sqlitestore/` is the single-process default, `pgstore/` the multi-node
+PostgreSQL one and `prefixstore/` the workspace-id prefix a multi-app host
+partitions one adapter with), `query/` (compiler + evaluator behind
 the `Query` RPC and app-side queries), `text/` (the collaborative text CRDT),
 `connect/` (bidirectional connectors to external stores), `effects/`
 (server-side reactions to committed writes, over the change feed), `notify/`

@@ -112,6 +112,72 @@ var _ = Describe("Manager", func() {
 		Expect(pullKeys(syncClient(m, "b"))).To(BeEmpty(), "app b's note partition is independent")
 	})
 
+	It("stores each app's workspaces under its own prefix", func() {
+		// The partition the isolation above rests on, asserted from below: the
+		// adapter holds one flat space of workspaces and the app id is part of
+		// the id, not a column it knows about.
+		store := newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db"))
+		m := newManager(store)
+		_, err := m.Register(ctx, "a", descriptorSetBytes(noteSpec))
+		Expect(err).NotTo(HaveOccurred())
+		putNote(syncClient(m, "a"), "shared", "only in a")
+
+		Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(ConsistOf("a/" + ws))
+	})
+
+	It("keeps two apps apart on one shared notifier", func() {
+		// The reason a Manager can be handed ONE notifier for every app it
+		// hosts: each app's server prefixes the ids it publishes, so a write
+		// to "ws" in one app does not wake the other app's watchers of the
+		// same name.
+		notifier := pubsub.NewLocal()
+		m := newManager(newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db")),
+			server.WithServerOptions(server.WithNotifier(notifier)))
+		for _, app := range []string{"a", "b"} {
+			_, err := m.Register(ctx, app, descriptorSetBytes(noteSpec))
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		woken, cancel := notifier.Subscribe("a/" + ws)
+		DeferCleanup(cancel)
+		quiet, cancelQuiet := notifier.Subscribe("b/" + ws)
+		DeferCleanup(cancelQuiet)
+
+		putNote(syncClient(m, "a"), "n1", "only in a")
+
+		Eventually(woken).Should(Receive())
+		Consistently(quiet, "100ms").ShouldNot(Receive())
+	})
+
+	It("reports its own workspaces on the activity stream", func() {
+		// The activity stream is the one place ids come back from a shared
+		// notifier on a channel: a hosted app must see its own writes under
+		// the ids it uses, and never the other app's at all.
+		notifier := pubsub.NewLocal()
+		m := newManager(newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db")),
+			server.WithServerOptions(server.WithNotifier(notifier)))
+		for _, app := range []string{"a", "b"} {
+			_, err := m.Register(ctx, app, descriptorSetBytes(noteSpec))
+			Expect(err).NotTo(HaveOccurred())
+		}
+
+		ids, cancel, ok := m.App("a").SubscribeActivity()
+		Expect(ok).To(BeTrue())
+		DeferCleanup(cancel)
+
+		putNote(syncClient(m, "b"), "n1", "only in b")
+		Consistently(ids, "100ms").ShouldNot(Receive())
+
+		putNote(syncClient(m, "a"), "n1", "only in a")
+		Eventually(ids).Should(Receive(Equal(ws)))
+	})
+
+	It("refuses an app id that would forge another app's prefix", func() {
+		m := newManager(newRootStore(filepath.Join(GinkgoT().TempDir(), "mgr.db")))
+		_, err := m.Register(ctx, "a/b", descriptorSetBytes(noteSpec))
+		Expect(err).To(MatchError(ContainSubstring("app id")))
+	})
+
 	It("reloads persisted schemas on restart", func() {
 		path := filepath.Join(GinkgoT().TempDir(), "restart.db")
 

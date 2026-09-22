@@ -1607,7 +1607,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 		})
 
 		It("lists workspaces that have been written", func() {
-			ids, err := store.ListWorkspaceIDs(ctx)
+			ids, err := store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(BeEmpty())
 			write("wsB", func(tx storage.WriteTx) {
@@ -1616,7 +1616,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			write("wsA", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
 			})
-			ids, err = store.ListWorkspaceIDs(ctx)
+			ids, err = store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(ConsistOf("wsA", "wsB"))
 		})
@@ -1634,7 +1634,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Expect(err).NotTo(HaveOccurred())
 				Expect(id).To(BeZero())
 			})
-			ids, err := store.ListWorkspaceIDs(ctx)
+			ids, err := store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(BeEmpty(), "a write tx that wrote nothing leaves no workspace behind")
 			read("ghost", func(tx storage.ReadTx) {
@@ -1646,7 +1646,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			write("ghost", func(tx storage.WriteTx) {
 				Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
 			})
-			ids, err = store.ListWorkspaceIDs(ctx)
+			ids, err = store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(ConsistOf("ghost"))
 		})
@@ -1665,7 +1665,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					return boom
 				})).To(MatchError(boom))
 			})
-			ids, err := store.ListWorkspaceIDs(ctx)
+			ids, err := store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(BeEmpty())
 			// Sequence allocation still starts from scratch afterwards: the
@@ -1676,9 +1676,51 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				Expect(seq).To(BeEquivalentTo(1))
 				Expect(tx.PutRow("widget", "k", []byte("v"), seq, storage.Actor{})).To(Succeed())
 			})
-			ids, err = store.ListWorkspaceIDs(ctx)
+			ids, err = store.ListWorkspaceIDs(ctx, storage.Range{})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(ids).To(ConsistOf("ghost"))
+		})
+
+		// Every workspace-list query takes a Range, which is what lets one
+		// server own part of a store's id space (see prefixstore) and still
+		// pay only for its own part. A query that ignored either end would
+		// serve another server's workspaces to this one.
+		Describe("workspace-id ranges", func() {
+			BeforeEach(func() {
+				for _, ws := range []string{"a", "b", "c"} {
+					write(ws, func(tx storage.WriteTx) {
+						Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
+					})
+				}
+			})
+
+			It("excludes both ends of the range", func() {
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{After: "a", Before: "c"})).
+					To(ConsistOf("b"))
+			})
+
+			It("treats an empty end as unbounded", func() {
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{After: "b"})).To(ConsistOf("c"))
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{Before: "b"})).To(ConsistOf("a"))
+			})
+
+			It("bounds every work query", func() {
+				// Each query is given a question every one of the three
+				// workspaces answers yes to, so the range is the only thing
+				// that can narrow the answer to one.
+				rng := storage.Range{After: "a", Before: "c"}
+				cutoff := storage.GCCutoffs{Clients: time.Now().Add(time.Hour)}
+				for _, ws := range []string{"a", "b", "c"} {
+					write(ws, func(tx storage.WriteTx) {
+						Expect(tx.SetClientLastMutationID("c1", 1)).To(Succeed())
+						Expect(tx.SetTextCompactMark(storage.TextCompactMark{MinPurged: 5})).To(Succeed())
+					})
+				}
+				Expect(store.ListCollectableWorkspaceIDs(ctx, cutoff, rng, 10)).To(ConsistOf("b"))
+				Expect(store.ListStaleIndexWorkspaceIDs(ctx, "mark", rng, 10)).To(ConsistOf("b"))
+				Expect(store.ListCompactableWorkspaceIDs(ctx, 1, rng, 10)).To(ConsistOf("b"))
+				Expect(store.ListPendingWorkspaceIDs(ctx, "indexer", rng, 10)).To(ConsistOf("b"))
+			})
 		})
 
 		// The collectable query is how a maintenance pass finds its work without
@@ -1693,7 +1735,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			past := func() time.Time { return time.Now().Add(-time.Hour) }
 			collectable := func(c storage.GCCutoffs, after string, limit int) []string {
 				GinkgoHelper()
-				ids, err := store.ListCollectableWorkspaceIDs(ctx, c, after, limit)
+				ids, err := store.ListCollectableWorkspaceIDs(ctx, c, storage.Range{After: after}, limit)
 				Expect(err).NotTo(HaveOccurred())
 				return ids
 			}
@@ -1815,9 +1857,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("rejects a non-positive limit", func() {
-				_, err := store.ListCollectableWorkspaceIDs(ctx, all(), "", 0)
+				_, err := store.ListCollectableWorkspaceIDs(ctx, all(), storage.Range{}, 0)
 				Expect(err).To(HaveOccurred())
-				_, err = store.ListCollectableWorkspaceIDs(ctx, all(), "", -1)
+				_, err = store.ListCollectableWorkspaceIDs(ctx, all(), storage.Range{}, -1)
 				Expect(err).To(HaveOccurred())
 			})
 		})
@@ -1828,7 +1870,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 		Describe("index build mark", func() {
 			stale := func(mark, after string, limit int) []string {
 				GinkgoHelper()
-				ids, err := store.ListStaleIndexWorkspaceIDs(ctx, mark, after, limit)
+				ids, err := store.ListStaleIndexWorkspaceIDs(ctx, mark, storage.Range{After: after}, limit)
 				Expect(err).NotTo(HaveOccurred())
 				return ids
 			}
@@ -1871,7 +1913,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				write("ghost", func(tx storage.WriteTx) {
 					Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
 				})
-				Expect(store.ListWorkspaceIDs(ctx)).To(BeEmpty())
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(BeEmpty())
 			})
 
 			It("keeps the mark across an unrelated write", func() {
@@ -1896,9 +1938,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("rejects a non-positive limit", func() {
-				_, err := store.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 0)
+				_, err := store.ListStaleIndexWorkspaceIDs(ctx, "m1", storage.Range{}, 0)
 				Expect(err).To(HaveOccurred())
-				_, err = store.ListStaleIndexWorkspaceIDs(ctx, "m1", "", -1)
+				_, err = store.ListStaleIndexWorkspaceIDs(ctx, "m1", storage.Range{}, -1)
 				Expect(err).To(HaveOccurred())
 			})
 		})
@@ -1910,7 +1952,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 		Describe("text compaction mark", func() {
 			compactable := func(minPurged int, after string, limit int) []string {
 				GinkgoHelper()
-				ids, err := store.ListCompactableWorkspaceIDs(ctx, minPurged, after, limit)
+				ids, err := store.ListCompactableWorkspaceIDs(ctx, minPurged, storage.Range{After: after}, limit)
 				Expect(err).NotTo(HaveOccurred())
 				return ids
 			}
@@ -2011,7 +2053,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				write("ghost", func(tx storage.WriteTx) {
 					Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 1})).To(Succeed())
 				})
-				Expect(store.ListWorkspaceIDs(ctx)).To(BeEmpty())
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(BeEmpty())
 			})
 
 			It("pages in id order from an exclusive cursor", func() {
@@ -2024,9 +2066,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 			})
 
 			It("rejects a non-positive limit", func() {
-				_, err := store.ListCompactableWorkspaceIDs(ctx, 1, "", 0)
+				_, err := store.ListCompactableWorkspaceIDs(ctx, 1, storage.Range{}, 0)
 				Expect(err).To(HaveOccurred())
-				_, err = store.ListCompactableWorkspaceIDs(ctx, 1, "", -1)
+				_, err = store.ListCompactableWorkspaceIDs(ctx, 1, storage.Range{}, -1)
 				Expect(err).To(HaveOccurred())
 			})
 		})
@@ -2460,7 +2502,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				write("ws1", func(tx storage.WriteTx) {
 					Expect(tx.PutIdempotencyRecord("k", storage.IdempotencyRecord{Seq: 1})).To(Succeed())
 				})
-				Expect(store.ListWorkspaceIDs(ctx)).To(ConsistOf("ws1"))
+				Expect(store.ListWorkspaceIDs(ctx, storage.Range{})).To(ConsistOf("ws1"))
 			})
 
 			It("removes keys past the cutoff and reports the count", func() {
@@ -2818,7 +2860,7 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				}
 				pending := func(consumer, after string, limit int) []string {
 					GinkgoHelper()
-					ids, err := store.ListPendingWorkspaceIDs(ctx, consumer, after, limit)
+					ids, err := store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, limit)
 					Expect(err).NotTo(HaveOccurred())
 					return ids
 				}
@@ -2883,9 +2925,9 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				It("rejects a non-positive limit", func() {
 					// The caller pages because the answer can be every
 					// workspace; "unlimited" is the one thing it must not mean.
-					_, err := store.ListPendingWorkspaceIDs(ctx, "indexer", "", 0)
+					_, err := store.ListPendingWorkspaceIDs(ctx, "indexer", storage.Range{}, 0)
 					Expect(err).To(HaveOccurred())
-					_, err = store.ListPendingWorkspaceIDs(ctx, "indexer", "", -1)
+					_, err = store.ListPendingWorkspaceIDs(ctx, "indexer", storage.Range{}, -1)
 					Expect(err).To(HaveOccurred())
 				})
 			})
@@ -3612,377 +3654,6 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					Expect(got.Version).To(BeEquivalentTo(1))
 					Expect(got.Actor).To(Equal(actor))
 				})
-			})
-		})
-
-		Describe("app schema catalog", func() {
-			It("starts empty", func() {
-				got, err := store.ListAppSchemas(ctx)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(got).To(BeEmpty())
-			})
-
-			It("persists and lists registered schemas in app-id order", func() {
-				Expect(store.PutAppSchema(ctx, "beta", []byte("b-set"), "rev-b")).To(Succeed())
-				Expect(store.PutAppSchema(ctx, "alpha", []byte("a-set"), "rev-a")).To(Succeed())
-
-				got, err := store.ListAppSchemas(ctx)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(got).To(HaveLen(2))
-				Expect(got[0].AppID).To(Equal("alpha"))
-				Expect(got[0].DescriptorSet).To(Equal([]byte("a-set")))
-				Expect(got[0].Revision).To(Equal("rev-a"))
-				Expect(got[1].AppID).To(Equal("beta"))
-			})
-
-			It("upserts an existing app in place", func() {
-				Expect(store.PutAppSchema(ctx, "app", []byte("v1"), "rev1")).To(Succeed())
-				Expect(store.PutAppSchema(ctx, "app", []byte("v2"), "rev2")).To(Succeed())
-
-				got, err := store.ListAppSchemas(ctx)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(got).To(HaveLen(1))
-				Expect(got[0].DescriptorSet).To(Equal([]byte("v2")))
-				Expect(got[0].Revision).To(Equal("rev2"))
-			})
-
-			It("deletes a schema (and ignores a missing one)", func() {
-				Expect(store.PutAppSchema(ctx, "app", []byte("v1"), "rev1")).To(Succeed())
-				Expect(store.DeleteAppSchema(ctx, "app")).To(Succeed())
-				Expect(store.DeleteAppSchema(ctx, "absent")).To(Succeed())
-
-				got, err := store.ListAppSchemas(ctx)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(got).To(BeEmpty())
-			})
-		})
-	})
-}
-
-// ConformanceNamespaced registers the namespace-isolation specs. newPair
-// must return two adapters backed by the SAME underlying database but
-// scoped to two different namespaces, plus a cleanup that owns closing the
-// shared resources (the adapters' own Close may be a no-op for derived
-// stores).
-func ConformanceNamespaced(name string, newPair func() (a, b storage.Adapter, cleanup func())) bool {
-	return Describe("storage.Adapter namespace conformance: "+name, func() {
-		var (
-			ctx  context.Context
-			a, b storage.Adapter
-		)
-
-		BeforeEach(func() {
-			ctx = context.Background()
-			var cleanup func()
-			a, b, cleanup = newPair()
-			DeferCleanup(cleanup)
-		})
-
-		writeTo := func(s storage.Adapter, ws string, fn func(storage.WriteTx)) {
-			GinkgoHelper()
-			Expect(s.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
-				fn(tx)
-				return nil
-			})).To(Succeed())
-		}
-		readFrom := func(s storage.Adapter, ws string, fn func(storage.ReadTx)) {
-			GinkgoHelper()
-			Expect(s.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
-				fn(tx)
-				return nil
-			})).To(Succeed())
-		}
-
-		It("isolates rows between namespaces", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutRow("widget", "k1", []byte("from-a"), 1, storage.Actor{})).To(Succeed())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				_, err := tx.GetRow("widget", "k1")
-				Expect(err).To(MatchError(storage.ErrNotFound))
-				var keys []string
-				Expect(tx.ScanEntity("widget", func(r storage.Row) error {
-					keys = append(keys, r.Key)
-					return nil
-				})).To(Succeed())
-				Expect(keys).To(BeEmpty())
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				row, err := tx.GetRow("widget", "k1")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(row.Value).To(Equal([]byte("from-a")))
-			})
-		})
-
-		It("keeps sequences independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				for i := 0; i < 3; i++ {
-					_, err := tx.NextSeq()
-					Expect(err).NotTo(HaveOccurred())
-				}
-			})
-			writeTo(b, "ws1", func(tx storage.WriteTx) {
-				seq, err := tx.NextSeq()
-				Expect(err).NotTo(HaveOccurred())
-				Expect(seq).To(BeEquivalentTo(1), "same workspace id, different namespace, fresh sequence")
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				seq, err := tx.CurrentSeq()
-				Expect(err).NotTo(HaveOccurred())
-				Expect(seq).To(BeEquivalentTo(3))
-			})
-		})
-
-		It("keeps text field delta logs independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("from-a"))).To(Succeed())
-			})
-			writeTo(b, "ws1", func(tx storage.WriteTx) {
-				_, err := tx.PruneFieldDeltas(time.Now().Add(time.Hour))
-				Expect(err).NotTo(HaveOccurred())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				frags, _, err := tx.FieldDeltas("widget", "k", "body", 0)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(frags).To(BeEmpty())
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				frags, complete, err := tx.FieldDeltas("widget", "k", "body", 0)
-				Expect(err).NotTo(HaveOccurred())
-				Expect(complete).To(BeTrue(), "the other namespace's prune is not ours")
-				Expect(frags).To(Equal([][]byte{[]byte("from-a")}))
-			})
-		})
-
-		It("keeps secondary index entries and state independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutIndexEntries("widget", "k1", []storage.IndexEntry{
-					{Index: "by_label", Key: []byte{0x01}},
-				})).To(Succeed())
-				Expect(tx.SetIndexState("widget", "by_label", "hash-a", true)).To(Succeed())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				var got []string
-				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
-					got = append(got, rowKey)
-					return nil
-				})).To(Succeed())
-				Expect(got).To(BeEmpty())
-				hash, ready, err := tx.IndexState("widget", "by_label")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(hash).To(BeEmpty())
-				Expect(ready).To(BeFalse())
-			})
-			// A delete in the other namespace must not reach ours.
-			writeTo(b, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.DeleteIndexEntries("widget", "k1")).To(Succeed())
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				var got []string
-				Expect(tx.ScanIndex("widget", "by_label", nil, nil, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
-					got = append(got, rowKey)
-					return nil
-				})).To(Succeed())
-				Expect(got).To(Equal([]string{"k1"}))
-			})
-		})
-
-		It("keeps recency-ordered scans independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutRow("widget", "k1", []byte("from-a"), 1, storage.Actor{})).To(Succeed())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				var keys []string
-				Expect(tx.ScanEntityByVersionDesc("widget", 0, func(r storage.Row) error {
-					keys = append(keys, r.Key)
-					return nil
-				})).To(Succeed())
-				Expect(keys).To(BeEmpty())
-			})
-		})
-
-		It("keeps text compaction floors independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutTextFloor("widget", "k", "body", []byte("from-a"))).To(Succeed())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				vv, err := tx.TextFloor("widget", "k", "body")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(vv).To(BeEmpty())
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				vv, err := tx.TextFloor("widget", "k", "body")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(vv).To(Equal([]byte("from-a")))
-			})
-		})
-
-		It("keeps client watermarks independent per namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.SetClientLastMutationID("c1", 7)).To(Succeed())
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				id, err := tx.ClientLastMutationID("c1")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(id).To(BeZero())
-			})
-		})
-
-		It("scopes ListWorkspaceIDs to the namespace", func() {
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
-			})
-			writeTo(b, "ws2", func(tx storage.WriteTx) {
-				Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
-			})
-			ids, err := a.ListWorkspaceIDs(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ids).To(ConsistOf("ws1"))
-			ids, err = b.ListWorkspaceIDs(ctx)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ids).To(ConsistOf("ws2"))
-		})
-
-		It("scopes ListPendingWorkspaceIDs to the namespace", func() {
-			// A consumer name is not namespaced, so two apps hosted in one
-			// database routinely run the same one. Leaking a workspace across
-			// would hand a consumer work in an app it knows nothing about.
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					seq, err := tx.NextSeq()
-					Expect(err).NotTo(HaveOccurred())
-					Expect(tx.PutRow("widget", "k", []byte("v"), seq, storage.Actor{})).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.SetConsumerPosition("indexer", storage.ConsumerPosition{Seq: 1})).To(Succeed())
-			})
-			Expect(a.ListPendingWorkspaceIDs(ctx, "indexer", "", 10)).To(BeEmpty())
-			Expect(b.ListPendingWorkspaceIDs(ctx, "indexer", "", 10)).To(ConsistOf("ws1"),
-				"catching up in one namespace must not catch up in the other")
-		})
-
-		It("scopes ListCollectableWorkspaceIDs to the namespace", func() {
-			cutoffs := storage.GCCutoffs{Clients: time.Now().Add(time.Hour)}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.SetClientLastMutationID("c1", 1)).To(Succeed())
-			})
-			Expect(a.ListCollectableWorkspaceIDs(ctx, cutoffs, "", 10)).To(ConsistOf("ws1"))
-			Expect(b.ListCollectableWorkspaceIDs(ctx, cutoffs, "", 10)).To(BeEmpty(),
-				"one namespace's garbage is not the other's to collect")
-		})
-
-		It("scopes the index build mark to the namespace", func() {
-			// Two apps in one database declare different indexes, so a mark
-			// carried across would let one app's build satisfy the other's.
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.SetIndexBuildMark("m1")).To(Succeed())
-			})
-			Expect(a.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(BeEmpty())
-			Expect(b.ListStaleIndexWorkspaceIDs(ctx, "m1", "", 10)).To(ConsistOf("ws1"))
-		})
-
-		It("scopes the text compaction mark to the namespace", func() {
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.PutRow("widget", "k", []byte("v"), 1, storage.Actor{})).To(Succeed())
-					Expect(tx.PutFieldDelta("widget", "k", "body", 1, []byte("frag"))).To(Succeed())
-				})
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					_, err := tx.PruneFieldDeltas(time.Now().Add(time.Hour))
-					Expect(err).NotTo(HaveOccurred())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				Expect(tx.SetTextCompactMark(storage.TextCompactMark{Seq: 1, MinPurged: 1})).To(Succeed())
-			})
-			Expect(a.ListCompactableWorkspaceIDs(ctx, 1, "", 10)).To(BeEmpty())
-			Expect(b.ListCompactableWorkspaceIDs(ctx, 1, "", 10)).To(ConsistOf("ws1"),
-				"one namespace's sweep does not cover the other's rows")
-		})
-
-		It("scopes tombstone GC to the namespace", func() {
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.DeleteRow("widget", "dead", 1, storage.Actor{})).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				horizon, err := tx.CollectTombstones(time.Now().Add(time.Hour))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(horizon).To(BeEquivalentTo(1))
-			})
-			readFrom(a, "ws1", func(tx storage.ReadTx) {
-				_, err := tx.GetRow("widget", "dead")
-				Expect(err).To(MatchError(storage.ErrNotFound))
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				row, err := tx.GetRow("widget", "dead")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(row.Deleted).To(BeTrue(), "the other namespace keeps its tombstone")
-				horizon, err := tx.TombstoneHorizon()
-				Expect(err).NotTo(HaveOccurred())
-				Expect(horizon).To(BeZero(), "the other namespace's horizon is untouched")
-			})
-		})
-
-		It("scopes idempotency keys and their GC to the namespace", func() {
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.PutIdempotencyRecord("k", storage.IdempotencyRecord{Seq: 4})).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				removed, err := tx.CollectIdempotencyKeys(time.Now().Add(time.Hour))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(removed).To(Equal(1))
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				rec, found, err := tx.IdempotencyRecord("k")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(found).To(BeTrue(), "the other namespace keeps its claim")
-				Expect(rec.Seq).To(BeEquivalentTo(4))
-			})
-		})
-
-		It("scopes idle-client GC to the namespace", func() {
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.SetClientLastMutationID("c1", 4)).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				removed, err := tx.CollectIdleClients(time.Now().Add(time.Hour))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(removed).To(Equal(1))
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				id, err := tx.ClientLastMutationID("c1")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(id).To(BeEquivalentTo(4), "the other namespace keeps its watermark")
-			})
-		})
-
-		It("scopes verdict expiry to the namespace", func() {
-			for _, s := range []storage.Adapter{a, b} {
-				writeTo(s, "ws1", func(tx storage.WriteTx) {
-					Expect(tx.SetClientRejections("c1", []storage.ClientRejection{{MutationID: 1, Code: "conflict"}})).To(Succeed())
-				})
-			}
-			writeTo(a, "ws1", func(tx storage.WriteTx) {
-				expired, err := tx.ExpireClientRejections(time.Now().Add(time.Hour))
-				Expect(err).NotTo(HaveOccurred())
-				Expect(expired).To(Equal(1))
-			})
-			readFrom(b, "ws1", func(tx storage.ReadTx) {
-				recs, err := tx.ClientRejections("c1")
-				Expect(err).NotTo(HaveOccurred())
-				Expect(recs).To(HaveLen(1), "the other namespace keeps its verdicts")
 			})
 		})
 	})

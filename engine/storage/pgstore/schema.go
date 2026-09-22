@@ -15,6 +15,12 @@ import (
 // structural changes append here, and the ledger is what makes them
 // replayable.
 //
+// The baseline states a lineage that keys every table by the workspace id
+// alone. The lineage before it keyed them by (namespace, workspace_id), which
+// no step can rewrite in place — a hash-partitioned table cannot change its
+// partition key — so such a database is refused at Open instead (see
+// checkLineage).
+//
 // Every step takes the layout, because a partitioned database and an
 // unpartitioned one are not the same schema. Only the baseline branches on it
 // so far; a step that adds an index will have to, since CREATE INDEX on a
@@ -27,61 +33,6 @@ import (
 // per column that a later index turns into a bug.
 var migrations = []migration{
 	{additive: true, sql: baselineSchema},
-	// 2: verdicts on refused mutations, so a retry that follows a lost push
-	// response is answered with the rejection instead of a bare ack. NULL until
-	// a client has had something refused, which is the common case.
-	{additive: true, sql: fixed(`ALTER TABLE clients ADD COLUMN rejections BYTEA;`)},
-	// 3: cursor-state entries — the membership sets of issued pull cursors,
-	// keyed by the (id, gen) reference the cursor carries. See cursorstate.go
-	// for the pruning that keeps the table bounded.
-	//
-	// Unpartitioned whatever the layout asks for: the store behind it is
-	// pluggable (server.WithCursorStateStore), entries are immutable and any
-	// of them may be evicted at any time, so a deployment large enough for its
-	// churn to matter points it at something else entirely.
-	{additive: true, sql: fixed(`
-	CREATE TABLE cursor_state (
-		namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
-		workspace_id TEXT COLLATE "C" NOT NULL,
-		id           BIGINT NOT NULL,
-		gen          BIGINT NOT NULL,
-		state        BYTEA NOT NULL,
-		written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
-		PRIMARY KEY (namespace, workspace_id, id, gen)
-	);
-	`)},
-	// 4: the ledger records what each step did to compatibility, so a binary
-	// older than the ledger can tell whether it may still serve. DEFAULT TRUE
-	// backfills the three steps above, all of which are additive.
-	{additive: true, sql: fixed(
-		`ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS additive BOOLEAN NOT NULL DEFAULT TRUE;`)},
-	// 5: the index-build mark — the opaque fingerprint of the index
-	// declarations a workspace's entries are fully built under (see
-	// ListStaleIndexWorkspaceIDs). The empty default is "never built", which is
-	// what makes every workspace in an upgraded database stale to the first
-	// pass and marked by it.
-	{additive: true, sql: fixed(
-		`ALTER TABLE workspaces ADD COLUMN index_build_mark TEXT COLLATE "C" NOT NULL DEFAULT '';`)},
-	// 6: the text-compaction mark — how far the sweep has considered rows in
-	// ScanChanges order, and the minPurged threshold it did so under (see
-	// ListCompactableWorkspaceIDs). The zero default is "never swept", so the
-	// first pass after the upgrade starts every workspace from the beginning,
-	// which is where compaction started on every pass before the sweep existed.
-	{additive: true, sql: fixed(`
-	ALTER TABLE workspaces
-		ADD COLUMN text_compact_seq         BIGINT NOT NULL DEFAULT 0,
-		ADD COLUMN text_compact_entity      TEXT COLLATE "C" NOT NULL DEFAULT '',
-		ADD COLUMN text_compact_key         TEXT COLLATE "C" NOT NULL DEFAULT '',
-		ADD COLUMN text_compact_min_purged  INTEGER NOT NULL DEFAULT 0;
-	`)},
-	// 7: the sequence that created each row (see storage.Row.CreatedVersion):
-	// stamped on insert, kept on every overwrite. The 0 default is "unknown",
-	// which pre-existing rows keep — the pull path treats unknown
-	// conservatively, so there is no backfill (the creating sequence of an
-	// existing row is not recorded anywhere). Additive both ways: an older
-	// binary's inserts leave the default, which reads back as unknown.
-	{additive: true, sql: fixed(
-		`ALTER TABLE rows ADD COLUMN created_version BIGINT NOT NULL DEFAULT 0;`)},
 }
 
 // migration is one step of the ledger.
@@ -126,58 +77,75 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 // partitioning clause lands; see partitionedTables for which five and why.
 const baselineDDL = `
 CREATE TABLE workspaces (
-	namespace           TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id        TEXT COLLATE "C" NOT NULL,
 	last_seq            BIGINT NOT NULL DEFAULT 0,
 	tombstone_horizon   BIGINT NOT NULL DEFAULT 0,
 	store_epoch         BIGINT NOT NULL DEFAULT 0,
 	field_delta_horizon BIGINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id)
+	-- The opaque fingerprint of the index declarations this workspace's
+	-- entries are fully built under (see ListStaleIndexWorkspaceIDs). Empty is
+	-- "never built", which makes a fresh workspace stale to the first pass.
+	index_build_mark    TEXT COLLATE "C" NOT NULL DEFAULT '',
+	-- How far the text-compaction sweep has considered rows in ScanChanges
+	-- order, and the minPurged threshold it did so under (see
+	-- ListCompactableWorkspaceIDs). Zero is "never swept".
+	text_compact_seq        BIGINT NOT NULL DEFAULT 0,
+	text_compact_entity     TEXT COLLATE "C" NOT NULL DEFAULT '',
+	text_compact_key        TEXT COLLATE "C" NOT NULL DEFAULT '',
+	text_compact_min_purged INTEGER NOT NULL DEFAULT 0,
+	PRIMARY KEY (workspace_id)
 );
 
 CREATE TABLE rows (
-	namespace     TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id  TEXT COLLATE "C" NOT NULL,
 	entity        TEXT COLLATE "C" NOT NULL,
 	key           TEXT COLLATE "C" NOT NULL,
 	value         BYTEA,
 	version       BIGINT NOT NULL,
+	-- The sequence that created the row (see storage.Row.CreatedVersion):
+	-- stamped on insert, kept on every overwrite. 0 is "unknown", which the
+	-- pull path treats conservatively.
+	created_version BIGINT NOT NULL DEFAULT 0,
 	deleted       BOOLEAN NOT NULL DEFAULT FALSE,
 	updated_at    BIGINT NOT NULL DEFAULT 0,
 	actor_subject TEXT COLLATE "C" NOT NULL DEFAULT '',
 	actor_system  TEXT COLLATE "C" NOT NULL DEFAULT '',
-	PRIMARY KEY (namespace, workspace_id, entity, key)
+	PRIMARY KEY (workspace_id, entity, key)
 )%[1]s;
 -- ScanChanges pages by the whole (version, entity, key) tuple, so the index
 -- carries all three: sqlitestore stops at version and sorts the tie-break,
 -- which a fresh schema has no reason to inherit.
-CREATE INDEX rows_by_version ON rows (namespace, workspace_id, version, entity, key);
+CREATE INDEX rows_by_version ON rows (workspace_id, version, entity, key);
 -- Partial, because deleted = true is the only collectable state, which keeps
 -- the GC index proportional to the dead rows rather than the live ones.
-CREATE INDEX rows_gc ON rows (namespace, workspace_id, updated_at) WHERE deleted;
+CREATE INDEX rows_gc ON rows (workspace_id, updated_at) WHERE deleted;
 -- Backs ScanEntityByVersionDesc. The key order matches the recency window's
 -- tie-break (version descending, key ascending) so a page boundary lands
 -- where the in-memory top-K would have put it.
 CREATE INDEX rows_by_entity_version
-	ON rows (namespace, workspace_id, entity, version DESC, key) WHERE NOT deleted;
+	ON rows (workspace_id, entity, version DESC, key) WHERE NOT deleted;
 
 CREATE TABLE clients (
-	namespace        TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id     TEXT COLLATE "C" NOT NULL,
 	client_id        TEXT COLLATE "C" NOT NULL,
 	last_mutation_id BIGINT NOT NULL DEFAULT 0,
 	updated_at       BIGINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, client_id)
+	-- Verdicts on refused mutations, so a retry that follows a lost push
+	-- response is answered with the rejection instead of a bare ack. NULL until
+	-- a client has had something refused, which is the common case.
+	rejections       BYTEA,
+	PRIMARY KEY (workspace_id, client_id)
 );
-CREATE INDEX clients_gc ON clients (namespace, workspace_id, updated_at);
+CREATE INDEX clients_gc ON clients (workspace_id, updated_at);
 
--- Server-global: app_id is the partition, because one engine hosts several
--- apps and reloads every app's entities on boot before serving.
-CREATE TABLE schemas (
-	app_id         TEXT COLLATE "C" PRIMARY KEY,
-	descriptor_set BYTEA NOT NULL,
-	revision       TEXT COLLATE "C" NOT NULL,
-	updated_at     BIGINT NOT NULL DEFAULT 0
+-- The server-global catalog (see storage.Catalog): opaque payloads keyed by id
+-- and belonging to no workspace, which is how a multi-app host persists each
+-- application's registered FileDescriptorSet and reloads it on boot.
+CREATE TABLE catalog (
+	id         TEXT COLLATE "C" PRIMARY KEY,
+	payload    BYTEA NOT NULL,
+	revision   TEXT COLLATE "C" NOT NULL,
+	updated_at BIGINT NOT NULL DEFAULT 0
 );
 
 -- One row per (text field, write), holding the fragment that write added so
@@ -185,7 +153,6 @@ CREATE TABLE schemas (
 -- ordered so the per-field span read (one row, one field, seq > cursor) is a
 -- range scan of its tail. frag is empty for a gap marker.
 CREATE TABLE field_deltas (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	key          TEXT COLLATE "C" NOT NULL,
@@ -193,97 +160,108 @@ CREATE TABLE field_deltas (
 	seq          BIGINT NOT NULL,
 	frag         BYTEA NOT NULL,
 	updated_at   BIGINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, entity, key, field, seq)
+	PRIMARY KEY (workspace_id, entity, key, field, seq)
 )%[1]s;
-CREATE INDEX field_deltas_gc ON field_deltas (namespace, workspace_id, updated_at);
+CREATE INDEX field_deltas_gc ON field_deltas (workspace_id, updated_at);
 
 CREATE TABLE text_floors (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	key          TEXT COLLATE "C" NOT NULL,
 	field        TEXT COLLATE "C" NOT NULL,
 	vv           BYTEA NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, entity, key, field)
+	PRIMARY KEY (workspace_id, entity, key, field)
 );
 
 CREATE TABLE idempotency (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	key          TEXT COLLATE "C" NOT NULL,
 	seq          BIGINT NOT NULL,
 	result       BYTEA NOT NULL,
 	updated_at   BIGINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, key)
+	PRIMARY KEY (workspace_id, key)
 )%[1]s;
-CREATE INDEX idempotency_gc ON idempotency (namespace, workspace_id, updated_at);
+CREATE INDEX idempotency_gc ON idempotency (workspace_id, updated_at);
 
 -- k is BYTEA, which Postgres compares bytewise — the order the engine's key
 -- encoder is built for, and the reason this must never become a text column
 -- whatever its collation. The key column sits in the primary key after k for
 -- uniqueness only: k already ends with the row key.
 CREATE TABLE index_entries (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	idx          TEXT COLLATE "C" NOT NULL,
 	k            BYTEA NOT NULL,
 	key          TEXT COLLATE "C" NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, entity, idx, k, key)
+	PRIMARY KEY (workspace_id, entity, idx, k, key)
 )%[1]s;
 -- Entries are replaced and deleted per ROW, and neither caller knows which
 -- indexes the row occupies; this is what makes that affordable.
 CREATE INDEX index_entries_by_row
-	ON index_entries (namespace, workspace_id, entity, key);
+	ON index_entries (workspace_id, entity, key);
 
 CREATE TABLE index_state (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	idx          TEXT COLLATE "C" NOT NULL,
 	spec_hash    TEXT COLLATE "C" NOT NULL,
 	ready        BOOLEAN NOT NULL DEFAULT FALSE,
-	PRIMARY KEY (namespace, workspace_id, entity, idx)
+	PRIMARY KEY (workspace_id, entity, idx)
 );
 
 CREATE TABLE consumer_positions (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	consumer     TEXT COLLATE "C" NOT NULL,
 	seq          BIGINT NOT NULL DEFAULT 0,
 	entity       TEXT COLLATE "C" NOT NULL DEFAULT '',
 	key          TEXT COLLATE "C" NOT NULL DEFAULT '',
 	updated_at   BIGINT NOT NULL DEFAULT 0,
-	PRIMARY KEY (namespace, workspace_id, consumer)
+	PRIMARY KEY (workspace_id, consumer)
 );
 CREATE INDEX consumer_positions_gc
-	ON consumer_positions (namespace, workspace_id, updated_at);
+	ON consumer_positions (workspace_id, updated_at);
 
 -- No GC index: shadows are deleted per row or wholesale with their
--- consumer, and the primary key's (namespace, workspace_id, consumer)
+-- consumer, and the primary key's (workspace_id, consumer)
 -- prefix is the range scan for that.
 CREATE TABLE consumer_shadows (
-	namespace    TEXT COLLATE "C" NOT NULL DEFAULT '',
 	workspace_id TEXT COLLATE "C" NOT NULL,
 	consumer     TEXT COLLATE "C" NOT NULL,
 	entity       TEXT COLLATE "C" NOT NULL,
 	key          TEXT COLLATE "C" NOT NULL,
 	snapshot     BYTEA NOT NULL,
-	PRIMARY KEY (namespace, workspace_id, consumer, entity, key)
+	PRIMARY KEY (workspace_id, consumer, entity, key)
 )%[1]s;
+
+-- Cursor-state entries: the membership sets of issued pull cursors, keyed by
+-- the (id, gen) reference the cursor carries. See cursorstate.go for the
+-- pruning that keeps the table bounded.
+--
+-- Unpartitioned whatever the layout asks for: the store behind it is pluggable
+-- (server.WithCursorStateStore), entries are immutable and any of them may be
+-- evicted at any time, so a deployment large enough for its churn to matter
+-- points it at something else entirely.
+CREATE TABLE cursor_state (
+	workspace_id TEXT COLLATE "C" NOT NULL,
+	id           BIGINT NOT NULL,
+	gen          BIGINT NOT NULL,
+	state        BYTEA NOT NULL,
+	written_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+	PRIMARY KEY (workspace_id, id, gen)
+);
 `
 
 // partitionedTables names the tables a partitioned layout hash-partitions, in
 // the order the baseline creates them. Each one leads its primary key with
-// (namespace, workspace_id) — which is what Postgres demands of a unique
-// constraint on a partitioned table — and every statement against them binds
-// both columns to equality, so pruning reaches a single partition and no
-// update ever moves a row across one.
+// workspace_id — which is what Postgres demands of a unique constraint on a
+// partitioned table — and every statement against them binds that column to
+// equality, so pruning reaches a single partition and no update ever moves a
+// row across one.
 //
 // The rest are left whole on purpose. workspaces is scanned ACROSS workspaces
 // by ListWorkspaceIDs and ListPendingWorkspaceIDs, with no equality on the key
 // to prune by, and holds one row per workspace. clients, text_floors,
-// index_state, consumer_positions, cursor_state and schemas are small enough
+// index_state, consumer_positions, cursor_state and catalog are small enough
 // that the partition count would cost more than the maintenance granularity
 // buys.
 var partitionedTables = []string{
@@ -302,8 +280,8 @@ var partitionedTables = []string{
 const maxPartitions = 1024
 
 // layout is the physical shape of the workspace-scoped tables. It belongs to
-// the database rather than to a Store: namespaces share tables, so every
-// namespace in one schema sees the same layout.
+// the database rather than to a Store: every workspace in one schema sees the
+// same layout.
 type layout struct {
 	// partitions is the hash modulus the baseline creates the tables in
 	// partitionedTables with; zero leaves each of them a single table.
@@ -322,7 +300,7 @@ func (l layout) partitionBy() string {
 	if l.partitions == 0 {
 		return ""
 	}
-	return " PARTITION BY HASH (namespace, workspace_id)"
+	return " PARTITION BY HASH (workspace_id)"
 }
 
 // baselineSchema is migration 1 under the given layout: the tables, then the
@@ -465,6 +443,32 @@ func schemaVersion(ctx context.Context, q querier) (int, error) {
 	return version, err
 }
 
+// checkLineage refuses a database from the lineage that partitioned every
+// table by an app namespace, which the workspaces table carries a namespace
+// column of.
+//
+// It is checked before the ledger version, because that database's version
+// numbers count within the OTHER lineage: it sits above this binary's baseline
+// and would otherwise be read as a schema from the future rather than one from
+// the past. Nothing upgrades it — the namespace is half of every primary key,
+// and of the partition key of five of the tables — so it has to be re-created,
+// at the cost of a re-bootstrap for every client of the workspaces it held.
+func checkLineage(ctx context.Context, q querier) error {
+	var found bool
+	err := q.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM information_schema.columns
+			WHERE table_schema = current_schema()
+			  AND table_name = 'workspaces' AND column_name = 'namespace')`).Scan(&found)
+	if err != nil {
+		return fmt.Errorf("pgstore: read schema lineage: %w", err)
+	}
+	if found {
+		return fmt.Errorf("pgstore: database belongs to the app-namespace schema lineage; it cannot be upgraded in place and must be re-created")
+	}
+	return nil
+}
+
 // serveFloor is the lowest ledger version whose binary can still serve this
 // database: the highest step recorded as non-additive, or zero when every step
 // was additive. A binary at or above it may open a database ahead of itself.
@@ -500,6 +504,9 @@ func serveFloor(ctx context.Context, q querier) (int, error) {
 // before it checks whether the table is already there, so even the ledger's
 // CREATE TABLE IF NOT EXISTS is refused to a role without it.
 func verifySchema(ctx context.Context, pool *pgxpool.Pool) error {
+	if err := checkLineage(ctx, pool); err != nil {
+		return err
+	}
 	version, err := schemaVersion(ctx, pool)
 	if err != nil {
 		return fmt.Errorf("pgstore: read schema version (has this database been migrated?): %w", err)
@@ -586,6 +593,10 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, want layout) error {
 
 	if _, err := conn.Exec(ctx, ledgerDDL); err != nil {
 		return fmt.Errorf("pgstore: create migration ledger: %w", err)
+	}
+
+	if err := checkLineage(ctx, conn); err != nil {
+		return err
 	}
 
 	version, err := schemaVersion(ctx, conn)

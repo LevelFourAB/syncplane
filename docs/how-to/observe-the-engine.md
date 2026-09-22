@@ -72,13 +72,13 @@ Follow these steps to configure OpenTelemetry in your application:
 
 2. Wrap the storage adapter and initialize the server:
 
-   Wrap your storage adapter once at the root with `otelstore.Wrap` before passing it to `server.New`. A manager namespaces the root adapter per application and carries the wrapper through, so wrapping per application causes double-counting.
+   Wrap your storage adapter once at the root with `otelstore.Wrap` before passing it to `server.New`. A manager partitions the root adapter per application with a wrapper that forwards to it, so wrapping per application causes double-counting.
 
    ```go
    // Storage is instrumented by wrapping the adapter — so any adapter gets it,
-   // not just sqlitestore. Wrap ONCE, at the root: a Manager namespaces the root
-   // adapter per app and the wrapper carries through, so wrapping per app would
-   // double-count.
+   // not only sqlitestore. Wrap ONCE, at the root: a Manager partitions the root
+   // adapter per app with a wrapper that forwards to this one, so wrapping per
+   // app would double-count.
    store, err := sqlitestore.Open(path)
    if err != nil { ... }
    defer store.Close()

@@ -26,7 +26,7 @@ func CursorState(name string, newAdapter func() storage.Adapter) bool {
 			ctx = context.Background()
 			adapter := newAdapter()
 			DeferCleanup(func() { Expect(adapter.Close()).To(Succeed()) })
-			provider, ok := adapter.(cursorstate.Provider)
+			provider, ok := storage.As[cursorstate.Provider](adapter)
 			Expect(ok).To(BeTrue(), "adapter must implement cursorstate.Provider to run this suite")
 			store = provider.CursorStateStore()
 		})
@@ -89,32 +89,6 @@ func CursorState(name string, newAdapter func() storage.Adapter) bool {
 			got, err = store.Get(ctx, "ws1", other)
 			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal([]byte("other-lineage")))
-		})
-	})
-}
-
-// CursorStateNamespaced registers the isolation specs for namespaced stores
-// sharing one database: an entry written through one namespace must be
-// invisible through another, or two apps' clients could resolve each other's
-// membership sets. newPair returns two adapters derived from the same
-// underlying store plus a cleanup that closes it.
-func CursorStateNamespaced(name string, newPair func() (a, b storage.Adapter, cleanup func())) bool {
-	return Describe("cursorstate.Provider namespacing: "+name, func() {
-		It("keeps namespaces apart", func() {
-			ctx := context.Background()
-			a, b, cleanup := newPair()
-			DeferCleanup(cleanup)
-			sa := a.(cursorstate.Provider).CursorStateStore()
-			sb := b.(cursorstate.Provider).CursorStateStore()
-
-			ref := cursorstate.Ref{ID: 7, Gen: 42}
-			Expect(sa.Put(ctx, "ws1", ref, []byte("app-a"))).To(Succeed())
-			_, err := sb.Get(ctx, "ws1", ref)
-			Expect(err).To(MatchError(cursorstate.ErrNotFound))
-			Expect(sb.Put(ctx, "ws1", ref, []byte("app-b"))).To(Succeed())
-			got, err := sa.Get(ctx, "ws1", ref)
-			Expect(err).NotTo(HaveOccurred())
-			Expect(got).To(Equal([]byte("app-a")))
 		})
 	})
 }

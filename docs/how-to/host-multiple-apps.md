@@ -1,6 +1,6 @@
 # Hosting multiple apps in one process
 
-This guide shows you how to host multiple applications in one process using storage namespaces and `server.Manager`. Use this approach to partition a single database between multiple sync servers or to dynamically register and route schemas at runtime.
+This guide shows you how to host multiple applications in one process using workspace-ID prefixes and `server.Manager`. Use this approach to partition a single database between multiple sync servers or to dynamically register and route schemas at runtime.
 
 ## Prerequisites
 
@@ -13,16 +13,18 @@ Before hosting multiple applications, ensure you have:
 
 1. **Open the root storage adapter:**
 
-   Open the database file once. If you partition a single SQLite file across static servers without dynamic schemas, derive namespaces directly from the root adapter:
+   Open the database file once. If you partition a single SQLite file across static servers without dynamic schemas, wrap the root adapter per app with `prefixstore`:
 
    ```go
    root, _ := sqlitestore.Open("apps.db")
    defer root.Close()                       // the root owns the handle
-   srvA, err := server.New(root.Namespace("app-a"), server.WithEntities(&appav1.Thing{}))
-   srvB, err := server.New(root.Namespace("app-b"), server.WithEntities(&appbv1.Widget{}))
+   srvA, err := server.New(prefixstore.Wrap(root, "app-a/"), server.WithEntities(&appav1.Thing{}))
+   srvB, err := server.New(prefixstore.Wrap(root, "app-b/"), server.WithEntities(&appbv1.Widget{}))
    ```
 
-   Calling `Close` on a derived store is a no-op. Calling `sqlitestore.WithNamespace("app-a")` on `Open` performs the same partitioning for a single-app process.
+   Each server keeps using bare workspace IDs; the wrapper prefixes every ID that reaches the database, so workspace `team` under `app-a` is stored as `app-a/team`. Calling `Close` on a wrapped adapter is a no-op. The prefix must end in a separator that no workspace ID can contain, such as `/`.
+
+   `server.Manager` applies the same wrapper itself, using `<appID>/`, so the steps below need no storage wiring per app.
 
 2. **Initialize the manager and configure options:**
 
@@ -42,26 +44,26 @@ Before hosting multiple applications, ensure you have:
 
    The authenticator runs on the app's handler after routing, so a request is authenticated once and the resulting `Principal` reaches that app's permission hooks (see [single-app server](authentication-and-permissions.md)).
 
-   Bind permission policies to an app ID. Permission hooks receive a principal and a `workspace_id`, not an app ID. Because each app is its own storage namespace, workspace `team` in `docs` and workspace `team` in `billing` are separate partitions.
+   Bind permission policies to an app ID. Permission hooks receive a principal and a `workspace_id`, not an app ID. Because each app has its own prefix, workspace `team` in `docs` and workspace `team` in `billing` are separate partitions.
+
+   App IDs are restricted to letters, digits, `_`, `-`, and `:`, starting with a letter or a digit, and are at most 64 bytes. `Register` refuses anything else, so no app ID can spell another app's prefix.
 
    Per-app options run after shared options and override them. An app with no configured policy inherits `AllowAll`.
 
-   If you use PostgreSQL with a shared change notifier and presence bus, configure them with namespaced options per app:
+   If you use PostgreSQL, pass one change notifier and one presence bus for every hosted app:
 
    ```go
    link, _ := pglisten.Open(ctx, dsn)
    notifier, _ := pgnotify.New(ctx, link)
    bus, _ := pgpresence.New(ctx, link)
 
-   server.WithAppOptions(func(appID string) []server.Option {
-   	return []server.Option{
-   		server.WithNotifier(notifier.Namespace(appID)),
-   		server.WithPresenceBus(bus.Namespace(appID)),
-   	}
-   })
+   server.WithServerOptions(
+   	server.WithNotifier(notifier),
+   	server.WithPresenceBus(bus),
+   )
    ```
 
-   A namespaced view shares the underlying fan-out, and closing a view is a no-op. The value returned by `Open` or `New` owns the fan-out and must outlive every view. Both fan-outs sit on one `pglisten.Conn`, which owns the connections and must outlive them in turn. `cmd/syncplaned` wires both this way when its data source name (DSN) selects PostgreSQL.
+   Each app's server prefixes the workspace IDs it publishes and subscribes to, and its room registry prefixes the topics it puts on the bus, so neither plane needs a view per app. Both fan-outs sit on one `pglisten.Conn`, which owns the connections and must outlive them. `cmd/syncplaned` wires both this way when its data source name (DSN) selects PostgreSQL.
 
 3. **Start the HTTP servers:**
 

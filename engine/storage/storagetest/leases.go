@@ -101,28 +101,3 @@ func Leases(name string, newShared func() (a, b storage.Adapter, cleanup func())
 		})
 	})
 }
-
-// LeasesNamespaced registers the isolation specs for namespaced stores sharing
-// one database: a lease taken through one namespace must not exclude another
-// namespace's holder, or one app's sweeps would starve every other app's.
-// newPair returns two adapters derived from the same underlying store plus a
-// cleanup that closes it.
-func LeasesNamespaced(name string, newPair func() (a, b storage.Adapter, cleanup func())) bool {
-	return Describe("lease.Provider namespacing: "+name, func() {
-		It("keeps namespaces apart", func() {
-			ctx := context.Background()
-			a, b, cleanup := newPair()
-			DeferCleanup(cleanup)
-			la := a.(lease.Provider).Leases()
-			lb := b.(lease.Provider).Leases()
-
-			_, ok, err := la.TryAcquire(ctx, "gc", "ws1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ok).To(BeTrue())
-
-			_, ok, err = lb.TryAcquire(ctx, "gc", "ws1")
-			Expect(err).NotTo(HaveOccurred())
-			Expect(ok).To(BeTrue())
-		})
-	})
-}

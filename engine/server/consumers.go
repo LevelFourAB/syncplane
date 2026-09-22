@@ -102,7 +102,7 @@ func (s *Server) ConsumerPendingWorkspaces(ctx context.Context, consumer, after 
 	if limit <= 0 {
 		return nil, fmt.Errorf("server: limit must be positive, got %d", limit)
 	}
-	return s.store.ListPendingWorkspaceIDs(ctx, consumer, after, limit)
+	return s.store.ListPendingWorkspaceIDs(ctx, consumer, storage.Range{After: after}, limit)
 }
 
 // AdvanceConsumer commits a consumer's new feed position together with the
