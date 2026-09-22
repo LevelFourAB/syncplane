@@ -1,0 +1,70 @@
+# Release Please keeps one release PR open against main. Merging it writes the
+# changelog, bumps client/package.json, tags vX.Y.Z and creates the GitHub
+# release; the npm job then publishes that tag.
+#
+# One version covers the whole repo. The Go module is rooted at the repo root, so
+# its tag must be exactly vX.Y.Z, and the client is only useful against an engine
+# that speaks the same wire contract.
+name: Release
+
+on:
+  push:
+    branches: [ main ]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    outputs:
+      release_created: ${{ steps.release.outputs.release_created }}
+      tag_name: ${{ steps.release.outputs.tag_name }}
+    steps:
+      - uses: googleapis/release-please-action@v4
+        id: release
+        with:
+          # GITHUB_TOKEN cannot start other workflows, so with it the release PR
+          # gets no CI run. Add a RELEASE_PLEASE_TOKEN secret (a PAT or a GitHub
+          # App token with contents and pull-requests write) to get one.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+
+  npm:
+    name: publish syncplane to npm
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # Lets the runner mint the OIDC token that npm trades for a short-lived
+      # publish grant. Trusted publishing needs no NPM_TOKEN, and it attaches a
+      # provenance attestation by itself.
+      id-token: write
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+
+      - uses: jdx/mise-action@v4
+
+      - name: Install the client dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      - run: task build:ts
+
+      - name: Install an npm that can do trusted publishing
+        # Trusted publishing needs npm 11.5.1 or later. pnpm publish is not used
+        # for the same reason: its OIDC support has lagged the npm client.
+        run: npm install --global npm@latest
+
+      - name: Publish
+        working-directory: client
+        run: npm publish

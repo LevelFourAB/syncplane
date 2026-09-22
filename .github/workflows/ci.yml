@@ -1,0 +1,83 @@
+# Everything here runs through mise and task, so a contributor reproduces a
+# failure with the same two commands the README gives them.
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  # Pushes to main stay serialized, so a red main is never hidden by a newer run
+  # that cancelled it.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check:
+    name: task ci
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          # `buf breaking` reads main out of the local clone (.git#branch=main),
+          # so it needs the history and not a shallow tip.
+          fetch-depth: 0
+
+      - name: Create a local main for the protobuf breaking check
+        # A pull_request build checks out a detached merge commit, which leaves
+        # no refs/heads/main. Without this step the breaking task finds no main
+        # and skips itself - silently, on the one event where it matters most.
+        if: github.ref_name != 'main'
+        run: git fetch --no-tags origin main:main
+
+      - uses: jdx/mise-action@v4
+
+      - name: Cache the Go build and module caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/go-build
+            ~/go/pkg/mod
+          key: go-${{ runner.os }}-${{ hashFiles('go.sum') }}
+          restore-keys: go-${{ runner.os }}-
+
+      - name: Find the pnpm store
+        id: pnpm
+        working-directory: client
+        run: echo "store=$(pnpm store path)" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the pnpm store
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.pnpm.outputs.store }}
+          key: pnpm-${{ runner.os }}-${{ hashFiles('client/pnpm-lock.yaml') }}
+          restore-keys: pnpm-${{ runner.os }}-
+
+      - name: Install the client dependencies
+        working-directory: client
+        run: pnpm install --frozen-lockfile
+
+      # Docker is available on the runner, so the pgstore, pglisten, pgnotify and
+      # pgpresence suites start their Postgres container and run for real instead
+      # of skipping.
+      - run: task ci
+
+  generated:
+    name: generated code is current
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: jdx/mise-action@v4
+
+      - run: task generate
+
+      - name: Fail if regeneration changed a checked-in file
+        # --intent-to-add puts new files into the diff, which a plain diff does
+        # not see.
+        run: |
+          git add --intent-to-add --all
+          git diff --exit-code
