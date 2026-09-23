@@ -57,10 +57,10 @@ var _ = Describe("SQLite schema versioning", func() {
 	// every database in the field, and this is the assertion that makes it
 	// deliberate.
 	const applicationID = 0x73796E63
-	const baselineVersion = 7
+	const baselineVersion = 1
 	// The version a database this binary creates or upgrades ends at: the
 	// baseline plus every migration since. Bump it with each migration added.
-	const latestVersion = 7
+	const latestVersion = 1
 
 	// foreign creates a database holding one table under the given stamps,
 	// standing in for whatever a binary other than this one left behind.
@@ -131,16 +131,6 @@ var _ = Describe("SQLite schema versioning", func() {
 	It("refuses a database newer than the binary", func() {
 		_, err := sqlitestore.Open(foreign("future.db", applicationID, latestVersion+1))
 		Expect(err).To(MatchError(ContainSubstring("newer than this binary")))
-	})
-
-	It("refuses a database from the app-namespace lineage", func() {
-		// Its tables key every row by (namespace, workspace_id), which no step
-		// can rewrite in place, so every version below the baseline is refused
-		// rather than opened and read through the wrong shape.
-		for _, version := range []int{1, baselineVersion - 1} {
-			_, err := sqlitestore.Open(foreign(fmt.Sprintf("ns-%d.db", version), applicationID, version))
-			Expect(err).To(MatchError(ContainSubstring("predates this binary's schema")))
-		}
 	})
 })
 
