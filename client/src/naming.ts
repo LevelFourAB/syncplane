@@ -146,16 +146,30 @@ const ENTITY_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 /** Throws unless `name` satisfies the entity-name rule. */
 export function validateEntityName(name: string, where?: string): void {
+	validateIdentifier('entity name', name, where);
+}
+
+/**
+ * Throws unless `name` satisfies the rule for the name a schema gives a
+ * reverse relation — (syncplane.v1.field_behavior).reverse_relation. The rule
+ * is the entity-name rule: the name is a follow segment on the wire, an
+ * `include` key and a property of the refs facade (`db.user.refs.assignedIssues`).
+ */
+export function validateRelationName(name: string, where?: string): void {
+	validateIdentifier('reverse relation name', name, where);
+}
+
+function validateIdentifier(what: string, name: string, where: string | undefined): void {
 	const prefix = where === undefined ? '' : `${where}: `;
-	if (name === '') throw new Error(`${prefix}entity name is empty`);
+	if (name === '') throw new Error(`${prefix}${what} is empty`);
 	if (name.length > MAX_ENTITY_NAME_LENGTH) {
 		throw new Error(
-			`${prefix}entity name "${name}" is ${name.length} characters, the limit is ${MAX_ENTITY_NAME_LENGTH}`,
+			`${prefix}${what} "${name}" is ${name.length} characters, the limit is ${MAX_ENTITY_NAME_LENGTH}`,
 		);
 	}
 	if (!ENTITY_NAME.test(name)) {
 		throw new Error(
-			`${prefix}entity name "${name}" is not an identifier: use letters, digits and underscores, `
+			`${prefix}${what} "${name}" is not an identifier: use letters, digits and underscores, `
 				+ 'starting with a letter or underscore',
 		);
 	}

@@ -623,7 +623,7 @@ describe('workspace-qualified references in the schema builder', () => {
 	const task = entity('bTask', {
 		id: text().key(),
 		assignee: workspaceRef(() => person),
-		watchers: workspaceRefList(() => person),
+		watchers: workspaceRefList(() => person).reverseRelation('watchedBTasks'),
 	});
 
 	it('synthesizes a reference message the registry reads as a qualified ref', () => {
@@ -635,7 +635,7 @@ describe('workspace-qualified references in the schema builder', () => {
 		expect(registry.forwardCasesOf('bTask', 'watchers')[0]?.repeated).toBe(true);
 		expect(registry.reverseRefsOf('person').map((r) => r.name).sort()).toEqual([
 			'bTasksByAssignee',
-			'bTasksByWatchers',
+			'watchedBTasks',
 		]);
 	});
 

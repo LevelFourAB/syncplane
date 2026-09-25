@@ -71,7 +71,7 @@ import {
 	SearchSpecSchema,
 	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
-import { validateEntityName } from '../naming.js';
+import { validateEntityName, validateRelationName } from '../naming.js';
 
 /**
  * Package the synthesized messages live in. Matches engine/server/dynamic.go's
@@ -166,6 +166,8 @@ interface FieldSpec {
 	searchable?: boolean;
 	/** Put this field out of a client's reach; see Field.protected. */
 	protectedField?: boolean;
+	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
+	reverseRelation?: string;
 }
 
 /**
@@ -324,6 +326,37 @@ export class Field<T> {
 			);
 		}
 		return new Field<T>({ ...this.spec, protectedField: true });
+	}
+
+	/**
+	 * Names the reverse relation this reference adds to its target — the
+	 * `db.<target>.refs.<name>` accessor, `include` key and `follow` segment
+	 * that lists the rows pointing at one target row. Without it, the name is
+	 * `<plural(entity)>By<Field>` in camelCase (`issuesByAssignee` for the
+	 * `assignee` field of `issue`).
+	 *
+	 * Reverse relation names must be unique on the target, and must not be the
+	 * name of a reference field of the target: the client and the server refuse
+	 * a schema that breaks this. Throws when the field is not a reference, or
+	 * when `name` breaks the identifier rule in docs/reference/naming.md.
+	 *
+	 * @example
+	 * ```ts
+	 * const issue = schema.entity('issue', {
+	 *   id: schema.text().key(),
+	 *   assignee: schema.ref(() => user), // user.refs.issuesByAssignee
+	 *   reporter: schema.ref(() => user).reverseRelation('reportedIssues'),
+	 * });
+	 * ```
+	 */
+	reverseRelation(name: string): Field<T> {
+		if (this.spec.kind !== 'ref') {
+			throw new Error(
+				'reverseRelation() is only valid on a ref(), refList(), workspaceRef() or workspaceRefList() field',
+			);
+		}
+		validateRelationName(name, 'reverseRelation()');
+		return new Field<T>({ ...this.spec, reverseRelation: name });
 	}
 }
 
@@ -1023,8 +1056,9 @@ function fieldProtoOf(
 				field.typeName = `.${target.typeName}`;
 			}
 			// Entity-typed reference detection is annotation-free, so the only
-			// mark the field itself carries is one that says who may write it.
-			setWritePolicy(field, spec);
+			// marks the field itself carries say who may write it and what its
+			// reverse relation is called.
+			setRefMarks(field, spec);
 			break;
 		}
 		case 'map': {
@@ -1163,6 +1197,25 @@ function setWritePolicy(field: FieldDescriptorProto, spec: FieldSpec): void {
 		fieldOptions,
 		fieldBehaviorExt,
 		create(FieldBehaviorSchema, { writePolicy: FieldWritePolicy.TRUSTED_ONLY }),
+	);
+	field.options = fieldOptions;
+}
+
+/**
+ * Sets the (syncplane.v1.field_behavior) marks a reference field carries: its
+ * write policy and its reverse relation's name. No-op when neither is set, for
+ * the reason setWritePolicy gives.
+ */
+function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
+	if (!spec.protectedField && spec.reverseRelation === undefined) return;
+	const fieldOptions = create(FieldOptionsSchema);
+	setExtension(
+		fieldOptions,
+		fieldBehaviorExt,
+		create(FieldBehaviorSchema, {
+			writePolicy: writePolicyOf(spec.protectedField),
+			reverseRelation: spec.reverseRelation ?? '',
+		}),
 	);
 	field.options = fieldOptions;
 }

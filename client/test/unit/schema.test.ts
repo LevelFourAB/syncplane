@@ -218,7 +218,7 @@ const issue: EntitySchema<IssueFields> = entity('issue', {
 	settings: message({ color: text(), size: int32() }),
 	project: ref(() => project),
 	assignee: ref(() => user),
-	reporter: ref(() => user),
+	reporter: ref(() => user).reverseRelation('reportedIssues'),
 	blockedBy: refList(() => issue),
 	members: keyedList(message({ uid: text(), name: text() }), 'uid'),
 	items: keyedList(message({ id: text(), pos: text(), label: text() }), 'id').order('pos'),
@@ -245,6 +245,11 @@ describe('schema builder — full parity', () => {
 		expect(proj.message!.typeName).toBe('sync.dynamic.Project');
 		// No field_behavior: ref detection is annotation-free.
 		expect(hasOption(proj, fieldBehaviorExt)).toBe(false);
+	});
+
+	it('lowers .reverseRelation() onto the reference field', () => {
+		expect(getOption(field('reporter'), fieldBehaviorExt).reverseRelation).toBe('reportedIssues');
+		expect(hasOption(field('assignee'), fieldBehaviorExt)).toBe(false);
 	});
 
 	it('synthesizes a to-many self reference', () => {
@@ -316,9 +321,10 @@ describe('schema builder — full parity', () => {
 	it('drops only the entities (not nested types) into EntityRegistry', () => {
 		const reg = new EntityRegistry(bundle.descMessages());
 		expect(reg.names().sort()).toEqual([ 'issue', 'project', 'user' ]);
-		// Two refs to user disambiguate into auto-named reverse relations.
+		// Two refs to user: the one that names no reverse relation takes the
+		// name of its field, the other the name it sets.
 		const revNames = reg.reverseRefsOf('user').map((r) => r.name).sort();
-		expect(revNames).toEqual([ 'issuesByAssignee', 'issuesByReporter' ]);
+		expect(revNames).toEqual([ 'issuesByAssignee', 'reportedIssues' ]);
 	});
 
 	it('survives a FileDescriptorSet wire round-trip', () => {
@@ -371,6 +377,28 @@ describe('schema builder — full parity', () => {
 			// put it, since a reference is detected by its target being an
 			// entity rather than by any annotation. Accepting it would drop it.
 			expect(() => ref(() => project).indexed()).toThrow(/already indexed/);
+		});
+		it('rejects reverseRelation on a field that is not a reference', () => {
+			expect(() => text().reverseRelation('posts')).toThrow(/only valid on a ref\(\)/);
+			expect(() => message({ a: text() }).reverseRelation('posts')).toThrow(/only valid on a ref\(\)/);
+		});
+		it('rejects a reverse relation name that is not an identifier', () => {
+			expect(() => ref(() => project).reverseRelation('owned.issues')).toThrow(
+				'reverseRelation(): reverse relation name "owned.issues" is not an identifier',
+			);
+		});
+		it('keeps both marks on a protected reference with a named reverse relation', () => {
+			const person = entity('person', { id: text().key() });
+			const task = entity('task', {
+				id: text().key(),
+				owner: ref(() => person).protected().reverseRelation('ownedTasks'),
+			});
+			const owner = defineSchema(person, task).descMessage('task').fields.find((f) =>
+				f.name === 'owner'
+			)!;
+			const fb = getOption(owner, fieldBehaviorExt);
+			expect(fb.writePolicy).toBe(FieldWritePolicy.TRUSTED_ONLY);
+			expect(fb.reverseRelation).toBe('ownedTasks');
 		});
 		it('rejects opaque on a map', () => {
 			expect(() => map('string', text()).opaque()).toThrow(/bytes\(\) or message\(\)/);

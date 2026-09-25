@@ -63,32 +63,80 @@ describe('reference graph naming', () => {
 		// pair → Pair is not registered here, so it is omitted from the graph.
 	});
 
-	it('auto-names a single-field reverse as the pluralized source', () => {
-		expect(registry.reverseRefsOf('project').map((r) => r.name)).toEqual([ 'issues' ]);
-	});
-
-	it('disambiguates multiple refs from one source with <plural>By<Field>', () => {
+	it('names a reverse relation after its source entity and field', () => {
+		expect(registry.reverseRefsOf('project').map((r) => r.name)).toEqual([ 'issuesByProject' ]);
+		expect(registry.reverseRefsOf('issue').map((r) => r.name)).toEqual([ 'issuesByBlockedBy' ]); // self-ref
 		expect(registry.reverseRefsOf('user').map((r) => r.name).sort()).toEqual([
 			'issuesByAssignee',
 			'issuesByReporter',
 		]);
 	});
 
-	it('throws on a reverse-name clash', () => {
-		// Two reverse relations colliding on one target is rejected at build time.
-		// (Constructed via the public auto-namer; our fixtures never clash, so we
-		// assert the guard exists by reaching into a crafted scenario is omitted —
-		// the deterministic naming above is the contract.)
-		expect(registry.reverseRefsOf('issue').map((r) => r.name)).toEqual([ 'issues' ]); // blocked_by self-ref
+	// engine/server/reversenames_test.go pins the same rule and wording for the
+	// engine's mirror of the graph.
+	describe('in a runtime schema', () => {
+		const user = entity('user', { id: text().key() });
+		const namesOn = (...schemas: EntitySchema<any>[]) =>
+			new EntityRegistry(defineSchema(user, ...schemas).descMessages())
+				.reverseRefsOf('user').map((r) => r.name).sort();
+
+		it('spells a snake_case entity and field in camelCase', () => {
+			const taskList = entity('task_list', { id: text().key(), createdBy: ref(() => user) });
+			expect(namesOn(taskList)).toEqual([ 'taskListsByCreatedBy' ]);
+		});
+
+		// The rule exists for this: a name is a wire contract that deployed
+		// clients follow by, so a reference added later must not rename the
+		// ones before it.
+		it('keeps the name of an existing reference when another joins it', () => {
+			const post = entity('post', {
+				id: text().key(),
+				author: ref(() => user),
+				editor: ref(() => user),
+			});
+			expect(namesOn(post)).toEqual([ 'postsByAuthor', 'postsByEditor' ]);
+		});
+
+		it('uses the name a field sets', () => {
+			const post = entity('post', {
+				id: text().key(),
+				author: ref(() => user),
+				editor: ref(() => user).reverseRelation('editedPosts'),
+			});
+			expect(namesOn(post)).toEqual([ 'editedPosts', 'postsByAuthor' ]);
+		});
+
+		it('throws on two references of one entity that set one name on one target', () => {
+			const post = entity('post', {
+				id: text().key(),
+				author: ref(() => user).reverseRelation('posts'),
+				editor: ref(() => user).reverseRelation('posts'),
+			});
+			expect(() => namesOn(post)).toThrow(
+				'reverse relation "posts" on entity "user" is named by both post.author and post.editor; '
+					+ 'set (syncplane.v1.field_behavior).reverse_relation on one of them to give it another name',
+			);
+		});
+
+		it("throws on a name that another entity's reference already takes on the target", () => {
+			const post = entity('post', { id: text().key(), author: ref(() => user) });
+			const comment = entity('comment', {
+				id: text().key(),
+				author: ref(() => user).reverseRelation('postsByAuthor'),
+			});
+			expect(() => namesOn(post, comment)).toThrow(
+				'reverse relation "postsByAuthor" on entity "user" is named by both comment.author and post.author',
+			);
+		});
 	});
 
 	it('throws when a ref field of the same name would shadow a reverse relation', () => {
 		// One namespace per entity: `post.comments` is a forward ref list, and the
-		// reverse of `comment.post` is auto-named pluralize("comment") =
-		// "comments" on post as well. Every resolver here and on the server tries
-		// forward first, so letting it build would leave the reverse half
-		// unreachable and answer `comments` with a different row set. The engine's
-		// buildRefGraph rejects the same schema with the same wording.
+		// reverse of `comment.post` is named "comments" on post as well. Every
+		// resolver here and on the server tries forward first, so letting it build
+		// would leave the reverse half unreachable and answer `comments` with a
+		// different row set. The engine's buildRefGraph rejects the same schema
+		// with the same wording.
 		type PostFields = {
 			id: Field<string>;
 			comments: Field<Infer<EntitySchema<CommentFields>>[]>;
@@ -103,10 +151,11 @@ describe('reference graph naming', () => {
 		});
 		const comment: EntitySchema<CommentFields> = entity('comment', {
 			id: text().key(),
-			post: ref(() => post),
+			post: ref(() => post).reverseRelation('comments'),
 		});
 		expect(() => new EntityRegistry(defineSchema(post, comment).descMessages())).toThrow(
-			/reverse relation "comments" on entity "post" collides with the reference field of that name/,
+			'reverse relation "comments" on entity "post" collides with the reference field of that name; '
+				+ 'set (syncplane.v1.field_behavior).reverse_relation on comment.post to name it otherwise',
 		);
 	});
 });
@@ -200,7 +249,9 @@ describe('reverse reference resolution', () => {
 		await client.db.issue.mutate.put({ id: 'i3', title: 'c', project: { id: 'other' } });
 
 		const p1 = (await client.db.project.get('p1'))!;
-		const issues = await (client.db.project.refs.issues as ReverseRelAccessor)(p1 as Message);
+		const issues = await (client.db.project.refs.issuesByProject as ReverseRelAccessor)(
+			p1 as Message,
+		);
 		expect(issues.map((r) => r.key).sort()).toEqual([ 'i1', 'i2' ]);
 		await client.close();
 	});
@@ -218,7 +269,9 @@ describe('reverse reference resolution', () => {
 
 		// "issues blocked by a" — the reverse of the repeated self-ref blocked_by.
 		const a = (await client.db.issue.get('a'))!;
-		const blocking = await (client.db.issue.refs.issues as ReverseRelAccessor)(a as Message);
+		const blocking = await (client.db.issue.refs.issuesByBlockedBy as ReverseRelAccessor)(
+			a as Message,
+		);
 		expect(blocking.map((r) => r.key).sort()).toEqual([ 'i1', 'i2' ]);
 		await client.close();
 	});
@@ -233,7 +286,7 @@ describe('reverse reference resolution', () => {
 		await client.db.issue.mutate.put({ id: 'i3', title: 'c' });
 
 		const p1 = (await client.db.pair.get('n1/p1'))!;
-		const issues = await (client.db.pair.refs.issues as ReverseRelAccessor)(p1 as Message);
+		const issues = await (client.db.pair.refs.issuesByPair as ReverseRelAccessor)(p1 as Message);
 		expect(issues.map((r) => r.key)).toEqual([ 'i1' ]);
 		await client.close();
 	});
@@ -247,7 +300,7 @@ describe('reverse reference resolution', () => {
 		await client.db.issue.mutate.put({ id: 'z9', title: 'unrelated' });
 
 		const a = (await client.db.issue.get('a'))!;
-		const page = await (client.db.issue.refs.issues as ReverseRelAccessor)(a as Message, {
+		const page = await (client.db.issue.refs.issuesByBlockedBy as ReverseRelAccessor)(a as Message, {
 			orderBy: (i: { id: { asc(): unknown } }) => [ i.id.asc() ],
 			limit: 2,
 			offset: 1,
@@ -426,13 +479,16 @@ describe('batched include hydration', () => {
 		const before = queries();
 		const rows = await client.db.project.query(
 			{ orderBy: (p) => [ p.id.asc() ] },
-			{ include: { issues: true } },
+			{ include: { issuesByProject: true } },
 		) as unknown as HydratedRow[];
 		// One read for the page, ONE for the whole reverse relation — not one
 		// per row.
 		expect(queries() - before).toBe(2);
-		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
-		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+		expect((rows[0]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([
+			'i1',
+			'i2',
+		]);
+		expect((rows[1]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
 		await client.close();
 	});
 
@@ -450,11 +506,14 @@ describe('batched include hydration', () => {
 		const before = queries();
 		const rows = await client.db.issue.query(
 			{ where: (i) => i.id.in([ 'a', 'b' ]), orderBy: (i) => [ i.id.asc() ] },
-			{ include: { issues: true } },
+			{ include: { issuesByBlockedBy: true } },
 		) as unknown as HydratedRow[];
 		expect(queries() - before).toBe(2);
-		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
-		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i2' ]);
+		expect((rows[0]!.refs.issuesByBlockedBy as HydratedRow[]).map((r) => r.key)).toEqual([
+			'i1',
+			'i2',
+		]);
+		expect((rows[1]!.refs.issuesByBlockedBy as HydratedRow[]).map((r) => r.key)).toEqual([ 'i2' ]);
 		await client.close();
 	});
 
@@ -467,14 +526,14 @@ describe('batched include hydration', () => {
 		const before = queries();
 		const rows = await client.db.issue.query(
 			{ orderBy: (i) => [ i.id.asc() ] },
-			{ include: { project: { issues: true } } },
+			{ include: { project: { issuesByProject: true } } },
 		) as unknown as HydratedRow[];
 		// Page read + one reverse read for the DISTINCT projects; the forward
 		// hop is point reads.
 		expect(queries() - before).toBe(2);
 		expect(rows[0]!.refs.project).toBe(rows[1]!.refs.project);
 		const project = rows[0]!.refs.project as HydratedRow;
-		expect((project.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
+		expect((project.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1', 'i2' ]);
 		await client.close();
 	});
 
@@ -594,21 +653,24 @@ describe('include relation options', () => {
 
 		const rows = await client.db.project.query({}, {
 			include: {
-				issues: {
+				issuesByProject: {
 					$where: (i) => i.title.eq('x'),
 					$orderBy: (i) => [ i.id.desc() ],
 					$limit: 1,
 				},
 			},
 		}) as unknown as HydratedRow[];
-		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+		expect((rows[0]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
 
 		const offset = await client.db.project.query({}, {
 			include: {
-				issues: { $orderBy: (i) => [ i.id.desc() ], $limit: 2, $offset: 1 },
+				issuesByProject: { $orderBy: (i) => [ i.id.desc() ], $limit: 2, $offset: 1 },
 			},
 		}) as unknown as HydratedRow[];
-		expect((offset[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i2', 'i1' ]);
+		expect((offset[0]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([
+			'i2',
+			'i1',
+		]);
 		await client.close();
 	});
 
@@ -622,11 +684,11 @@ describe('include relation options', () => {
 
 		const rows = await client.db.project.query(
 			{ orderBy: (p) => [ p.id.asc() ] },
-			{ include: { issues: { $orderBy: (i) => [ i.id.asc() ], $limit: 1 } } },
+			{ include: { issuesByProject: { $orderBy: (i) => [ i.id.asc() ], $limit: 1 } } },
 		) as unknown as HydratedRow[];
 		// The limit cuts EACH project's list, not the batched read behind them.
-		expect((rows[0]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1' ]);
-		expect((rows[1]!.refs.issues as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
+		expect((rows[0]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([ 'i1' ]);
+		expect((rows[1]!.refs.issuesByProject as HydratedRow[]).map((r) => r.key)).toEqual([ 'i3' ]);
 		await client.close();
 	});
 
@@ -684,9 +746,9 @@ describe('include relation options', () => {
 			{},
 			(rows) => {
 				const refs = (rows[0] as unknown as HydratedRow | undefined)?.refs;
-				seen.push(((refs?.issues as HydratedRow[] | undefined) ?? []).map((r) => r.key));
+				seen.push(((refs?.issuesByProject as HydratedRow[] | undefined) ?? []).map((r) => r.key));
 			},
-			{ include: { issues: { $where: (i) => i.title.eq('x') } } },
+			{ include: { issuesByProject: { $where: (i) => i.title.eq('x') } } },
 		);
 		await new Promise((r) => setTimeout(r, 0));
 		expect(seen.at(-1)).toEqual([ 'i1' ]);

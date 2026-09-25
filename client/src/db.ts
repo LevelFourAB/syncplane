@@ -46,14 +46,14 @@ export type EntityKey<D extends DescMessage> = Uncapitalize<
 /**
  * Reference accessors for an entity. A forward ref (a field that points at
  * another entity) exposes `.load(holder)` to resolve the live target(s); a
- * reverse relation (the auto-named inverse, surfaced on the target) is a
- * callable returning the source rows that point here.
+ * reverse relation (the inverse, surfaced on the target) is a callable
+ * returning the source rows that point here.
  *
  * Forward refs are typed from the message shape, so `refs.project.load(issue)`
  * returns `Row<Project>` with no cast. Reverse relations cannot be: their names
- * are coined by the registry from the ref graph (issuesByAssignee), which the
- * generated types know nothing about, so they arrive through the index
- * signature as `Row<Message>[]`.
+ * come from the source entity's field options (`reverse_relation`, else
+ * `<plural(source)>By<Field>`), which the generated types do not carry, so
+ * they arrive through the index signature as `Row<Message>[]`.
  *
  * The index signature also means an unknown name type-checks. It fails loudly
  * at runtime rather than as "cannot read properties of undefined" — including

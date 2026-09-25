@@ -185,23 +185,29 @@ describe('polymorphic reference graph', () => {
 		expect(refCasePath(parentUser, refShape(parentUser)!)).toEqual([ 'parent', 'user' ]);
 	});
 
-	it('derives one reverse relation per case, disambiguated by relation and then by case', () => {
+	// A member of the holder's oneof is its own field, so each case of it is
+	// named after the member; a reference message's cases share its field's
+	// name, one per target.
+	it('derives one reverse relation per case, named after the field that holds it', () => {
 		expect(registry.reverseRefsOf('project').map((r) => r.name).sort()).toEqual([
-			'attachments',
+			'attachmentsByProject',
 			'memosByMentions',
 			'memosByOwner',
-			'oneof_refs',
+			'oneofRefsByProject',
 		]);
 		expect(registry.reverseRefsOf('user').map((r) => r.name).sort()).toEqual([
-			'attachments',
+			'attachmentsByUser',
 			'memosByMentions',
 			'memosByOwner',
-			'oneof_refs',
+			'oneofRefsByUser',
 		]);
 		const byOwner = registry.reverseRef('user', 'memosByOwner')!;
 		expect(byOwner.viaPath).toEqual([ 'owner', 'owner', 'user' ]);
 		expect(byOwner.holderField.localName).toBe('owner');
-		expect(registry.reverseRef('project', 'oneof_refs')!.viaPath).toEqual([ 'target', 'project' ]);
+		expect(registry.reverseRef('project', 'oneofRefsByProject')!.viaPath).toEqual([
+			'target',
+			'project',
+		]);
 	});
 });
 
@@ -340,6 +346,86 @@ describe('polymorphic reference registration', () => {
 			.toThrow(
 				/fields "a" and "b" are both entity-typed; a reference names one target, or one of several as the members of a single oneof/,
 			);
+	});
+});
+
+// engine/server/reversenames_test.go pins the same shapes and wording.
+describe('reverse relation names in a hand-written schema', () => {
+	const u = entityMsg('User', 'user', [ strField('id', 1) ]);
+	const reverse = (field: FieldDescriptorProto, name: string): FieldDescriptorProto => {
+		const options = create(FieldOptionsSchema);
+		setExtension(options, fieldBehaviorExt, create(FieldBehaviorSchema, { reverseRelation: name }));
+		field.options = options;
+		return field;
+	};
+	const registryOf = (files: ReturnType<typeof handWritten>) =>
+		new EntityRegistry([ files.getMessage('hand.User')!, files.getMessage('hand.Task')! ]);
+
+	it('names each member of a oneof after the member', () => {
+		const files = handWritten(
+			u,
+			entityMsg('Task', 'task', [
+				strField('id', 1),
+				msgField('owner', 2, 'User', 0),
+				msgField('reviewer', 3, 'User', 0),
+			], [ 'parent' ]),
+		);
+		expect(registryOf(files).reverseRefsOf('user').map((r) => r.name).sort()).toEqual([
+			'tasksByOwner',
+			'tasksByReviewer',
+		]);
+	});
+
+	it('uses the name a member of a oneof sets', () => {
+		const files = handWritten(
+			u,
+			entityMsg('Task', 'task', [
+				strField('id', 1),
+				msgField('owner', 2, 'User', 0),
+				reverse(msgField('reviewer', 3, 'User', 0), 'reviewedTasks'),
+			], [ 'parent' ]),
+		);
+		expect(registryOf(files).reverseRefsOf('user').map((r) => r.name).sort()).toEqual([
+			'reviewedTasks',
+			'tasksByOwner',
+		]);
+	});
+
+	// One field gives every case of its reference message one name, so no
+	// option on the field can tell two cases with one target apart.
+	it('refuses two cases of one reference message that point at one entity', () => {
+		const files = handWritten(
+			u,
+			refMsg('PersonRef', [ msgField('human', 1, 'User', 0), msgField('bot', 2, 'User', 0) ], [
+				'person',
+			]),
+			entityMsg('Task', 'task', [ strField('id', 1), msgField('assignee', 2, 'PersonRef') ]),
+		);
+		expect(() => registryOf(files)).toThrow(
+			'reverse relation "tasksByAssignee" on entity "user" is named by both task.assignee.bot and task.assignee.human; '
+				+ 'task.assignee gives all its cases one reverse relation name, so cases that point at one entity need fields of their own',
+		);
+	});
+
+	it('refuses reverse_relation on a field that is not a reference', () => {
+		const files = handWritten(
+			u,
+			entityMsg('Task', 'task', [ strField('id', 1), reverse(strField('title', 2), 'tasks') ]),
+		);
+		expect(() => registryOf(files)).toThrow(
+			'field "title" sets reverse_relation, but it is not a reference; only a reference has a reverse relation',
+		);
+	});
+
+	it('refuses reverse_relation inside a reference message', () => {
+		const files = handWritten(
+			u,
+			refMsg('UserRef', [ reverse(msgField('user', 1, 'User'), 'tasks') ]),
+			entityMsg('Task', 'task', [ strField('id', 1), msgField('assignee', 2, 'UserRef') ]),
+		);
+		expect(() => registryOf(files)).toThrow(
+			'field "user" of hand.UserRef sets reverse_relation, but only a reference field declared on an entity has a reverse relation',
+		);
 	});
 });
 
@@ -531,10 +617,12 @@ describe('polymorphic reverse resolution', () => {
 		const projUser = (await client.ws(PROJ).db.user.get('u1'))!;
 		const orgUser = (await client.ws(ORG).db.user.get('u1'))!;
 		const db = client.ws(PROJ).db;
-		expect(keysOf(await (db.project.refs.oneof_refs as ReverseRelAccessor)(project))).toEqual([
-			'r-proj',
-		]);
-		expect(keysOf(await (db.user.refs.oneof_refs as ReverseRelAccessor)(projUser))).toEqual([
+		expect(keysOf(await (db.project.refs.oneofRefsByProject as ReverseRelAccessor)(project))).toEqual(
+			[
+				'r-proj',
+			],
+		);
+		expect(keysOf(await (db.user.refs.oneofRefsByUser as ReverseRelAccessor)(projUser))).toEqual([
 			'r-user',
 		]);
 		expect(keysOf(await (db.project.refs.memosByOwner as ReverseRelAccessor)(project))).toEqual([
@@ -550,13 +638,16 @@ describe('polymorphic reverse resolution', () => {
 		expect(keysOf(await (db.project.refs.memosByMentions as ReverseRelAccessor)(project))).toEqual([
 			'm-mentions',
 		]);
-		expect(keysOf(await (db.project.refs.attachments as ReverseRelAccessor)(project))).toEqual([
-			'a-proj',
-		]);
-		expect(keysOf(await (db.user.refs.attachments as ReverseRelAccessor)(projUser))).toEqual([
+		expect(keysOf(await (db.project.refs.attachmentsByProject as ReverseRelAccessor)(project)))
+			.toEqual([
+				'a-proj',
+			]);
+		expect(keysOf(await (db.user.refs.attachmentsByUser as ReverseRelAccessor)(projUser))).toEqual([
 			'a-user-here',
 		]);
-		expect(keysOf(await (client.ws(ORG).db.user.refs.attachments as ReverseRelAccessor)(orgUser)))
+		expect(
+			keysOf(await (client.ws(ORG).db.user.refs.attachmentsByUser as ReverseRelAccessor)(orgUser)),
+		)
 			.toEqual([
 				'a-user-org',
 			]);
@@ -567,11 +658,11 @@ describe('polymorphic reverse resolution', () => {
 		const client = newClient();
 		await seed(client);
 		const users = await client.ws(PROJ).db.user.query({}, {
-			include: { oneof_refs: true, attachments: true },
+			include: { oneofRefsByUser: true, attachmentsByUser: true },
 		});
 		const hydrated = users as unknown as HydratedRow<User>[];
-		expect(keysOf(hydrated[0]!.refs.oneof_refs as Row<unknown>[])).toEqual([ 'r-user' ]);
-		expect(keysOf(hydrated[0]!.refs.attachments as Row<unknown>[])).toEqual([ 'a-user-here' ]);
+		expect(keysOf(hydrated[0]!.refs.oneofRefsByUser as Row<unknown>[])).toEqual([ 'r-user' ]);
+		expect(keysOf(hydrated[0]!.refs.attachmentsByUser as Row<unknown>[])).toEqual([ 'a-user-here' ]);
 		await client.close();
 	});
 });

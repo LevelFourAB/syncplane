@@ -470,7 +470,7 @@ function includeToPaths(spec: IncludeSpec): string[][] {
 /**
  * Serializes a follow include tree into a wire FollowSpec. The segment names
  * are the same relation accessors the server's reference graph resolves
- * (forward field localName or auto-named reverse relation), so the server picks
+ * (forward field localName or reverse relation name), so the server picks
  * the direction per segment.
  */
 function compileFollow(include: IncludeSpec, depth?: number): FollowSpec {

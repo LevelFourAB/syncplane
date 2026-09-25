@@ -50,6 +50,14 @@ Cross-reference sorting is therefore limited to two supported patterns:
 - For an ordered slice per holder (for example, the five newest comments on each issue), `include` accepts `$where`, `$orderBy`, and `$limit`, which apply to each holder during hydration.
 - For a table sorted by a related column, hydrate and sort the data in your application. Those rows are already loaded on the client, so re-sorting them in the application avoids unnecessary server overhead.
 
+## A reverse relation is named by its field alone
+
+A reverse relation name is part of the wire contract. A `follow` segment carries it to the server, and a deployed client sends the names it was built with until it is updated. If a name came from the whole schema, for example with the field name added only when two references reach the same target, a new reference would rename an existing relation. Clients that still send the old name would then fail, and an additive schema change would break them.
+
+For this reason, the name comes from the reference field alone: its `reverse_relation`, else `<plural(holder)>By<Field>`. Field names are unique within an entity, so two default names on one target cannot be the same, and a new reference needs no decision. The cost is length: `project.refs.issuesByProject` where one reference would permit `issues`. A shorter name is one `reverse_relation`, set when the field is created and before any client depends on it. For the rules, see [Reverse relations](../reference/proto-options.md#reverse-relations).
+
+A polymorphic reference has one reverse relation per case, not one per relation. Each case has its own derived index, so a reverse hop is one index probe. A relation-wide reverse relation would have to merge the probes of all cases that reach one target, and a client that needs that union can follow two segments. A member of a oneof is its own field, so it takes its own name. A reference message field gives one name to all its cases, which usually land on different targets. Two cases of one reference message that point at the same entity therefore clash, and need fields of their own.
+
 ## Cursors page, offset jumps to a rank
 
 Paging uses `after` and `before` cursors by default. A cursor represents a position in the ordering, so the index walk seeks directly to that position and stops once the page is full (`O(limit)` rather than `O(offset + limit)` on an indexed query). This guarantees that the page remains stable.

@@ -204,7 +204,7 @@ Mutators and mergers must be registered at construction time and cannot be regis
 
 A mutator receives arguments matching its registered prototype. If registered with a message prototype, the mutator always receives a non-nil message of that type (zeroed if omitted by the caller). If registered with `nil`, the mutator always receives `nil`. Supplying arguments to a mutator registered without a prototype returns an error.
 
-Dynamic schema construction helpers include `server.DynamicField` (`Message`, `Ref`, `KeyField`/`OrderField`, `MapKey`/`MapValue`) with `server.BuildDynamicFile` and `server.RegisterDynamicEntities`, which builds a set of referencing entities into one file like the TypeScript builder. See [Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
+Dynamic schema construction helpers include `server.DynamicField` (`Message`, `Ref`/`RefWorkspace`/`ReverseRelation`, `KeyField`/`OrderField`, `MapKey`/`MapValue`) with `server.BuildDynamicFile` and `server.RegisterDynamicEntities`, which builds a set of referencing entities into one file like the TypeScript builder. See [Define schemas in TypeScript](../how-to/define-schemas-in-typescript.md).
 
 Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
 

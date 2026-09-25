@@ -76,7 +76,7 @@ var _ = Describe("Secondary indexes", func() {
 			WorkspaceId: ws,
 			Subscriptions: []*syncplanev1.Subscription{{
 				Entity: "project",
-				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 			}},
 		}))
 		Expect(err).NotTo(HaveOccurred())

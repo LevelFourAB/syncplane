@@ -140,7 +140,7 @@ var _ = Describe("Bootstrap delivery order", func() {
 			Subscriptions: []*syncplanev1.Subscription{{
 				Entity: "project",
 				Follow: &syncplanev1.FollowSpec{
-					Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}},
+					Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}},
 				},
 			}},
 		})

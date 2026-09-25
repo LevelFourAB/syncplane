@@ -49,6 +49,29 @@ var _ = Describe("ValidateEntityName", func() {
 	})
 })
 
+var _ = Describe("ValidateRelationName", func() {
+	It("accepts identifiers", func() {
+		for _, name := range []string{"issues", "assignedIssues", "issues_by_owner", "_private", "v2"} {
+			Expect(naming.ValidateRelationName(name)).To(Succeed(), name)
+		}
+	})
+
+	// A dot would read as two follow segments, and a name that is not an
+	// identifier cannot be a property of the client's refs facade.
+	It("rejects anything that is not an identifier", func() {
+		for _, name := range []string{"assigned.issues", "assigned-issues", "assigned issues", "1issues", "$issues"} {
+			Expect(naming.ValidateRelationName(name)).
+				To(MatchError(ContainSubstring(`reverse relation name "`+name+`" is not an identifier`)), name)
+		}
+	})
+
+	It("rejects an empty name and one past the length cap", func() {
+		Expect(naming.ValidateRelationName("")).To(MatchError("reverse relation name is empty"))
+		Expect(naming.ValidateRelationName(strings.Repeat("a", naming.MaxEntityNameLength+1))).
+			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
 var _ = Describe("ValidateWorkspaceID", func() {
 	It("accepts the id shapes apps actually use", func() {
 		for _, id := range []string{

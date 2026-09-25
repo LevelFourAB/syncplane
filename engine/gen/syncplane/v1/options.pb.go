@@ -919,9 +919,31 @@ type FieldBehavior struct {
 	// `(syncplane.v1.reference)` that stores the target workspace identifier.
 	// An empty value defaults to the holder's workspace. Each reference
 	// message can contain at most one workspace field. See `ReferenceOptions`.
-	Workspace     bool `protobuf:"varint,9,opt,name=workspace,proto3" json:"workspace,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	Workspace bool `protobuf:"varint,9,opt,name=workspace,proto3" json:"workspace,omitempty"`
+	// Names the reverse relation that this reference adds to its target
+	// entity.
+	//
+	// The reverse relation lists the rows of this entity that point at one
+	// target row. A `follow` segment, an `include` key and the client's
+	// `refs` accessor on the target entity use its name. When empty, the
+	// name is the plural of this entity's name and this field's name in
+	// camelCase, joined by `By`: `issuesByAssignee` for the `assignee`
+	// field of the `issue` entity. The name never depends on other fields,
+	// so adding a reference does not rename an existing one.
+	//
+	// Two reverse relations on one target entity must have different
+	// names, and a name must not be the name of a reference field of the
+	// target. On a clash, the client refuses the schema when it starts and
+	// the server refuses each request that follows a relation.
+	//
+	// The name must start with a letter or an underscore, followed by
+	// letters, digits and underscores. Valid only on a reference field
+	// declared directly on an entity, including a member of a `oneof`. A
+	// field that holds a polymorphic reference message gives its name to
+	// the reverse relation of every case.
+	ReverseRelation string `protobuf:"bytes,10,opt,name=reverse_relation,json=reverseRelation,proto3" json:"reverse_relation,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *FieldBehavior) Reset() {
@@ -1017,6 +1039,13 @@ func (x *FieldBehavior) GetWorkspace() bool {
 	return false
 }
 
+func (x *FieldBehavior) GetReverseRelation() string {
+	if x != nil {
+		return x.ReverseRelation
+	}
+	return ""
+}
+
 var file_syncplane_v1_options_proto_extTypes = []protoimpl.ExtensionInfo{
 	{
 		ExtendedType:  (*descriptorpb.MessageOptions)(nil),
@@ -1097,7 +1126,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x04desc\x18\x02 \x01(\bR\x04desc\"I\n" +
 	"\tIndexSpec\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12(\n" +
-	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xae\x02\n" +
+	"\x03key\x18\x02 \x03(\v2\x16.syncplane.v1.IndexKeyR\x03key\"\xd9\x02\n" +
 	"\rFieldBehavior\x12\x16\n" +
 	"\x06opaque\x18\x01 \x01(\bR\x06opaque\x12\x1b\n" +
 	"\tkey_field\x18\x02 \x03(\tR\bkeyField\x12\x1f\n" +
@@ -1110,7 +1139,9 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"searchable\x18\a \x01(\bR\n" +
 	"searchable\x12A\n" +
 	"\fwrite_policy\x18\b \x01(\x0e2\x1e.syncplane.v1.FieldWritePolicyR\vwritePolicy\x12\x1c\n" +
-	"\tworkspace\x18\t \x01(\bR\tworkspace*f\n" +
+	"\tworkspace\x18\t \x01(\bR\tworkspace\x12)\n" +
+	"\x10reverse_relation\x18\n" +
+	" \x01(\tR\x0freverseRelation*f\n" +
 	"\fDeletePolicy\x12\x1d\n" +
 	"\x19DELETE_POLICY_UNSPECIFIED\x10\x00\x12\x17\n" +
 	"\x13DELETE_POLICY_ALLOW\x10\x01\x12\x1e\n" +

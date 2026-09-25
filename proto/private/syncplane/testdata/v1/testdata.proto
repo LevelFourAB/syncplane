@@ -272,7 +272,8 @@ message VariantElement {
 // A polymorphic reference declared on the holder: a oneof whose members are
 // entity-typed, so one row points at a project or at a user. The relation is
 // followed by the oneof's name (target); each member is a case with its own
-// derived index and reverse relation (oneofRefs on Project and on User).
+// derived index and reverse relation (oneofRefsByProject on Project,
+// oneofRefsByUser on User).
 message OneofRefEntity {
 	option (syncplane.v1.entity) = {
 		name: "oneof_ref"
@@ -418,9 +419,8 @@ message Issue {
 	Project project = 3;
 	// To-many self-ref: each element stores only its id.
 	repeated Issue blocked_by = 4;
-	// Two refs to the same target — reverse accessor names disambiguate to
-	// issuesByAssignee / issuesByReporter (the source entity pluralizes when a
-	// single field targets it, else <source>By<Field>).
+	// Two refs to the same target. Each reverse relation takes the name of
+	// its own field: issuesByAssignee and issuesByReporter on User.
 	User assignee = 5;
 	User reporter = 6;
 	// Composite-key ref: incomparable in queries except isSet/isNotSet.

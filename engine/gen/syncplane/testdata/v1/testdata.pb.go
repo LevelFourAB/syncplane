@@ -1393,7 +1393,8 @@ func (*VariantElement_Num) isVariantElement_Which() {}
 // A polymorphic reference declared on the holder: a oneof whose members are
 // entity-typed, so one row points at a project or at a user. The relation is
 // followed by the oneof's name (target); each member is a case with its own
-// derived index and reverse relation (oneofRefs on Project and on User).
+// derived index and reverse relation (oneofRefsByProject on Project,
+// oneofRefsByUser on User).
 type OneofRefEntity struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
@@ -1797,9 +1798,8 @@ type Issue struct {
 	Project *Project `protobuf:"bytes,3,opt,name=project,proto3" json:"project,omitempty"`
 	// To-many self-ref: each element stores only its id.
 	BlockedBy []*Issue `protobuf:"bytes,4,rep,name=blocked_by,json=blockedBy,proto3" json:"blocked_by,omitempty"`
-	// Two refs to the same target — reverse accessor names disambiguate to
-	// issuesByAssignee / issuesByReporter (the source entity pluralizes when a
-	// single field targets it, else <source>By<Field>).
+	// Two refs to the same target. Each reverse relation takes the name of
+	// its own field: issuesByAssignee and issuesByReporter on User.
 	Assignee *User `protobuf:"bytes,5,opt,name=assignee,proto3" json:"assignee,omitempty"`
 	Reporter *User `protobuf:"bytes,6,opt,name=reporter,proto3" json:"reporter,omitempty"`
 	// Composite-key ref: incomparable in queries except isSet/isNotSet.

@@ -31,8 +31,8 @@ import { schema } from 'syncplane';
    	title: schema.text(),
    	settings: schema.message({ color: schema.text(), size: schema.int32() }), // embedded
    	project: schema.ref(() => project), // to-one reference
-   	assignee: schema.ref(() => user),
-   	reporter: schema.ref(() => user), // two refs → issuesByAssignee / issuesByReporter
+   	assignee: schema.ref(() => user), // user.refs.issuesByAssignee
+   	reporter: schema.ref(() => user).reverseRelation('reportedIssues'), // user.refs.reportedIssues
    	blockedBy: schema.refList(() => issue), // to-many SELF reference
    	members: schema.keyedList(
    		schema.message({ uid: schema.text(), name: schema.text() }),
@@ -61,7 +61,7 @@ import { schema } from 'syncplane';
 
    Reference detection is annotation-free. A message-typed field whose target carries `(syncplane.v1.entity)` is treated as a reference. The stored row retains only the key fields of the target, and the live target resolves on read.
 
-   The inverse relation is automatically named `<plural(source)>` on the target entity, or `<plural(source)>By<Field>` when multiple references point to the same target. These auto-generated names share the namespace of the target entity's reference fields. If a name collision occurs between an explicit field and an auto-named relation, rename one of the fields.
+   Each reference adds a reverse relation to its target entity. Its name is the one `.reverseRelation('name')` sets, else the plural of the holder entity and the field name, such as `issuesByAssignee` for `issue.assignee`. Adding a reference never renames an existing reverse relation. A name that you set must differ from the other reverse relations and the reference fields of its target, or the client throws at construction. See [Reverse relations](../reference/proto-options.md#reverse-relations).
 
    **Note:** If you encounter a TypeScript inference cycle with self-referencing entities, name the recursive field map and annotate the entity type using `type X = Infer<typeof x>`.
 

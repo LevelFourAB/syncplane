@@ -83,8 +83,10 @@ describe('reference-following subscriptions', () => {
 		await writer.mutate.put(IssueSchema, { id: 'i2', title: 'two', project: { id: 'P' } });
 		await writer.syncNow();
 
-		// Subscribe the project, follow its reverse "issues" relation.
-		const followIssues = subscription(ProjectSchema, undefined, { include: { issues: true } });
+		// Subscribe the project, follow its reverse "issuesByProject" relation.
+		const followIssues = subscription(ProjectSchema, undefined, {
+			include: { issuesByProject: true },
+		});
 		const reader = newClient(ws, { ...refEntities, subscriptions: [ followIssues ] });
 		await reader.start();
 		await reader.syncNow();

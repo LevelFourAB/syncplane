@@ -1331,6 +1331,9 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if err := checkReferenceMessages(desc); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
+	if err := checkReverseRelations(desc); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
 	// Precompute reference fields: any field whose (element) message is itself
 	// a registered entity, or a reference message wrapping one. Detection and
 	// the target's key fields come from the target message's own
@@ -1968,6 +1971,61 @@ func checkReferenceMessages(desc protoreflect.MessageDescriptor) error {
 			}
 			if sub == nil {
 				continue
+			}
+			if err := walk(sub); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(desc)
+}
+
+// checkReverseRelations reports a (syncplane.v1.field_behavior).reverse_relation
+// that no reverse relation takes its name from, or a name that breaks the
+// relation-name rule. Only a reference field declared on the entity itself has
+// a reverse relation. The walk covers the embedded messages too, and does not
+// enter an entity-typed field: the target's own fields name the target's
+// relations and are checked when the target registers.
+func checkReverseRelations(desc protoreflect.MessageDescriptor) error {
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		name := protoopts.FieldBehavior(fd).GetReverseRelation()
+		if name == "" {
+			continue
+		}
+		if len(lww.RefsOf(fd)) == 0 {
+			return fmt.Errorf("field %q sets reverse_relation, but it is not a reference; only a reference has a reverse relation", fd.Name())
+		}
+		if err := naming.ValidateRelationName(name); err != nil {
+			return fmt.Errorf("field %q: %w", fd.Name(), err)
+		}
+	}
+	seen := map[protoreflect.FullName]bool{desc.FullName(): true}
+	var walk func(md protoreflect.MessageDescriptor) error
+	walk = func(md protoreflect.MessageDescriptor) error {
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			var sub protoreflect.MessageDescriptor
+			switch {
+			case fd.IsMap():
+				if fd.MapValue().Kind() == protoreflect.MessageKind {
+					sub = fd.MapValue().Message()
+				}
+			case fd.Kind() == protoreflect.MessageKind:
+				sub = fd.Message()
+			}
+			if sub == nil || seen[sub.FullName()] || protoopts.Entity(sub) != nil {
+				continue
+			}
+			seen[sub.FullName()] = true
+			subFields := sub.Fields()
+			for j := 0; j < subFields.Len(); j++ {
+				if f := subFields.Get(j); protoopts.FieldBehavior(f).GetReverseRelation() != "" {
+					return fmt.Errorf("field %q of %s sets reverse_relation, but only a reference field declared on an entity has a reverse relation", f.Name(), sub.FullName())
+				}
 			}
 			if err := walk(sub); err != nil {
 				return err

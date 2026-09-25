@@ -126,7 +126,7 @@ func followPull(cursor []byte) *connect.Request[syncplanev1.PullRequest] {
 		Subscriptions: []*syncplanev1.Subscription{{
 			Entity: "project",
 			Follow: &syncplanev1.FollowSpec{
-				Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}},
+				Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}},
 			},
 		}},
 	})

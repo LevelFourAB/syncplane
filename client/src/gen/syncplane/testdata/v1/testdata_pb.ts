@@ -667,7 +667,8 @@ export const VariantElementSchema: GenMessage<VariantElement> = /*@__PURE__*/
  * A polymorphic reference declared on the holder: a oneof whose members are
  * entity-typed, so one row points at a project or at a user. The relation is
  * followed by the oneof's name (target); each member is a case with its own
- * derived index and reverse relation (oneofRefs on Project and on User).
+ * derived index and reverse relation (oneofRefsByProject on Project,
+ * oneofRefsByUser on User).
  *
  * @generated from message syncplane.testdata.v1.OneofRefEntity
  */
@@ -879,9 +880,8 @@ export type Issue = Message<"syncplane.testdata.v1.Issue"> & {
   blockedBy: Issue[];
 
   /**
-   * Two refs to the same target — reverse accessor names disambiguate to
-   * issuesByAssignee / issuesByReporter (the source entity pluralizes when a
-   * single field targets it, else <source>By<Field>).
+   * Two refs to the same target. Each reverse relation takes the name of
+   * its own field: issuesByAssignee and issuesByReporter on User.
    *
    * @generated from field: syncplane.testdata.v1.User assignee = 5;
    */

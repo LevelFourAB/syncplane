@@ -54,9 +54,10 @@ func limitExceeded(what, knob string, limit int) string {
 // errUnknownSegment reports a follow path naming something that is not a
 // relation of the entity it was applied to, listing the relations that ARE
 // available. Segment names are derived (forward refs by their JSON field name,
-// reverse refs pluralized from the source entity), so a developer writing a
-// path by hand cannot reliably guess them — showing the set is the difference
-// between a typo fixed in seconds and one debugged against the ref-graph rules.
+// reverse refs by the source field's reverse_relation or else
+// <plural(source)>By<Field>), so a developer writing a path by hand cannot
+// reliably guess them — showing the set is the difference between a typo fixed in
+// seconds and one debugged against the ref-graph rules.
 func errUnknownSegment(g *refGraph, entity, seg string) error {
 	return connect.NewError(connect.CodeInvalidArgument,
 		fmt.Errorf("follow segment %q is not a relation of entity %q (relations: %s)",

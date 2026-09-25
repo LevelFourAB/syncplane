@@ -24,6 +24,17 @@ Validation timing:
 - **Server:** Checked during registration by `RegisterEntity` and `RegisterDescriptorSet`.
 - **Client:** Checked during initialization by `new SyncClient({ entities })` and `entity()`.
 
+## Reverse relation names
+
+A reverse relation name identifies a [reverse relation](proto-options.md#reverse-relations) on its target entity. In Protocol Buffers, set `(syncplane.v1.field_behavior).reverse_relation` on the reference field. In the TypeScript schema builder, call `.reverseRelation("name")`. In a Go runtime schema, set `server.DynamicField.ReverseRelation`.
+
+A reverse relation name follows the syntax rules for entity names: an ASCII letter or `_`, followed by ASCII letters, digits, or `_`, from 1 to 64 characters. A name that the schema does not set is `<plural(holder entity)>By<Field>` in camelCase, such as `issuesByAssignee`.
+
+Validation timing:
+
+- **Server:** Checked during registration by `RegisterEntity`, `RegisterDescriptorSet`, and `RegisterDynamicEntities`.
+- **Client:** Checked during initialization by `new SyncClient({ entities })` and by `.reverseRelation()`.
+
 ## Key fields
 
 The `key_fields` option specifies the fields whose values compose the row key,
@@ -124,6 +135,10 @@ An entity name serves four purposes:
 - A token in the cross-tab change notification channel.
 - A property name on the client database facade (`db.todo`).
 - The source of synthesized Protocol Buffer message names in TypeScript schemas.
+
+### Reverse relation name constraints
+
+A reverse relation name is a `follow` segment on the wire, an `include` key, and a property name on the client's `refs` facade (`db.user.refs.reportedIssues`). An identifier is valid in all three. A `.` would read as two segments.
 
 ### Key field restrictions
 

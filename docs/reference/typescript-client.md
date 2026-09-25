@@ -895,7 +895,7 @@ client.db.task.refs.project.load(holder):   Promise<Row<Project> | undefined>
 client.db.task.refs.blockedBy.load(holder): Promise<Row<Task>[]>
 
 // Reverse relations
-client.db.project.refs.tasks(target, q?): Promise<Row[]>
+client.db.project.refs.tasksByProject(target, q?): Promise<Row[]>
 
 // Schema-first equivalents
 client.resolveRef(holderSchema, fieldLocalName, holder)
@@ -903,6 +903,8 @@ client.resolveReverseRef(targetSchema, relationName, target, q?)
 ```
 
 Exported types: `EntityRefs<D>`, `ForwardRefAccessor`, `ReverseRelAccessor`.
+
+A reverse relation takes its name from the reference field that it reverses: the name `.reverseRelation()` sets (`reverse_relation` in a `.proto`), else `<plural(holder entity)>By<Field>` in camelCase, such as `tasksByProject` for the `project` field of `task`. Adding a reference never renames an existing reverse relation. See [Reverse relations](proto-options.md#reverse-relations).
 
 ### Workspace-qualified references
 
@@ -915,7 +917,7 @@ const person = schema.entity('person', {
 });
 const task = schema.entity('task', {
 	id: schema.text().key(),
-	assignee: schema.workspaceRef(() => person),
+	assignee: schema.workspaceRef(() => person), // person.refs.tasksByAssignee
 	watchers: schema.workspaceRefList(() => person),
 });
 
@@ -994,7 +996,7 @@ await client.db.task.query({ where: (t) => t.parent.area.isSet() });
 Rules:
 
 - **Relation accessors**: The forward accessor uses the `oneof` group name on the holder (`refs.parent`, `include: { parent }`) or the field name on a reference message (`refs.owner`). Individual cases do not expose separate accessors on the holder.
-- **Reverse relations**: Every case target receives an inverse relation accessor (`client.db.client.refs.tasks(client)` and `client.db.area.refs.tasks(area)`). When a source entity links to a target through multiple relations or cases, names use `<plural(source)>By<Relation>`, or `<plural(source)>By<Relation><Case>` if two cases in the same relation share a target entity.
+- **Reverse relations**: Every case target receives a reverse relation accessor. A member of the holder's `oneof` is its own field and takes its own name (`client.db.client.refs.tasksByClient(client)` and `client.db.area.refs.tasksByArea(area)`). A reference message field gives its name to every case (`refs.tasksByOwner` on each target). See [Reverse relations](proto-options.md#reverse-relations).
 - **Resolution**: `refs.<relation>.load()` and `include` resolve the active case stored on the row within that case's target entity and designated workspace. In to-many polymorphic references, each element resolves its own case, allowing the list to contain rows from different entities.
 - **Include options**: Specifying list options (`$where`, `$orderBy`, `$limit`, `$offset`) on a polymorphic list relation throws an error because the options target a single entity type, but the relation resolves to multiple entity types.
 - **Set merging**: Repeated polymorphic reference messages merge as a set keyed by `<workspace>/<case>/<key>`. Mutation updates add or remove only the modified elements.
@@ -1358,6 +1360,7 @@ Field modifiers:
 - `.opaque()`: Disables sub-field merging; writes replace the field value entirely.
 - `.indexed()`: Declares a secondary index on the field.
 - `.order(posField)`: Sets the fractional index ordering property on `keyedList`.
+- `.reverseRelation(name)`: Names the reverse relation a reference adds to its target. Valid on `ref`, `refList`, `workspaceRef`, and `workspaceRefList`. See [Reverse relations](proto-options.md#reverse-relations).
 
 ### Secondary indexes
 

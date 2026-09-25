@@ -288,12 +288,13 @@ var _ = Describe("Reference-following subscriptions", func() {
 	})
 
 	Describe("reverse following", func() {
-		// project→issues is the auto-named reverse of the single issue.project
-		// forward ref (pluralized source). Subscribe a project, get its issues.
+		// project→issuesByProject is the reverse of the issue.project forward
+		// ref, named after the source entity and field. Subscribe a project, get
+		// its issues.
 		reverseSub := &syncplanev1.Subscription{
 			Entity:    "project",
 			Predicate: nil, // whole project entity (only P exists below)
-			Follow:    &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+			Follow:    &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 		}
 
 		It("delivers children of a subscribed parent", func() {
@@ -739,7 +740,7 @@ var _ = Describe("Reference-following subscriptions", func() {
 				WorkspaceId: ws,
 				Subscriptions: []*syncplanev1.Subscription{{
 					Entity: "project",
-					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 				}},
 			}))
 			Expect(connect.CodeOf(err)).To(Equal(connect.CodeResourceExhausted))
@@ -760,7 +761,7 @@ var _ = Describe("Reference-following subscriptions", func() {
 			// Segment names are derived, not spelled out in the .proto, so the
 			// error has to show the set to be debuggable (issues/072).
 			Expect(err).To(MatchError(ContainSubstring(
-				`follow segment "issue" is not a relation of entity "project" (relations: issues)`)))
+				`follow segment "issue" is not a relation of entity "project" (relations: issuesByProject)`)))
 		})
 	})
 })
@@ -769,8 +770,7 @@ var _ = Describe("Reference-following subscriptions", func() {
 // a name can only mean one relation. The compiled test entities cannot collide
 // (their names are fixed in the .proto), so this reaches for dynamic entities
 // to build the schema that does: post.comments is a forward ref list, and the
-// reverse of comment.post is auto-named pluralize("comment") = "comments" on
-// post as well.
+// reverse of comment.post is named "comments" on post as well.
 var _ = Describe("Follow segment namespace", func() {
 	post := server.DynamicEntity{
 		Name: "post", KeyFields: []string{"id"},
@@ -783,7 +783,7 @@ var _ = Describe("Follow segment namespace", func() {
 		Name: "comment", KeyFields: []string{"id"},
 		Fields: []server.DynamicField{
 			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
-			{Name: "post", Number: 2, Ref: "post"},
+			{Name: "post", Number: 2, Ref: "post", ReverseRelation: "comments"},
 		},
 	}
 
@@ -808,6 +808,6 @@ var _ = Describe("Follow segment namespace", func() {
 		Expect(connect.CodeOf(err)).To(Equal(connect.CodeFailedPrecondition))
 		Expect(err).To(MatchError(ContainSubstring(
 			`reverse relation "comments" on entity "post" collides with the reference field of that name; ` +
-				`rename a ref field to disambiguate`)))
+				`set (syncplane.v1.field_behavior).reverse_relation on comment.post to name it otherwise`)))
 	})
 })

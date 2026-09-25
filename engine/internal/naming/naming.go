@@ -85,11 +85,28 @@ const (
 // declared at runtime — is lowered to a proto message name by the TS schema
 // builder. An identifier is the intersection of all four.
 func ValidateEntityName(name string) error {
+	return validateIdentifier("entity name", name)
+}
+
+// ValidateRelationName checks the name a schema gives a reverse relation —
+// (syncplane.v1.field_behavior).reverse_relation. It follows the entity-name
+// rule: an ASCII letter or underscore followed by letters, digits or
+// underscores, at most MaxEntityNameLength of them.
+//
+// The name is a follow segment on the wire, an `include` key, and a property
+// name on the client's refs facade (`db.user.refs.assignedIssues`).
+func ValidateRelationName(name string) error {
+	return validateIdentifier("reverse relation name", name)
+}
+
+// validateIdentifier applies the identifier rule entity and relation names
+// share; what names the value in its errors.
+func validateIdentifier(what, name string) error {
 	if name == "" {
-		return fmt.Errorf("entity name is empty")
+		return fmt.Errorf("%s is empty", what)
 	}
 	if len(name) > MaxEntityNameLength {
-		return fmt.Errorf("entity name %q is %d bytes, the limit is %d", name, len(name), MaxEntityNameLength)
+		return fmt.Errorf("%s %q is %d bytes, the limit is %d", what, name, len(name), MaxEntityNameLength)
 	}
 	for i := 0; i < len(name); i++ {
 		c := name[i]
@@ -98,8 +115,8 @@ func ValidateEntityName(name string) error {
 		case (c >= '0' && c <= '9') && i > 0:
 		default:
 			return fmt.Errorf(
-				"entity name %q is not an identifier: use letters, digits and underscores, starting with a letter or underscore",
-				name)
+				"%s %q is not an identifier: use letters, digits and underscores, starting with a letter or underscore",
+				what, name)
 		}
 	}
 	return nil

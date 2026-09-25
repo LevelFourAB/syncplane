@@ -14,6 +14,7 @@ import {
 	ScalarType,
 	toBinary,
 } from '@bufbuild/protobuf';
+import { protoCamelCase } from '@bufbuild/protobuf/reflect';
 import { anyPack } from '@bufbuild/protobuf/wkt';
 import { FieldMaskSchema } from '@bufbuild/protobuf/wkt';
 
@@ -42,6 +43,7 @@ import {
 	scalarKeyString,
 	validateEntityName,
 	validateKeyField,
+	validateRelationName,
 	validateRowKey,
 	validateWorkspaceId,
 } from './naming.js';
@@ -766,6 +768,50 @@ function validateReferenceMessages(schema: DescMessage): void {
 }
 
 /**
+ * Registration-time guard for (syncplane.v1.field_behavior).reverse_relation:
+ * only a reference field declared on the entity itself has a reverse
+ * relation, and the name must satisfy the relation-name rule. The walk covers
+ * the embedded messages too, and does not enter an entity-typed field: the
+ * target's own fields name the target's relations. Mirrors the engine's
+ * checkReverseRelations.
+ */
+function validateReverseRelations(schema: DescMessage): void {
+	for (const field of schema.fields) {
+		const name = fieldBehaviorOf(field)?.reverseRelation;
+		if (!name) continue;
+		if (!isRef(field)) {
+			throw new Error(
+				`field "${field.name}" sets reverse_relation, but it is not a reference; only a reference has a reverse relation`,
+			);
+		}
+		validateRelationName(name, `field "${field.name}"`);
+	}
+	const seen = new Set<string>([ schema.typeName ]);
+	const walk = (desc: DescMessage): void => {
+		for (const field of desc.fields) {
+			const sub = field.fieldKind === 'message'
+				? field.message
+				: field.fieldKind === 'list' && field.listKind === 'message'
+				? field.message
+				: field.fieldKind === 'map' && field.mapKind === 'message'
+				? field.message
+				: undefined;
+			if (!sub || seen.has(sub.typeName) || entityOptionsOf(sub)) continue;
+			seen.add(sub.typeName);
+			for (const f of sub.fields) {
+				if (fieldBehaviorOf(f)?.reverseRelation) {
+					throw new Error(
+						`field "${f.name}" of ${sub.typeName} sets reverse_relation, but only a reference field declared on an entity has a reverse relation`,
+					);
+				}
+			}
+			walk(sub);
+		}
+	};
+	walk(schema);
+}
+
+/**
  * An entity's key fields when its key can identify a stub, else undefined.
  * This is the detection rule for an entity-typed reference: no annotation on
  * the field, the target message being an entity makes it one.
@@ -820,11 +866,11 @@ export interface ForwardRef {
 }
 
 /**
- * A reverse relation: the inverse of a forward ref, surfaced on the TARGET
- * entity. Its name is the pluralized source entity when a single reference of
- * that source targets here, else `<plural(source)>By<Relation>`
- * (issuesByAssignee), and `<plural(source)>By<Relation><Case>` where two
- * cases of one relation share the target.
+ * A reverse relation: the inverse of one forward case, surfaced on the case's
+ * TARGET entity. Its name is the holder field's
+ * (syncplane.v1.field_behavior).reverse_relation, or
+ * `<plural(source)>By<Field>` in camelCase when the field sets none
+ * (`issuesByAssignee` for `issue.assignee`).
  */
 export interface ReverseRef {
 	name: string;
@@ -966,6 +1012,7 @@ export class EntityRegistry {
 			}
 			validateOneofs(schema);
 			validateReferenceMessages(schema);
+			validateReverseRelations(schema);
 			validateOrderFields(schema);
 			warnShadowedQueryFields(schema);
 			this.installTextMergers(def);
@@ -1048,17 +1095,20 @@ export class EntityRegistry {
 
 	/**
 	 * Builds the reference graph. Forward refs come straight from each entity's
-	 * ref fields (validated: the target must be a registered entity). Reverse
-	 * relations are derived and auto-named: pluralized source when a single
-	 * field of a source targets here, else <plural(source)>By<Field>. Names are
-	 * deterministic (fields sorted) and must be unique per target — a clash
-	 * throws, matching the entity-facade precedent.
+	 * ref fields (validated: the target must be a registered entity). Each
+	 * forward case adds one reverse relation to its target, named by the holder
+	 * field alone (see {@link ReverseRef}), so a name never changes when a
+	 * sibling reference is added. Field names are unique, so two default names
+	 * from different fields of one entity never clash; a reverse_relation, two
+	 * cases of one polymorphic reference message on one target, or a forward
+	 * ref field of the same name can. A clash throws, matching the entity-facade
+	 * precedent.
 	 *
 	 * The two halves share ONE namespace per entity — what a follow segment, an
 	 * `include` key and `client.db.<entity>.refs` all resolve against — so a
-	 * derived reverse name must be unique against BOTH the other reverse names
-	 * and that entity's forward ref fields. The engine's mirror of this builder
-	 * rejects the same two clashes with the same wording.
+	 * reverse name must be unique against BOTH the other reverse names and that
+	 * entity's forward ref fields. The engine's mirror of this builder rejects
+	 * the same two clashes with the same wording.
 	 */
 	private buildRefGraph(): void {
 		for (const [ name, def ] of this.byName) {
@@ -1089,51 +1139,35 @@ export class EntityRegistry {
 		}
 		for (const [ source, refs ] of this.forwardRefs) {
 			const sourceSchema = this.byName.get(source)!.schema;
-			const byTarget = new Map<string, ForwardRef[]>();
 			for (const r of refs) {
-				const group = byTarget.get(r.targetEntity);
-				if (group) group.push(r);
-				else byTarget.set(r.targetEntity, [ r ]);
-			}
-			for (const [ target, group ] of byTarget) {
-				const single = group.length === 1;
-				const perRelation = new Map<string, number>();
-				for (const r of group) perRelation.set(r.localName, (perRelation.get(r.localName) ?? 0) + 1);
-				for (const r of group) {
-					let relName = pluralize(source);
-					if (!single) {
-						relName += `By${capitalizeFirst(r.localName)}`;
-						if ((perRelation.get(r.localName) ?? 0) > 1) relName += capitalizeFirst(r.caseName ?? '');
-					}
-					const list = this.reverseRefs.get(target) ?? [];
-					if (list.some((x) => x.name === relName)) {
-						throw new Error(
-							`reverse relation "${relName}" on entity "${target}" is ambiguous; rename a ref field to disambiguate`,
-						);
-					}
-					// Forward names are complete by now (the loop above ran over every
-					// entity), so this sees the whole namespace a segment resolves
-					// against. Shadowing is worse than ambiguity: every resolver tries
-					// forward first, so the reverse half would be unreachable and the
-					// name would answer with a different row set, silently.
-					if (this.forwardRefs.get(target)!.some((x) => x.localName === relName)) {
-						throw new Error(
-							`reverse relation "${relName}" on entity "${target}" collides with the reference field of that name; rename a ref field to disambiguate`,
-						);
-					}
-					list.push({
-						name: relName,
-						sourceEntity: source,
-						sourceSchema,
-						viaField: r.localName,
-						viaFieldName: r.fieldName,
-						holderField: r.field,
-						viaPath: refCasePath(r.field, r.shape),
-						repeated: r.repeated,
-						shape: r.shape,
-					});
-					this.reverseRefs.set(target, list);
+				const rev: ReverseRef = {
+					name: reverseRelationName(source, r.field),
+					sourceEntity: source,
+					sourceSchema,
+					viaField: r.localName,
+					viaFieldName: r.fieldName,
+					holderField: r.field,
+					viaPath: refCasePath(r.field, r.shape),
+					repeated: r.repeated,
+					shape: r.shape,
+				};
+				const list = this.reverseRefs.get(r.targetEntity) ?? [];
+				const prev = list.find((x) => x.name === rev.name);
+				if (prev) throw reverseClashError(rev.name, r.targetEntity, prev, rev);
+				// Forward names are complete by now (the loop above ran over every
+				// entity), so this sees the whole namespace a segment resolves
+				// against. Shadowing is worse than ambiguity: every resolver tries
+				// forward first, so the reverse half would be unreachable and the
+				// name would answer with a different row set, silently.
+				if (this.forwardRefs.get(r.targetEntity)!.some((x) => x.localName === rev.name)) {
+					const origin = reverseOrigin(rev);
+					throw new Error(
+						`reverse relation "${rev.name}" on entity "${r.targetEntity}" collides with the reference field of that name; `
+							+ `set (syncplane.v1.field_behavior).reverse_relation on ${origin} to name it otherwise`,
+					);
 				}
+				list.push(rev);
+				this.reverseRefs.set(r.targetEntity, list);
 			}
 		}
 	}
@@ -1222,7 +1256,22 @@ export function keyOf(def: EntityDef, msg: Message): string {
 	return rowKey(def.keyFields.map((f) => keyComponent(f, record[f.localName])));
 }
 
-/** Naive English pluralization for reverse-relation auto-naming. */
+/**
+ * The name of the reverse relation a reference field of `source` adds to its
+ * target: the field's reverse_relation, else `<plural(source)>By<Field>` in
+ * camelCase — `issuesByAssignee` for `issue.assignee`, `taskListsByOwner` for
+ * `task_list.owner`. Mirrors the engine's reverseRelationName.
+ */
+function reverseRelationName(source: string, field: DescField): string {
+	const explicit = fieldBehaviorOf(field)?.reverseRelation;
+	if (explicit) return explicit;
+	// From the proto name rather than localName or jsonName: localName escapes
+	// reserved words and jsonName follows a json_name option, and the engine
+	// derives the name from the proto name alone.
+	return `${pluralize(protoCamelCase(source))}By${capitalizeFirst(protoCamelCase(field.name))}`;
+}
+
+/** Naive English pluralization for the default reverse-relation name. */
 function pluralize(s: string): string {
 	if (/[^aeiou]y$/.test(s)) return s.slice(0, -1) + 'ies';
 	if (/(s|x|z|ch|sh)$/.test(s)) return s + 'es';
@@ -1231,6 +1280,33 @@ function pluralize(s: string): string {
 
 function capitalizeFirst(s: string): string {
 	return s.charAt(0).toUpperCase() + s.slice(1);
+}
+
+/**
+ * The forward case a reverse relation reverses as a dotted proto path: source
+ * entity, holder field and, for a case inside a reference message, that
+ * case's field.
+ */
+function reverseOrigin(rev: ReverseRef): string {
+	const origin = `${rev.sourceEntity}.${rev.viaFieldName}`;
+	return refInnerCase(rev.shape) ? `${origin}.${rev.shape.valueField!.name}` : origin;
+}
+
+/**
+ * Two forward cases whose reverse relations take one name on one target,
+ * named in sorted order so the message does not depend on which was seen
+ * first. The advice differs for two cases of one field: the field gives every
+ * case one name, so reverse_relation cannot tell them apart. Mirrors the
+ * engine's reverseClashError.
+ */
+function reverseClashError(name: string, target: string, a: ReverseRef, b: ReverseRef): Error {
+	const [ first, second ] = [ reverseOrigin(a), reverseOrigin(b) ].sort();
+	const advice = a.holderField === b.holderField
+		? `${a.sourceEntity}.${a.viaFieldName} gives all its cases one reverse relation name, so cases that point at one entity need fields of their own`
+		: 'set (syncplane.v1.field_behavior).reverse_relation on one of them to give it another name';
+	return new Error(
+		`reverse relation "${name}" on entity "${target}" is named by both ${first} and ${second}; ${advice}`,
+	);
 }
 
 // A field is replaced/merged whole when explicitly opaque, or when it is a

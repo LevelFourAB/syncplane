@@ -381,6 +381,28 @@ message FieldBehavior {
 	// An empty value defaults to the holder's workspace. Each reference
 	// message can contain at most one workspace field. See `ReferenceOptions`.
 	bool workspace = 9;
+	// Names the reverse relation that this reference adds to its target
+	// entity.
+	//
+	// The reverse relation lists the rows of this entity that point at one
+	// target row. A `follow` segment, an `include` key and the client's
+	// `refs` accessor on the target entity use its name. When empty, the
+	// name is the plural of this entity's name and this field's name in
+	// camelCase, joined by `By`: `issuesByAssignee` for the `assignee`
+	// field of the `issue` entity. The name never depends on other fields,
+	// so adding a reference does not rename an existing one.
+	//
+	// Two reverse relations on one target entity must have different
+	// names, and a name must not be the name of a reference field of the
+	// target. On a clash, the client refuses the schema when it starts and
+	// the server refuses each request that follows a relation.
+	//
+	// The name must start with a letter or an underscore, followed by
+	// letters, digits and underscores. Valid only on a reference field
+	// declared directly on an entity, including a member of a `oneof`. A
+	// field that holds a polymorphic reference message gives its name to
+	// the reverse relation of every case.
+	string reverse_relation = 10;
 }
 
 extend google.protobuf.MessageOptions {

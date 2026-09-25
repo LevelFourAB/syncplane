@@ -164,12 +164,9 @@ func closureSetRows(cs *syncplanecursorv1.ClosureSet) closureRows {
 // one stored reference, named by the RefPath segment a client spells the
 // relation as — the field's JSON (camelCase) accessor, or the oneof's for a
 // oneof of references on the holder. The cases of one segment share a
-// localName and differ in caseName; a holder row takes at most one of them.
+// localName and differ in ref; a holder row takes at most one of them.
 type forwardRefRel struct {
-	localName string
-	// caseName is the accessor of the field that decides this case, for a
-	// case of a polymorphic relation; "" for a relation to one entity.
-	caseName     string
+	localName    string
 	fd           protoreflect.FieldDescriptor
 	targetEntity string
 	keyFields    []protoreflect.FieldDescriptor // target entity's key fields
@@ -178,9 +175,9 @@ type forwardRefRel struct {
 	ref *lww.Ref
 }
 
-// reverseRefRel is the inverse, surfaced on the target entity, auto-named
-// pluralized-source (or <plural(source)>By<Segment>, and further By<Case>,
-// when ambiguous).
+// reverseRefRel is the inverse of one forward case, surfaced on the case's
+// target entity. Its name is the holder field's reverse_relation, or
+// <plural(source)>By<Field> when the field sets none.
 type reverseRefRel struct {
 	name         string
 	sourceEntity string
@@ -203,15 +200,19 @@ func (g *refGraph) forwardBy(entity, seg string) []*forwardRefRel { return g.for
 func (g *refGraph) reverseBy(entity, seg string) *reverseRefRel   { return g.reverse[entity][seg] }
 
 // buildRefGraph mirrors client EntityRegistry.buildRefGraph exactly: forward
-// refs keyed by source, reverse relations derived and auto-named, names sorted
-// for determinism, a clash is a hard error. A ref whose target entity is not
-// registered here is omitted (cannot be followed locally); a polymorphic
-// relation keeps the cases whose targets are.
+// refs keyed by source, and one reverse relation per forward case, named by
+// the holder field alone, so a name never changes when a sibling reference is
+// added. Field names are unique, so two default names from different fields
+// of one entity never clash; a reverse_relation, two cases of one polymorphic
+// reference message on one target, or a forward ref field of the same name can.
+// A clash is a hard error. A ref whose target entity is not registered
+// here is omitted (cannot be followed locally); a polymorphic relation keeps
+// the cases whose targets are.
 //
 // The two halves share ONE segment namespace per entity — that is what a
 // RefPath segment, an include key and client.db.<entity>.refs all resolve
-// against — so a derived reverse name must be unique against BOTH the other
-// reverse names and the entity's forward ref fields.
+// against — so a reverse name must be unique against BOTH the other reverse
+// names and the entity's forward ref fields.
 func (c *catalog) buildRefGraph() (*refGraph, error) {
 	g := &refGraph{
 		forward: map[string]map[string][]*forwardRefRel{},
@@ -236,7 +237,6 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 				seg := refSegmentName(ref)
 				fwd[seg] = append(fwd[seg], &forwardRefRel{
 					localName:    seg,
-					caseName:     ref.CaseJSONName(),
 					fd:           fd,
 					targetEntity: target.name,
 					keyFields:    ref.KeyFields,
@@ -246,12 +246,10 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		}
 		g.forward[name] = fwd
 	}
-	// Reverse relations: group a source's forward cases by target; a single
-	// case to a target ⇒ pluralized source, multiple ⇒ disambiguated by
-	// segment, and by case too where two cases of one segment share a target.
+	// Reverse relations: one per forward case, on the case's target. Sources
+	// and their cases run in a fixed order so a clash between three or more
+	// relations reports the same pair on every build.
 	for _, source := range c.entityNames() {
-		byTarget := map[string][]*forwardRefRel{}
-		// Iterate in deterministic (localName) order for stable naming.
 		locals := make([]string, 0, len(g.forward[source]))
 		for ln := range g.forward[source] {
 			locals = append(locals, ln)
@@ -259,28 +257,18 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 		sort.Strings(locals)
 		for _, ln := range locals {
 			for _, r := range g.forward[source][ln] {
-				byTarget[r.targetEntity] = append(byTarget[r.targetEntity], r)
-			}
-		}
-		for target, group := range byTarget {
-			single := len(group) == 1
-			perSegment := map[string]int{}
-			for _, r := range group {
-				perSegment[r.localName]++
-			}
-			for _, r := range group {
-				relName := pluralizeEntity(source)
-				if !single {
-					relName += "By" + capitalizeFirst(r.localName)
-					if perSegment[r.localName] > 1 {
-						relName += capitalizeFirst(r.caseName)
-					}
+				rel := &reverseRefRel{
+					name:         reverseRelationName(source, r.fd),
+					sourceEntity: source,
+					viaField:     r.fd,
+					via:          r.ref,
 				}
+				target := r.targetEntity
 				if g.reverse[target] == nil {
 					g.reverse[target] = map[string]*reverseRefRel{}
 				}
-				if _, dup := g.reverse[target][relName]; dup {
-					return nil, fmt.Errorf("server: reverse relation %q on entity %q is ambiguous; rename a ref field to disambiguate", relName, target)
+				if prev := g.reverse[target][rel.name]; prev != nil {
+					return nil, reverseClashError(rel.name, target, prev, rel)
 				}
 				// Forward names are complete by now (the loop above ran over every
 				// entity), so this sees the whole namespace the segment resolves
@@ -288,19 +276,60 @@ func (c *catalog) buildRefGraph() (*refGraph, error) {
 				// resolution would answer the segment with the holder's own ref
 				// list instead of the rows pointing back, which is a different row
 				// set and no error anywhere.
-				if _, shadowed := g.forward[target][relName]; shadowed {
-					return nil, fmt.Errorf("server: reverse relation %q on entity %q collides with the reference field of that name; rename a ref field to disambiguate", relName, target)
+				if _, shadowed := g.forward[target][rel.name]; shadowed {
+					return nil, fmt.Errorf("server: reverse relation %q on entity %q collides with the reference field of that name; "+
+						"set (syncplane.v1.field_behavior).reverse_relation on %s to name it otherwise", rel.name, target, rel.origin())
 				}
-				g.reverse[target][relName] = &reverseRefRel{
-					name:         relName,
-					sourceEntity: source,
-					viaField:     r.fd,
-					via:          r.ref,
-				}
+				g.reverse[target][rel.name] = rel
 			}
 		}
 	}
 	return g, nil
+}
+
+// reverseRelationName is the name of the reverse relation a reference field
+// of source adds to its target: the field's reverse_relation, else
+// <plural(source)>By<Field> in camelCase — issuesByAssignee for issue.assignee,
+// taskListsByOwner for task_list.owner. A polymorphic reference message gives
+// every case the same name, since each case lands on its own target.
+//
+// The field part comes from the proto name, not JSONName: a json_name option
+// changes the JSON mapping only, and the client derives the same name from the
+// proto name without reading it.
+func reverseRelationName(source string, fd protoreflect.FieldDescriptor) string {
+	if name := fieldBehaviorOf(fd).GetReverseRelation(); name != "" {
+		return name
+	}
+	return pluralizeEntity(protoCamelCase(source)) + "By" + capitalizeFirst(protoCamelCase(string(fd.Name())))
+}
+
+// origin spells the forward case a reverse relation reverses as a dotted proto
+// path: source entity, holder field and, for a case inside a reference
+// message, that case's field.
+func (r *reverseRefRel) origin() string {
+	s := r.sourceEntity + "." + string(r.viaField.Name())
+	if r.via.InnerCase() {
+		s += "." + string(r.via.Value.Name())
+	}
+	return s
+}
+
+// reverseClashError reports two forward cases whose reverse relations take one
+// name on one target, naming both cases in sorted order so the message does
+// not depend on which was seen first. The advice differs for two cases of one
+// field: the field gives every case one name, so reverse_relation cannot tell
+// them apart.
+func reverseClashError(name, target string, a, b *reverseRefRel) error {
+	first, second := a.origin(), b.origin()
+	if second < first {
+		first, second = second, first
+	}
+	advice := "set (syncplane.v1.field_behavior).reverse_relation on one of them to give it another name"
+	if a.sourceEntity == b.sourceEntity && a.viaField == b.viaField {
+		advice = fmt.Sprintf("%s.%s gives all its cases one reverse relation name, so cases that point at one entity need fields of their own",
+			a.sourceEntity, a.viaField.Name())
+	}
+	return fmt.Errorf("server: reverse relation %q on entity %q is named by both %s and %s; %s", name, target, first, second, advice)
 }
 
 // refSegmentName is the RefPath segment a reference is followed by: the
@@ -386,14 +415,10 @@ func hasSuffixAny(s string, suffixes ...string) bool {
 }
 
 func capitalizeFirst(s string) string {
-	if s == "" {
+	if s == "" || s[0] < 'a' || s[0] > 'z' {
 		return s
 	}
-	b := []byte(s)
-	if b[0] >= 'a' && b[0] <= 'z' {
-		b[0] -= 'a' - 'A'
-	}
-	return string(b)
+	return string(s[0]-('a'-'A')) + s[1:]
 }
 
 // ---- closure computation ----

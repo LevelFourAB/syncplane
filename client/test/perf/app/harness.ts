@@ -158,7 +158,7 @@ function scopeSpecs(scope: ScopeName, opts: ScopeOptions): SubscriptionSpec[] {
 					include: {
 						project: true,
 						assignee: true,
-						comments: { author: true },
+						commentsByIssue: { author: true },
 						blockedBy: { blockedBy: { assignee: true } },
 					},
 				}),

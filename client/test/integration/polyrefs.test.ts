@@ -94,11 +94,15 @@ describe('polymorphic references', () => {
 
 		const user = (await reader.get(UserSchema, 'u1'))!;
 		expect(
-			keysOf(await reader.resolveReverseRef(UserSchema, 'oneof_refs', user) as Row<OneofRefEntity>[]),
+			keysOf(
+				await reader.resolveReverseRef(UserSchema, 'oneofRefsByUser', user) as Row<OneofRefEntity>[],
+			),
 		).toEqual([ 'r-user' ]);
 		expect(keysOf(await reader.resolveReverseRef(UserSchema, 'memosByOwner', user) as Row<Memo>[]))
 			.toEqual([ 'm1' ]);
-		expect(keysOf(await reader.resolveReverseRef(UserSchema, 'attachments', user) as Row<Memo>[]))
+		expect(
+			keysOf(await reader.resolveReverseRef(UserSchema, 'attachmentsByUser', user) as Row<Memo>[]),
+		)
 			.toEqual([ 'a-user' ]);
 
 		await reader.close();

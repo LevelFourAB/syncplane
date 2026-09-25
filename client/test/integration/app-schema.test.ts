@@ -53,7 +53,7 @@ function makeRefBundle() {
 		settings: message({ color: text(), size: int32() }),
 		project: ref(() => project),
 		assignee: ref(() => user),
-		reporter: ref(() => user),
+		reporter: ref(() => user).reverseRelation('reportedIssues'),
 		blockedBy: refList(() => issue),
 		members: keyedList(message({ uid: text(), name: text() }), 'uid'),
 		items: keyedList(message({ id: text(), pos: text(), label: text() }), 'id').order('pos'),
@@ -217,12 +217,13 @@ describe('runtime app schema registration', () => {
 		const proj = (await b.resolveRef(Issue, 'project', i1 as never)) as Row<Record<string, any>>;
 		expect(proj.value.name).toBe('alpha');
 
-		// Two refs to user disambiguate into auto-named reverse relations.
+		// Two refs to user: assignee takes the name of its field, reporter the
+		// reverse relation name it sets.
 		const ada = (await b.get(User, 'ada')) as Record<string, any>;
 		const bob = (await b.get(User, 'bob')) as Record<string, any>;
 		const assigned = await b.resolveReverseRef(User, 'issuesByAssignee', ada as never);
 		expect(assigned.map((r) => r.key)).toEqual([ 'i1' ]);
-		const reported = await b.resolveReverseRef(User, 'issuesByReporter', bob as never);
+		const reported = await b.resolveReverseRef(User, 'reportedIssues', bob as never);
 		expect(reported.map((r) => r.key)).toEqual([ 'i1' ]);
 
 		// Self-ref (to-many): i2.blockedBy resolves to i1.

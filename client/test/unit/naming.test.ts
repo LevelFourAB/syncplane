@@ -12,6 +12,7 @@ import {
 	rowKey,
 	validateEntityName,
 	validateKeyField,
+	validateRelationName,
 	validateRoomName,
 	validateRowKey,
 	validateWorkspaceId,
@@ -48,6 +49,33 @@ describe('validateEntityName', () => {
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH))).not.toThrow();
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH + 1)))
 			.toThrow(/the limit is/);
+	});
+});
+
+describe('validateRelationName', () => {
+	it('accepts identifiers', () => {
+		for (const name of [ 'issues', 'assignedIssues', 'issues_by_owner', '_private', 'v2' ]) {
+			expect(() => validateRelationName(name)).not.toThrow();
+		}
+	});
+
+	// A dot would read as two follow segments, and a name that is not an
+	// identifier cannot be a property of the refs facade.
+	it('rejects anything that is not an identifier', () => {
+		for (
+			const name of [ 'assigned.issues', 'assigned-issues', 'assigned issues', '1issues', '$issues' ]
+		) {
+			expect(() => validateRelationName(name)).toThrow(
+				`reverse relation name "${name}" is not an identifier`,
+			);
+		}
+	});
+
+	it('rejects an empty name and one past the length cap', () => {
+		expect(() => validateRelationName('')).toThrow('reverse relation name is empty');
+		expect(() => validateRelationName('a'.repeat(MAX_ENTITY_NAME_LENGTH + 1))).toThrow(
+			/the limit is/,
+		);
 	});
 });
 

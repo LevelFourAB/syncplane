@@ -221,7 +221,7 @@ var _ = Describe("Bootstrap candidate narrowing", func() {
 			Entity:    "project",
 			Predicate: stringIs("id", "p1"),
 			Follow: &syncplanev1.FollowSpec{
-				Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}},
+				Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}},
 			},
 		})
 

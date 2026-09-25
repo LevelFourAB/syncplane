@@ -426,7 +426,7 @@ var _ = Describe("Membership maintenance", func() {
 					OrderBy: []*syncplanev1.OrderKey{{Path: []string{"name"}, Dir: syncplanev1.Direction_DIRECTION_ASC}},
 					Limit:   2,
 				},
-				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 			})
 		},
 	)
@@ -435,7 +435,7 @@ var _ = Describe("Membership maintenance", func() {
 		func(seed int64) {
 			differential(seed, 120, &syncplanev1.Subscription{
 				Entity: "project",
-				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 			})
 		},
 	)
@@ -449,7 +449,7 @@ var _ = Describe("Membership maintenance", func() {
 				windowSub(3, nil),
 				&syncplanev1.Subscription{
 					Entity: "project",
-					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 				})
 		},
 	)
@@ -468,7 +468,7 @@ var _ = Describe("Membership maintenance", func() {
 						OrderBy: []*syncplanev1.OrderKey{{Path: []string{"name"}, Dir: syncplanev1.Direction_DIRECTION_ASC}},
 						Limit:   2,
 					},
-					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+					Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 				})
 		},
 	)
@@ -478,7 +478,7 @@ var _ = Describe("Membership maintenance", func() {
 			// A window and a predicate over the SAME entity, both following the
 			// same relation. Whether a project is a follow root is a different
 			// question for each, asked about the same rows.
-			issues := &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}}
+			issues := &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}}
 			drive(seed, 120, 0, nil,
 				&syncplanev1.Subscription{
 					Entity: "project",
@@ -522,7 +522,7 @@ var _ = Describe("Membership maintenance", func() {
 					OrderBy: []*syncplanev1.OrderKey{{Path: []string{"id"}, Dir: syncplanev1.Direction_DIRECTION_ASC}},
 					Limit:   projects,
 				},
-				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issues"}}}},
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"issuesByProject"}}}},
 			}}
 		}
 

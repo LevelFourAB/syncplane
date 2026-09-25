@@ -133,6 +133,11 @@ type DynamicField struct {
 	// so a stored value may name the workspace its target lives in. Ignored
 	// without Ref.
 	RefWorkspace bool
+	// ReverseRelation names the reverse relation a Ref adds to its target
+	// entity (the same (syncplane.v1.field_behavior).reverse_relation the
+	// compiled path honours). Empty means <plural(entity)>By<Field>, such as
+	// postsByAuthor. Valid only with Ref, on a field of the entity itself.
+	ReverseRelation string
 	// KeyField names the identity field(s) of a keyed message list (composite
 	// allowed). OrderField names the element's fractional position field,
 	// promoting it to a movable list. Both lower to (syncplane.v1.field_behavior).
@@ -380,6 +385,9 @@ func dynamicFieldProto(
 		f.isMap() || f.isRef() || f.isMessage()) {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: text is only valid on a singular non-opaque bytes field", ctx, f.Name)
 	}
+	if f.ReverseRelation != "" && !f.isRef() {
+		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: reverse_relation is only valid on a Ref field", ctx, f.Name)
+	}
 
 	switch {
 	case f.isMap():
@@ -400,6 +408,11 @@ func dynamicFieldProto(
 			return nil, nil, fmt.Errorf("server: dynamic entity %q field %q references unknown entity %q", ctx, f.Name, f.Ref)
 		}
 		fdp.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
+		if f.ReverseRelation != "" {
+			fopts := &descriptorpb.FieldOptions{}
+			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, &syncplanev1.FieldBehavior{ReverseRelation: f.ReverseRelation})
+			fdp.Options = fopts
+		}
 		if f.RefWorkspace {
 			// A workspace-qualified reference is stored as a reference message
 			// synthesized per field, nested beside the map entries and embedded
@@ -409,8 +422,8 @@ func dynamicFieldProto(
 			return fdp, []*descriptorpb.DescriptorProto{referenceMessageProto(simple, "."+pkg+"."+targetMsg)}, nil
 		}
 		fdp.TypeName = proto.String("." + pkg + "." + targetMsg)
-		// No (syncplane.v1.field_behavior): entity-typed reference detection is
-		// annotation-free.
+		// Entity-typed reference detection is annotation-free, so the only mark
+		// the field itself carries is its reverse relation's name.
 		return fdp, nil, nil
 
 	case f.isMessage():
