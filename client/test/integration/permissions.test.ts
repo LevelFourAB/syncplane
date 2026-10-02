@@ -82,6 +82,36 @@ describe('permissions', () => {
 		await a.close();
 		await b.close();
 	});
+
+	it('refuses an edit of a row the read filter hides by the time it arrives', async () => {
+		const ws = freshWorkspace();
+		const rejections: RejectionInfo[] = [];
+		const a = newClient(ws);
+		const b = newClient(ws, { onMutationRejected: (info) => rejections.push(info) });
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(TodoSchema, { id: 't', title: 'public' });
+		await a.syncNow();
+		await b.syncNow();
+		expect(await b.get(TodoSchema, 't')).toBeDefined();
+
+		// b edits its copy while a hides the row, which a may do: the row as
+		// stored is one a can read.
+		await b.mutate.patch(TodoSchema, 't', { completed: true });
+		await a.mutate.patch(TodoSchema, 't', { title: 'secret now' });
+		await a.syncNow();
+
+		await b.syncNow();
+
+		expect(rejections).toHaveLength(1);
+		expect(rejections[0]?.errorCode).toBe(CodePermissionDenied);
+		expect(await b.pendingCount()).toBe(0);
+		expect(await b.get(TodoSchema, 't')).toBeUndefined();
+
+		await a.close();
+		await b.close();
+	});
 });
 
 describe('filter epoch', () => {

@@ -198,7 +198,9 @@ type Permissions interface {
 	// schema's own rules first — the (syncplane.v1.entity) create_policy,
 	// update_policy and delete_policy — so a write this hook never sees has
 	// already been rejected. A policy therefore cannot widen what a schema
-	// forbids, only narrow it further.
+	// forbids, only narrow it further. A write this hook admits must then pass
+	// the row check against the row it targets, which by default refuses a
+	// write to a row ReadFilter hides; see RowWritePermissions.
 	//
 	// Runs before the push write transaction opens, and between Apply's read and
 	// write transactions — but INSIDE the transaction on Server.Mutate. Keep it
@@ -224,6 +226,10 @@ type Permissions interface {
 	// closure makes — where a filtered row reads as absent rather than as a
 	// tombstone. Those callers can touch any entity, so they resolve every
 	// registered entity's filter up front rather than one per request.
+	//
+	// Unless RowWritePermissions supplies a write filter for the entity, it
+	// also gates writes: a PUT, PATCH or DELETE of a stored row it hides is
+	// refused with CodePermissionDenied, on the wire and in-process alike.
 	//
 	// The returned filter is applied to rows of one request and must close over
 	// p rather than consult ctx: it runs during the row scan, after this hook
@@ -303,6 +309,70 @@ type FieldPermissions interface {
 	// (see the interface doc on execution context) and the same purity
 	// requirement as CanMutate.
 	ProtectedFields(ctx context.Context, p Principal, workspaceID, entity string) ([]string, error)
+}
+
+// RowWriteFilter decides whether one write may change an existing row. stored
+// is the row the write replaces, patches or deletes, decoded as it stands inside
+// the write transaction, and w.Crud is always set. Return nil to admit the
+// write, or a Rejection (via Reject) to refuse it; any other error aborts the
+// RPC.
+//
+// It runs while the workspace write lock is held and may run again when the
+// storage adapter retries the transaction, so it must be fast and a pure
+// function of its arguments and of what it closed over when WriteFilter
+// returned it. It must not retain or modify stored.
+type RowWriteFilter func(w Write, stored proto.Message) error
+
+// RowWritePermissions is an optional Permissions extension for write rules that
+// depend on the row a write targets, such as "only the owner may delete a
+// task". CanMutate sees only the write, so it cannot state such a rule.
+//
+// Every write that is not Trusted and that targets a live row is checked
+// against the stored row before it is applied: a PUT that replaces the row, a
+// PATCH, and a DELETE. A create, which is a write to a key with no live row, is
+// not checked and is left to CanMutate, which sees the new value. The rows a
+// custom mutator's body writes are not checked either; the verdict on the
+// invocation covers them.
+//
+// The check for an entity is the RowWriteFilter that WriteFilter returns. When
+// it returns nil, or the Permissions does not implement this interface, the
+// check is the entity's ReadFilter: a caller may change a row exactly when they
+// may read it, and a write to a row the ReadFilter hides is refused with
+// CodePermissionDenied. An entity with neither filter is not checked and costs
+// no extra read.
+//
+// A stored row that does not decode cannot be checked, so a write to it is
+// refused with CodePermissionDenied whenever the entity has a check; a Trusted
+// write repairs it. A refused write does not disclose the row's version.
+//
+//	func (p *policy) WriteFilter(
+//		_ context.Context, who server.Principal, _, entity string,
+//	) (server.RowWriteFilter, error) {
+//		if entity != "task" {
+//			return nil, nil // writable exactly when readable
+//		}
+//		member := p.engagementsOf(who) // cached lookup, resolved once per request
+//		return func(w server.Write, stored proto.Message) error {
+//			task := stored.(*taskv1.Task)
+//			if !member[task.GetEngagementId()] {
+//				return server.Reject(server.CodePermissionDenied, "no access to this task")
+//			}
+//			if w.Crud.GetOp() == syncplanev1.CrudOp_CRUD_OP_DELETE && task.GetOwner() != who.Subject {
+//				return server.Reject(server.CodePermissionDenied, "only the owner may delete this task")
+//			}
+//			return nil
+//		}, nil
+//	}
+type RowWritePermissions interface {
+	// WriteFilter returns the check for writes to existing rows of the named
+	// entity, or nil to check them with the entity's ReadFilter.
+	//
+	// The engine resolves it at most once per entity per request, before the
+	// write transaction opens — except on Server.Mutate, which discovers its
+	// writes inside the transaction (see the Permissions doc on execution
+	// context). It carries the cost contract of ReadFilter, and the returned
+	// filter must close over p rather than consult ctx.
+	WriteFilter(ctx context.Context, p Principal, workspaceID, entity string) (RowWriteFilter, error)
 }
 
 // RoomDenial is a PERMANENT "no" from CanJoinRoom: this caller may not be in
@@ -457,15 +527,20 @@ func (AllowAll) FilterEpoch(context.Context, Principal, string) (uint64, error) 
 // `enforced` check that skips CanMutate — which is what lets the TRUSTED_ONLY
 // policies be defined in terms of that bypass.
 //
-// g is the request's field gate, non-nil for every enforced write. Resolving it
-// here rather than at apply time is what keeps FieldPermissions off the write
-// lock: the answer this call memoizes is the one the PUT carry-away reads inside
+// g is the request's write gate, non-nil for every enforced write. Resolving it
+// here rather than at apply time is what keeps FieldPermissions, WriteFilter and
+// the ReadFilter a row check falls back to off the write lock: the answers this
+// call memoizes are the ones the PUT carry-over and the row check read inside
 // the transaction.
+//
+// The row check itself cannot run here — it needs the stored row, which only
+// the write transaction can read without racing a concurrent write — so this
+// only resolves it, and only once the write has cleared CanMutate.
 func (s *Server) authorizeWrite(
 	ctx context.Context,
 	p Principal,
 	workspaceID string,
-	g *fieldGate,
+	g *writeGate,
 	w Write,
 ) error {
 	if err := s.checkWritePolicy(w); err != nil {
@@ -474,7 +549,10 @@ func (s *Server) authorizeWrite(
 	if err := s.checkFieldPolicy(g, w); err != nil {
 		return err
 	}
-	return s.perms.CanMutate(ctx, p, workspaceID, w)
+	if err := s.perms.CanMutate(ctx, p, workspaceID, w); err != nil {
+		return err
+	}
+	return s.warmRowCheck(g, w)
 }
 
 // checkFieldPolicy enforces the per-caller half of field protection — the
@@ -489,7 +567,7 @@ func (s *Server) authorizeWrite(
 //
 // A custom mutation has no fields to protect: its rows are covered by the
 // verdict on the invocation, exactly as the entity policies are.
-func (s *Server) checkFieldPolicy(g *fieldGate, w Write) error {
+func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 	if g == nil || w.Crud == nil {
 		return nil
 	}

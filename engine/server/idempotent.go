@@ -106,7 +106,7 @@ func (s *Server) MutateIdempotent(
 	if err != nil {
 		return WriteOutcome{}, err
 	}
-	authz, fields := s.writeAuthorizer(ctx, p, workspaceID, enforced)
+	authz, gate := s.writeAuthorizer(ctx, p, workspaceID, enforced)
 	var (
 		out   WriteOutcome
 		wrote bool
@@ -131,7 +131,7 @@ func (s *Server) MutateIdempotent(
 		if err != nil {
 			return err
 		}
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, fields: fields, actor: actor}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor}
 		result, err := fn(etx)
 		if err != nil {
 			return err

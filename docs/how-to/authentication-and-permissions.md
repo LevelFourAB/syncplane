@@ -93,6 +93,8 @@ Return the appropriate error type based on the failure condition:
 
 `ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter` so that a permission change triggers a delta resync instead of requiring a full re-bootstrap. For more information, see [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
+`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
+
 Keep membership checks out of `ReadFilter`. Handle membership in `CanAccessWorkspace`. Combining the two can cause a `nil` return to leak entities across tenants.
 
 Keep secrets out of keys. A filter hides row values, but the entity, key, and version can reach subscribed clients as tombstones upon deletion or when an edit hides a row the client previously held. Key rows by surrogate ID and place sensitive data such as email addresses, slugs, or invite codes in filtered fields. For more information, see [Read filter trade-offs](../explanation/limits-and-trade-offs.md#a-read-filter-hides-values-not-existence).
@@ -102,6 +104,8 @@ Keep secrets out of keys. A filter hides row values, but the entity, key, and ve
 Hooks run outside storage transactions, so a slow hook does not hold the workspace write lock. However, a slow hook stalls its caller. Verify credentials and cache membership lookups to avoid I/O operations on every call.
 
 As an exception, `Server.Mutate` executes `CanMutate` inside its write transaction because writes in the closure are not known until it runs. `Apply` executes outside the write transaction.
+
+The row check is the one part of a policy that always runs inside the write transaction, because it needs the stored row. The function that `WriteFilter` returns runs there; `WriteFilter` itself runs before the transaction opens, so do lookups in `WriteFilter`.
 
 ## Authorizing in-process API calls
 
@@ -121,7 +125,7 @@ To bypass authorization for internal server operations, specify `server.Trusted(
 err := srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error { ... })
 ```
 
-`server.Trusted` skips both `CanAccessWorkspace` and `CanMutate`. Omitting `server.Trusted` fails safe: the engine authorizes the call as anonymous, and the policy rejects it. To record a specific actor name on written rows during a trusted operation, use `server.TrustedAs(ctx, name)`.
+`server.Trusted` skips every permission hook, including `CanAccessWorkspace`, `CanMutate`, and the row check. Omitting `server.Trusted` fails safe: the engine authorizes the call as anonymous, and the policy rejects it. To record a specific actor name on written rows during a trusted operation, use `server.TrustedAs(ctx, name)`.
 
 The engine uses the principal to attribute writes. Every row records its last writer, which appears in the change feed. For more information, see [Change feed attribution](../reference/server.md#change-feed). Because attribution derives from the context that the hooks read, attribution cannot disagree with authorization.
 
@@ -143,13 +147,49 @@ Setting a policy to `*_TRUSTED_ONLY` restricts that write operation to trusted s
 
 Use schema write policies for rules that apply to all deployments. Defining the rule in the schema ensures it is enforced consistently, rather than relying on policy code in each deployment where a missing check fails open.
 
-Schema write policies apply to caller classes rather than specific rows. To enforce row-level rules such as "only edit your own comment", use `CanMutate` if ownership can be derived from the key, or use a custom mutator if the check requires reading the stored row. For more information, see [Check ownership in a mutator](#check-ownership-in-a-mutator) and [Write policies](../reference/proto-options.md#write-policies).
+Schema write policies apply to caller classes rather than specific rows. To enforce row-level rules such as "only edit your own comment", use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row), [Check ownership in a mutator](#check-ownership-in-a-mutator), and [Write policies](../reference/proto-options.md#write-policies).
 
 To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
 
+## Check writes against the stored row
+
+`CanMutate` sees only the write. To decide based on the row that a write changes, implement `RowWritePermissions` on your `Permissions` struct. `WriteFilter` returns a function that the engine calls with the write and the stored row:
+
+```go
+func (p *policy) WriteFilter(
+	_ context.Context, caller server.Principal, workspaceID, entity string,
+) (server.RowWriteFilter, error) {
+	if entity != "task" {
+		return nil, nil // writable when readable
+	}
+	member := p.engagementsOf(workspaceID, caller) // cached lookup
+	return func(w server.Write, stored proto.Message) error {
+		task := stored.(*taskv1.Task)
+		if !member[task.GetEngagementId()] {
+			return server.Reject(server.CodePermissionDenied, "no access to this task")
+		}
+		if w.Crud.GetOp() == syncplanev1.CrudOp_CRUD_OP_DELETE && task.GetOwner() != caller.Subject {
+			return server.Reject(server.CodePermissionDenied, "only the owner may delete this task")
+		}
+		return nil
+	}, nil
+}
+```
+
+Follow these rules:
+
+- **Return `nil` to keep the default.** Without a write filter, the engine refuses a write to a row that `ReadFilter` hides. A caller can then change a row exactly when it can read the row.
+- **Return a filter that admits every write to allow writes to hidden rows.** A filter replaces the `ReadFilter` check for its entity. Do this only when callers must change rows that they cannot read.
+- **Check incoming values in `CanMutate`.** The filter receives the stored row as it is before the write, and the engine does not call it for creates. To stop a caller from moving a row to a place where the caller may not put it, check the new value in `CanMutate`.
+- **Do lookups in `WriteFilter`.** The engine calls `WriteFilter` at most once per entity per request, before the write transaction opens. The returned filter runs inside the transaction while the workspace write lock is held, and runs again if the storage adapter retries. Keep the filter a fast, pure function of its arguments.
+
+The client cannot predict a row-check refusal. It enqueues the write, and reverts the write when the server rejects it.
+
+A write filter sees only the fields of the row. To decide based on who last wrote the row, check ownership in a custom mutator.
+
 ## Check ownership in a mutator
 
-When authorization requires inspecting stored row data, implement a custom mutator. Custom mutators are authorized once by name, and the mutator function evaluates access. `EntityTx.GetMeta` returns the actor stamped on the row:
+When authorization depends on who last wrote a row, implement a custom mutator. Custom mutators are authorized once by name, and the mutator function evaluates access. `EntityTx.GetMeta` returns the actor stamped on the row:
 
 ```go
 server.WithMutator("editComment", &appv1.EditComment{},

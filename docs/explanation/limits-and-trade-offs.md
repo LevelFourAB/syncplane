@@ -186,9 +186,24 @@ A `ReadFilter` controls which rows a client can read, but does not hide the exis
 - **Deletions:** A tombstone containing the entity name, key, and version is sent to all subscribed clients when a row is deleted. Because the value is removed, the read filter cannot be evaluated against it.
 - **Revocation:** If an update modifies a row such that it no longer passes the read filter, the server sends a tombstone to ensure clients drop their cached copy. If the server cannot determine whether a client previously held the row, it sends a tombstone conservatively. Bootstrap sync skips denied rows entirely, and permission-change resync evaluates the client's prior filter to tombstone only previously visible rows.
 
+Writes disclose existence too, whatever the subscription. A write to a row that the caller may not read is refused with `permission_denied`, while a `PATCH` of a missing row is refused with `conflict` and a `PUT` or `DELETE` of one applies. A caller that guesses a key can therefore learn that a row exists, but not its fields or its version.
+
 Because row keys are visible in tombstones, keys must not contain sensitive data such as email addresses, slugs, or invite codes. Use surrogate keys (such as UUIDs) and store sensitive data in entity fields protected by the read filter.
 
 A timing channel also exists: versions are workspace-global, allowing clients to infer that hidden writes occurred by observing version gaps, though without disclosing affected rows or field values.
+
+## Row checks run inside the write, CanMutate before it
+
+A write passes two policy decisions, and each one sees a different side of the write:
+
+- **`CanMutate` sees the write:** its operation, key, field mask, and new values. The engine calls it before the write transaction opens, so a slow policy does not hold the workspace write lock. `Server.Mutate`, which discovers its writes as its closure runs, is the exception.
+- **The row check sees the stored row** that the write changes, as it is before the write.
+
+A decision based on the stored row is correct only against the row that the write actually lands on, and only the write transaction can read that row without racing a concurrent writer. If an administrator moves a task out of a project at the same moment that a member edits the task, a check against an earlier read admits an edit to a row that the member can no longer see. In one push, a later mutation can also target a row that an earlier mutation in the same push wrote; that row exists only inside the transaction.
+
+The row check therefore has the shape of a read filter. `WriteFilter` does the slow work, such as membership lookups, before the transaction opens and returns a pure function. The engine runs that function inside the transaction against the real row. The function cannot do I/O, and `CanMutate` cannot see the stored row. Together they cover the old row and the new values.
+
+The default row check is the read filter, so a caller can change a row exactly when it can read the row. Without that default, a caller that knows a key, for example from a tombstone, could edit, overwrite, or delete a row that it cannot see. A `PATCH` that moves the row into the caller's view would also deliver every field of the row on the next pull. A write filter replaces the default for its entity, for apps where callers must write rows that they cannot read. See [Check writes against the stored row](../how-to/authentication-and-permissions.md#check-writes-against-the-stored-row).
 
 ## One node by default, more than one on purpose
 
@@ -226,6 +241,7 @@ Quarantined rows are not deleted from storage:
 
 - A `PUT` request with valid data replaces the corrupt bytes and restores normal sync.
 - A `PATCH` request is rejected with a `conflict` error because a field mask cannot be applied to undecodable base bytes.
+- When the entity has a row check (a read filter or a write filter), the check cannot run on the corrupt bytes, so the engine refuses every client write to the row with `permission_denied`. A trusted write repairs the row. Admitting the write would let any caller overwrite or delete a row that nobody can show they may change.
 
 Full sync operations without read filters or predicates transmit raw bytes without decoding them, allowing corrupt rows to reach clients where decoding errors surface on read. In-process methods (`ViewTx`, `ApplyTx`, and `EntityTx`) return decode errors directly to Go callers rather than quarantining rows.
 
@@ -285,7 +301,7 @@ Because policy checks are syntactic rather than semantic:
 
 - An unguarded `PUT` (without `expected_version`) can either create or replace a row. To prevent unauthorized creations when updates are permitted, unguarded `PUT` requests must satisfy both `create_policy` and `update_policy`.
 - Inside a batch transaction, `DELETE(k)` followed by `PUT(k, expected_version: 0)` evaluates as a valid delete and create, replacing the row. Use `delete_policy` in combination with `update_policy` to restrict row modifications.
-- Policies evaluate caller roles, not row-level ownership rules. Ownership rules (such as "only the author may edit this comment") must be enforced in `CanMutate` (if derivable from the key) or inside custom mutator logic that inspects the stored row.
+- Policies evaluate caller roles, not row-level ownership rules. Ownership rules (such as "only the author may edit this comment") belong in a write filter, which sees the stored row, or in a custom mutator when the rule depends on who last wrote the row.
 - Undo operations convert a `DELETE` into an unguarded `PUT`, which fails if the entity restricts updates.
 - Collaborative text edits execute as `PATCH` operations and require update permissions on the entity.
 

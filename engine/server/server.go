@@ -81,7 +81,7 @@ type entityInfo struct {
 	// protectedFields are the top-level units no authorized caller may write:
 	// the fields marked (field_behavior).write_policy TRUSTED_ONLY, with a
 	// oneof contributing its group name. Empty for almost every entity, which
-	// is what keeps the check off the hot path — see fieldGate.
+	// is what keeps the check off the hot path — see writeGate.
 	protectedFields []string
 }
 

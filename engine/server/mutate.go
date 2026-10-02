@@ -27,9 +27,10 @@ import (
 //
 // Each Put/Patch/Delete is authorized with CanMutate against the ctx principal,
 // carrying the same CrudMutation a client push would have — so a policy cannot
-// tell the two apart. The workspace gate (CanAccessWorkspace) runs first, before
-// the transaction opens. A ctx with no principal authorizes as anonymous, which
-// a deny-by-default policy refuses.
+// tell the two apart — and a write to an existing row then passes the row check
+// (see RowWritePermissions). The workspace gate (CanAccessWorkspace) runs first,
+// before the transaction opens. A ctx with no principal authorizes as
+// anonymous, which a deny-by-default policy refuses.
 //
 // System work that has no caller to authorize — connectors, migrations, cron —
 // marks its ctx with Trusted, which skips both hooks. See Trusted for why the
@@ -78,7 +79,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 	if err != nil {
 		return err
 	}
-	authz, fields := s.writeAuthorizer(ctx, p, workspaceID, enforced)
+	authz, gate := s.writeAuthorizer(ctx, p, workspaceID, enforced)
 	wrote := false
 	err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		actor, err := actorOf(ctx)
@@ -88,7 +89,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		// A fresh EntityTx per attempt keeps the closure re-runnable: a
 		// retried attempt re-allocates its sequence instead of stamping rows
 		// with one a rolled-back attempt consumed.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, fields: fields, actor: actor}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor}
 		if err := fn(etx); err != nil {
 			return err
 		}

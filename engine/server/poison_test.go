@@ -233,6 +233,26 @@ var _ = Describe("Undecodable rows", func() {
 			}
 			Expect(keys).To(ConsistOf("w1", "w2"))
 		})
+
+		It("refuses a client PUT or DELETE over it, since the filter cannot be checked", func() {
+			results := push(
+				putMutation("c1", 3, "widget", badKey, &testdatav1.Widget{Id: badKey, Label: "repaired"}),
+				deleteMutation("c1", 4, "widget", badKey),
+			)
+			for _, r := range results {
+				Expect(r.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(r.GetErrorCode()).To(Equal(server.CodePermissionDenied))
+			}
+		})
+
+		It("takes a Trusted Put over it", func() {
+			Expect(engine.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+				return tx.Put(&testdatav1.Widget{Id: badKey, Label: "repaired"})
+			})).To(Succeed())
+
+			got := changeKinds(pull().GetPatch().GetChanges())
+			Expect(got).To(HaveKeyWithValue(badKey, false))
+		})
 	})
 
 	Describe("with a follow spec", func() {

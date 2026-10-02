@@ -160,8 +160,10 @@ var _ = Describe("Permissions and custom mutations", func() {
 	})
 
 	Describe("ReadFilter hook", func() {
+		var srv *server.Server
+
 		BeforeEach(func() {
-			srv := newTestServer(server.WithPermissions(exampleapp.NewPermissions()))
+			srv = newTestServer(server.WithPermissions(exampleapp.NewPermissions()))
 			start(srv)
 		})
 
@@ -240,7 +242,11 @@ var _ = Describe("Permissions and custom mutations", func() {
 				second := pullFrom(first.GetNextCursor())
 				Expect(second.GetPatch().GetChanges()).To(BeEmpty())
 
-				push(putMutation("c1", 3, "todo", "t2", &todov1.Todo{Id: "t2", Title: "secret v2"}))
+				// A trusted writer makes the edit: no client may change a row its
+				// read filter hides.
+				Expect(srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+					return tx.Put(&todov1.Todo{Id: "t2", Title: "secret v2"})
+				})).To(Succeed())
 				third := pullFrom(second.GetNextCursor())
 				Expect(tombstoneKeys(third)).To(Equal([]string{"t2"}))
 			})

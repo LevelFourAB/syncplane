@@ -126,14 +126,15 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// A non-rejection (infra) error fails this workspace before any lock is
 	// taken; a rejection is stored and replayed inside the tx to produce the
 	// REJECTED ack and watermark bump.
-	// The gate resolves FieldPermissions once per entity and is read again by
-	// the apply below, so the hook runs out here with the rest of authorization
-	// rather than inside the transaction where a PUT needs its answer.
-	fields := s.newFieldGate(ctx, principal, ws, true)
+	// The gate resolves FieldPermissions and the row check once per entity and
+	// is read again by the apply below, so the hooks run out here with the rest
+	// of authorization rather than inside the transaction where a write needs
+	// their answers.
+	gate := s.newWriteGate(ctx, principal, ws, true)
 	muts := batch.GetMutations()
 	authz := make([]error, len(muts))
 	for i, m := range muts {
-		if err := s.authorize(ctx, principal, ws, fields, m); err != nil {
+		if err := s.authorize(ctx, principal, ws, gate, m); err != nil {
 			if _, isRejection := AsRejection(err); !isRejection {
 				return failInternal(fmt.Sprintf("authorizing mutation %d", m.GetMutationId()), err)
 			}
@@ -267,11 +268,11 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			if guarded {
 				applyErr = tx.InSavepoint(func() error {
 					var err error
-					seq, err = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
+					seq, err = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i])
 					return err
 				})
 			} else {
-				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, fields, m, authz[i])
+				seq, applyErr = s.applyMutation(ctx, ws, tx, rows, gate, m, authz[i])
 			}
 
 			var result *syncplanev1.MutationResult
@@ -732,8 +733,8 @@ func (s *Server) checkCrudLimits(crud *syncplanev1.CrudMutation) error {
 //
 // g is the same gate authorization warmed, carried in for the CRUD writes. It
 // does NOT reach a custom mutation: a mutator body writes under the verdict on
-// its invocation, which is the escape hatch a protected field is designed
-// around.
+// its invocation, which is the escape hatch a protected field and a row check
+// are designed around.
 //
 // rows serves the CRUD base-row reads; it must be positioned on this mutation's
 // index (see batchRows).
@@ -742,7 +743,7 @@ func (s *Server) applyMutation(
 	ws string,
 	tx storage.WriteTx,
 	rows *batchRows,
-	g *fieldGate,
+	g *writeGate,
 	m *syncplanev1.Mutation,
 	authErr error,
 ) (uint64, error) {
@@ -768,7 +769,8 @@ func (s *Server) applyMutation(
 
 	switch payload := m.GetPayload().(type) {
 	case *syncplanev1.Mutation_Crud:
-		if err := s.applyCrud(ctx, ws, tx, rows, g, payload.Crud, seq, actor); err != nil {
+		w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: payload.Crud}
+		if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
@@ -783,7 +785,8 @@ func (s *Server) applyMutation(
 		// row a preceding PUT created). An empty batch is rejected in
 		// checkLimits, above.
 		for _, crud := range payload.Batch.GetMutations() {
-			if err := s.applyCrud(ctx, ws, tx, rows, g, crud, seq, actor); err != nil {
+			w := Write{ClientId: m.GetClientId(), MutationId: m.GetMutationId(), Crud: crud}
+			if err := s.applyCrud(ctx, ws, tx, rows, g, w, seq, actor); err != nil {
 				return 0, err
 			}
 		}
@@ -802,7 +805,7 @@ func (s *Server) authorize(
 	ctx context.Context,
 	p Principal,
 	workspaceID string,
-	g *fieldGate,
+	g *writeGate,
 	m *syncplanev1.Mutation,
 ) error {
 	switch payload := m.GetPayload().(type) {
@@ -827,16 +830,20 @@ func (s *Server) authorize(
 	return nil
 }
 
+// applyCrud applies one CRUD write. w is the write as authorized, carrying its
+// envelope's ClientId and MutationId so the row check is handed what CanMutate
+// was.
 func (s *Server) applyCrud(
 	ctx context.Context,
 	ws string,
 	tx storage.WriteTx,
 	rows *batchRows,
-	g *fieldGate,
-	crud *syncplanev1.CrudMutation,
+	g *writeGate,
+	w Write,
 	seq uint64,
 	actor storage.Actor,
 ) error {
+	crud := w.Crud
 	info, ok := s.catalogPtr().entities[crud.GetEntity()]
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown entity %q", crud.GetEntity()))
@@ -860,14 +867,14 @@ func (s *Server) applyCrud(
 	}
 
 	// The stored row as it stands before this mutation, fetched at most once.
-	// Four sites inside this one mutation want it — the CAS guard below, the
-	// PUT text union, the PATCH merge base and history capture — and each has to
-	// treat an absent row and a tombstone alike; one fetch behind one `live`
-	// flag is what keeps that handling from drifting apart between them.
-	// Nothing here writes the row before the op switch's final
+	// Five sites inside this one mutation want it — the row check and CAS guard
+	// below, the PUT text union, the PATCH merge base and history capture — and
+	// each has to treat an absent row and a tombstone alike; one fetch behind
+	// one `live` flag is what keeps that handling from drifting apart between
+	// them. Nothing here writes the row before the op switch's final
 	// PutRow/DeleteRow, so the memo cannot go stale. Lazy, so a DELETE (or an
-	// unguarded PUT of an entity that has neither text fields nor history) still
-	// reads nothing.
+	// unguarded PUT of an entity that has neither text fields nor history)
+	// still reads nothing unless the entity has a row check.
 	var (
 		cachedRow  storage.Row
 		cachedLive bool
@@ -911,6 +918,14 @@ func (s *Server) applyCrud(
 		}
 		cachedBase = base
 		return base, nil
+	}
+
+	// Before the compare-and-swap below, so a caller refused here does not
+	// learn the row's version from a conflict.
+	if err := g.guardRow(info, crud.GetKey(), currentRow, func() (Write, error) {
+		return w, nil
+	}); err != nil {
+		return err
 	}
 
 	// Optional compare-and-swap: apply only if the row is still at the version

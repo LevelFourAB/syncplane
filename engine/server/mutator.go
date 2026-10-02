@@ -112,12 +112,13 @@ type EntityTx struct {
 	// consults a permission hook under a lock — see Server.Mutate for why that
 	// is confined to this path.
 	authz func(Write) error
-	// fields, when non-nil, is the request's protected-field resolution: Put
-	// takes the stored value for every field it names rather than the one the
-	// caller submitted. It is nil wherever authz is, and additionally nil for a
-	// mutator body — whose rows the Write{Custom} verdict covers — while Apply
-	// sets it with no authz, having authorized its intents in an earlier pass.
-	fields *fieldGate
+	// gate, when non-nil, is the request's write gate: Put takes the stored
+	// value for every protected field rather than the one the caller submitted,
+	// and every write to a live row passes the row check first. It is nil
+	// wherever authz is, and additionally nil for a mutator body — whose rows
+	// the Write{Custom} verdict covers — while Apply sets it with no authz,
+	// having authorized its intents in an earlier pass.
+	gate *writeGate
 }
 
 // authorizeCrud runs the per-write hook for one CRUD write, building the same
@@ -140,6 +141,23 @@ func (e *EntityTx) authorizeCrud(
 	if e.authz == nil {
 		return nil
 	}
+	w, err := writeOf(info, key, op, msg, mask, expected)
+	if err != nil {
+		return err
+	}
+	return e.authz(w)
+}
+
+// writeOf renders an in-process CRUD write as the Write a client push would
+// have carried: the submitted value and mask, before any merge.
+func writeOf(
+	info *entityInfo,
+	key string,
+	op syncplanev1.CrudOp,
+	msg proto.Message,
+	mask []string,
+	expected *uint64,
+) (Write, error) {
 	crud := &syncplanev1.CrudMutation{
 		Entity:          info.name,
 		Key:             key,
@@ -149,14 +167,24 @@ func (e *EntityTx) authorizeCrud(
 	if msg != nil {
 		value, err := proto.Marshal(msg)
 		if err != nil {
-			return err
+			return Write{}, err
 		}
 		crud.Value = value
 	}
 	if len(mask) > 0 {
 		crud.FieldMask = &fieldmaskpb.FieldMask{Paths: mask}
 	}
-	return e.authz(Write{Crud: crud})
+	return Write{Crud: crud}, nil
+}
+
+// liveRow reads the stored row for key and reports whether it is live: absent
+// and tombstoned read alike, as everywhere a write consults the row.
+func (e *EntityTx) liveRow(info *entityInfo, key string) (storage.Row, bool, error) {
+	row, err := e.tx.GetRow(info.name, key)
+	if err != nil && err != storage.ErrNotFound {
+		return storage.Row{}, false, err
+	}
+	return row, err == nil && !row.Deleted, nil
 }
 
 // Workspace returns the workspace this tx writes to. A mutator body that
@@ -290,7 +318,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	// write. A WithTextString naming one is refused instead: unlike a value in a
 	// submitted row, the option names the field outright, which is the same
 	// thing a PATCH mask does.
-	protected, err := e.fields.protected(info)
+	protected, err := e.gate.protected(info)
 	if err != nil {
 		return err
 	}
@@ -303,20 +331,35 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}
 	var (
 		prevText map[string][]byte
-		// The stored row before this write, hoisted out of the text branch
-		// because history capture wants the same one — and, like the wire path's
-		// memo, must treat an absent row and a tombstone alike.
-		row  storage.Row
-		live bool
+		// The stored row before this write, read at most once: the row check,
+		// the merges and history capture all want the same one — and, like the
+		// wire path's memo, must treat an absent row and a tombstone alike.
+		row     storage.Row
+		live    bool
+		fetched bool
 	)
+	currentRow := func() (storage.Row, bool, error) {
+		if !fetched {
+			r, l, err := e.liveRow(info, key)
+			if err != nil {
+				return storage.Row{}, false, err
+			}
+			row, live, fetched = r, l, true
+		}
+		return row, live, nil
+	}
+	// Before the compare-and-swap below, so a caller refused here does not
+	// learn the row's version from a conflict.
+	if err := e.gate.guardRow(info, key, currentRow, func() (Write, error) {
+		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, msg, nil, o.expected)
+	}); err != nil {
+		return err
+	}
 	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
 		len(protected) > 0 {
-		var rowErr error
-		row, rowErr = e.tx.GetRow(info.name, key)
-		if rowErr != nil && rowErr != storage.ErrNotFound {
-			return rowErr
+		if _, _, err := currentRow(); err != nil {
+			return err
 		}
-		live = rowErr == nil && !row.Deleted
 		// WithExpectedVersion turns the write into a compare-and-swap, checked
 		// before any merge so a stale write conflicts deterministically. Mirrors
 		// Patch: an absent or deleted row reads as version 0.
@@ -457,11 +500,19 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 		return err
 	}
 
-	row, rowErr := e.tx.GetRow(info.name, key)
-	if rowErr != nil && rowErr != storage.ErrNotFound {
-		return rowErr
+	row, live, err := e.liveRow(info, key)
+	if err != nil {
+		return err
 	}
-	live := rowErr == nil && !row.Deleted
+	// Before the compare-and-swap below, so a caller refused here does not
+	// learn the row's version from a conflict.
+	if err := e.gate.guardRow(info, key, func() (storage.Row, bool, error) {
+		return row, live, nil
+	}, func() (Write, error) {
+		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, msg, mask, expected)
+	}); err != nil {
+		return err
+	}
 
 	// Optional compare-and-swap: an absent or deleted row reads as version 0
 	// (so expected 0 means "row must not exist"). The check runs before the
@@ -591,6 +642,13 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	}
 	// A DELETE carries no value, exactly as on the wire.
 	if err := e.authorizeCrud(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil); err != nil {
+		return err
+	}
+	if err := e.gate.guardRow(info, key, func() (storage.Row, bool, error) {
+		return e.liveRow(info, key)
+	}, func() (Write, error) {
+		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil)
+	}); err != nil {
 		return err
 	}
 	seq, err := e.writeSeq()

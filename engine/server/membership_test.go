@@ -237,6 +237,12 @@ func (hidingPermissions) ReadFilter(_ context.Context, _ server.Principal, _, en
 	return nil, nil
 }
 
+// WriteFilter admits every write. The scripts edit hidden rows on purpose: a row
+// moving into and out of the read filter is the case under test.
+func (hidingPermissions) WriteFilter(context.Context, server.Principal, string, string) (server.RowWriteFilter, error) {
+	return func(server.Write, proto.Message) error { return nil }, nil
+}
+
 // nameIs and titleIs are the "equals" predicates the seed-rule specs narrow a
 // project and an issue subscription with.
 func nameIs(v string) *syncplanev1.Condition  { return stringIs("name", v) }

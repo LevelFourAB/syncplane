@@ -1,7 +1,6 @@
 package server
 
 import (
-	"context"
 	"fmt"
 	"strings"
 
@@ -12,57 +11,23 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/lww"
 )
 
-// fieldGate resolves, per entity, the fields one request's writes may not
-// change: the schema's own (syncplane.v1.field_behavior).write_policy marks,
-// widened by whatever FieldPermissions adds for this caller.
-//
-// A nil gate means no field is protected, which is what three kinds of write
-// get: a Trusted one, the rows a custom mutator's body writes (covered by the
-// verdict on its invocation, exactly as the entity policies are), and Apply's
-// second pass, whose intents the first pass already authorized and carried a
-// gate for. Every enforced write path builds one before it opens a transaction.
-//
-// It memoizes per entity because both halves of the feature ask the same
-// question: the PATCH refusal in authorizeWrite, and the PUT carry-over inside
-// the transaction. Resolving once per entity per request is what keeps the hook
-// off the write lock — warmed while authorizing, read while applying. The
-// exception is Server.Mutate, which authorizes inside the transaction for the
-// reason its doc gives, so warms it there too.
-type fieldGate struct {
-	ctx  context.Context
-	p    Principal
-	ws   string
-	hook FieldPermissions
-	memo map[string][]string
-}
-
-// newFieldGate builds the gate an enforced request carries into its writes, or
-// nil when nothing is enforced.
-func (s *Server) newFieldGate(ctx context.Context, p Principal, workspaceID string, enforced bool) *fieldGate {
-	if !enforced {
-		return nil
-	}
-	hook, _ := s.perms.(FieldPermissions)
-	return &fieldGate{ctx: ctx, p: p, ws: workspaceID, hook: hook}
-}
-
 // protected returns the entity's effective protected set for this caller. The
 // result is owned by the gate: callers read it and must not retain or mutate it.
 //
 // A nil gate protects nothing, and neither does an entity that marks no field
 // under a policy that implements no hook — the common case, which allocates
 // nothing and consults nobody.
-func (g *fieldGate) protected(info *entityInfo) ([]string, error) {
+func (g *writeGate) protected(info *entityInfo) ([]string, error) {
 	if g == nil {
 		return nil, nil
 	}
-	if g.hook == nil {
+	if g.fieldHook == nil {
 		return info.protectedFields, nil
 	}
-	if fields, ok := g.memo[info.name]; ok {
+	if fields, ok := g.fieldMemo[info.name]; ok {
 		return fields, nil
 	}
-	extra, err := g.hook.ProtectedFields(g.ctx, g.p, g.ws, info.name)
+	extra, err := g.fieldHook.ProtectedFields(g.ctx, g.p, g.ws, info.name)
 	if err != nil {
 		return nil, fmt.Errorf("server: entity %q: resolving protected fields: %w", info.name, err)
 	}
@@ -70,10 +35,10 @@ func (g *fieldGate) protected(info *entityInfo) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
-	if g.memo == nil {
-		g.memo = map[string][]string{}
+	if g.fieldMemo == nil {
+		g.fieldMemo = map[string][]string{}
 	}
-	g.memo[info.name] = fields
+	g.fieldMemo[info.name] = fields
 	return fields, nil
 }
 

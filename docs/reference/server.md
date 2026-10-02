@@ -438,6 +438,12 @@ type Authenticator interface {
 type FieldPermissions interface {
     ProtectedFields(ctx context.Context, p Principal, workspaceID, entity string) ([]string, error)
 }
+
+type RowWritePermissions interface {
+    WriteFilter(ctx context.Context, p Principal, workspaceID, entity string) (RowWriteFilter, error)
+}
+
+type RowWriteFilter func(w Write, stored proto.Message) error
 ```
 
 Built-in authenticators and helpers:
@@ -447,9 +453,22 @@ Built-in authenticators and helpers:
 - `server.WithPrincipal(ctx, p)`: Sets the principal on a context.
 - `server.AllowAll`: Default implementation permitting all operations.
 
-Permission interfaces include `CanAccessWorkspace`, `CanMutate`, `ReadFilter`, `FilterEpoch`, `EpochReadFilters`, and `FieldPermissions`.
+Permission interfaces include `CanAccessWorkspace`, `CanMutate`, `ReadFilter`, `FilterEpoch`, `EpochReadFilters`, `FieldPermissions`, and `RowWritePermissions`.
 
 `FieldPermissions.ProtectedFields` returns top-level field names that the caller cannot modify. Fields declared as protected via schema options `(syncplane.v1.field_behavior).write_policy` remain protected. A `PATCH` touching a protected field is rejected with `CodePermissionDenied`. A `PUT` ignores incoming values for protected fields and preserves stored values. Protected field names matching no known schema field or matching a key field fail the request.
+
+Every write that is not trusted and targets a live row passes a row check before it is applied. The check sees the stored row as it is inside the write transaction:
+
+| Situation                                                  | Row check                                                          |
+| ---------------------------------------------------------- | ------------------------------------------------------------------ |
+| `WriteFilter` returns a filter for the entity              | The filter decides. `ReadFilter` is not used for writes.           |
+| No `RowWritePermissions`, or `WriteFilter` returns `nil`   | Refused with `CodePermissionDenied` if `ReadFilter` hides the row. |
+| Neither filter applies to the entity                       | None. The write costs no extra read.                               |
+| No live row (create, or a key whose row is deleted)        | None. `CanMutate` alone decides.                                   |
+| The stored row does not decode                             | Refused with `CodePermissionDenied`. A trusted write repairs it.   |
+| Trusted context, or rows that a custom mutator body writes | None.                                                              |
+
+`WriteFilter` is resolved at most once per entity per request, before the write transaction opens. `Server.Mutate` resolves it inside the transaction. The returned `RowWriteFilter` runs inside the transaction for each write, receives the same `Write` that `CanMutate` received, and must be a pure function of its arguments. A refused write does not disclose the row's version.
 
 Error constructors and rejection codes:
 

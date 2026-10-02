@@ -70,8 +70,10 @@ import (
 //
 // Authorized against the ctx principal; a ctx with no principal authorizes as
 // anonymous, which a deny-by-default policy refuses. System work with no caller
-// to authorize marks its ctx with Trusted. A rejection (from either hook) is
-// returned as an error and nothing is applied — recovered with AsRejection, or
+// to authorize marks its ctx with Trusted. A write to an existing row also
+// passes the row check (see RowWritePermissions) when the write transaction
+// applies it. A rejection, from a hook or from the row check, is returned as an
+// error and nothing is applied — recovered with AsRejection, or
 // AsWorkspaceDenial for a settled workspace denial.
 //
 // A call that records no writes opens no write transaction at all: it consumes
@@ -181,12 +183,12 @@ func (s *Server) apply(
 
 	// Phase 2: authorize every recorded write, outside any transaction. A
 	// rejection here means nothing is applied — the writes were never opened.
-	// The gate outlives this pass: phase 3 reads the protected fields it
-	// resolved here rather than calling the hook under the write lock.
-	fields := s.newFieldGate(ctx, p, workspaceID, enforced)
+	// The gate outlives this pass: phase 3 reads the protected fields and row
+	// checks it resolved here rather than calling the hooks under the write lock.
+	gate := s.newWriteGate(ctx, p, workspaceID, enforced)
 	if enforced {
 		for _, in := range atx.intents {
-			if err := s.authorizeWrite(ctx, p, workspaceID, fields, Write{Crud: in.crud()}); err != nil {
+			if err := s.authorizeWrite(ctx, p, workspaceID, gate, Write{Crud: in.crud()}); err != nil {
 				return WriteOutcome{}, err
 			}
 		}
@@ -222,9 +224,9 @@ func (s *Server) apply(
 		}
 		// authz stays nil: phase 2 already authorized every intent, and
 		// re-running the hook here would put it back under the write lock. The
-		// field gate does travel, warm: a PUT needs the protected set at the
-		// moment it has the stored row, which is here.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, fields: fields, actor: actor}
+		// write gate does travel, warm: the PUT carry-over and the row check
+		// need the stored row, which only this transaction reads.
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err
