@@ -47,6 +47,8 @@ The following table lists configuration options for `server.New`:
 | ------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `WithAuthenticator(a)`                      | anonymous    | Authenticates request headers into a `Principal` before each sync RPC.                                                                                                                                                                                                         |
 | `WithPermissions(p)`                        | `AllowAll`   | Sets workspace access, write permissions, and per-row read filter policies.                                                                                                                                                                                                    |
+| `WithSubjects(fn)`                          | subject      | Sets the subjects a caller's grant rows may name in the access model. Defaults to `Principal.Subject`, and none for an anonymous caller. See [Access model](#access-model).                                                                                                    |
+| `WithGlobalRoles(fn)`                       | none         | Sets the roles a caller holds at the root of every workspace in the access model. See [Access model](#access-model).                                                                                                                                                           |
 | `WithLimits(l)`                             | See limits   | Sets request and data size bounds. Non-positive fields retain default values.                                                                                                                                                                                                  |
 | `WithChunkSize(n)`                          | 256          | Sets bootstrap chunk size in rows.                                                                                                                                                                                                                                             |
 | `WithHeartbeat(d)`                          | 30s          | Sets `Subscribe` heartbeat interval and access re-verification frequency for active streams. Zero or negative keeps the default.                                                                                                                                               |
@@ -78,33 +80,33 @@ The following table lists configuration options for `server.New`:
 
 The following table lists request and data bounds in `server.Limits`:
 
-| Field                     | Default | Description                                                                                                                                                      |
-| ------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `MaxRequestBytes`         | 16 MiB  | Maximum decompressed request body size, enforced before parsing.                                                                                                 |
-| `MaxMutationsPerPush`     | 256     | Maximum mutations per `Push` across all per-workspace batches.                                                                                                   |
-| `MaxWorkspacesPerRequest` | 64      | Maximum push batches or `Subscribe` scopes per request.                                                                                                          |
-| `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                            |
-| `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                  |
-| `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                            |
-| `MaxResyncScan`           | 65536   | Maximum live rows examined per `Pull` while delta-resyncing a subscription or permission change. Values below `MaxPullChanges` are raised to it.                 |
-| `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                      |
-| `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.    |
-| `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                      |
-| `MaxFollowDepth`          | 4       | Maximum recursive hops a `Subscription.follow` can evaluate.                                                                                                     |
-| `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                              |
-| `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                      |
-| `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                  |
-| `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                  |
-| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. A write exceeding this limit is rejected with `invalid_argument`.     |
-| `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates. Exceeding this limit falls back to a table scan.                     |
-| `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                            |
-| `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                    |
-| `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                            |
-| `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                  |
-| `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                         |
-| `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                          |
-| `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                           |
-| `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions. |
+| Field                     | Default | Description                                                                                                                                                                                                                                     |
+| ------------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `MaxRequestBytes`         | 16 MiB  | Maximum decompressed request body size, enforced before parsing.                                                                                                                                                                                |
+| `MaxMutationsPerPush`     | 256     | Maximum mutations per `Push` across all per-workspace batches.                                                                                                                                                                                  |
+| `MaxWorkspacesPerRequest` | 64      | Maximum push batches or `Subscribe` scopes per request.                                                                                                                                                                                         |
+| `MaxValueBytes`           | 1 MiB   | Maximum serialized entity value size (`crud.value` or `custom.args`).                                                                                                                                                                           |
+| `MaxFieldMaskPaths`       | 64      | Maximum field-mask paths per `PATCH` operation.                                                                                                                                                                                                 |
+| `MaxPullChanges`          | 4096    | Maximum row changes per `Pull` response. Larger result sets paginate with `has_more`.                                                                                                                                                           |
+| `MaxResyncScan`           | 65536   | Maximum live rows examined per `Pull` while delta-resyncing a subscription or permission change. Values below `MaxPullChanges` are raised to it.                                                                                                |
+| `MaxQueryRows`            | 1024    | Maximum rows returned per `Query` response.                                                                                                                                                                                                     |
+| `MaxQueryOffset`          | 16384   | Maximum offset permitted in a `Query`. Requests exceeding this offset are rejected. Specifying an offset alongside an `after` or `before` cursor is rejected.                                                                                   |
+| `MaxQueryCursorBytes`     | 4096    | Maximum byte length of an `after` or `before` query cursor.                                                                                                                                                                                     |
+| `MaxFollowDepth`          | 4       | Maximum recursive hops a `Subscription.follow` can evaluate.                                                                                                                                                                                    |
+| `MaxClosureSize`          | 10000   | Maximum rows in a reference-following closure for a single request.                                                                                                                                                                             |
+| `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                                                                                                     |
+| `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                                                                                                 |
+| `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                                                                                                 |
+| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. A write exceeding this limit is rejected with `invalid_argument`.                                                                                    |
+| `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates, and maximum rows of one entity that `Query` reads by key for a caller below the access-model root. Exceeding this limit falls back to a table scan. |
+| `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                                                                                                           |
+| `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                                                                                                   |
+| `MaxRelKeys`              | 50000   | Maximum target rows selected by a single `matches()` condition. Exceeding this limit fails the query.                                                                                                                                           |
+| `MaxRoomsPerStream`       | 64      | Maximum rooms permitted on a single `Watch` stream, and maximum sessions kept alive on behalf of other clients.                                                                                                                                 |
+| `MaxPresenceStateBytes`   | 4 KiB   | Maximum presence state payload size for one participant.                                                                                                                                                                                        |
+| `MaxBroadcastBytes`       | 4 KiB   | Maximum broadcast message payload size.                                                                                                                                                                                                         |
+| `MaxPublishItems`         | 32      | Maximum items permitted in a single `Publish` request.                                                                                                                                                                                          |
+| `MaxParticipantsPerRoom`  | 128     | Maximum participant records retained per room. When full, the room retains the lowest session IDs, reports snapshot truncation, and rejects additional sessions.                                                                                |
 
 Increasing `MaxMutationsPerPush` or `MaxValueBytes` requires increasing `MaxRequestBytes` accordingly.
 
@@ -480,6 +482,66 @@ Error constructors and rejection codes:
 - Built-in error codes: `CodePermissionDenied`, `CodeInvalidArgument`, `CodeConflict`, `CodeWorkspaceAccessRevoked`, `CodeMutationIDGap`, `CodeInternal`, `CodeTextFullStateRequired`, and `CodeTextStateStale`.
 
 See [Authentication and permissions](../how-to/authentication-and-permissions.md).
+
+### Access model
+
+A schema that declares `access` or `grant` options uses the [access model](proto-options.md#access-model). The engine then reads what each caller holds from the grant rows:
+
+```go
+type SubjectsFunc func(p Principal) []string
+type GlobalRolesFunc func(ctx context.Context, p Principal) ([]string, error)
+
+server.WithSubjects(fn SubjectsFunc)
+server.WithGlobalRoles(fn GlobalRolesFunc)
+```
+
+- A grant row applies to a caller when its subject field equals one of the caller's subjects. `WithSubjects` sets them; the default is `Principal.Subject`, and none for an anonymous caller. Empty subjects are ignored.
+- `WithGlobalRoles` adds roles the caller holds at the root of every workspace, such as staff roles from an identity-provider claim. A role that no grant entity declares fails the request with `internal`. Any other error from the hook fails the request as retryable.
+- Both hooks run once per request before any read transaction opens, and again on every `Subscribe` heartbeat.
+
+| Step                                           | Rule                                                                                                                                                                                           |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace gate (every RPC and in-process call) | `CanAccessWorkspace` runs first. The engine then reads the caller's grants from the primary and refuses a caller that holds no permission with `DenyWorkspace` (`CodeWorkspaceAccessRevoked`). |
+| Reads                                          | Pull, Bootstrap, Subscribe, Query, `View` and `Apply` read the grants again inside their read snapshot. A row is visible when the model admits it and `ReadFilter` admits it.                  |
+| Anchored rooms                                 | The anchor row must be readable under the grants the workspace gate read.                                                                                                                      |
+
+Writes are decided inside the write transaction, so a write sees the grant rows that earlier writes of the same batch, `Mutate` closure or `Apply` wrote:
+
+| Write                                         | The caller needs                                                                                                    |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Create                                        | The entity's `write` permission where the new row sits: the root, the row itself, or its access parent.             |
+| Update, delete                                | The `write` permission where the stored row sits. Checked before the version check, so a refusal hides the version. |
+| Update that changes the access parent         | The `write` permission at both the stored and the new parent.                                                       |
+| Write to a grant row that can change its role | Every permission of the stored role at the stored anchor, and of the new role at the new anchor.                    |
+
+The last rule runs on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, role or access-parent field. A caller can therefore grant and revoke only what it holds itself. Every write path, `Trusted` included, refuses a grant row with an empty subject, an undeclared role, or no access parent where the entity has one, with `CodeInvalidArgument`. All other refusals are `CodePermissionDenied`, with one message whether the parent is missing or hidden. `CanMutate`, `FieldPermissions` and `RowWritePermissions` still run and can refuse what the model allows.
+
+A mutator is checked by its `MutatorAccess`, inside the write transaction before its body runs:
+
+```go
+server.WithMutator("rename_task", &taskv1.TaskArgs{}, renameTask,
+	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
+```
+
+The caller must hold `Permission` at the row of `Entity` whose key the args' `KeyField` holds, or at the root when both are empty. A row that does not exist refuses the invocation. In a schema that uses the access model, a mutator without `MutatorAccess` is refused for every caller who is not `Trusted`. The rows the body writes are not checked; `EntityTx.Can(permission, prototype, key)` reports whether the invoking caller holds a permission at a row. Registration refuses a `MutatorAccess` whose permission no role grants, whose entity is outside the model, or whose key field is not a singular string field of the args.
+
+A grant row counts only when its subject matches, its role is declared, and its anchor row exists. The engine derives an index over each grant entity's subject field, so the read costs one probe per subject once the index is built, and a scan of the grant entity before that.
+
+A Bootstrap for a caller who holds an entity's read permission below the root reads the rows below its anchors by key, through the index of the access-parent reference, rather than scanning the entity.
+
+A cursor records what its caller could read: a hash in the cursor, and the full record in the cursor-state store, never inline. A pull or a `Subscribe` drain compares the caller's current grants with the record:
+
+| Finding                                                                                                                                                                                          | Result                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------- |
+| Same grants                                                                                                                                                                                      | An ordinary page.                                                                                                 |
+| Grants added or removed                                                                                                                                                                          | A resync of the rows below the anchors that changed: values for rows now visible, tombstones for rows now hidden. |
+| A permission held at the root is lost                                                                                                                                                            | The entity is in `drop_entities`, and the rows still visible are sent again.                                      |
+| A role grants other permissions, or an entity joins the access model                                                                                                                             | As for grants added or removed.                                                                                   |
+| An entity the cursor knows has another read permission, access parent or `unrestricted` setting; a record the store no longer holds; other subjects; or grants that change again during a resync | `reset`; the client bootstraps again.                                                                             |
+
+Without a cursor-state store, every change of a caller's grants resets that caller's clients. So does an entity that joins the access model or changes its read permission, access parent or `unrestricted` setting.
+
+Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from.
 
 ## Rooms
 

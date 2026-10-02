@@ -104,6 +104,58 @@ message Cursor {
 	// time on that catch-up page — which therefore ships every row as full
 	// state, since delta state presumes the client holds the row as of seq.
 	bool resynced = 14;
+	// Fingerprint of the read rules of the access model the cursor was issued
+	// under (see ReadAccess.rules), 0 for a schema without the model. A pull
+	// under other rules compares the stored rules entity by entity, and resets
+	// when an entity both sides know reads by another rule, or when no stored
+	// ReadAccess names the rules.
+	fixed64 access_policy = 15;
+	// Hash of what the caller could read when the cursor was issued: its
+	// subjects and, per read permission, the anchors it held the permission at
+	// (see ReadAccess). A pull that finds a different hash resyncs the rows
+	// under the anchors that changed. 0 for a schema without the model.
+	fixed64 access_hash = 16;
+	// Reference to the stored ReadAccess the hash was computed from. Never
+	// inlined: a resync tombstones rows by what this names, so a client must
+	// not be able to write it. Absent when the store could not take the entry;
+	// a later change of access then resets the client.
+	StateRef access_ref = 17;
+	// Hash of the CallerAccess the client last received: every permission the
+	// caller holds, not only the ones entities read by. A response carries a
+	// new CallerAccess when the hash differs. 0 for a schema without the model.
+	fixed64 caller_access_hash = 18;
+}
+
+// ReadAccess is what a caller could read when a cursor was issued, stored in
+// the cursor-state store under Cursor.access_ref. Encoded deterministically,
+// with every list sorted, so equal access produces equal bytes.
+message ReadAccess {
+	// The caller's subjects. A cursor presented by a caller with other subjects
+	// cannot resync from this entry.
+	repeated string subjects = 1;
+	// One entry per permission that some entity reads by, sorted by permission.
+	repeated PermissionAnchors permissions = 2;
+	// The read rule of every entity in the access model the entry was recorded
+	// under, sorted by entity. They hash to Cursor.access_policy, and
+	// Cursor.access_hash leaves them out.
+	repeated EntityReadRule rules = 3;
+}
+
+// EntityReadRule is what decides which rows of one entity a caller reads: its
+// read permission and its access parent, in a canonical text form. Two equal
+// rules read the same rows from the same anchors.
+message EntityReadRule {
+	string entity = 1;
+	string rule = 2;
+}
+
+// PermissionAnchors is where a caller held one permission.
+message PermissionAnchors {
+	string permission = 1;
+	// Held at the workspace root, which covers every row.
+	bool root = 2;
+	// The anchor rows, per entity, sorted by entity and key.
+	repeated ClosureSet.Entry rows = 3;
 }
 
 // StateRef names one immutable entry in the cursor-state store. The pair is
@@ -187,6 +239,9 @@ message ResyncState {
 	// to_filter_epoch; any further change mid-resync falls back to reset.
 	fixed64 to_sub_hash = 3;
 	uint64 to_filter_epoch = 4;
+	// The access hash the resync converges on (see Cursor.access_hash). A pull
+	// that finds the caller's access moved again mid-resync resets.
+	fixed64 to_access_hash = 5;
 }
 
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside

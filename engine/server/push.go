@@ -109,7 +109,8 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return fail(CodeInternal, "workspace %q: %s failed", ws, phase)
 	}
 
-	principal, err := s.enterWorkspace(ctx, ws)
+	adm, err := s.enterWorkspace(ctx, ws)
+	principal := adm.principal
 	if err != nil {
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return fail(CodeWorkspaceAccessRevoked, "workspace %q: access denied", ws)
@@ -131,7 +132,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// is read again by the apply below, so the hooks run out here with the rest
 	// of authorization rather than inside the transaction where a write needs
 	// their answers.
-	gate := s.newWriteGate(ctx, principal, ws, true)
+	gate := s.newWriteGate(ctx, adm, ws, true)
 	muts := batch.GetMutations()
 	authz := make([]error, len(muts))
 	for i, m := range muts {
@@ -192,6 +193,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
+		gate.accessOf().invalidate()
 		rejectionsOf := func(key string) ([]storage.ClientRejection, error) {
 			if recs, ok := verdicts[key]; ok {
 				return recs, nil
@@ -303,8 +305,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					// the batch again under savepoints.
 					return errNeedsSavepoints
 				}
-				// The savepoint already rolled the mutation's writes back; a
+				// The savepoint already rolled the mutation's writes back, and
+				// what the caller holds may have been read after them; a
 				// rejected mutation consumes no sequence.
+				gate.accessOf().invalidate()
 				result = &syncplanev1.MutationResult{
 					MutationId:   m.GetMutationId(),
 					Status:       syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED,
@@ -786,7 +790,7 @@ func (s *Server) applyMutation(
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, payload.Custom, seq, actor); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, payload.Custom, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -958,6 +962,10 @@ func (s *Server) applyCrud(
 	}); err != nil {
 		return err
 	}
+	aw, err := g.beginAccessWrite(tx, info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), currentRow)
+	if err != nil {
+		return err
+	}
 
 	// Optional compare-and-swap: apply only if the row is still at the version
 	// the client read. An absent or deleted row reads as version 0 (so
@@ -1043,6 +1051,14 @@ func (s *Server) applyCrud(
 		if err := info.projectRefs(msg.ProtoReflect()); err != nil {
 			return err
 		}
+		// On the row as it will be stored, so the access parent the checks
+		// read is the projected one.
+		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), nil, msg); err != nil {
+			return err
+		}
+		if err := aw.finish(tx, msg); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(msg)
 		if err != nil {
 			return err
@@ -1075,7 +1091,11 @@ func (s *Server) applyCrud(
 				return err
 			}
 		}
-		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
+		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
 		// PATCH modifies an existing row; it is NOT an upsert. A partial patch
@@ -1159,6 +1179,12 @@ func (s *Server) applyCrud(
 		if err := info.projectRefs(base.ProtoReflect()); err != nil {
 			return err
 		}
+		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), base); err != nil {
+			return err
+		}
+		if err := aw.finish(tx, base); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(base)
 		if err != nil {
 			return err
@@ -1193,7 +1219,11 @@ func (s *Server) applyCrud(
 				return err
 			}
 		}
-		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
+		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
 		// Per-document side state is keyed by instance path, and the nested
@@ -1227,7 +1257,11 @@ func (s *Server) applyCrud(
 		if err := s.purgeHistory(tx, info, crud.GetKey()); err != nil {
 			return err
 		}
-		return tx.DeleteRow(info.name, crud.GetKey(), seq, actor)
+		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	default:
 		return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q: unknown op", info.name))
@@ -1263,7 +1297,19 @@ func maskNamesPath(paths []string) func(string) bool {
 	}
 }
 
-func (s *Server) applyCustom(ctx context.Context, ws string, tx storage.WriteTx, custom *syncplanev1.CustomMutation, seq uint64, actor storage.Actor) error {
+// applyCustom runs one custom mutation. g is the push's gate: its access is
+// the invoking caller's, which the invocation is checked against (see
+// MutatorAccess) and which the body's EntityTx.Can answers from. The body's
+// own writes pass no gate.
+func (s *Server) applyCustom(
+	ctx context.Context,
+	ws string,
+	tx storage.WriteTx,
+	g *writeGate,
+	custom *syncplanev1.CustomMutation,
+	seq uint64,
+	actor storage.Actor,
+) error {
 	mi, ok := s.mutators[custom.GetName()]
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown mutator %q", custom.GetName()))
@@ -1279,5 +1325,10 @@ func (s *Server) applyCustom(ctx context.Context, ws string, tx storage.WriteTx,
 			}
 		}
 	}
-	return mi.fn(markWriteTx(ctx), &EntityTx{srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor}, args)
+	if err := s.checkInvocation(ctx, ws, tx, g.accessOf(), mi, args); err != nil {
+		return err
+	}
+	return mi.fn(markWriteTx(ctx), &EntityTx{
+		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(),
+	}, args)
 }

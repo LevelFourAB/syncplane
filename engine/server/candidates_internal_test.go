@@ -93,7 +93,7 @@ var _ = Describe("candidateKeysByIndex", func() {
 		var served bool
 		Expect(store.WithReadTx(ctx, ws, func(tx storage.ReadTx) error {
 			var err error
-			served, err = queryByIndex(tx, info, compile(cond), nil, page{}, limits,
+			served, err = queryByIndex(tx, info, compile(cond), nil, page{}, limits, nil,
 				func(row storage.Row, _ *query.Compiled) error {
 					keys = append(keys, row.Key)
 					return nil

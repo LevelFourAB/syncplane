@@ -9,6 +9,14 @@ import {
 } from '@bufbuild/protobuf';
 import { createClient, type Transport } from '@connectrpc/connect';
 
+import {
+	ACCESS_TOUCH_ENTITY,
+	AccessSummary,
+	type CanAnswer,
+	canAt,
+	parentRefOf,
+	pendingChangesAccess,
+} from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
 	COMPLETE,
@@ -41,8 +49,10 @@ import {
 	WindowSchema,
 } from './gen/syncplane/v1/patch_pb.js';
 import { AggregateOp, type QueryFacet } from './gen/syncplane/v1/query_pb.js';
-import { SyncService } from './gen/syncplane/v1/service_pb.js';
+import { CallerAccessSchema, SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
+	accessGeneration,
+	accessGenerationFor,
 	compareWorkspaces,
 	confirmedKey,
 	type ConfirmedRecord,
@@ -51,6 +61,7 @@ import {
 	META_CLIENT_ID,
 	META_FORMAT_VERSION,
 	META_WS_PREFIX,
+	metaCallerAccess,
 	metaLastMutationId,
 	metaPushedThrough,
 	metaWsPrefix,
@@ -59,6 +70,7 @@ import {
 	type OverlayRecord,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
+	parseTouchKey,
 	PENDING_ROOT,
 	pendingPrefix,
 	searchIndexWsPrefix,
@@ -1055,6 +1067,8 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	): Room<S, M>;
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
+	/** Predicts a permission at a row in this workspace; see SyncClient.can. */
+	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
@@ -1328,6 +1342,10 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined> {
 		return this.client.getIn(this.workspaceId, schema, key);
+	}
+
+	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer> {
+		return this.client.canIn(this.workspaceId, schema, key, permission);
 	}
 
 	getRow<D extends DescMessage>(
@@ -1716,6 +1734,18 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private hubInstance?: WatcherHub;
 	private hubPromise?: Promise<WatcherHub>;
 	private changeShare?: ChangeShare;
+	/** onAccessChange listeners; see fireAccessChange. */
+	private accessListeners = new Set<(workspaceId: string) => void>();
+	/**
+	 * Per workspace, the summary accessSummaryIn last decided, against the
+	 * access generation it was read under (see keys.accessGeneration). Held
+	 * as a promise, so the answers a screen of useCan hooks asks for in one
+	 * tick share one read.
+	 */
+	private accessSummaries = new Map<
+		string,
+		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
+	>();
 	private coordinator?: Coordinator;
 	/**
 	 * Cross-tab intent record for this instance (sync/intent.ts): created in
@@ -2402,9 +2432,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			? IDBKVStore.open(this.storageNames.store)
 			: Promise.resolve(new MemoryKVStore())).then((store) => {
 				// What lets a local read reuse the overlay it read last time
-				// instead of walking the pending queue again (see readOverlay). A
+				// instead of walking the pending queue again (see readOverlay),
+				// and can() the summary it decided (see accessSummaryIn). A
 				// caller's own store need not keep generations; its readers scan.
-				if (tracksGenerations(store)) store.trackGenerations(overlayGenerationFor);
+				if (tracksGenerations(store)) {
+					store.trackGenerations((key) => overlayGenerationFor(key) ?? accessGenerationFor(key));
+				}
 				return store;
 			});
 		return this.kvPromise;
@@ -2439,7 +2472,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// A commit in another tab updates the shared store but only that tab's
 			// hub; mirror its touched set into ours so our watchers stay fresh.
 			this.changeShare = startChangeShare(this.storageNames.changeChannel, (tokens) => {
-				void hub.notify(TouchSet.fromTokens(tokens));
+				const touched = TouchSet.fromTokens(tokens);
+				void hub.notify(touched);
+				this.fireAccessChange(touched);
 			});
 			return hub;
 		})();
@@ -2481,9 +2516,26 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			if (this.closed) return;
 			await hub.notify(touched);
 		}
+		this.fireAccessChange(touched);
 		// Peers get the compat encoding (keyed tokens PLUS a wildcard per pair),
 		// so a tab of an older build still full-scans while a current one patches.
 		this.changeShare?.broadcast(touched.broadcastTokens());
+	}
+
+	/**
+	 * Calls the onAccessChange listeners once per workspace whose stored
+	 * CallerAccess the touched set reports written.
+	 */
+	private fireAccessChange(touched: TouchSet): void {
+		if (this.accessListeners.size === 0) return;
+		const workspaces = new Set<string>();
+		for (const token of touched.tokens()) {
+			const t = parseTouchKey(token);
+			if (t.entity === ACCESS_TOUCH_ENTITY) workspaces.add(t.workspaceId);
+		}
+		for (const ws of workspaces) {
+			for (const cb of [ ...this.accessListeners ]) safeInvoke(cb, ws, 'onAccessChange');
+		}
 	}
 
 	private assertOpen(): void {
@@ -3005,6 +3057,98 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/** Subscribes to sync status changes; returns an unsubscribe function. */
 	onStatusChange(cb: (status: SyncStatus) => void): () => void {
 		return this.statusTracker.onChange(cb);
+	}
+
+	/**
+	 * Subscribes to changes of what the caller holds under the access model:
+	 * `cb` runs with the workspace id whenever a new CallerAccess from the
+	 * server is stored for it, by this tab or another tab sharing the store.
+	 * Returns an unsubscribe function.
+	 */
+	onAccessChange(cb: (workspaceId: string) => void): () => void {
+		this.accessListeners.add(cb);
+		return () => {
+			this.accessListeners.delete(cb);
+		};
+	}
+
+	/**
+	 * Predicts whether the caller holds `permission` at the row of `schema`
+	 * with `key` in the default workspace, from the CallerAccess the server
+	 * last sent: held at the workspace root, at the row itself, or at the row
+	 * its access parent points at.
+	 *
+	 * The answer is advisory. The server decides every read and write itself,
+	 * and a write this predicts as allowed can still come back as a rejection
+	 * ack. A row the caller has lost access to keeps showing an optimistic
+	 * write queued against it until that ack arrives.
+	 *
+	 * Resolves to `'unknown'` before the first summary arrives, in a schema
+	 * without the access model, when the row is not held locally and the
+	 * answer depends on its access parent, and while a local write to a grant
+	 * row, or a delete of a row other rows sit below, waits for its ack.
+	 */
+	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer> {
+		return this.canIn(this.defaultScope().workspaceId, schema, key, permission);
+	}
+
+	/** @internal backs WorkspaceClient.can. */
+	async canIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<CanAnswer> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				const summary = await this.accessSummaryIn(tx, workspaceId);
+				if (summary === undefined) return 'unknown';
+				if (summary.holds(permission, def.name, key)) return 'yes';
+				const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
+				const row = bytes === undefined ? undefined : fromBinary(schema, bytes);
+				return canAt(summary, permission, def.name, key, parentRefOf(def, row));
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * The summary canIn decides from in `workspaceId`, or undefined when it
+	 * cannot decide: none is stored, or a queued write can change the caller's
+	 * grants. Reuses the one decided under the same access generation, which
+	 * spares every answer after the first a walk of the pending queue.
+	 */
+	private async accessSummaryIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<AccessSummary | undefined> {
+		const generation = await tx.get(accessGeneration(workspaceId));
+		const cached = this.accessSummaries.get(workspaceId);
+		if (generation !== undefined && cached?.generation === generation) return cached.summary;
+		const summary = (async () => {
+			const raw = await tx.get(metaCallerAccess(workspaceId));
+			if (raw === undefined) return undefined;
+			if (pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))) {
+				return undefined;
+			}
+			return new AccessSummary(fromBinary(CallerAccessSchema, raw as Uint8Array));
+		})();
+		if (generation !== undefined) {
+			// Entered before the first await, so a caller that reads the same
+			// generation while this read is in flight waits for it.
+			const entry = { generation, summary };
+			this.accessSummaries.set(workspaceId, entry);
+			// A failed read is not an answer to reuse.
+			summary.catch(() => {
+				if (this.accessSummaries.get(workspaceId) === entry) this.accessSummaries.delete(workspaceId);
+			});
+		}
+		return summary;
 	}
 
 	/** @internal backs devtools.ts; see ClientInternals. */

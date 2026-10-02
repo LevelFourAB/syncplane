@@ -76,10 +76,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err := checkClientID(msg.GetClientId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
 	if err != nil {
 		return err
 	}
+	principal := adm.principal
 	wantHash, err := subscriptionHash(msg.GetSubscriptions())
 	if err != nil {
 		return err
@@ -88,6 +89,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err != nil {
 		return err
 	}
+	emitter.caller = adm.caller
 	epoch, err := s.perms.FilterEpoch(ctx, principal, msg.GetWorkspaceId())
 	if err != nil {
 		return err
@@ -132,6 +134,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		if err != nil {
 			return err
 		}
+		// The whole snapshot is filtered under the access read here, with the
+		// Begin position: every later page reads at or above it.
+		if err := emitter.bindAccess(tx); err != nil {
+			return err
+		}
 		emitter.windowMembers, err = emitter.buildWindows(tx)
 		if err != nil {
 			return err
@@ -155,7 +162,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			if err != nil {
 				return err
 			}
-			if resume.servable(horizon, current, storeEpoch) {
+			// A snapshot is filtered by one access throughout, so one begun
+			// under other grants cannot be continued.
+			if emitter.accessUnchanged(resume.cur) && resume.servable(horizon, current, storeEpoch) {
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
@@ -173,9 +182,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				closure:    closureSet,
 				windows:    emitter.windowStates(),
 			}
+			emitter.stampAccess(&st, cursorState{})
 			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)
 			begin.Seq = current
 		}
+		// Sent on a resumed snapshot too: an earlier attempt's Begin may not
+		// have reached the client's store, and the access is the same.
+		begin.CallerAccess = emitter.callerAccessUpdate(cursorState{}, false, current)
 		if msg.GetClientId() != "" {
 			acked, err := tx.ClientLastMutationID(watermarkKey(principal, msg.GetClientId()))
 			if err != nil {
@@ -327,17 +340,29 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 // client's first pull from the Begin cursor delivers it; that is the same
 // guarantee the scan path relies on for rows written mid-stream (see the
 // Bootstrap doc comment).
+//
+// The caller's access is a second source of candidates. A row the access model
+// hides is hidden whatever the scope says, closure and window members
+// included, since they were filtered when built. So when both sources narrow,
+// the candidates are the keys both name.
 func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq uint64, e *rowEmitter, entity string) (keys []string, narrowed bool, err error) {
-	scope, ok := bootstrapNarrowable(e, entity)
-	if !ok {
-		return nil, false, nil
-	}
 	info, registered := s.catalogPtr().entities[entity]
 	if !registered {
 		return nil, false, nil
 	}
+	scope, scoped := bootstrapNarrowable(e, entity)
+	if !scoped && !e.accessNarrows(info) {
+		return nil, false, nil
+	}
 	err = s.readTx(ctx, ws, beginSeq, func(tx storage.ReadTx) error {
-		var err error
+		accessKeys, byAccess, err := e.accessCandidates(tx, info, s.limits.MaxResyncScan)
+		if err != nil {
+			return err
+		}
+		if !scoped {
+			keys, narrowed = accessKeys, byAccess
+			return nil
+		}
 		keys, narrowed, err = candidateKeys(tx, info,
 			[]*entityScope{scope},
 			// A closure member and a window member are visible whatever the
@@ -346,12 +371,39 @@ func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq ui
 			// can therefore treat it as the explicit key set it is.
 			[]closureRows{e.closure, e.windowMembers},
 			s.limits.MaxResyncScan, s.limits)
-		return err
+		if err != nil {
+			return err
+		}
+		switch {
+		case byAccess && narrowed:
+			keys = intersectSorted(keys, accessKeys)
+		case byAccess:
+			keys, narrowed = accessKeys, true
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	return keys, narrowed, nil
+}
+
+// intersectSorted returns the keys present in both sorted slices, sorted.
+func intersectSorted(a, b []string) []string {
+	out := make([]string, 0, min(len(a), len(b)))
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] == b[j]:
+			out = append(out, a[i])
+			i++
+			j++
+		case a[i] < b[j]:
+			i++
+		default:
+			j++
+		}
+	}
+	return out
 }
 
 // bootstrapNarrowable reports this entity's base scope when a snapshot's

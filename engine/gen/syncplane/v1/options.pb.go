@@ -598,6 +598,13 @@ func (x *AccessOptions) GetUnrestricted() bool {
 //
 // ```
 //
+// A write that can change what a grant row grants needs every permission of
+// the row's role where the row applies: of the stored role at the stored
+// anchor, and of the new role at the new anchor. A caller can therefore grant
+// and revoke only what it holds itself. Every write path, trusted ones
+// included, refuses a grant row with an empty subject, an undeclared role, or
+// no `access_parent` on an entity that has one.
+//
 // Registration refuses unknown fields inside this message and inside `Role`.
 type GrantOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`

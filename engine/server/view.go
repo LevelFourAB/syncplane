@@ -40,15 +40,18 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 	if workspaceID == "" {
 		return fmt.Errorf("server: workspace id is required")
 	}
-	_, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gate(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
-	visible, err := s.readGate(ctx, workspaceID, enforced)
+	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return err
 	}
 	return s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		if err := bind(tx); err != nil {
+			return err
+		}
 		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible})
 	})
 }

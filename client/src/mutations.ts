@@ -146,6 +146,12 @@ export interface EntityDef {
 	 * enqueues and comes back as a rejection ack.
 	 */
 	protectedFields: string[];
+	/**
+	 * Whether the entity's rows grant roles in the access model
+	 * (`(syncplane.v1.entity).grant`), so a local write to one can change what
+	 * the caller holds before the server says so.
+	 */
+	grant: boolean;
 }
 
 /** Who may perform each class of write on an entity, mirroring the
@@ -198,6 +204,7 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		indexes: indexesOf(schema, opts),
 		serverOnly: opts.serverOnly,
 		protectedFields: protectedFieldsOf(schema, keyFields),
+		grant: opts.grant !== undefined,
 		policies: {
 			create: opts.createPolicy === CreatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
 			update: opts.updatePolicy === UpdatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',

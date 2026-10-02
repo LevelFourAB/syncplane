@@ -82,6 +82,18 @@ type cursorState struct {
 	stateID   uint64
 	stateGen  uint64
 	stateBlob []byte
+	// accessPolicy, accessHash and accessID/accessGen are the cursor's record
+	// of what its caller could read (Cursor.access_policy, access_hash and
+	// access_ref). accessPending is a ReadAccess encodeCursor must store
+	// before issuing the cursor; see stampAccess.
+	accessPolicy  uint64
+	accessHash    uint64
+	accessID      uint64
+	accessGen     uint64
+	accessPending *syncplanecursorv1.ReadAccess
+	// callerAccessHash is the hash of the CallerAccess the client last
+	// received (Cursor.caller_access_hash).
+	callerAccessHash uint64
 	// stateEvicted marks a cursor whose referenced entry the store no longer
 	// holds. The sets above are then empty and unusable, and pullPreamble
 	// turns the cursor into a reset — the same recovery as falling below the
@@ -149,19 +161,24 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (curso
 		return cursorState{}, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("bad cursor: %w", err))
 	}
 	st := cursorState{
-		seq:            c.GetSeq(),
-		subHash:        c.GetSubHash(),
-		epoch:          c.GetFilterEpoch(),
-		storeEpoch:     c.GetStoreEpoch(),
-		partialEntity:  c.GetPartialEntity(),
-		partialKey:     c.GetPartialKey(),
-		subs:           c.GetSubscriptions(),
-		resync:         c.GetResync(),
-		closure:        c.GetClosure(),
-		closureRebuild: c.GetClosureRebuild(),
-		resynced:       c.GetResynced(),
-		window:         c.GetWindow(),
-		windows:        c.GetWindows(),
+		seq:              c.GetSeq(),
+		subHash:          c.GetSubHash(),
+		epoch:            c.GetFilterEpoch(),
+		storeEpoch:       c.GetStoreEpoch(),
+		partialEntity:    c.GetPartialEntity(),
+		partialKey:       c.GetPartialKey(),
+		subs:             c.GetSubscriptions(),
+		resync:           c.GetResync(),
+		closure:          c.GetClosure(),
+		closureRebuild:   c.GetClosureRebuild(),
+		resynced:         c.GetResynced(),
+		window:           c.GetWindow(),
+		windows:          c.GetWindows(),
+		accessPolicy:     c.GetAccessPolicy(),
+		accessHash:       c.GetAccessHash(),
+		accessID:         c.GetAccessRef().GetId(),
+		accessGen:        c.GetAccessRef().GetGen(),
+		callerAccessHash: c.GetCallerAccessHash(),
 	}
 	ref := c.GetSetsRef()
 	if ref.GetId() == 0 {
@@ -229,6 +246,7 @@ func (s *Server) encodeCursor(ctx context.Context, ws string, st *cursorState) [
 		c.Window = st.window
 		c.Windows = st.windows
 	}
+	s.storeAccess(ctx, ws, st, c)
 	raw, err := proto.Marshal(c)
 	if err != nil {
 		panic(err) // cannot fail for a message of valid in-memory protos
@@ -330,10 +348,11 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	if err := checkClientID(msg.GetClientId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
 	if err != nil {
 		return nil, err
 	}
+	principal := adm.principal
 	cur, err := s.decodeCursor(ctx, msg.GetWorkspaceId(), msg.GetCursor())
 	if err != nil {
 		return nil, err
@@ -347,6 +366,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		return nil, err
 	}
 	emitter.noDeltaEntities = noDeltaEntitySet(msg.GetNoDeltaEntities())
+	emitter.caller = adm.caller
 
 	// Resolve every Permissions hook OUTSIDE the read snapshot, mirroring
 	// bootstrap.go: FilterEpoch up front, then warm the emitter's per-entity
@@ -358,7 +378,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		return nil, err
 	}
 	for _, e := range emitter.entities() {
-		if _, err := emitter.filterOf(e); err != nil {
+		if _, err := emitter.appFilterOf(e); err != nil {
 			return nil, err
 		}
 	}
@@ -387,7 +407,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// onto the primary — the behavior every pull had before replicas.
 	err = s.readTx(ctx, msg.GetWorkspaceId(), max(cur.seq, msg.GetMinSeq()), func(tx storage.ReadTx) error {
 		var e error
-		resp, _, resetSeen, e = s.servePullPage(tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), watermarkKey(principal, msg.GetClientId()), msg.GetCursor(), limit)
+		resp, _, resetSeen, e = s.servePullPage(ctx, tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), watermarkKey(principal, msg.GetClientId()), msg.GetCursor(), limit)
 		return e
 	})
 	if err != nil {
@@ -477,10 +497,30 @@ func (s *Server) routePull(ctx context.Context, ws string, cur cursorState, rawC
 // (pullPage), a delta resync step, or a reset. The returned cursorState is the
 // position the page advanced to; Subscribe carries it forward across pages.
 //
-// A resync still runs the shared reset checks first, so a cursor below the
-// horizon or from a foreign store resets rather than resyncs.
-func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, ackKey string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
-	if !route.resync {
+// It binds the caller's access in the access model from tx first. A change of
+// that access since the cursor was issued also makes the page a resync step,
+// or a reset when the cursor's access cannot be read back. A resync still runs
+// the shared reset checks first, so a cursor below the horizon or from a
+// foreign store resets rather than resyncs.
+func (s *Server) servePullPage(ctx context.Context, tx storage.ReadTx, route pullRoute, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, ackKey string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
+	if err := emitter.bindAccess(tx); err != nil {
+		return nil, cursorState{}, resetNone, err
+	}
+	// What the caller can read moves with its grants, which the cursor
+	// recorded, so a change of access diverts the page into a resync the same
+	// way a change of scope does. Only this snapshot can tell.
+	acc, err := s.compareAccess(ctx, emitter.ws, cur, len(rawCursor) > 0, emitter)
+	if err != nil {
+		return nil, cursorState{}, resetNone, err
+	}
+	old, resync, ok := route.oldEm, route.resync, route.resync && route.reset == resetNone
+	if acc.reset == resetNone && route.reset != resetStaleResync {
+		old, resync, ok, err = s.bindResyncAccess(ctx, emitter.ws, cur, acc, old, resync, ok, emitter)
+		if err != nil {
+			return nil, cursorState{}, resetNone, err
+		}
+	}
+	if !resync && acc.reset == resetNone {
 		return s.pullPage(tx, cur, emitter, wantHash, epoch, subs, ackKey, rawCursor, limit)
 	}
 	resp := &syncplanev1.PullResponse{Patch: &syncplanev1.Patch{}}
@@ -488,8 +528,14 @@ func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorSta
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
-	if reset == resetNone {
-		reset = route.reset
+	switch {
+	case reset != resetNone:
+	case route.reset == resetStaleResync:
+		reset = resetStaleResync
+	case acc.reset != resetNone:
+		reset = acc.reset
+	case !ok:
+		reset = resetResyncUnavailable
 	}
 	if reset != resetNone {
 		resp.Reset_ = true
@@ -500,9 +546,9 @@ func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorSta
 	if cur.resync != nil {
 		pos = resyncPos{entity: cur.resync.GetEntity(), afterKey: cur.resync.GetAfterKey()}
 	} else {
-		resp.Patch.DropEntities = route.dropEnts
+		resp.Patch.DropEntities = appendMissing(route.dropEnts, old.hiddenEntities)
 	}
-	next, err := s.resyncStep(tx, cur, route.oldEm, emitter, wantHash, epoch, subs, pos, limit, resp)
+	next, err := s.resyncStep(tx, cur, old, emitter, wantHash, epoch, subs, pos, limit, resp)
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
@@ -713,10 +759,11 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// the window and the follow closure — are functions of the workspace's rows
 	// and this request's read filters, and neither can have moved since the
 	// cursor was issued: it already sits at the current sequence, so no row has
-	// been written, and a visibility change would have bumped FilterEpoch and
-	// diverted this pull into a resync before it reached here. So the sets the
-	// cursor carries are the sets a rebuild would produce, and the scan below
-	// has nothing to deliver either — every row is at or below cur.seq.
+	// been written, and a visibility change would have bumped FilterEpoch or
+	// moved the caller's access, and diverted this pull into a resync before it
+	// reached here. So the sets the cursor carries are the sets a rebuild would
+	// produce, and the scan below has nothing to deliver either — every row is
+	// at or below cur.seq.
 	//
 	// It stays worth doing even though the sets below are usually maintained
 	// rather than rebuilt: maintenance still reads the change scan, resolves the
@@ -741,6 +788,8 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		// exactly as it would on the normal path below.
 		next := cur
 		next.subHash, next.epoch, next.storeEpoch, next.subs = wantHash, epoch, storeEpoch, subs
+		emitter.stampAccess(&next, cur)
+		resp.CallerAccess = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 		resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 		resp.Seq = next.seq
 		return resp, next, resetNone, nil
@@ -895,6 +944,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// unchanged reuse the entry they were decoded from, and a page that moved
 	// them writes its entry under the same id (see storeSets).
 	next.stateID, next.stateGen, next.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+	emitter.stampAccess(&next, cur)
 	if resp.HasMore {
 		// Resume just past the last delivered row. The (entity, key)
 		// sub-position lets the next pull pick up the rest of a group
@@ -943,6 +993,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			next.windows = emitter.windowStates()
 		}
 	}
+	resp.CallerAccess = emitter.callerAccessUpdate(cur, len(rawCursor) > 0, current)
 	resp.NextCursor = s.encodeCursor(emitter.ctx, emitter.ws, &next)
 	resp.Seq = next.seq
 	return resp, next, resetNone, nil

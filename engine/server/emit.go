@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/query"
@@ -105,6 +106,30 @@ type rowEmitter struct {
 	// may disagree on a row even where their subscriptions agree.
 	filterSource       func(entity string) (RowFilter, error)
 	filterEpochShifted bool
+	// caller is the caller's identity in the access model, nil for a schema
+	// that does not use it; modelInUse records that the catalog had a model
+	// when the emitter was built, so a path that forgot to set caller fails
+	// instead of reading without the model. access is what the caller holds,
+	// bound inside the read snapshot by bindAccess. combined memoizes, per
+	// entity, the model's filter joined with the application's, and is
+	// cleared whenever access is bound again.
+	caller     *accessCaller
+	modelInUse bool
+	access     *accessSet
+	combined   map[string]RowFilter
+	// readAccess and readAccessHash render access as a cursor records it,
+	// once per binding (see boundReadAccess). hiddenEntities are the entities
+	// the old side of a resync reads nothing of (see hideOnOldSide).
+	readAccess     *syncplanecursorv1.ReadAccess
+	readAccessHash uint64
+	// callerAccess and callerAccessHash render access for the client, once
+	// per binding (see boundCallerAccess).
+	callerAccess     *syncplanev1.CallerAccess
+	callerAccessHash uint64
+	hiddenEntities   []string
+	// accessOnly marks the old side of a resync whose scope and filter epoch
+	// match the new side's, so only the caller's access differs between them.
+	accessOnly bool
 	// subs is the subscription set this emitter was built from, as given; nil
 	// for full sync. A resync compares the two sides' sets per entity to skip
 	// the entities whose scope did not change.
@@ -169,6 +194,8 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 		ws:          ws,
 		filters:     map[string]RowFilter{},
 		filterKnown: map[string]bool{},
+		modelInUse:  srv.catalogPtr().access != nil,
+		combined:    map[string]RowFilter{},
 	}
 	e.filterSource = func(entity string) (RowFilter, error) {
 		return srv.perms.ReadFilter(ctx, principalOf(ctx), ws, entity)
@@ -344,18 +371,80 @@ func (e *rowEmitter) bootstrapEntities(subs []*syncplanev1.Subscription, priorit
 	return out
 }
 
-// warmFilters resolves the read filter of every entity in scope, so classify
-// inside a read snapshot only applies predicates and never calls a hook.
+// warmFilters resolves the application's read filter of every entity in
+// scope, so classify inside a read snapshot only applies predicates and never
+// calls a hook.
 func (e *rowEmitter) warmFilters() error {
 	for _, entity := range e.entities() {
-		if _, err := e.filterOf(entity); err != nil {
+		if _, err := e.appFilterOf(entity); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// filterOf returns the read filter for rows of entity: the access model's
+// filter for this caller joined with the application's ReadFilter, or nil when
+// neither hides a row. In a schema that uses the access model it fails until
+// bindAccess has run.
 func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
+	if e.caller == nil {
+		if e.modelInUse {
+			return nil, errAccessUnbound
+		}
+		return e.appFilterOf(entity)
+	}
+	if f, ok := e.combined[entity]; ok {
+		return f, nil
+	}
+	if e.access == nil {
+		return nil, errAccessUnbound
+	}
+	app, err := e.appFilterOf(entity)
+	if err != nil {
+		return nil, err
+	}
+	var model RowFilter
+	if info, ok := e.srv.catalogPtr().entities[entity]; ok {
+		model = e.access.modelReadFilter(e.caller.model, info)
+	}
+	f := andFilters(model, app)
+	e.combined[entity] = f
+	return f, nil
+}
+
+// bindAccess resolves what the caller holds from the grant rows in tx. A read
+// path calls it at the start of every read transaction whose rows it
+// classifies, so the grants it reads and the rows it filters come from one
+// snapshot. It is a no-op for a schema that does not use the access model.
+func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
+	if e.caller == nil {
+		return nil
+	}
+	set, err := resolveAccess(tx, e.caller, e.srv.limits)
+	if err != nil {
+		return err
+	}
+	e.useAccess(set)
+	return nil
+}
+
+// useAccess binds an access set resolved elsewhere: the one the workspace gate
+// read, or the one another emitter of the same request bound.
+func (e *rowEmitter) useAccess(set *accessSet) {
+	e.access = set
+	e.readAccess, e.readAccessHash = nil, 0
+	e.callerAccess, e.callerAccessHash = nil, 0
+	clear(e.combined)
+	// A delta verdict reads the combined filter, so it is only as current as
+	// the binding it was made under.
+	clear(e.deltaSafeBy)
+}
+
+// appFilterOf resolves and memoizes the application's ReadFilter for entity.
+// It calls the Permissions hook, so a read path warms it for every entity it
+// may read before its read snapshot opens.
+func (e *rowEmitter) appFilterOf(entity string) (RowFilter, error) {
 	if !e.filterKnown[entity] {
 		filter, err := e.filterSource(entity)
 		if err != nil {

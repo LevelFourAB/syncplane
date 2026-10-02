@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
@@ -60,6 +61,9 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		// field is gone after a server upgrade).
 		return nil, false, nil
 	}
+	// The caller's access binds inside the read transaction, where Pull hands
+	// the old side the set it bound for the new one.
+	oldEm.caller = newEm.caller
 	if cur.epoch != currentEpoch {
 		erf, implemented := s.perms.(EpochReadFilters)
 		if !implemented {
@@ -77,7 +81,7 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		if !oldEm.subscribed(entity) {
 			continue
 		}
-		if _, err := oldEm.filterOf(entity); err != nil {
+		if _, err := oldEm.appFilterOf(entity); err != nil {
 			if errors.Is(err, ErrEpochUnavailable) {
 				return nil, false, nil
 			}
@@ -182,14 +186,26 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		// Same state lineage, new entry: the sets moved with the scope, but
 		// they are still this client's succession of cursors.
 		st.stateID, st.stateGen, st.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+		// The client now holds what the new access shows.
+		newEm.stampAccess(&st, cur)
+		current, err := tx.CurrentSeq()
+		if err != nil {
+			return cursorState{}, err
+		}
+		resp.CallerAccess = newEm.callerAccessUpdate(cur, true, current)
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
+		// Mid-resync the cursor keeps the access it was issued under, which
+		// is the old side the next page diffs from.
 		st = cur
 		st.resync = &syncplanecursorv1.ResyncState{
 			Entity:        next.entity,
 			AfterKey:      next.afterKey,
 			ToSubHash:     wantHash,
 			ToFilterEpoch: epoch,
+		}
+		if newEm.caller != nil {
+			_, st.resync.ToAccessHash = newEm.boundReadAccess()
 		}
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	}
@@ -276,10 +292,25 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		if emitted >= emitLimit || scanned >= scanLimit {
 			return resyncPos{entity: entity, afterKey: afterKey}, false, nil
 		}
-		if entityScopeUnchanged(oldEm, newEm, entity) {
-			continue
+		var (
+			keys     []string
+			narrowed bool
+			err      error
+		)
+		if oldEm.accessOnly {
+			// Same scope on both sides, so only the rows below the anchors
+			// that moved can differ.
+			if readAccessUnchanged(oldEm, newEm, entity) && !slices.Contains(oldEm.hiddenEntities, entity) {
+				continue
+			}
+			keys, narrowed, err = accessDeltaCandidates(tx, oldEm, newEm, newEm.srv.catalogPtr().entities[entity], scanLimit)
+		} else {
+			if entityScopeUnchanged(oldEm, newEm, entity) && readAccessUnchanged(oldEm, newEm, entity) &&
+				!slices.Contains(oldEm.hiddenEntities, entity) {
+				continue
+			}
+			keys, narrowed, err = resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)
 		}
-		keys, narrowed, err := resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)
 		if err != nil {
 			return resyncPos{}, false, err
 		}

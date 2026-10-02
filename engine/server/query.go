@@ -29,7 +29,8 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if _, err := s.enterWorkspace(ctx, msg.GetWorkspaceId()); err != nil {
+	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	if err != nil {
 		return nil, err
 	}
 	info, ok := s.catalogPtr().entities[msg.GetEntity()]
@@ -117,12 +118,12 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// entity is reachable here even though nothing ever syncs it. Read filters
 	// still apply — this is not a permission bypass, only a sync one.
 	emitter.includeServerOnly = true
+	emitter.caller = adm.caller
 	// Resolve the entity's read filter BEFORE opening the snapshot (the hook
 	// must not run while the read tx is pinned); classify() inside the scan
 	// then hits the memoized filter. Query scans a single entity, so this is
 	// the only filter to warm.
-	filter, err := emitter.filterOf(info.name)
-	if err != nil {
+	if _, err := emitter.appFilterOf(info.name); err != nil {
 		return nil, err
 	}
 	// A rel pre-pass reads the TARGET entities too, under the same rule, so
@@ -132,7 +133,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		if _, err := emitter.filterOf(target.name); err != nil {
+		if _, err := emitter.appFilterOf(target.name); err != nil {
 			return nil, err
 		}
 	}
@@ -146,11 +147,6 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 	}
 
-	// A row a filter or the history rule can hide is a row an index entry may
-	// not stand in for; the grouped walk needs that stated, because otherwise it
-	// counts entries without reading them.
-	filtered := filter != nil || history
-
 	var (
 		rows      []qrow
 		groups    []query.GroupCount
@@ -161,6 +157,17 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
 	err = s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+		if err := emitter.bindAccess(tx); err != nil {
+			return err
+		}
+		filter, err := emitter.filterOf(info.name)
+		if err != nil {
+			return err
+		}
+		// A row a filter or the history rule can hide is a row an index entry
+		// may not stand in for; the grouped walk needs that stated, because
+		// otherwise it counts entries without reading them.
+		filtered := filter != nil || history
 		visible := func(row storage.Row) (bool, error) {
 			class, err := emitter.classify(row)
 			if err != nil {
@@ -188,7 +195,6 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 				return err
 			}
 		}
-		var err error
 		if group != nil {
 			if msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
 				rowGroups, more, err = groupRows(tx, info, pred, group, order,
@@ -478,10 +484,17 @@ func queryRowsFaceted(
 	// fall through to the scan below, and discard is how a decline hands the
 	// heap (and the fold) back empty: the scan re-offers every row the walk
 	// already offered, and neither dedupes.
-	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, want, discard); err != nil {
+	//
+	// A caller the access model narrows considers only its candidate rows, on
+	// both paths.
+	narrowed, err := emitter.accessRowsOf(tx, info)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, narrowed, consider, want, discard); err != nil {
 		return nil, false, nil, err
 	} else if !served {
-		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
+		if err := narrowed.scan(tx, info.name, func(row storage.Row) error {
 			return consider(row, predicate)
 		}); err != nil {
 			return nil, false, nil, err

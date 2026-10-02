@@ -171,7 +171,7 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 		}
 		// A descriptor set is a whole schema, so unlike RegisterEntity it is
 		// judged here and refused when it breaks a rule of the access model.
-		c.recompileAccess()
+		c.recompileAccess(s.mutators)
 		return c.accessErr
 	})
 	if err != nil {

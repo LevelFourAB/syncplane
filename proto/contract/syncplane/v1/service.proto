@@ -220,6 +220,44 @@ message PullResponse {
 	// client configured with its own revision compares the two and reacts to a
 	// mismatch per its skew policy.
 	string schema_revision = 7;
+	// What the caller holds in the workspace under the access model. Present
+	// when it differs from what the request's cursor was issued under, and on
+	// a response to a request without a cursor. Absent otherwise, and in a
+	// schema without the access model: the client keeps the last one it
+	// received.
+	CallerAccess caller_access = 8;
+}
+
+// What one caller holds in one workspace under the access model: for each
+// permission, the anchors it holds the permission at.
+//
+// It is advisory. The server decides every read and every write itself, and a
+// client uses this to predict an answer, for example to hide a control the
+// caller cannot use.
+message CallerAccess {
+	// The permissions the caller holds, sorted by name. A permission that is
+	// not listed is held nowhere.
+	repeated PermissionAccess permissions = 1;
+	// The workspace sequence this summary is current through.
+	uint64 seq = 2;
+}
+
+// Where a caller holds one permission.
+message PermissionAccess {
+	string permission = 1;
+	// Held at the workspace root, which covers every row.
+	bool root = 2;
+	// The rows the permission is held at, per entity, sorted by entity. A
+	// permission held at a row applies to the row and to every row whose
+	// `access_parent` field points at it.
+	repeated AnchorRows anchors = 3;
+}
+
+// Rows of one entity, by key.
+message AnchorRows {
+	string entity = 1;
+	// Row keys, sorted.
+	repeated string keys = 2;
 }
 
 message BootstrapRequest {
@@ -280,6 +318,9 @@ message BootstrapResponse {
 		// False means a fresh snapshot — whatever an earlier attempt staged
 		// belongs to a different one and must be discarded rather than merged.
 		bool resumed = 6;
+		// What the caller holds in the workspace under the access model, as of
+		// the snapshot. Absent in a schema without the access model.
+		CallerAccess caller_access = 7;
 	}
 	message Chunk {
 		repeated RowChange rows = 1;

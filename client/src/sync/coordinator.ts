@@ -22,6 +22,7 @@ import {
 } from '../gen/syncplane/v1/mutation_pb.js';
 import type { Subscription } from '../gen/syncplane/v1/patch_pb.js';
 import {
+	type CallerAccess,
 	MutationStatus,
 	type PullResponse,
 	SyncService,
@@ -2296,6 +2297,7 @@ export class Coordinator {
 				// it) is dropped whole — rows AND cursor — instead of regressing
 				// the shared store.
 				serverSeq: page.seq,
+				...(page.callerAccess === undefined ? {} : { callerAccess: page.callerAccess }),
 			}, this.opts.indexes)
 		);
 	}
@@ -2501,6 +2503,8 @@ export class Coordinator {
 		let cursor: Uint8Array | undefined;
 		let lastAcked = 0n;
 		let snapshotSeq = 0n;
+		// What the caller holds as of the snapshot; written with it at install.
+		let snapshotAccess: CallerAccess | undefined;
 		let ended = false;
 		let superseded = false;
 		// A bootstrap re-downloads the whole workspace, so its size and duration
@@ -2568,6 +2572,7 @@ export class Coordinator {
 						cursor = msg.body.value.cursor;
 						lastAcked = msg.body.value.lastAckedMutationId;
 						snapshotSeq = msg.body.value.seq;
+						snapshotAccess = msg.body.value.callerAccess;
 						this.observeServerRevision(msg.body.value.schemaRevision);
 						if (direct) {
 							this.hydration.order(workspaceId, msg.body.value.entities);
@@ -2810,6 +2815,7 @@ export class Coordinator {
 							// The snapshot's watermark covers an unanswered push as a
 							// pull's does (see rebaseTx), so the same hold applies.
 							deferAcked: this.unresolvedPush.has(workspaceId),
+							...(snapshotAccess === undefined ? {} : { callerAccess: snapshotAccess }),
 						},
 						touched,
 					);

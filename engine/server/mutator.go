@@ -37,6 +37,8 @@ type mutatorInfo struct {
 	name string
 	args proto.Message // prototype; cloned per invocation
 	fn   MutatorFunc
+	// access is the MutatorAccess the declaration carried, nil when none.
+	access *MutatorAccess
 }
 
 // pendingMutator is one WithMutator declaration, held until New has built the
@@ -45,6 +47,44 @@ type pendingMutator struct {
 	name string
 	args proto.Message
 	fn   MutatorFunc
+	opts []MutatorOption
+}
+
+// MutatorOption adjusts one WithMutator declaration.
+type MutatorOption interface {
+	applyMutator(*mutatorInfo)
+}
+
+// MutatorAccess states the permission an invocation of a mutator needs in the
+// access model, and where the caller must hold it.
+//
+// With Entity and KeyField set, the caller must hold Permission at the row of
+// Entity whose key the KeyField of the args holds: at the row itself, at the
+// row its access parent points at, or at the workspace root. A row that does
+// not exist refuses the invocation. With both empty, the caller must hold
+// Permission at the workspace root.
+//
+// In a schema that uses the access model, an invocation of a mutator without a
+// MutatorAccess is refused for every caller who is not Trusted. The check runs
+// inside the write transaction before the body, and is refused with
+// CodePermissionDenied. The rows the body writes are not checked; the body can
+// ask EntityTx.Can.
+//
+// Registration fails, with the rest of the access model, when Permission is
+// granted by no role, Entity is not in the model, or KeyField is not a singular
+// string field of the args. In a schema without the access model, it has no
+// effect.
+//
+//	server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
+//		server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
+type MutatorAccess struct {
+	Permission string
+	Entity     string
+	KeyField   string
+}
+
+func (ma MutatorAccess) applyMutator(mi *mutatorInfo) {
+	mi.access = &ma
 }
 
 // WithMutator declares a custom mutation handler. argsPrototype defines the
@@ -55,22 +95,28 @@ type pendingMutator struct {
 // cannot be provisioned at runtime (see DynamicEntity, the CRUD-only dynamic
 // tier). That is also what keeps the mutator table lock-free on the push path
 // — it never changes after New.
-func WithMutator(name string, argsPrototype proto.Message, fn MutatorFunc) Option {
+//
+// opts adjust the declaration; see MutatorAccess.
+func WithMutator(name string, argsPrototype proto.Message, fn MutatorFunc, opts ...MutatorOption) Option {
 	return func(s *Server) error {
-		s.pendingMutators = append(s.pendingMutators, pendingMutator{name: name, args: argsPrototype, fn: fn})
+		s.pendingMutators = append(s.pendingMutators, pendingMutator{name: name, args: argsPrototype, fn: fn, opts: opts})
 		return nil
 	}
 }
 
 // registerMutator installs a WithMutator declaration. See WithMutator.
-func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn MutatorFunc) error {
+func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn MutatorFunc, opts ...MutatorOption) error {
 	if name == "" || fn == nil {
 		return fmt.Errorf("server: mutator needs a name and a func")
 	}
 	if _, dup := s.mutators[name]; dup {
 		return fmt.Errorf("server: mutator %q already registered", name)
 	}
-	s.mutators[name] = &mutatorInfo{name: name, args: argsPrototype, fn: fn}
+	mi := &mutatorInfo{name: name, args: argsPrototype, fn: fn}
+	for _, opt := range opts {
+		opt.applyMutator(mi)
+	}
+	s.mutators[name] = mi
 	s.log().LogAttrs(context.Background(), slog.LevelInfo, "mutator registered",
 		slog.String("component", "schema"), slog.String("mutator", name))
 	return nil
@@ -119,6 +165,11 @@ type EntityTx struct {
 	// the Write{Custom} verdict covers — while Apply sets it with no authz,
 	// having authorized its intents in an earlier pass.
 	gate *writeGate
+	// access is what the transaction's caller holds in the access model: the
+	// enforced caller's, or for a mutator body the invoking caller's. Nil for
+	// a Trusted transaction and in a schema without the model. Can answers
+	// from it, and a write that can change it drops what it resolved.
+	access *txAccess
 }
 
 // authorizeCrud runs the per-write hook for one CRUD write, building the same
@@ -355,6 +406,10 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}); err != nil {
 		return err
 	}
+	aw, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, currentRow)
+	if err != nil {
+		return err
+	}
 	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
 		len(protected) > 0 {
 		if _, _, err := currentRow(); err != nil {
@@ -421,6 +476,12 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.projectRefs(msg.ProtoReflect()); err != nil {
 		return err
 	}
+	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, msg); err != nil {
+		return err
+	}
+	if err := aw.finish(e.tx, msg); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(msg)
 	if err != nil {
 		return err
@@ -448,7 +509,11 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, msg, nil, seq, e.actor); err != nil {
 		return err
 	}
-	return e.tx.PutRow(info.name, key, value, seq, e.actor)
+	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Patch merges only the masked fields of msg onto the stored row, honoring
@@ -514,6 +579,11 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}, func() (Write, error) {
 		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, msg, mask, expected)
 	}); err != nil {
+		return err
+	}
+	aw, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask,
+		func() (storage.Row, bool, error) { return row, live, nil })
+	if err != nil {
 		return err
 	}
 
@@ -600,6 +670,12 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := info.projectRefs(base.ProtoReflect()); err != nil {
 		return err
 	}
+	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask, base); err != nil {
+		return err
+	}
+	if err := aw.finish(e.tx, base); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(base)
 	if err != nil {
 		return err
@@ -634,7 +710,11 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, base, mask, seq, e.actor); err != nil {
 		return err
 	}
-	return e.tx.PutRow(info.name, key, value, seq, e.actor)
+	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Delete writes a tombstone. prototype only identifies the entity type.
@@ -655,6 +735,10 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	}, func() (Write, error) {
 		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil)
 	}); err != nil {
+		return err
+	}
+	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil,
+		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
 		return err
 	}
 	seq, err := e.writeSeq()
@@ -687,7 +771,11 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	if err := e.srv.purgeHistory(e.tx, info, key); err != nil {
 		return err
 	}
-	return e.tx.DeleteRow(info.name, key, seq, e.actor)
+	if err := e.tx.DeleteRow(info.name, key, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Scan iterates all live rows of the entity identified by prototype,

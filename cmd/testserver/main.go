@@ -1,6 +1,8 @@
 // testserver runs the sync engine with the test entities (Todo, Widget),
 // the complete_all mutator and a deny-rule permission hook. The integration
-// suites spawn it on port 0 and read the address from stdout.
+// suites spawn it on port 0 and read the address from stdout. With -access it
+// serves the access-model test schema instead, and /debug/trusted to seed its
+// grant rows.
 //
 // It also serves permissive CORS and a /debug/rpc counter endpoint so the
 // browser e2e suite can reach it from the harness origin and assert what did
@@ -40,6 +42,8 @@ func main() {
 			"presence re-announce interval; a record nobody re-announces expires after three of these")
 		gcTextPurge = flag.Int("gc-text-compaction", 1,
 			"items a text field must give up before compaction rewrites its row (0 disables)")
+		access = flag.Bool("access", false,
+			"serve the access-model test schema instead of the default one; see access.go")
 	)
 	buildLogger := clilog.Flags(flag.CommandLine)
 	flag.Parse()
@@ -60,63 +64,18 @@ func main() {
 	}
 	defer store.Close()
 
-	perms := exampleapp.NewPermissions()
-	opts := append(exampleapp.Options(perms),
+	opts := []server.Option{
 		server.WithHeartbeat(*heartbeat),
 		server.WithRoomAnnounce(*roomAnnounce),
 		server.WithNotifyCoalescing(*notifyWindow),
-		server.WithPermissions(perms),
 		server.WithChunkSize(*chunkSize),
 		server.WithLogger(logger),
-		server.WithEntities(
-			// Widget.body carries (syncplane.v1.field_behavior).text, so
-			// registration auto-installs the convergent text merger —
-			// integration tests verify that concurrent PATCHes to the same text
-			// field merge without interleaving instead of last-writer-wins
-			// clobbering.
-			&testdatav1.Widget{},
-			// Composite-key entity: integration tests verify both sides derive
-			// the same escaped row key when key fields contain the "/" separator.
-			&testdatav1.Pair{},
-			// Reference entities: integration tests verify typed-reference
-			// projection and reference-following subscriptions (issue→project,
-			// project→issues).
-			&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{},
-			// Task holds workspace-qualified references (UserRef): integration
-			// tests verify a stub naming another workspace round-trips, and
-			// that the server's follow and matches() stay inside one workspace.
-			&testdatav1.Task{},
-			// Polymorphic references: a oneof of targets on the holder
-			// (OneofRefEntity), inside a reference message (Memo's OwnerRef) and
-			// a holder oneof mixing both with a plain member (Attachment).
-			&testdatav1.OneofRefEntity{}, &testdatav1.Memo{}, &testdatav1.Attachment{},
-			// Historied opts into field history (and carries a collaborative
-			// text field), which also brings the engine's server-only history
-			// entity into the catalog: integration tests read it back through
-			// queryServer and restore from it with an ordinary PATCH.
-			&testdatav1.Historied{},
-			// Comment restricts updates and deletes: integration tests verify
-			// that the client's local refusal and the server's rejection
-			// classify the same write the same way.
-			&testdatav1.Comment{},
-			// Guarded marks fields TRUSTED_ONLY, and exampleapp's policy
-			// protects one more for the subject "viewer": integration tests
-			// verify that a PUT keeps the stored value of a protected field and
-			// that the half only the server knows arrives as a rejection ack.
-			&testdatav1.Guarded{},
-			// Article declares full-text search (a searchable mark plus an
-			// EntityOptions.search spec): integration tests verify a match
-			// predicate and a relevance ordering return the same rows in the
-			// same order locally and through queryServer, and that cursors
-			// minted by one side page the other.
-			&testdatav1.Article{},
-			// Collaborative text inside keyed-list elements and map values:
-			// integration tests verify that both sides address one document
-			// per element by instance path ("notes.<id>.body") and merge
-			// concurrent edits element by element.
-			&testdatav1.KeyedTextEntity{},
-		),
-	)
+	}
+	if *access {
+		opts = append(opts, accessOptions()...)
+	} else {
+		opts = append(opts, defaultOptions()...)
+	}
 	if *gcInterval > 0 || *gcRetention > 0 {
 		opts = append(opts, server.WithGC(*gcRetention, *gcInterval))
 	} else {
@@ -174,6 +133,9 @@ func main() {
 	// One garbage-collection pass on demand, so suites can decide when
 	// collaborative-text compaction happens.
 	mux.Handle("/debug/gc", gcHandler(srv))
+	if *access {
+		mux.Handle("/debug/trusted", trustedWriteHandler(srv))
+	}
 
 	ln, err := net.Listen("tcp", *addr)
 	if err != nil {
@@ -184,4 +146,62 @@ func main() {
 	os.Stdout.Sync()
 
 	clilog.Fatal(logger, "http server stopped", http.Serve(ln, cors(mux)))
+}
+
+// defaultOptions is the schema and permission policy every suite but the
+// access-model one runs against.
+func defaultOptions() []server.Option {
+	perms := exampleapp.NewPermissions()
+	return append(exampleapp.Options(perms),
+		server.WithPermissions(perms),
+		server.WithEntities(
+
+			// Widget.body carries (syncplane.v1.field_behavior).text, so
+			// registration auto-installs the convergent text merger —
+			// integration tests verify that concurrent PATCHes to the same text
+			// field merge without interleaving instead of last-writer-wins
+			// clobbering.
+			&testdatav1.Widget{},
+			// Composite-key entity: integration tests verify both sides derive
+			// the same escaped row key when key fields contain the "/" separator.
+			&testdatav1.Pair{},
+			// Reference entities: integration tests verify typed-reference
+			// projection and reference-following subscriptions (issue→project,
+			// project→issues).
+			&testdatav1.Project{}, &testdatav1.User{}, &testdatav1.Issue{},
+			// Task holds workspace-qualified references (UserRef): integration
+			// tests verify a stub naming another workspace round-trips, and
+			// that the server's follow and matches() stay inside one workspace.
+			&testdatav1.Task{},
+			// Polymorphic references: a oneof of targets on the holder
+			// (OneofRefEntity), inside a reference message (Memo's OwnerRef) and
+			// a holder oneof mixing both with a plain member (Attachment).
+			&testdatav1.OneofRefEntity{}, &testdatav1.Memo{}, &testdatav1.Attachment{},
+			// Historied opts into field history (and carries a collaborative
+			// text field), which also brings the engine's server-only history
+			// entity into the catalog: integration tests read it back through
+			// queryServer and restore from it with an ordinary PATCH.
+			&testdatav1.Historied{},
+			// Comment restricts updates and deletes: integration tests verify
+			// that the client's local refusal and the server's rejection
+			// classify the same write the same way.
+			&testdatav1.Comment{},
+			// Guarded marks fields TRUSTED_ONLY, and exampleapp's policy
+			// protects one more for the subject "viewer": integration tests
+			// verify that a PUT keeps the stored value of a protected field and
+			// that the half only the server knows arrives as a rejection ack.
+			&testdatav1.Guarded{},
+			// Article declares full-text search (a searchable mark plus an
+			// EntityOptions.search spec): integration tests verify a match
+			// predicate and a relevance ordering return the same rows in the
+			// same order locally and through queryServer, and that cursors
+			// minted by one side page the other.
+			&testdatav1.Article{},
+			// Collaborative text inside keyed-list elements and map values:
+			// integration tests verify that both sides address one document
+			// per element by instance path ("notes.<id>.body") and merge
+			// concurrent edits element by element.
+			&testdatav1.KeyedTextEntity{},
+		),
+	)
 }

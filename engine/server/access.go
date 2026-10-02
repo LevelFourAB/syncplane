@@ -13,9 +13,11 @@ import (
 
 	"google.golang.org/protobuf/reflect/protoreflect"
 
+	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/internal/lww"
 	"github.com/levelfourab/syncplane/engine/internal/naming"
+	"github.com/levelfourab/syncplane/engine/query"
 	"github.com/levelfourab/syncplane/internal/protoopts"
 )
 
@@ -57,7 +59,7 @@ type grantSpec struct {
 	// roles maps a declared role name to the permissions it grants, sorted.
 	roles map[string][]string
 	// roleNames are the declared role names in declaration order, for errors
-	// and for the fingerprint, which sorts them.
+	// and for the evolution check, which sorts them.
 	roleNames []string
 }
 
@@ -274,6 +276,38 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	return g, nil
 }
 
+// grantSubjectIndexName is the index the engine derives over a grant entity's
+// subject field, so resolving a caller's grants probes its own rows instead
+// of scanning the entity. It shares the name an indexed mark on the field
+// would give, so marking the field as well adds no second index.
+func grantSubjectIndexName(g *grantSpec) string {
+	return fieldIndexName(g.subject)
+}
+
+// buildGrantIndex derives the subject index of a grant entity. It runs after
+// buildDeclaredIndexes, so a field the schema marks indexed already has it.
+func buildGrantIndex(info *entityInfo) error {
+	if info.grant == nil || info.indexByName(grantSubjectIndexName(info.grant)) != nil {
+		return nil
+	}
+	desc := info.msgType.Descriptor()
+	c, err := query.CompileIndexComponent(desc, []string{string(info.grant.subject.Name())}, false)
+	if err != nil {
+		return fmt.Errorf("grant subject field %q: %w", info.grant.subject.Name(), err)
+	}
+	comps := []query.IndexComponent{c}
+	enc, err := query.NewIndexEncoder(comps)
+	if err != nil {
+		return fmt.Errorf("grant subject field %q: %w", info.grant.subject.Name(), err)
+	}
+	info.indexes = append(info.indexes, compiledIndex{
+		name:     grantSubjectIndexName(info.grant),
+		specHash: query.SpecHash(comps),
+		encoder:  enc,
+	})
+	return nil
+}
+
 // grantField resolves the field a grant option names for one of its parts.
 // The field must be present on every row, which rules out a oneof member, and
 // hold one value, which rules out a list or a map.
@@ -314,10 +348,21 @@ type accessModel struct {
 	roles map[string]*modelRole
 	// grantEntities are the entities whose rows grant roles, sorted by name.
 	grantEntities []*entityInfo
-	// fingerprint hashes everything that decides what a caller can read and
-	// write: each entity's permissions and parent, and each role's
-	// permissions. Two catalogs with the same fingerprint compute the same
-	// visibility from the same rows. Never 0 for a model.
+	// parents maps the name of each entity with an access parent to the
+	// entity the parent reference points at. anchors holds the names of those
+	// targets: the entities whose rows can be anchors, so a write to one can
+	// change what a caller holds.
+	parents map[string]*entityInfo
+	anchors map[string]bool
+	// readPerms are the permissions model entities read by, sorted. They are
+	// what a cursor records of a caller's access.
+	readPerms []string
+	// readRules are the read rules of the model entities, sorted by entity
+	// (see readRuleOf), and fingerprint is their hash (see readPolicyOf). Two
+	// models with the same fingerprint read the same rows from the same
+	// anchors. What roles grant is not part of it: a cursor records that as
+	// the anchors a caller holds.
+	readRules   []*syncplanecursorv1.EntityReadRule
 	fingerprint uint64
 	// warnings are findings that do not make the model invalid but are likely
 	// mistakes. Registration logs them.
@@ -339,7 +384,10 @@ type modelRole struct {
 // a schema can fail here until its last entity arrives. The caller decides
 // whether that is an error to report or a state to hold (see
 // catalog.accessErr).
-func compileAccessModel(c *catalog) (*accessModel, error) {
+//
+// mutators are the server's mutators. A MutatorAccess counts as a use of its
+// permission, and is checked against the model here.
+func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessModel, error) {
 	names := make([]string, 0, len(c.entities))
 	inUse := false
 	for name, info := range c.entities {
@@ -356,7 +404,7 @@ func compileAccessModel(c *catalog) (*accessModel, error) {
 	}
 	sort.Strings(names)
 
-	m := &accessModel{roles: map[string]*modelRole{}}
+	m := &accessModel{roles: map[string]*modelRole{}, parents: map[string]*entityInfo{}, anchors: map[string]bool{}}
 	used := map[string][]string{}       // permission → entities that name it
 	depths := map[string]map[int]bool{} // permission → anchor depths of those entities
 	for _, name := range names {
@@ -383,6 +431,8 @@ func compileAccessModel(c *catalog) (*accessModel, error) {
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which has an access_parent of its own; "+
 					"an access parent must anchor at the workspace root", name, a.parent.fd.Name(), target.name)
 			}
+			m.parents[name] = target
+			m.anchors[target.name] = true
 		}
 		for _, p := range []string{a.read, a.write} {
 			if !slices.Contains(used[p], name) {
@@ -406,6 +456,23 @@ func compileAccessModel(c *catalog) (*accessModel, error) {
 		}
 	}
 
+	mutatorNames := make([]string, 0, len(mutators))
+	for name, mi := range mutators {
+		if mi.access != nil {
+			mutatorNames = append(mutatorNames, name)
+		}
+	}
+	sort.Strings(mutatorNames)
+	for _, name := range mutatorNames {
+		ma := mutators[name].access
+		if err := checkMutatorAccess(c, mutators[name], ma); err != nil {
+			return nil, err
+		}
+		if !slices.Contains(used[ma.Permission], "mutator "+name) {
+			used[ma.Permission] = append(used[ma.Permission], "mutator "+name)
+		}
+	}
+
 	granted := map[string]bool{}
 	for _, r := range m.roles {
 		for _, p := range r.perms {
@@ -419,8 +486,8 @@ func compileAccessModel(c *catalog) (*accessModel, error) {
 	sort.Strings(perms)
 	for _, p := range perms {
 		if !granted[p] {
-			return nil, fmt.Errorf("server: permission %q of entity %q is granted by no role; declare a role that grants it",
-				p, used[p][0])
+			return nil, fmt.Errorf("server: permission %q of %s is granted by no role; declare a role that grants it",
+				p, usedBy(used[p][0]))
 		}
 	}
 	roleNames := make([]string, 0, len(m.roles))
@@ -431,37 +498,136 @@ func compileAccessModel(c *catalog) (*accessModel, error) {
 	for _, name := range roleNames {
 		for _, p := range m.roles[name].perms {
 			if used[p] == nil {
-				return nil, fmt.Errorf("server: role %q of entity %q grants permission %q, which no entity uses",
+				return nil, fmt.Errorf("server: role %q of entity %q grants permission %q, which no entity or mutator uses",
 					name, m.roles[name].entity, p)
 			}
 		}
 	}
+	for _, name := range names {
+		if a := c.entities[name].access; a != nil && !a.unrestricted && !slices.Contains(m.readPerms, a.read) {
+			m.readPerms = append(m.readPerms, a.read)
+		}
+	}
+	sort.Strings(m.readPerms)
 	for _, p := range perms {
 		if len(depths[p]) > 1 {
 			m.warnings = append(m.warnings, fmt.Sprintf(
 				"permission %q governs entities at different anchor depths (%s): a role that grants it at the workspace root "+
 					"reaches the rows below every anchor, so give each depth a permission of its own unless that is intended",
-				p, strings.Join(used[p], ", ")))
+				p, strings.Join(entitiesOnly(used[p]), ", ")))
 		}
 	}
 
-	var spec strings.Builder
 	for _, name := range names {
-		spec.WriteString(accessSpecOf(c.entities[name]))
-		spec.WriteByte('\n')
+		m.readRules = append(m.readRules, &syncplanecursorv1.EntityReadRule{Entity: name, Rule: readRuleOf(c.entities[name])})
 	}
-	sum := sha256.Sum256([]byte(spec.String()))
-	m.fingerprint = binary.BigEndian.Uint64(sum[:8])
-	if m.fingerprint == 0 {
-		m.fingerprint = 1
-	}
+	m.fingerprint = readPolicyOf(m.readRules)
 	return m, nil
+}
+
+// readRuleOf renders what decides which rows of a model entity a caller
+// reads, in a canonical form: two entities with equal rules read the same
+// rows from the same anchors.
+func readRuleOf(info *entityInfo) string {
+	a := info.access
+	if a.unrestricted {
+		return "unrestricted"
+	}
+	rule := "read=" + a.read
+	if a.parent != nil {
+		rule += " parent=" + string(a.parent.fd.Name()) + ">" + a.parentEntity
+	}
+	return rule
+}
+
+// readPolicyOf fingerprints read rules sorted by entity. Never 0, which a
+// cursor reserves for a schema without the access model.
+func readPolicyOf(rules []*syncplanecursorv1.EntityReadRule) uint64 {
+	h := sha256.New()
+	for _, r := range rules {
+		h.Write([]byte(r.GetEntity() + " " + r.GetRule() + "\n"))
+	}
+	if p := binary.BigEndian.Uint64(h.Sum(nil)[:8]); p != 0 {
+		return p
+	}
+	return 1
+}
+
+// sameSharedReadRules reports whether every entity that both rule lists name
+// reads by the same rule. Both are sorted by entity. An entity only one side
+// names leaves the rows a client holds valid: a server reads no rows of an
+// entity it does not know, and rows of an entity new to the model reach the
+// client like any other change.
+func sameSharedReadRules(a, b []*syncplanecursorv1.EntityReadRule) bool {
+	for len(a) > 0 && len(b) > 0 {
+		switch x, y := a[0], b[0]; {
+		case x.GetEntity() < y.GetEntity():
+			a = a[1:]
+		case x.GetEntity() > y.GetEntity():
+			b = b[1:]
+		case x.GetRule() != y.GetRule():
+			return false
+		default:
+			a, b = a[1:], b[1:]
+		}
+	}
+	return true
+}
+
+// usedBy names what a permission's first user is, for errors: an entity name,
+// or "mutator <name>".
+func usedBy(user string) string {
+	if strings.HasPrefix(user, "mutator ") {
+		return user
+	}
+	return fmt.Sprintf("entity %q", user)
+}
+
+// entitiesOnly drops the mutators from a permission's users.
+func entitiesOnly(users []string) []string {
+	out := make([]string, 0, len(users))
+	for _, u := range users {
+		if !strings.HasPrefix(u, "mutator ") {
+			out = append(out, u)
+		}
+	}
+	return out
+}
+
+// checkMutatorAccess checks one mutator's MutatorAccess against the catalog:
+// its row entity is in the model, and its key field is a singular string
+// field of the args.
+func checkMutatorAccess(c *catalog, mi *mutatorInfo, ma *MutatorAccess) error {
+	if err := naming.ValidatePermissionName(ma.Permission); err != nil {
+		return fmt.Errorf("server: mutator %q MutatorAccess: %w", mi.name, err)
+	}
+	if (ma.Entity == "") != (ma.KeyField == "") {
+		return fmt.Errorf("server: mutator %q MutatorAccess names an Entity without a KeyField or a KeyField without an Entity", mi.name)
+	}
+	if ma.Entity == "" {
+		return nil
+	}
+	info, ok := c.entities[ma.Entity]
+	if !ok {
+		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not registered", mi.name, ma.Entity)
+	}
+	if info.access == nil || info.access.unrestricted {
+		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not in the access model", mi.name, ma.Entity)
+	}
+	if mi.args == nil {
+		return fmt.Errorf("server: mutator %q MutatorAccess names key field %q, but the mutator takes no args", mi.name, ma.KeyField)
+	}
+	fd := mi.args.ProtoReflect().Descriptor().Fields().ByName(protoreflect.Name(ma.KeyField))
+	if fd == nil || fd.Kind() != protoreflect.StringKind || fd.IsList() || fd.IsMap() {
+		return fmt.Errorf("server: mutator %q MutatorAccess key field %q must be a singular string field of %s",
+			mi.name, ma.KeyField, mi.args.ProtoReflect().Descriptor().FullName())
+	}
+	return nil
 }
 
 // accessSpecOf renders everything about one entity that decides access, in a
 // canonical form: two entities with equal specs grant and require the same
-// permissions on the same rows. It feeds both the model fingerprint and the
-// evolution check, so a change one sees the other sees too.
+// permissions on the same rows. The evolution check compares it.
 func accessSpecOf(info *entityInfo) string {
 	var b strings.Builder
 	b.WriteString(info.name)

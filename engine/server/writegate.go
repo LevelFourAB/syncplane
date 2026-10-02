@@ -36,16 +36,30 @@ type writeGate struct {
 	// rowMemo holds each resolved entity's row check. A present nil entry is a
 	// resolved "no check", so the hooks are not asked again.
 	rowMemo map[string]RowWriteFilter
+	// access is what the caller holds in the access model, resolved inside
+	// each write transaction; nil for a schema without the model.
+	access *txAccess
 }
 
 // newWriteGate builds the gate an enforced request carries into its writes, or
 // nil when nothing is enforced.
-func (s *Server) newWriteGate(ctx context.Context, p Principal, workspaceID string, enforced bool) *writeGate {
+func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID string, enforced bool) *writeGate {
 	if !enforced {
 		return nil
 	}
 	hook, _ := s.perms.(FieldPermissions)
-	return &writeGate{srv: s, ctx: ctx, p: p, ws: workspaceID, fieldHook: hook}
+	return &writeGate{
+		srv: s, ctx: ctx, p: adm.principal, ws: workspaceID, fieldHook: hook,
+		access: newTxAccess(adm.caller, s.limits),
+	}
+}
+
+// accessOf returns the gate's access, nil for a nil gate.
+func (g *writeGate) accessOf() *txAccess {
+	if g == nil {
+		return nil
+	}
+	return g.access
 }
 
 // rowCheck returns the check this caller's writes to existing rows of the

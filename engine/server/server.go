@@ -645,9 +645,10 @@ func (c *catalog) accessModelOrErr() (*accessModel, error) {
 }
 
 // recompileAccess compiles the access model for the catalog's current
-// entities. Every swap that adds or replaces an entity calls it.
-func (c *catalog) recompileAccess() {
-	c.access, c.accessErr = compileAccessModel(c)
+// entities and the server's mutators. Every swap that adds or replaces an
+// entity calls it.
+func (c *catalog) recompileAccess(mutators map[string]*mutatorInfo) {
+	c.access, c.accessErr = compileAccessModel(c, mutators)
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -807,6 +808,10 @@ type Server struct {
 	// poison dedupes the quarantine log for rows that will not decode (see
 	// poison.go).
 	poison poisonReports
+	// subjects and globalRoles are the WithSubjects and WithGlobalRoles hooks,
+	// nil when not installed. Fixed once New returns.
+	subjects    SubjectsFunc
+	globalRoles GlobalRolesFunc
 }
 
 // catalogPtr returns the current immutable catalog snapshot.
@@ -1141,10 +1146,13 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	if err := s.applyDeclarations(); err != nil {
 		return nil, err
 	}
-	// Entities register one at a time, so the model is judged once the last
-	// one is in.
-	if _, err := s.catalogPtr().accessModelOrErr(); err != nil {
-		return nil, s.catalogPtr().accessErr
+	// Entities register one at a time and mutators after them, so the model is
+	// judged once both are in.
+	if err := s.swapCatalog(func(c *catalog) error {
+		c.recompileAccess(s.mutators)
+		return c.accessErr
+	}); err != nil {
+		return nil, err
 	}
 	s.logAccessWarnings(s.catalogPtr())
 	if s.gc != nil {
@@ -1179,7 +1187,7 @@ func (s *Server) applyDeclarations() error {
 		}
 	}
 	for _, m := range s.pendingMutators {
-		if err := s.registerMutator(m.name, m.args, m.fn); err != nil {
+		if err := s.registerMutator(m.name, m.args, m.fn, m.opts...); err != nil {
 			return err
 		}
 	}
@@ -1297,7 +1305,7 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		if err := ensureHistoryEntity(c); err != nil {
 			return err
 		}
-		c.recompileAccess()
+		c.recompileAccess(s.mutators)
 		return nil
 	}); err != nil {
 		return err
@@ -1434,6 +1442,9 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// Then the schema's own: a field-level `indexed` mark and an entity-level
 	// `index` declaration desugar to the same compiled shape.
 	if err := buildDeclaredIndexes(info, eo); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if err := buildGrantIndex(info); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Search: a field-level `searchable` mark and an entity-level `search`

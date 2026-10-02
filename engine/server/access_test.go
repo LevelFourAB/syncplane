@@ -286,7 +286,7 @@ var _ = Describe("Access model registration", func() {
 			g := specNamed(s, "org_member").Grant
 			g.Roles[0].Grants = append(g.Roles[0].Grants, "delete_org")
 			return s
-		}, `role "org_admin" of entity "org_member" grants permission "delete_org", which no entity uses`),
+		}, `role "org_admin" of entity "org_member" grants permission "delete_org", which no entity or mutator uses`),
 	)
 
 	Context("compiled entities", func() {
@@ -322,8 +322,9 @@ var _ = Describe("Access model registration", func() {
 			for _, msg := range []proto.Message{&accessv1.Project{}, &accessv1.OrgMember{}, &accessv1.Label{}} {
 				Expect(srv.RegisterEntity(msg)).To(Succeed())
 			}
+			// Once complete, the model judges the caller, who holds no grant.
 			_, err = srv.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{WorkspaceId: ws}))
-			Expect(err).NotTo(HaveOccurred())
+			Expect(connect.CodeOf(err)).To(Equal(connect.CodePermissionDenied))
 		})
 	})
 

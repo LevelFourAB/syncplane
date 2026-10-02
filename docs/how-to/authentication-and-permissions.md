@@ -38,6 +38,8 @@ If you authenticate requests in HTTP middleware, call `server.WithPrincipal(ctx,
 
 ## Configuring permissions
 
+For access that follows rows in the workspace — project members who see their projects, org admins who see everything — declare it in the schema instead of writing hooks. See [Declare roles and permissions](declare-roles-and-permissions.md). The hooks below still run with the access model, and can narrow what it allows.
+
 Permission hooks receive the `server.Principal` as a direct argument rather than reading it from `ctx`. This prevents a policy from silently authorizing an anonymous caller. Embed `server.AllowAll` to implement only the hooks you need:
 
 ```go

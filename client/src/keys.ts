@@ -175,6 +175,41 @@ export const metaServerSeq = (workspaceId: string): string =>
  * swap could sit above the new head forever.
  */
 export const metaAckedSeq = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}ackedSeq`;
+/**
+ * What the caller holds in one workspace under the access model: the last
+ * CallerAccess the server sent, binary-encoded. Written in the same
+ * transaction as the cursor it arrived with, because the server sends it only
+ * when it differs from what that cursor was issued under. Absent for a
+ * workspace whose schema does not use the access model.
+ */
+export const metaCallerAccess = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}callerAccess`;
+
+/**
+ * The access generation of one workspace: a token restamped by every
+ * committed transaction that writes or deletes its {@link metaCallerAccess}
+ * or anything in its pending queue, the two inputs `can()` decides from
+ * besides the row itself. Like {@link overlayGeneration}, the stamp rides in
+ * the writer's own transaction, and an ABSENT token means unknown.
+ */
+export const accessGeneration = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}agen`;
+
+/**
+ * The generation {@link accessGeneration} names for a pending-queue entry or
+ * a stored CallerAccess at `key`, or undefined for every other key.
+ */
+export const accessGenerationFor = (key: string): string | undefined => {
+	const root = key.startsWith(PENDING_ROOT)
+		? PENDING_ROOT
+		: key.startsWith(META_WS_PREFIX)
+		? META_WS_PREFIX
+		: undefined;
+	if (root === undefined) return undefined;
+	const segmentEnd = key.indexOf('/', root.length);
+	if (segmentEnd === -1) return undefined;
+	if (root === META_WS_PREFIX && key.slice(segmentEnd + 1) !== 'callerAccess') return undefined;
+	return `${META_WS_PREFIX}${key.slice(root.length, segmentEnd)}/agen`;
+};
 
 /**
  * Version of this KV layout. On mismatch the client tries to push the

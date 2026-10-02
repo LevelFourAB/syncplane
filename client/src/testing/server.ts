@@ -23,6 +23,8 @@ import { type CrudMutation, CrudOp, type Mutation } from '../gen/syncplane/v1/mu
 import {
 	type BootstrapRequest,
 	BootstrapResponseSchema,
+	type CallerAccess,
+	CallerAccessSchema,
 	MutationStatus,
 	type PullRequest,
 	type PushRequest,
@@ -307,6 +309,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	private mutators = new Map<string, TestMutator>();
 	private rules = new Set<RejectRule>();
 	private revoked = new Set<string>();
+	private callerAccess = new Map<string, CallerAccess>();
 	private holds = 0;
 	private holdWaiters: (() => void)[] = [];
 	private schemaRevision: string;
@@ -427,6 +430,37 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	/** Lifts a {@link TestServer.revoke}. Clients notice on their next cycle. */
 	restore(workspaceId: string): void {
 		this.revoked.delete(workspaceId);
+	}
+
+	/**
+	 * Sets what clients are told the caller holds in a workspace under the
+	 * access model, which `SyncClient.can` and `useCan` answer from. Every
+	 * bootstrap, pull and stream page after this call carries it, and
+	 * `undefined` stops sending one; a client keeps the last one it received.
+	 * Nothing here is enforced: the server still applies every write and
+	 * serves every row.
+	 *
+	 * @example
+	 * ```ts
+	 * server.setCallerAccess({
+	 *   permissions: [
+	 *     { permission: 'view_tasks', root: true },
+	 *     { permission: 'edit_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] },
+	 *   ],
+	 * });
+	 * ```
+	 */
+	setCallerAccess(
+		access: MessageInitShape<typeof CallerAccessSchema> | undefined,
+		opts?: { workspace?: string },
+	): void {
+		const workspace = opts?.workspace ?? DEFAULT_WORKSPACE;
+		if (access === undefined) {
+			this.callerAccess.delete(workspace);
+			return;
+		}
+		this.callerAccess.set(workspace, create(CallerAccessSchema, access));
+		this.ws(workspace).wake();
 	}
 
 	/** Registers a custom mutator; see {@link TestMutator}. */
@@ -723,7 +757,13 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/** One forward page from `from`, in commit order. */
-	private page(state: WorkspaceState, clientId: string, from: bigint, limit: number) {
+	private page(
+		workspaceId: string,
+		state: WorkspaceState,
+		clientId: string,
+		from: bigint,
+		limit: number,
+	) {
 		const changed: { entity: string; key: string; row: StoredRow }[] = [];
 		for (const [ entity, rows ] of state.rows) {
 			for (const [ key, row ] of rows) {
@@ -739,6 +779,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			: state.seq > from
 			? state.seq
 			: from;
+		const access = this.callerAccess.get(workspaceId);
 		return {
 			patch: {
 				changes: included.map((c) => rowChangeInit(c.entity, c.key, c.row)),
@@ -750,6 +791,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			hasMore,
 			seq: through,
 			schemaRevision: this.schemaRevision,
+			...(access === undefined ? {} : { callerAccess: { ...access, seq: through } }),
 		};
 	}
 
@@ -767,7 +809,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				schemaRevision: this.schemaRevision,
 			};
 		}
-		return this.page(state, req.clientId, from, req.limit);
+		return this.page(req.workspaceId, state, req.clientId, from, req.limit);
 	}
 
 	private async *handleBootstrap(req: BootstrapRequest) {
@@ -786,6 +828,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 					schemaRevision: this.schemaRevision,
 					entities: order,
 					resumed: false,
+					...(this.callerAccess.has(req.workspaceId)
+						? { callerAccess: { ...this.callerAccess.get(req.workspaceId)!, seq: state.seq } }
+						: {}),
 				},
 			},
 		});
@@ -879,7 +924,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	) {
 		const state = this.ws(workspaceId);
 		while (state.seq > cursors.get(workspaceId)!) {
-			const page = this.page(state, req.clientId, cursors.get(workspaceId)!, req.limit);
+			const page = this.page(workspaceId, state, req.clientId, cursors.get(workspaceId)!, req.limit);
 			cursors.set(workspaceId, page.seq);
 			yield create(SubscribeResponseSchema, {
 				workspaceId,

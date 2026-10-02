@@ -34,7 +34,8 @@ type roomAccess struct {
 // It returns the drop reason the client should act on: a settled denial is
 // permanent, everything else is worth a retry.
 func (s *Server) openRoom(ctx context.Context, t presence.Topic) (roomAccess, syncplanev1.TopicDropped_Reason, error) {
-	principal, err := s.enterWorkspace(ctx, t.WorkspaceID)
+	adm, err := s.enterWorkspace(ctx, t.WorkspaceID)
+	principal := adm.principal
 	if err != nil {
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return roomAccess{}, syncplanev1.TopicDropped_REASON_ACCESS_REVOKED, err
@@ -43,7 +44,7 @@ func (s *Server) openRoom(ctx context.Context, t presence.Topic) (roomAccess, sy
 	}
 
 	if t.Anchored() {
-		reason, err := s.checkAnchor(ctx, t)
+		reason, err := s.checkAnchor(ctx, t, adm)
 		if err != nil {
 			return roomAccess{}, reason, err
 		}
@@ -73,7 +74,12 @@ func (s *Server) openRoom(ctx context.Context, t presence.Topic) (roomAccess, sy
 //
 // A missing or deleted row is a denial rather than an error. The row is the
 // room's subject, and there is nothing to be present at.
-func (s *Server) checkAnchor(ctx context.Context, t presence.Topic) (syncplanev1.TopicDropped_Reason, error) {
+//
+// In a schema that uses the access model the row must also be readable under
+// what the caller held when the workspace gate read its grants. The anchor row
+// comes from a cache rather than from one snapshot with the grants, so the
+// gate's reading serves as well as a fresh one.
+func (s *Server) checkAnchor(ctx context.Context, t presence.Topic, adm admission) (syncplanev1.TopicDropped_Reason, error) {
 	info, ok := s.catalogPtr().entities[t.Entity]
 	if !ok {
 		return syncplanev1.TopicDropped_REASON_ACCESS_REVOKED,
@@ -101,6 +107,10 @@ func (s *Server) checkAnchor(ctx context.Context, t presence.Topic) (syncplanev1
 	emitter, err := newRowEmitter(ctx, s, t.WorkspaceID, nil)
 	if err != nil {
 		return syncplanev1.TopicDropped_REASON_ERROR, err
+	}
+	if adm.caller != nil {
+		emitter.caller = adm.caller
+		emitter.useAccess(adm.access)
 	}
 	ok, err = emitter.readable(row)
 	if err != nil {

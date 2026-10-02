@@ -622,7 +622,7 @@ func (s *Server) warmHistorySourceFilters(e *rowEmitter) error {
 		if name == historyEntityName {
 			continue
 		}
-		if _, err := e.filterOf(name); err != nil {
+		if _, err := e.appFilterOf(name); err != nil {
 			return err
 		}
 	}

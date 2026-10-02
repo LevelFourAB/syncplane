@@ -70,15 +70,18 @@ func (t *readCountingTx) GetRow(entity, key string) (storage.Row, error) {
 // GetRows counts the batch read twice over: "batch" is what a networked
 // adapter pays a round trip for, and "batchkeys" is how many rows it resolved
 // — the ratio between them is what batching buys, and neither number alone
-// says it.
+// says it. The keys are counted per entity as well, for the specs that ask
+// which rows of ONE entity a read named.
 func (t *readCountingTx) GetRows(entity string, keys []string, fn func(storage.Row) error) error {
 	t.owner.bump("batch")
 	t.owner.add("batchkeys", len(keys))
+	t.owner.add("batchkeys:"+entity, len(keys))
 	return t.ReadTx.GetRows(entity, keys, fn)
 }
 
 func (t *readCountingTx) ScanEntity(entity string, fn func(storage.Row) error) error {
 	t.owner.bump("scan")
+	t.owner.bump("scan:" + entity)
 	return t.ReadTx.ScanEntity(entity, fn)
 }
 

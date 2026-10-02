@@ -74,6 +74,27 @@ message ProjectMember {
 						"view_tasks",
 						"edit_tasks"
 					]
+				},
+				{
+					name: "project_admin"
+					grants: [
+						"view_projects",
+						"view_members",
+						"manage_members",
+						"view_tasks",
+						"edit_tasks"
+					]
+				},
+				{
+					name: "project_owner"
+					grants: [
+						"view_projects",
+						"edit_projects",
+						"view_members",
+						"manage_members",
+						"view_tasks",
+						"edit_tasks"
+					]
 				}
 			]
 		}
@@ -119,6 +140,11 @@ message Note {
 	};
 	string id = 1;
 	string body = 2;
+}
+
+// The args of the test mutators that act on one task.
+message TaskArgs {
+	string task_id = 1;
 }
 
 // Roles a TeamMember row can hold, matched by value name.

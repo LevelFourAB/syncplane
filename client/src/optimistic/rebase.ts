@@ -8,6 +8,7 @@ import {
 } from '@bufbuild/protobuf';
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
+import { ACCESS_TOUCH_ENTITY } from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
 	type CrudMutation,
@@ -16,11 +17,13 @@ import {
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
+import { type CallerAccess, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
 import {
 	confirmedKey,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	metaAckedSeq,
+	metaCallerAccess,
 	metaCursor,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
@@ -508,6 +511,11 @@ export async function wipeConfirmedState(
 	touched: TouchSet,
 ): Promise<void> {
 	await tx.del(metaCursor(workspaceId));
+	// The summary is what the cursor's lineage was told; the snapshot that
+	// replaces it brings its own. Announced like the write that stored it, so
+	// access listeners stop answering from it now.
+	await tx.del(metaCallerAccess(workspaceId));
+	touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	// The acked floor goes with the cursor: it names a seq in the lineage being
 	// discarded, and carried across a swap it could sit above the new lineage's
 	// head and pin every pull to the primary.
@@ -968,6 +976,13 @@ export interface FinalizeInput {
 	 * rejection.
 	 */
 	deferAcked?: boolean;
+	/**
+	 * What the caller holds in the workspace, when the server sent it with this
+	 * position. Absent leaves the stored summary alone, except on a baseline,
+	 * which removes it: a snapshot without one is of a schema without the
+	 * access model.
+	 */
+	callerAccess?: CallerAccess;
 }
 
 /**
@@ -1083,6 +1098,16 @@ export async function finalizeRebase(
 	} else if (input.serverSeq) {
 		await tx.put(metaServerSeq(workspaceId), input.serverSeq.toString());
 	}
+	if (input.callerAccess !== undefined) {
+		await tx.put(metaCallerAccess(workspaceId), toBinary(CallerAccessSchema, input.callerAccess));
+		// Announced like a row change, so it reaches this tab's access
+		// listeners and every other tab's on the same channel (see
+		// SyncClient.onAccessChange).
+		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+	} else if (input.baseline) {
+		await tx.del(metaCallerAccess(workspaceId));
+		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+	}
 
 	const remaining = input.deferAcked
 		? await readPending(tx, workspaceId)
@@ -1139,6 +1164,8 @@ export interface RebaseInput {
 	 * ungated (older server).
 	 */
 	serverSeq?: bigint;
+	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
+	callerAccess?: CallerAccess;
 }
 
 export interface RebaseResult {

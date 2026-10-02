@@ -327,7 +327,7 @@ describe('runtime registration of an access-model schema', () => {
 			registerSchema(adminTransport(), 'access-unused', makeAccessBundle({ unusedGrant: true }), {
 				token: TOKEN,
 			}),
-		).rejects.toThrow(/grants permission "delete_org", which no entity uses/);
+		).rejects.toThrow(/grants permission "delete_org", which no entity or mutator uses/);
 	});
 
 	it("changes an entity's access model only when the registration allows it", async () => {

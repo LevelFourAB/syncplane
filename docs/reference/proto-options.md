@@ -462,7 +462,9 @@ A caller holds a permission at an **anchor**: the workspace root, or one row tha
 | `grant`                        | `roles`        | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                            |
 | `field_behavior.access_parent` | (none)         | Marks the reference that places each row below another row. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root.                     |
 
-A grant row grants nothing when its subject is empty, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist.
+A grant row grants nothing when its subject is empty, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist. Every write path refuses to store a grant row with an empty subject, an undeclared role, or no `access_parent` on an entity that has one.
+
+A caller can create a row where it holds the entity's `write` permission, and update or delete a row where the stored row sits. A write that moves a row to another access parent needs `write` at both. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
 
 ### Registration rules
 
@@ -487,6 +489,10 @@ Registration logs a warning when one permission governs entities at different de
 ### Changing the access model
 
 A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access`, `grant` or `access_parent` options, or to the numbers of the enum values its role field matches. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
+
+Registration does not read stored rows. A stored grant row whose role the schema does not declare grants nothing, but keeps its value. When a registration declares that role, or adds `grant` to an entity that already holds rows, every stored row with that role value grants it. `New` has no earlier schema to compare with, so a schema compiled into the server applies such a change without `AllowAccessChange`.
+
+Clients follow a change on their next pull. A change to an entity's `read` permission, `unrestricted` setting or `access_parent` field resets every client that holds a cursor. Every other change, such as a role that grants other permissions, sends only the rows whose visibility changed. See [Access model](server.md#access-model) for every case.
 
 ## Secondary indexes
 

@@ -108,11 +108,11 @@ func (s *Server) MutateIdempotent(
 	if inWriteTx(ctx) {
 		return WriteOutcome{}, fmt.Errorf("server: MutateIdempotent called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
-	p, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gate(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
-	return s.mutateIdempotent(ctx, workspaceID, ledgerKey(p, enforced, key), p, enforced, fn)
+	return s.mutateIdempotent(ctx, workspaceID, ledgerKey(adm.principal, enforced, key), adm, enforced, fn)
 }
 
 // mutateIdempotent is the body of MutateIdempotent once the call is validated
@@ -120,11 +120,11 @@ func (s *Server) MutateIdempotent(
 func (s *Server) mutateIdempotent(
 	ctx context.Context,
 	workspaceID, key string,
-	p Principal,
+	adm admission,
 	enforced bool,
 	fn func(tx *EntityTx) ([]byte, error),
 ) (WriteOutcome, error) {
-	authz, gate := s.writeAuthorizer(ctx, p, workspaceID, enforced)
+	authz, gate := s.writeAuthorizer(ctx, adm, workspaceID, enforced)
 	var (
 		out   WriteOutcome
 		wrote bool
@@ -149,7 +149,9 @@ func (s *Server) mutateIdempotent(
 		if err != nil {
 			return err
 		}
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor}
+		gate.accessOf().invalidate()
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
+			access: gate.accessOf()}
 		result, err := fn(etx)
 		if err != nil {
 			return err
@@ -197,7 +199,8 @@ func (s *Server) InvokeIdempotent(
 	if err != nil {
 		return WriteOutcome{}, err
 	}
-	if err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args); err != nil {
+	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args)
+	if err != nil {
 		return WriteOutcome{}, err
 	}
 	if workspaceID == "" {
@@ -211,8 +214,11 @@ func (s *Server) InvokeIdempotent(
 	// stays the caller's, though: the body runs trusted, but the record must
 	// not replay to another principal.
 	key = ledgerKey(principalOf(ctx), !isTrusted(ctx), key)
-	return s.mutateIdempotent(Trusted(ctx), workspaceID, key, Principal{}, false,
+	return s.mutateIdempotent(Trusted(ctx), workspaceID, key, admission{}, false,
 		func(tx *EntityTx) ([]byte, error) {
+			if err := s.beginInvocation(ctx, workspaceID, tx, access, mi, bodyArgs); err != nil {
+				return nil, err
+			}
 			return nil, mi.fn(markWriteTx(ctx), tx, bodyArgs)
 		})
 }

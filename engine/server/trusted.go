@@ -61,18 +61,32 @@ func isTrusted(ctx context.Context) bool {
 // it onto a Connect code: an in-process caller recovers a settled denial with
 // AsWorkspaceDenial and sees a plain error for a hook that could not decide,
 // instead of having to unpick a transport status it never asked for.
-func (s *Server) gate(ctx context.Context, workspaceID string) (p Principal, enforced bool, err error) {
+//
+// In a schema that uses the access model it also resolves the caller's access
+// and refuses a caller that holds no permission in the workspace, as
+// enterWorkspace does.
+func (s *Server) gate(ctx context.Context, workspaceID string) (adm admission, enforced bool, err error) {
 	if isTrusted(ctx) {
-		return Principal{}, false, nil
+		return admission{}, false, nil
 	}
-	p = principalOf(ctx)
+	adm.principal = principalOf(ctx)
 	if err := s.catalogPtr().accessErr; err != nil {
-		return p, true, err
+		return adm, true, err
 	}
-	if err := s.perms.CanAccessWorkspace(ctx, p, workspaceID); err != nil {
-		return p, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
+	model := s.catalogPtr().access
+	if err := s.perms.CanAccessWorkspace(ctx, adm.principal, workspaceID); err != nil {
+		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
 	}
-	return p, true, nil
+	if model == nil {
+		return adm, true, nil
+	}
+	if adm.caller, err = s.resolveCaller(ctx, adm.principal, model); err != nil {
+		return adm, true, err
+	}
+	if adm.access, err = s.admitAccess(ctx, workspaceID, adm.caller); err != nil {
+		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
+	}
+	return adm, true, nil
 }
 
 // writeAuthorizer returns the per-write hook an EntityTx runs and the write gate
@@ -85,22 +99,25 @@ func (s *Server) gate(ctx context.Context, workspaceID string) (p Principal, enf
 // with no authorizer, having authorized its intents in an earlier pass.
 func (s *Server) writeAuthorizer(
 	ctx context.Context,
-	p Principal,
+	adm admission,
 	workspaceID string,
 	enforced bool,
 ) (func(Write) error, *writeGate) {
 	if !enforced {
 		return nil, nil
 	}
-	g := s.newWriteGate(ctx, p, workspaceID, enforced)
+	g := s.newWriteGate(ctx, adm, workspaceID, enforced)
 	return func(w Write) error {
-		return s.authorizeWrite(ctx, p, workspaceID, g, w)
+		return s.authorizeWrite(ctx, adm.principal, workspaceID, g, w)
 	}, g
 }
 
 // readGate resolves the read filters for an in-process read and returns the
 // per-row visibility predicate the transaction applies. A nil predicate means
 // everything live is visible, which is what a Trusted call gets.
+//
+// bind must run first inside the read transaction: it resolves the caller's
+// access in the access model from that snapshot. It is never nil.
 //
 // It reuses the same rowEmitter that pull, bootstrap and the Query RPC classify
 // rows through, so "visible" means one thing across every read path rather than
@@ -113,22 +130,28 @@ func (s *Server) writeAuthorizer(
 // may touch any entity, so there is nothing narrower to warm. That costs one
 // ReadFilter call per registered entity per View/Apply; the hook is contractually
 // a cached lookup, which is what keeps it cheap.
-func (s *Server) readGate(ctx context.Context, workspaceID string, enforced bool) (func(storage.Row) (bool, error), error) {
+func (s *Server) readGate(
+	ctx context.Context,
+	workspaceID string,
+	adm admission,
+	enforced bool,
+) (visible func(storage.Row) (bool, error), bind func(storage.ReadTx) error, err error) {
 	if !enforced {
-		return nil, nil
+		return nil, func(storage.ReadTx) error { return nil }, nil
 	}
 	emitter, err := newRowEmitter(ctx, s, workspaceID, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	emitter.caller = adm.caller
 	// In-process reads are a READ path: an app handler that scans a server-only
 	// entity asked for it by name, and withholding it here would only make the
 	// entity unreadable from the process that owns it. The read filter it
 	// carries still applies.
 	emitter.includeServerOnly = true
 	for _, name := range s.catalogPtr().entityNames() {
-		if _, err := emitter.filterOf(name); err != nil {
-			return nil, err
+		if _, err := emitter.appFilterOf(name); err != nil {
+			return nil, nil, err
 		}
 	}
 	return func(row storage.Row) (bool, error) {
@@ -137,5 +160,5 @@ func (s *Server) readGate(ctx context.Context, workspaceID string, enforced bool
 			return false, err
 		}
 		return class == rowVisible, nil
-	}, nil
+	}, emitter.bindAccess, nil
 }

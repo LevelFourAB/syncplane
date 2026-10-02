@@ -1474,6 +1474,28 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 `entity()` throws on the rules that concern one entity. The server checks the rules that span entities when the schema is registered.
 See [Access model](proto-options.md#access-model).
 
+#### Predicting permissions
+
+```ts
+type CanAnswer = 'yes' | 'no' | 'unknown';
+
+client.can(schema, key, permission): Promise<CanAnswer>;
+client.ws(id).can(schema, key, permission): Promise<CanAnswer>;
+client.onAccessChange((workspaceId) => { ... }): () => void;
+```
+
+`can` predicts whether the caller holds `permission` at a row: at the workspace root, at the row itself, or at the row its access parent points at. It answers from the `CallerAccess` summary the server sends when the caller's grants change; the client stores it with the cursor, so it survives a restart.
+
+| Answer      | When                                                                                                                                                                                 |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `'yes'`     | The summary holds the permission at the root, the row, or the row's access parent.                                                                                                   |
+| `'no'`      | It does not, and the client holds the row, or the row's entity has no access parent.                                                                                                 |
+| `'unknown'` | No summary has arrived, the answer depends on the access parent of a row the client does not hold, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+
+The answer is advisory. The client does not refuse writes from it: every write is queued, and a write the server refuses comes back as a rejection ack. A row the caller lost access to keeps showing a pending local write until that ack arrives.
+
+`onAccessChange` calls back with the workspace id when a new summary is stored, by this tab or another tab sharing the store. The React hook `useCan(schema, key, permission, opts?)` follows the answer.
+
 ### Schema compilation: defineSchema
 
 ```ts
@@ -1581,6 +1603,7 @@ interface ReactSync<E> {
 	db: ReactEntityApis<E>;
 	useSyncStatus: typeof useSyncStatus;
 	useWorkspaceStatus: typeof useWorkspaceStatus;
+	useCan: typeof useCan;
 	useUndo: typeof useUndo;
 }
 ```
@@ -1823,6 +1846,11 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   once the row has synced, so a document outside the declared subscriptions
   can be edited without a scope change.
 
+- **`useCan(schema, key, permission, opts?)`** — `client.can` as a hook: re-renders
+  when the row changes, when a new access summary arrives, and when the sync status
+  changes. `'unknown'` until the first answer resolves. See
+  [Predicting permissions](#predicting-permissions).
+
 - **`useSyncStatus()`** — the live account-wide status object.
   **`useWorkspaceStatus(opts?)`** — one workspace's slice of it (its pending
   count, scope, access verdict and first-snapshot progress), which a busy
@@ -1985,7 +2013,7 @@ Exported functions and types:
 - `createTestClient(opts: TestClientOptions): Promise<TestClient>`: Returns an instance configured with an in-memory server.
 - `createTestServer(opts?: TestServerOptions): TestServer`: Creates a shared in-memory sync server.
 - `TestClient`: Implements `client`, `db`, `server`, `net` (`offline()`, `online()`, `isOffline`), `clientId`, `rejections`, `sync()`, and `close()`.
-- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `restore(id)`, `mutator(name, m)`, and data inspection helpers (`put`, `del`, `get`, `rows`).
+- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` sets the access summary every later bootstrap and pull carries, which `can` and `useCan` answer from; the test server enforces none of it.
 - `Rejection`: Error class thrown inside test mutators to simulate server rejections.
 - `DEFAULT_WORKSPACE`: Constant string `'main'`.
 

@@ -137,14 +137,15 @@ func (s *Server) apply(
 	if inWriteTx(ctx) {
 		return WriteOutcome{}, fmt.Errorf("server: Apply called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
-	p, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gate(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
+	p := adm.principal
 	if key != "" {
 		key = ledgerKey(p, enforced, key)
 	}
-	visible, err := s.readGate(ctx, workspaceID, enforced)
+	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
@@ -157,6 +158,9 @@ func (s *Server) apply(
 		replay *storage.IdempotencyRecord
 	)
 	err = s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		if err := bind(tx); err != nil {
+			return err
+		}
 		atx.tx = tx
 		if key != "" {
 			// Cheap early-out for a retry whose key is already claimed: skip fn
@@ -189,7 +193,7 @@ func (s *Server) apply(
 	// rejection here means nothing is applied — the writes were never opened.
 	// The gate outlives this pass: phase 3 reads the protected fields and row
 	// checks it resolved here rather than calling the hooks under the write lock.
-	gate := s.newWriteGate(ctx, p, workspaceID, enforced)
+	gate := s.newWriteGate(ctx, adm, workspaceID, enforced)
 	if enforced {
 		for _, in := range atx.intents {
 			if err := s.authorizeWrite(ctx, p, workspaceID, gate, Write{Crud: in.crud()}); err != nil {
@@ -230,7 +234,8 @@ func (s *Server) apply(
 		// re-running the hook here would put it back under the write lock. The
 		// write gate does travel, warm: the PUT carry-over and the row check
 		// need the stored row, which only this transaction reads.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor}
+		gate.accessOf().invalidate()
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf()}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err

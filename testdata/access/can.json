@@ -1,0 +1,131 @@
+{
+	"comment": "Shared conformance vectors for the access model's permission decision: engine/server/accesswrite.go (accessSet.holdsUnder) and client/src/access.ts (canAt) must reach the same verdict on every case both can decide. A caller holds a permission at a row when it holds it at the workspace root, at the row itself, or at the row the row's access_parent reference names. `access` maps each permission the caller holds to where: `root` for the workspace root, `anchors` as entity name to row keys; null means no summary has reached the client, which only the client can be missing. `parent` is what the row's access_parent names: an object for a row below another row, null for a row whose entity has no access parent or whose reference is unset, and the string \"unknown\" for a row the client does not hold, which the server never lacks. `want` is \"yes\", \"no\" or \"unknown\"; the engine checks the cases whose `access` is not null and whose `parent` is not \"unknown\", where \"yes\" means it holds the permission.",
+	"cases": [
+		{
+			"name": "a permission held at the root reaches every row",
+			"access": { "view_tasks": { "root": true } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "yes"
+		},
+		{
+			"name": "the root reaches a row with no parent",
+			"access": { "view_tasks": { "root": true } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": null,
+			"want": "yes"
+		},
+		{
+			"name": "the root reaches a row the client does not hold",
+			"access": { "view_tasks": { "root": true } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": "unknown",
+			"want": "yes"
+		},
+		{
+			"name": "a permission held at the parent reaches the row",
+			"access": { "view_tasks": { "anchors": { "project": ["p1"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "yes"
+		},
+		{
+			"name": "a permission held at another parent does not",
+			"access": { "view_tasks": { "anchors": { "project": ["p2"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "no"
+		},
+		{
+			"name": "a permission held at the row itself reaches it",
+			"access": { "view_projects": { "anchors": { "project": ["p1"] } } },
+			"permission": "view_projects",
+			"entity": "project",
+			"key": "p1",
+			"parent": null,
+			"want": "yes"
+		},
+		{
+			"name": "an unset parent never falls back to the root",
+			"access": { "view_tasks": { "anchors": { "project": ["p1"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": null,
+			"want": "no"
+		},
+		{
+			"name": "an anchor of another entity with the same key does not reach the row",
+			"access": { "view_tasks": { "anchors": { "label": ["p1"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "no"
+		},
+		{
+			"name": "another permission held at the parent does not count",
+			"access": { "view_tasks": { "anchors": { "project": ["p1"] } } },
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "no"
+		},
+		{
+			"name": "a permission held nowhere answers no",
+			"access": {},
+			"permission": "edit_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "no"
+		},
+		{
+			"name": "a row the client does not hold is unknown when only a parent could reach it",
+			"access": { "view_tasks": { "anchors": { "project": ["p1"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": "unknown",
+			"want": "unknown"
+		},
+		{
+			"name": "a row anchor answers even for a row the client does not hold",
+			"access": { "view_projects": { "anchors": { "project": ["p1"] } } },
+			"permission": "view_projects",
+			"entity": "project",
+			"key": "p1",
+			"parent": "unknown",
+			"want": "yes"
+		},
+		{
+			"name": "no summary is unknown",
+			"access": null,
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "p1" },
+			"want": "unknown"
+		},
+		{
+			"name": "composite keys compare whole",
+			"access": { "view_tasks": { "anchors": { "project": ["a/b"] } } },
+			"permission": "view_tasks",
+			"entity": "task",
+			"key": "t1",
+			"parent": { "entity": "project", "key": "a/b" },
+			"want": "yes"
+		}
+	]
+}

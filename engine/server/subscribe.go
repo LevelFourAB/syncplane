@@ -274,7 +274,8 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool, sparseCursor bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
 	ws := want.GetWorkspaceId()
 
-	principal, err := s.enterWorkspace(ctx, ws)
+	adm, err := s.enterWorkspace(ctx, ws)
+	principal := adm.principal
 	if err != nil {
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return nil, syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED, err
@@ -297,6 +298,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
 	emitter.noDeltaEntities = noDeltas
+	emitter.caller = adm.caller
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
@@ -341,6 +343,7 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 		return err
 	}
 	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
+	emitter.caller = sc.emitter.caller
 	if err := emitter.warmFilters(); err != nil {
 		return err
 	}
@@ -372,8 +375,11 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 		if !sc.live {
 			continue
 		}
-		_, err := s.enterWorkspace(ctx, sc.ws)
+		adm, err := s.enterWorkspace(ctx, sc.ws)
 		if err == nil {
+			// The hooks may answer differently now, and the next drain binds
+			// the caller's access from what they say.
+			sc.emitter.caller = adm.caller
 			continue
 		}
 		reason := syncplanev1.WorkspaceDropped_REASON_ERROR
@@ -439,7 +445,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		var reason resetReason
 		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
-			page, next, reason, e = s.servePullPage(tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
+			page, next, reason, e = s.servePullPage(ctx, tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
 			return e
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.
@@ -453,7 +459,9 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		sc.rawCursor = page.GetNextCursor()
 		last := !page.GetHasMore()
 		hasRows := len(page.GetPatch().GetChanges()) > 0 || len(page.GetPatch().GetDropEntities()) > 0
-		if hasRows || (keepalive && last) {
+		// sc.cur now records that the client holds this CallerAccess, so a page
+		// carrying one goes out even without rows, or no later page resends it.
+		if hasRows || page.GetCallerAccess() != nil || (keepalive && last) {
 			// The scope carries its own position, so the cursor on the frame is
 			// the client's resume point and nothing else — it can be left off
 			// when it would cost more than the re-delivery it saves.

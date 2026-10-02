@@ -424,6 +424,51 @@ func (x *Note) GetBody() string {
 	return ""
 }
 
+// The args of the test mutators that act on one task.
+type TaskArgs struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	TaskId        string                 `protobuf:"bytes,1,opt,name=task_id,json=taskId,proto3" json:"task_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TaskArgs) Reset() {
+	*x = TaskArgs{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TaskArgs) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TaskArgs) ProtoMessage() {}
+
+func (x *TaskArgs) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TaskArgs.ProtoReflect.Descriptor instead.
+func (*TaskArgs) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *TaskArgs) GetTaskId() string {
+	if x != nil {
+		return x.TaskId
+	}
+	return ""
+}
+
 // A grant entity whose role field is an enum. Registered on its own with
 // Team, apart from the org schema above.
 type TeamMember struct {
@@ -438,7 +483,7 @@ type TeamMember struct {
 
 func (x *TeamMember) Reset() {
 	*x = TeamMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -450,7 +495,7 @@ func (x *TeamMember) String() string {
 func (*TeamMember) ProtoMessage() {}
 
 func (x *TeamMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -463,7 +508,7 @@ func (x *TeamMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamMember.ProtoReflect.Descriptor instead.
 func (*TeamMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *TeamMember) GetId() string {
@@ -503,7 +548,7 @@ type Team struct {
 
 func (x *Team) Reset() {
 	*x = Team{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -515,7 +560,7 @@ func (x *Team) String() string {
 func (*Team) ProtoMessage() {}
 
 func (x *Team) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -528,7 +573,7 @@ func (x *Team) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Team.ProtoReflect.Descriptor instead.
 func (*Team) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Team) GetId() string {
@@ -561,18 +606,24 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name:1\xa2\xbb\x18-\n" +
 	"\aproject\x12\x02idR\x1e\n" +
-	"\rview_projects\x12\redit_projects\"\xe5\x02\n" +
+	"\rview_projects\x12\redit_projects\"\xa0\x04\n" +
 	"\rProjectMember\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
 	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xcd\x01\xa2\xbb\x18\xc8\x01\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\x88\x03\xa2\xbb\x18\x83\x03\n" +
 	"\x0eproject_member\x12\x02idR\x1e\n" +
-	"\fview_members\x12\x0emanage_membersZ\x91\x01\n" +
+	"\fview_members\x12\x0emanage_membersZ\xcc\x02\n" +
 	"\auser_id\x12\x04role\x1a9\n" +
 	"\x0eproject_reader\x12\rview_projects\x12\fview_members\x12\n" +
 	"view_tasks\x1aE\n" +
 	"\x0eproject_writer\x12\rview_projects\x12\fview_members\x12\n" +
+	"view_tasks\x12\n" +
+	"edit_tasks\x1aT\n" +
+	"\rproject_admin\x12\rview_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
+	"view_tasks\x12\n" +
+	"edit_tasks\x1ac\n" +
+	"\rproject_owner\x12\rview_projects\x12\redit_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
 	"view_tasks\x12\n" +
 	"edit_tasks\"\x9f\x01\n" +
 	"\x04Task\x12\x0e\n" +
@@ -591,7 +642,9 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04Note\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04body\x18\x02 \x01(\tR\x04body:\x12\xa2\xbb\x18\x0e\n" +
-	"\x04note\x12\x02idR\x02\x18\x01\"\xbc\x02\n" +
+	"\x04note\x12\x02idR\x02\x18\x01\"#\n" +
+	"\bTaskArgs\x12\x17\n" +
+	"\atask_id\x18\x01 \x01(\tR\x06taskId\"\xbc\x02\n" +
 	"\n" +
 	"TeamMember\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
@@ -625,7 +678,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 8)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
@@ -634,13 +687,14 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Task)(nil),          // 4: syncplane.testdata.access.v1.Task
 	(*Label)(nil),         // 5: syncplane.testdata.access.v1.Label
 	(*Note)(nil),          // 6: syncplane.testdata.access.v1.Note
-	(*TeamMember)(nil),    // 7: syncplane.testdata.access.v1.TeamMember
-	(*Team)(nil),          // 8: syncplane.testdata.access.v1.Team
+	(*TaskArgs)(nil),      // 7: syncplane.testdata.access.v1.TaskArgs
+	(*TeamMember)(nil),    // 8: syncplane.testdata.access.v1.TeamMember
+	(*Team)(nil),          // 9: syncplane.testdata.access.v1.Team
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2, // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
 	2, // 1: syncplane.testdata.access.v1.Task.project:type_name -> syncplane.testdata.access.v1.Project
-	8, // 2: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
+	9, // 2: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
 	0, // 3: syncplane.testdata.access.v1.TeamMember.role:type_name -> syncplane.testdata.access.v1.TeamRole
 	4, // [4:4] is the sub-list for method output_type
 	4, // [4:4] is the sub-list for method input_type
@@ -660,7 +714,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   8,
+			NumMessages:   9,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
