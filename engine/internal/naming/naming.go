@@ -104,6 +104,20 @@ func ValidateRelationName(name string) error {
 	return validateIdentifier("reverse relation name", name)
 }
 
+// ValidatePermissionName checks a permission name of the access model —
+// (syncplane.v1.entity).access.read and .write, and the grants of a role. It
+// follows the entity-name rule: an ASCII letter or underscore followed by
+// letters, digits or underscores, at most MaxEntityNameLength of them.
+func ValidatePermissionName(name string) error {
+	return validateIdentifier("permission name", name)
+}
+
+// ValidateRoleName checks a role name of the access model —
+// (syncplane.v1.entity).grant.roles[].name. It follows the entity-name rule.
+func ValidateRoleName(name string) error {
+	return validateIdentifier("role name", name)
+}
+
 // validateIdentifier applies the identifier rule entity and relation names
 // share; what names the value in its errors.
 func validateIdentifier(what, name string) error {

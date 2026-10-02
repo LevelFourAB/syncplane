@@ -10,7 +10,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/admin.proto.
  */
 export const file_syncplane_v1_admin: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvYWRtaW4ucHJvdG8SDHN5bmNwbGFuZS52MSJUCg9SZWdpc3RlclJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhYKDmRlc2NyaXB0b3Jfc2V0GAIgASgMEhkKEWV4cGVjdGVkX3JldmlzaW9uGAMgASgJImgKEFJlZ2lzdGVyUmVzcG9uc2USEAoIcmV2aXNpb24YASABKAkSLAoGc3RhdHVzGAIgASgOMhwuc3luY3BsYW5lLnYxLlJlZ2lzdGVyU3RhdHVzEhQKDGVudGl0eV9uYW1lcxgDIAMoCSIiChBHZXRTY2hlbWFSZXF1ZXN0Eg4KBmFwcF9pZBgBIAEoCSJMChFHZXRTY2hlbWFSZXNwb25zZRIWCg5kZXNjcmlwdG9yX3NldBgBIAEoDBIQCghyZXZpc2lvbhgCIAEoCRINCgVmb3VuZBgDIAEoCCqKAQoOUmVnaXN0ZXJTdGF0dXMSHwobUkVHSVNURVJfU1RBVFVTX1VOU1BFQ0lGSUVEEAASGwoXUkVHSVNURVJfU1RBVFVTX0NSRUFURUQQARIbChdSRUdJU1RFUl9TVEFUVVNfVVBEQVRFRBACEh0KGVJFR0lTVEVSX1NUQVRVU19VTkNIQU5HRUQQAzKnAQoMQWRtaW5TZXJ2aWNlEkkKCFJlZ2lzdGVyEh0uc3luY3BsYW5lLnYxLlJlZ2lzdGVyUmVxdWVzdBoeLnN5bmNwbGFuZS52MS5SZWdpc3RlclJlc3BvbnNlEkwKCUdldFNjaGVtYRIeLnN5bmNwbGFuZS52MS5HZXRTY2hlbWFSZXF1ZXN0Gh8uc3luY3BsYW5lLnYxLkdldFNjaGVtYVJlc3BvbnNlQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM");
+  fileDesc("ChhzeW5jcGxhbmUvdjEvYWRtaW4ucHJvdG8SDHN5bmNwbGFuZS52MSJxCg9SZWdpc3RlclJlcXVlc3QSDgoGYXBwX2lkGAEgASgJEhYKDmRlc2NyaXB0b3Jfc2V0GAIgASgMEhkKEWV4cGVjdGVkX3JldmlzaW9uGAMgASgJEhsKE2FsbG93X2FjY2Vzc19jaGFuZ2UYBCABKAgiaAoQUmVnaXN0ZXJSZXNwb25zZRIQCghyZXZpc2lvbhgBIAEoCRIsCgZzdGF0dXMYAiABKA4yHC5zeW5jcGxhbmUudjEuUmVnaXN0ZXJTdGF0dXMSFAoMZW50aXR5X25hbWVzGAMgAygJIiIKEEdldFNjaGVtYVJlcXVlc3QSDgoGYXBwX2lkGAEgASgJIkwKEUdldFNjaGVtYVJlc3BvbnNlEhYKDmRlc2NyaXB0b3Jfc2V0GAEgASgMEhAKCHJldmlzaW9uGAIgASgJEg0KBWZvdW5kGAMgASgIKooBCg5SZWdpc3RlclN0YXR1cxIfChtSRUdJU1RFUl9TVEFUVVNfVU5TUEVDSUZJRUQQABIbChdSRUdJU1RFUl9TVEFUVVNfQ1JFQVRFRBABEhsKF1JFR0lTVEVSX1NUQVRVU19VUERBVEVEEAISHQoZUkVHSVNURVJfU1RBVFVTX1VOQ0hBTkdFRBADMqcBCgxBZG1pblNlcnZpY2USSQoIUmVnaXN0ZXISHS5zeW5jcGxhbmUudjEuUmVnaXN0ZXJSZXF1ZXN0Gh4uc3luY3BsYW5lLnYxLlJlZ2lzdGVyUmVzcG9uc2USTAoJR2V0U2NoZW1hEh4uc3luY3BsYW5lLnYxLkdldFNjaGVtYVJlcXVlc3QaHy5zeW5jcGxhbmUudjEuR2V0U2NoZW1hUmVzcG9uc2VCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw");
 
 /**
  * Request message for registering or updating an application schema.
@@ -50,6 +50,19 @@ export type RegisterRequest = Message<"syncplane.v1.RegisterRequest"> & {
    * @generated from field: string expected_revision = 3;
    */
   expectedRevision: string;
+
+  /**
+   * Allows the registration to change the access model of an entity that is
+   * already registered: its `access`, `grant` or `access_parent` options, or
+   * the names of the enum values its role field matches.
+   *
+   * If `false`, the server rejects such a change with
+   * `FAILED_PRECONDITION`. A change makes every client resync the affected
+   * rows.
+   *
+   * @generated from field: bool allow_access_change = 4;
+   */
+  allowAccessChange: boolean;
 };
 
 /**

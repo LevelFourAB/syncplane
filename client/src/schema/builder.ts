@@ -55,6 +55,8 @@ import {
 } from '@bufbuild/protobuf/wkt';
 
 import {
+	AccessOptionsSchema,
+	AccessParentOptionsSchema,
 	CreatePolicy,
 	DeletePolicy,
 	entity as entityExt,
@@ -63,15 +65,22 @@ import {
 	FieldBehaviorSchema,
 	FieldWritePolicy,
 	file_syncplane_v1_options,
+	GrantOptionsSchema,
 	IndexKeySchema,
 	IndexSpecSchema,
 	reference as referenceExt,
 	ReferenceOptionsSchema,
+	RoleSchema,
 	SearchFieldSchema,
 	SearchSpecSchema,
 	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
-import { validateEntityName, validateRelationName } from '../naming.js';
+import {
+	validateEntityName,
+	validatePermissionName,
+	validateRelationName,
+	validateRoleName,
+} from '../naming.js';
 
 /**
  * Package the synthesized messages live in. Matches engine/server/dynamic.go's
@@ -168,6 +177,8 @@ interface FieldSpec {
 	protectedField?: boolean;
 	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
 	reverseRelation?: string;
+	/** kind 'ref' — place each row below the referenced row; see Field.accessParent. */
+	accessParent?: boolean;
 }
 
 /**
@@ -357,6 +368,31 @@ export class Field<T> {
 		}
 		validateRelationName(name, 'reverseRelation()');
 		return new Field<T>({ ...this.spec, reverseRelation: name });
+	}
+
+	/**
+	 * Places each row below the row this reference points at in the access
+	 * model: a permission held at the referenced row applies to this row. An
+	 * entity has at most one access parent, and must declare `access` with
+	 * `read` and `write`; see {@link EntityOptions.access}.
+	 *
+	 * Throws unless the field is a singular `ref()`. The server also refuses
+	 * the mark on a protected field, and when the referenced entity has an
+	 * access parent of its own.
+	 *
+	 * @example
+	 * ```ts
+	 * const task = schema.entity('task', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project).accessParent(),
+	 * }, { access: { read: 'view_tasks', write: 'edit_tasks' } });
+	 * ```
+	 */
+	accessParent(): Field<T> {
+		if (this.spec.kind !== 'ref' || this.spec.repeated || this.spec.refWorkspace) {
+			throw new Error('accessParent() is only valid on a ref() field');
+		}
+		return new Field<T>({ ...this.spec, accessParent: true });
 	}
 }
 
@@ -594,6 +630,10 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly updatePolicy: PolicyDecl;
 	/** Who may delete rows of this entity; see {@link EntityOptions.deletePolicy}. */
 	readonly deletePolicy: PolicyDecl;
+	/** The entity's place in the access model; see {@link EntityOptions.access}. */
+	readonly access?: AccessDecl;
+	/** The roles the entity's rows grant; see {@link EntityOptions.grant}. */
+	readonly grant?: GrantDecl;
 	/** @internal synthesized proto full name, e.g. "sync.dynamic.Todo". */
 	readonly typeName: string;
 }
@@ -610,6 +650,39 @@ export interface EntitySchema<F extends Fields = Fields> {
  * rows are covered by the verdict on the invocation.
  */
 export type PolicyDecl = 'allow' | 'trustedOnly';
+
+/**
+ * An entity's place in the access model, mirroring syncplane.v1.AccessOptions:
+ * the permission a caller must hold to read rows, and the one to create,
+ * update and delete them, or `unrestricted` for an entity outside the model.
+ *
+ * A caller holds a permission at an anchor — the workspace root, or the row a
+ * grant row's access parent points at — and it applies to the anchor row and
+ * to the rows whose `.accessParent()` reference points at it.
+ */
+export type AccessDecl = { read: string; write: string } | { unrestricted: true };
+
+/**
+ * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
+ * row gives the subject in its `subject` field the role in its `role` field,
+ * at the row its `.accessParent()` reference points at, or at the workspace
+ * root when the entity has no access parent.
+ */
+export interface GrantDecl {
+	/** Accessor name of the `text()` field that holds the subject. */
+	subject: string;
+	/** Accessor name of the `text()` field that holds the role. */
+	role: string;
+	/** The roles rows can grant. At least one, with names unique across the schema. */
+	roles: RoleDecl[];
+}
+
+/** One role of a {@link GrantDecl}, mirroring syncplane.v1.Role. */
+export interface RoleDecl {
+	name: string;
+	/** The permissions the role grants at its anchor. At least one. */
+	grants: string[];
+}
 
 /** Alias of {@link PolicyDecl}, kept for the `deletePolicy` option it was named for. */
 export type DeletePolicyDecl = PolicyDecl;
@@ -690,11 +763,14 @@ export function entity<F extends Fields>(
 
 	const indexes = options?.indexes ?? [];
 	assertIndexes(name, indexes);
+	assertAccess(name, fields, options);
 	return {
 		name,
 		fields,
 		indexes,
 		...(options?.search === undefined ? {} : { search: options.search }),
+		...(options?.access === undefined ? {} : { access: options.access }),
+		...(options?.grant === undefined ? {} : { grant: options.grant }),
 		createPolicy: options?.createPolicy ?? 'allow',
 		updatePolicy: options?.updatePolicy ?? 'allow',
 		deletePolicy: options?.deletePolicy ?? 'allow',
@@ -764,6 +840,114 @@ export interface EntityOptions {
 	 * cannot have its text edited by clients while this is `'trustedOnly'`.
 	 */
 	updatePolicy?: PolicyDecl;
+	/**
+	 * The permissions that govern rows of this entity in the access model.
+	 *
+	 * A caller can read a row when it holds `read` at the workspace root, at
+	 * the row itself, or at the row the row's `.accessParent()` reference
+	 * points at, and the same holds for `write`. In a schema where any entity
+	 * declares `access` or `grant`, every entity must declare `access`, and the
+	 * server refuses a schema where one does not.
+	 *
+	 * Permission names follow the identifier rule in docs/reference/naming.md.
+	 * The server refuses a permission no role grants, and a role that grants a
+	 * permission no entity uses.
+	 */
+	access?: AccessDecl;
+	/**
+	 * Declares the entity's rows as grant rows; see {@link GrantDecl}. A grant
+	 * entity must also declare `access` with `read` and `write`.
+	 *
+	 * @example
+	 * ```ts
+	 * const projectMember = schema.entity('project_member', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project).accessParent(),
+	 *   userId: schema.text(),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: {
+	 *     subject: 'userId',
+	 *     role: 'role',
+	 *     roles: [
+	 *       { name: 'project_reader', grants: ['view_projects', 'view_tasks'] },
+	 *       { name: 'project_writer', grants: ['view_projects', 'view_tasks', 'edit_tasks'] },
+	 *     ],
+	 *   },
+	 *   access: { read: 'view_members', write: 'manage_members' },
+	 * });
+	 * ```
+	 */
+	grant?: GrantDecl;
+}
+
+/**
+ * Validates the access declarations of one entity against the rules the
+ * engine enforces on one entity at registration. The rules that span entities
+ * — coverage of permissions, unique role names, the parent's own place in the
+ * model — need the whole schema, which only registration has.
+ */
+function assertAccess(
+	entityName: string,
+	fields: Fields,
+	options: EntityOptions | undefined,
+): void {
+	const where = `entity "${entityName}"`;
+	const access = options?.access;
+	if (access !== undefined && !('unrestricted' in access)) {
+		validatePermissionName(access.read, `${where} access.read`);
+		validatePermissionName(access.write, `${where} access.write`);
+	}
+	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
+	if (parents.length > 1) {
+		throw new Error(
+			`${where}: fields "${parents[0]}" and "${parents[1]}" are both marked accessParent()`,
+		);
+	}
+	if (parents.length > 0 && (access === undefined || 'unrestricted' in access)) {
+		throw new Error(
+			`${where}: field "${
+				parents[0]
+			}" is marked accessParent(), but the entity declares no read and write access`,
+		);
+	}
+	const grant = options?.grant;
+	if (grant === undefined) return;
+	if (access === undefined || 'unrestricted' in access) {
+		throw new Error(`${where}: a grant entity must declare access with read and write`);
+	}
+	for (const part of [ 'subject', 'role' ] as const) {
+		const spec = fields[grant[part]]?.spec;
+		if (spec === undefined) {
+			throw new Error(`${where}: grant ${part} field "${grant[part]}" is not declared`);
+		}
+		if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+			throw new Error(
+				`${where}: grant ${part} field "${grant[part]}" must be a singular text() field`,
+			);
+		}
+	}
+	if (grant.subject === grant.role) {
+		throw new Error(`${where}: grant names field "${grant.subject}" as both subject and role`);
+	}
+	if (grant.roles.length === 0) throw new Error(`${where}: grant declares no roles`);
+	const names = new Set<string>();
+	for (const role of grant.roles) {
+		validateRoleName(role.name, `${where} grant`);
+		if (names.has(role.name)) throw new Error(`${where}: grant declares role "${role.name}" twice`);
+		names.add(role.name);
+		if (role.grants.length === 0) {
+			throw new Error(`${where}: grant role "${role.name}" grants no permissions`);
+		}
+		const perms = new Set<string>();
+		for (const perm of role.grants) {
+			validatePermissionName(perm, `${where} grant role "${role.name}"`);
+			if (perms.has(perm)) {
+				throw new Error(`${where}: grant role "${role.name}" grants "${perm}" twice`);
+			}
+			perms.add(perm);
+		}
+	}
 }
 
 /**
@@ -941,6 +1125,19 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 			deletePolicy: e.deletePolicy === 'trustedOnly'
 				? DeletePolicy.TRUSTED_ONLY
 				: DeletePolicy.ALLOW,
+			...(e.access === undefined ? {} : {
+				access: 'unrestricted' in e.access
+					? create(AccessOptionsSchema, { unrestricted: true })
+					: create(AccessOptionsSchema, { read: e.access.read, write: e.access.write }),
+			}),
+			...(e.grant === undefined ? {} : {
+				grant: create(GrantOptionsSchema, {
+					// Accessor names lower to proto names, as a key field's does.
+					subject: snakeCase(e.grant.subject),
+					role: snakeCase(e.grant.role),
+					roles: e.grant.roles.map((r) => create(RoleSchema, { name: r.name, grants: r.grants })),
+				}),
+			}),
 			// Paths are written in accessor names and lowered to proto names
 			// here, which is the same translation a query path takes on the way
 			// to the wire — so an index and a query naming one field agree.
@@ -1203,11 +1400,11 @@ function setWritePolicy(field: FieldDescriptorProto, spec: FieldSpec): void {
 
 /**
  * Sets the (syncplane.v1.field_behavior) marks a reference field carries: its
- * write policy and its reverse relation's name. No-op when neither is set, for
- * the reason setWritePolicy gives.
+ * write policy, its reverse relation's name and its access-parent mark. No-op
+ * when none is set, for the reason setWritePolicy gives.
  */
 function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (!spec.protectedField && spec.reverseRelation === undefined) return;
+	if (!spec.protectedField && spec.reverseRelation === undefined && !spec.accessParent) return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
@@ -1215,6 +1412,7 @@ function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 		create(FieldBehaviorSchema, {
 			writePolicy: writePolicyOf(spec.protectedField),
 			reverseRelation: spec.reverseRelation ?? '',
+			...(spec.accessParent ? { accessParent: create(AccessParentOptionsSchema) } : {}),
 		}),
 	);
 	field.options = fieldOptions;

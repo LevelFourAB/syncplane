@@ -278,3 +278,67 @@ describe('runtime app schema registration', () => {
 		await a.close();
 	});
 });
+
+// The access-model declarations are lowered by the builder and judged by the
+// engine, so only a round trip shows that the two agree on what was declared.
+describe('runtime registration of an access-model schema', () => {
+	function makeAccessBundle(opts: { orgViewerRole?: boolean; unusedGrant?: boolean } = {}) {
+		const project = entity('project', { id: text().key(), name: text() }, {
+			access: { read: 'view_projects', write: 'edit_projects' },
+		});
+		const orgMember = entity('org_member', { id: text().key(), userId: text(), role: text() }, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [
+					{
+						name: 'org_admin',
+						grants: [
+							'view_members',
+							'manage_members',
+							'view_projects',
+							'edit_projects',
+							'view_tasks',
+							'edit_tasks',
+							...(opts.unusedGrant ? [ 'delete_org' ] : []),
+						],
+					},
+					...(opts.orgViewerRole ? [ { name: 'org_viewer', grants: [ 'view_tasks' ] } ] : []),
+				],
+			},
+			access: { read: 'view_members', write: 'manage_members' },
+		});
+		const task = entity('task', { id: text().key(), project: ref(() => project).accessParent() }, {
+			access: { read: 'view_tasks', write: 'edit_tasks' },
+		});
+		const label = entity('label', { id: text().key() }, { access: { unrestricted: true } });
+		return defineSchema(project, orgMember, task, label);
+	}
+
+	it('registers a schema that uses the access model', async () => {
+		const res = await registerSchema(adminTransport(), 'access-ok', makeAccessBundle(), {
+			token: TOKEN,
+		});
+		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
+	});
+
+	it('refuses a role that grants a permission no entity uses', async () => {
+		await expect(
+			registerSchema(adminTransport(), 'access-unused', makeAccessBundle({ unusedGrant: true }), {
+				token: TOKEN,
+			}),
+		).rejects.toThrow(/grants permission "delete_org", which no entity uses/);
+	});
+
+	it("changes an entity's access model only when the registration allows it", async () => {
+		await registerSchema(adminTransport(), 'access-evolve', makeAccessBundle(), { token: TOKEN });
+		const changed = makeAccessBundle({ orgViewerRole: true });
+		await expect(registerSchema(adminTransport(), 'access-evolve', changed, { token: TOKEN }))
+			.rejects.toThrow(/entity "org_member" changes its access model/);
+		const res = await registerSchema(adminTransport(), 'access-evolve', changed, {
+			token: TOKEN,
+			allowAccessChange: true,
+		});
+		expect(res.entityNames).toContain('org_member');
+	});
+});

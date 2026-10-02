@@ -1439,6 +1439,41 @@ Calling `put` ignores the incoming protected field value and preserves the exist
 Key fields cannot be protected.
 See [Protected fields](proto-options.md#protected-fields).
 
+### Access model
+
+The `access` and `grant` entity options and the `.accessParent()` field mark declare who can read and write rows:
+
+```ts
+const project = schema.entity('project', { id: schema.text().key() }, {
+	access: { read: 'view_projects', write: 'edit_projects' },
+});
+
+const projectMember = schema.entity('project_member', {
+	id: schema.text().key(),
+	project: schema.ref(() => project).accessParent(),
+	userId: schema.text(),
+	role: schema.text(),
+}, {
+	grant: {
+		subject: 'userId',
+		role: 'role',
+		roles: [
+			{ name: 'project_reader', grants: [ 'view_projects' ] },
+			{ name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] },
+		],
+	},
+	access: { read: 'view_projects', write: 'edit_projects' },
+});
+
+const label = schema.entity('label', { id: schema.text().key() }, {
+	access: { unrestricted: true },
+});
+```
+
+`grant.subject` and `grant.role` name `text()` fields by accessor name. `.accessParent()` is valid on a singular `ref()` only.
+`entity()` throws on the rules that concern one entity. The server checks the rules that span entities when the schema is registered.
+See [Access model](proto-options.md#access-model).
+
 ### Schema compilation: defineSchema
 
 ```ts
@@ -1462,7 +1497,7 @@ Functions:
 ```ts
 import { fetchSchema, registerSchema } from 'syncplane';
 
-await registerSchema(transport, appId, bundle, { token?, expectedRevision? }): Promise<RegisterResult>;
+await registerSchema(transport, appId, bundle, { token?, expectedRevision?, allowAccessChange? }): Promise<RegisterResult>;
 await fetchSchema(transport, appId): Promise<DescMessage[]>;
 
 interface RegisterResult {

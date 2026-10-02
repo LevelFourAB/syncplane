@@ -399,8 +399,8 @@ type ManagerRegisterResult struct {
 // rejects conflicts) runs first, so a rejected set never reaches storage; an
 // identical set is a no-op and is not re-persisted. It does NOT check the
 // authorizer — that gate lives on the admin RPC, which calls this after
-// admitting the caller.
-func (m *Manager) Register(ctx context.Context, appID string, set []byte) (ManagerRegisterResult, error) {
+// admitting the caller. opts apply as they do to Server.RegisterDescriptorSet.
+func (m *Manager) Register(ctx context.Context, appID string, set []byte, opts ...RegisterOption) (ManagerRegisterResult, error) {
 	if appID == "" {
 		return ManagerRegisterResult{}, fmt.Errorf("server: register needs an app_id")
 	}
@@ -409,7 +409,7 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte) (Manag
 		return ManagerRegisterResult{}, err
 	}
 	prevRev := srv.SchemaRevision()
-	r, err := srv.registerDescriptorSet(set)
+	r, err := srv.registerDescriptorSet(set, opts...)
 	if err != nil {
 		return ManagerRegisterResult{}, err
 	}

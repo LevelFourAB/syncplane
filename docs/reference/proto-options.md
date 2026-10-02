@@ -24,6 +24,8 @@ message Todo {
 | `delete_policy` | Determines who may delete rows of this entity. See [Write policies](#write-policies).               |
 | `server_only`   | When `true`, rows never sync to clients. See [Server-only entities](#server-only-entities).         |
 | `history`       | Configures append-only field history tracking. See [Field history](#field-history).                 |
+| `access`        | Names the permissions that govern rows of this entity. See [Access model](#access-model).           |
+| `grant`         | Declares the rows of this entity as grant rows. See [Access model](#access-model).                  |
 
 The `name` field must be a valid identifier. Each entry in `key_fields` must reference a singular string, integer, boolean, or enum field. For complete syntax and constraints, see [Naming rules](naming.md).
 
@@ -194,6 +196,7 @@ repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] o
 | `write_policy`     | `enum`     | Set to `FIELD_WRITE_POLICY_TRUSTED_ONLY` to restrict field modification to trusted callers while leaving the rest of the row writable. Allowed on top-level fields only. Protects a oneof as a group. Cannot be applied to key fields. See [Protected fields](#protected-fields).                                                                                                                                                                                                                                                                                                   |
 | `workspace`        | `bool`     | Inside a reference message, marks the string field that names the workspace the referenced row lives in. Empty means the holder's own workspace. Valid on one singular `string` field of a message carrying `(syncplane.v1.reference)`. See [References](#references).                                                                                                                                                                                                                                                                                                              |
 | `reverse_relation` | `string`   | Names the reverse relation this reference adds to its target entity. Empty means `<plural(holder entity)>By<Field>`, such as `issuesByAssignee`. Valid on a reference field declared on an entity, including a member of a oneof. See [Reverse relations](#reverse-relations).                                                                                                                                                                                                                                                                                                      |
+| `access_parent`    | `message`  | Places each row below the row this reference points at in the access model. Set it as `access_parent: {}`. See [Access model](#access-model).                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 
 ## References
 
@@ -370,6 +373,120 @@ The TypeScript client validates protected fields locally: `patch()` calls target
 For caller-dependent rules (such as allowing owners to update a field while restricting viewers), configure the server's `FieldPermissions` hook. See [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
 
 Mutator operations are authorized at the invocation level. A mutator can update protected fields when invoked by an authorized caller.
+
+## Access model
+
+Three options declare who can read and write rows: `access` and `grant` on an entity, and `access_parent` on a reference field.
+
+```proto
+// A role on the whole workspace.
+message OrgMember {
+	option (syncplane.v1.entity) = {
+		name: "org_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "org_member" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "org_admin" grants: [ "view_members", "manage_members", "view_projects", "edit_projects", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: { read: "view_members" write: "manage_members" }
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: { read: "view_projects" write: "edit_projects" }
+	};
+	string id = 1;
+}
+
+// A role on one project and the rows below it.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "project_reader" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "project_writer" grants: [ "view_projects", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: { read: "view_members" write: "manage_members" }
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: { read: "view_tasks" write: "edit_tasks" }
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+
+// Outside the model: every caller admitted to the workspace reads and writes it.
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+		access: { unrestricted: true }
+	};
+	string id = 1;
+}
+```
+
+A caller holds a permission at an **anchor**: the workspace root, or one row that a grant row's `access_parent` field points at. A permission held at an anchor applies to the anchor row and to every row whose `access_parent` field points at it.
+
+| Option                         | Field          | Description                                                                                                                                                                                  |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access`                       | `read`         | The permission that lets a caller read rows. Required unless `unrestricted` is set.                                                                                                          |
+| `access`                       | `write`        | The permission that lets a caller create, update and delete rows. Required unless `unrestricted` is set.                                                                                     |
+| `access`                       | `unrestricted` | Puts the entity outside the model: every caller admitted to the workspace reads and writes its rows, subject to the application permission hooks. Cannot be combined with `read` or `write`. |
+| `grant`                        | `subject`      | The name of the field that holds the subject the row grants to: a top-level, singular `string` field outside any oneof.                                                                      |
+| `grant`                        | `role`         | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.      |
+| `grant`                        | `roles`        | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                            |
+| `field_behavior.access_parent` | (none)         | Marks the reference that places each row below another row. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root.                     |
+
+A grant row grants nothing when its subject is empty, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist.
+
+### Registration rules
+
+A schema **uses the access model** when any of its entities declares `access` or `grant`. Registration refuses such a schema when:
+
+- An entity declares no `access`. Declare `access: { unrestricted: true }` for an entity outside the model.
+- An `access` sets `unrestricted` together with a permission, or names only one of `read` and `write`.
+- An entity marks more than one `access_parent` field, or marks one that is repeated, a member of a oneof, nested inside a message field, a workspace-qualified or polymorphic reference, or protected by `write_policy`.
+- An `access_parent` points at an entity that is not registered, is outside the model, or has an `access_parent` of its own.
+- A grant entity does not declare `access` with `read` and `write`.
+- A `grant` names a `subject` or `role` field that does not exist or has the wrong type, declares no roles, declares one role twice, or declares an enum role that is not a value of the enum.
+- A role name is declared by two entities. Role names are unique across the schema.
+- A role grants no permissions, or one permission twice.
+- A permission that an entity names is granted by no role, or a role grants a permission that no entity names.
+- A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
+- The `access`, `grant`, role or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
+
+`RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so a schema it builds can break a rule until its last entity is registered. While it does, every request to the server fails with `failed_precondition`.
+
+Registration logs a warning when one permission governs entities at different depths, such as `view_members` on `OrgMember` (at the workspace root) and on `ProjectMember` (below a project). A role that grants such a permission at the workspace root reaches the rows below every anchor.
+
+### Changing the access model
+
+A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access`, `grant` or `access_parent` options, or to the numbers of the enum values its role field matches. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
 
 ## Secondary indexes
 

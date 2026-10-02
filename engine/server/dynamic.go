@@ -59,6 +59,15 @@ type DynamicEntity struct {
 	CreatePolicy syncplanev1.CreatePolicy
 	UpdatePolicy syncplanev1.UpdatePolicy
 	DeletePolicy syncplanev1.DeletePolicy
+	// Access mirrors (syncplane.v1.entity).access: the permissions that govern
+	// the entity's rows in the access model. Nil declares none. The entity
+	// keeps the pointer, so do not modify it after registration.
+	Access *syncplanev1.AccessOptions
+	// Grant mirrors (syncplane.v1.entity).grant and declares the entity's rows
+	// as grant rows. Nil declares none. A dynamic entity has no enum fields, so
+	// its role field is a string field. The entity keeps the pointer, so do
+	// not modify it after registration.
+	Grant *syncplanev1.GrantOptions
 }
 
 // DynamicIndex is one declared secondary index of a dynamic entity, mirroring
@@ -138,6 +147,11 @@ type DynamicField struct {
 	// compiled path honours). Empty means <plural(entity)>By<Field>, such as
 	// postsByAuthor. Valid only with Ref, on a field of the entity itself.
 	ReverseRelation string
+	// AccessParent places each row below the row this reference points at in
+	// the access model (the same (syncplane.v1.field_behavior).access_parent
+	// the compiled path honours). Valid only with a singular Ref without
+	// RefWorkspace, on a field of the entity itself.
+	AccessParent bool
 	// KeyField names the identity field(s) of a keyed message list (composite
 	// allowed). OrderField names the element's fractional position field,
 	// promoting it to a movable list. Both lower to (syncplane.v1.field_behavior).
@@ -304,6 +318,8 @@ func dynamicEntityProto(
 		CreatePolicy: spec.CreatePolicy,
 		UpdatePolicy: spec.UpdatePolicy,
 		DeletePolicy: spec.DeletePolicy,
+		Access:       spec.Access,
+		Grant:        spec.Grant,
 	})
 	dp.Options = mopts
 
@@ -388,6 +404,9 @@ func dynamicFieldProto(
 	if f.ReverseRelation != "" && !f.isRef() {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: reverse_relation is only valid on a Ref field", ctx, f.Name)
 	}
+	if f.AccessParent && !f.isRef() {
+		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: access_parent is only valid on a Ref field", ctx, f.Name)
+	}
 
 	switch {
 	case f.isMap():
@@ -408,9 +427,13 @@ func dynamicFieldProto(
 			return nil, nil, fmt.Errorf("server: dynamic entity %q field %q references unknown entity %q", ctx, f.Name, f.Ref)
 		}
 		fdp.Type = descriptorpb.FieldDescriptorProto_TYPE_MESSAGE.Enum()
-		if f.ReverseRelation != "" {
+		if f.ReverseRelation != "" || f.AccessParent {
+			b := &syncplanev1.FieldBehavior{ReverseRelation: f.ReverseRelation}
+			if f.AccessParent {
+				b.AccessParent = &syncplanev1.AccessParentOptions{}
+			}
 			fopts := &descriptorpb.FieldOptions{}
-			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, &syncplanev1.FieldBehavior{ReverseRelation: f.ReverseRelation})
+			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, b)
 			fdp.Options = fopts
 		}
 		if f.RefWorkspace {

@@ -100,8 +100,16 @@ type RegisterRequest struct {
 	// unless this value matches the application's current revision. If empty,
 	// the server does not check the revision.
 	ExpectedRevision string `protobuf:"bytes,3,opt,name=expected_revision,json=expectedRevision,proto3" json:"expected_revision,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// Allows the registration to change the access model of an entity that is
+	// already registered: its `access`, `grant` or `access_parent` options, or
+	// the names of the enum values its role field matches.
+	//
+	// If `false`, the server rejects such a change with
+	// `FAILED_PRECONDITION`. A change makes every client resync the affected
+	// rows.
+	AllowAccessChange bool `protobuf:"varint,4,opt,name=allow_access_change,json=allowAccessChange,proto3" json:"allow_access_change,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *RegisterRequest) Reset() {
@@ -153,6 +161,13 @@ func (x *RegisterRequest) GetExpectedRevision() string {
 		return x.ExpectedRevision
 	}
 	return ""
+}
+
+func (x *RegisterRequest) GetAllowAccessChange() bool {
+	if x != nil {
+		return x.AllowAccessChange
+	}
+	return false
 }
 
 // Response message returned after a schema registration request.
@@ -344,11 +359,12 @@ var File_syncplane_v1_admin_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_admin_proto_rawDesc = "" +
 	"\n" +
-	"\x18syncplane/v1/admin.proto\x12\fsyncplane.v1\"|\n" +
+	"\x18syncplane/v1/admin.proto\x12\fsyncplane.v1\"\xac\x01\n" +
 	"\x0fRegisterRequest\x12\x15\n" +
 	"\x06app_id\x18\x01 \x01(\tR\x05appId\x12%\n" +
 	"\x0edescriptor_set\x18\x02 \x01(\fR\rdescriptorSet\x12+\n" +
-	"\x11expected_revision\x18\x03 \x01(\tR\x10expectedRevision\"\x87\x01\n" +
+	"\x11expected_revision\x18\x03 \x01(\tR\x10expectedRevision\x12.\n" +
+	"\x13allow_access_change\x18\x04 \x01(\bR\x11allowAccessChange\"\x87\x01\n" +
 	"\x10RegisterResponse\x12\x1a\n" +
 	"\brevision\x18\x01 \x01(\tR\brevision\x124\n" +
 	"\x06status\x18\x02 \x01(\x0e2\x1c.syncplane.v1.RegisterStatusR\x06status\x12!\n" +

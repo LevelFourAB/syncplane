@@ -48,8 +48,13 @@ type RegisterResult struct {
 // an identical set is a no-op, appended fields/new entities upsert, and a
 // conflicting change (a removed, renumbered or retyped field, or changed
 // key_fields) is rejected without partially applying.
-func (s *Server) RegisterDescriptorSet(set []byte) ([]string, error) {
-	r, err := s.registerDescriptorSet(set)
+//
+// A change to the access model of an entity that is already registered — its
+// access, grant or access_parent options, or the enum values its grant role
+// field matches — is rejected the same way unless opts include
+// AllowAccessChange.
+func (s *Server) RegisterDescriptorSet(set []byte, opts ...RegisterOption) ([]string, error) {
+	r, err := s.registerDescriptorSet(set, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +67,30 @@ func (s *Server) RegisterDescriptorSet(set []byte) ([]string, error) {
 	return r.Entities, nil
 }
 
+// RegisterOption adjusts one call to RegisterDescriptorSet or
+// Manager.Register.
+type RegisterOption func(*registerConfig)
+
+type registerConfig struct {
+	allowAccessChange bool
+}
+
+// AllowAccessChange lets a registration change the access model of an entity
+// that is already registered: its access, grant or access_parent options, or
+// the names of the enum values its grant role field matches. Every client
+// resyncs the rows the change affects.
+func AllowAccessChange() RegisterOption {
+	return func(c *registerConfig) { c.allowAccessChange = true }
+}
+
 // registerDescriptorSet is the richer internal form RegisterDescriptorSet and
 // the Manager share: it also reports the derived revision and whether the
 // catalog changed.
-func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
+func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (RegisterResult, error) {
+	var cfg registerConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
 	var fds descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(set, &fds); err != nil {
 		return RegisterResult{}, fmt.Errorf("server: decode FileDescriptorSet: %w", err)
@@ -131,6 +156,9 @@ func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
 				if err := validateEvolution(cur.msgType.Descriptor(), info.msgType.Descriptor()); err != nil {
 					return err
 				}
+				if err := validateAccessEvolution(cur, info, cfg.allowAccessChange); err != nil {
+					return err
+				}
 			}
 		}
 		for _, info := range infos {
@@ -138,11 +166,18 @@ func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
 			c.byType[info.msgType.Descriptor().FullName()] = info
 		}
 		c.schemaRev = revision
-		return ensureHistoryEntity(c)
+		if err := ensureHistoryEntity(c); err != nil {
+			return err
+		}
+		// A descriptor set is a whole schema, so unlike RegisterEntity it is
+		// judged here and refused when it breaks a rule of the access model.
+		c.recompileAccess()
+		return c.accessErr
 	})
 	if err != nil {
 		return RegisterResult{}, err
 	}
+	s.logAccessWarnings(s.catalogPtr())
 	return RegisterResult{Entities: names, Revision: revision, Changed: true}, nil
 }
 
@@ -194,6 +229,13 @@ func validateEvolution(old, next protoreflect.MessageDescriptor) error {
 		if of.Kind() == protoreflect.MessageKind && of.Message().FullName() != nf.Message().FullName() {
 			return fmt.Errorf("server: entity %q field %q message type changed %s -> %s; not an additive evolution",
 				name, of.Name(), of.Message().FullName(), nf.Message().FullName())
+		}
+		// The same holds for an enum: another enum type reads the stored
+		// numbers as other values, and a grant role field picks its role by the
+		// value's name.
+		if of.Kind() == protoreflect.EnumKind && of.Enum().FullName() != nf.Enum().FullName() {
+			return fmt.Errorf("server: entity %q field %q enum type changed %s -> %s; not an additive evolution",
+				name, of.Name(), of.Enum().FullName(), nf.Enum().FullName())
 		}
 		if of.Cardinality() != nf.Cardinality() {
 			return fmt.Errorf("server: entity %q field %q cardinality changed %s -> %s; not an additive evolution",

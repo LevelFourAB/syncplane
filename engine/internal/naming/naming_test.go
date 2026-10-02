@@ -72,6 +72,24 @@ var _ = Describe("ValidateRelationName", func() {
 	})
 })
 
+var _ = Describe("ValidatePermissionName and ValidateRoleName", func() {
+	It("accept identifiers", func() {
+		for _, name := range []string{"view_tasks", "editTasks", "_internal", "v2"} {
+			Expect(naming.ValidatePermissionName(name)).To(Succeed(), name)
+			Expect(naming.ValidateRoleName(name)).To(Succeed(), name)
+		}
+	})
+
+	It("reject anything that is not an identifier", func() {
+		for _, name := range []string{"", "view-tasks", "view.tasks", "1view", "view tasks"} {
+			Expect(naming.ValidatePermissionName(name)).NotTo(Succeed(), name)
+			Expect(naming.ValidateRoleName(name)).NotTo(Succeed(), name)
+		}
+		Expect(naming.ValidatePermissionName("a-b")).To(MatchError(ContainSubstring(`permission name "a-b"`)))
+		Expect(naming.ValidateRoleName("a-b")).To(MatchError(ContainSubstring(`role name "a-b"`)))
+	})
+})
+
 var _ = Describe("ValidateWorkspaceID", func() {
 	It("accepts the id shapes apps actually use", func() {
 		for _, id := range []string{

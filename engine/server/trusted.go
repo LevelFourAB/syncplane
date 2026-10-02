@@ -66,6 +66,9 @@ func (s *Server) gate(ctx context.Context, workspaceID string) (p Principal, enf
 		return Principal{}, false, nil
 	}
 	p = principalOf(ctx)
+	if err := s.catalogPtr().accessErr; err != nil {
+		return p, true, err
+	}
 	if err := s.perms.CanAccessWorkspace(ctx, p, workspaceID); err != nil {
 		return p, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
 	}

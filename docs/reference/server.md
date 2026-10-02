@@ -196,7 +196,7 @@ Dynamic schemas can be registered on a running server instance:
 
 ```go
 srv.RegisterEntity(&mycorpv1.Thing{})
-srv.RegisterDescriptorSet(set []byte)          // the wire form defineSchema(...).toBinary() produces
+srv.RegisterDescriptorSet(set []byte, opts ...server.RegisterOption) // the wire form defineSchema(...).toBinary() produces
 srv.RegisterDynamicEntities(specs ...server.DynamicEntity)
 ```
 
@@ -208,11 +208,14 @@ Dynamic schema construction helpers include `server.DynamicField` (`Message`, `R
 
 Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
 
+`server.DynamicEntity` carries `Access` and `Grant` (the `syncplanev1.AccessOptions` and `syncplanev1.GrantOptions` messages), and `server.DynamicField.AccessParent` marks a `Ref` field as the access parent. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
+
 ### Registration guarantees
 
 - **Trust**: `RegisterAuthorizer` defaults to deny (`DenyAll`). The built-in `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant time. A denied call never touches state.
 - **Persistence**: The descriptor set is stored per app and re-registered on boot before serving. A restart leaves every app immediately syncable.
 - **Idempotence and evolution**: Re-registering an identical set is a no-op. New entities and appended fields upsert. The manager rejects conflicting changes without partially applying them. Conflicting changes include removed, renumbered, or retyped fields, references retargeted to different entities, or changed `key_fields`. Each app's schema revision is a stable hash of its canonical descriptor bytes, surfaced to clients as `schema_revision` so that a schema change causes clients to re-bootstrap.
+- **Access model changes**: A change to the access model of a registered entity is refused unless the registration passes `server.AllowAccessChange()` (`allow_access_change` on `AdminService.Register`). See [Changing the access model](proto-options.md#changing-the-access-model).
 
 ## In-process writes
 

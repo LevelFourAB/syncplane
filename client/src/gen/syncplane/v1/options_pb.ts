@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIuACCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLuAQoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIEhgKEHJldmVyc2VfcmVsYXRpb24YCiABKAkqZgoMRGVsZXRlUG9saWN5Eh0KGURFTEVURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNERUxFVEVfUE9MSUNZX0FMTE9XEAESHgoaREVMRVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxDcmVhdGVQb2xpY3kSHQoZQ1JFQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0NSRUFURV9QT0xJQ1lfQUxMT1cQARIeChpDUkVBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKmYKDFVwZGF0ZVBvbGljeRIdChlVUERBVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTVVBEQVRFX1BPTElDWV9BTExPVxABEh4KGlVQREFURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIrgDCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMiQgoNQWNjZXNzT3B0aW9ucxIMCgRyZWFkGAEgASgJEg0KBXdyaXRlGAIgASgJEhQKDHVucmVzdHJpY3RlZBgDIAEoCCJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiJAoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCSIVChNBY2Nlc3NQYXJlbnRPcHRpb25zIhAKDkhpc3RvcnlPcHRpb25zIhIKEFJlZmVyZW5jZU9wdGlvbnMiGwoLU2VhcmNoRmllbGQSDAoEcGF0aBgBIAEoCSJPCgpTZWFyY2hTcGVjEigKBWZpZWxkGAEgAygLMhkuc3luY3BsYW5lLnYxLlNlYXJjaEZpZWxkEhcKD2tlZXBfZGlhY3JpdGljcxgCIAEoCCImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IqgCCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIEg8KB2hpc3RvcnkYBiABKAgSEgoKc2VhcmNoYWJsZRgHIAEoCBI0Cgx3cml0ZV9wb2xpY3kYCCABKA4yHi5zeW5jcGxhbmUudjEuRmllbGRXcml0ZVBvbGljeRIRCgl3b3Jrc3BhY2UYCSABKAgSGAoQcmV2ZXJzZV9yZWxhdGlvbhgKIAEoCRI4Cg1hY2Nlc3NfcGFyZW50GAsgASgLMiEuc3luY3BsYW5lLnYxLkFjY2Vzc1BhcmVudE9wdGlvbnMqZgoMRGVsZXRlUG9saWN5Eh0KGURFTEVURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNERUxFVEVfUE9MSUNZX0FMTE9XEAESHgoaREVMRVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxDcmVhdGVQb2xpY3kSHQoZQ1JFQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0NSRUFURV9QT0xJQ1lfQUxMT1cQARIeChpDUkVBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKmYKDFVwZGF0ZVBvbGljeRIdChlVUERBVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTVVBEQVRFX1BPTElDWV9BTExPVxABEh4KGlVQREFURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
 
 /**
  * Declares a message as a syncable entity.
@@ -128,6 +128,30 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: syncplane.v1.SearchSpec search = 9;
    */
   search?: SearchSpec | undefined;
+
+  /**
+   * Names the permissions that govern rows of this entity in the access
+   * model.
+   *
+   * A schema uses the access model when any of its entities declares
+   * `access` or `grant`. In such a schema every entity must declare
+   * `access`, and registration refuses a schema where one does not. See
+   * `AccessOptions`.
+   *
+   * @generated from field: syncplane.v1.AccessOptions access = 10;
+   */
+  access?: AccessOptions | undefined;
+
+  /**
+   * Declares the rows of this entity as grant rows: each row gives one
+   * subject one role at the row's anchor.
+   *
+   * A grant entity must also declare `access` with `read` and `write`. See
+   * `GrantOptions`.
+   *
+   * @generated from field: syncplane.v1.GrantOptions grant = 11;
+   */
+  grant?: GrantOptions | undefined;
 };
 
 /**
@@ -136,6 +160,191 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
  */
 export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 0);
+
+/**
+ * Names the permissions a caller must hold to read and to write the rows of
+ * an entity.
+ *
+ * A caller holds a permission at an anchor: the workspace root, or one row
+ * that a grant row's `access_parent` field points at. A permission held at
+ * an anchor applies to the anchor row and to every row whose
+ * `access_parent` field points at it. See `GrantOptions` and
+ * `AccessParentOptions`.
+ *
+ * A caller can read a row when it holds `read` at the workspace root, at
+ * the row itself, or at the row that the row's `access_parent` field points
+ * at. A row whose `access_parent` field is unset, or names a row that does
+ * not exist, has no parent and never falls back to the workspace root.
+ *
+ * A permission name starts with a letter or an underscore, followed by
+ * letters, digits and underscores. Registration refuses a permission that
+ * no declared role grants, and a role that grants a permission no entity
+ * uses, so a misspelled name fails on either side.
+ *
+ * The application permission hooks still run, and can refuse what the
+ * model allows. They cannot allow what the model refuses.
+ *
+ * Registration refuses unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.AccessOptions
+ */
+export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
+  /**
+   * The permission that lets a caller read rows. Required unless
+   * `unrestricted` is set.
+   *
+   * @generated from field: string read = 1;
+   */
+  read: string;
+
+  /**
+   * The permission that lets a caller create, update and delete rows.
+   * Required unless `unrestricted` is set.
+   *
+   * @generated from field: string write = 2;
+   */
+  write: string;
+
+  /**
+   * Puts the entity outside the access model: every caller admitted to the
+   * workspace can read and write its rows, subject to the application
+   * permission hooks. Cannot be combined with `read` or `write`.
+   *
+   * @generated from field: bool unrestricted = 3;
+   */
+  unrestricted: boolean;
+};
+
+/**
+ * Describes the message syncplane.v1.AccessOptions.
+ * Use `create(AccessOptionsSchema)` to create a new message.
+ */
+export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 1);
+
+/**
+ * Declares an entity whose rows grant roles.
+ *
+ * Each row gives the subject in its `subject` field the role in its `role`
+ * field. The role applies at the row's anchor: the row that its
+ * `access_parent` field points at, or the workspace root when the entity has
+ * no `access_parent` field. A row grants nothing when its subject is empty,
+ * its role is not declared in `roles`, or its `access_parent` field is unset
+ * or names a row that does not exist.
+ *
+ * ```protobuf
+ * message ProjectMember {
+ *   option (syncplane.v1.entity) = {
+ *     name: "project_member" key_fields: ["id"]
+ *     grant: {
+ *       subject: "user_id" role: "role"
+ *       roles: [
+ *         { name: "project_reader" grants: ["view_projects", "view_tasks"] },
+ *         { name: "project_writer" grants: ["view_projects", "view_tasks",
+ *         "edit_tasks"] }
+ *       ]
+ *     }
+ *     access: { read: "view_members" write: "manage_members" }
+ *   };
+ *   string id = 1;
+ *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   string user_id = 3;
+ *   string role = 4;
+ * }
+ * ```
+ *
+ * Registration refuses unknown fields inside this message and inside `Role`.
+ *
+ * @generated from message syncplane.v1.GrantOptions
+ */
+export type GrantOptions = Message<"syncplane.v1.GrantOptions"> & {
+  /**
+   * The name of a top-level, singular `string` field outside any `oneof`
+   * that holds the subject the row grants to. The server compares it with
+   * the subjects of the caller.
+   *
+   * @generated from field: string subject = 1;
+   */
+  subject: string;
+
+  /**
+   * The name of a top-level, singular `string` or enum field outside any
+   * `oneof` that holds the role the row grants. An enum value names the
+   * role with the same name as the value, and every declared role must be a
+   * value of the enum.
+   *
+   * @generated from field: string role = 2;
+   */
+  role: string;
+
+  /**
+   * The roles that rows of this entity can grant. At least one.
+   *
+   * @generated from field: repeated syncplane.v1.Role roles = 3;
+   */
+  roles: Role[];
+};
+
+/**
+ * Describes the message syncplane.v1.GrantOptions.
+ * Use `create(GrantOptionsSchema)` to create a new message.
+ */
+export const GrantOptionsSchema: GenMessage<GrantOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 2);
+
+/**
+ * Declares one role and the permissions it grants.
+ *
+ * @generated from message syncplane.v1.Role
+ */
+export type Role = Message<"syncplane.v1.Role"> & {
+  /**
+   * The role name. Unique across the schema, with the same character rules
+   * as a permission name.
+   *
+   * @generated from field: string name = 1;
+   */
+  name: string;
+
+  /**
+   * The permissions the role grants at its anchor. At least one, without
+   * duplicates.
+   *
+   * @generated from field: repeated string grants = 2;
+   */
+  grants: string[];
+};
+
+/**
+ * Describes the message syncplane.v1.Role.
+ * Use `create(RoleSchema)` to create a new message.
+ */
+export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 3);
+
+/**
+ * Marks the reference that places each row of an entity below another row in
+ * the access model.
+ *
+ * A permission held at the referenced row applies to the referencing row.
+ * Valid on one field per entity: a top-level, singular field outside any
+ * `oneof`, whose type is an entity message. The referenced entity must
+ * declare `access` with `read` and `write`, and must not have an
+ * `access_parent` field itself. The field cannot carry a `write_policy`.
+ *
+ * Registration refuses unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.AccessParentOptions
+ */
+export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & {
+};
+
+/**
+ * Describes the message syncplane.v1.AccessParentOptions.
+ * Use `create(AccessParentOptionsSchema)` to create a new message.
+ */
+export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -163,7 +372,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 1);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -241,7 +450,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * Specifies a single field read during full-text search.
@@ -265,7 +474,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -311,7 +520,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 8);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -346,7 +555,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 5);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Defines a secondary index for an entity.
@@ -379,7 +588,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -528,6 +737,14 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
    * @generated from field: string reverse_relation = 10;
    */
   reverseRelation: string;
+
+  /**
+   * Places each row below the row that this reference points at in the
+   * access model. See `AccessParentOptions`.
+   *
+   * @generated from field: syncplane.v1.AccessParentOptions access_parent = 11;
+   */
+  accessParent?: AccessParentOptions | undefined;
 };
 
 /**
@@ -535,7 +752,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 7);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Specifies which callers can delete rows of an entity.

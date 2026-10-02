@@ -159,6 +159,23 @@ export function validateRelationName(name: string, where?: string): void {
 	validateIdentifier('reverse relation name', name, where);
 }
 
+/**
+ * Throws unless `name` satisfies the rule for a permission name of the access
+ * model — (syncplane.v1.entity).access.read and .write, and the grants of a
+ * role. The rule is the entity-name rule.
+ */
+export function validatePermissionName(name: string, where?: string): void {
+	validateIdentifier('permission name', name, where);
+}
+
+/**
+ * Throws unless `name` satisfies the rule for a role name of the access model
+ * — (syncplane.v1.entity).grant.roles[].name. The rule is the entity-name rule.
+ */
+export function validateRoleName(name: string, where?: string): void {
+	validateIdentifier('role name', name, where);
+}
+
 function validateIdentifier(what: string, name: string, where: string | undefined): void {
 	const prefix = where === undefined ? '' : `${where}: `;
 	if (name === '') throw new Error(`${prefix}${what} is empty`);

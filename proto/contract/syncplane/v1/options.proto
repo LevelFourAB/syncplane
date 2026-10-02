@@ -72,7 +72,124 @@ message EntityOptions {
 	// indexed first in field order, followed by the fields declared in this
 	// search specification. See `SearchSpec`.
 	SearchSpec search = 9;
+	// Names the permissions that govern rows of this entity in the access
+	// model.
+	//
+	// A schema uses the access model when any of its entities declares
+	// `access` or `grant`. In such a schema every entity must declare
+	// `access`, and registration refuses a schema where one does not. See
+	// `AccessOptions`.
+	AccessOptions access = 10;
+	// Declares the rows of this entity as grant rows: each row gives one
+	// subject one role at the row's anchor.
+	//
+	// A grant entity must also declare `access` with `read` and `write`. See
+	// `GrantOptions`.
+	GrantOptions grant = 11;
 }
+
+// Names the permissions a caller must hold to read and to write the rows of
+// an entity.
+//
+// A caller holds a permission at an anchor: the workspace root, or one row
+// that a grant row's `access_parent` field points at. A permission held at
+// an anchor applies to the anchor row and to every row whose
+// `access_parent` field points at it. See `GrantOptions` and
+// `AccessParentOptions`.
+//
+// A caller can read a row when it holds `read` at the workspace root, at
+// the row itself, or at the row that the row's `access_parent` field points
+// at. A row whose `access_parent` field is unset, or names a row that does
+// not exist, has no parent and never falls back to the workspace root.
+//
+// A permission name starts with a letter or an underscore, followed by
+// letters, digits and underscores. Registration refuses a permission that
+// no declared role grants, and a role that grants a permission no entity
+// uses, so a misspelled name fails on either side.
+//
+// The application permission hooks still run, and can refuse what the
+// model allows. They cannot allow what the model refuses.
+//
+// Registration refuses unknown fields inside this message.
+message AccessOptions {
+	// The permission that lets a caller read rows. Required unless
+	// `unrestricted` is set.
+	string read = 1;
+	// The permission that lets a caller create, update and delete rows.
+	// Required unless `unrestricted` is set.
+	string write = 2;
+	// Puts the entity outside the access model: every caller admitted to the
+	// workspace can read and write its rows, subject to the application
+	// permission hooks. Cannot be combined with `read` or `write`.
+	bool unrestricted = 3;
+}
+
+// Declares an entity whose rows grant roles.
+//
+// Each row gives the subject in its `subject` field the role in its `role`
+// field. The role applies at the row's anchor: the row that its
+// `access_parent` field points at, or the workspace root when the entity has
+// no `access_parent` field. A row grants nothing when its subject is empty,
+// its role is not declared in `roles`, or its `access_parent` field is unset
+// or names a row that does not exist.
+//
+// ```protobuf
+// message ProjectMember {
+//   option (syncplane.v1.entity) = {
+//     name: "project_member" key_fields: ["id"]
+//     grant: {
+//       subject: "user_id" role: "role"
+//       roles: [
+//         { name: "project_reader" grants: ["view_projects", "view_tasks"] },
+//         { name: "project_writer" grants: ["view_projects", "view_tasks",
+//         "edit_tasks"] }
+//       ]
+//     }
+//     access: { read: "view_members" write: "manage_members" }
+//   };
+//   string id = 1;
+//   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   string user_id = 3;
+//   string role = 4;
+// }
+// ```
+//
+// Registration refuses unknown fields inside this message and inside `Role`.
+message GrantOptions {
+	// The name of a top-level, singular `string` field outside any `oneof`
+	// that holds the subject the row grants to. The server compares it with
+	// the subjects of the caller.
+	string subject = 1;
+	// The name of a top-level, singular `string` or enum field outside any
+	// `oneof` that holds the role the row grants. An enum value names the
+	// role with the same name as the value, and every declared role must be a
+	// value of the enum.
+	string role = 2;
+	// The roles that rows of this entity can grant. At least one.
+	repeated Role roles = 3;
+}
+
+// Declares one role and the permissions it grants.
+message Role {
+	// The role name. Unique across the schema, with the same character rules
+	// as a permission name.
+	string name = 1;
+	// The permissions the role grants at its anchor. At least one, without
+	// duplicates.
+	repeated string grants = 2;
+}
+
+// Marks the reference that places each row of an entity below another row in
+// the access model.
+//
+// A permission held at the referenced row applies to the referencing row.
+// Valid on one field per entity: a top-level, singular field outside any
+// `oneof`, whose type is an entity message. The referenced entity must
+// declare `access` with `read` and `write`, and must not have an
+// `access_parent` field itself. The field cannot carry a `write_policy`.
+//
+// Registration refuses unknown fields inside this message.
+message AccessParentOptions {}
 
 // Enables server-side field history tracking for an entity.
 //
@@ -403,6 +520,9 @@ message FieldBehavior {
 	// field that holds a polymorphic reference message gives its name to
 	// the reverse relation of every case.
 	string reverse_relation = 10;
+	// Places each row below the row that this reference points at in the
+	// access model. See `AccessParentOptions`.
+	AccessParentOptions access_parent = 11;
 }
 
 extend google.protobuf.MessageOptions {

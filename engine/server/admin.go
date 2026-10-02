@@ -51,7 +51,11 @@ func (a *adminService) Register(
 		}
 	}
 
-	res, err := a.mgr.Register(ctx, appID, req.Msg.GetDescriptorSet())
+	var opts []RegisterOption
+	if req.Msg.GetAllowAccessChange() {
+		opts = append(opts, AllowAccessChange())
+	}
+	res, err := a.mgr.Register(ctx, appID, req.Msg.GetDescriptorSet(), opts...)
 	if err != nil {
 		// A conflicting (non-additive) schema is a precondition failure; a
 		// malformed descriptor set is invalid argument.

@@ -35,6 +35,17 @@ Validation timing:
 - **Server:** Checked during registration by `RegisterEntity`, `RegisterDescriptorSet`, and `RegisterDynamicEntities`.
 - **Client:** Checked during initialization by `new SyncClient({ entities })` and by `.reverseRelation()`.
 
+## Permission and role names
+
+Permission names and role names belong to the [access model](proto-options.md#access-model). A permission name appears in `(syncplane.v1.entity).access` (`read`, `write`) and in the `grants` of a role. A role name appears in `(syncplane.v1.entity).grant.roles[].name`.
+
+Both follow the syntax rules for entity names: an ASCII letter or `_`, followed by ASCII letters, digits, or `_`, from 1 to 64 characters.
+
+Validation timing:
+
+- **Server:** Checked during registration by `RegisterEntity`, `RegisterDescriptorSet`, and `RegisterDynamicEntities`.
+- **Client:** Checked by `entity()` in the TypeScript schema builder.
+
 ## Key fields
 
 The `key_fields` option specifies the fields whose values compose the row key,

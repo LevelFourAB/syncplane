@@ -423,3 +423,119 @@ describe('schema builder — full parity', () => {
 		});
 	});
 });
+
+describe('schema builder — access model', () => {
+	const project = entity('project', { id: text().key() }, {
+		access: { read: 'view_projects', write: 'edit_projects' },
+	});
+	const member = entity('project_member', {
+		id: text().key(),
+		project: ref(() => project).accessParent(),
+		userId: text(),
+		role: text(),
+	}, {
+		grant: {
+			subject: 'userId',
+			role: 'role',
+			roles: [ { name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] } ],
+		},
+		access: { read: 'view_projects', write: 'edit_projects' },
+	});
+	const note = entity('note', { id: text().key() }, { access: { unrestricted: true } });
+	const bundle = defineSchema(project, member, note);
+	const options = (name: string) => getOption(bundle.descMessage(name), entityExt);
+
+	it('lowers access onto the entity option', () => {
+		expect(options('project').access?.read).toBe('view_projects');
+		expect(options('project').access?.write).toBe('edit_projects');
+		expect(options('note').access?.unrestricted).toBe(true);
+	});
+
+	it('lowers grant with proto field names', () => {
+		const grant = options('project_member').grant!;
+		expect(grant.subject).toBe('user_id');
+		expect(grant.role).toBe('role');
+		expect(grant.roles.map((r) => [ r.name, r.grants ])).toEqual([
+			[ 'project_writer', [ 'view_projects', 'edit_projects' ] ],
+		]);
+	});
+
+	it('lowers .accessParent() onto the reference field', () => {
+		const field = bundle.descMessage('project_member').fields.find((f) => f.name === 'project')!;
+		expect(getOption(field, fieldBehaviorExt).accessParent).toBeDefined();
+	});
+
+	it('leaves the options unset on an entity that declares none', () => {
+		const plain = defineSchema(entity('plain', { id: text().key() })).descMessage('plain');
+		expect(getOption(plain, entityExt).access).toBeUndefined();
+		expect(getOption(plain, entityExt).grant).toBeUndefined();
+	});
+
+	describe('validation', () => {
+		const fields = { id: text().key(), userId: text(), role: text() };
+		const access = { read: 'view', write: 'edit' };
+		const roles = [ { name: 'writer', grants: [ 'view', 'edit' ] } ];
+
+		it('rejects accessParent() on anything but a singular ref()', () => {
+			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\)/);
+			expect(() => refList(() => project).accessParent()).toThrow(/only valid on a ref\(\)/);
+		});
+		it('rejects a permission name that is not an identifier', () => {
+			expect(() => entity('e', fields, { access: { read: 'view-all', write: 'edit' } })).toThrow(
+				'entity "e" access.read: permission name "view-all" is not an identifier',
+			);
+		});
+		it('rejects two access parents', () => {
+			expect(() =>
+				entity('e', {
+					id: text().key(),
+					a: ref(() => project).accessParent(),
+					b: ref(() => project).accessParent(),
+				}, { access })
+			).toThrow(/fields "a" and "b" are both marked accessParent\(\)/);
+		});
+		it('rejects an access parent without read and write access', () => {
+			expect(() => entity('e', { id: text().key(), p: ref(() => project).accessParent() })).toThrow(
+				/is marked accessParent\(\), but the entity declares no read and write access/,
+			);
+		});
+		it('rejects a grant entity outside the model', () => {
+			expect(() =>
+				entity('e', fields, {
+					access: { unrestricted: true },
+					grant: { subject: 'userId', role: 'role', roles },
+				})
+			).toThrow(/a grant entity must declare access with read and write/);
+		});
+		it('rejects a grant field that is not a declared text() field', () => {
+			expect(() => entity('e', fields, { access, grant: { subject: 'who', role: 'role', roles } }))
+				.toThrow(
+					/grant subject field "who" is not declared/,
+				);
+			expect(() =>
+				entity('e', { ...fields, level: int32() }, {
+					access,
+					grant: { subject: 'userId', role: 'level', roles },
+				})
+			).toThrow(/grant role field "level" must be a singular text\(\) field/);
+		});
+		it('rejects a role declared twice or granting a permission twice', () => {
+			expect(() =>
+				entity('e', fields, {
+					access,
+					grant: { subject: 'userId', role: 'role', roles: [ ...roles, ...roles ] },
+				})
+			).toThrow(/declares role "writer" twice/);
+			expect(() =>
+				entity('e', fields, {
+					access,
+					grant: {
+						subject: 'userId',
+						role: 'role',
+						roles: [ { name: 'w', grants: [ 'edit', 'edit' ] } ],
+					},
+				})
+			).toThrow(/grant role "w" grants "edit" twice/);
+		});
+	});
+});

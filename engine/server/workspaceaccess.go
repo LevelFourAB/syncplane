@@ -23,8 +23,14 @@ import (
 // a failure to decide becomes internal, so a client never reads an outage as
 // revocation. Errors already carrying a Connect code (a policy that built one
 // itself) pass through untouched.
+//
+// A schema that breaks a rule of the access model fails every request here
+// with failed_precondition, before the application's hook runs.
 func (s *Server) enterWorkspace(ctx context.Context, workspaceID string) (Principal, error) {
 	p := principalOf(ctx)
+	if _, err := s.catalogPtr().accessModelOrErr(); err != nil {
+		return p, err
+	}
 	if err := s.perms.CanAccessWorkspace(ctx, p, workspaceID); err != nil {
 		return p, workspaceAccessError(err)
 	}

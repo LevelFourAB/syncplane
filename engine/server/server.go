@@ -83,6 +83,11 @@ type entityInfo struct {
 	// oneof contributing its group name. Empty for almost every entity, which
 	// is what keeps the check off the hot path — see writeGate.
 	protectedFields []string
+	// access is the entity's place in the access model, nil when it declares
+	// no access option. grant is set on an entity whose rows grant roles. See
+	// access.go.
+	access *entityAccess
+	grant  *grantSpec
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -620,6 +625,29 @@ type catalog struct {
 	// move with it.
 	indexMarkOnce sync.Once
 	indexMark     string
+	// access is the compiled access model, nil for a schema that does not use
+	// it. accessErr is set instead while the catalog breaks a rule of the
+	// model, which RegisterEntity can leave behind because it adds one entity
+	// at a time; see accessModelOrErr.
+	access    *accessModel
+	accessErr error
+}
+
+// accessModelOrErr returns the catalog's access model, nil when the schema
+// does not use one. It fails while the schema breaks a rule of the model, so
+// a request against such a schema is refused rather than served with access
+// that nothing checked.
+func (c *catalog) accessModelOrErr() (*accessModel, error) {
+	if c.accessErr != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, c.accessErr)
+	}
+	return c.access, nil
+}
+
+// recompileAccess compiles the access model for the catalog's current
+// entities. Every swap that adds or replaces an entity calls it.
+func (c *catalog) recompileAccess() {
+	c.access, c.accessErr = compileAccessModel(c)
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -659,6 +687,8 @@ func (c *catalog) clone() *catalog {
 		entities:  make(map[string]*entityInfo, len(c.entities)+1),
 		byType:    make(map[protoreflect.FullName]*entityInfo, len(c.byType)+1),
 		schemaRev: c.schemaRev,
+		access:    c.access,
+		accessErr: c.accessErr,
 	}
 	for k, v := range c.entities {
 		nc.entities[k] = v
@@ -1111,6 +1141,12 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	if err := s.applyDeclarations(); err != nil {
 		return nil, err
 	}
+	// Entities register one at a time, so the model is judged once the last
+	// one is in.
+	if _, err := s.catalogPtr().accessModelOrErr(); err != nil {
+		return nil, s.catalogPtr().accessErr
+	}
+	s.logAccessWarnings(s.catalogPtr())
 	if s.gc != nil {
 		s.gc.start(s)
 	}
@@ -1258,7 +1294,11 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		}
 		c.entities[info.name] = info
 		c.byType[info.msgType.Descriptor().FullName()] = info
-		return ensureHistoryEntity(c)
+		if err := ensureHistoryEntity(c); err != nil {
+			return err
+		}
+		c.recompileAccess()
+		return nil
 	}); err != nil {
 		return err
 	}
@@ -1374,6 +1414,14 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	}
 	if err := validateListIdentities(desc, info.name); err != nil {
 		return nil, err
+	}
+	access, err := accessOf(desc, eo, info)
+	if err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	info.access = access
+	if info.grant, err = grantOf(desc, eo, info.access); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Derive one index per reference field, over the target key the row
 	// stores. This is not a schema decision: a reverse lookup is what every

@@ -1,0 +1,166 @@
+syntax = "proto3";
+
+// An access-model schema used only by the engine and client test suites: an
+// org whose members hold roles on the whole workspace, projects with members
+// of their own, and tasks below the projects.
+package syncplane.testdata.access.v1;
+
+import "syncplane/v1/options.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1;accessv1";
+
+// A role on the whole workspace.
+message OrgMember {
+	option (syncplane.v1.entity) = {
+		name: "org_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "org_member"
+					grants: [ "view_projects", "view_tasks", "view_labels" ]
+				},
+				{
+					name: "org_admin"
+					grants: [
+						"view_members",
+						"manage_members",
+						"view_projects",
+						"edit_projects",
+						"view_tasks",
+						"edit_tasks",
+						"view_labels"
+					]
+				}
+			]
+		}
+		access: { read: "view_members" write: "manage_members" }
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: { read: "view_projects" write: "edit_projects" }
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// A role on one project and the rows below it.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "project_reader"
+					grants: [ "view_projects", "view_members", "view_tasks" ]
+				},
+				{
+					name: "project_writer"
+					grants: [
+						"view_projects",
+						"view_members",
+						"view_tasks",
+						"edit_tasks"
+					]
+				}
+			]
+		}
+		access: { read: "view_members" write: "manage_members" }
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: { read: "view_tasks" write: "edit_tasks" }
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}
+
+// Readable by every org member, writable only through trusted writes.
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+		access: { read: "view_labels" write: "view_labels" }
+		create_policy: CREATE_POLICY_TRUSTED_ONLY
+		update_policy: UPDATE_POLICY_TRUSTED_ONLY
+		delete_policy: DELETE_POLICY_TRUSTED_ONLY
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// Outside the access model: every admitted caller reads and writes it.
+message Note {
+	option (syncplane.v1.entity) = {
+		name: "note"
+		key_fields: [ "id" ]
+		access: { unrestricted: true }
+	};
+	string id = 1;
+	string body = 2;
+}
+
+// Roles a TeamMember row can hold, matched by value name.
+enum TeamRole {
+	TEAM_ROLE_UNSPECIFIED = 0;
+	TEAM_ROLE_VIEWER = 1;
+	TEAM_ROLE_EDITOR = 2;
+}
+
+// A grant entity whose role field is an enum. Registered on its own with
+// Team, apart from the org schema above.
+message TeamMember {
+	option (syncplane.v1.entity) = {
+		name: "team_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "TEAM_ROLE_VIEWER"
+					grants: [ "view_team" ]
+				},
+				{
+					name: "TEAM_ROLE_EDITOR"
+					grants: [ "view_team", "edit_team" ]
+				}
+			]
+		}
+		access: { read: "view_team" write: "edit_team" }
+	};
+	string id = 1;
+	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	TeamRole role = 4;
+}
+
+message Team {
+	option (syncplane.v1.entity) = {
+		name: "team"
+		key_fields: [ "id" ]
+		access: { read: "view_team" write: "edit_team" }
+	};
+	string id = 1;
+}
