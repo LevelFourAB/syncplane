@@ -1,5 +1,14 @@
+export type {
+	AccessOperation,
+	CanAnswer,
+	CanDetail,
+	UnknownDetail,
+	UnknownReason,
+} from './access.js';
 export { subscription, SyncClient } from './client.js';
 export type {
+	CanOptions,
+	DetailOptions,
 	DiscardedMutation,
 	HoldHandle,
 	HydrationInfo,
@@ -30,6 +39,7 @@ export type {
 	WorkspaceStatus,
 } from './client.js';
 export {
+	CodeAccessDenied,
 	CodeConflict,
 	CodeFormatUpgraded,
 	CodeInternal,
@@ -44,6 +54,7 @@ export {
 	CodeUnavailable,
 	CodeWatchFailed,
 	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
 	CodeWorkspacePurged,
 	ErrorCodeMetadataKey,
 } from './codes.js';
@@ -214,6 +225,7 @@ export { applyTextInverse } from './text/undo-ops.js';
 export type { TextInverseOp } from './text/undo-ops.js';
 // Undo is driven through the client (undo/redo/canUndo) — the manager and the
 // inversion it runs on are not part of the surface; only the option types are.
+export { UndoRefusedError } from './undo.js';
 export type { UndoOptions, UndoScopeOptions } from './undo.js';
 export type {
 	KeyedRows,

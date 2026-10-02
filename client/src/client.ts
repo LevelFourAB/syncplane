@@ -9,6 +9,52 @@ import {
 } from '@bufbuild/protobuf';
 import { createClient, type Transport } from '@connectrpc/connect';
 
+import {
+	ACCESS_TOUCH_ENTITY,
+	type AccessChain,
+	type AccessOperation,
+	accessParentFields,
+	accessParentUnits,
+	type AccessRow,
+	accessRowId,
+	AccessSummary,
+	anchorEntities,
+	and,
+	answerOf,
+	type CanAnswer,
+	canAt,
+	type CanDetail,
+	childEntitiesOf,
+	decideRead,
+	decideRules,
+	decideUpdate,
+	decideUpdateChecks,
+	decodeAccess,
+	type DecodedAccess,
+	detailOf,
+	entitiesAboveOf,
+	grantSubsetAt,
+	hasGrantEntities,
+	inRecursiveChain,
+	type ParentRefs,
+	parentRefsOf,
+	parentsRead,
+	pendingChangesAccess,
+	type RuleRow,
+	ruleRowOf,
+	subjectEntitiesOf,
+	subjectRefsOf,
+	touchPendingAccess,
+	UNKNOWN_CHAIN,
+	unknownBecause,
+	type UnknownDetail,
+	updateUnitsOf,
+	type Verdict,
+	whenReads,
+	withinEntities,
+	withinReads,
+	writeChangesAccess,
+} from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
 	COMPLETE,
@@ -43,6 +89,9 @@ import {
 import { AggregateOp, type QueryFacet } from './gen/syncplane/v1/query_pb.js';
 import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
+	accessGeneration,
+	accessGenerationFor,
+	callerAccessGeneration,
 	compareWorkspaces,
 	confirmedKey,
 	type ConfirmedRecord,
@@ -51,9 +100,12 @@ import {
 	META_CLIENT_ID,
 	META_FORMAT_VERSION,
 	META_WS_PREFIX,
+	metaCallerAccess,
 	metaLastMutationId,
+	metaPendingAccess,
 	metaPushedThrough,
 	metaWsPrefix,
+	overlayGeneration,
 	overlayGenerationFor,
 	overlayKey,
 	type OverlayRecord,
@@ -101,6 +153,7 @@ import {
 	protectedFieldOf,
 	refQualified,
 	refSegmentOf,
+	stampCreatorFields,
 	takeTextStrings,
 	textFieldBytes,
 	textFieldInit,
@@ -113,7 +166,12 @@ import { createKvMutex, type Mutex } from './mutex.js';
 import { validateRowKey, validateWorkspaceId } from './naming.js';
 import { buildIndexes } from './optimistic/index-build.js';
 import { IndexCache } from './optimistic/index-maintain.js';
-import { enqueuePending, readPending } from './optimistic/queue.js';
+import {
+	enqueuePending,
+	notePendingAppended,
+	pendingAccessOf,
+	readPending,
+} from './optimistic/queue.js';
 import {
 	applyCrudLocally,
 	applyMutationLocally,
@@ -173,12 +231,16 @@ import {
 } from './query/wire.js';
 import {
 	decodeWholeRow,
+	type EntityRowRef,
+	forEachMergedRow,
 	mergedRowFrom,
 	type NamedWorkspaces,
 	readMergedRow,
+	readMergedRows,
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
+	rowOf,
 	scanDecoded,
 	scanProjected,
 	workspacesWithRows,
@@ -192,7 +254,7 @@ import {
 	type RefClient,
 	resolveReverse,
 } from './refs.js';
-import { reportError, reportMisuse, safeInvoke } from './report.js';
+import { reportError, reportMisuse, safeInvoke, safeRun } from './report.js';
 import { createRoom, type Room, type RoomOptions } from './room.js';
 import {
 	DEFAULT_STORAGE_PREFIX,
@@ -231,6 +293,7 @@ import {
 	type StackName,
 	UndoManager,
 	type UndoOptions,
+	UndoRefusedError,
 	type UndoScopeOptions,
 } from './undo.js';
 import {
@@ -780,6 +843,46 @@ export interface PatchOptions extends CasOptions {
 	paths?: string[];
 }
 
+/**
+ * The accessor name of a top-level field or oneof of the message `D`
+ * describes; any string when `D` is not known.
+ */
+export type FieldNameOf<D extends DescMessage> = DescMessage extends D ? string
+	: Exclude<keyof MessageShape<D> & string, '$typeName' | '$unknown'>;
+
+/** Options for {@link SyncClient.canCreate} and {@link SyncClient.hasPermission}. */
+export interface DetailOptions {
+	/**
+	 * When `true`, the answer is a {@link CanDetail}, which also gives the
+	 * reason for an `'unknown'` answer.
+	 */
+	detail?: boolean;
+}
+
+/** Options for {@link SyncClient.can}. */
+export interface CanOptions<D extends DescMessage = DescMessage> extends DetailOptions {
+	/**
+	 * For a read, the fields to read, by accessor name, with a oneof named by
+	 * its own name. Reading a field that a field guard restricts also needs a
+	 * read rule of that guard, so naming such a field answers `'no'` when no
+	 * read rule of the guard admits the caller on the row. When omitted, the
+	 * answer is for reading the row.
+	 *
+	 * For an update, the fields it changes, named the same way, as a patch init
+	 * object names them. When omitted,
+	 * the answer is for some update: `'yes'` when a rule admits an update of
+	 * one field its `fields` list names, or a rule without a list admits an
+	 * update of fields that keeps the access parent and every subject field.
+	 * An update of a field that a field guard restricts also needs a rule of
+	 * that guard, so naming such a field answers `'no'` when no rule of the
+	 * guard admits the caller.
+	 *
+	 * `can` rejects with an `Error` for a name that is not a top-level field
+	 * or oneof of the entity.
+	 */
+	fields?: readonly FieldNameOf<D>[];
+}
+
 /** A PATCH whose mask is given rather than derived — see PatchInit. */
 export interface MaskedPatchOptions extends PatchOptions {
 	paths: string[];
@@ -1055,6 +1158,43 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	): Room<S, M>;
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
+	/** Predicts an operation on a row in this workspace; see SyncClient.can. */
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer>;
+	/** Predicts a create in this workspace; see SyncClient.canCreate. */
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	/** Predicts a permission at a row in this workspace; see SyncClient.hasPermission. */
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
@@ -1236,6 +1376,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			...this.client.crudMutateApi(
 				(crud) => this.client.enqueue(this, { case: 'crud', value: crud }),
 				(schema, key) => this.get(schema, key),
+				() => this.client.primarySubjectIn(this.workspaceId),
 			),
 			custom: async (name, argsSchema, args) => {
 				await this.client.enqueue(this, {
@@ -1328,6 +1469,69 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined> {
 		return this.client.getIn(this.workspaceId, schema, key);
+	}
+
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer>;
+	async can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.client.canIn(this.workspaceId, schema, key, operation, opts), opts);
+	}
+
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.client.canCreateIn(this.workspaceId, schema, row), opts);
+	}
+
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.client.hasPermissionIn(this.workspaceId, schema, key, permission),
+			opts,
+		);
 	}
 
 	getRow<D extends DescMessage>(
@@ -1638,6 +1842,112 @@ interface QueryPage<T> {
 }
 
 /**
+ * The row a prediction starts from: the row of `def` stored under `key`, or a
+ * `row` the caller supplies. `decide` answers from that row, undefined when the
+ * client does not hold it, and the rows above it.
+ */
+type AccessPlan =
+	& {
+		def: EntityDef;
+		decide(row: Message | undefined, chain: AccessChain): Verdict;
+		/**
+		 * Reads the rows directly above the row even where no access parent
+		 * or within entry leads further, so that `chain.row` knows them.
+		 */
+		readsParents?: boolean;
+	}
+	& ({ key: string } | { row: Message });
+
+/** The answer outright, or the row a prediction starts from. */
+type AccessPlanner = (summary: AccessSummary) => Verdict | AccessPlan;
+
+/**
+ * A prediction before it reads the store: the answer outright, which needs no
+ * summary, or the planner that decides it from one.
+ */
+type AccessQuestion = Verdict | AccessPlanner;
+
+/**
+ * The planner of an entity outside the model in a schema with a grant entity.
+ * It answers 'yes' also where no summary decides, as the gate admits the
+ * caller unless a summary shows it holds nothing.
+ */
+const outsideModelPlanner: AccessPlanner = () => 'yes';
+
+/**
+ * Whether `tx` holds a live row of `defs` in `workspaceId` whose references,
+ * as `refsOf` reads them, name the row of `schema` at `key`. The server
+ * refuses a delete of a row that a live row names as its access parent, or
+ * that a live grant row names as its subject.
+ */
+async function holdsRowNaming(
+	tx: KVRead,
+	registry: EntityRegistry,
+	workspaceId: string,
+	defs: readonly EntityDef[],
+	refsOf: (def: EntityDef, row: Message) => readonly AccessRow[] | undefined,
+	schema: DescMessage,
+	key: string,
+): Promise<boolean> {
+	const entity = registry.bySchema(schema).name;
+	for (const def of defs) {
+		let found = false;
+		// A scan of the entity: the client keeps no index of the rows that
+		// name a row as their access parent or their subject.
+		await forEachMergedRow(tx, registry, def.name, workspaceId, (row) => {
+			if (found) return;
+			const refs = refsOf(def, fromBinary(def.schema, row.v));
+			found = refs?.some((ref) => ref.entity === entity && ref.key === key) ?? false;
+		});
+		if (found) return true;
+	}
+	return false;
+}
+
+/** One prediction waiting in an access batch; see SyncClient.askAccess. */
+interface AccessAsk {
+	workspaceId: string;
+	plan: AccessPlanner;
+	resolve(answer: Verdict): void;
+	reject(err: unknown): void;
+}
+
+/** How one prediction of a batch came out. */
+type AccessOutcome = { answer: Verdict } | { error: unknown };
+
+function isAccessPlan(plan: Verdict | AccessPlan): plan is AccessPlan {
+	return typeof plan === 'object' && 'decide' in plan;
+}
+
+/** `verdict` in the form `opts` asks for. */
+function answerAs(verdict: Verdict, opts: DetailOptions | undefined): CanAnswer | CanDetail {
+	return opts?.detail === true ? detailOf(verdict) : answerOf(verdict);
+}
+
+/** One prediction of a batch, part way up its chain of access parents. */
+interface AccessWalk {
+	/** Its index in the batch. */
+	at: number;
+	workspaceId: string;
+	plan: AccessPlan;
+	row: Message | undefined;
+	/** The rows the row's access parents name, undefined when it is not held. */
+	parents: readonly AccessRow[] | undefined;
+	/**
+	 * The rows the access parents of each row reached above the row name, by
+	 * accessRowId: undefined for a row the client does not hold, or one past
+	 * maxHops hops.
+	 */
+	above: Map<string, readonly AccessRow[] | undefined>;
+	/** The summary's maxAccessDepth: how many hops above the row the walk reads. */
+	maxHops: number;
+	/** The entities whose rows the walk reads for a `within` entry. */
+	withinEntities: ReadonlySet<string>;
+	/** The rows of the level the walk reads next. */
+	level: NonNullable<ParentRefs>[number][];
+}
+
+/**
  * State the devtools helper reads that the public surface has no reason to
  * carry; see SyncClient.inspect(). Every method answers for the moment it is
  * called — nothing here is a live view.
@@ -1716,6 +2026,51 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	private hubInstance?: WatcherHub;
 	private hubPromise?: Promise<WatcherHub>;
 	private changeShare?: ChangeShare;
+	/** onAccessChange listeners; see fireAccessChange. */
+	private accessListeners = new Set<(workspaceId: string) => void>();
+	/** onEntitiesChange listeners; see fireAccessChange. */
+	private entitiesListeners = new Set<
+		{ workspaceId: string; entities: ReadonlySet<string>; cb: () => void }
+	>();
+	/**
+	 * Per workspace, the summary accessSummaryIn last decided, against the
+	 * access generation it was read under (see keys.accessGeneration). Held
+	 * as a promise, so the answers a screen of useCan hooks asks for in one
+	 * tick share one read.
+	 */
+	private accessSummaries = new Map<
+		string,
+		{
+			generation: unknown;
+			summary: Promise<AccessSummary | UnknownDetail>;
+			/**
+			 * The overlay generations the summary was decided under, when it
+			 * read the overlay: a mirror's writes, which decide a queued custom
+			 * mutation, can change with no change to the queue.
+			 */
+			overlay?: { keys: string[]; values: unknown[] };
+		}
+	>();
+	/**
+	 * Per workspace, the summary the last access batch decided from, or why it
+	 * had none. What peekAccess decides from, with no read of the store.
+	 */
+	private settledAccess = new Map<string, AccessSummary | UnknownDetail>();
+	/**
+	 * Per workspace, the CallerAccess that storedAccessUnder read last, or that
+	 * this tab stored last (see accessStored), with its stored bytes and the
+	 * CallerAccess generation it was read under (see
+	 * keys.callerAccessGeneration), undefined where that is not known.
+	 * storedAccessUnder uses it again with no read of the stored bytes while the
+	 * generation stays the same, so a local write, which moves the access
+	 * generation through the pending queue, does not read the CallerAccess
+	 * again.
+	 */
+	private decodedAccess = new Map<string, { generation: unknown; access: DecodedAccess }>();
+	/** The workspaces storedAccessUnder has read the stored CallerAccess for. */
+	private accessAsked = new Set<string>();
+	/** The access batch that still takes predictions; see askAccess. */
+	private accessBatch: AccessAsk[] | undefined;
 	private coordinator?: Coordinator;
 	/**
 	 * Cross-tab intent record for this instance (sync/intent.ts): created in
@@ -1875,6 +2230,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.dropHolds(workspaceId);
 		this.coordinator?.removeWorkspace(workspaceId);
 		this.statusTracker.removeWorkspace(workspaceId);
+		this.accessSummaries.delete(workspaceId);
+		this.settledAccess.delete(workspaceId);
+		this.decodedAccess.delete(workspaceId);
+		this.accessAsked.delete(workspaceId);
 		if (this.defaultWorkspaceId === workspaceId) {
 			this.defaultWorkspaceId = undefined;
 			this.statusTracker.setDefaultWorkspace(undefined);
@@ -1932,6 +2291,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 					touched.entity(workspaceId, entity);
 				}
+				// The sweep of the meta prefix below takes the stored CallerAccess
+				// with it, so the access listeners hear of it as they do of a wipe.
+				touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 				const kept = new Set([
 					metaLastMutationId(workspaceId),
 					metaPushedThrough(workspaceId),
@@ -2100,8 +2462,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return tracked;
 	}
 
+	/**
+	 * Asks again for the rooms of a workspace that wait for a grant: a change
+	 * of what the caller holds there can be the grant.
+	 */
+	private readonly retryRoomsOnAccess = (workspaceId: string): void => {
+		this.presence?.retryNoAccess(workspaceId);
+	};
+
 	/** The ephemeral plane's coordinator, started with the first room. */
 	private presenceCoordinator(): PresenceCoordinator {
+		this.accessListeners.add(this.retryRoomsOnAccess);
 		this.presence ??= new PresenceCoordinator({
 			transport: () => this.resolveTransport(),
 			sessionId: this.sessionId,
@@ -2118,12 +2489,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * own mutation, a transact() handle's facade pushes it into the batch buffer.
 	 * `read` supplies the base row `update` diffs against, from the same place
 	 * that facade's reads come from — inside a transaction that is the pre-batch
-	 * state, matching every other read on the handle.
+	 * state, matching every other read on the handle. `primarySubject` supplies
+	 * what a put of a row the facade does not hold stores in creator fields.
 	 * @internal
 	 */
 	crudMutateApi(
 		sink: (crud: CrudMutation) => Promise<void> | void,
 		read: <D extends DescMessage>(schema: D, key: string) => Promise<MessageShape<D> | undefined>,
+		primarySubject: () => Promise<string>,
 	): CrudMutateApi {
 		// Written as one wide signature rather than inline in the object literal:
 		// `patch` is overloaded on the interface, and a single implementation
@@ -2171,8 +2544,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 				}
 				let msg = create(schema, init as MessageInitShape<typeof schema>);
-				if (def.protectedFields.length > 0) {
-					msg = carryProtectedFields(def, schema, msg, await read(schema, keyOf(def, msg)));
+				if (
+					def.protectedFields.length > 0 || def.clearedOnCreate.length > 0
+					|| def.creatorFields.length > 0
+				) {
+					const base = await read(schema, keyOf(def, msg));
+					msg = carryProtectedFields(def, schema, msg, base);
+					if (base === undefined && def.creatorFields.length > 0) {
+						msg = stampCreatorFields(def, msg, await primarySubject());
+					}
 				}
 				const crud = buildPut(def, schema, msg, opts?.expectedVersion);
 				attachTextStrings(crud, texts);
@@ -2270,6 +2650,12 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				return undefined;
 			}
 		};
+		// A field the server does not send reads as an empty document, and an
+		// edit of it would type into text the caller cannot see.
+		const head = schema.fields.find((f) => f.name === path.split('.')[0]);
+		const unit = head?.oneof?.localName ?? head?.localName;
+		const isHidden = (row: Row<MessageShape<D>> | undefined): boolean =>
+			unit !== undefined && row?.hidden?.includes(unit) === true;
 		return openTextHandle({
 			acquirePeer: async () => {
 				const lease = await (await this.textPeerLeases()).acquire();
@@ -2282,7 +2668,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					},
 				};
 			},
-			load: async () => fieldOf(await scope.get(schema, rowKey)),
+			load: async () => {
+				const row = await this.getRowIn(scope.workspaceId, schema, rowKey);
+				if (isHidden(row)) {
+					throw new Error(
+						`text: field "${fieldName}" of row "${rowKey}" is hidden from this caller by a field guard`,
+					);
+				}
+				return fieldOf(row?.value);
+			},
 			patch: (state, inverseOps, coalesce) => {
 				const crud = buildPatch(
 					def,
@@ -2308,7 +2702,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			watch: (cb) => {
 				const handle = scope.watchRows(schema, [ rowKey ], (rows) => {
 					if (!rows.has(rowKey)) return;
-					cb(fieldOf(rows.get(rowKey)?.value));
+					const row = rows.get(rowKey);
+					// A field the server stops sending reads as empty; the handle
+					// keeps the document it holds instead.
+					if (isHidden(row)) return;
+					cb(fieldOf(row?.value));
 				});
 				return () => handle.close();
 			},
@@ -2402,9 +2800,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			? IDBKVStore.open(this.storageNames.store)
 			: Promise.resolve(new MemoryKVStore())).then((store) => {
 				// What lets a local read reuse the overlay it read last time
-				// instead of walking the pending queue again (see readOverlay). A
-				// caller's own store need not keep generations; its readers scan.
-				if (tracksGenerations(store)) store.trackGenerations(overlayGenerationFor);
+				// instead of walking the pending queue again (see readOverlay),
+				// and can() the summary it decided (see accessSummaryIn) and the
+				// CallerAccess it read (see storedAccessIn). A caller's own store
+				// need not keep generations; its readers scan.
+				if (tracksGenerations(store)) {
+					store.trackGenerations((key) => overlayGenerationFor(key) ?? accessGenerationFor(key));
+				}
 				return store;
 			});
 		return this.kvPromise;
@@ -2439,7 +2841,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			// A commit in another tab updates the shared store but only that tab's
 			// hub; mirror its touched set into ours so our watchers stay fresh.
 			this.changeShare = startChangeShare(this.storageNames.changeChannel, (tokens) => {
-				void hub.notify(TouchSet.fromTokens(tokens));
+				const touched = TouchSet.fromTokens(tokens);
+				void hub.notify(touched);
+				this.fireAccessChange(touched);
 			});
 			return hub;
 		})();
@@ -2481,9 +2885,42 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			if (this.closed) return;
 			await hub.notify(touched);
 		}
+		this.fireAccessChange(touched);
 		// Peers get the compat encoding (keyed tokens PLUS a wildcard per pair),
 		// so a tab of an older build still full-scans while a current one patches.
 		this.changeShare?.broadcast(touched.broadcastTokens());
+	}
+
+	/**
+	 * Calls the onAccessChange listeners once per workspace in which the
+	 * touched set reports ACCESS_TOUCH_ENTITY, or a row of an entity that rows
+	 * sit below, and each onEntitiesChange listener once when it reports a row
+	 * of one of the listener's entities in its workspace.
+	 */
+	private fireAccessChange(touched: TouchSet): void {
+		for (const listener of [ ...this.entitiesListeners ]) {
+			for (const { workspaceId, entity } of touched.pairs()) {
+				if (workspaceId !== listener.workspaceId || !listener.entities.has(entity)) continue;
+				safeRun(listener.cb, 'onEntitiesChange');
+				break;
+			}
+		}
+		if (this.accessListeners.size === 0) return;
+		// A prediction reads the summary, whether the pending queue holds a
+		// write that can change grants, the row asked about and the rows up its
+		// chain. The first two announce themselves as ACCESS_TOUCH_ENTITY, the
+		// chain rows are anchor rows, and the row's own asker watches it. A
+		// grant row is not an input once confirmed: the server folds it into the
+		// summary, so a pull of one reports nothing here unless the summary
+		// changes too.
+		const anchors = anchorEntities(this.entityRegistry);
+		const workspaces = new Set<string>();
+		for (const { workspaceId, entity } of touched.pairs()) {
+			if (entity === ACCESS_TOUCH_ENTITY || anchors.has(entity)) workspaces.add(workspaceId);
+		}
+		for (const ws of workspaces) {
+			for (const cb of [ ...this.accessListeners ]) safeInvoke(cb, ws, 'onAccessChange');
+		}
 	}
 
 	private assertOpen(): void {
@@ -2541,6 +2978,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			onIndexesStale: (workspaceId) => this.startIndexBuild(workspaceId),
 			mirrors: this.mirrors,
 			notify: (touched) => this.notifyChange(touched),
+			onAccessStored: (workspaceId, access) => this.accessStored(workspaceId, access),
 			status: this.statusTracker,
 			scopes: this.ownScopes(),
 			// Resolved through the registry so an unregistered schema fails here,
@@ -3007,6 +3445,910 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return this.statusTracker.onChange(cb);
 	}
 
+	/**
+	 * Subscribes to changes that can change what {@link can},
+	 * {@link canCreate} and {@link hasPermission} predict in a workspace.
+	 * Returns an unsubscribe function.
+	 *
+	 * `cb` runs with the workspace id once for each commit, by this tab or
+	 * another tab sharing the store, that stores or removes the workspace's
+	 * CallerAccess; queues, acks or rolls back a local write to a grant row or
+	 * a delete of a row that other rows sit below; replays the mirror of a
+	 * queued custom mutation that writes such a row; or writes a row of an
+	 * entity that other rows sit below, locally or from the server. It can run
+	 * when no prediction changed.
+	 *
+	 * A change of the row a prediction is for is not reported unless the row
+	 * is of such an entity. Watch that row as well to follow the prediction.
+	 * Nor is a change of the rows below the row, or of the grant rows that
+	 * name it as their subject, which a prediction of a delete reads: watch
+	 * them to follow it.
+	 */
+	onAccessChange(cb: (workspaceId: string) => void): () => void {
+		this.accessListeners.add(cb);
+		return () => {
+			this.accessListeners.delete(cb);
+		};
+	}
+
+	/**
+	 * Subscribes to commits, by this tab or another tab sharing the store,
+	 * that write a row of one of `entities` in `workspaceId`, locally or from
+	 * the server. `cb` runs once for each such commit. Returns an unsubscribe
+	 * function.
+	 * @internal useCan follows the rows that a prediction of a delete reads
+	 * with it, which onAccessChange does not report.
+	 */
+	onEntitiesChange(workspaceId: string, entities: readonly string[], cb: () => void): () => void {
+		const listener = { workspaceId, entities: new Set(entities), cb };
+		this.entitiesListeners.add(listener);
+		return () => {
+			this.entitiesListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Predicts whether the entity's access rules admit `operation` on the row
+	 * of `schema` with `key` in the default workspace, from the CallerAccess
+	 * the server last sent and the rows held locally: where the caller holds
+	 * each rule's permission up the row's chain of access parents, and the
+	 * value of each subject field.
+	 *
+	 * For `'update'`, `opts.fields` names the fields the update changes. A
+	 * rule with a `fields` list counts only when the list names each of them,
+	 * and a rule whose subject field or the access parent is among them
+	 * answers `'unknown'` at best, since the new value decides. Without
+	 * `opts.fields`, the answer is for some update; see {@link CanOptions}.
+	 *
+	 * The answer also covers the checks the server makes beside the rules,
+	 * where the client holds their inputs. An update that changes the access
+	 * parent needs the right to read the row, each field of it a guard can
+	 * hide, and every row of each entity whose rows can sit below it, where
+	 * the row is now; a read rule with a `callerIs` or `when` check does not
+	 * give the right to read every row. An update of a field that a `within`
+	 * entry reads needs the same right for the rows below. An update of a
+	 * field that a read rule of a hiding guard checks needs the right to read
+	 * the guarded fields, and answers `'unknown'` at best. On a grant entity, a
+	 * delete, or an update of the subject, the role or the access parent,
+	 * needs every permission of the row's role where the row applies; an
+	 * update of the role or the access parent answers `'unknown'` at best.
+	 * Where a chain of access parents can lead back to an entity it passes, an
+	 * update that changes the access parent answers `'unknown'` at best, as
+	 * the caller must read the new parent. A delete answers `'no'` while the
+	 * client holds a live row whose access parent names the row, or a live
+	 * grant row whose subject names it, as the server refuses that delete. To
+	 * find one, it scans the rows held locally of each entity whose rows can
+	 * sit below the row or grant to its members. An update or a delete of a
+	 * row the client does not hold answers `'unknown'` at best.
+	 *
+	 * Resolves to `'yes'` for an entity outside the access model, which is
+	 * open to every caller in the workspace.
+	 *
+	 * When the client registers a grant entity and the stored summary holds no
+	 * permission, as after the caller lost its last grant, every prediction
+	 * answers `'no'`: the server then refuses every request in the workspace.
+	 *
+	 * The answer is advisory. The server decides every read and write itself,
+	 * and a write this predicts as allowed can still come back as a rejection
+	 * ack. A row the caller has lost access to keeps showing an optimistic
+	 * write queued against it until that ack arrives.
+	 *
+	 * Resolves to `'unknown'`, unless a rule admits the operation without the
+	 * missing input, in these cases. With `opts.detail`, the answer is a
+	 * {@link CanDetail} that names the {@link UnknownReason}:
+	 *
+	 * - `'no_summary'`: before the first summary arrives;
+	 * - `'row_not_held'`: when a rule's subject check or condition reads a row
+	 *   that is not held locally, or when a permission depends on a row of the
+	 *   chain that is not held locally, the row itself included, and the
+	 *   caller holds that permission at a row of an entity that can sit above
+	 *   it;
+	 * - `'pending_grant'`: while a local write to a grant row or a delete of a
+	 *   row other rows sit below waits for its ack. That includes such a write
+	 *   by the mirror of a custom mutation, and, in a schema with grant
+	 *   entities, a custom mutation with no mirror;
+	 * - `'new_value'`: when the update changes a field whose new value decides;
+	 * - `'chain_too_deep'`: when the chain of access parents is longer than
+	 *   the client walks.
+	 *
+	 * @example
+	 * ```ts
+	 * const canEdit = await client.can(CommentSchema, id, 'update', { fields: ['body'] });
+	 * const canDelete = await client.can(CommentSchema, id, 'delete');
+	 * const { answer, reason } = await client.can(CommentSchema, id, 'delete', { detail: true });
+	 * ```
+	 */
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts: CanOptions<D> & { detail: true },
+	): Promise<CanDetail>;
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer>;
+	async can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.canIn(this.defaultScope().workspaceId, schema, key, operation, opts),
+			opts,
+		);
+	}
+
+	/**
+	 * Predicts whether the entity's access rules admit creating `row` in the
+	 * default workspace: the row as the server would store it, with each
+	 * creator field holding the caller's primary subject. See {@link can} for
+	 * what the answer means and when it is `'unknown'`; the row's access
+	 * parent takes the place of the row itself. A grant row needs every
+	 * permission of its role where it applies.
+	 *
+	 * Each permission a rule requires and each of its `within` entries must
+	 * hold through each access parent of the row on its own: at the row, or at
+	 * that parent or a row above it. Where a chain of access parents can lead
+	 * back to an entity it passes, as a folder in a folder does, the caller must
+	 * also read each access parent the row names: the answer is `'no'` when it
+	 * does not, and `'unknown'` (`row_not_held`) when the client does not hold
+	 * the parent, which can then be missing or hidden.
+	 *
+	 * @example
+	 * ```ts
+	 * const canComment = await client.canCreate(CommentSchema, { id: 'c1', task: { id: taskId } });
+	 * ```
+	 */
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async canCreate<D extends DescMessage>(
+		schema: D,
+		row: MessageInitShape<D>,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(await this.canCreateIn(this.defaultScope().workspaceId, schema, row), opts);
+	}
+
+	/**
+	 * Predicts whether the caller holds `permission` at the row of `schema`
+	 * with `key` in the default workspace: at the workspace root, at the row
+	 * itself, or at a row up its chain of access parents, as the rows held
+	 * locally name it. Use it for a permission no access rule checks, such as
+	 * the one a custom mutator needs; {@link can} answers for an operation.
+	 *
+	 * Resolves to `'unknown'` in the cases {@link can} lists, where the row
+	 * itself counts as a row up the chain.
+	 */
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts: DetailOptions & { detail: true },
+	): Promise<CanDetail>;
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer>;
+	async hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+		opts?: DetailOptions,
+	): Promise<CanAnswer | CanDetail> {
+		return answerAs(
+			await this.hasPermissionIn(this.defaultScope().workspaceId, schema, key, permission),
+			opts,
+		);
+	}
+
+	/** @internal backs WorkspaceClient.can. */
+	async canIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Promise<Verdict> {
+		this.assertOpen();
+		const verdict = await this.askQuestion(
+			workspaceId,
+			this.canQuestion(schema, key, operation, opts),
+		);
+		if (operation !== 'delete' || verdict === 'no') return verdict;
+		const entity = this.entityRegistry.bySchema(schema).name;
+		const below = childEntitiesOf(this.entityRegistry, entity);
+		const granting = subjectEntitiesOf(this.entityRegistry, entity);
+		if (below.length === 0 && granting.length === 0) return verdict;
+		const named = await this.withAccessRead(async (tx) =>
+			await holdsRowNaming(tx, this.entityRegistry, workspaceId, below, parentRefsOf, schema, key)
+			|| await holdsRowNaming(
+				tx,
+				this.entityRegistry,
+				workspaceId,
+				granting,
+				subjectRefsOf,
+				schema,
+				key,
+			)
+		);
+		return named ? 'no' : verdict;
+	}
+
+	/** @internal backs WorkspaceClient.canCreate. */
+	async canCreateIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		init: MessageInitShape<D>,
+	): Promise<Verdict> {
+		this.assertOpen();
+		return this.askQuestion(workspaceId, this.canCreateQuestion(schema, init));
+	}
+
+	/** @internal backs WorkspaceClient.hasPermission. */
+	async hasPermissionIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<Verdict> {
+		this.assertOpen();
+		return this.askQuestion(workspaceId, this.hasPermissionQuestion(schema, key, permission));
+	}
+
+	/**
+	 * What canIn answers, decided at once from what the client holds in
+	 * memory: the summary the last prediction in `workspaceId` read, and no
+	 * row. An unknown verdict can mean only that the rows were not read.
+	 * Undefined before a prediction in the workspace read a summary, and
+	 * where canIn rejects.
+	 * @internal the answer useCan starts from.
+	 */
+	peekCanIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.canQuestion(schema, key, operation, opts));
+	}
+
+	/**
+	 * What canCreateIn answers, decided as {@link peekCanIn} decides.
+	 * @internal the answer useCanCreate starts from.
+	 */
+	peekCanCreateIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		init: MessageInitShape<D>,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.canCreateQuestion(schema, init));
+	}
+
+	/**
+	 * What hasPermissionIn answers, decided as {@link peekCanIn} decides.
+	 * @internal the answer useHasPermission starts from.
+	 */
+	peekHasPermissionIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
+		permission: string,
+	): Verdict | undefined {
+		return this.peekAccess(workspaceId, () => this.hasPermissionQuestion(schema, key, permission));
+	}
+
+	private canQuestion<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions<D>,
+	): AccessQuestion {
+		const def = this.entityRegistry.bySchema(schema);
+		const rules = def.accessRules;
+		if (rules === undefined) return this.outsideModel();
+		return (summary) => {
+			const decide = (row: Message | undefined, chain: AccessChain): Verdict => {
+				const stored = ruleRowOf(summary, def, key, row, chain);
+				if (operation === 'read' && opts?.fields !== undefined) {
+					return decideRead(
+						rules,
+						def.guards,
+						summary.subjects,
+						stored,
+						updateUnitsOf(def.schema, opts.fields),
+					);
+				}
+				if (operation === 'read') return decideRules(rules, operation, summary.subjects, stored);
+				if (operation === 'delete') {
+					// A delete takes away what a grant row grants.
+					const admits = decideRules(rules, operation, summary.subjects, stored);
+					return admits === 'no' ? 'no' : and(admits, grantSubsetAt(summary, def, row, chain));
+				}
+				// Without named fields the answer is for some update, and the best
+				// answer of the candidates wins: null, for an update that only a rule
+				// without a fields list admits, and each field a list names, alone.
+				// One field is the smallest update a list admits.
+				const candidates: readonly (readonly string[] | null)[] = opts?.fields !== undefined
+					? [ updateUnitsOf(def.schema, opts.fields) ]
+					: [ null, ...new Set(rules.flatMap((r) => (r.update ? r.fields ?? [] : []))) ].map((u) =>
+						u === null ? null : [ u ]
+					);
+				const newValue = unknownBecause('new_value');
+				const recursive = inRecursiveChain(def);
+				let answer: Verdict = 'no';
+				for (const changed of candidates) {
+					// The new value of a changed subject field, access parent or field a
+					// condition reads decides the final side, and none is known here.
+					const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
+					const final: RuleRow = {
+						held: moves
+							? (p) => {
+								const held = canAt(summary, p, def.name, key, UNKNOWN_CHAIN);
+								return typeof held === 'string' ? held : newValue;
+							}
+							: stored.held,
+						fieldValue: (field) => (changed?.includes(field) ? newValue : stored.fieldValue(field)),
+						matches: (rule) =>
+							changed !== null && whenReads(def.schema, rule, changed) ? newValue : stored.matches(rule),
+						within: (rule) =>
+							moves || (changed !== null && withinReads(def, rule, changed))
+								? newValue
+								: stored.within(rule),
+					};
+					let one = decideUpdate(rules, def.guards, summary.subjects, stored, final, changed);
+					if (one !== 'no' && changed !== null) {
+						one = and(
+							one,
+							decideUpdateChecks(
+								this.entityRegistry,
+								summary,
+								def,
+								key,
+								row,
+								stored,
+								chain,
+								changed,
+								moves,
+							),
+						);
+					}
+					// In a recursive chain the server refuses a new parent the caller
+					// does not read, and the new parent is not known here.
+					if (moves && recursive) one = and(one, newValue);
+					if (one === 'yes') return 'yes';
+					if (one !== 'no' && answer === 'no') answer = one;
+				}
+				return answer;
+			};
+			return {
+				def,
+				key,
+				decide: (row, chain) => {
+					const answer = decide(row, chain);
+					// The server refuses an update or a delete of a row it does not
+					// hold live, and a row this client does not hold can be one.
+					return answer === 'yes' && row === undefined && operation !== 'read'
+						? unknownBecause('row_not_held')
+						: answer;
+				},
+			};
+		};
+	}
+
+	private canCreateQuestion<D extends DescMessage>(
+		schema: D,
+		init: MessageInitShape<D>,
+	): AccessQuestion {
+		const def = this.entityRegistry.bySchema(schema);
+		const rules = def.accessRules;
+		if (rules === undefined) return this.outsideModel();
+		return (summary) => {
+			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
+			const recursive = inRecursiveChain(def);
+			return {
+				def,
+				row,
+				readsParents: recursive,
+				decide: (_, chain) => {
+					const admits = decideRules(
+						rules,
+						'create',
+						summary.subjects,
+						ruleRowOf(summary, def, keyOf(def, row), row, chain, true),
+					);
+					if (admits === 'no') return 'no';
+					const answer = and(admits, grantSubsetAt(summary, def, row, chain));
+					// In a recursive chain the server refuses a parent the caller
+					// does not read.
+					return recursive && answer !== 'no'
+						? and(answer, parentsRead(summary, parentRefsOf(def, row), chain))
+						: answer;
+				},
+			};
+		};
+	}
+
+	private hasPermissionQuestion<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+	): AccessQuestion {
+		const def = this.entityRegistry.bySchema(schema);
+		return (summary) =>
+			summary.holds(permission, def.name, key)
+				? 'yes'
+				: { def, key, decide: (_, chain) => canAt(summary, permission, def.name, key, chain) };
+	}
+
+	/**
+	 * The question for an entity outside the model, which is open to every
+	 * caller the workspace gate admits. In a schema with a grant entity, the
+	 * gate admits only a caller that holds a permission, which a stored
+	 * summary tells (see {@link gateRefuses}); without one the answer stays
+	 * 'yes'.
+	 */
+	private outsideModel(): AccessQuestion {
+		return hasGrantEntities(this.entityRegistry) ? outsideModelPlanner : 'yes';
+	}
+
+	/**
+	 * Whether the server's workspace gate refuses the caller that `summary`
+	 * describes: in a schema with a grant entity, a caller that holds no
+	 * permission. Every operation is then refused, whatever the rules say.
+	 */
+	private gateRefuses(summary: AccessSummary): boolean {
+		return summary.holdsNothing && hasGrantEntities(this.entityRegistry);
+	}
+
+	/** The answer to `question`, read from the store when it needs a summary. */
+	private askQuestion(workspaceId: string, question: AccessQuestion): Promise<Verdict> {
+		return typeof question === 'function'
+			? this.askAccess(workspaceId, question)
+			: Promise.resolve(question);
+	}
+
+	/** See {@link peekCanIn}. */
+	private peekAccess(workspaceId: string, question: () => AccessQuestion): Verdict | undefined {
+		if (this.closed) return undefined;
+		try {
+			const q = question();
+			if (typeof q !== 'function') return q;
+			const summary = this.settledAccess.get(workspaceId);
+			if (!(summary instanceof AccessSummary)) return q === outsideModelPlanner ? 'yes' : summary;
+			if (this.gateRefuses(summary)) return 'no';
+			const plan = q(summary);
+			if (!isAccessPlan(plan)) return plan;
+			const row = 'row' in plan ? plan.row : undefined;
+			return plan.decide(row, {
+				parents: row === undefined ? undefined : parentRefsOf(plan.def, row),
+				above: () => undefined,
+				entitiesAbove: (entity) => entitiesAboveOf(plan.def).get(entity),
+			});
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * The primary subject in the last CallerAccess stored for `workspaceId`, or
+	 * an empty string before the first one arrives.
+	 * @internal
+	 */
+	async primarySubjectIn(workspaceId: string): Promise<string> {
+		return this.withAccessRead(async (tx) =>
+			(await this.storedAccessIn(tx, workspaceId))?.summary.subjects[0] ?? ''
+		);
+	}
+
+	/** Runs `fn` over a shared read of the local store. */
+	private async withAccessRead<T>(fn: (tx: KVRead) => Promise<T>): Promise<T> {
+		const kv = await this.kv();
+		return this.kvMutex.runShared(async () => {
+			const tx = await kv.read();
+			try {
+				return await fn(tx);
+			} finally {
+				tx.release();
+			}
+		});
+	}
+
+	/**
+	 * Adds a prediction in `workspaceId` to the open access batch, or opens a
+	 * batch when none is open, and resolves with its answer. A batch takes
+	 * predictions until its read of the store starts, so the predictions asked
+	 * in one synchronous run (a Promise.all over many keys, the effects of one
+	 * React commit) share one read. Rejects when that read fails.
+	 */
+	private askAccess(workspaceId: string, plan: AccessPlanner): Promise<Verdict> {
+		return new Promise((resolve, reject) => {
+			const ask: AccessAsk = { workspaceId, plan, resolve, reject };
+			if (this.accessBatch !== undefined) {
+				this.accessBatch.push(ask);
+				return;
+			}
+			const batch = [ ask ];
+			this.accessBatch = batch;
+			void this.answerAccessBatch(batch);
+		});
+	}
+
+	/**
+	 * Settles every prediction in `batch` from one shared read of the store.
+	 * Never rejects: a failed read rejects each prediction instead.
+	 */
+	private async answerAccessBatch(batch: AccessAsk[]): Promise<void> {
+		const close = () => {
+			if (this.accessBatch === batch) this.accessBatch = undefined;
+		};
+		let outcomes: AccessOutcome[];
+		try {
+			const kv = await this.kv();
+			outcomes = await this.kvMutex.runShared(async () => {
+				// Closed when the read starts and not when the batch opens: a
+				// prediction asked while the batch waits for the store, or for
+				// the lock behind a writer, still shares this read.
+				close();
+				const tx = await kv.read();
+				try {
+					return await this.decideAccessBatch(tx, batch);
+				} finally {
+					tx.release();
+				}
+			});
+		} catch (err) {
+			close();
+			for (const ask of batch) ask.reject(err);
+			return;
+		}
+		batch.forEach((ask, i) => {
+			const outcome = outcomes[i]!;
+			if ('answer' in outcome) ask.resolve(outcome.answer);
+			else ask.reject(outcome.error);
+		});
+	}
+
+	/**
+	 * Decides every prediction in `batch` from `tx`: the summary once per
+	 * workspace, then the rows above each row level by level, with one getMany
+	 * per level for every distinct row the level reaches. The rows are read
+	 * through the merged view, so a queued move counts where the row will be
+	 * once the server accepts it. A path stops at a row the client does not
+	 * hold, and after as many hops as the summary's maxAccessDepth allows.
+	 *
+	 * An error deciding one prediction is the outcome of that prediction alone.
+	 * An error reading the store rejects.
+	 */
+	private async decideAccessBatch(
+		tx: KVRead,
+		batch: readonly AccessAsk[],
+	): Promise<AccessOutcome[]> {
+		const summaries = new Map(
+			await Promise.all(
+				[ ...new Set(batch.map((ask) => ask.workspaceId)) ].map(async (ws) =>
+					[ ws, await this.accessSummaryIn(tx, ws) ] as const
+				),
+			),
+		);
+		for (const [ ws, summary ] of summaries) {
+			if (this.scopes.has(ws)) this.settledAccess.set(ws, summary);
+		}
+		const out: AccessOutcome[] = new Array(batch.length);
+		const walks: AccessWalk[] = [];
+		batch.forEach((ask, at) => {
+			const summary = summaries.get(ask.workspaceId)!;
+			if (!(summary instanceof AccessSummary)) {
+				out[at] = { answer: ask.plan === outsideModelPlanner ? 'yes' : summary };
+				return;
+			}
+			if (this.gateRefuses(summary)) {
+				out[at] = { answer: 'no' };
+				return;
+			}
+			try {
+				const plan = ask.plan(summary);
+				if (!isAccessPlan(plan)) out[at] = { answer: plan };
+				else {
+					walks.push({
+						at,
+						workspaceId: ask.workspaceId,
+						plan,
+						row: undefined,
+						parents: undefined,
+						above: new Map(),
+						withinEntities: withinEntities(plan.def),
+						maxHops: summary.maxAccessDepth,
+						level: [],
+					});
+				}
+			} catch (error) {
+				out[at] = { error };
+			}
+		});
+		// Merged bytes by confirmed key, which is unique to the entity, workspace
+		// and key. Many rows share a parent, so each row is read and decoded once.
+		const held = new Map<string, Uint8Array | undefined>();
+		const decoded = new Map<string, { schema: DescMessage; row: Message }>();
+		const read = async (refs: readonly EntityRowRef[]) => {
+			const missing = new Map<string, EntityRowRef>();
+			for (const ref of refs) {
+				const id = confirmedKey(ref.entity, ref.workspaceId, ref.key);
+				if (!held.has(id)) missing.set(id, ref);
+			}
+			if (missing.size === 0) return;
+			const rows = await readMergedRows(tx, this.entityRegistry, [ ...missing.values() ]);
+			let i = 0;
+			for (const id of missing.keys()) held.set(id, rows[i++]);
+		};
+		const rowOf = (def: EntityDef, workspaceId: string, key: string): Message | undefined => {
+			const id = confirmedKey(def.name, workspaceId, key);
+			const bytes = held.get(id);
+			if (bytes === undefined) return undefined;
+			const hit = decoded.get(id);
+			if (hit?.schema === def.schema) return hit.row;
+			const row = fromBinary(def.schema, bytes);
+			decoded.set(id, { schema: def.schema, row });
+			return row;
+		};
+		const step = (walk: AccessWalk, fn: () => void): boolean => {
+			try {
+				fn();
+				return true;
+			} catch (error) {
+				out[walk.at] = { error };
+				return false;
+			}
+		};
+		const finish = (walk: AccessWalk) => {
+			step(walk, () => {
+				const chain: AccessChain = {
+					parents: walk.parents,
+					maxHops: walk.maxHops,
+					above: (row) => walk.above.get(accessRowId(row)),
+					row: (at) => {
+						const def = this.entityRegistry.get(at.entity);
+						if (def === undefined) return undefined;
+						const row = rowOf(def, walk.workspaceId, at.key);
+						return row === undefined ? undefined : { def, row };
+					},
+					entitiesAbove: (entity) => entitiesAboveOf(walk.plan.def).get(entity),
+				};
+				out[walk.at] = { answer: walk.plan.decide(walk.row, chain) };
+			});
+		};
+		// Moves the rows of `refs`, `hops` above the row, that `walk` has not
+		// reached into its next level. A row past walk.maxHops hops is not
+		// read, so the rows above it are not known. A row without an access
+		// parent ends its path, and is read only when a within entry reads it.
+		const enter = (walk: AccessWalk, refs: NonNullable<ParentRefs>, hops: number) => {
+			for (const ref of refs) {
+				const id = accessRowId(ref);
+				if (walk.above.has(id)) continue;
+				if (
+					accessParentFields(ref.def.schema).length === 0 && !walk.withinEntities.has(ref.def.name)
+					&& !(hops === 1 && walk.plan.readsParents === true)
+				) walk.above.set(id, []);
+				else if (hops > walk.maxHops) walk.above.set(id, undefined);
+				else {
+					walk.above.set(id, undefined);
+					walk.level.push(ref);
+				}
+			}
+		};
+
+		await read(
+			walks.flatMap(({ plan, workspaceId }) =>
+				'key' in plan ? [ { entity: plan.def.name, workspaceId, key: plan.key } ] : []
+			),
+		);
+		let climbing = walks.filter((walk) =>
+			step(walk, () => {
+				const { plan } = walk;
+				walk.row = 'key' in plan ? rowOf(plan.def, walk.workspaceId, plan.key) : plan.row;
+				const parents = parentRefsOf(plan.def, walk.row);
+				walk.parents = parents;
+				if (parents !== undefined) enter(walk, parents, 1);
+			})
+		);
+		for (let hops = 1; climbing.length > 0; hops++) {
+			const next: AccessWalk[] = [];
+			const refs: EntityRowRef[] = [];
+			for (const walk of climbing) {
+				if (walk.level.length === 0) finish(walk);
+				else {
+					next.push(walk);
+					for (const at of walk.level) {
+						// A parent of an entity this client does not register counts as
+						// a row it does not hold: none of its rows reach the store.
+						if (this.entityRegistry.get(at.def.name) !== undefined) {
+							refs.push({ entity: at.def.name, workspaceId: walk.workspaceId, key: at.key });
+						}
+					}
+				}
+			}
+			await read(refs);
+			climbing = next.filter((walk) =>
+				step(walk, () => {
+					const level = walk.level;
+					walk.level = [];
+					for (const at of level) {
+						const parents = parentRefsOf(at.def, rowOf(at.def, walk.workspaceId, at.key));
+						walk.above.set(accessRowId(at), parents);
+						if (parents !== undefined) enter(walk, parents, hops + 1);
+					}
+				})
+			);
+		}
+		return out;
+	}
+
+	/**
+	 * The summary canIn decides from in `workspaceId`, or why it cannot decide:
+	 * none is stored, or a queued write can change the caller's grants. Reuses the one decided under the same access generation. Under a
+	 * new generation it reads the stored CallerAccess only when it changed (see
+	 * storedAccessUnder), and walks the pending queue unless the pending-access
+	 * record counts no queued write that can change the grants (see
+	 * keys.metaPendingAccess).
+	 */
+	private async accessSummaryIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<AccessSummary | UnknownDetail> {
+		// The generations and the pending-access record in one getMany:
+		// IndexedDB opens one transaction for it where a get per key opens one
+		// each.
+		const [ generation, storedGeneration, pendingRecord, lastMutationId ] = await tx.getMany([
+			accessGeneration(workspaceId),
+			callerAccessGeneration(workspaceId),
+			metaPendingAccess(workspaceId),
+			metaLastMutationId(workspaceId),
+		]);
+		const cached = this.accessSummaries.get(workspaceId);
+		if (generation !== undefined && cached?.generation === generation) {
+			const overlay = cached.overlay;
+			if (overlay === undefined) return cached.summary;
+			const now = await tx.getMany(overlay.keys);
+			if (now.every((v, i) => v !== undefined && v === overlay.values[i])) return cached.summary;
+		}
+		let entry: NonNullable<typeof cached> | undefined;
+		const summary = (async () => {
+			const decoded = await this.storedAccessUnder(tx, workspaceId, storedGeneration);
+			if (decoded === undefined) return unknownBecause('no_summary');
+			// Only a count of zero is trusted. A build that predates the record
+			// drops queued writes without counting them down, so a count above
+			// zero can be too high, and the walk keeps the answer exact for it.
+			if (pendingAccessOf(pendingRecord, lastMutationId) === 0) return decoded.summary;
+			const pending = await this.pendingAccessIn(tx, workspaceId);
+			if (pending.overlay !== undefined && entry !== undefined) {
+				if (pending.overlay.values.some((v) => v === undefined)) {
+					// A store written by a build that does not stamp the overlay.
+					if (this.accessSummaries.get(workspaceId) === entry) this.accessSummaries.delete(workspaceId);
+				} else entry.overlay = pending.overlay;
+			}
+			return pending.changes ? unknownBecause('pending_grant') : decoded.summary;
+		})();
+		if (generation !== undefined) {
+			// Entered before the first await, so a caller that reads the same
+			// generation while this read is in flight waits for it.
+			entry = { generation, summary };
+			this.accessSummaries.set(workspaceId, entry);
+			// A failed read is not an answer to reuse.
+			summary.catch(() => {
+				if (this.accessSummaries.get(workspaceId) === entry) this.accessSummaries.delete(workspaceId);
+			});
+		}
+		return summary;
+	}
+
+	/**
+	 * Whether the pending queue of `workspaceId` holds a write that can change
+	 * what the caller holds. A custom mutation with a mirror can when the
+	 * overlay holds a grant row or a deleted row that other rows sit below,
+	 * which only a queued write puts there; `overlay` then names the overlay
+	 * generations read. One without a mirror can when the schema has grant
+	 * entities, as the client cannot see what the server's mutator writes.
+	 */
+	private async pendingAccessIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<{ changes: boolean; overlay?: { keys: string[]; values: unknown[] } }> {
+		const registry = this.entityRegistry;
+		const unmirrored = hasGrantEntities(registry);
+		let mirrored = false;
+		const queued = pendingChangesAccess(registry, await readPending(tx, workspaceId), (custom) => {
+			if (this.mirrors[custom.name] === undefined) return unmirrored;
+			mirrored = true;
+			return false;
+		});
+		if (queued || !mirrored) return { changes: queued };
+		const anchors = anchorEntities(registry);
+		const entities = registry.names().filter((name) =>
+			registry.get(name)!.grant || anchors.has(name)
+		);
+		if (entities.length === 0) return { changes: false };
+		const keys = entities.map((name) => overlayGeneration(name, workspaceId));
+		const values = await tx.getMany(keys);
+		for (const name of entities) {
+			for await (const [ , v ] of tx.scan(overlayWsPrefix(name, workspaceId))) {
+				if (writeChangesAccess(registry, name, (v as OverlayRecord).del === true)) {
+					return { changes: true, overlay: { keys, values } };
+				}
+			}
+		}
+		return { changes: false, overlay: { keys, values } };
+	}
+
+	/** storedAccessUnder, with the CallerAccess generation read from `tx`. */
+	private async storedAccessIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<DecodedAccess | undefined> {
+		return this.storedAccessUnder(
+			tx,
+			workspaceId,
+			await tx.get(callerAccessGeneration(workspaceId)),
+		);
+	}
+
+	/**
+	 * The CallerAccess stored for `workspaceId`, or undefined when none is.
+	 * `generation` is the CallerAccess generation as `tx` read it. Returns the
+	 * one read last with no read of the stored bytes while the generation is
+	 * the one it was read under. Otherwise it reads the bytes, and decodes them
+	 * only when they differ from the ones read or stored last.
+	 */
+	private async storedAccessUnder(
+		tx: KVRead,
+		workspaceId: string,
+		generation: unknown,
+	): Promise<DecodedAccess | undefined> {
+		this.accessAsked.add(workspaceId);
+		const last = this.decodedAccess.get(workspaceId);
+		// Every commit that writes or deletes the stored bytes restamps the
+		// generation in the same transaction, so an equal token means equal
+		// bytes. An absent token proves nothing: the store can keep no
+		// generations, or a transaction deleted the token with the bytes.
+		if (generation !== undefined && last?.generation === generation) return last.access;
+		const raw = await tx.get(metaCallerAccess(workspaceId));
+		if (raw === undefined) {
+			this.decodedAccess.delete(workspaceId);
+			return undefined;
+		}
+		const access = decodeAccess(raw as Uint8Array, last?.access);
+		this.decodedAccess.set(workspaceId, { generation, access });
+		return access;
+	}
+
+	/**
+	 * Keeps `access`, which a commit of this tab just stored for `workspaceId`,
+	 * for storedAccessUnder to compare the stored bytes with, so the next read
+	 * does not decode the bytes this tab encoded. The comparison is what keeps
+	 * it correct when a later commit, in this tab or another, stores other
+	 * bytes. The generation the commit stamped is not known here, so the next
+	 * read reads the bytes once. Kept only for a workspace this tab reads the
+	 * CallerAccess in, because what it keeps stays in memory until the next
+	 * CallerAccess replaces it.
+	 */
+	private accessStored(workspaceId: string, access: DecodedAccess): void {
+		if (!this.accessAsked.has(workspaceId) || !this.scopes.has(workspaceId)) return;
+		this.decodedAccess.set(workspaceId, { generation: undefined, access });
+	}
+
 	/** @internal backs devtools.ts; see ClientInternals. */
 	inspect(): ClientInternals {
 		return {
@@ -3296,11 +4638,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		});
 	}
 
-	/** Forces one push+pull cycle across every workspace (mostly for tests). */
+	/**
+	 * Forces one push+pull cycle across every workspace (mostly for tests). A
+	 * workspace that waits for a grant (`access === 'none'`) is asked again at
+	 * once, without waiting for its backoff: call it after the app's backend
+	 * writes the caller's first grant.
+	 */
 	async syncNow(): Promise<void> {
 		this.assertOpen();
 		if (!this.coordinator) throw new Error('start() first');
-		await this.coordinator.syncNow();
+		await this.coordinator.syncNow({ retryNoAccess: true });
 	}
 
 	/**
@@ -3396,6 +4743,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// itself a record this wipe removes.
 				for (const entity of await syncableEntities(tx, this.entityRegistry)) {
 					for (const workspaceId of this.scopes.keys()) touched.entity(workspaceId, entity);
+				}
+				for (const workspaceId of this.scopes.keys()) {
+					touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 				}
 				const doomed: string[] = [];
 				for await (const [ k ] of tx.scan('')) doomed.push(k);
@@ -4235,7 +5585,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				if (rc.body.case !== 'value') continue;
 				const value = fromBinary(schema, rc.body.value);
 				sortOrderedFields(schema, value);
-				rows.push({ key: rc.key, value, workspaceId, version: rc.version });
+				rows.push(rowOf(schema, rc.key, value, workspaceId, rc.version, rc.hidden));
 			}
 			return {
 				value: g.value === undefined ? undefined : scalarFromProto(g.value),
@@ -4513,7 +5863,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			if (rc.body.case === 'value') {
 				const value = fromBinary(schema, rc.body.value);
 				sortOrderedFields(schema, value);
-				rows.push({ key: rc.key, value, workspaceId, version: rc.version });
+				rows.push(rowOf(schema, rc.key, value, workspaceId, rc.version, rc.hidden));
 			}
 		}
 		// A server query sees the whole entity, so the only thing that can make
@@ -4680,7 +6030,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					if (row === undefined) return undefined;
 					const value = fromBinary(schema, row.v);
 					sortOrderedFields(schema, value);
-					return { key: keys[i]!, value, workspaceId, version: row.version };
+					return rowOf(schema, keys[i]!, value, workspaceId, row.version, row.hidden);
 				});
 			} finally {
 				tx.release();
@@ -4799,12 +6149,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						);
 					// One read-only round trip for the whole payload: the mutation-id
 					// watermark together with the records every crud below resolves its
-					// prior row from. A backend answers a getMany in ONE transaction
-					// where per-key gets each open their own (kv/idb.ts), and those
-					// transactions are most of what a local write costs.
+					// prior row from, and the pending-access record the append updates.
+					// A backend answers a getMany in ONE transaction where per-key gets
+					// each open their own (kv/idb.ts), and those transactions are most
+					// of what a local write costs.
 					const pre = await tx.getMany([
 						metaLastMutationId(workspaceId),
 						...(plan?.keys ?? []),
+						metaPendingAccess(workspaceId),
 					]);
 					const lastRaw = pre[0] as string | undefined;
 					const mutationId = (lastRaw ? BigInt(lastRaw) : 0n) + 1n;
@@ -4825,10 +6177,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							// row: what lets the apply below state the merged view it leaves,
 							// so a watcher takes the row from the touch set instead of
 							// reading it back (see TouchSet.rowWithView).
-							let confirmed: { version: bigint } | undefined;
+							let confirmed: { version: bigint; hidden?: readonly string[] } | undefined;
 							if (at !== undefined) {
 								const rec = pre[at + 2] as ConfirmedRecord | undefined;
-								confirmed = { version: rec ? BigInt(rec.ver) : 0n };
+								confirmed = { version: rec ? BigInt(rec.ver) : 0n, hidden: rec?.h };
 							}
 							// The records are in hand, but the row is RESOLVED on first use:
 							// for a collaborative-text keystroke that means folding the row's
@@ -4908,10 +6260,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							if (undoMgr) {
 								const override = undoOpts?.overrides?.[crudIndex]
 									?? this.textStringInverse(crud, textEdits);
+								// The fields the server did not send, which the prior row holds
+								// as zero values.
+								const hidden = at !== undefined
+									? confirmed?.hidden ?? []
+									: ((await tx.get(confirmedKey(crud.entity, workspaceId, crud.key))) as
+										| ConfirmedRecord
+										| undefined)?.h ?? [];
 								if (override !== undefined) {
 									capturedInverses.push(override);
+								} else if (crud.op === CrudOp.DELETE && hidden.length > 0) {
+									capturedInverses.push({
+										kind: 'refused',
+										reason: `undo: row "${crud.key}" of ${crud.entity} had fields hidden from this caller `
+											+ `(${hidden.join(', ')}), which restoring it would clear`,
+									});
 								} else {
-									const inv = invertCrud(crud, await priorRow());
+									const inv = invertCrud(crud, await priorRow(), hidden);
 									capturedInverses.push(inv && { kind: 'crud', crud: inv });
 								}
 							}
@@ -4944,6 +6309,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						}
 						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
 						await enqueuePending(tx, workspaceId, mutation);
+						touchPendingAccess(touched, this.entityRegistry, workspaceId, [ mutation ]);
 					} else {
 						// Custom mutation: an undo barrier, applied in one shot.
 						undoBarrier = true;
@@ -4957,6 +6323,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							touched,
 						);
 					}
+					await notePendingAppended(
+						tx,
+						this.entityRegistry,
+						workspaceId,
+						{ record: pre[pre.length - 1], lastMutationId: lastRaw },
+						[ mutation ],
+						mutationId,
+					);
 					if (this.intentReg && this.opts.undo) {
 						// Persist the PREDICTED post-commit fold-barrier set in this same
 						// transaction: recordGroup below only runs after the commit, so
@@ -5096,9 +6470,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			resolveReverseRef: (schema, rel, target, q) => scope.resolveReverseRef(schema, rel, target, q),
 			// Reads go to the scope, so `update` diffs against the pre-batch row —
 			// the same state every other read on the handle sees.
-			mutate: this.crudMutateApi((crud) => {
-				buffer.push(crud);
-			}, (schema, key) => scope.get(schema, key)),
+			mutate: this.crudMutateApi(
+				(crud) => {
+					buffer.push(crud);
+				},
+				(schema, key) => scope.get(schema, key),
+				() => this.primarySubjectIn(scope.workspaceId),
+			),
 			db: undefined as unknown as EntityApis<E>,
 		};
 		tx.db = buildEntityApis(this.opts.entities, tx, this.entityRegistry);
@@ -5118,6 +6496,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * multi-mutation group (a transact() batch) replays atomically as one batch.
 	 * Concurrent remote edits to fields named by the inverse get clobbered —
 	 * accepted per-field LWW.
+	 *
+	 * Rejects with {@link UndoRefusedError} for a group that deleted a row with
+	 * fields the server did not send (see Row.hidden); the group is used up. An
+	 * undo restores no field the server did not send.
 	 */
 	undo(): Promise<boolean> {
 		return this.undoIn(this.defaultScope());
@@ -5140,7 +6522,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		try {
 			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'redo');
 		} catch (err) {
-			mgr.restoreUndoGroup(group);
+			// A refused step can never replay, so it stays used up.
+			if (!(err instanceof UndoRefusedError)) mgr.restoreUndoGroup(group);
 			throw err;
 		}
 		return true;
@@ -5161,7 +6544,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		try {
 			await this.enqueueInverses(scope, group.map((entry) => entry.inverse), 'undo');
 		} catch (err) {
-			mgr.restoreRedoGroup(group);
+			if (!(err instanceof UndoRefusedError)) mgr.restoreRedoGroup(group);
 			throw err;
 		}
 		return true;
@@ -5210,6 +6593,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		// same counters twice for different content.
 		const docs = new Map<string, TextDoc>();
 		for (const inverse of inverses) {
+			if (inverse.kind === 'refused') throw new UndoRefusedError(inverse.reason);
 			if (inverse.kind === 'crud') {
 				cruds.push(inverse.crud);
 				overrides.push(undefined);

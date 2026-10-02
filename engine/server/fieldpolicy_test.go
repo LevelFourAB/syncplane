@@ -38,7 +38,7 @@ func (p *fieldPolicy) ProtectedFields(
 	return p.protect[entity], nil
 }
 
-var _ = Describe("Protected fields", func() {
+var _ = Describe("Field guards and protected fields", func() {
 	var (
 		ctx    context.Context
 		policy *fieldPolicy
@@ -46,9 +46,10 @@ var _ = Describe("Protected fields", func() {
 		client syncplanev1connect.SyncServiceClient
 	)
 
-	// The fixture is "guarded" in proto/private/syncplane/testdata/v1: `owner`,
-	// `audit`, `summary` (collaborative text) and the `state` oneof are marked
-	// TRUSTED_ONLY, while `label` and `settings` stay client-writable.
+	// The fixture is "guarded" in proto/private/syncplane/testdata/v1: a guard
+	// that admits no write puts `owner`, `audit`, `summary` (collaborative
+	// text) and the `state` oneof out of every client's reach, while `label`
+	// and `settings` stay client-writable.
 	build := func(opts ...server.Option) {
 		GinkgoHelper()
 		srv = newTestServer(append([]server.Option{
@@ -64,7 +65,7 @@ var _ = Describe("Protected fields", func() {
 				func(_ context.Context, tx *server.EntityTx, args proto.Message) error {
 					g := args.(*testdatav1.Guarded)
 					return tx.Patch(g, []string{"owner"}, nil)
-				}),
+				}, server.MutatorAccess{Admitted: true}),
 		}, opts...)...)
 
 		path, handler := srv.Handler()
@@ -125,7 +126,17 @@ var _ = Describe("Protected fields", func() {
 		return found
 	}
 
+	// denied expects the refusal of a guard, which is the access model's.
 	denied := func(result *syncplanev1.MutationResult) string {
+		GinkgoHelper()
+		Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+		Expect(result.GetErrorCode()).To(Equal(server.CodeAccessDenied))
+		return result.GetErrorMessage()
+	}
+
+	// hookDenied expects the refusal of a field the FieldPermissions hook
+	// protects, which is the app's.
+	hookDenied := func(result *syncplanev1.MutationResult) string {
 		GinkgoHelper()
 		Expect(result.GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
 		Expect(result.GetErrorCode()).To(Equal(server.CodePermissionDenied))
@@ -139,11 +150,10 @@ var _ = Describe("Protected fields", func() {
 	}
 
 	Describe("registration", func() {
-		It("refuses a protected key field, which no write could ever honour", func() {
+		It("refuses a guarded key field, which no write could ever honour", func() {
 			err := newTestServerErr(server.WithEntities(&testdatav1.ProtectedKeyEntity{}))
 
-			Expect(err).To(MatchError(ContainSubstring("key field \"id\"")))
-			Expect(err).To(MatchError(ContainSubstring("write_policy")))
+			Expect(err).To(MatchError(ContainSubstring(`access guard[0] fields: "id" is a key field`)))
 		})
 	})
 
@@ -311,7 +321,7 @@ var _ = Describe("Protected fields", func() {
 
 			rej, ok := server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "got %v", err)
-			Expect(rej.Code).To(Equal(server.CodePermissionDenied))
+			Expect(rej.Code).To(Equal(server.CodeAccessDenied))
 			Expect(read("g1").GetOwner()).To(Equal("alice"))
 		})
 
@@ -352,7 +362,8 @@ var _ = Describe("Protected fields", func() {
 
 			rej, ok := server.AsRejection(err)
 			Expect(ok).To(BeTrue(), "got %v", err)
-			Expect(rej.Code).To(Equal(server.CodePermissionDenied))
+			Expect(rej.Code).To(Equal(server.CodeAccessDenied))
+			Expect(plainBody(read("g1").GetSummary())).To(BeEmpty())
 		})
 	})
 
@@ -364,7 +375,7 @@ var _ = Describe("Protected fields", func() {
 		})
 
 		It("refuses a PATCH of a field only the hook protects", func() {
-			Expect(denied(push(patchMutation("c1", 1, "guarded", "g1",
+			Expect(hookDenied(push(patchMutation("c1", 1, "guarded", "g1",
 				&testdatav1.Guarded{Label: "edited"}, "label"))[0])).To(ContainSubstring("label"))
 
 			Expect(read("g1").GetLabel()).To(Equal("seeded"))
@@ -420,12 +431,11 @@ var _ = Describe("Protected fields", func() {
 			Expect(read("g1").GetLabel()).To(Equal("seeded"))
 		})
 
-		It("resolves a oneof member the hook names to its group", func() {
+		It("accepts a oneof member the hook names, which resolves to its group", func() {
 			policy.protect = map[string][]string{"guarded": {"state_code"}}
 
-			Expect(denied(push(patchMutation("c1", 1, "guarded", "g1",
-				&testdatav1.Guarded{State: &testdatav1.Guarded_StateCode{StateCode: 7}}, "state"))[0])).
-				To(ContainSubstring("state"))
+			applied(push(patchMutation("c1", 1, "guarded", "g1",
+				&testdatav1.Guarded{Label: "edited"}, "label"))[0])
 		})
 	})
 })

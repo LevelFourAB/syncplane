@@ -65,9 +65,9 @@ import { schema } from 'syncplane';
 
    **Note:** If you encounter a TypeScript inference cycle with self-referencing entities, name the recursive field map and annotate the entity type using `type X = Infer<typeof x>`.
 
-2. Configure entity write policies and protected fields.
+2. Configure access rules and field guards.
 
-   To restrict entity-level write permissions, pass an options object as the third argument to `schema.entity()`:
+   To decide who reads and writes the rows of an entity, pass `access` in the options object, the third argument to `schema.entity()`. Each rule admits operations to the callers that hold a permission, or to every admitted caller with `admitted: true`. An operation that no rule admits is open only to trusted server-side writes:
 
    ```ts
    // Server-owned: the server records these rows, clients only read them.
@@ -75,32 +75,68 @@ import { schema } from 'syncplane';
    	id: schema.text().key(),
    	what: schema.text(),
    }, {
-   	createPolicy: 'trustedOnly',
-   	updatePolicy: 'trustedOnly',
-   	deletePolicy: 'trustedOnly',
+   	access: { allow: [ { read: true, requires: 'view_activity' } ] },
    });
 
-   // Append-only: a client may post a comment but not silently edit or remove one.
+   // Append-only: a client may post a comment but not edit or remove one.
    const comment = schema.entity('comment', {
    	id: schema.text().key(),
    	body: schema.text(),
-   }, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
+   }, {
+   	access: {
+   		allow: [
+   			{ read: true, requires: 'view_comments' },
+   			{ create: true, requires: 'post_comments' },
+   		],
+   	},
+   });
    ```
 
-   The `'trustedOnly'` setting lowers to the matching `*_TRUSTED_ONLY` proto option. Clients reject restricted operations at the call site; for example, calling `comment.mutate.del(...)` throws an error. Creating an append-only row requires `{ expectedVersion: 0n }` on `put()`. For more information, see [Write policies](../reference/proto-options.md#write-policies).
+   An entity without `access` stays open to every caller that enters the workspace, and a role of a grant entity must grant each permission that a rule names. The server refuses to register these two entities alone: add a grant entity whose roles grant `view_activity`, `view_comments` and `post_comments`. See [Declare roles and permissions](declare-roles-and-permissions.md).
 
-   To restrict specific fields while keeping the entity writable, add `.protected()` to the field definition:
+   At the call site, the client rejects a write that no rule can admit. For example, `comment.mutate.del(...)` rejects with an error. A `put()` creates a comment, and the server refuses a `put()` of a comment that exists. For more information, see [Access model](../reference/typescript-client.md#access-model).
+
+   In a schema without `access`, refuse such writes in the server's `CanMutate` hook. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
+
+   To restrict who writes specific fields while keeping the entity writable, add a `guard` to `access`. A guard whose only rule is the read rule keeps its fields from every client:
 
    ```ts
    const task = schema.entity('task', {
    	id: schema.text().key(),
    	title: schema.text(),
-   	// Advanced by a server-side workflow; clients read it, never write it.
-   	status: schema.text().protected(),
+   	status: schema.text(),
+   	priority: schema.int32(),
+   }, {
+   	access: {
+   		allow: [
+   			{ read: true, requires: 'view_tasks' },
+   			{ write: true, requires: 'edit_tasks' },
+   		],
+   		guard: [
+   			// Advanced by a server-side workflow; clients read it, never write it.
+   			{ fields: [ 'status' ], allow: [ { read: true, admitted: true } ] },
+   			// Only a caller with set_priority changes the priority.
+   			{
+   				fields: [ 'priority' ],
+   				allow: [ { read: true, admitted: true }, {
+   					write: true,
+   					requires: 'set_priority',
+   				} ],
+   			},
+   		],
+   	},
    });
    ```
 
-   A `patch` operation that masks a protected field throws an error. A `put` operation succeeds and preserves the existing field value. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
+   A `patch` operation that masks `status` throws an error. A `put` operation succeeds and keeps the stored value of each guarded field the caller may not write. For more information, see [Field guards](../reference/proto-options.md#field-guards).
+
+   A guard read rule narrower than `{ read: true, admitted: true }` keeps its fields from some readers, and a guard without a read rule keeps them from every client. The client receives each such field cleared, and `Row.hidden` names it:
+
+   ```ts
+   guard: [ { fields: [ 'salary' ], allow: [ { read: true, write: true, requires: 'hr' } ] } ],
+   ```
+
+   For more information, see [Who reads a guarded field](../reference/proto-options.md#who-reads-a-guarded-field).
 
 3. Create the schema bundle with `schema.defineSchema()`:
 

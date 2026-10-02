@@ -21,6 +21,8 @@ Before you begin, ensure you have a configured `SyncClient` instance.
    				return toast('Someone else changed this first');
    			case CodePermissionDenied:
    				return toast(info.errorMessage);
+   			case CodeAccessDenied:
+   				return toast('You may not make this change');
    			case CodeWorkspacePurged:
    				return; // handled by the code that called removeWorkspace
    			default:
@@ -63,6 +65,8 @@ Before you begin, ensure you have a configured `SyncClient` instance.
    	if (discarded.length) await stashSomewhere(discarded);
    }
    ```
+
+   In a schema that uses the access model, a caller that holds no permission in the workspace gets `'none'` instead. This is not permanent: the client keeps the local rows and the queue, and syncs the workspace again by itself once a grant exists. Show the user that they wait for access. Call `client.syncNow()` to ask again at once, for example after your backend writes the grant. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
 
 4. **Handle schema version skew during deployment.** Configure `schemaRevision` and `onSchemaSkew` to detect and respond to schema differences between the client and server.
 

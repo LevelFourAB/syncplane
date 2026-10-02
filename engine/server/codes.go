@@ -7,6 +7,16 @@ package server
 const (
 	// CodePermissionDenied rejects a mutation the caller may not perform.
 	CodePermissionDenied = "permission_denied"
+	// CodeAccessDenied rejects a mutation the schema's access model refuses:
+	// no access rule of the entity admits the write for the caller, the caller
+	// grants a role it does not hold, a move needs a read permission the caller
+	// lacks, a mutator's MutatorAccess does not hold, or the entity has no
+	// rule for the operation. The application's own permission hooks refuse
+	// with CodePermissionDenied, except the default row check: on an entity of
+	// the access model, a write to a row ReadFilter hides gets CodeAccessDenied,
+	// as a write to a missing row does. The message names only what the caller
+	// sent; the server logs why at debug level, as "access refused".
+	CodeAccessDenied = "access_denied"
 	// CodeInvalidArgument rejects a mutation whose payload is semantically
 	// invalid for the application.
 	CodeInvalidArgument = "invalid_argument"
@@ -37,6 +47,15 @@ const (
 	// should stop syncing that workspace and discard its local copy rather than
 	// back off and retry.
 	CodeWorkspaceAccessRevoked = "workspace_access_revoked"
+	// CodeWorkspaceNoAccess reports that the caller holds no permission in the
+	// workspace's access model. Unlike CodeWorkspaceAccessRevoked it is not
+	// permanent: a grant row written later admits the caller. It arrives where
+	// CodeWorkspaceAccessRevoked does, and as a WorkspaceDropped frame with
+	// reason NO_ACCESS on Subscribe. A client seeing it keeps its local copy and
+	// its queue, and retries with backoff. A Pull from a cursor issued while
+	// the caller held a permission gets it only after a page that tombstones
+	// the rows the caller read and sets has_more.
+	CodeWorkspaceNoAccess = "workspace_no_access"
 )
 
 // Workspace-scoped failure codes. These appear on WorkspaceResults.error_code,

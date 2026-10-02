@@ -36,16 +36,46 @@ type writeGate struct {
 	// rowMemo holds each resolved entity's row check. A present nil entry is a
 	// resolved "no check", so the hooks are not asked again.
 	rowMemo map[string]RowWriteFilter
+	// access is what the caller holds in the access model, resolved inside
+	// each write transaction; nil for a schema without the model.
+	access *txAccess
+	// creator is what an enforced create stores in each creator field.
+	creator string
+	// refusalsLogged holds the writes whose access refusal was logged, by
+	// entity, key and operation. A push runs its batch again under savepoints
+	// after a refusal, and the storage adapter may run a closure again, so the
+	// same refusal can be reached more than once in one request.
+	refusalsLogged map[string]bool
 }
 
 // newWriteGate builds the gate an enforced request carries into its writes, or
 // nil when nothing is enforced.
-func (s *Server) newWriteGate(ctx context.Context, p Principal, workspaceID string, enforced bool) *writeGate {
+func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID string, enforced bool) *writeGate {
 	if !enforced {
 		return nil
 	}
 	hook, _ := s.perms.(FieldPermissions)
-	return &writeGate{srv: s, ctx: ctx, p: p, ws: workspaceID, fieldHook: hook}
+	return &writeGate{
+		srv: s, ctx: ctx, p: adm.principal, ws: workspaceID, fieldHook: hook, creator: adm.creator,
+		access: newTxAccess(adm, s.limits, func(row storage.Row, err error) {
+			s.reportPoison(ctx, workspaceID, row, err)
+		}),
+	}
+}
+
+// creatorSubject returns the caller's primary subject, which a create stores
+// in each creator field. The workspace gate resolved it, so the
+// WithCallerAccess hook runs once per request and never inside a transaction.
+func (g *writeGate) creatorSubject() string {
+	return g.creator
+}
+
+// accessOf returns the gate's access, nil for a nil gate.
+func (g *writeGate) accessOf() *txAccess {
+	if g == nil {
+		return nil
+	}
+	return g.access
 }
 
 // rowCheck returns the check this caller's writes to existing rows of the
@@ -136,6 +166,12 @@ func (g *writeGate) guardRow(
 // names only what the caller sent, and reads the same whether the row was
 // hidden or would not decode.
 func refuseRow(info *entityInfo, key string) error {
+	if info.access != nil {
+		// The access model gives a PATCH or DELETE of a missing row this
+		// refusal (see beginAccessWrite). The same answer here keeps a row the
+		// row check hides apart from a key that does not exist.
+		return accessRefusal(info, key)
+	}
 	return Reject(CodePermissionDenied,
 		fmt.Sprintf("entity %q: row %q may not be changed by this caller", info.name, key))
 }

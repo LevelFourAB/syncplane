@@ -15,6 +15,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 
+	"github.com/levelfourab/syncplane/engine/cursorstate"
 	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
@@ -425,7 +426,7 @@ var _ = Describe("Delta resync", func() {
 			cursor, _ := bootstrap()
 
 			changes, drops, _ := drain(cursor, widgetSub(nil))
-			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "keyed_text", "ledger", "pair", "project", "task", "todo", "user"}))
+			Expect(drops).To(Equal([]string{"historied", "historied_all", "issue", "keyed_text", "pair", "project", "task", "todo", "user"}))
 			Expect(changes).To(BeEmpty(), "widgets were already held under full sync")
 		})
 
@@ -580,7 +581,7 @@ var _ = Describe("Delta resync", func() {
 
 			perms.setHiddenWord("plain")
 			changes, drops, _ := drain(cursor, &syncplanev1.Subscription{Entity: "todo"})
-			Expect(drops).To(Equal([]string{"activity", "comment", "historied", "historied_all", "issue", "keyed_text", "ledger", "pair", "project", "task", "user", "widget"}))
+			Expect(drops).To(Equal([]string{"historied", "historied_all", "issue", "keyed_text", "pair", "project", "task", "user", "widget"}))
 			Expect(tombstoneKeys(changes)).To(Equal([]string{"t-plain"}))
 			Expect(valueKeys(changes, "todo")).To(Equal([]string{"t-alpha"}))
 		})
@@ -593,6 +594,80 @@ var _ = Describe("Delta resync", func() {
 			perms.forget()
 			resp := pull(cursor, 0)
 			Expect(resp.GetReset_()).To(BeTrue())
+		})
+
+		It("resets without a cursor-state store, which holds the key of the cursor's tag", func() {
+			start(newTestServer(server.WithPermissions(perms), server.WithCursorStateStore(nil)))
+			push(putTodo(1, "t1", "plain thing"))
+			cursor, _ := bootstrap()
+
+			perms.setHiddenWord("beta")
+			resp := pull(cursor, 0)
+			Expect(resp.GetReset_()).To(BeTrue())
+			Expect(resp.GetPatch().GetChanges()).To(BeEmpty())
+		})
+
+		// The epoch and seq of a cursor are plain protobuf in the client's
+		// hands. A resync classifies the old side with the filter at the
+		// cursor's epoch and bounds its diff with the cursor's seq, so an
+		// edit of either must not make the diff name a row the client never
+		// could read.
+		Describe("from a cursor the client edited", func() {
+			// namedKeys follows has_more until the pulls settle or reset, and
+			// returns the key of every change the client received.
+			namedKeys := func(cursor []byte) []string {
+				GinkgoHelper()
+				var keys []string
+				for range 100 {
+					resp := pull(cursor, 0)
+					for _, rc := range resp.GetPatch().GetChanges() {
+						keys = append(keys, rc.GetKey())
+					}
+					if resp.GetReset_() || !resp.GetHasMore() {
+						return keys
+					}
+					cursor = resp.GetNextCursor()
+				}
+				Fail("pull never drained")
+				return nil
+			}
+
+			edit := func(cursor []byte, change func(*syncplanecursorv1.Cursor)) []byte {
+				GinkgoHelper()
+				var cur syncplanecursorv1.Cursor
+				Expect(proto.Unmarshal(cursor, &cur)).To(Succeed())
+				change(&cur)
+				return mustMarshal(&cur)
+			}
+
+			It("names no row written after the cursor when the client raised its seq", func() {
+				push(putTodo(1, "t-plain", "plain thing"))
+				cursor, _ := bootstrap()
+
+				perms.setHiddenWord("beta")
+				push(putTodo(2, "t-secret", "beta secret"))
+				current := pull(nil, 0).GetSeq()
+
+				Expect(namedKeys(cursor)).NotTo(ContainElement("t-secret"), "control: the cursor as issued")
+				raised := edit(cursor, func(c *syncplanecursorv1.Cursor) { c.Seq = current })
+				Expect(namedKeys(raised)).NotTo(ContainElement("t-secret"),
+					"a raised seq made the resync name a row created after the cursor")
+			})
+
+			It("names no row the current epoch hides when the client lowered its epoch", func() {
+				perms.setHiddenWord("beta")
+				push(
+					putTodo(1, "t-plain", "plain thing"),
+					putTodo(2, "t-secret", "beta secret"),
+				)
+				cursor, rows := bootstrap()
+				Expect(valueKeys(rows, "todo")).To(Equal([]string{"t-plain"}))
+
+				Expect(namedKeys(cursor)).NotTo(ContainElement("t-secret"), "control: the cursor as issued")
+				lowered := edit(cursor, func(c *syncplanecursorv1.Cursor) { c.FilterEpoch = 0 })
+				Expect(namedKeys(lowered)).NotTo(ContainElement("t-secret"),
+					"a lowered epoch made the resync name a row no epoch of this client showed")
+			})
 		})
 	})
 
@@ -607,7 +682,10 @@ var _ = Describe("Delta resync", func() {
 			open := &atomic.Int32{}
 			perms = &watchedFilters{open: open, lost: "widget"}
 			store := snapshotStore{Adapter: newTestStore(), open: open}
-			start(mustNewServer(store, testEntities(), server.WithPermissions(perms)))
+			// The wrapper hides the adapter's cursor-state store, and a resync
+			// after a change of epoch needs one.
+			start(mustNewServer(store, testEntities(), server.WithPermissions(perms),
+				server.WithCursorStateStore(cursorstate.NewMemory(1<<20))))
 			push(putWidget(1, "w1", 5), putWidget(2, "w2", 50), putTodo(3, "t1", "plain"))
 		})
 

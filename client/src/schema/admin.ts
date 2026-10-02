@@ -38,6 +38,14 @@ export interface RegisterOptions {
 	 * app's current revision.
 	 */
 	expectedRevision?: string;
+	/**
+	 * Lets the registration change the access model of an entity that is
+	 * already registered: its `access` options, access parents included, or
+	 * its `grant` options. Without it, the server refuses such a change.
+	 *
+	 * @defaultValue false
+	 */
+	allowAccessChange?: boolean;
 }
 
 /**
@@ -58,6 +66,7 @@ export async function registerSchema(
 			appId,
 			descriptorSet: bundle.toBinary(),
 			expectedRevision: opts.expectedRevision ?? '',
+			allowAccessChange: opts.allowAccessChange ?? false,
 		},
 		opts.token ? { headers: { Authorization: `Bearer ${opts.token}` } } : undefined,
 	);

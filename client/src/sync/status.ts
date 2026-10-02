@@ -89,8 +89,22 @@ export interface SchemaSkewInfo {
  * reading a frame. What it does do is stop syncing that workspace, so the app
  * can act on this status — `client.removeWorkspace(id, { purge: true })` is the
  * purge when it decides to.
+ *
+ * "none" means the caller holds no permission in the workspace's access model,
+ * such as a new user before the first grant is written, or a caller whose last
+ * grant was removed. A caller that loses its last grant first receives a
+ * tombstone for each row of an entity in the access model, as for any row the
+ * caller can no longer read; rows of entities outside the model stay. A caller
+ * that waits for its first grant keeps its local copy. It is not permanent:
+ * the client keeps the queue, leaves the workspace out of the stream and of
+ * each cycle, and asks again with backoff, 1 to 30 seconds apart, and at once
+ * on `SyncClient.syncNow()`. The first answer that admits the caller sets
+ * "granted" and syncs the workspace again, queued writes included.
+ *
+ * "granted" is set only after "none"; a workspace that was never refused leaves
+ * the field unset.
  */
-export type WorkspaceAccess = 'granted' | 'revoked';
+export type WorkspaceAccess = 'granted' | 'revoked' | 'none';
 
 /** Sync health of one workspace the client holds. */
 export interface WorkspaceStatus {
@@ -99,9 +113,9 @@ export interface WorkspaceStatus {
 	pendingMutations: number;
 	/**
 	 * Whether the workspace is still accessible. Unset means "no verdict yet" —
-	 * it only becomes "revoked" when the server says so. Like schemaSkew and
-	 * unlike lastError, this survives successful cycles: it is a standing
-	 * condition, not a transient failure.
+	 * it only becomes "revoked" or "none" when the server says so. Like
+	 * schemaSkew and unlike lastError, this survives successful cycles of other
+	 * workspaces: it is a standing condition, not a transient failure.
 	 */
 	access?: WorkspaceAccess;
 	/** The effective sync scope for this workspace. Unset until the first cycle. */

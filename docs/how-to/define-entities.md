@@ -38,7 +38,7 @@ If you use `protoc`, export the dependency to your local file system:
 buf export buf.build/levelfourab/syncplane -o vendor/proto
 ```
 
-This exports `syncplane/v1/options.proto` with its `go_package` option intact.
+This exports `syncplane/v1/options.proto` and the files it imports, such as `syncplane/v1/query.proto`, with their `go_package` options intact.
 
 ## 2. Annotate your proto message
 
@@ -60,11 +60,11 @@ For more options, such as `key_fields`, keyed lists, movable lists, opaque field
 
 ## 3. Configure Go code generation
 
-Configure your code generator so that `options.proto` points to the `github.com/levelfourab/syncplane` Go module and does not generate Go code in your project.
+Configure your code generator so that `options.proto` and `query.proto`, which `options.proto` imports, point to the `github.com/levelfourab/syncplane` Go module and do not generate Go code in your project.
 
 ### If you use buf
 
-Managed mode rewrites `go_package` for every file by default. Disable `go_package` rewriting for `syncplane/v1/options.proto` and exclude it from the target inputs in `buf.gen.yaml`:
+Managed mode rewrites `go_package` for every file by default. Disable `go_package` rewriting for the `syncplane/v1` files and exclude them from the target inputs in `buf.gen.yaml`:
 
 ```yaml
 # buf.gen.yaml
@@ -77,7 +77,7 @@ managed:
   disable:
     # Share the engine's extension types rather than registering a second copy.
     - file_option: go_package
-      path: syncplane/v1/options.proto
+      path: syncplane/v1
 inputs:
   - directory: proto
     paths:
@@ -90,7 +90,7 @@ plugins:
 
 ### If you use protoc
 
-Pass `Msyncplane/v1/options.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` to `protoc` and omit `options.proto` from the list of target files.
+Pass `Msyncplane/v1/options.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` and `Msyncplane/v1/query.proto=github.com/levelfourab/syncplane/engine/gen/syncplane/v1` to `protoc`, and omit both files from the list of target files.
 
 ## 4. Register the entity with the server
 

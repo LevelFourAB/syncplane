@@ -120,6 +120,11 @@ type Participant struct {
 	// other field hangs off: records are keyed by it, a departure names it, and
 	// an expiry is measured per session.
 	SessionID string
+	// Issuer is the issuer of the publishing principal, stamped by the server
+	// with Subject. Empty when the principal names no issuer. A bus must carry
+	// it verbatim and must never let a payload set it. It never reaches a
+	// client.
+	Issuer string
 	// Subject is who is publishing, stamped by the server from the request
 	// principal. Empty when the publisher was unauthenticated. A bus must carry
 	// it verbatim and must never let a payload set it.
@@ -153,8 +158,8 @@ type Event struct {
 	Topic Topic
 	Kind  Kind
 	// Participant is the session the event concerns. KindState carries the
-	// whole record; KindLeave and KindMessage set only SessionID and Subject,
-	// naming the departing session and the sender respectively.
+	// whole record; KindLeave and KindMessage set only SessionID, Issuer and
+	// Subject, naming the departing session and the sender respectively.
 	Participant Participant
 	// Payload is the broadcast body, set only for KindMessage.
 	Payload []byte
@@ -176,11 +181,12 @@ type Event struct {
 // including its own publishes.
 //
 // An implementation MAY coalesce KindState events for one (topic, session,
-// subject) down to the one with the highest revision, keeping the later of two
-// equal revisions, because a receiver keeps only the highest anyway. It must
-// NOT keep a lower revision in place of a higher one — events do not always
-// arrive in revision order — and must NOT fold together events of two
-// subjects, because a receiver keeps a record for the subject that wrote it.
+// issuer, subject) down to the one with the highest revision, keeping the
+// later of two equal revisions, because a receiver keeps only the highest
+// anyway. It must NOT keep a lower revision in place of a higher one — events
+// do not always arrive in revision order — and must NOT fold together events
+// of two issuers or two subjects, because a receiver keeps a record for the
+// issuer and subject that wrote it.
 // It must NOT coalesce KindMessage events, which are each distinct — it may
 // only drop them.
 //

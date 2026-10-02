@@ -8,12 +8,14 @@ import (
 	"log/slog"
 	"sort"
 
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protodesc"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/dynamicpb"
 
+	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/internal/protoopts"
 )
 
@@ -44,12 +46,20 @@ type RegisterResult struct {
 // synthesized entity files, so the whole schema resolves from these bytes
 // with no codegen.
 //
+// Each entity is checked as RegisterEntity checks it, so a reserved name or an
+// option field this server does not know refuses the whole set.
+//
 // Re-registration is idempotent and additive (see registerDescriptorSet):
 // an identical set is a no-op, appended fields/new entities upsert, and a
 // conflicting change (a removed, renumbered or retyped field, or changed
 // key_fields) is rejected without partially applying.
-func (s *Server) RegisterDescriptorSet(set []byte) ([]string, error) {
-	r, err := s.registerDescriptorSet(set)
+//
+// A change to the access model of an entity that is already registered — its
+// access or grant options, or the enum values its grant role field matches —
+// is rejected the same way unless opts include AllowAccessChange. So is a set that declares the first role of a schema
+// that served callers without one, or removes the last role.
+func (s *Server) RegisterDescriptorSet(set []byte, opts ...RegisterOption) ([]string, error) {
+	r, err := s.registerDescriptorSet(set, opts...)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +72,40 @@ func (s *Server) RegisterDescriptorSet(set []byte) ([]string, error) {
 	return r.Entities, nil
 }
 
+// RegisterOption adjusts one call to RegisterDescriptorSet, RegisterEntity,
+// RegisterDynamicEntity or Manager.Register.
+type RegisterOption func(*registerConfig)
+
+type registerConfig struct {
+	allowAccessChange bool
+}
+
+func registerConfigOf(opts []RegisterOption) registerConfig {
+	var cfg registerConfig
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+	return cfg
+}
+
+// AllowAccessChange lets a registration change the access model of an entity
+// that is already registered: its access or grant options, or the names of
+// the enum values its grant role field matches. Every client
+// resyncs the rows the change affects.
+//
+// It also lets a registration declare the first role of a schema that served
+// callers without one, or remove the last. That decides whether the
+// workspace gate refuses a caller that holds no permission, so callers without
+// a grant row lose or gain access to every workspace.
+func AllowAccessChange() RegisterOption {
+	return func(c *registerConfig) { c.allowAccessChange = true }
+}
+
 // registerDescriptorSet is the richer internal form RegisterDescriptorSet and
 // the Manager share: it also reports the derived revision and whether the
 // catalog changed.
-func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
+func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (RegisterResult, error) {
+	cfg := registerConfigOf(opts)
 	var fds descriptorpb.FileDescriptorSet
 	if err := proto.Unmarshal(set, &fds); err != nil {
 		return RegisterResult{}, fmt.Errorf("server: decode FileDescriptorSet: %w", err)
@@ -131,6 +171,9 @@ func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
 				if err := validateEvolution(cur.msgType.Descriptor(), info.msgType.Descriptor()); err != nil {
 					return err
 				}
+				if err := validateAccessEvolution(cur, info, cfg.allowAccessChange); err != nil {
+					return err
+				}
 			}
 		}
 		for _, info := range infos {
@@ -138,11 +181,21 @@ func (s *Server) registerDescriptorSet(set []byte) (RegisterResult, error) {
 			c.byType[info.msgType.Descriptor().FullName()] = info
 		}
 		c.schemaRev = revision
-		return ensureHistoryEntity(c)
+		if err := ensureHistoryEntity(c); err != nil {
+			return err
+		}
+		// A descriptor set is a whole schema, so unlike RegisterEntity it is
+		// judged here and refused when it breaks a rule of the access model.
+		c.recompileAccess(s)
+		if c.accessErr != nil {
+			return c.accessErr
+		}
+		return c.settleGate(cfg.allowAccessChange, s.callerAccess != nil)
 	})
 	if err != nil {
 		return RegisterResult{}, err
 	}
+	s.logAccessWarnings(s.catalogPtr())
 	return RegisterResult{Entities: names, Revision: revision, Changed: true}, nil
 }
 
@@ -195,6 +248,13 @@ func validateEvolution(old, next protoreflect.MessageDescriptor) error {
 			return fmt.Errorf("server: entity %q field %q message type changed %s -> %s; not an additive evolution",
 				name, of.Name(), of.Message().FullName(), nf.Message().FullName())
 		}
+		// The same holds for an enum: another enum type reads the stored
+		// numbers as other values, and a grant role field picks its role by the
+		// value's name.
+		if of.Kind() == protoreflect.EnumKind && of.Enum().FullName() != nf.Enum().FullName() {
+			return fmt.Errorf("server: entity %q field %q enum type changed %s -> %s; not an additive evolution",
+				name, of.Name(), of.Enum().FullName(), nf.Enum().FullName())
+		}
 		if of.Cardinality() != nf.Cardinality() {
 			return fmt.Errorf("server: entity %q field %q cardinality changed %s -> %s; not an additive evolution",
 				name, of.Name(), of.Cardinality(), nf.Cardinality())
@@ -228,4 +288,159 @@ func equalStrings(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// removedEntityOptions names, by field number, the EntityOptions fields that
+// the access model replaced. options.proto reserves the numbers, so this
+// server reads them as unknown fields.
+var removedEntityOptions = map[protowire.Number]string{
+	4: "delete_policy",
+	7: "create_policy",
+	8: "update_policy",
+}
+
+// removedFieldWritePolicy is the FieldBehavior field number of write_policy,
+// which the field guards of the access model replaced.
+const removedFieldWritePolicy protowire.Number = 8
+
+// refuseStaleOptions refuses an entity whose (syncplane.v1.entity) options,
+// or the (syncplane.v1.field_behavior) of any field in its shape, carry a
+// field this server does not know. A removed write policy gets an error that
+// says what replaces it. Dropping such a field would silently give every
+// admitted caller a write that the policy kept to trusted writes, and a field
+// from a newer options.proto can narrow access or change merge semantics.
+//
+// It checks only the fields directly on the two option messages. The option
+// messages inside them are checked where they are read, and then once more by
+// refuseUnknownNestedOptions.
+func refuseStaleOptions(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions) error {
+	for _, n := range unknownNumbers(eo.ProtoReflect().GetUnknown()) {
+		if name, ok := removedEntityOptions[n]; ok {
+			return fmt.Errorf("server: entity %q sets %s (field %d of EntityOptions), which this server no longer reads: "+
+				"declare an access option on the entity instead, with rules for the operations callers may do; "+
+				"an operation that no rule names is open only to trusted writes", eo.GetName(), name, n)
+		}
+		return fmt.Errorf("server: entity %q options carry field %d, which this server does not know; "+
+			"upgrade the server before using it", eo.GetName(), n)
+	}
+	return walkFieldBehaviors(desc, func(fd protoreflect.FieldDescriptor, b *syncplanev1.FieldBehavior) error {
+		for _, n := range unknownNumbers(b.ProtoReflect().GetUnknown()) {
+			if n == removedFieldWritePolicy {
+				return fmt.Errorf("server: entity %q field %q sets write_policy (field %d of FieldBehavior), which this server no longer reads: "+
+					"name the field in a guard of the entity's access option instead; "+
+					"a field operation that no rule of the guard admits is open only to trusted writes",
+					eo.GetName(), fd.FullName(), n)
+			}
+			return fmt.Errorf("server: entity %q field %q behavior carries field %d, which this server does not know; "+
+				"upgrade the server before using it", eo.GetName(), fd.FullName(), n)
+		}
+		return nil
+	})
+}
+
+// refuseUnknownNestedOptions refuses an entity whose (syncplane.v1.entity)
+// options, or the (syncplane.v1.field_behavior) of any field in its shape,
+// hold an option message at any depth that carries fields this server does
+// not know.
+func refuseUnknownNestedOptions(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions) error {
+	if path := unknownOptionPath(eo.ProtoReflect(), "options"); path != "" {
+		return fmt.Errorf("server: entity %q %s carries option fields this server does not know; "+
+			"upgrade the server before using them", eo.GetName(), path)
+	}
+	return walkFieldBehaviors(desc, func(fd protoreflect.FieldDescriptor, b *syncplanev1.FieldBehavior) error {
+		if path := unknownOptionPath(b.ProtoReflect(), "behavior"); path != "" {
+			return fmt.Errorf("server: entity %q field %q %s carries option fields this server does not know; "+
+				"upgrade the server before using them", eo.GetName(), fd.FullName(), path)
+		}
+		return nil
+	})
+}
+
+// walkFieldBehaviors calls fn with the field behavior of each field of desc
+// that carries one, and of each field of the messages nested in desc. It does
+// not enter entity-typed fields: those are other entities, checked when they
+// register.
+func walkFieldBehaviors(desc protoreflect.MessageDescriptor, fn func(protoreflect.FieldDescriptor, *syncplanev1.FieldBehavior) error) error {
+	seen := map[protoreflect.FullName]bool{}
+	var walk func(md protoreflect.MessageDescriptor) error
+	walk = func(md protoreflect.MessageDescriptor) error {
+		seen[md.FullName()] = true
+		fields := md.Fields()
+		for i := 0; i < fields.Len(); i++ {
+			fd := fields.Get(i)
+			if b := fieldBehaviorOf(fd); b != nil {
+				if err := fn(fd, b); err != nil {
+					return err
+				}
+			}
+			var sub protoreflect.MessageDescriptor
+			switch {
+			case fd.IsMap():
+				if fd.MapValue().Kind() == protoreflect.MessageKind {
+					sub = fd.MapValue().Message()
+				}
+			case fd.Kind() == protoreflect.MessageKind:
+				sub = fd.Message()
+			}
+			if sub == nil || seen[sub.FullName()] || protoopts.Entity(sub) != nil {
+				continue
+			}
+			if err := walk(sub); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return walk(desc)
+}
+
+// unknownOptionPath returns the path, below root, of the first message in m
+// that carries unknown fields, or "" when no message does.
+func unknownOptionPath(m protoreflect.Message, root string) string {
+	if len(m.GetUnknown()) > 0 {
+		return root
+	}
+	var found string
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		at := root + "." + string(fd.Name())
+		switch {
+		case fd.IsMap():
+			if fd.MapValue().Kind() == protoreflect.MessageKind {
+				v.Map().Range(func(k protoreflect.MapKey, mv protoreflect.Value) bool {
+					found = unknownOptionPath(mv.Message(), fmt.Sprintf("%s[%v]", at, k.Interface()))
+					return found == ""
+				})
+			}
+		case fd.IsList():
+			if fd.Kind() == protoreflect.MessageKind {
+				for i := 0; i < v.List().Len() && found == ""; i++ {
+					found = unknownOptionPath(v.List().Get(i).Message(), fmt.Sprintf("%s[%d]", at, i))
+				}
+			}
+		case fd.Kind() == protoreflect.MessageKind:
+			found = unknownOptionPath(v.Message(), at)
+		}
+		return found == ""
+	})
+	return found
+}
+
+// unknownNumbers returns the field numbers in raw, the unknown fields of a
+// message, in order. It stops at the first field it cannot parse, which a
+// message decoded from valid bytes never carries.
+func unknownNumbers(raw []byte) []protowire.Number {
+	var out []protowire.Number
+	for len(raw) > 0 {
+		n, typ, tagLen := protowire.ConsumeTag(raw)
+		if tagLen < 0 {
+			break
+		}
+		valLen := protowire.ConsumeFieldValue(n, typ, raw[tagLen:])
+		if valLen < 0 {
+			break
+		}
+		out = append(out, n)
+		raw = raw[tagLen+valLen:]
+	}
+	return out
 }

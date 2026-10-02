@@ -56,6 +56,14 @@ message RegisterRequest {
 	// unless this value matches the application's current revision. If empty,
 	// the server does not check the revision.
 	string expected_revision = 3;
+	// Allows the registration to change the access model of an entity that is
+	// already registered: its `access` or `grant` options, or the names of the
+	// enum values its role field matches.
+	//
+	// If `false`, the server rejects such a change with
+	// `FAILED_PRECONDITION`. A change makes every client resync the affected
+	// rows.
+	bool allow_access_change = 4;
 }
 
 // The result status of a schema registration request.

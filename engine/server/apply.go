@@ -41,6 +41,10 @@ import (
 //	(no tx)         CanAccessWorkspace, then CanMutate per recorded write.
 //	write tx        the recorded writes are applied at one sequence.
 //
+// Reads apply the caller's read rules as View's do, and clear each field a
+// field guard hides from the caller. A Put of such a row keeps the stored value
+// of each field the caller may not read.
+//
 // No permission hook ever runs inside a transaction on this path, and none of
 // your code runs while the workspace's write lock is held. A policy that needs
 // to do I/O can therefore afford to, and a slow handler does not serialize
@@ -137,26 +141,30 @@ func (s *Server) apply(
 	if inWriteTx(ctx) {
 		return WriteOutcome{}, fmt.Errorf("server: Apply called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
-	p, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gateServed(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
+	p := adm.principal
 	if key != "" {
 		key = ledgerKey(p, enforced, key)
 	}
-	visible, err := s.readGate(ctx, workspaceID, enforced)
+	visible, project, refuse, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
-		return WriteOutcome{}, err
+		return WriteOutcome{}, adm.verdict.settle(ctx, err)
 	}
 
 	// Phase 1: run fn over a read snapshot, recording its writes. No write lock
 	// is held and fn runs at most once (WithReadTx never retries).
-	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible}
+	atx := &ApplyTx{srv: s, ctx: ctx, ws: workspaceID, visible: visible, project: project, refuse: refuse}
 	var (
 		result []byte
 		replay *storage.IdempotencyRecord
 	)
 	err = s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		if err := bind(tx); err != nil {
+			return err
+		}
 		atx.tx = tx
 		if key != "" {
 			// Cheap early-out for a retry whose key is already claimed: skip fn
@@ -175,7 +183,9 @@ func (s *Server) apply(
 		result, fnErr = fn(atx)
 		return fnErr
 	})
-	if err != nil {
+	// The snapshot reached the grant check first, so whatever follows runs for
+	// an admitted caller.
+	if err = adm.verdict.settle(ctx, err); err != nil {
 		return WriteOutcome{}, err
 	}
 	if replay != nil {
@@ -189,7 +199,7 @@ func (s *Server) apply(
 	// rejection here means nothing is applied — the writes were never opened.
 	// The gate outlives this pass: phase 3 reads the protected fields and row
 	// checks it resolved here rather than calling the hooks under the write lock.
-	gate := s.newWriteGate(ctx, p, workspaceID, enforced)
+	gate := s.newWriteGate(ctx, adm, workspaceID, enforced)
 	if enforced {
 		for _, in := range atx.intents {
 			if err := s.authorizeWrite(ctx, p, workspaceID, gate, Write{Crud: in.crud()}); err != nil {
@@ -230,7 +240,10 @@ func (s *Server) apply(
 		// re-running the hook here would put it back under the write lock. The
 		// write gate does travel, warm: the PUT carry-over and the row check
 		// need the stored row, which only this transaction reads.
-		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor}
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
+		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf()}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {
 				return err
@@ -245,7 +258,7 @@ func (s *Server) apply(
 		wrote = etx.wrote
 		return nil
 	})
-	if err != nil {
+	if err = adm.verdict.settle(ctx, err); err != nil {
 		return WriteOutcome{}, err
 	}
 	if wrote {
@@ -329,6 +342,12 @@ type ApplyTx struct {
 	// visible gates each row read against the caller's read filter, or is nil
 	// for a Trusted call. Resolved before the snapshot opened; see readGate.
 	visible func(storage.Row) (bool, error)
+	// project clears the fields a guard hides from the caller in each row a
+	// read returns, or is nil for a Trusted call.
+	project rowProjector
+	// refuse refuses a query that names a field a guard hides from the
+	// caller, or is nil for a Trusted call.
+	refuse specRefuser
 }
 
 // rowRef identifies a row within the workspace for read-after-write detection.
@@ -365,7 +384,7 @@ func (a *ApplyTx) Get(dst proto.Message, key string) (found bool, version uint64
 	if a.written[rowRef{entity: info.name, key: key}] {
 		return false, 0, fmt.Errorf("server: Apply: Get of %s/%q after writing it — reads come from the snapshot taken before the closure ran and do not see recorded writes; keep the written value, or use Mutate for read-your-own-writes", info.name, key)
 	}
-	return readRowVisible(a.tx, info, dst, key, a.visible)
+	return readRowVisible(a.tx, info, dst, key, a.visible, a.project)
 }
 
 // GetMeta is Get, reporting the row's whole RowMeta instead of its version
@@ -380,7 +399,7 @@ func (a *ApplyTx) GetMeta(dst proto.Message, key string) (found bool, meta RowMe
 	if a.written[rowRef{entity: info.name, key: key}] {
 		return false, RowMeta{}, fmt.Errorf("server: Apply: GetMeta of %s/%q after writing it — reads come from the snapshot taken before the closure ran and do not see recorded writes; keep the written value, or use Mutate for read-your-own-writes", info.name, key)
 	}
-	return readRowMeta(a.tx, info, dst, key, a.visible)
+	return readRowMeta(a.tx, info, dst, key, a.visible, a.project)
 }
 
 // ScanPage iterates up to limit live rows of the entity identified by prototype
@@ -396,7 +415,7 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(a.tx, info, afterKey, limit, a.visible, fn)
+	return scanPageRows(a.tx, info, afterKey, limit, a.visible, a.project, fn)
 }
 
 // Query iterates the live rows matching spec, in spec's order, decoding each
@@ -410,13 +429,17 @@ func (a *ApplyTx) ScanPage(prototype proto.Message, afterKey string, limit int, 
 // it does NOT run under the workspace write lock, so a broad query here blocks
 // no other writer.
 //
-// Recorded writes are not visible to it (see Apply).
+// A spec that names a field the caller does not read on every row fails as on
+// ViewTx.Query. Recorded writes are not visible to it (see Apply).
 func (a *ApplyTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message, version uint64) error) error {
 	info, err := a.info(prototype)
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(a.srv, a.tx, a.ws, info, spec, a.visible)
+	if err := a.refuse.check(info, spec); err != nil {
+		return err
+	}
+	rows, err := runQuerySpec(a.srv, a.tx, a.ws, info, spec, a.visible, a.project)
 	if err != nil {
 		return err
 	}

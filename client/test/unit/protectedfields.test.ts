@@ -1,8 +1,9 @@
 // Fields a client may not write, the half a schema states — the engine's
 // FieldPermissions hook can protect more per caller, and none of that is
 // knowable here. The fixture is "guarded" in
-// proto/private/syncplane/testdata/v1: `owner`, `audit`, `summary` and the
-// `state` oneof are marked TRUSTED_ONLY, `label` and `settings` are not.
+// proto/private/syncplane/testdata/v1: a field guard with no write rule puts
+// `owner`, `audit`, `summary` and the `state` oneof out of every client's
+// reach, and `label` and `settings` stay writable.
 //
 // A patch masking one is refused at the call site rather than applied to the
 // overlay and rolled back on the rejection ack. A put is not refused: it names
@@ -34,18 +35,18 @@ function newClient() {
 
 describe('protected fields', () => {
 	describe('the entity definition', () => {
-		it('names a oneof by its group, once, however many members are marked', () => {
+		it('names a guarded oneof by its group', () => {
 			expect(entityDefOf(GuardedSchema).protectedFields)
 				.toEqual([ 'owner', 'audit', 'summary', 'state' ]);
 		});
 
-		it('leaves an entity that marks nothing with an empty set', () => {
+		it('leaves an entity without guards or creator fields with an empty set', () => {
 			expect(entityDefOf(TodoSchema).protectedFields).toEqual([]);
 		});
 
-		it('refuses a protected key field, which no write could ever honour', () => {
+		it('refuses a guarded key field, which no write could ever honour', () => {
 			expect(() => entityDefOf(ProtectedKeyEntitySchema))
-				.toThrow(/key field "id" is marked write_policy TRUSTED_ONLY/);
+				.toThrow(/access guard\[0\] fields: "id" is a key field/);
 		});
 	});
 

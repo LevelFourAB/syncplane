@@ -11,6 +11,7 @@
  * | Failure                              | Channel                        | Code                       |
  * | ------------------------------------ | ------------------------------ | -------------------------- |
  * | Mutation refused by the app's rules  | `onMutationRejected`           | `permission_denied`, `invalid_argument`, `conflict`, or an app-defined code |
+ * | Mutation refused by the access model | `onMutationRejected`           | `access_denied`            |
  * | Text PATCH's delta state did not fit | (handled internally, re-sent)  | `text_full_state_required` |
  * | Text write predates a compaction     | (handled internally, re-applied) | `text_state_stale`       |
  * | Mutation dropped after repeated      | `onMutationRejected`           | `poison_dropped`           |
@@ -28,15 +29,26 @@
  * | Room publish could not be sent       | `Room.onError`                 | `room_offline`             |
  * | Room send on a closed or dropped room | the `RoomSendError` it rejects with | `room_closed`, `room_dropped` |
  * | Access to a workspace withdrawn      | `status().workspaces[id].access` | (no code — `'revoked'`)  |
+ * | No grant in a workspace yet          | `status().workspaces[id].access` | (no code — `'none'`)     |
  * | Server/client schema revisions differ | `status().schemaSkew`         | (no code — see SchemaSkewInfo) |
  *
- * The two `status()` fields at the bottom are standing conditions rather than
- * failures: unlike `lastError` they survive a successful sync cycle, because
- * neither clears by retrying.
+ * The `status()` fields at the bottom are standing conditions rather than
+ * failures: unlike `lastError` they survive a successful sync cycle. `'revoked'`
+ * and a schema skew do not clear by retrying; `'none'` clears once a grant
+ * exists and the client's next retry finds it.
  */
 
 /** The caller may not perform this mutation. */
 export const CodePermissionDenied = 'permission_denied';
+/**
+ * The schema's access model refused this mutation: no access rule admits it
+ * for the caller, or it grants a role the caller does not hold. The app's own
+ * permission policy refuses with CodePermissionDenied instead, except a write
+ * to a row its read filter hides on an entity of the access model: that gets
+ * this code, as a write to a row that does not exist does. The server logs
+ * why at debug level, as "access refused".
+ */
+export const CodeAccessDenied = 'access_denied';
 /** The mutation payload is semantically invalid for the application. */
 export const CodeInvalidArgument = 'invalid_argument';
 /** The mutation lost a business-level conflict (e.g. uniqueness). */
@@ -85,6 +97,19 @@ export const CodeTextStateStale = 'text_state_stale';
  * on its own — `removeWorkspace(id, { purge: true })` is how an app decides to.
  */
 export const CodeWorkspaceAccessRevoked = 'workspace_access_revoked';
+
+/**
+ * The caller holds no permission in the workspace's access model. It arrives
+ * where CodeWorkspaceAccessRevoked does, and as a `WorkspaceDropped` frame with
+ * reason NO_ACCESS on Subscribe.
+ *
+ * Unlike CodeWorkspaceAccessRevoked it is not permanent: a grant written later
+ * admits the caller. The client keeps the workspace's local rows and queue,
+ * surfaces `status().workspaces[id].access === 'none'`, and asks again with
+ * backoff, 1 to 30 seconds apart, and at once on `syncNow()`. The first answer
+ * that admits the caller sets `access` to `'granted'`.
+ */
+export const CodeWorkspaceNoAccess = 'workspace_no_access';
 
 /**
  * A push batch's mutation ids were not contiguous with the server's watermark

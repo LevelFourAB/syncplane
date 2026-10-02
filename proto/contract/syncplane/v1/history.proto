@@ -169,4 +169,30 @@ message FieldHistory {
 	// subsequent writes into the session does not update `recorded_at`,
 	// preserving the moment when the recorded before-state was modified.
 	google.protobuf.Timestamp recorded_at = 13;
+	// The writes folded into this record, grouped by the top-level fields
+	// each write changed.
+	//
+	// The server uses the groups to compute `seq`, `through_seq` and `writes`
+	// for a caller that may not read some of the fields: a write that changed
+	// only fields the caller may not read does not count. The `Query` RPC
+	// never returns this field. Server-side reads and `Server.Changes` return
+	// it as stored.
+	//
+	// This field is empty in a record written before the server kept groups.
+	// Such a record keeps its stored counts for every caller.
+	repeated FieldHistoryWriteGroup write_groups = 14;
+}
+
+// The writes of one field-history session that changed the same set of
+// top-level fields.
+message FieldHistoryWriteGroup {
+	// The first segments of the `mask` paths the writes changed, sorted and
+	// without duplicates. Empty for the write that created the row.
+	repeated string fields = 1;
+	// The number of writes in the group. At least 1.
+	uint32 writes = 2;
+	// The workspace sequence number of the first write in the group.
+	uint64 first_seq = 3;
+	// The workspace sequence number of the last write in the group.
+	uint64 last_seq = 4;
 }

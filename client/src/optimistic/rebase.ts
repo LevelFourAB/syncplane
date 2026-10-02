@@ -8,6 +8,14 @@ import {
 } from '@bufbuild/protobuf';
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
+import {
+	ACCESS_TOUCH_ENTITY,
+	applyAccessDelta,
+	type DecodedAccess,
+	encodeAccess,
+	touchPendingAccess,
+	writeChangesAccess,
+} from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
 	type CrudMutation,
@@ -16,11 +24,14 @@ import {
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
+import { type CallerAccessDelta, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
 import {
 	confirmedKey,
 	type ConfirmedRecord,
 	confirmedWsPrefix,
 	metaAckedSeq,
+	metaCallerAccess,
+	metaCallerAccessVersion,
 	metaCursor,
 	metaIndexEntityPrefix,
 	metaIndexPrefix,
@@ -41,7 +52,7 @@ import {
 	stagingKey,
 	stagingPrefix,
 } from '../keys.js';
-import type { KVStore, KVWrite } from '../kv/store.js';
+import type { KVRead, KVStore, KVWrite } from '../kv/store.js';
 import {
 	type EntityDef,
 	type EntityMergers,
@@ -67,7 +78,13 @@ import {
 	searchPositions,
 	writeSearchRecord,
 } from './index-maintain.js';
-import { dropAcked, enqueuePending, readPending, writePushedThrough } from './queue.js';
+import {
+	dropAcked,
+	enqueuePending,
+	readPending,
+	recountPendingAccess,
+	writePushedThrough,
+} from './queue.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve
@@ -125,6 +142,7 @@ class KVMirrorTx implements MirrorTx {
 		const key = keyOf(def, value);
 		await this.tx.put(overlayKey(def.name, this.workspaceId, key), record);
 		this.touched.row(this.workspaceId, def.name, key);
+		this.touchAccess(def.name, false);
 	}
 
 	async del(schema: DescMessage, key: string): Promise<void> {
@@ -132,6 +150,16 @@ class KVMirrorTx implements MirrorTx {
 		const record: OverlayRecord = { del: true };
 		await this.tx.put(overlayKey(def.name, this.workspaceId, key), record);
 		this.touched.row(this.workspaceId, def.name, key);
+		this.touchAccess(def.name, true);
+	}
+
+	// What a queued custom mutation can do to the caller's grants is decided
+	// from what its mirror wrote, and a replay during rebase can write other
+	// rows than the first apply did, with no change to the queue.
+	private touchAccess(entity: string, del: boolean): void {
+		if (writeChangesAccess(this.registry, entity, del)) {
+			this.touched.entity(this.workspaceId, ACCESS_TOUCH_ENTITY);
+		}
 	}
 }
 
@@ -158,8 +186,9 @@ export type LocalApplyOutcome = 'applied' | 'no-target';
  * absent argument. It must be the row as of this call: pass it only from the
  * same transaction, and only before anything else in it has written the row.
  *
- * `confirmed` is the row's confirmed base version, which a caller that read the
- * confirmed record up front already holds. Given it, a write that produces a
+ * `confirmed` is the row's confirmed base version and the fields its confirmed
+ * record hides (see ConfirmedRecord.h), which a caller that read the confirmed
+ * record up front already holds. Given it, a write that produces a
  * whole row reports that row on `touched` as well as its key, so a consumer can
  * take the post-commit merged view from there rather than reading it back (see
  * TouchSet.rowWithView). Leaving it out costs a read, not correctness.
@@ -172,7 +201,7 @@ export async function applyCrudLocally(
 	touched: TouchSet,
 	prior?: { bytes: Uint8Array | undefined },
 	slot?: TextLogSlot,
-	confirmed?: { version: bigint },
+	confirmed?: { version: bigint; hidden?: readonly string[] },
 ): Promise<LocalApplyOutcome> {
 	const def = registry.get(crud.entity);
 	if (!def) throw new Error(`unknown entity "${crud.entity}"`);
@@ -211,6 +240,7 @@ export async function applyCrudLocally(
 				touched.rowWithView(workspaceId, def.name, crud.key, {
 					v: value,
 					version: confirmed.version,
+					hidden: confirmed.hidden,
 				});
 			}
 			return 'applied';
@@ -251,6 +281,7 @@ export async function applyCrudLocally(
 				touched.rowWithView(workspaceId, def.name, crud.key, {
 					v: bytes,
 					version: confirmed.version,
+					hidden: confirmed.hidden,
 				});
 			}
 			return 'applied';
@@ -508,6 +539,12 @@ export async function wipeConfirmedState(
 	touched: TouchSet,
 ): Promise<void> {
 	await tx.del(metaCursor(workspaceId));
+	// The summary is what the cursor's lineage was told; the snapshot that
+	// replaces it brings its own. Announced like the write that stored it, so
+	// access listeners stop answering from it now.
+	await tx.del(metaCallerAccess(workspaceId));
+	await tx.del(metaCallerAccessVersion(workspaceId));
+	touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	// The acked floor goes with the cursor: it names a seq in the lineage being
 	// discarded, and carried across a swap it could sit above the new lineage's
 	// head and pin every pull to the primary.
@@ -587,6 +624,13 @@ function detached(bytes: Uint8Array): Uint8Array {
 	return ownsBuffer ? bytes : bytes.slice();
 }
 
+/** The confirmed record of a value row change whose row bytes are `value`. */
+function confirmedRecordOf(change: RowChange, value: Uint8Array): ConfirmedRecord {
+	const record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+	if (change.hidden.length > 0) record.h = [ ...change.hidden ];
+	return record;
+}
+
 /**
  * Applies a batch of one workspace's server row changes to the confirmed state.
  *
@@ -630,7 +674,7 @@ export async function applyServerChanges(
 			const value = detached(
 				await applyTextDeltas(tx, registry, workspaceId, change, change.body.value),
 			);
-			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+			let record = confirmedRecordOf(change, value);
 			if (idx.length > 0) {
 				// Where the row USED to sit does not matter — the position list is
 				// replaced, not amended — so this needs neither the bytes being
@@ -755,7 +799,7 @@ async function writeSnapshotRows(
 			}
 		} else if (change.body.case === 'value') {
 			const value = detached(change.body.value);
-			let record: ConfirmedRecord = { v: value, ver: change.version.toString() };
+			let record = confirmedRecordOf(change, value);
 			const compiled = index?.indexes.for(change.entity) ?? [];
 			if (compiled.length > 0) {
 				const def = registry.get(change.entity)!;
@@ -968,6 +1012,14 @@ export interface FinalizeInput {
 	 * rejection.
 	 */
 	deferAcked?: boolean;
+	/**
+	 * What the caller holds in the workspace, when the server sent it with this
+	 * position, encoded by encodeAccess; the transaction stores its `raw`.
+	 * Absent leaves the stored summary alone, except on a baseline, which
+	 * removes it: a snapshot without one is of a schema without the access
+	 * model.
+	 */
+	callerAccess?: DecodedAccess;
 }
 
 /**
@@ -1083,10 +1135,34 @@ export async function finalizeRebase(
 	} else if (input.serverSeq) {
 		await tx.put(metaServerSeq(workspaceId), input.serverSeq.toString());
 	}
+	if (input.callerAccess !== undefined) {
+		await tx.put(metaCallerAccess(workspaceId), input.callerAccess.raw);
+		if (input.callerAccess.version === 0n) {
+			await tx.del(metaCallerAccessVersion(workspaceId));
+		} else {
+			await tx.put(metaCallerAccessVersion(workspaceId), input.callerAccess.version.toString());
+		}
+		// Announced like a row change, so it reaches this tab's access
+		// listeners and every other tab's on the same channel (see
+		// SyncClient.onAccessChange).
+		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+	} else if (input.baseline) {
+		await tx.del(metaCallerAccess(workspaceId));
+		await tx.del(metaCallerAccessVersion(workspaceId));
+		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+	}
 
-	const remaining = input.deferAcked
-		? await readPending(tx, workspaceId)
-		: await dropAcked(tx, workspaceId, input.lastAckedMutationId);
+	let remaining: Mutation[];
+	if (input.deferAcked) {
+		remaining = await readPending(tx, workspaceId);
+	} else {
+		const acked = await dropAcked(tx, workspaceId, input.lastAckedMutationId);
+		touchPendingAccess(touched, registry, workspaceId, acked.dropped);
+		if (acked.dropped.length > 0) {
+			await recountPendingAccess(tx, registry, workspaceId, acked.remaining);
+		}
+		remaining = acked.remaining;
+	}
 	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 	return remaining.length;
 }
@@ -1108,13 +1184,17 @@ export async function rollbackRejected(
 	const tx = await kv.write();
 	try {
 		const remaining: Mutation[] = [];
+		const dropped: Mutation[] = [];
 		for (const m of await readPending(tx, workspaceId)) {
 			if (rejected.has(m.mutationId)) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				dropped.push(m);
 			} else {
 				remaining.push(m);
 			}
 		}
+		touchPendingAccess(touched, registry, workspaceId, dropped);
+		if (dropped.length > 0) await recountPendingAccess(tx, registry, workspaceId, remaining);
 		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 		await tx.commit();
 		return { touched, pendingCount: remaining.length };
@@ -1139,6 +1219,20 @@ export interface RebaseInput {
 	 * ungated (older server).
 	 */
 	serverSeq?: bigint;
+	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
+	callerAccess?: DecodedAccess;
+	/**
+	 * The page's change to the stored CallerAccess
+	 * (PullResponse.caller_access_delta), in place of `callerAccess`.
+	 */
+	callerAccessDelta?: CallerAccessDelta;
+	/**
+	 * `callerAccessDelta` applied to the summary whose version is its
+	 * `baseVersion`, made before the transaction. Stored when that summary
+	 * is still the stored one; without it, the transaction applies the delta
+	 * itself.
+	 */
+	callerAccessApplied?: DecodedAccess;
 }
 
 export interface RebaseResult {
@@ -1151,6 +1245,17 @@ export interface RebaseResult {
 	 * `touched` is empty and `pendingCount` is meaningless. See rebase().
 	 */
 	skipped?: boolean;
+	/**
+	 * The CallerAccess the transaction stored: the page's own, or the stored
+	 * one with the page's delta applied. Absent when it stored none.
+	 */
+	callerAccess?: DecodedAccess;
+	/**
+	 * Set when the page's CallerAccessDelta applies to another summary than
+	 * the stored one. The stored summary stays as it was, and a pull, which
+	 * names the version it holds, gets the change from there.
+	 */
+	accessStale?: boolean;
 }
 
 /**
@@ -1191,13 +1296,94 @@ export async function rebase(
 		}
 		await dropConfirmedEntities(tx, workspaceId, input.dropEntities ?? [], touched, indexes);
 		await applyServerChanges(tx, registry, workspaceId, input.changes, touched, indexes);
-		const pendingCount = await finalizeRebase(tx, registry, mirrors, workspaceId, input, touched);
+		let callerAccess = input.callerAccess;
+		let accessStale = false;
+		if (input.callerAccessDelta !== undefined) {
+			const applied = await applyStoredAccessDelta(
+				tx,
+				workspaceId,
+				input.callerAccessDelta,
+				input.callerAccessApplied,
+			);
+			callerAccess = applied.access;
+			accessStale = applied.stale;
+		}
+		const pendingCount = await finalizeRebase(
+			tx,
+			registry,
+			mirrors,
+			workspaceId,
+			callerAccess === input.callerAccess ? input : { ...input, callerAccess },
+			touched,
+		);
 		await tx.commit();
-		return { touched, pendingCount };
+		return {
+			touched,
+			pendingCount,
+			...(callerAccess === undefined ? {} : { callerAccess }),
+			...(accessStale ? { accessStale } : {}),
+		};
 	} catch (err) {
 		tx.release();
 		throw err;
 	}
+}
+
+/**
+ * Applies `delta` to the CallerAccess stored for `workspaceId`. `access` is
+ * the summary for finalizeRebase to store, absent when it stores none.
+ * `applied`, when given, is `delta` applied to the summary whose version is
+ * `delta.baseVersion`.
+ *
+ * A delta for another summary is not applied. It changes nothing when the
+ * stored summary is already the one the delta gives, which happens when a
+ * stream page and another tab's pull both carry the same change. Otherwise
+ * `stale` is set and the stored summary stays: it is older than the server's
+ * but still the best prediction there is, and the next pull names its
+ * version.
+ */
+async function applyStoredAccessDelta(
+	tx: KVWrite,
+	workspaceId: string,
+	delta: CallerAccessDelta,
+	applied: DecodedAccess | undefined,
+): Promise<{ access?: DecodedAccess; stale: boolean }> {
+	const stored = (await tx.get(metaCallerAccessVersion(workspaceId))) as string | undefined;
+	const version = stored === undefined ? 0n : BigInt(stored);
+	if (version === delta.version) return { stale: false };
+	if (version === 0n || version !== delta.baseVersion) return { stale: true };
+	// Equal versions mean equal summaries, so a delta applied before the
+	// transaction to a summary of this version is the result here too.
+	if (applied !== undefined) return { access: applied, stale: false };
+	const raw = await storedAccessAt(tx, workspaceId, delta.baseVersion);
+	if (raw === undefined) return { stale: true };
+	return { access: withAccessDelta(raw, delta), stale: false };
+}
+
+/**
+ * The encoded CallerAccess stored for `workspaceId` when its version is
+ * `version`. Undefined for a summary of any other version, and when no
+ * summary is stored.
+ */
+export async function storedAccessAt(
+	tx: KVRead,
+	workspaceId: string,
+	version: bigint,
+): Promise<Uint8Array | undefined> {
+	const [ stored, raw ] = await tx.getMany([
+		metaCallerAccessVersion(workspaceId),
+		metaCallerAccess(workspaceId),
+	]) as [string | undefined, Uint8Array | undefined];
+	return stored === version.toString() ? raw : undefined;
+}
+
+/**
+ * `delta` applied to the CallerAccess encoded as `raw`, as CallerAccessDelta
+ * documents it. The caller checks that `raw` is the summary whose version is
+ * `delta.baseVersion`.
+ */
+export function withAccessDelta(raw: Uint8Array, delta: CallerAccessDelta): DecodedAccess {
+	return encodeAccess(applyAccessDelta(fromBinary(CallerAccessSchema, raw), delta));
 }
 
 /** Outcome of resequencePending. */
@@ -1287,6 +1473,7 @@ async function runResequence(
 		for (const m of pending) {
 			if (m.mutationId === dropId) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				touchPendingAccess(touched, registry, workspaceId, [ m ]);
 				dropped = true;
 			} else {
 				survivors.push(m);
@@ -1298,6 +1485,7 @@ async function runResequence(
 			// upward would manufacture the very gap this closes. dropAcked retires
 			// those ids instead.
 			if (dropped) {
+				await recountPendingAccess(tx, registry, workspaceId, survivors);
 				await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, survivors, touched);
 				await tx.commit();
 			} else {
@@ -1324,6 +1512,7 @@ async function runResequence(
 		// what the next local write mints from, and an id above the watermark gaps
 		// the workspace again on the very next edit.
 		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
+		await recountPendingAccess(tx, registry, workspaceId, renumbered, nextId - 1n);
 		await writePushedThrough(tx, workspaceId, firstId - 1n);
 		if (dropped || renumbered.length > 0) {
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);

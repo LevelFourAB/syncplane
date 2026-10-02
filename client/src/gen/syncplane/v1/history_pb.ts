@@ -13,7 +13,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/history.proto.
  */
 export const file_syncplane_v1_history: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvaGlzdG9yeS5wcm90bxIMc3luY3BsYW5lLnYxIo0DCgxGaWVsZEhpc3RvcnkSFQoNc291cmNlX2VudGl0eRgBIAEoCRISCgpzb3VyY2Vfa2V5GAIgASgJEgsKA3NlcRgDIAEoBBITCgt0aHJvdWdoX3NlcRgEIAEoBBIOCgZ3cml0ZXMYBSABKA0SEwoLcm93X2NyZWF0ZWQYBiABKAgSKAoEbWFzaxgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE1hc2sSDQoFcHJpb3IYCCABKAwSFQoNYWN0b3Jfc3ViamVjdBgJIAEoCRIUCgxhY3Rvcl9zeXN0ZW0YDCABKAkSLwoLcmVjb3JkZWRfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wOnSiuxhwChdzeW5jcGxhbmVfZmllbGRfaGlzdG9yeRINc291cmNlX2VudGl0eRIKc291cmNlX2tleRIDc2VxGjMKCWJ5X3NvdXJjZRIPCg1zb3VyY2VfZW50aXR5EgwKCnNvdXJjZV9rZXkSBwoDc2VxEAEoAUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_field_mask, file_google_protobuf_timestamp, file_syncplane_v1_options]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvaGlzdG9yeS5wcm90bxIMc3luY3BsYW5lLnYxIskDCgxGaWVsZEhpc3RvcnkSFQoNc291cmNlX2VudGl0eRgBIAEoCRISCgpzb3VyY2Vfa2V5GAIgASgJEgsKA3NlcRgDIAEoBBITCgt0aHJvdWdoX3NlcRgEIAEoBBIOCgZ3cml0ZXMYBSABKA0SEwoLcm93X2NyZWF0ZWQYBiABKAgSKAoEbWFzaxgHIAEoCzIaLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE1hc2sSDQoFcHJpb3IYCCABKAwSFQoNYWN0b3Jfc3ViamVjdBgJIAEoCRIUCgxhY3Rvcl9zeXN0ZW0YDCABKAkSLwoLcmVjb3JkZWRfYXQYDSABKAsyGi5nb29nbGUucHJvdG9idWYuVGltZXN0YW1wEjoKDHdyaXRlX2dyb3VwcxgOIAMoCzIkLnN5bmNwbGFuZS52MS5GaWVsZEhpc3RvcnlXcml0ZUdyb3VwOnSiuxhwChdzeW5jcGxhbmVfZmllbGRfaGlzdG9yeRINc291cmNlX2VudGl0eRIKc291cmNlX2tleRIDc2VxGjMKCWJ5X3NvdXJjZRIPCg1zb3VyY2VfZW50aXR5EgwKCnNvdXJjZV9rZXkSBwoDc2VxEAEoASJdChZGaWVsZEhpc3RvcnlXcml0ZUdyb3VwEg4KBmZpZWxkcxgBIAMoCRIOCgZ3cml0ZXMYAiABKA0SEQoJZmlyc3Rfc2VxGAMgASgEEhAKCGxhc3Rfc2VxGAQgASgEQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_field_mask, file_google_protobuf_timestamp, file_syncplane_v1_options]);
 
 /**
  * Records the state of a row's changed fields before an editing session began.
@@ -217,6 +217,23 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
    * @generated from field: google.protobuf.Timestamp recorded_at = 13;
    */
   recordedAt?: Timestamp | undefined;
+
+  /**
+   * The writes folded into this record, grouped by the top-level fields
+   * each write changed.
+   *
+   * The server uses the groups to compute `seq`, `through_seq` and `writes`
+   * for a caller that may not read some of the fields: a write that changed
+   * only fields the caller may not read does not count. The `Query` RPC
+   * never returns this field. Server-side reads and `Server.Changes` return
+   * it as stored.
+   *
+   * This field is empty in a record written before the server kept groups.
+   * Such a record keeps its stored counts for every caller.
+   *
+   * @generated from field: repeated syncplane.v1.FieldHistoryWriteGroup write_groups = 14;
+   */
+  writeGroups: FieldHistoryWriteGroup[];
 };
 
 /**
@@ -225,4 +242,48 @@ export type FieldHistory = Message<"syncplane.v1.FieldHistory"> & {
  */
 export const FieldHistorySchema: GenMessage<FieldHistory> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_history, 0);
+
+/**
+ * The writes of one field-history session that changed the same set of
+ * top-level fields.
+ *
+ * @generated from message syncplane.v1.FieldHistoryWriteGroup
+ */
+export type FieldHistoryWriteGroup = Message<"syncplane.v1.FieldHistoryWriteGroup"> & {
+  /**
+   * The top-level fields the writes changed, sorted. A `oneof` is named by
+   * its group name. Empty for the write that created the row.
+   *
+   * @generated from field: repeated string fields = 1;
+   */
+  fields: string[];
+
+  /**
+   * The number of writes in the group. At least 1.
+   *
+   * @generated from field: uint32 writes = 2;
+   */
+  writes: number;
+
+  /**
+   * The workspace sequence number of the first write in the group.
+   *
+   * @generated from field: uint64 first_seq = 3;
+   */
+  firstSeq: bigint;
+
+  /**
+   * The workspace sequence number of the last write in the group.
+   *
+   * @generated from field: uint64 last_seq = 4;
+   */
+  lastSeq: bigint;
+};
+
+/**
+ * Describes the message syncplane.v1.FieldHistoryWriteGroup.
+ * Use `create(FieldHistoryWriteGroupSchema)` to create a new message.
+ */
+export const FieldHistoryWriteGroupSchema: GenMessage<FieldHistoryWriteGroup> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_history, 1);
 

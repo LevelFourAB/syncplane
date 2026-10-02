@@ -11,15 +11,20 @@ Before you begin, ensure you have:
 
 ## 1. Model deletion as a captured field
 
-Define your entity schema with a deletion timestamp field and enable field history tracking. Set `delete_policy` to `DELETE_POLICY_TRUSTED_ONLY` so clients cannot issue hard deletes:
+Define your entity schema with a deletion timestamp field and enable field history tracking. In a schema that uses the [access model](declare-roles-and-permissions.md), give the entity no access rule that admits `delete`, so clients cannot issue hard deletes:
 
 ```proto
 message Project {
 	option (syncplane.v1.entity) = {
 		name: "project"
 		key_fields: [ "id" ]
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
 		history: {}
+		access: {
+			allow: [
+				{ read: true requires: "view_projects" },
+				{ create: true update: true requires: "edit_projects" }
+			]
+		}
 	};
 	string id = 1;
 	string name = 2 [(syncplane.v1.field_behavior) = { history: true }];
@@ -30,7 +35,9 @@ message Project {
 
 Setting `history: true` on `deleted_at_ms` ensures removals are logged with their actor and timestamp.
 
-Setting `delete_policy: DELETE_POLICY_TRUSTED_ONLY` refuses the `DELETE` primitive to callers that the server authorizes, including the in-process API. This prevents clients from bypassing soft deletion. The policy governs the primitive, not deletion as an outcome. Custom mutators are authorized by their invocation, so place checks inside any mutator that deletes.
+No rule admits `delete`, so the server refuses the `DELETE` primitive to every caller that it authorizes, including the in-process API, and the TypeScript client rejects `del` at the call site. This prevents clients from bypassing soft deletion. The rules govern the primitive, not deletion as an outcome. The rows that a custom mutator body writes are not checked against the rules, so place checks inside any mutator that deletes.
+
+In a schema that does not use the access model, leave out `access` and refuse the `DELETE` of the entity in `CanMutate`. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
 
 ## 2. Delete a row by updating the field
 
@@ -118,5 +125,5 @@ Confirm that the query returns the restored row and that its previous field valu
 ## Related
 
 - [Restore a field to a previous value](restore-a-field.md)
-- [Proto options → Write policies](../reference/proto-options.md#write-policies)
+- [Proto options → Operations no rule admits](../reference/proto-options.md#operations-no-rule-admits)
 - [Limits and trade-offs](../explanation/limits-and-trade-offs.md#field-history-is-a-restore-mechanism-not-an-audit-log)

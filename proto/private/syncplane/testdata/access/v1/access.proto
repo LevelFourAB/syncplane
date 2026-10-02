@@ -1,0 +1,1822 @@
+syntax = "proto3";
+
+// An access-model schema used only by the engine and client test suites: an
+// org whose members hold roles on the whole workspace, projects with members
+// of their own, and tasks below the projects.
+package syncplane.testdata.access.v1;
+
+import "syncplane/v1/options.proto";
+
+option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1;accessv1";
+
+// A role on the whole workspace.
+message OrgMember {
+	option (syncplane.v1.entity) = {
+		name: "org_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "org_member"
+					grants: [ "view_projects", "view_tasks", "view_labels" ]
+				},
+				{
+					name: "org_admin"
+					grants: [
+						"view_members",
+						"manage_members",
+						"view_projects",
+						"edit_projects",
+						"view_tasks",
+						"edit_tasks",
+						"view_labels"
+					]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
+			]
+		}
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// A role on one project and the rows below it.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "project_reader"
+					grants: [ "view_projects", "view_members", "view_tasks" ]
+				},
+				{
+					name: "project_writer"
+					includes: [ "project_reader" ]
+					grants: [ "edit_tasks" ]
+				},
+				{
+					name: "project_admin"
+					includes: [ "project_writer" ]
+					grants: [ "manage_members" ]
+				},
+				{
+					name: "project_editor"
+					grants: [ "view_projects", "edit_tasks" ]
+				},
+				{
+					name: "project_owner"
+					includes: [ "project_admin" ]
+					grants: [ "edit_projects" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string title = 3;
+}
+
+// A comment on a task, two access parent hops below its project. Registered
+// with the org schema by the specs that walk chains deeper than one level.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "task" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2;
+	string body = 3;
+}
+
+// A page on a task, two access parent hops below its project, whose body is
+// collaborative text. A caller who can read the task's tasks reads it, and so
+// does its owner where they can read the project. Registered with the org
+// schema by the specs that ship text to readers below the workspace root.
+message Page {
+	option (syncplane.v1.entity) = {
+		name: "page"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "task" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ read: true requires: "view_projects" caller_is: "owner_id" },
+				{ write: true requires: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2;
+	string owner_id = 3;
+	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// Readable by every org member. No rule admits a write, so only trusted
+// writes create, change and delete labels.
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true requires: "view_labels" } ] }
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// Every admitted caller reads and writes it.
+message Note {
+	option (syncplane.v1.entity) = {
+		name: "note"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+		}
+	};
+	string id = 1;
+	string body = 2;
+}
+
+// An entry in an append-only log: a caller who can read tasks posts one, and
+// no rule admits an update or a delete. Registered with the org schema by the
+// specs that check which write operations a rule set leaves to trusted writes.
+message Entry {
+	option (syncplane.v1.entity) = {
+		name: "entry"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ create: true requires: "view_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	string body = 2;
+}
+
+// The args of the test mutators that act on one task.
+message TaskArgs {
+	string task_id = 1;
+}
+
+// Roles a TeamMember row can hold, matched by value name.
+enum TeamRole {
+	TEAM_ROLE_UNSPECIFIED = 0;
+	TEAM_ROLE_VIEWER = 1;
+	TEAM_ROLE_EDITOR = 2;
+}
+
+// A grant entity whose role field is an enum. Registered on its own with
+// Team, apart from the org schema above.
+message TeamMember {
+	option (syncplane.v1.entity) = {
+		name: "team_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "TEAM_ROLE_VIEWER"
+					grants: [ "view_team" ]
+				},
+				{
+					name: "TEAM_ROLE_EDITOR"
+					grants: [ "view_team", "edit_team" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "team" ]
+			allow: [
+				{ read: true requires: "view_team" },
+				{ write: true requires: "edit_team" }
+			]
+		}
+	};
+	string id = 1;
+	Team team = 2;
+	string user_id = 3;
+	TeamRole role = 4;
+}
+
+message Team {
+	option (syncplane.v1.entity) = {
+		name: "team"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_team" },
+				{ write: true requires: "edit_team" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A folder inside a folder, or at the top when parent is unset. Registered
+// with FolderMember and Doc, apart from the org schema above.
+message Folder {
+	option (syncplane.v1.entity) = {
+		name: "folder"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "parent" ]
+			allow: [
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "edit_folders" }
+			]
+		}
+	};
+	string id = 1;
+	Folder parent = 2;
+	string name = 3;
+}
+
+// A role on one folder and everything below it.
+message FolderMember {
+	option (syncplane.v1.entity) = {
+		name: "folder_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "folder_viewer"
+					grants: [ "view_folders" ]
+				},
+				{
+					name: "folder_editor"
+					grants: [ "view_folders", "edit_folders" ]
+				},
+				{
+					name: "folder_manager"
+					grants: [ "view_folders", "edit_folders", "manage_folders" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "folder" ]
+			allow: [
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "manage_folders" }
+			]
+		}
+	};
+	string id = 1;
+	Folder folder = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A document in a folder.
+message Doc {
+	option (syncplane.v1.entity) = {
+		name: "doc"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "folder" ]
+			allow: [
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "edit_folders" }
+			]
+		}
+	};
+	string id = 1;
+	Folder folder = 2;
+	string title = 3;
+}
+
+// A board, the top of one of two trees in the polymorphic schema below:
+// Board, Space, PlaceMember, Card, CardItem and Pin, registered apart from
+// the schemas above.
+message Board {
+	option (syncplane.v1.entity) = {
+		name: "board"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_places" },
+				{ write: true requires: "edit_places" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A space, the top of the other tree.
+message Space {
+	option (syncplane.v1.entity) = {
+		name: "space"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_places" },
+				{ write: true requires: "edit_places" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A role on one board or one space and the rows below it.
+message PlaceMember {
+	option (syncplane.v1.entity) = {
+		name: "place_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "place_viewer"
+					grants: [
+						"view_places",
+						"view_place_members",
+						"view_cards",
+						"view_pins"
+					]
+				},
+				{
+					name: "place_editor"
+					grants: [
+						"view_places",
+						"view_place_members",
+						"view_cards",
+						"edit_cards",
+						"view_pins",
+						"edit_pins"
+					]
+				},
+				{
+					name: "place_admin"
+					grants: [
+						"view_places",
+						"edit_places",
+						"view_place_members",
+						"manage_place_members",
+						"view_cards",
+						"edit_cards",
+						"view_pins",
+						"edit_pins"
+					]
+				}
+			]
+		}
+		access: {
+			parents: [ "place" ]
+			allow: [
+				{ read: true requires: "view_place_members" },
+				{ write: true requires: "manage_place_members" }
+			]
+		}
+	};
+	string id = 1;
+	oneof place {
+		Board board = 2;
+		Space space = 3;
+	}
+	string user_id = 4;
+	string role = 5;
+}
+
+// A card on a board or in a space: below whichever of the two it names.
+message Card {
+	option (syncplane.v1.entity) = {
+		name: "card"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "place" ]
+			allow: [
+				{ read: true requires: "view_cards" },
+				{ write: true requires: "edit_cards" }
+			]
+		}
+	};
+	string id = 1;
+	oneof place {
+		Board board = 2;
+		Space space = 3;
+	}
+	string title = 4;
+}
+
+// An item on a card, two access parent hops below the card's board or space.
+message CardItem {
+	option (syncplane.v1.entity) = {
+		name: "card_item"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "card" ]
+			allow: [
+				{ read: true requires: "view_cards" },
+				{ write: true requires: "edit_cards" }
+			]
+		}
+	};
+	string id = 1;
+	Card card = 2;
+	string text = 3;
+}
+
+// A reference to a board or a space.
+message PlaceRef {
+	option (syncplane.v1.reference) = {
+	};
+
+	oneof target {
+		Board board = 1;
+		Space space = 2;
+	}
+}
+
+// A pin on a board or in a space, placed through a reference message rather
+// than a oneof of its own.
+message Pin {
+	option (syncplane.v1.entity) = {
+		name: "pin"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "place" ]
+			allow: [
+				{ read: true requires: "view_pins" },
+				{ write: true requires: "edit_pins" }
+			]
+		}
+	};
+	string id = 1;
+	PlaceRef place = 2;
+	string label = 3;
+}
+
+// A room, the top of the owner-rule schema below: Room, RoomMember, Post,
+// Draft, Ticket and Setting, registered apart from the schemas above.
+message Room {
+	option (syncplane.v1.entity) = {
+		name: "room"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_rooms" },
+				{ write: true requires: "edit_rooms" }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// A role on one room and the rows below it. A member can leave the room by
+// deleting their own row.
+message RoomMember {
+	option (syncplane.v1.entity) = {
+		name: "room_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "room_viewer"
+					grants: [ "view_rooms", "view_room_members", "view_posts" ]
+				},
+				{
+					name: "room_poster"
+					grants: [
+						"view_rooms",
+						"view_room_members",
+						"view_posts",
+						"post"
+					]
+				},
+				{
+					name: "room_moderator"
+					grants: [
+						"view_rooms",
+						"edit_rooms",
+						"view_room_members",
+						"manage_room_members",
+						"view_posts",
+						"post",
+						"moderate_posts"
+					]
+				}
+			]
+		}
+		access: {
+			parents: [ "room" ]
+			allow: [
+				{ read: true requires: "view_room_members" },
+				{ write: true requires: "manage_room_members" },
+				{ delete: true requires: "view_rooms" caller_is: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A post in a room: its author edits the body and deletes it, and a
+// moderator edits or deletes any post.
+message Post {
+	option (syncplane.v1.entity) = {
+		name: "post"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "room" ]
+			allow: [
+				{ read: true requires: "view_posts" },
+				{
+					create: true
+					delete: true
+					requires: "post"
+					caller_is: "author_id"
+				},
+				{
+					update: true
+					requires: "post"
+					caller_is: "author_id"
+					fields: [ "body" ]
+				},
+				{ update: true delete: true requires: "moderate_posts" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2;
+	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string body = 4;
+	string title = 5;
+}
+
+// A draft in a room, which only its author reads and writes while they can
+// read the room's posts.
+message Draft {
+	option (syncplane.v1.entity) = {
+		name: "draft"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "room" ]
+			allow: [ {
+				read: true
+				write: true
+				requires: "view_posts"
+				caller_is: "author_id"
+			} ]
+		}
+	};
+	string id = 1;
+	Room room = 2;
+	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string body = 4;
+}
+
+// A ticket in a room: a moderator writes it, and its assignee changes its
+// status.
+message Ticket {
+	option (syncplane.v1.entity) = {
+		name: "ticket"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "room" ]
+			allow: [
+				{ read: true requires: "view_posts" },
+				{ write: true requires: "moderate_posts" },
+				{
+					update: true
+					requires: "view_posts"
+					caller_is: "assignee_id"
+					fields: [ "status" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2;
+	string assignee_id = 3;
+	string status = 4;
+	string title = 5;
+}
+
+// The settings of one user, which every admitted caller reads and writes for
+// themselves only.
+message Setting {
+	option (syncplane.v1.entity) = {
+		name: "setting"
+		key_fields: [ "user_id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+				caller_is: "user_id"
+			} ]
+		}
+	};
+	string user_id = 1;
+	string theme = 2;
+}
+
+// A thread in a room, registered with the owner-rule schema, whose rules test
+// fields of the row: a poster writes a thread while it is not archived, a
+// moderator writes every thread, and a hidden thread is read only by
+// moderators.
+message Thread {
+	option (syncplane.v1.entity) = {
+		name: "thread"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "room" ]
+			allow: [
+				{
+					read: true
+					requires: "view_posts"
+					when: {
+						cmp: {
+							path: [ "hidden" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ read: true requires: "moderate_posts" },
+				{
+					create: true
+					update: true
+					delete: true
+					requires: "post"
+					when: {
+						cmp: {
+							path: [ "archived" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ write: true requires: "moderate_posts" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2;
+	bool archived = 3;
+	bool hidden = 4;
+	string title = 5;
+	bytes notes = 6 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// A bulletin on the whole workspace: every admitted caller reads the
+// published ones, and its author reads and writes their own.
+message Bulletin {
+	option (syncplane.v1.entity) = {
+		name: "bulletin"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					admitted: {}
+					when: {
+						cmp: {
+							path: [ "status" ]
+							op: CMP_OP_EQ
+							value: { string_value: "published" }
+						}
+					}
+				},
+				{
+					read: true
+					write: true
+					admitted: {}
+					caller_is: "author_id"
+				}
+			]
+		}
+	};
+	string id = 1;
+	string author_id = 2 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string status = 3;
+	string body = 4;
+}
+
+// A squad, the team of the team schema below: Squad, SquadMember, Repo,
+// RepoMember, RepoSquad and Issue, registered apart from the schemas above.
+message Squad {
+	option (syncplane.v1.entity) = {
+		name: "squad"
+		key_fields: [ "id" ]
+		members: { entity: "squad_member" }
+		access: {
+			allow: [
+				{ read: true requires: "view_squads" },
+				{ write: true requires: "manage_squads" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// Makes its user a member of one squad, whatever the role.
+message SquadMember {
+	option (syncplane.v1.entity) = {
+		name: "squad_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "squad_member"
+					grants: [ "view_squads" ]
+				},
+				{
+					name: "squad_lead"
+					grants: [ "view_squads", "manage_squads" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "squad" ]
+			allow: [
+				{ read: true requires: "view_squads" },
+				{ write: true requires: "manage_squads" }
+			]
+		}
+	};
+	string id = 1;
+	Squad squad = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+message Repo {
+	option (syncplane.v1.entity) = {
+		name: "repo"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_repos" },
+				{ write: true requires: "edit_repos" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A role on one repo for one user, or for every member of one squad. A user
+// can leave the repo by deleting their own row.
+message RepoMember {
+	option (syncplane.v1.entity) = {
+		name: "repo_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{
+					name: "repo_reader"
+					grants: [ "view_repos", "view_repo_members", "view_issues" ]
+				},
+				{
+					name: "repo_writer"
+					grants: [
+						"view_repos",
+						"view_repo_members",
+						"view_issues",
+						"edit_issues"
+					]
+				},
+				{
+					name: "repo_admin"
+					grants: [
+						"view_repos",
+						"edit_repos",
+						"view_repo_members",
+						"manage_repo_members",
+						"view_issues",
+						"edit_issues"
+					]
+				}
+			]
+		}
+		access: {
+			parents: [ "repo" ]
+			allow: [
+				{ read: true requires: "view_repo_members" },
+				{ write: true requires: "manage_repo_members" },
+				{ delete: true requires: "view_repos" caller_is: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2;
+	oneof member {
+		string user_id = 3;
+		Squad squad = 4;
+	}
+	string role = 5;
+}
+
+// A role on one repo for every member of one squad, named by a plain
+// reference rather than a oneof.
+message RepoSquad {
+	option (syncplane.v1.entity) = {
+		name: "repo_squad"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "squad"
+			role: "role"
+			roles: [ {
+				name: "repo_squad_reader"
+				grants: [ "view_repos", "view_issues" ]
+			} ]
+		}
+		access: {
+			parents: [ "repo" ]
+			allow: [
+				{ read: true requires: "view_repo_members" },
+				{ write: true requires: "manage_repo_members" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2;
+	Squad squad = 3;
+	string role = 4;
+}
+
+// An issue in a repo.
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "repo" ]
+			allow: [
+				{ read: true requires: "view_issues" },
+				{ write: true requires: "edit_issues" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2;
+	string title = 3;
+}
+
+// The commons of the share-control schema below: Commons, CommonsMember,
+// Steward, Initiative, InitiativeMember and Milestone, registered apart from
+// the schemas above together with Squad and SquadMember. A shared initiative
+// sits below the one commons row, so every commons member reads it; a
+// restricted initiative sits at the root, where only stewards and its own
+// grants reach it.
+message Commons {
+	option (syncplane.v1.entity) = {
+		name: "commons"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				admitted: {}
+			} ]
+		}
+	};
+	string id = 1;
+}
+
+// Makes its user a member of the workspace. Its role applies at the commons
+// row, not at the root, so it reaches shared initiatives alone.
+message CommonsMember {
+	option (syncplane.v1.entity) = {
+		name: "commons_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "commons_member"
+				grants: [
+					"view_commons_members",
+					"view_initiatives",
+					"edit_initiatives",
+					"view_initiative_members",
+					"view_milestones",
+					"edit_milestones"
+				]
+			} ]
+		}
+		access: {
+			parents: [ "commons" ]
+			allow: [
+				{ read: true requires: "view_commons_members" },
+				{ write: true requires: "manage_commons_members" }
+			]
+		}
+	};
+	string id = 1;
+	Commons commons = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A role at the workspace root.
+message Steward {
+	option (syncplane.v1.entity) = {
+		name: "steward"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "steward"
+				grants: [
+					"view_stewards",
+					"manage_stewards",
+					"view_commons_members",
+					"manage_commons_members",
+					"view_initiatives",
+					"edit_initiatives",
+					"view_initiative_members",
+					"manage_initiative_members",
+					"view_milestones",
+					"edit_milestones"
+				]
+			} ]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_stewards" },
+				{ write: true requires: "manage_stewards" }
+			]
+		}
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// An initiative, shared with the workspace when commons is set and restricted
+// to its own grants when it is not.
+message Initiative {
+	option (syncplane.v1.entity) = {
+		name: "initiative"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "commons" ]
+			allow: [
+				{ read: true requires: "view_initiatives" },
+				{ write: true requires: "edit_initiatives" }
+			]
+		}
+	};
+	string id = 1;
+	Commons commons = 2;
+	string name = 3;
+}
+
+// A role on one initiative for one user, or for every member of one squad.
+message InitiativeMember {
+	option (syncplane.v1.entity) = {
+		name: "initiative_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{
+					name: "initiative_reader"
+					grants: [
+						"view_initiatives",
+						"view_initiative_members",
+						"view_milestones"
+					]
+				},
+				{
+					name: "initiative_writer"
+					includes: [ "initiative_reader" ]
+					grants: [ "edit_milestones" ]
+				},
+				{
+					name: "initiative_admin"
+					includes: [ "initiative_writer" ]
+					grants: [ "edit_initiatives", "manage_initiative_members" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "initiative" ]
+			allow: [
+				{ read: true requires: "view_initiative_members" },
+				{ write: true requires: "manage_initiative_members" }
+			]
+		}
+	};
+	string id = 1;
+	Initiative initiative = 2;
+	oneof member {
+		string user_id = 3;
+		Squad squad = 4;
+	}
+	string role = 5;
+}
+
+// A milestone in an initiative.
+message Milestone {
+	option (syncplane.v1.entity) = {
+		name: "milestone"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "initiative" ]
+			allow: [
+				{ read: true requires: "view_milestones" },
+				{ write: true requires: "edit_milestones" }
+			]
+		}
+	};
+	string id = 1;
+	Initiative initiative = 2;
+	string title = 3;
+}
+
+// An account, the top of the billing schema below: Account, AccountMember,
+// Biller, Invoice and Charge, registered apart from the schemas above. An
+// invoice and a charge need two permissions together: one that an account
+// role grants, and one that a billing role grants at the workspace root or an
+// account role grants at one account.
+message Account {
+	option (syncplane.v1.entity) = {
+		name: "account"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true requires: "view_accounts" } ] }
+	};
+	string id = 1;
+}
+
+// A role on one account and the rows below it.
+message AccountMember {
+	option (syncplane.v1.entity) = {
+		name: "account_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "account_viewer"
+					grants: [ "view_accounts", "view_invoices" ]
+				},
+				{
+					name: "account_editor"
+					includes: [ "account_viewer" ]
+					grants: [ "edit_invoices" ]
+				},
+				{
+					name: "account_biller"
+					grants: [ "view_accounts", "read_billing", "use_billing" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "account" ]
+			allow: [ { read: true requires: "view_accounts" } ]
+		}
+	};
+	string id = 1;
+	Account account = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A billing role at the workspace root.
+message Biller {
+	option (syncplane.v1.entity) = {
+		name: "biller"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "billing_reader"
+					grants: [ "view_billers", "read_billing" ]
+				},
+				{
+					name: "billing_clerk"
+					includes: [ "billing_reader" ]
+					grants: [ "use_billing" ]
+				}
+			]
+		}
+		access: { allow: [ { read: true requires: "view_billers" } ] }
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// An invoice of an account.
+message Invoice {
+	option (syncplane.v1.entity) = {
+		name: "invoice"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "account" ]
+			allow: [
+				{
+					read: true
+					requires: [ "view_invoices", "read_billing" ]
+				},
+				{
+					write: true
+					requires: [ "edit_invoices", "use_billing" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Account account = 2;
+	string title = 3;
+}
+
+// A charge on an invoice, two access parent hops below its account.
+message Charge {
+	option (syncplane.v1.entity) = {
+		name: "charge"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "invoice" ]
+			allow: [
+				{
+					read: true
+					requires: [ "view_invoices", "read_billing" ]
+				},
+				{
+					write: true
+					requires: [ "edit_invoices", "use_billing" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Invoice invoice = 2;
+	string memo = 3;
+}
+
+// A product, the top of one of the trees in the multi-parent schema below:
+// Product, Cycle, Shelf, Topic, LaneMember, Story, StoryNote and Leaflet,
+// registered apart from the schemas above. A story sits below its product and
+// below its cycle, a leaflet below each shelf it lists, and a topic below
+// each topic it lists.
+message Product {
+	option (syncplane.v1.entity) = {
+		name: "product"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A cycle, the top of another tree.
+message Cycle {
+	option (syncplane.v1.entity) = {
+		name: "cycle"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A shelf, the top of another tree.
+message Shelf {
+	option (syncplane.v1.entity) = {
+		name: "shelf"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_lanes" },
+				{ write: true requires: "edit_lanes" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A topic below each topic it lists, so that the topics form a graph.
+message Topic {
+	option (syncplane.v1.entity) = {
+		name: "topic"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "parents" ]
+			allow: [
+				{ read: true requires: "view_topics" },
+				{ write: true requires: "edit_topics" }
+			]
+		}
+	};
+	string id = 1;
+	repeated Topic parents = 2;
+}
+
+// A role on one product, cycle, shelf or topic and the rows below it.
+message LaneMember {
+	option (syncplane.v1.entity) = {
+		name: "lane_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "lane_viewer"
+					grants: [
+						"view_lanes",
+						"view_lane_members",
+						"view_stories",
+						"view_leaflets",
+						"view_topics"
+					]
+				},
+				{
+					name: "lane_editor"
+					includes: [ "lane_viewer" ]
+					grants: [ "edit_stories", "edit_leaflets", "edit_topics" ]
+				},
+				{
+					name: "lane_planner"
+					includes: [ "lane_viewer" ]
+					grants: [ "plan_stories" ]
+				},
+				{
+					name: "lane_admin"
+					includes: [ "lane_editor", "lane_planner" ]
+					grants: [ "edit_lanes", "manage_lane_members" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "lane" ]
+			allow: [
+				{ read: true requires: "view_lane_members" },
+				{ write: true requires: "manage_lane_members" }
+			]
+		}
+	};
+	string id = 1;
+	oneof lane {
+		Product product = 2;
+		Cycle cycle = 3;
+		Shelf shelf = 4;
+		Topic topic = 5;
+	}
+	string user_id = 6;
+	string role = 7;
+}
+
+// A story below its product and below its cycle. A planner moves a story
+// between cycles without the right to edit it.
+message Story {
+	option (syncplane.v1.entity) = {
+		name: "story"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "product", "cycle" ]
+			allow: [
+				{ read: true requires: "view_stories" },
+				{ write: true requires: "edit_stories" },
+				{
+					update: true
+					requires: "plan_stories"
+					fields: [ "cycle" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Product product = 2;
+	Cycle cycle = 3;
+	string title = 4;
+}
+
+// A note on a story, below whichever product and cycle the story sits below.
+message StoryNote {
+	option (syncplane.v1.entity) = {
+		name: "story_note"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "story" ]
+			allow: [
+				{ read: true requires: "view_stories" },
+				{ write: true requires: "edit_stories" }
+			]
+		}
+	};
+	string id = 1;
+	Story story = 2;
+	string body = 3;
+}
+
+// A leaflet below each shelf it lists.
+message Leaflet {
+	option (syncplane.v1.entity) = {
+		name: "leaflet"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "shelves" ]
+			allow: [
+				{ read: true requires: "view_leaflets" },
+				{ write: true requires: "edit_leaflets" }
+			]
+		}
+	};
+	string id = 1;
+	repeated Shelf shelves = 2;
+	string title = 3;
+}
+
+// A role on the whole workspace, the top of the within schema below: Clerk,
+// Dossier, DossierMember, Matter, MatterWatcher, Memo, Binder and Sheet,
+// registered apart from the schemas above.
+message Clerk {
+	option (syncplane.v1.entity) = {
+		name: "clerk"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "clerk"
+					grants: [ "view_open_dossiers", "view_open_matters" ]
+				},
+				{
+					name: "registrar"
+					grants: [
+						"manage_clerks",
+						"view_dossiers",
+						"edit_dossiers",
+						"manage_dossier_members",
+						"view_matters",
+						"edit_matters",
+						"view_binders",
+						"edit_binders"
+					]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "manage_clerks" },
+				{ write: true requires: "manage_clerks" }
+			]
+		}
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// A dossier: a private one hides its matters and memos from clerks, who read
+// matters through the workspace root, and an archived one makes its matters
+// read-only. Its owner reads and writes the memos below it.
+message Dossier {
+	option (syncplane.v1.entity) = {
+		name: "dossier"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_dossiers" },
+				{
+					read: true
+					requires: "view_open_dossiers"
+					when: {
+						cmp: {
+							path: [ "private" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ update: true requires: "edit_dossiers" }
+			]
+		}
+	};
+	string id = 1;
+	string title = 2;
+	bool private = 3;
+	bool archived = 4;
+	string owner_id = 5 [(syncplane.v1.field_behavior) = { indexed: true }];
+}
+
+// A role on one dossier and the rows below it.
+message DossierMember {
+	option (syncplane.v1.entity) = {
+		name: "dossier_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "dossier_member"
+					grants: [ "view_dossiers", "view_matters", "edit_matters" ]
+				},
+				{
+					name: "dossier_editor"
+					grants: [ "view_dossiers", "edit_dossiers" ]
+				}
+			]
+		}
+		access: {
+			parents: [ "dossier" ]
+			allow: [
+				{ read: true requires: "view_dossiers" },
+				{ write: true requires: "manage_dossier_members" }
+			]
+		}
+	};
+	string id = 1;
+	Dossier dossier = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A matter in a dossier.
+message Matter {
+	option (syncplane.v1.entity) = {
+		name: "matter"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "dossier" ]
+			allow: [
+				{ read: true requires: "view_matters" },
+				{
+					read: true
+					requires: "view_open_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					write: true
+					requires: "edit_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "archived" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				}
+			]
+		}
+	};
+	string id = 1;
+	Dossier dossier = 2;
+	string title = 3;
+}
+
+// A role on one matter: a watcher reads it and its memos while its dossier is
+// not private.
+message MatterWatcher {
+	option (syncplane.v1.entity) = {
+		name: "matter_watcher"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "matter_watcher"
+				grants: [ "view_open_matters" ]
+			} ]
+		}
+		access: {
+			parents: [ "matter" ]
+			allow: [
+				{ read: true requires: "view_matters" },
+				{ write: true requires: "edit_matters" }
+			]
+		}
+	};
+	string id = 1;
+	Matter matter = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A memo on a matter, two access parent hops below its dossier, whose body is
+// collaborative text.
+message Memo {
+	option (syncplane.v1.entity) = {
+		name: "memo"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "matter" ]
+			allow: [
+				{ read: true requires: "view_matters" },
+				{
+					read: true
+					requires: "view_open_matters"
+					within: {
+						entity: "dossier"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "dossier" caller_is: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Matter matter = 2;
+	bytes body = 3 [(syncplane.v1.field_behavior) = { text: true }];
+	string title = 4;
+}
+
+// A binder inside a binder, or at the top when parent is unset. Its owner
+// reads it and everything below it, and edits it.
+message Binder {
+	option (syncplane.v1.entity) = {
+		name: "binder"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "parent" ]
+			allow: [
+				{ read: true requires: "view_binders" },
+				{ write: true requires: "edit_binders" },
+				{
+					read: true
+					update: true
+					admitted: {}
+					within: { entity: "binder" caller_is: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Binder parent = 2;
+	string owner_id = 3 [(syncplane.v1.field_behavior) = { indexed: true }];
+	string title = 4;
+}
+
+// A sheet in a binder.
+message Sheet {
+	option (syncplane.v1.entity) = {
+		name: "sheet"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "binder" ]
+			allow: [
+				{ read: true requires: "view_binders" },
+				{ write: true requires: "edit_binders" },
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "binder" caller_is: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Binder binder = 2;
+	string title = 3;
+}
+
+// An expense below a project, whose field guards restrict who writes four of
+// its fields: `total` only trusted writes set, `status` only a caller with
+// edit_projects sets, `notes` only the reporter sets, and `estimate` changes
+// only while the expense is open. `title` follows the entity rules alone.
+message Expense {
+	option (syncplane.v1.entity) = {
+		name: "expense"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				{
+					fields: [ "total" ]
+					allow: [ {
+						read: true
+						admitted: {}
+					} ]
+				},
+				{
+					fields: [ "status" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{ write: true requires: "edit_projects" }
+					]
+				},
+				{
+					fields: [ "notes" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{
+							write: true
+							requires: "edit_tasks"
+							caller_is: "reporter_id"
+						}
+					]
+				},
+				{
+					fields: [ "estimate" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+						},
+						{ create: true requires: "edit_tasks" },
+						{
+							update: true
+							requires: "edit_tasks"
+							when: {
+								cmp: {
+									path: [ "closed" ]
+									op: CMP_OP_EQ
+									value: { bool_value: false }
+								}
+							}
+						}
+					]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string title = 3;
+	string status = 4;
+	int64 total = 5;
+	string reporter_id = 6 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string notes = 7;
+	int32 estimate = 8;
+	bool closed = 9;
+}
+
+// A staff record below a project, whose field guards restrict who reads five
+// of its fields: `salary` only a caller with edit_projects reads and writes,
+// `review` only the person it is about reads, `bonus` no client reads or
+// writes, `pin` a caller with edit_tasks writes and no client reads, and
+// `bio` only a caller with edit_projects reads. `name` follows the entity
+// rules alone. Its history records the changes of `name` and `salary`.
+message Staff {
+	option (syncplane.v1.entity) = {
+		name: "staff"
+		key_fields: [ "id" ]
+		history: {}
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				{
+					fields: [ "salary" ]
+					allow: [
+						{ read: true write: true requires: "edit_projects" }
+					]
+				},
+				{
+					fields: [ "review" ]
+					allow: [
+						{
+							read: true
+							admitted: {}
+							caller_is: "person_id"
+						},
+						{ write: true requires: "edit_projects" }
+					]
+				},
+				{ fields: [ "bonus" ] },
+				{
+					fields: [ "pin" ]
+					allow: [ { write: true requires: "edit_tasks" } ]
+				},
+				{
+					fields: [ "bio" ]
+					allow: [
+						{ read: true requires: "edit_projects" },
+						{ write: true requires: "edit_tasks" }
+					]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string name = 3
+		[(syncplane.v1.field_behavior) = { searchable: true history: true }];
+	int64 salary = 4 [(syncplane.v1.field_behavior) = { history: true }];
+	string review = 5 [(syncplane.v1.field_behavior) = { searchable: true }];
+	string person_id = 6;
+	int64 bonus = 7;
+	string pin = 8;
+	bytes bio = 9 [(syncplane.v1.field_behavior) = { text: true }];
+}

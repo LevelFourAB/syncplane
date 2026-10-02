@@ -37,6 +37,8 @@ type mutatorInfo struct {
 	name string
 	args proto.Message // prototype; cloned per invocation
 	fn   MutatorFunc
+	// access is the MutatorAccess the declaration carried, nil when none.
+	access *MutatorAccess
 }
 
 // pendingMutator is one WithMutator declaration, held until New has built the
@@ -45,6 +47,58 @@ type pendingMutator struct {
 	name string
 	args proto.Message
 	fn   MutatorFunc
+	opts []MutatorOption
+}
+
+// MutatorOption adjusts one WithMutator declaration.
+type MutatorOption interface {
+	applyMutator(*mutatorInfo)
+}
+
+// MutatorAccess states which callers may invoke a mutator in the access model:
+// every caller admitted to the workspace, or the callers that hold a
+// permission where the access names.
+//
+// With Admitted set, every caller admitted to the workspace may invoke the
+// mutator, and Permission, Entity and KeyField stay empty. With Entity and
+// KeyField set, the caller must hold Permission at the row of
+// Entity whose key the KeyField of the args holds: at the row itself, at the
+// row its access parent points at, or at the workspace root. A row that does
+// not exist refuses the invocation. With both empty, the caller must hold
+// Permission at the workspace root.
+//
+// With TrustedOnly set, only a Trusted caller may invoke the mutator, and the
+// other fields stay empty. This is also what a mutator without a MutatorAccess
+// gets, but registration logs a warning for such a mutator and not for one
+// that sets TrustedOnly.
+//
+// In a schema that uses the access model, an invocation of a mutator without a
+// MutatorAccess is refused for every caller who is not Trusted. The check runs
+// inside the write transaction before the body, and is refused with
+// CodeAccessDenied. The rows the body writes are not checked unless it
+// writes them through EntityTx.AsCaller; the body can also ask EntityTx.Can.
+//
+// Registration fails, with the rest of the access model, when Admitted or
+// TrustedOnly is set together with another field, Permission is granted by no role, Entity is not
+// in the model, or KeyField is not a singular string field of the args. In a
+// schema without the access model, it has no effect.
+//
+//	server.WithMutator("complete_task", &taskv1.CompleteTaskArgs{}, completeTask,
+//		server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
+//	server.WithMutator("send_feedback", &feedbackv1.SendArgs{}, sendFeedback,
+//		server.MutatorAccess{Admitted: true})
+//	server.WithMutator("rebuild_index", nil, rebuildIndex,
+//		server.MutatorAccess{TrustedOnly: true})
+type MutatorAccess struct {
+	Permission  string
+	Entity      string
+	KeyField    string
+	Admitted    bool
+	TrustedOnly bool
+}
+
+func (ma MutatorAccess) applyMutator(mi *mutatorInfo) {
+	mi.access = &ma
 }
 
 // WithMutator declares a custom mutation handler. argsPrototype defines the
@@ -55,22 +109,28 @@ type pendingMutator struct {
 // cannot be provisioned at runtime (see DynamicEntity, the CRUD-only dynamic
 // tier). That is also what keeps the mutator table lock-free on the push path
 // — it never changes after New.
-func WithMutator(name string, argsPrototype proto.Message, fn MutatorFunc) Option {
+//
+// opts adjust the declaration; see MutatorAccess.
+func WithMutator(name string, argsPrototype proto.Message, fn MutatorFunc, opts ...MutatorOption) Option {
 	return func(s *Server) error {
-		s.pendingMutators = append(s.pendingMutators, pendingMutator{name: name, args: argsPrototype, fn: fn})
+		s.pendingMutators = append(s.pendingMutators, pendingMutator{name: name, args: argsPrototype, fn: fn, opts: opts})
 		return nil
 	}
 }
 
 // registerMutator installs a WithMutator declaration. See WithMutator.
-func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn MutatorFunc) error {
+func (s *Server) registerMutator(name string, argsPrototype proto.Message, fn MutatorFunc, opts ...MutatorOption) error {
 	if name == "" || fn == nil {
 		return fmt.Errorf("server: mutator needs a name and a func")
 	}
 	if _, dup := s.mutators[name]; dup {
 		return fmt.Errorf("server: mutator %q already registered", name)
 	}
-	s.mutators[name] = &mutatorInfo{name: name, args: argsPrototype, fn: fn}
+	mi := &mutatorInfo{name: name, args: argsPrototype, fn: fn}
+	for _, opt := range opts {
+		opt.applyMutator(mi)
+	}
+	s.mutators[name] = mi
 	s.log().LogAttrs(context.Background(), slog.LevelInfo, "mutator registered",
 		slog.String("component", "schema"), slog.String("mutator", name))
 	return nil
@@ -119,6 +179,121 @@ type EntityTx struct {
 	// the Write{Custom} verdict covers — while Apply sets it with no authz,
 	// having authorized its intents in an earlier pass.
 	gate *writeGate
+	// access is what the transaction's caller holds in the access model: the
+	// enforced caller's, or for a mutator body the invoking caller's. Nil for
+	// a Trusted transaction and in a schema without the model. Can answers
+	// from it, and a write that can change it drops what it resolved.
+	access *txAccess
+	// caller, when non-nil, is the invoking caller's write gate, which the
+	// writes of AsCaller's view pass. Set only on a mutator body invoked by a
+	// caller who is not Trusted.
+	caller *writeGate
+	// root is the transaction an AsCaller view writes for, nil on the
+	// transaction itself. The view stamps its writes with root's sequence and
+	// marks root as written, so that the caller of the body sees every write.
+	root *EntityTx
+	// view is the AsCaller view, kept so that each call returns the same one.
+	view *EntityTx
+	// writes counts the writes of the transaction, on the transaction itself
+	// and not on its view. Reads that apply the caller's read gate bind the
+	// caller's access again after a write, which can change what it reads.
+	writes uint64
+	// reads is what the reads of a transaction with a write gate apply, nil
+	// until its first read and on every transaction without one.
+	reads *callerReads
+}
+
+// callerReads is the caller's read gate (see Server.readGate) that the reads
+// of a transaction with a write gate apply. writes is the transaction's write
+// count when the gate was bound.
+type callerReads struct {
+	visible func(storage.Row) (bool, error)
+	project rowProjector
+	refuse  specRefuser
+	writes  uint64
+}
+
+// unfilteredReads is the callerReads of a transaction without a write gate:
+// it filters and refuses nothing.
+var unfilteredReads = &callerReads{}
+
+// callerReadGate returns what this transaction's reads apply. A transaction
+// with a write gate reads as its caller: an AsCaller view, and a
+// Server.Mutate for a caller who is not Trusted. Its reads apply the caller's
+// read rules, guards and ReadFilter, bound on the first read and again after
+// the transaction writes. Every other transaction reads unfiltered.
+func (e *EntityTx) callerReadGate() (*callerReads, error) {
+	if e.gate == nil {
+		return unfilteredReads, nil
+	}
+	owner := e
+	if e.root != nil {
+		owner = e.root
+	}
+	writes := owner.writes
+	if e.reads != nil && e.reads.writes == writes {
+		return e.reads, nil
+	}
+	adm := admission{principal: e.gate.p, creator: e.gate.creator}
+	if a := e.gate.accessOf(); a != nil {
+		// The transaction reached the gate's verdict before the body ran, so
+		// none is left for the bind.
+		adm.caller, adm.access = a.caller, a.admitted
+	}
+	visible, project, refuse, bind, err := e.srv.readGate(e.ctx, e.ws, adm, true)
+	if err != nil {
+		return nil, err
+	}
+	if err := bind(e.tx); err != nil {
+		return nil, err
+	}
+	e.reads = &callerReads{visible: visible, project: project, refuse: refuse, writes: writes}
+	return e.reads, nil
+}
+
+// AsCaller returns a view of this transaction whose writes are checked as the
+// same writes sent by the invoking caller's client would be: by the access
+// rules, the field write policies and the application's row write filters.
+// A refused write returns a Rejection, with CodeAccessDenied for the access
+// rules and CodePermissionDenied for the others, and writes nothing; the body
+// decides whether to return it and fail the invocation.
+// Permissions.CanMutate does not run for these writes, since the verdict on
+// the invocation covers them.
+//
+// Reads through the view read as the invoking caller's client would: a row the
+// caller may not read reads as absent from Get, GetMeta, Scan, ScanPage and
+// Query, and each field a field guard hides from the caller reads as its zero
+// value. A Query whose predicate or order names a field that a guard hides
+// from the caller on some row fails with code permission_denied. The reads
+// see the transaction's own earlier writes, grants included. Reads through a
+// mutator body's own transaction are not filtered.
+//
+// Can and Seq answer as on this transaction, and writes through either one
+// share its sequence. In a transaction whose writes are already checked, such
+// as one Server.Mutate runs for a caller who is not Trusted, AsCaller returns
+// this transaction itself, whose reads are filtered for that caller as above.
+// In a Trusted transaction, AsCaller returns this transaction itself, whose
+// reads are not filtered.
+//
+// A write or a read through the view can call the application's WriteFilter,
+// ReadFilter and FieldPermissions hooks inside the transaction. The first read
+// through the view, and the first after a write, calls ReadFilter once for
+// each registered entity.
+//
+//	func completeTask(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+//		id := args.(*taskv1.CompleteTaskArgs).GetTaskId()
+//		return tx.AsCaller().Patch(&taskv1.Task{Id: id, Done: true}, []string{"done"}, nil)
+//	}
+func (e *EntityTx) AsCaller() *EntityTx {
+	if e.caller == nil || e.gate != nil {
+		return e
+	}
+	if e.view == nil {
+		view := *e
+		view.gate, view.caller, view.root, view.view = e.caller, nil, e, nil
+		e.view = &view
+	}
+	return e.view
 }
 
 // authorizeCrud runs the per-write hook for one CRUD write, building the same
@@ -200,6 +375,9 @@ func (e *EntityTx) Workspace() string {
 // stamping its bookkeeping so it can later recognize its own writes in the
 // change feed.
 func (e *EntityTx) Seq() uint64 {
+	if e.root != nil {
+		return e.root.Seq()
+	}
 	if !e.wrote {
 		return 0
 	}
@@ -209,6 +387,9 @@ func (e *EntityTx) Seq() uint64 {
 // writeSeq returns the sequence for a write, allocating it on first use
 // when the tx was created without one (Server.Mutate).
 func (e *EntityTx) writeSeq() (uint64, error) {
+	if e.root != nil {
+		return e.root.writeSeq()
+	}
 	if e.seq == 0 {
 		seq, err := e.tx.NextSeq()
 		if err != nil {
@@ -217,6 +398,7 @@ func (e *EntityTx) writeSeq() (uint64, error) {
 		e.seq = seq
 	}
 	e.wrote = true
+	e.writes++
 	return e.seq, nil
 }
 
@@ -225,13 +407,20 @@ func (e *EntityTx) info(msg proto.Message) (*entityInfo, error) {
 }
 
 // Get loads the row with the given key into dst. Returns false if the row
-// does not exist (or is deleted).
+// does not exist (or is deleted). Through an AsCaller view, and in a
+// Server.Mutate for a caller who is not Trusted, it also returns false for a
+// row the caller may not read and clears the fields a guard hides from the
+// caller (see AsCaller).
 func (e *EntityTx) Get(dst proto.Message, key string) (bool, error) {
 	info, err := e.info(dst)
 	if err != nil {
 		return false, err
 	}
-	found, _, err := readRowInto(e.tx, info, dst, key)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return false, err
+	}
+	found, _, err := readRowVisible(e.tx, info, dst, key, g.visible, g.project)
 	return found, err
 }
 
@@ -268,7 +457,11 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 	if err != nil {
 		return false, RowMeta{}, err
 	}
-	return readRowMeta(e.tx, info, dst, key, nil)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return false, RowMeta{}, err
+	}
+	return readRowMeta(e.tx, info, dst, key, g.visible, g.project)
 }
 
 // Put stores msg as a full-row snapshot; the key derives from key_fields.
@@ -292,9 +485,8 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // an invented identity.
 //
 // WithExpectedVersion makes the write a compare-and-swap and is also how it
-// states create-or-update intent to an entity restricting either (see
-// CreatePolicy); without one the write is unguarded and follows arrival order
-// like any other.
+// states create-or-update intent; without one the write is unguarded and
+// follows arrival order like any other.
 func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {
@@ -331,6 +523,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}
 	var (
 		prevText map[string][]byte
+		prevRead readInputs
 		// The stored row before this write, read at most once: the row check,
 		// the merges and history capture all want the same one — and, like the
 		// wire path's memo, must treat an absent row and a tombstone alike.
@@ -355,8 +548,12 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}); err != nil {
 		return err
 	}
+	aw, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, currentRow)
+	if err != nil {
+		return err
+	}
 	if len(info.textFields) > 0 || len(o.texts) > 0 || info.history != nil || o.expected != nil ||
-		len(protected) > 0 {
+		len(protected) > 0 || aw != nil {
 		if _, _, err := currentRow(); err != nil {
 			return err
 		}
@@ -383,6 +580,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 			} else {
 				base = decoded
 				prevText = info.textSnapshot(base)
+				prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
 			}
 		}
 		// Clone so the caller's message is not mutated by the merges.
@@ -391,6 +589,16 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		// field is replaced by the stored document rather than resolved into an
 		// edit against it.
 		if err := carryProtectedFields(info, protected, base, msg); err != nil {
+			return err
+		}
+		if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
+			stampCreatorFields(info, msg, e.gate.creatorSubject())
+		}
+		named := make([]string, 0, len(o.texts))
+		for path := range o.texts {
+			named = append(named, protectedHead(path))
+		}
+		if err := aw.carryGuarded(e.tx, msg, named); err != nil {
 			return err
 		}
 		texts, err := takePlainStrings(info, msg, nil, o)
@@ -421,6 +629,18 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := info.projectRefs(msg.ProtoReflect()); err != nil {
 		return err
 	}
+	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, msg); err != nil {
+		return err
+	}
+	if err := aw.checkNewParentsRead(e.tx, msg); err != nil {
+		return err
+	}
+	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key, currentRow, msg); err != nil {
+		return err
+	}
+	if err := aw.finish(e.tx, msg); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(msg)
 	if err != nil {
 		return err
@@ -433,6 +653,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
+		return err
+	}
+	if err := info.recordReadGaps(e.tx, e.srv.catalogPtr().access, key, prevRead, msg, seq); err != nil {
 		return err
 	}
 	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,
@@ -448,7 +671,14 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, msg, nil, seq, e.actor); err != nil {
 		return err
 	}
-	return e.tx.PutRow(info.name, key, value, seq, e.actor)
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key, currentRow, msg, seq, e.actor); err != nil {
+		return err
+	}
+	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Patch merges only the masked fields of msg onto the stored row, honoring
@@ -516,6 +746,11 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}); err != nil {
 		return err
 	}
+	aw, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask,
+		func() (storage.Row, bool, error) { return row, live, nil })
+	if err != nil {
+		return err
+	}
 
 	// Optional compare-and-swap: an absent or deleted row reads as version 0
 	// (so expected 0 means "row must not exist"). The check runs before the
@@ -550,6 +785,8 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	// Snapshot before the merge: the delta log records the move it makes.
 	prevText := info.textSnapshot(base)
+	model := e.srv.catalogPtr().access
+	prevRead := readInputsOf(model, info, base)
 	if len(o.texts) > 0 || hasPlainString(info, msg) {
 		// Clone before either rewrite so the caller's message is not mutated.
 		msg = proto.Clone(msg)
@@ -600,6 +837,19 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := info.projectRefs(base.ProtoReflect()); err != nil {
 		return err
 	}
+	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask, base); err != nil {
+		return err
+	}
+	if err := aw.checkNewParentsRead(e.tx, base); err != nil {
+		return err
+	}
+	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return row, live, nil }, base); err != nil {
+		return err
+	}
+	if err := aw.finish(e.tx, base); err != nil {
+		return err
+	}
 	value, err := proto.Marshal(base)
 	if err != nil {
 		return err
@@ -612,6 +862,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 		return err
 	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {
+		return err
+	}
+	if err := info.recordReadGaps(e.tx, model, key, prevRead, base, seq); err != nil {
 		return err
 	}
 	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,
@@ -634,7 +887,15 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, base, mask, seq, e.actor); err != nil {
 		return err
 	}
-	return e.tx.PutRow(info.name, key, value, seq, e.actor)
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return row, live, nil }, base, seq, e.actor); err != nil {
+		return err
+	}
+	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Delete writes a tombstone. prototype only identifies the entity type.
@@ -655,6 +916,10 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	}, func() (Write, error) {
 		return writeOf(info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil, nil, nil)
 	}); err != nil {
+		return err
+	}
+	if _, err := e.gate.beginAccessWrite(e.tx, info, key, syncplanev1.CrudOp_CRUD_OP_DELETE, nil,
+		func() (storage.Row, bool, error) { return e.liveRow(info, key) }); err != nil {
 		return err
 	}
 	seq, err := e.writeSeq()
@@ -687,19 +952,43 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	if err := e.srv.purgeHistory(e.tx, info, key); err != nil {
 		return err
 	}
-	return e.tx.DeleteRow(info.name, key, seq, e.actor)
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return e.liveRow(info, key) }, nil, seq, e.actor); err != nil {
+		return err
+	}
+	if err := e.tx.DeleteRow(info.name, key, seq, e.actor); err != nil {
+		return err
+	}
+	e.access.noteWrite(info)
+	return nil
 }
 
 // Scan iterates all live rows of the entity identified by prototype,
-// decoding each into a fresh message.
+// decoding each into a fresh message. Through an AsCaller view, and in a
+// Server.Mutate for a caller who is not Trusted, it skips the rows the caller
+// may not read and clears the fields a guard hides from the caller (see
+// AsCaller).
 func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) error) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err
 	}
+	g, err := e.callerReadGate()
+	if err != nil {
+		return err
+	}
 	return e.tx.ScanEntity(info.name, func(r storage.Row) error {
+		if g.visible != nil {
+			ok, err := g.visible(r)
+			if err != nil || !ok {
+				return err
+			}
+		}
 		msg, err := info.decode(r.Value)
 		if err != nil {
+			return err
+		}
+		if err := g.project.apply(info, r.Key, msg); err != nil {
 			return err
 		}
 		return fn(msg)
@@ -716,12 +1005,22 @@ func (e *EntityTx) Scan(prototype proto.Message, fn func(msg proto.Message) erro
 // every other writer for its duration — and it is a full scan of the entity
 // unless a declared secondary index covers its predicate and ordering. A spec
 // with no Limit also retains every match in memory. See query.Spec.
+//
+// Through an AsCaller view, and in a Server.Mutate for a caller who is not
+// Trusted, it answers as ViewTx.Query does for the caller (see AsCaller).
 func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg proto.Message) error) error {
 	info, err := e.info(prototype)
 	if err != nil {
 		return err
 	}
-	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, nil)
+	g, err := e.callerReadGate()
+	if err != nil {
+		return err
+	}
+	if err := g.refuse.check(info, spec); err != nil {
+		return err
+	}
+	rows, err := runQuerySpec(e.srv, e.tx, e.ws, info, spec, g.visible, g.project)
 	if err != nil {
 		return err
 	}
@@ -735,13 +1034,20 @@ func (e *EntityTx) Query(prototype proto.Message, spec query.Spec, fn func(msg p
 
 // ScanPage iterates up to limit live rows with key > afterKey, in key order.
 // It returns the key of the last row visited and whether more rows follow;
-// pass lastKey back as afterKey to continue. limit must be positive.
+// pass lastKey back as afterKey to continue. limit must be positive. Through
+// an AsCaller view, and in a Server.Mutate for a caller who is not Trusted, it
+// skips the rows the caller may not read (see AsCaller); a skipped row still
+// counts toward limit.
 func (e *EntityTx) ScanPage(prototype proto.Message, afterKey string, limit int, fn func(msg proto.Message) error) (lastKey string, more bool, err error) {
 	info, err := e.info(prototype)
 	if err != nil {
 		return "", false, err
 	}
-	return scanPageRows(e.tx, info, afterKey, limit, nil, func(msg proto.Message, _ uint64) error {
+	g, err := e.callerReadGate()
+	if err != nil {
+		return "", false, err
+	}
+	return scanPageRows(e.tx, info, afterKey, limit, g.visible, g.project, func(msg proto.Message, _ uint64) error {
 		return fn(msg)
 	})
 }

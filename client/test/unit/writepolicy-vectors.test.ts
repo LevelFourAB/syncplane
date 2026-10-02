@@ -11,14 +11,23 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { assertWritePolicy, type EntityDef, type WritePolicies } from '../../src/mutations.js';
+import {
+	type AccessRuleDef,
+	assertWritePolicy,
+	closedUnits,
+	type EntityDef,
+	type GuardDef,
+	type WriteAccess,
+} from '../../src/mutations.js';
 
 interface PolicyCase {
 	name: string;
 	op: 'PUT' | 'PATCH' | 'DELETE' | 'UNSPECIFIED';
 	expectedVersion: string | null;
-	policies: WritePolicies;
+	access?: WriteAccess;
+	keyFields?: string[];
 	protected?: string[];
+	guards?: { fields: string[]; update: boolean }[];
 	mask?: string[];
 	want: 'allow' | 'refuse';
 }
@@ -38,10 +47,29 @@ const opOf = (op: PolicyCase['op']): CrudOp =>
 		? CrudOp.DELETE
 		: CrudOp.UNSPECIFIED;
 
-/** Only `name`, `policies` and `protectedFields` are read by the classifier, so
- * the rest of the EntityDef stays unbuilt rather than stubbed. */
-const defWith = (policies: WritePolicies, protectedFields: string[]): EntityDef =>
-	({ name: 'vector', policies, protectedFields }) as unknown as EntityDef;
+/** A guard as the vectors state it: its units, and one update rule when a
+ * rule of it names update, whatever that rule's source. */
+const guardOf = (g: { fields: string[]; update: boolean }): GuardDef => ({
+	units: g.fields,
+	rules: g.update ? [ { update: true } as AccessRuleDef ] : [],
+});
+
+/** Only `name`, `keyFields` (by name), `writeAccess` and `protectedFields` are
+ * read by the classifier, so the rest of the EntityDef stays unbuilt rather
+ * than stubbed. `protectedFields` is built as entityDefOf builds it: the
+ * creator fields, and the units of each guard without an update rule. */
+const defWith = (
+	writeAccess: WriteAccess | undefined,
+	protectedFields: string[],
+	guards: GuardDef[],
+	keyFields: string[],
+): EntityDef =>
+	({
+		name: 'vector',
+		writeAccess,
+		protectedFields: [ ...protectedFields, ...closedUnits(guards, 'update') ],
+		keyFields: keyFields.map((name) => ({ name })),
+	}) as unknown as EntityDef;
 
 describe('write policy conformance vectors', () => {
 	it('has cases', () => {
@@ -53,7 +81,7 @@ describe('write policy conformance vectors', () => {
 			const expectedVersion = tc.expectedVersion === null ? undefined : BigInt(tc.expectedVersion);
 			const call = () =>
 				assertWritePolicy(
-					defWith(tc.policies, tc.protected ?? []),
+					defWith(tc.access, tc.protected ?? [], (tc.guards ?? []).map(guardOf), tc.keyFields ?? []),
 					opOf(tc.op),
 					expectedVersion,
 					tc.mask,

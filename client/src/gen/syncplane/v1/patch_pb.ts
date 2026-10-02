@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/patch.proto.
  */
 export const file_syncplane_v1_patch: GenFile = /*@__PURE__*/
-  fileDesc("ChhzeW5jcGxhbmUvdjEvcGF0Y2gucHJvdG8SDHN5bmNwbGFuZS52MSItCgpGaWVsZERlbHRhEg0KBWZpZWxkGAEgASgJEhAKCGZyYWdtZW50GAIgASgMIpYBCglSb3dDaGFuZ2USDgoGZW50aXR5GAEgASgJEgsKA2tleRgCIAEoCRIPCgd2ZXJzaW9uGAMgASgEEg8KBXZhbHVlGAQgASgMSAASEwoJdG9tYnN0b25lGAUgASgISAASLQoLdGV4dF9kZWx0YXMYBiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGREZWx0YUIGCgRib2R5IkgKBVBhdGNoEigKB2NoYW5nZXMYASADKAsyFy5zeW5jcGxhbmUudjEuUm93Q2hhbmdlEhUKDWRyb3BfZW50aXRpZXMYAiADKAkiwQEKDFN1YnNjcmlwdGlvbhIOCgZlbnRpdHkYASABKAkSKgoJcHJlZGljYXRlGAIgASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbhIoCgZmb2xsb3cYAyABKAsyGC5zeW5jcGxhbmUudjEuRm9sbG93U3BlYxIkCgZ3aW5kb3cYBCABKAsyFC5zeW5jcGxhbmUudjEuV2luZG93EiUKB2tleV9zZXQYBSABKAsyFC5zeW5jcGxhbmUudjEuS2V5U2V0IhYKBktleVNldBIMCgRrZXlzGAEgAygJIlUKBldpbmRvdxIoCghvcmRlcl9ieRgBIAMoCzIWLnN5bmNwbGFuZS52MS5PcmRlcktleRINCgVsaW1pdBgCIAEoDRISCgpieV9yZWNlbmN5GAMgASgIIhsKB1JlZlBhdGgSEAoIc2VnbWVudHMYASADKAkiQQoKRm9sbG93U3BlYxIkCgVwYXRocxgBIAMoCzIVLnN5bmNwbGFuZS52MS5SZWZQYXRoEg0KBWRlcHRoGAIgASgNQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_syncplane_v1_query]);
+  fileDesc("ChhzeW5jcGxhbmUvdjEvcGF0Y2gucHJvdG8SDHN5bmNwbGFuZS52MSItCgpGaWVsZERlbHRhEg0KBWZpZWxkGAEgASgJEhAKCGZyYWdtZW50GAIgASgMIqYBCglSb3dDaGFuZ2USDgoGZW50aXR5GAEgASgJEgsKA2tleRgCIAEoCRIPCgd2ZXJzaW9uGAMgASgEEg8KBXZhbHVlGAQgASgMSAASEwoJdG9tYnN0b25lGAUgASgISAASLQoLdGV4dF9kZWx0YXMYBiADKAsyGC5zeW5jcGxhbmUudjEuRmllbGREZWx0YRIOCgZoaWRkZW4YByADKAlCBgoEYm9keSJICgVQYXRjaBIoCgdjaGFuZ2VzGAEgAygLMhcuc3luY3BsYW5lLnYxLlJvd0NoYW5nZRIVCg1kcm9wX2VudGl0aWVzGAIgAygJIsEBCgxTdWJzY3JpcHRpb24SDgoGZW50aXR5GAEgASgJEioKCXByZWRpY2F0ZRgCIAEoCzIXLnN5bmNwbGFuZS52MS5Db25kaXRpb24SKAoGZm9sbG93GAMgASgLMhguc3luY3BsYW5lLnYxLkZvbGxvd1NwZWMSJAoGd2luZG93GAQgASgLMhQuc3luY3BsYW5lLnYxLldpbmRvdxIlCgdrZXlfc2V0GAUgASgLMhQuc3luY3BsYW5lLnYxLktleVNldCIWCgZLZXlTZXQSDAoEa2V5cxgBIAMoCSJVCgZXaW5kb3cSKAoIb3JkZXJfYnkYASADKAsyFi5zeW5jcGxhbmUudjEuT3JkZXJLZXkSDQoFbGltaXQYAiABKA0SEgoKYnlfcmVjZW5jeRgDIAEoCCIbCgdSZWZQYXRoEhAKCHNlZ21lbnRzGAEgAygJIkEKCkZvbGxvd1NwZWMSJAoFcGF0aHMYASADKAsyFS5zeW5jcGxhbmUudjEuUmVmUGF0aBINCgVkZXB0aBgCIAEoDUJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_syncplane_v1_query]);
 
 /**
  * FieldDelta carries one collaborative-text document of a RowChange as delta
@@ -64,7 +64,8 @@ export const FieldDeltaSchema: GenMessage<FieldDelta> = /*@__PURE__*/
  * RowChange is a full-row snapshot (or tombstone) at a given workspace
  * sequence. Every field is a merged snapshot except the collaborative-text
  * fields named in text_deltas, which the recipient reconstructs from state it
- * already holds.
+ * already holds, and the fields named in hidden, which the recipient may not
+ * read.
  *
  * @generated from message syncplane.v1.RowChange
  */
@@ -99,7 +100,7 @@ export type RowChange = Message<"syncplane.v1.RowChange"> & {
   body: {
     /**
      * Serialized entity message. Full merged snapshot, EXCEPT that every
-     * field named in text_deltas is cleared.
+     * field named in text_deltas or in hidden is cleared.
      *
      * @generated from field: bytes value = 4;
      */
@@ -128,6 +129,24 @@ export type RowChange = Message<"syncplane.v1.RowChange"> & {
    * @generated from field: repeated syncplane.v1.FieldDelta text_deltas = 6;
    */
   textDeltas: FieldDelta[];
+
+  /**
+   * The fields of the row that the recipient may not read, sorted: each
+   * entry names a top-level field outside any `oneof`, or a `oneof`. The
+   * server clears each one in `value`, so a cleared field reads as its zero
+   * value; this list tells it apart from a stored zero value. Empty when
+   * the recipient reads every field. A field guard decides it (see
+   * `syncplane.v1.FieldGuard`), per row, so two rows of one entity can
+   * hide different fields, and a change of the recipient's access sends
+   * the row again with a new list.
+   *
+   * A `PUT` that updates the row keeps the stored value of each field the
+   * writer may not read and leaves unset, so a recipient can write the row
+   * back whole.
+   *
+   * @generated from field: repeated string hidden = 7;
+   */
+  hidden: string[];
 };
 
 /**

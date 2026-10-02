@@ -38,6 +38,8 @@ If you authenticate requests in HTTP middleware, call `server.WithPrincipal(ctx,
 
 ## Configuring permissions
 
+For access that follows rows in the workspace — project members who see their projects, org admins who see everything — declare it in the schema instead of writing hooks. See [Declare roles and permissions](declare-roles-and-permissions.md). The hooks below still run with the access model, and can narrow what it allows.
+
 Permission hooks receive the `server.Principal` as a direct argument rather than reading it from `ctx`. This prevents a policy from silently authorizing an anonymous caller. Embed `server.AllowAll` to implement only the hooks you need:
 
 ```go
@@ -85,6 +87,8 @@ Return the appropriate error type based on the failure condition:
 | `server.DenyWorkspace(...)` | Settled denial       | Receives `permission_denied` and `workspace_access_revoked`, then stops syncing |
 | Any other error             | Policy cannot decide | Receives an infrastructure error, then retries                                  |
 
+In a schema that uses the access model, a caller that `CanAccessWorkspace` admits but that holds no permission in the workspace gets `permission_denied` with `workspace_no_access`. In-process calls return `server.ErrNoAccess`. This denial is not permanent: the client keeps its queue and syncs again once a grant exists. A caller that loses its last permission first receives a pull that removes the rows it can no longer read. See [Create a workspace and invite people](create-a-workspace-and-invite-people.md).
+
 **Note:** Do not return a denial when a membership store is unreachable. Return the transient error so clients retry instead of discarding valid local data.
 
 ### Filtering reads and writes with CanMutate and ReadFilter
@@ -93,7 +97,7 @@ Return the appropriate error type based on the failure condition:
 
 `ReadFilter` returns a per-row predicate. `FilterEpoch` versions the visibility inputs behind `ReadFilter` so that a permission change triggers a delta resync instead of requiring a full re-bootstrap. For more information, see [Partial sync and coverage](../explanation/partial-sync-and-coverage.md).
 
-`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
+`ReadFilter` also gates writes. The engine refuses a `PUT`, `PATCH`, or `DELETE` of a stored row that the filter hides with `permission_denied`, or with `access_denied` on an entity in the access model. A caller therefore cannot change, delete, or reveal a row that it cannot read. To decide writes with a different rule, see [Check writes against the stored row](#check-writes-against-the-stored-row).
 
 Keep membership checks out of `ReadFilter`. Handle membership in `CanAccessWorkspace`. Combining the two can cause a `nil` return to leak entities across tenants.
 
@@ -136,20 +140,84 @@ Note the following behavior regarding stored write attribution:
 
 `Invoke` authorizes once on the verb (`Write{Custom}`). The mutator body's individual row writes are not authorized separately.
 
-## Enforcing write policies in the schema
+## Reserve an operation for trusted writes
 
-`(syncplane.v1.entity)` defines three write policies: `create_policy`, `update_policy`, and `delete_policy`. The engine enforces these policies before `CanMutate` runs on every write path.
+Some writes must come only from your own server code. For example, only the server records activity rows, or clients archive projects but never delete them. Trusted writes skip the access rules and the permission hooks, so a rule that refuses the operation to every other caller reserves it for trusted writes.
 
-Setting a policy to `*_TRUSTED_ONLY` restricts that write operation to trusted server writes and custom mutators, blocking sync clients and direct in-process calls. Common use cases include:
+In a schema that uses the access model, leave the operation out of every access rule of the entity. The server refuses the write before `CanMutate` runs, and the TypeScript client rejects it at the call site. See [Allow some operations and not others](declare-roles-and-permissions.md#allow-some-operations-and-not-others).
 
-- Server-owned entities: restrict all three operations to `*_TRUSTED_ONLY`.
-- Append-only entities: restrict update and delete operations while permitting creation.
+The access model does not need roles for this. When no entity declares `grant`, the schema declares no role, and `CanAccessWorkspace` alone decides who enters a workspace. Give the entity rules with `admitted: {}` as the source. The other entities need no `access`: an entity without one is open to every caller that enters the workspace, as before.
 
-Use schema write policies for rules that apply to all deployments. Defining the rule in the schema ensures it is enforced consistently, rather than relying on policy code in each deployment where a missing check fails open.
+```proto
+// Clients read activity rows. Only the server records them.
+message Activity {
+	option (syncplane.v1.entity) = {
+		name: "activity"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true admitted: {} } ] }
+	};
+	string id = 1;
+	string text = 2;
+}
 
-Schema write policies apply to caller classes rather than specific rows. To enforce row-level rules such as "only edit your own comment", use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row), [Check ownership in a mutator](#check-ownership-in-a-mutator), and [Write policies](../reference/proto-options.md#write-policies).
+// Clients create, read and archive projects, but never delete them.
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true create: true update: true admitted: {} } ] }
+	};
+	string id = 1;
+	bool archived = 2;
+}
+```
 
-To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
+In a schema that uses the access model, a client can invoke only a mutator that declares a `MutatorAccess`. Without roles, declare `server.MutatorAccess{Admitted: true}` to let every caller that enters the workspace invoke it:
+
+```go
+server.WithMutator("send_feedback", &appv1.SendFeedbackArgs{}, sendFeedback,
+	server.MutatorAccess{Admitted: true})
+```
+
+If you later add a grant entity, the schema declares its first role, and the workspace gate then refuses every caller that holds no permission. Registration refuses that change unless you allow it; see [Changing the access model](../reference/proto-options.md#changing-the-access-model).
+
+In a schema that does not use the access model, refuse the operation in `CanMutate`. The hook receives each CRUD write of a batch on its own, with its entity and its operation:
+
+```go
+func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string, w server.Write) error {
+	if c := w.Crud; c != nil && c.GetEntity() == "project" && c.GetOp() == syncplanev1.CrudOp_CRUD_OP_DELETE {
+		return server.Reject(server.CodePermissionDenied, "projects are archived, not deleted")
+	}
+	return nil
+}
+```
+
+- **Writes under `server.Trusted` skip the hook,** so a connector, an effect or a retention job can still delete projects.
+- **A custom mutator reaches the hook as one `Write` with `Custom` set,** and the rows that its body writes do not. A mutator that deletes projects therefore needs its own check.
+- **The client cannot predict this refusal.** It queues the delete, and reverts it when the server rejects it.
+
+`CanMutate` cannot enforce a rule that depends on the stored row, such as "only edit your own comment". An access rule can when a field of the row names the caller: set `caller_is` on the rule to that field. For other rules, use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
+
+To keep individual fields of a writable row from clients, give the entity a field guard whose only rule is the read rule. A `PATCH` whose mask names a guarded field is rejected with `access_denied`. A `PUT` keeps the stored value of the guarded field and applies the rest of the row:
+
+```proto
+// Clients edit the title. Only the server sets the total.
+message Order {
+	option (syncplane.v1.entity) = {
+		name: "order"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ { read: true write: true admitted: {} } ]
+			guard: [ { fields: [ "total" ] allow: [ { read: true admitted: {} } ] } ]
+		}
+	};
+	string id = 1;
+	string title = 2;
+	int64 total = 3;
+}
+```
+
+A guard can also give a field back to some callers, such as a status that only managers set, and keep a field from some readers, such as a salary that only HR reads. For more information, see [Field guards](../reference/proto-options.md#field-guards).
 
 ## Check writes against the stored row
 
@@ -214,13 +282,13 @@ server.WithMutator("editComment", &appv1.EditComment{},
 
 Check and reject anonymous callers before comparing subjects. Unauthenticated callers and rows written without an authenticated actor both have an empty `Actor.Subject`, which evaluates as a match if unchecked.
 
-`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, store the creator's identity in a field on creation and set `write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY` to prevent subsequent client modifications.
+`meta.Actor` reflects the last writer of the row. If a moderator edits a comment created by an author, `meta.Actor` reports the moderator. To restrict edits to the original creator, mark a field of the row `(syncplane.v1.field_behavior).creator`: the server stores the caller's subject in it on the create, and no client write changes it later. An access rule with `caller_is` on that field then admits only the creator, and needs no mutator. See [Access model](../reference/proto-options.md#access-model).
 
 `meta.Version` contains the row version. Because a mutator holds the workspace write lock, read-then-write operations within a mutator are serializable. When performing the same check in an `Apply` closure, pass the version to `server.WithExpectedVersion` so the write fails if the row changes concurrently. To read metadata in a read-only transaction, call `ViewTx.GetMeta` inside a `View`.
 
 ## Protecting fields per caller
 
-To restrict field writes based on the identity of the caller, implement `FieldPermissions` on your `Permissions` struct:
+A [field guard](../reference/proto-options.md#field-guards) restricts a field to the callers that hold a permission where the row sits, or that a field of the row names. The client predicts a guard with `can()`. When the rule depends on facts outside the workspace's rows, such as a billing plan, implement `FieldPermissions` on your `Permissions` struct:
 
 ```go
 func (p *policy) ProtectedFields(
@@ -233,18 +301,18 @@ func (p *policy) ProtectedFields(
 }
 ```
 
-The effective protected set combines the schema definitions with the fields returned by `ProtectedFields`. This hook widens restrictions and cannot remove protections defined in the schema. Both schema rules and hook returns are enforced identically: a `PATCH` targeting a protected field is rejected, and a `PUT` preserves the stored field value.
+The hook only takes fields away: a field is writable when the schema's guards admit the caller and the hook does not return it. A `PATCH` targeting a field the hook returns is rejected with `permission_denied`, and a `PUT` preserves the stored field value.
 
 Return names of top-level fields or oneof group names. Returning an invalid field name or a key field causes the request to fail rather than silently permitting access.
 
 `ProtectedFields` must execute quickly and without side effects. The engine calls `ProtectedFields` at most once per entity per request before opening the write transaction and reuses the result during application. Place expensive lookups, such as membership checks, in middleware that attaches results to the context.
 
-Clients handle schema protections and dynamic protections differently:
+Clients handle guards and the hook differently:
 
-- The TypeScript client checks schema annotations locally and prevents protected writes before sending requests.
-- Protections returned by `ProtectedFields` are evaluated on the server. The client enqueues the write and reverts it when receiving the server rejection.
+- The TypeScript client refuses a `patch()` of a field whose guard admits no update to any caller before it sends the request, and `can()` predicts the other guard rules.
+- Fields returned by `ProtectedFields` are evaluated on the server. The client enqueues the write and reverts it when receiving the server rejection.
 
-Prefer schema definitions when a field protection applies to all callers.
+Prefer a guard when the rule depends only on permissions and the row.
 
 ## Unauthenticated services
 

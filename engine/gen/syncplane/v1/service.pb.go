@@ -92,6 +92,10 @@ const (
 	// A failure scoped to this workspace that may not persist (storage
 	// error, a permission hook that could not decide). Reopen with backoff.
 	WorkspaceDropped_REASON_ERROR WorkspaceDropped_Reason = 3
+	// The caller holds no permission in the workspace's access model. A
+	// grant written later lifts it, so keep the local copy and the queue,
+	// and retry with backoff.
+	WorkspaceDropped_REASON_NO_ACCESS WorkspaceDropped_Reason = 4
 )
 
 // Enum value maps for WorkspaceDropped_Reason.
@@ -101,12 +105,14 @@ var (
 		1: "REASON_RESET",
 		2: "REASON_ACCESS_REVOKED",
 		3: "REASON_ERROR",
+		4: "REASON_NO_ACCESS",
 	}
 	WorkspaceDropped_Reason_value = map[string]int32{
 		"REASON_UNSPECIFIED":    0,
 		"REASON_RESET":          1,
 		"REASON_ACCESS_REVOKED": 2,
 		"REASON_ERROR":          3,
+		"REASON_NO_ACCESS":      4,
 	}
 )
 
@@ -134,7 +140,7 @@ func (x WorkspaceDropped_Reason) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use WorkspaceDropped_Reason.Descriptor instead.
 func (WorkspaceDropped_Reason) EnumDescriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15, 0}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19, 0}
 }
 
 // WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
@@ -515,9 +521,15 @@ type PullRequest struct {
 	// their optimistic state and briefly revert them. It never widens what the
 	// pull returns; the cursor still decides that. 0 (and clients predating
 	// the field) means no floor beyond the cursor's own position.
-	MinSeq        uint64 `protobuf:"varint,7,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MinSeq uint64 `protobuf:"varint,7,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
+	// The CallerAccess.version of the summary the client holds for the
+	// workspace, 0 when it holds none. A client that sets the field can apply
+	// a CallerAccessDelta, and the response carries one only when it applies
+	// to this version. Without the field, the response carries a whole
+	// CallerAccess when the cursor was issued under another one.
+	CallerAccessVersion *uint64 `protobuf:"fixed64,8,opt,name=caller_access_version,json=callerAccessVersion,proto3,oneof" json:"caller_access_version,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *PullRequest) Reset() {
@@ -599,6 +611,13 @@ func (x *PullRequest) GetMinSeq() uint64 {
 	return 0
 }
 
+func (x *PullRequest) GetCallerAccessVersion() uint64 {
+	if x != nil && x.CallerAccessVersion != nil {
+		return *x.CallerAccessVersion
+	}
+	return 0
+}
+
 type PullResponse struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Patch *Patch                 `protobuf:"bytes,1,opt,name=patch,proto3" json:"patch,omitempty"`
@@ -630,8 +649,18 @@ type PullResponse struct {
 	// client configured with its own revision compares the two and reacts to a
 	// mismatch per its skew policy.
 	SchemaRevision string `protobuf:"bytes,7,opt,name=schema_revision,json=schemaRevision,proto3" json:"schema_revision,omitempty"`
-	unknownFields  protoimpl.UnknownFields
-	sizeCache      protoimpl.SizeCache
+	// What the caller holds in the workspace under the access model. Present
+	// when it differs from what the request's cursor was issued under, and on
+	// a response to a request without a cursor. Absent otherwise, and in a
+	// schema without the access model: the client keeps the last one it
+	// received.
+	CallerAccess *CallerAccess `protobuf:"bytes,8,opt,name=caller_access,json=callerAccess,proto3" json:"caller_access,omitempty"`
+	// A change to the CallerAccess that PullRequest.caller_access_version
+	// names, in place of caller_access. At most one of the two is present,
+	// and only a request that sets caller_access_version receives this one.
+	CallerAccessDelta *CallerAccessDelta `protobuf:"bytes,9,opt,name=caller_access_delta,json=callerAccessDelta,proto3" json:"caller_access_delta,omitempty"`
+	unknownFields     protoimpl.UnknownFields
+	sizeCache         protoimpl.SizeCache
 }
 
 func (x *PullResponse) Reset() {
@@ -713,6 +742,340 @@ func (x *PullResponse) GetSchemaRevision() string {
 	return ""
 }
 
+func (x *PullResponse) GetCallerAccess() *CallerAccess {
+	if x != nil {
+		return x.CallerAccess
+	}
+	return nil
+}
+
+func (x *PullResponse) GetCallerAccessDelta() *CallerAccessDelta {
+	if x != nil {
+		return x.CallerAccessDelta
+	}
+	return nil
+}
+
+// What one caller holds in one workspace under the access model: the
+// permissions it holds at the workspace root, and the rows it holds
+// permissions at, grouped by the permissions held there.
+//
+// The caller holds a permission at a row when root_permissions lists it, or
+// when the anchor group that lists the row lists it. A permission held at a
+// row applies to the row and to every row whose access parent points at it.
+// A permission that no list names is held nowhere.
+//
+// Every list except subjects is sorted and holds no duplicates, so equal
+// access has one encoding, apart from seq and version.
+//
+// It is advisory. The server decides every read and every write itself, and a
+// client uses this to predict an answer, for example to hide a control the
+// caller cannot use.
+type CallerAccess struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The workspace sequence this summary is current through.
+	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// The caller's subjects: the values grant rows and `subject` checks
+	// compare with. The first is the primary subject, which a create stores
+	// in each `creator` field. Empty for an anonymous caller.
+	Subjects []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
+	// The permissions the caller holds at the workspace root, which covers
+	// every row. Sorted.
+	RootPermissions []string `protobuf:"bytes,4,rep,name=root_permissions,json=rootPermissions,proto3" json:"root_permissions,omitempty"`
+	// One group for each distinct set of permissions the caller holds at rows,
+	// sorted by permission list: compared element by element, with a list
+	// before the longer lists it begins. A row is in at most one group, which
+	// lists all the permissions the caller's grants at the row give together.
+	AnchorGroups []*AnchorGroup `protobuf:"bytes,5,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
+	// Identifies what the summary holds: equal summaries have equal versions,
+	// whatever their seq. Never 0 in a summary from the server.
+	Version uint64 `protobuf:"fixed64,6,opt,name=version,proto3" json:"version,omitempty"`
+	// The most access parent hops the server follows up from a row: its
+	// MaxAccessDepth. A permission held at a row further up does not apply to
+	// the row. 0 from a server that does not send it, and a client then
+	// assumes 32, the default.
+	MaxAccessDepth uint32 `protobuf:"varint,7,opt,name=max_access_depth,json=maxAccessDepth,proto3" json:"max_access_depth,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
+}
+
+func (x *CallerAccess) Reset() {
+	*x = CallerAccess{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CallerAccess) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CallerAccess) ProtoMessage() {}
+
+func (x *CallerAccess) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CallerAccess.ProtoReflect.Descriptor instead.
+func (*CallerAccess) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *CallerAccess) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *CallerAccess) GetSubjects() []string {
+	if x != nil {
+		return x.Subjects
+	}
+	return nil
+}
+
+func (x *CallerAccess) GetRootPermissions() []string {
+	if x != nil {
+		return x.RootPermissions
+	}
+	return nil
+}
+
+func (x *CallerAccess) GetAnchorGroups() []*AnchorGroup {
+	if x != nil {
+		return x.AnchorGroups
+	}
+	return nil
+}
+
+func (x *CallerAccess) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *CallerAccess) GetMaxAccessDepth() uint32 {
+	if x != nil {
+		return x.MaxAccessDepth
+	}
+	return 0
+}
+
+// A change to a CallerAccess: applied to the summary whose version is
+// base_version, it gives the summary whose version is version. Subjects,
+// root_permissions and max_access_depth do not change.
+//
+// To apply it, put each row that anchor_groups lists in the group with the
+// permissions listed there, and take it out of the group it was in. Then
+// take each row that removed lists out of every group, and drop the groups
+// that hold no rows. A client whose summary has another version must not
+// apply it: when its summary already has version, the delta changes nothing,
+// and otherwise the client keeps its summary and pulls again with
+// PullRequest.caller_access_version, which gets it the change from there.
+type CallerAccessDelta struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The workspace sequence the new summary is current through.
+	Seq uint64 `protobuf:"varint,1,opt,name=seq,proto3" json:"seq,omitempty"`
+	// The version of the summary the delta applies to.
+	BaseVersion uint64 `protobuf:"fixed64,2,opt,name=base_version,json=baseVersion,proto3" json:"base_version,omitempty"`
+	// The version of the summary the delta gives.
+	Version uint64 `protobuf:"fixed64,3,opt,name=version,proto3" json:"version,omitempty"`
+	// The rows whose permissions changed, and rows the caller holds
+	// permissions at for the first time, each with all the permissions it now
+	// holds there. Ordered and grouped as in CallerAccess.anchor_groups.
+	AnchorGroups []*AnchorGroup `protobuf:"bytes,4,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
+	// The rows that are in no group of the new summary. Sorted by entity.
+	Removed       []*AnchorRows `protobuf:"bytes,5,rep,name=removed,proto3" json:"removed,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CallerAccessDelta) Reset() {
+	*x = CallerAccessDelta{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CallerAccessDelta) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CallerAccessDelta) ProtoMessage() {}
+
+func (x *CallerAccessDelta) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CallerAccessDelta.ProtoReflect.Descriptor instead.
+func (*CallerAccessDelta) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{8}
+}
+
+func (x *CallerAccessDelta) GetSeq() uint64 {
+	if x != nil {
+		return x.Seq
+	}
+	return 0
+}
+
+func (x *CallerAccessDelta) GetBaseVersion() uint64 {
+	if x != nil {
+		return x.BaseVersion
+	}
+	return 0
+}
+
+func (x *CallerAccessDelta) GetVersion() uint64 {
+	if x != nil {
+		return x.Version
+	}
+	return 0
+}
+
+func (x *CallerAccessDelta) GetAnchorGroups() []*AnchorGroup {
+	if x != nil {
+		return x.AnchorGroups
+	}
+	return nil
+}
+
+func (x *CallerAccessDelta) GetRemoved() []*AnchorRows {
+	if x != nil {
+		return x.Removed
+	}
+	return nil
+}
+
+// Rows at which the caller holds the same set of permissions.
+type AnchorGroup struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The permissions held at each row of the group. Sorted and never empty.
+	// It leaves out the permissions in CallerAccess.root_permissions, so a row
+	// whose permissions are all held at the root is in no group.
+	Permissions []string `protobuf:"bytes,1,rep,name=permissions,proto3" json:"permissions,omitempty"`
+	// The rows, per entity, sorted by entity.
+	Anchors       []*AnchorRows `protobuf:"bytes,2,rep,name=anchors,proto3" json:"anchors,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnchorGroup) Reset() {
+	*x = AnchorGroup{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnchorGroup) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnchorGroup) ProtoMessage() {}
+
+func (x *AnchorGroup) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnchorGroup.ProtoReflect.Descriptor instead.
+func (*AnchorGroup) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *AnchorGroup) GetPermissions() []string {
+	if x != nil {
+		return x.Permissions
+	}
+	return nil
+}
+
+func (x *AnchorGroup) GetAnchors() []*AnchorRows {
+	if x != nil {
+		return x.Anchors
+	}
+	return nil
+}
+
+// Rows of one entity, by key.
+type AnchorRows struct {
+	state  protoimpl.MessageState `protogen:"open.v1"`
+	Entity string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	// Row keys, sorted.
+	Keys          []string `protobuf:"bytes,2,rep,name=keys,proto3" json:"keys,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnchorRows) Reset() {
+	*x = AnchorRows{}
+	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnchorRows) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnchorRows) ProtoMessage() {}
+
+func (x *AnchorRows) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnchorRows.ProtoReflect.Descriptor instead.
+func (*AnchorRows) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *AnchorRows) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *AnchorRows) GetKeys() []string {
+	if x != nil {
+		return x.Keys
+	}
+	return nil
+}
+
 type BootstrapRequest struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
@@ -738,7 +1101,7 @@ type BootstrapRequest struct {
 
 func (x *BootstrapRequest) Reset() {
 	*x = BootstrapRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	mi := &file_syncplane_v1_service_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -750,7 +1113,7 @@ func (x *BootstrapRequest) String() string {
 func (*BootstrapRequest) ProtoMessage() {}
 
 func (x *BootstrapRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[7]
+	mi := &file_syncplane_v1_service_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -763,7 +1126,7 @@ func (x *BootstrapRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapRequest.ProtoReflect.Descriptor instead.
 func (*BootstrapRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BootstrapRequest) GetWorkspaceId() string {
@@ -823,7 +1186,7 @@ type BootstrapResume struct {
 
 func (x *BootstrapResume) Reset() {
 	*x = BootstrapResume{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	mi := &file_syncplane_v1_service_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -835,7 +1198,7 @@ func (x *BootstrapResume) String() string {
 func (*BootstrapResume) ProtoMessage() {}
 
 func (x *BootstrapResume) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[8]
+	mi := &file_syncplane_v1_service_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -848,7 +1211,7 @@ func (x *BootstrapResume) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResume.ProtoReflect.Descriptor instead.
 func (*BootstrapResume) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *BootstrapResume) GetCursor() []byte {
@@ -879,7 +1242,7 @@ type BootstrapResponse struct {
 
 func (x *BootstrapResponse) Reset() {
 	*x = BootstrapResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	mi := &file_syncplane_v1_service_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -891,7 +1254,7 @@ func (x *BootstrapResponse) String() string {
 func (*BootstrapResponse) ProtoMessage() {}
 
 func (x *BootstrapResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[9]
+	mi := &file_syncplane_v1_service_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -904,7 +1267,7 @@ func (x *BootstrapResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *BootstrapResponse) GetBody() isBootstrapResponse_Body {
@@ -1055,7 +1418,7 @@ type QueryRequest struct {
 
 func (x *QueryRequest) Reset() {
 	*x = QueryRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	mi := &file_syncplane_v1_service_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1067,7 +1430,7 @@ func (x *QueryRequest) String() string {
 func (*QueryRequest) ProtoMessage() {}
 
 func (x *QueryRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[10]
+	mi := &file_syncplane_v1_service_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1080,7 +1443,7 @@ func (x *QueryRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRequest.ProtoReflect.Descriptor instead.
 func (*QueryRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *QueryRequest) GetWorkspaceId() string {
@@ -1212,7 +1575,7 @@ type QueryResponse struct {
 
 func (x *QueryResponse) Reset() {
 	*x = QueryResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[11]
+	mi := &file_syncplane_v1_service_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1224,7 +1587,7 @@ func (x *QueryResponse) String() string {
 func (*QueryResponse) ProtoMessage() {}
 
 func (x *QueryResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[11]
+	mi := &file_syncplane_v1_service_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1237,7 +1600,7 @@ func (x *QueryResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryResponse.ProtoReflect.Descriptor instead.
 func (*QueryResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *QueryResponse) GetRows() []*RowChange {
@@ -1319,7 +1682,7 @@ type QueryRowGroup struct {
 
 func (x *QueryRowGroup) Reset() {
 	*x = QueryRowGroup{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[12]
+	mi := &file_syncplane_v1_service_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1331,7 +1694,7 @@ func (x *QueryRowGroup) String() string {
 func (*QueryRowGroup) ProtoMessage() {}
 
 func (x *QueryRowGroup) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[12]
+	mi := &file_syncplane_v1_service_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1344,7 +1707,7 @@ func (x *QueryRowGroup) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use QueryRowGroup.ProtoReflect.Descriptor instead.
 func (*QueryRowGroup) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *QueryRowGroup) GetValue() *QueryValue {
@@ -1393,14 +1756,18 @@ type WorkspaceScope struct {
 	Subscriptions []*Subscription `protobuf:"bytes,3,rep,name=subscriptions,proto3" json:"subscriptions,omitempty"`
 	// PullRequest.min_seq, applied to every page this scope is served: the
 	// highest seq the client has seen a push acked at for this workspace.
-	MinSeq        uint64 `protobuf:"varint,4,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	MinSeq uint64 `protobuf:"varint,4,opt,name=min_seq,json=minSeq,proto3" json:"min_seq,omitempty"`
+	// PullRequest.caller_access_version, for the first page of this scope. A
+	// later page sends what changed since the CallerAccess or delta the scope
+	// sent last.
+	CallerAccessVersion *uint64 `protobuf:"fixed64,5,opt,name=caller_access_version,json=callerAccessVersion,proto3,oneof" json:"caller_access_version,omitempty"`
+	unknownFields       protoimpl.UnknownFields
+	sizeCache           protoimpl.SizeCache
 }
 
 func (x *WorkspaceScope) Reset() {
 	*x = WorkspaceScope{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[13]
+	mi := &file_syncplane_v1_service_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1412,7 +1779,7 @@ func (x *WorkspaceScope) String() string {
 func (*WorkspaceScope) ProtoMessage() {}
 
 func (x *WorkspaceScope) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[13]
+	mi := &file_syncplane_v1_service_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1425,7 +1792,7 @@ func (x *WorkspaceScope) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceScope.ProtoReflect.Descriptor instead.
 func (*WorkspaceScope) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *WorkspaceScope) GetWorkspaceId() string {
@@ -1452,6 +1819,13 @@ func (x *WorkspaceScope) GetSubscriptions() []*Subscription {
 func (x *WorkspaceScope) GetMinSeq() uint64 {
 	if x != nil {
 		return x.MinSeq
+	}
+	return 0
+}
+
+func (x *WorkspaceScope) GetCallerAccessVersion() uint64 {
+	if x != nil && x.CallerAccessVersion != nil {
+		return *x.CallerAccessVersion
 	}
 	return 0
 }
@@ -1490,7 +1864,7 @@ type SubscribeRequest struct {
 
 func (x *SubscribeRequest) Reset() {
 	*x = SubscribeRequest{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[14]
+	mi := &file_syncplane_v1_service_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1502,7 +1876,7 @@ func (x *SubscribeRequest) String() string {
 func (*SubscribeRequest) ProtoMessage() {}
 
 func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[14]
+	mi := &file_syncplane_v1_service_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1515,7 +1889,7 @@ func (x *SubscribeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeRequest.ProtoReflect.Descriptor instead.
 func (*SubscribeRequest) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *SubscribeRequest) GetClientId() string {
@@ -1568,7 +1942,7 @@ type WorkspaceDropped struct {
 
 func (x *WorkspaceDropped) Reset() {
 	*x = WorkspaceDropped{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[15]
+	mi := &file_syncplane_v1_service_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1580,7 +1954,7 @@ func (x *WorkspaceDropped) String() string {
 func (*WorkspaceDropped) ProtoMessage() {}
 
 func (x *WorkspaceDropped) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[15]
+	mi := &file_syncplane_v1_service_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1593,7 +1967,7 @@ func (x *WorkspaceDropped) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkspaceDropped.ProtoReflect.Descriptor instead.
 func (*WorkspaceDropped) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{15}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *WorkspaceDropped) GetReason() WorkspaceDropped_Reason {
@@ -1633,7 +2007,7 @@ type SubscribeResponse struct {
 
 func (x *SubscribeResponse) Reset() {
 	*x = SubscribeResponse{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[16]
+	mi := &file_syncplane_v1_service_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1645,7 +2019,7 @@ func (x *SubscribeResponse) String() string {
 func (*SubscribeResponse) ProtoMessage() {}
 
 func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[16]
+	mi := &file_syncplane_v1_service_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1658,7 +2032,7 @@ func (x *SubscribeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SubscribeResponse.ProtoReflect.Descriptor instead.
 func (*SubscribeResponse) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{16}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *SubscribeResponse) GetWorkspaceId() string {
@@ -1777,14 +2151,17 @@ type BootstrapResponse_Begin struct {
 	// are the REST of that snapshot, and `cursor` is the one it began with.
 	// False means a fresh snapshot — whatever an earlier attempt staged
 	// belongs to a different one and must be discarded rather than merged.
-	Resumed       bool `protobuf:"varint,6,opt,name=resumed,proto3" json:"resumed,omitempty"`
+	Resumed bool `protobuf:"varint,6,opt,name=resumed,proto3" json:"resumed,omitempty"`
+	// What the caller holds in the workspace under the access model, as of
+	// the snapshot. Absent in a schema without the access model.
+	CallerAccess  *CallerAccess `protobuf:"bytes,7,opt,name=caller_access,json=callerAccess,proto3" json:"caller_access,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
 func (x *BootstrapResponse_Begin) Reset() {
 	*x = BootstrapResponse_Begin{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[17]
+	mi := &file_syncplane_v1_service_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1796,7 +2173,7 @@ func (x *BootstrapResponse_Begin) String() string {
 func (*BootstrapResponse_Begin) ProtoMessage() {}
 
 func (x *BootstrapResponse_Begin) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[17]
+	mi := &file_syncplane_v1_service_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1809,7 +2186,7 @@ func (x *BootstrapResponse_Begin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_Begin.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_Begin) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9, 0}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 0}
 }
 
 func (x *BootstrapResponse_Begin) GetCursor() []byte {
@@ -1854,6 +2231,13 @@ func (x *BootstrapResponse_Begin) GetResumed() bool {
 	return false
 }
 
+func (x *BootstrapResponse_Begin) GetCallerAccess() *CallerAccess {
+	if x != nil {
+		return x.CallerAccess
+	}
+	return nil
+}
+
 type BootstrapResponse_Chunk struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	Rows  []*RowChange           `protobuf:"bytes,1,rep,name=rows,proto3" json:"rows,omitempty"`
@@ -1869,7 +2253,7 @@ type BootstrapResponse_Chunk struct {
 
 func (x *BootstrapResponse_Chunk) Reset() {
 	*x = BootstrapResponse_Chunk{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[18]
+	mi := &file_syncplane_v1_service_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1881,7 +2265,7 @@ func (x *BootstrapResponse_Chunk) String() string {
 func (*BootstrapResponse_Chunk) ProtoMessage() {}
 
 func (x *BootstrapResponse_Chunk) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[18]
+	mi := &file_syncplane_v1_service_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1894,7 +2278,7 @@ func (x *BootstrapResponse_Chunk) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_Chunk.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_Chunk) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9, 1}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 1}
 }
 
 func (x *BootstrapResponse_Chunk) GetRows() []*RowChange {
@@ -1919,7 +2303,7 @@ type BootstrapResponse_End struct {
 
 func (x *BootstrapResponse_End) Reset() {
 	*x = BootstrapResponse_End{}
-	mi := &file_syncplane_v1_service_proto_msgTypes[19]
+	mi := &file_syncplane_v1_service_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1931,7 +2315,7 @@ func (x *BootstrapResponse_End) String() string {
 func (*BootstrapResponse_End) ProtoMessage() {}
 
 func (x *BootstrapResponse_End) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_service_proto_msgTypes[19]
+	mi := &file_syncplane_v1_service_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1944,7 +2328,7 @@ func (x *BootstrapResponse_End) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapResponse_End.ProtoReflect.Descriptor instead.
 func (*BootstrapResponse_End) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{9, 2}
+	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{13, 2}
 }
 
 var File_syncplane_v1_service_proto protoreflect.FileDescriptor
@@ -1973,7 +2357,7 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\rerror_message\x18\x04 \x01(\tR\ferrorMessage\"q\n" +
 	"\fPushResponse\x128\n" +
 	"\aresults\x18\x01 \x03(\v2\x1e.syncplane.v1.WorkspaceResultsR\aresults\x12'\n" +
-	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\x82\x02\n" +
+	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\"\xd5\x02\n" +
 	"\vPullRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12\x16\n" +
@@ -1981,7 +2365,9 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\rsubscriptions\x18\x04 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x12\x14\n" +
 	"\x05limit\x18\x05 \x01(\rR\x05limit\x12*\n" +
 	"\x11no_delta_entities\x18\x06 \x03(\tR\x0fnoDeltaEntities\x12\x17\n" +
-	"\amin_seq\x18\a \x01(\x04R\x06minSeq\"\xfb\x01\n" +
+	"\amin_seq\x18\a \x01(\x04R\x06minSeq\x127\n" +
+	"\x15caller_access_version\x18\b \x01(\x06H\x00R\x13callerAccessVersion\x88\x01\x01B\x18\n" +
+	"\x16_caller_access_version\"\x8d\x03\n" +
 	"\fPullResponse\x12)\n" +
 	"\x05patch\x18\x01 \x01(\v2\x13.syncplane.v1.PatchR\x05patch\x12\x1f\n" +
 	"\vnext_cursor\x18\x02 \x01(\fR\n" +
@@ -1990,7 +2376,29 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x05reset\x18\x04 \x01(\bR\x05reset\x12\x19\n" +
 	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x12\x10\n" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
-	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\"\xf8\x01\n" +
+	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
+	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x12O\n" +
+	"\x13caller_access_delta\x18\t \x01(\v2\x1f.syncplane.v1.CallerAccessDeltaR\x11callerAccessDelta\"\xeb\x01\n" +
+	"\fCallerAccess\x12\x10\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
+	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12)\n" +
+	"\x10root_permissions\x18\x04 \x03(\tR\x0frootPermissions\x12>\n" +
+	"\ranchor_groups\x18\x05 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroups\x12\x18\n" +
+	"\aversion\x18\x06 \x01(\x06R\aversion\x12(\n" +
+	"\x10max_access_depth\x18\a \x01(\rR\x0emaxAccessDepth\"\xd6\x01\n" +
+	"\x11CallerAccessDelta\x12\x10\n" +
+	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12!\n" +
+	"\fbase_version\x18\x02 \x01(\x06R\vbaseVersion\x12\x18\n" +
+	"\aversion\x18\x03 \x01(\x06R\aversion\x12>\n" +
+	"\ranchor_groups\x18\x04 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroups\x122\n" +
+	"\aremoved\x18\x05 \x03(\v2\x18.syncplane.v1.AnchorRowsR\aremoved\"c\n" +
+	"\vAnchorGroup\x12 \n" +
+	"\vpermissions\x18\x01 \x03(\tR\vpermissions\x122\n" +
+	"\aanchors\x18\x02 \x03(\v2\x18.syncplane.v1.AnchorRowsR\aanchors\"8\n" +
+	"\n" +
+	"AnchorRows\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x12\n" +
+	"\x04keys\x18\x02 \x03(\tR\x04keys\"\xf8\x01\n" +
 	"\x10BootstrapRequest\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x1b\n" +
 	"\tclient_id\x18\x02 \x01(\tR\bclientId\x12@\n" +
@@ -1999,18 +2407,19 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x06resume\x18\x05 \x01(\v2\x1d.syncplane.v1.BootstrapResumeR\x06resume\"?\n" +
 	"\x0fBootstrapResume\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\fR\x06cursor\x12\x14\n" +
-	"\x05token\x18\x02 \x01(\fR\x05token\"\xfa\x03\n" +
+	"\x05token\x18\x02 \x01(\fR\x05token\"\xbb\x04\n" +
 	"\x11BootstrapResponse\x12=\n" +
 	"\x05begin\x18\x01 \x01(\v2%.syncplane.v1.BootstrapResponse.BeginH\x00R\x05begin\x12=\n" +
 	"\x05chunk\x18\x02 \x01(\v2%.syncplane.v1.BootstrapResponse.ChunkH\x00R\x05chunk\x127\n" +
-	"\x03end\x18\x03 \x01(\v2#.syncplane.v1.BootstrapResponse.EndH\x00R\x03end\x1a\xc5\x01\n" +
+	"\x03end\x18\x03 \x01(\v2#.syncplane.v1.BootstrapResponse.EndH\x00R\x03end\x1a\x86\x02\n" +
 	"\x05Begin\x12\x16\n" +
 	"\x06cursor\x18\x01 \x01(\fR\x06cursor\x123\n" +
 	"\x16last_acked_mutation_id\x18\x02 \x01(\x04R\x13lastAckedMutationId\x12\x10\n" +
 	"\x03seq\x18\x03 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\x04 \x01(\tR\x0eschemaRevision\x12\x1a\n" +
 	"\bentities\x18\x05 \x03(\tR\bentities\x12\x18\n" +
-	"\aresumed\x18\x06 \x01(\bR\aresumed\x1aW\n" +
+	"\aresumed\x18\x06 \x01(\bR\aresumed\x12?\n" +
+	"\rcaller_access\x18\a \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\x1aW\n" +
 	"\x05Chunk\x12+\n" +
 	"\x04rows\x18\x01 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12!\n" +
 	"\fresume_token\x18\x02 \x01(\fR\vresumeToken\x1a\x05\n" +
@@ -2046,26 +2455,29 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\x05value\x18\x01 \x01(\v2\x18.syncplane.v1.QueryValueR\x05value\x12+\n" +
 	"\x04rows\x18\x02 \x03(\v2\x17.syncplane.v1.RowChangeR\x04rows\x12\x14\n" +
 	"\x05total\x18\x03 \x01(\x04R\x05total\x12\x19\n" +
-	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\xa6\x01\n" +
+	"\bhas_more\x18\x04 \x01(\bR\ahasMore\"\xf9\x01\n" +
 	"\x0eWorkspaceScope\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12\x16\n" +
 	"\x06cursor\x18\x02 \x01(\fR\x06cursor\x12@\n" +
 	"\rsubscriptions\x18\x03 \x03(\v2\x1a.syncplane.v1.SubscriptionR\rsubscriptions\x12\x17\n" +
-	"\amin_seq\x18\x04 \x01(\x04R\x06minSeq\"\xcc\x01\n" +
+	"\amin_seq\x18\x04 \x01(\x04R\x06minSeq\x127\n" +
+	"\x15caller_access_version\x18\x05 \x01(\x06H\x00R\x13callerAccessVersion\x88\x01\x01B\x18\n" +
+	"\x16_caller_access_version\"\xcc\x01\n" +
 	"\x10SubscribeRequest\x12\x1b\n" +
 	"\tclient_id\x18\x01 \x01(\tR\bclientId\x124\n" +
 	"\x06scopes\x18\x02 \x03(\v2\x1c.syncplane.v1.WorkspaceScopeR\x06scopes\x12\x14\n" +
 	"\x05limit\x18\x03 \x01(\rR\x05limit\x12*\n" +
 	"\x11no_delta_entities\x18\x04 \x03(\tR\x0fnoDeltaEntities\x12#\n" +
-	"\rsparse_cursor\x18\x05 \x01(\bR\fsparseCursor\"\xcc\x01\n" +
+	"\rsparse_cursor\x18\x05 \x01(\bR\fsparseCursor\"\xe2\x01\n" +
 	"\x10WorkspaceDropped\x12=\n" +
 	"\x06reason\x18\x01 \x01(\x0e2%.syncplane.v1.WorkspaceDropped.ReasonR\x06reason\x12\x18\n" +
-	"\amessage\x18\x02 \x01(\tR\amessage\"_\n" +
+	"\amessage\x18\x02 \x01(\tR\amessage\"u\n" +
 	"\x06Reason\x12\x16\n" +
 	"\x12REASON_UNSPECIFIED\x10\x00\x12\x10\n" +
 	"\fREASON_RESET\x10\x01\x12\x19\n" +
 	"\x15REASON_ACCESS_REVOKED\x10\x02\x12\x10\n" +
-	"\fREASON_ERROR\x10\x03\"\x94\x02\n" +
+	"\fREASON_ERROR\x10\x03\x12\x14\n" +
+	"\x10REASON_NO_ACCESS\x10\x04\"\x94\x02\n" +
 	"\x11SubscribeResponse\x12!\n" +
 	"\fworkspace_id\x18\x01 \x01(\tR\vworkspaceId\x12'\n" +
 	"\x0fschema_revision\x18\x02 \x01(\tR\x0eschemaRevision\x120\n" +
@@ -2099,7 +2511,7 @@ func file_syncplane_v1_service_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_service_proto_enumTypes = make([]protoimpl.EnumInfo, 2)
-var file_syncplane_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
+var file_syncplane_v1_service_proto_msgTypes = make([]protoimpl.MessageInfo, 24)
 var file_syncplane_v1_service_proto_goTypes = []any{
 	(MutationStatus)(0),             // 0: syncplane.v1.MutationStatus
 	(WorkspaceDropped_Reason)(0),    // 1: syncplane.v1.WorkspaceDropped.Reason
@@ -2110,74 +2522,85 @@ var file_syncplane_v1_service_proto_goTypes = []any{
 	(*PushResponse)(nil),            // 6: syncplane.v1.PushResponse
 	(*PullRequest)(nil),             // 7: syncplane.v1.PullRequest
 	(*PullResponse)(nil),            // 8: syncplane.v1.PullResponse
-	(*BootstrapRequest)(nil),        // 9: syncplane.v1.BootstrapRequest
-	(*BootstrapResume)(nil),         // 10: syncplane.v1.BootstrapResume
-	(*BootstrapResponse)(nil),       // 11: syncplane.v1.BootstrapResponse
-	(*QueryRequest)(nil),            // 12: syncplane.v1.QueryRequest
-	(*QueryResponse)(nil),           // 13: syncplane.v1.QueryResponse
-	(*QueryRowGroup)(nil),           // 14: syncplane.v1.QueryRowGroup
-	(*WorkspaceScope)(nil),          // 15: syncplane.v1.WorkspaceScope
-	(*SubscribeRequest)(nil),        // 16: syncplane.v1.SubscribeRequest
-	(*WorkspaceDropped)(nil),        // 17: syncplane.v1.WorkspaceDropped
-	(*SubscribeResponse)(nil),       // 18: syncplane.v1.SubscribeResponse
-	(*BootstrapResponse_Begin)(nil), // 19: syncplane.v1.BootstrapResponse.Begin
-	(*BootstrapResponse_Chunk)(nil), // 20: syncplane.v1.BootstrapResponse.Chunk
-	(*BootstrapResponse_End)(nil),   // 21: syncplane.v1.BootstrapResponse.End
-	(*Mutation)(nil),                // 22: syncplane.v1.Mutation
-	(*Subscription)(nil),            // 23: syncplane.v1.Subscription
-	(*Patch)(nil),                   // 24: syncplane.v1.Patch
-	(*Condition)(nil),               // 25: syncplane.v1.Condition
-	(*OrderKey)(nil),                // 26: syncplane.v1.OrderKey
-	(AggregateOp)(0),                // 27: syncplane.v1.AggregateOp
-	(*QueryFacet)(nil),              // 28: syncplane.v1.QueryFacet
-	(*RowChange)(nil),               // 29: syncplane.v1.RowChange
-	(*QueryGroup)(nil),              // 30: syncplane.v1.QueryGroup
-	(*QueryValue)(nil),              // 31: syncplane.v1.QueryValue
+	(*CallerAccess)(nil),            // 9: syncplane.v1.CallerAccess
+	(*CallerAccessDelta)(nil),       // 10: syncplane.v1.CallerAccessDelta
+	(*AnchorGroup)(nil),             // 11: syncplane.v1.AnchorGroup
+	(*AnchorRows)(nil),              // 12: syncplane.v1.AnchorRows
+	(*BootstrapRequest)(nil),        // 13: syncplane.v1.BootstrapRequest
+	(*BootstrapResume)(nil),         // 14: syncplane.v1.BootstrapResume
+	(*BootstrapResponse)(nil),       // 15: syncplane.v1.BootstrapResponse
+	(*QueryRequest)(nil),            // 16: syncplane.v1.QueryRequest
+	(*QueryResponse)(nil),           // 17: syncplane.v1.QueryResponse
+	(*QueryRowGroup)(nil),           // 18: syncplane.v1.QueryRowGroup
+	(*WorkspaceScope)(nil),          // 19: syncplane.v1.WorkspaceScope
+	(*SubscribeRequest)(nil),        // 20: syncplane.v1.SubscribeRequest
+	(*WorkspaceDropped)(nil),        // 21: syncplane.v1.WorkspaceDropped
+	(*SubscribeResponse)(nil),       // 22: syncplane.v1.SubscribeResponse
+	(*BootstrapResponse_Begin)(nil), // 23: syncplane.v1.BootstrapResponse.Begin
+	(*BootstrapResponse_Chunk)(nil), // 24: syncplane.v1.BootstrapResponse.Chunk
+	(*BootstrapResponse_End)(nil),   // 25: syncplane.v1.BootstrapResponse.End
+	(*Mutation)(nil),                // 26: syncplane.v1.Mutation
+	(*Subscription)(nil),            // 27: syncplane.v1.Subscription
+	(*Patch)(nil),                   // 28: syncplane.v1.Patch
+	(*Condition)(nil),               // 29: syncplane.v1.Condition
+	(*OrderKey)(nil),                // 30: syncplane.v1.OrderKey
+	(AggregateOp)(0),                // 31: syncplane.v1.AggregateOp
+	(*QueryFacet)(nil),              // 32: syncplane.v1.QueryFacet
+	(*RowChange)(nil),               // 33: syncplane.v1.RowChange
+	(*QueryGroup)(nil),              // 34: syncplane.v1.QueryGroup
+	(*QueryValue)(nil),              // 35: syncplane.v1.QueryValue
 }
 var file_syncplane_v1_service_proto_depIdxs = []int32{
-	22, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
+	26, // 0: syncplane.v1.WorkspaceBatch.mutations:type_name -> syncplane.v1.Mutation
 	2,  // 1: syncplane.v1.PushRequest.batches:type_name -> syncplane.v1.WorkspaceBatch
 	0,  // 2: syncplane.v1.MutationResult.status:type_name -> syncplane.v1.MutationStatus
 	4,  // 3: syncplane.v1.WorkspaceResults.results:type_name -> syncplane.v1.MutationResult
 	5,  // 4: syncplane.v1.PushResponse.results:type_name -> syncplane.v1.WorkspaceResults
-	23, // 5: syncplane.v1.PullRequest.subscriptions:type_name -> syncplane.v1.Subscription
-	24, // 6: syncplane.v1.PullResponse.patch:type_name -> syncplane.v1.Patch
-	23, // 7: syncplane.v1.BootstrapRequest.subscriptions:type_name -> syncplane.v1.Subscription
-	10, // 8: syncplane.v1.BootstrapRequest.resume:type_name -> syncplane.v1.BootstrapResume
-	19, // 9: syncplane.v1.BootstrapResponse.begin:type_name -> syncplane.v1.BootstrapResponse.Begin
-	20, // 10: syncplane.v1.BootstrapResponse.chunk:type_name -> syncplane.v1.BootstrapResponse.Chunk
-	21, // 11: syncplane.v1.BootstrapResponse.end:type_name -> syncplane.v1.BootstrapResponse.End
-	25, // 12: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
-	26, // 13: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
-	27, // 14: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
-	28, // 15: syncplane.v1.QueryRequest.facets:type_name -> syncplane.v1.QueryFacet
-	29, // 16: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
-	30, // 17: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
-	14, // 18: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
-	28, // 19: syncplane.v1.QueryResponse.facets:type_name -> syncplane.v1.QueryFacet
-	31, // 20: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
-	29, // 21: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
-	23, // 22: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
-	15, // 23: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
-	1,  // 24: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
-	8,  // 25: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
-	17, // 26: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
-	29, // 27: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
-	3,  // 28: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
-	7,  // 29: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
-	9,  // 30: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
-	16, // 31: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
-	12, // 32: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
-	6,  // 33: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
-	8,  // 34: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
-	11, // 35: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
-	18, // 36: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
-	13, // 37: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
-	33, // [33:38] is the sub-list for method output_type
-	28, // [28:33] is the sub-list for method input_type
-	28, // [28:28] is the sub-list for extension type_name
-	28, // [28:28] is the sub-list for extension extendee
-	0,  // [0:28] is the sub-list for field type_name
+	27, // 5: syncplane.v1.PullRequest.subscriptions:type_name -> syncplane.v1.Subscription
+	28, // 6: syncplane.v1.PullResponse.patch:type_name -> syncplane.v1.Patch
+	9,  // 7: syncplane.v1.PullResponse.caller_access:type_name -> syncplane.v1.CallerAccess
+	10, // 8: syncplane.v1.PullResponse.caller_access_delta:type_name -> syncplane.v1.CallerAccessDelta
+	11, // 9: syncplane.v1.CallerAccess.anchor_groups:type_name -> syncplane.v1.AnchorGroup
+	11, // 10: syncplane.v1.CallerAccessDelta.anchor_groups:type_name -> syncplane.v1.AnchorGroup
+	12, // 11: syncplane.v1.CallerAccessDelta.removed:type_name -> syncplane.v1.AnchorRows
+	12, // 12: syncplane.v1.AnchorGroup.anchors:type_name -> syncplane.v1.AnchorRows
+	27, // 13: syncplane.v1.BootstrapRequest.subscriptions:type_name -> syncplane.v1.Subscription
+	14, // 14: syncplane.v1.BootstrapRequest.resume:type_name -> syncplane.v1.BootstrapResume
+	23, // 15: syncplane.v1.BootstrapResponse.begin:type_name -> syncplane.v1.BootstrapResponse.Begin
+	24, // 16: syncplane.v1.BootstrapResponse.chunk:type_name -> syncplane.v1.BootstrapResponse.Chunk
+	25, // 17: syncplane.v1.BootstrapResponse.end:type_name -> syncplane.v1.BootstrapResponse.End
+	29, // 18: syncplane.v1.QueryRequest.predicate:type_name -> syncplane.v1.Condition
+	30, // 19: syncplane.v1.QueryRequest.order_by:type_name -> syncplane.v1.OrderKey
+	31, // 20: syncplane.v1.QueryRequest.aggregate:type_name -> syncplane.v1.AggregateOp
+	32, // 21: syncplane.v1.QueryRequest.facets:type_name -> syncplane.v1.QueryFacet
+	33, // 22: syncplane.v1.QueryResponse.rows:type_name -> syncplane.v1.RowChange
+	34, // 23: syncplane.v1.QueryResponse.groups:type_name -> syncplane.v1.QueryGroup
+	18, // 24: syncplane.v1.QueryResponse.row_groups:type_name -> syncplane.v1.QueryRowGroup
+	32, // 25: syncplane.v1.QueryResponse.facets:type_name -> syncplane.v1.QueryFacet
+	35, // 26: syncplane.v1.QueryRowGroup.value:type_name -> syncplane.v1.QueryValue
+	33, // 27: syncplane.v1.QueryRowGroup.rows:type_name -> syncplane.v1.RowChange
+	27, // 28: syncplane.v1.WorkspaceScope.subscriptions:type_name -> syncplane.v1.Subscription
+	19, // 29: syncplane.v1.SubscribeRequest.scopes:type_name -> syncplane.v1.WorkspaceScope
+	1,  // 30: syncplane.v1.WorkspaceDropped.reason:type_name -> syncplane.v1.WorkspaceDropped.Reason
+	8,  // 31: syncplane.v1.SubscribeResponse.page:type_name -> syncplane.v1.PullResponse
+	21, // 32: syncplane.v1.SubscribeResponse.dropped:type_name -> syncplane.v1.WorkspaceDropped
+	9,  // 33: syncplane.v1.BootstrapResponse.Begin.caller_access:type_name -> syncplane.v1.CallerAccess
+	33, // 34: syncplane.v1.BootstrapResponse.Chunk.rows:type_name -> syncplane.v1.RowChange
+	3,  // 35: syncplane.v1.SyncService.Push:input_type -> syncplane.v1.PushRequest
+	7,  // 36: syncplane.v1.SyncService.Pull:input_type -> syncplane.v1.PullRequest
+	13, // 37: syncplane.v1.SyncService.Bootstrap:input_type -> syncplane.v1.BootstrapRequest
+	20, // 38: syncplane.v1.SyncService.Subscribe:input_type -> syncplane.v1.SubscribeRequest
+	16, // 39: syncplane.v1.SyncService.Query:input_type -> syncplane.v1.QueryRequest
+	6,  // 40: syncplane.v1.SyncService.Push:output_type -> syncplane.v1.PushResponse
+	8,  // 41: syncplane.v1.SyncService.Pull:output_type -> syncplane.v1.PullResponse
+	15, // 42: syncplane.v1.SyncService.Bootstrap:output_type -> syncplane.v1.BootstrapResponse
+	22, // 43: syncplane.v1.SyncService.Subscribe:output_type -> syncplane.v1.SubscribeResponse
+	17, // 44: syncplane.v1.SyncService.Query:output_type -> syncplane.v1.QueryResponse
+	40, // [40:45] is the sub-list for method output_type
+	35, // [35:40] is the sub-list for method input_type
+	35, // [35:35] is the sub-list for extension type_name
+	35, // [35:35] is the sub-list for extension extendee
+	0,  // [0:35] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_service_proto_init() }
@@ -2188,12 +2611,14 @@ func file_syncplane_v1_service_proto_init() {
 	file_syncplane_v1_mutation_proto_init()
 	file_syncplane_v1_patch_proto_init()
 	file_syncplane_v1_query_proto_init()
-	file_syncplane_v1_service_proto_msgTypes[9].OneofWrappers = []any{
+	file_syncplane_v1_service_proto_msgTypes[5].OneofWrappers = []any{}
+	file_syncplane_v1_service_proto_msgTypes[13].OneofWrappers = []any{
 		(*BootstrapResponse_Begin_)(nil),
 		(*BootstrapResponse_Chunk_)(nil),
 		(*BootstrapResponse_End_)(nil),
 	}
-	file_syncplane_v1_service_proto_msgTypes[16].OneofWrappers = []any{
+	file_syncplane_v1_service_proto_msgTypes[17].OneofWrappers = []any{}
+	file_syncplane_v1_service_proto_msgTypes[20].OneofWrappers = []any{
 		(*SubscribeResponse_Page)(nil),
 		(*SubscribeResponse_CaughtUp)(nil),
 		(*SubscribeResponse_Dropped)(nil),
@@ -2205,7 +2630,7 @@ func file_syncplane_v1_service_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_service_proto_rawDesc), len(file_syncplane_v1_service_proto_rawDesc)),
 			NumEnums:      2,
-			NumMessages:   20,
+			NumMessages:   24,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

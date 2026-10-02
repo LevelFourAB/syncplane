@@ -15,6 +15,7 @@ syntax = "proto3";
 package syncplane.cursor.v1;
 
 import "syncplane/v1/patch.proto";
+import "syncplane/v1/query.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1;syncplanecursorv1";
 
@@ -98,12 +99,209 @@ message Cursor {
 	// following pull walks the closure again from the new scope's seeds, and
 	// clears this once it stores the rebuilt set at a clean version boundary.
 	bool closure_rebuild = 13;
-	// Set on the cursor a delta resync completes with, and cleared by the pull
-	// that follows it. The resync reconciles the client's rows as of seq only,
-	// so a row an added entity gained past seq reaches the client for the first
-	// time on that catch-up page — which therefore ships every row as full
-	// state, since delta state presumes the client holds the row as of seq.
+	// Set on the cursor a delta resync completes with, and kept by the pages of
+	// the catch-up pull that follows it until one ends at a clean version
+	// boundary. The resync reconciles the client's rows as of its seq only, so
+	// a row the new scope or access shows that was written past that seq
+	// reaches the client for the first time on some page of the catch-up —
+	// which therefore ships every row as full state, since delta state presumes
+	// the client holds the row as of the page's cursor.
 	bool resynced = 14;
+	// Fingerprint of the read rules of the access model the cursor was issued
+	// under (see ReadAccess.rules), 0 for a schema without the model. A pull
+	// under other rules compares the stored rules entity by entity, and resets
+	// when an entity both sides know reads by another rule, or when no stored
+	// ReadAccess names the rules.
+	fixed64 access_policy = 15;
+	// Hash of what the caller could read when the cursor was issued: its
+	// subjects and, per read permission, the anchors it held the permission at
+	// (see ReadAccess). A pull that finds a different hash resyncs the rows
+	// under the anchors that changed. 0 for a schema without the model.
+	fixed64 access_hash = 16;
+	// Reference to the stored ReadAccess the hash was computed from. Never
+	// inlined: a resync tombstones rows by what this names, so a client must
+	// not be able to write it. Absent when the store could not take the entry;
+	// a later change of access then resets the client.
+	StateRef access_ref = 17;
+	// Hash of the CallerAccess the client last received: every permission the
+	// caller holds, not only the ones entities read by. It is the summary's
+	// CallerAccess.version. A client that sends no
+	// PullRequest.caller_access_version receives a new CallerAccess when the
+	// hash differs. 0 for a schema without the model.
+	fixed64 caller_access_hash = 18;
+	// The sequence through which the rows the client holds reflect every
+	// access move (see AccessMove). A pull compares the client's rows with
+	// the moves after the greater of seq and this, so the pull that follows a
+	// resync does not resync the same moves again. 0 when seq alone says it.
+	uint64 access_moves_through = 19;
+	// Reference to the stored syncplane.v1.CallerAccess whose version is
+	// caller_access_hash, with seq 0. A pull whose client holds that version
+	// is sent the change from it as a CallerAccessDelta. It has its own
+	// lineage, apart from access_ref's, so a change to only one of the two
+	// writes only one entry. Absent when the store could not take the entry,
+	// and on cursors of clients that apply no CallerAccessDelta.
+	StateRef caller_access_ref = 20;
+	// Keyed hash of seq and access_moves_through under the seq_key of the
+	// ReadAccess that access_ref names. A resync from that entry reads only
+	// rows at or below seq, and a client can edit seq, so the resync trusts
+	// the two values only when the tag matches; otherwise the client resets.
+	// 0 when access_ref is absent, and on cursors older than the field.
+	fixed64 access_tag = 21;
+	// Keyed hash of seq and filter_epoch under the seq_key of the StoredSets
+	// entry that sets_ref names. A resync after a change of filter epoch
+	// classifies the old side with the read filters at filter_epoch and reads
+	// only rows at or below seq, and a client can edit both, so the resync
+	// trusts the two values only when the tag matches; otherwise the client
+	// resets. 0 when sets_ref is absent, and on cursors older than the field.
+	fixed64 epoch_tag = 22;
+}
+
+// AccessMove is one change of the access parent of a row that other rows sit
+// below: a move to another parent, a change of what access rules' within
+// checks read of the row, or the row's creation or deletion. The rows below
+// it change visibility without being written, so the server
+// records the change in the transaction that makes it, as a row of an entity
+// no schema declares, at the change's sequence. A pull reads the moves after
+// its cursor and resyncs the rows below each one that changes what the client
+// can read.
+message AccessMove {
+	// The row whose access parent changed.
+	string entity = 1;
+	string key = 2;
+	// The first of the row's access parents before the change, as of the start
+	// of the sequence, in entity and then key order; absent when the row did
+	// not exist or anchored at nothing. more_from holds the others, in the
+	// same order.
+	AnchorRef from = 3;
+	// The first of the row's access parents after the change; absent when the
+	// row was deleted or anchors at nothing. more_to holds the others.
+	AnchorRef to = 4;
+	repeated AnchorRef more_from = 5;
+	repeated AnchorRef more_to = 6;
+	// What the access rules' within checks read of the row before the change,
+	// as of the start of the sequence. Set only for a row of an entity that a
+	// within check names, and only when the row existed: absent, the row
+	// passed no such check.
+	WithinState from_within = 7;
+}
+
+// WithinState is what the within checks that name one entity read of one of
+// its rows.
+message WithinState {
+	// The value of each subject field a check reads, by field name.
+	map<string, string> subjects = 1;
+	// The conditions the row matched, each as the canonical form of a check's
+	// when condition, sorted.
+	repeated string matched = 2;
+}
+
+// AnchorRef names one row of a workspace.
+message AnchorRef {
+	string entity = 1;
+	string key = 2;
+}
+
+// ReadAccess is what a caller could read when a cursor was issued, stored in
+// the cursor-state store under Cursor.access_ref. Every list is sorted, so
+// equal access holds equal values. Cursor.access_hash and
+// Cursor.access_policy hash the engine's canonical encoding of it, which reads
+// the field values by field number and not the encoded bytes, so a field that
+// is not set leaves both hashes as they were.
+message ReadAccess {
+	// The caller's subjects. A cursor presented by a caller with other subjects
+	// cannot resync from this entry.
+	repeated string subjects = 1;
+	// One entry per permission that some entity reads by, sorted by permission.
+	repeated PermissionAnchors permissions = 2;
+	// The read rule of every entity in the access model the entry was recorded
+	// under, sorted by entity. They and max_access_depth hash to
+	// Cursor.access_policy, and Cursor.access_hash leaves them out.
+	repeated EntityReadRule rules = 3;
+	// The longest parent chain a read walks (Limits.MaxAccessDepth). A cursor
+	// recorded under another limit cannot resync from this entry.
+	uint32 max_access_depth = 4;
+	// Random key that Cursor.access_tag is computed with. It never leaves the
+	// server, so a client cannot compute the tag of another position. Neither
+	// hash reads it.
+	bytes seq_key = 5;
+}
+
+// EntityReadRule is what decides which rows of one entity a caller reads, and
+// which of their fields: who reads them, through which access parents, and
+// what each guard that can hide fields admits. Two equal rules read the same
+// rows and fields from the same anchors. A rule feature added later is a new
+// field, which a rule that does not use it leaves unset.
+message EntityReadRule {
+	string entity = 1;
+	// A text form of the rule, which the first records held.
+	reserved 2;
+	reserved "rule";
+	// Set for an entity outside the access model, whose rows every admitted
+	// caller reads.
+	bool open = 3;
+	// Who reads the rows.
+	ReadersRule read = 4;
+	// The access parents, one per reference case, sorted by path and entity.
+	repeated ParentCase parents = 5;
+	// The guards that can hide fields, sorted by their units.
+	repeated HidingGuard hides = 6;
+}
+
+// ReadersRule is who reads the rows of an entity, or the fields of a guard.
+message ReadersRule {
+	// Every admitted caller reads every row.
+	bool all = 1;
+	// The permissions of the rules that check nothing on the row, sorted.
+	repeated string permissions = 2;
+	// The rules with a check on the row or above it, or that need more than
+	// one permission, in the engine's order.
+	repeated CheckedRule checked = 3;
+}
+
+// CheckedRule is one access rule of a ReadersRule.checked list.
+message CheckedRule {
+	// The operations the rule admits, by name, in the engine's order.
+	repeated string ops = 1;
+	// The permissions the rule needs, sorted; empty for a rule that admits
+	// every admitted caller.
+	repeated string requires = 2;
+	// The field that must hold one of the caller's subjects.
+	string caller_is = 3;
+	// The condition a row must match.
+	syncplane.v1.Condition when = 4;
+	// The rule's within entries, in the engine's order.
+	repeated WithinRule within = 5;
+}
+
+// WithinRule is one within entry of an access rule.
+message WithinRule {
+	string entity = 1;
+	string caller_is = 2;
+	syncplane.v1.Condition when = 3;
+}
+
+// ParentCase is one case of an entity's access parent: the reference that
+// names the parent row, and the parent's entity.
+message ParentCase {
+	string path = 1;
+	string entity = 2;
+}
+
+// HidingGuard is a guard that can hide fields from a caller.
+message HidingGuard {
+	// The units the guard restricts, sorted.
+	repeated string units = 1;
+	// Who reads them.
+	ReadersRule read = 2;
+}
+
+// PermissionAnchors is where a caller held one permission.
+message PermissionAnchors {
+	string permission = 1;
+	// Held at the workspace root, which covers every row.
+	bool root = 2;
+	// The anchor rows, per entity, sorted by entity and key.
+	repeated ClosureSet.Entry rows = 3;
 }
 
 // StateRef names one immutable entry in the cursor-state store. The pair is
@@ -133,6 +331,10 @@ message StoredSets {
 	// Cursor.window — carried only when adopting a cursor from a server that
 	// predates `windows`, so nothing is lost in the exchange.
 	ClosureSet window = 4;
+	// Random key that Cursor.epoch_tag is computed with. It never leaves the
+	// server, so a client cannot compute the tag of another position. Empty on
+	// entries written before the field.
+	bytes seq_key = 5;
 }
 
 // WindowState is one Subscription.window's membership plus the position of its
@@ -187,6 +389,12 @@ message ResyncState {
 	// to_filter_epoch; any further change mid-resync falls back to reset.
 	fixed64 to_sub_hash = 3;
 	uint64 to_filter_epoch = 4;
+	// The access hash the resync converges on (see Cursor.access_hash). A pull
+	// that finds the caller's access moved again mid-resync resets.
+	fixed64 to_access_hash = 5;
+	// The newest access move the resync accounts for (see AccessMove). A pull
+	// that finds a later move that changes what the client can read resets.
+	uint64 to_moves_through = 6;
 }
 
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside

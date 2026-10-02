@@ -12,7 +12,9 @@ import {
 	rowKey,
 	validateEntityName,
 	validateKeyField,
+	validatePermissionName,
 	validateRelationName,
+	validateRoleName,
 	validateRoomName,
 	validateRowKey,
 	validateWorkspaceId,
@@ -49,6 +51,25 @@ describe('validateEntityName', () => {
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH))).not.toThrow();
 		expect(() => validateEntityName('a'.repeat(MAX_ENTITY_NAME_LENGTH + 1)))
 			.toThrow(/the limit is/);
+	});
+});
+
+describe('validatePermissionName and validateRoleName', () => {
+	it('accept identifiers', () => {
+		for (const name of [ 'view_tasks', 'editTasks', '_internal', 'v2' ]) {
+			expect(() => validatePermissionName(name)).not.toThrow();
+			expect(() => validateRoleName(name)).not.toThrow();
+		}
+	});
+
+	it('reject anything that is not an identifier', () => {
+		for (const name of [ 'view-tasks', 'view.tasks', '1view', 'view tasks' ]) {
+			expect(() => validatePermissionName(name)).toThrow(
+				`permission name "${name}" is not an identifier`,
+			);
+			expect(() => validateRoleName(name)).toThrow(`role name "${name}" is not an identifier`);
+		}
+		expect(() => validatePermissionName('')).toThrow('permission name is empty');
 	});
 });
 

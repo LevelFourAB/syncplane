@@ -14,93 +14,20 @@ message Todo {
 }
 ```
 
-| Field           | Description                                                                                         |
-| --------------- | --------------------------------------------------------------------------------------------------- |
-| `name`          | Logical entity name used on the wire and in storage (for example, `"todo"`).                        |
-| `key_fields`    | Field names, in order, whose values form the row key. Must be singular scalar fields.               |
-| `index`         | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes). |
-| `create_policy` | Determines who may create rows of this entity. See [Write policies](#write-policies).               |
-| `update_policy` | Determines who may modify existing rows of this entity. See [Write policies](#write-policies).      |
-| `delete_policy` | Determines who may delete rows of this entity. See [Write policies](#write-policies).               |
-| `server_only`   | When `true`, rows never sync to clients. See [Server-only entities](#server-only-entities).         |
-| `history`       | Configures append-only field history tracking. See [Field history](#field-history).                 |
+| Field         | Description                                                                                                           |
+| ------------- | --------------------------------------------------------------------------------------------------------------------- |
+| `name`        | Logical entity name used on the wire and in storage (for example, `"todo"`).                                          |
+| `key_fields`  | Field names, in order, whose values form the row key. Must be singular scalar fields.                                 |
+| `index`       | Composite secondary indexes over this entity's fields. See [Secondary indexes](#secondary-indexes).                   |
+| `server_only` | When `true`, rows never sync to clients. See [Server-only entities](#server-only-entities).                           |
+| `history`     | Configures append-only field history tracking. See [Field history](#field-history).                                   |
+| `access`      | The rules that decide who can read, create, update and delete rows of this entity. See [Access model](#access-model). |
+| `grant`       | Declares the rows of this entity as grant rows. See [Access model](#access-model).                                    |
+| `members`     | Declares the rows of this entity as teams, and names the entity whose rows make members. See [Teams](#teams).         |
 
 The `name` field must be a valid identifier. Each entry in `key_fields` must reference a singular string, integer, boolean, or enum field. For complete syntax and constraints, see [Naming rules](naming.md).
 
 A message configured with `(syncplane.v1.entity)` is an **entity**. Message-typed fields that reference this message type automatically become entity references without additional annotations. See [References](#references) for what a reference stores and how it resolves.
-
-<a id="delete-policy"></a>
-
-### Write policies
-
-Three options control write access to an entity's rows: `create_policy`, `update_policy`, and `delete_policy`. By default, each option is unset, which permits any caller allowed by the application's permission policy.
-
-```proto
-// Server-owned: the server records these rows, clients only read them.
-message Activity {
-	option (syncplane.v1.entity) = {
-		name: "activity"
-		key_fields: [ "id" ]
-		create_policy: CREATE_POLICY_TRUSTED_ONLY
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-	string id = 1;
-}
-
-// Append-only: a client may post a comment but not silently edit or remove one.
-message Comment {
-	option (syncplane.v1.entity) = {
-		name: "comment"
-		key_fields: [ "id" ]
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-	string id = 1;
-}
-```
-
-Setting a policy to `*_TRUSTED_ONLY` rejects that class of write for all regular callers with `permission_denied`. This restriction includes in-process API calls such as `Apply` and `Mutate` from an application handler. It permits only writes executed under the `Trusted` bypass, such as a connector, a migration, or a background job.
-
-The engine evaluates these policies before running the application's `Permissions.CanMutate` hook on every write path.
-
-#### Which policy a write must satisfy
-
-The engine checks policies before opening the write transaction without reading the existing row. The check classifies the operation based solely on the incoming write request. An absent or tombstoned row has version 0, so `expected_version: 0` indicates that the operation applies only if the row does not exist.
-
-| Write                                  | Policy required                           |
-| -------------------------------------- | ----------------------------------------- |
-| `PATCH`                                | `update_policy` (a `PATCH` never creates) |
-| `DELETE`                               | `delete_policy`                           |
-| `PUT` with `expected_version: 0`       | `create_policy`                           |
-| `PUT` with non-zero `expected_version` | `update_policy`                           |
-| `PUT` with no `expected_version`       | Both `create_policy` and `update_policy`  |
-
-An unguarded `PUT` can create or update a row. The engine permits an unguarded `PUT` only when both `create_policy` and `update_policy` allow the caller. To write to an entity that restricts updates, a client must supply `expected_version: 0` (in Go, using `server.WithExpectedVersion(0)` on `Put`).
-
-The TypeScript client evaluates this table locally and throws an error at the call site to prevent invalid writes from entering the pending queue.
-
-#### Policy scope and limitations
-
-Write policies apply to caller classes (trusted bypass versus authorized callers) rather than individual rows. Row-level permissions, such as restricting edits to the author of a comment, cannot be configured here. Implement row-level checks in `CanMutate` when ownership is derivable from the row key, or in a mutator body using `EntityTx.GetMeta` when the check requires reading the stored row. See [Check ownership in a mutator](../how-to/authentication-and-permissions.md#check-ownership-in-a-mutator).
-
-Write policies apply to entire rows rather than individual fields. To restrict access to a specific field on a writable row, use [Protected fields](#protected-fields).
-
-Write policies govern write primitives rather than high-level operations. Custom mutators are authorized at the invocation level rather than per individual row operation. An application requiring client-initiated modifications to a protected entity can implement a mutator that handles validation and cascading operations:
-
-```go
-server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
-	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
-		// … whatever must happen first …
-		return tx.Delete(&appv1.Project{}, args.(*appv1.ArchiveArgs).GetId())
-	})
-```
-
-Additional constraints:
-
-- Batch operations apply sequentially in a single savepoint. A `DELETE(k)` followed by `PUT(k, expected_version: 0)` is evaluated as a create and executed as a replace. To prevent row replacement, configure `delete_policy` alongside `update_policy`.
-- Collaborative-text fields are modified using `PATCH`. Clients can edit collaborative-text fields only when `update_policy` permits updates.
-- Set `delete_policy` on rows with cascading dependencies to prevent unintended deletions.
 
 ### Server-only entities
 
@@ -118,7 +45,7 @@ message ProjectStats {
 }
 ```
 
-Server-only entities are queryable but not syncable. Server-side `ViewTx` and mutators can access the entity, and clients can query it using the `Query` RPC (`queryServer` in TypeScript). Any client with workspace access can read these rows unless restricted by a [`ReadFilter`](../how-to/authentication-and-permissions.md#filtering-reads-and-writes-with-canmutate-and-readfilter). Setting `server_only: true` removes the entity from synchronization streams but does not restrict query access.
+Server-only entities are queryable but not syncable. Server-side `ViewTx` and mutators can access the entity, and clients can query it using the `Query` RPC (`queryServer` in TypeScript). `server_only` controls replication, not access: the entity's read rules (see [Access model](#access-model)) and the application's [`ReadFilter`](../how-to/authentication-and-permissions.md#filtering-reads-and-writes-with-canmutate-and-readfilter) decide which rows a query returns. An entity outside the access model and without a `ReadFilter` returns its rows to every client with workspace access.
 
 Client subscription filters cannot replace `server_only`. An empty subscription list requests a full sync, which syncs across browser tabs sharing local storage (such as IndexedDB). Only the `server_only` schema option prevents an entity from syncing to clients.
 
@@ -156,6 +83,7 @@ History records are stored in the `syncplane.v1.FieldHistory` entity (wire name 
 | `prior`                         | Serialized source entity containing key fields and the masked fields in their prior state. Text fields contain plain-string values rather than documents. Read using `plainTextOf` or `text.PlainText` for display. |
 | `actor_subject`, `actor_system` | The actor who performed the write (see `storage.Actor`): caller subject, trusted write label, or both. Each session belongs to one actor. Unattributed writes leave both fields empty.                              |
 | `recorded_at`                   | Server wall-clock timestamp when the record opened, used for display. Writes are ordered strictly by `seq`.                                                                                                         |
+| `write_groups`                  | The session's writes grouped by the fields each one changed. The server reads them to count `seq`, `through_seq` and `writes` for a caller with hidden fields. `Query` never returns them.                          |
 
 History recording rules:
 
@@ -191,9 +119,30 @@ repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] o
 | `text`             | `bool`     | Configures collaborative text with Peritext-style marks and anchors. Requires a singular `bytes` field; implies `opaque`. The engine registers the text merger automatically. Incompatible with `key_field` and `order_field`. May cross keyed message lists and message-valued maps (`notes.<key>.body`). Rejected inside a oneof or unkeyed repeated element. A write that moves a document's highest counter more than 2^32 above the stored document is rejected with `invalid_argument` (see [The counter ceiling](../explanation/collaborative-text.md#the-counter-ceiling)). |
 | `indexed`          | `bool`     | Maintains a single-component secondary index on this field. On a repeated scalar field, produces one index entry per element. See [Secondary indexes](#secondary-indexes).                                                                                                                                                                                                                                                                                                                                                                                                          |
 | `history`          | `bool`     | Records this field in entity history. Capture is explicit: only marked fields are recorded, and registration fails if an entity enables history without marking any fields. Marking any member of a oneof records the entire oneof group. Ignored if the entity does not enable `history`. See [Field history](#field-history).                                                                                                                                                                                                                                                     |
-| `write_policy`     | `enum`     | Set to `FIELD_WRITE_POLICY_TRUSTED_ONLY` to restrict field modification to trusted callers while leaving the rest of the row writable. Allowed on top-level fields only. Protects a oneof as a group. Cannot be applied to key fields. See [Protected fields](#protected-fields).                                                                                                                                                                                                                                                                                                   |
 | `workspace`        | `bool`     | Inside a reference message, marks the string field that names the workspace the referenced row lives in. Empty means the holder's own workspace. Valid on one singular `string` field of a message carrying `(syncplane.v1.reference)`. See [References](#references).                                                                                                                                                                                                                                                                                                              |
 | `reverse_relation` | `string`   | Names the reverse relation this reference adds to its target entity. Empty means `<plural(holder entity)>By<Field>`, such as `issuesByAssignee`. Valid on a reference field declared on an entity, including a member of a oneof. See [Reverse relations](#reverse-relations).                                                                                                                                                                                                                                                                                                      |
+
+### Option fields the server does not know
+
+Registration refuses an entity whose `(syncplane.v1.entity)` options, or the
+`(syncplane.v1.field_behavior)` of a field in its shape, carry a field that
+the server does not know, at any depth. A descriptor set built against a newer
+`options.proto` can carry one. The error names the entity, the field and the
+field number. Upgrade the server before the schema uses the new option.
+
+Registration also refuses the write policies that the [access model](#access-model)
+replaced. A descriptor set built against an older `options.proto` can still
+carry them:
+
+| Option                        | Field number | Replace it with                                                      |
+| ----------------------------- | ------------ | -------------------------------------------------------------------- |
+| `EntityOptions.delete_policy` | 4            | `access` on the entity, with rules for the operations callers may do |
+| `EntityOptions.create_policy` | 7            | `access` on the entity, with rules for the operations callers may do |
+| `EntityOptions.update_policy` | 8            | `access` on the entity, with rules for the operations callers may do |
+| `FieldBehavior.write_policy`  | 8            | a [field guard](#field-guards) that names the field                  |
+
+An operation that no rule names, and a field operation that no rule of its
+guard admits, are open only to trusted writes.
 
 ## References
 
@@ -335,41 +284,697 @@ Each reference member is a **case** of the relation. A row holds at most one cas
 | Merge             | The holder's oneof replaces as a whole when a `PATCH` mask names the group. A polymorphic reference message also replaces as a whole. A repeated reference message merges as a set with element identity `<workspace>/<case>/<key>`. Two elements with the same key under different cases remain distinct.                                                                                                                            |
 | Workspaces        | In a reference message, `workspace_id` sets the workspace for all cases. In a holder oneof, each reference message case specifies its own workspace. All [workspace-qualified reference rules](#syncplanev1reference--workspace-qualified-references) apply per case.                                                                                                                                                                 |
 
-## Protected fields
+## Access model
 
-The entity options `create_policy`, `update_policy`, and `delete_policy` govern entire rows. The `write_policy` field option restricts write access to an individual field, such as a server-maintained status, counter, or immutable creator field:
+Three entity options declare who can read and write rows: `access`, `grant` and `members`.
 
 ```proto
-message Task {
-	option (syncplane.v1.entity) = { name: "task" key_fields: [ "id" ] };
-
+// A role on the whole workspace.
+message OrgMember {
+	option (syncplane.v1.entity) = {
+		name: "org_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "org_member" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "org_admin" includes: [ "org_member" ] grants: [ "view_members", "manage_members", "edit_projects", "edit_tasks" ] }
+			]
+		}
+		access: {
+			allow: [
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
+			]
+		}
+	};
 	string id = 1;
-	string title = 2;
-	// Advanced by a server-side workflow; a client may read it, never write it.
-	string status = 3
-		[(syncplane.v1.field_behavior) = { write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY }];
+	string user_id = 2;
+	string role = 3;
+}
+
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A role on one project and the rows below it.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "project_reader" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "project_writer" grants: [ "view_projects", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+}
+
+// Every caller admitted to the workspace reads labels. Org admins write them.
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true admitted: {} },
+				{ write: true requires: "edit_projects" }
+			]
+		}
+	};
+	string id = 1;
 }
 ```
 
-Protected fields handle write operations as follows:
+A caller holds a permission at an **anchor**: the workspace root, or one row that a grant row's access parent points at. A permission held at an anchor applies to the anchor row and to every row below it: the rows whose access parents point at it, the rows whose access parents point at those, and so on. The `parents` list of an entity's `access` names its access parents. A comment whose parent is a task, whose parent is a project, is below the project. An entity can be its own access parent, such as a folder inside a folder.
 
-| Write                                | Outcome                                                                             |
-| ------------------------------------ | ----------------------------------------------------------------------------------- |
-| `PATCH` whose mask targets the field | Rejected with `permission_denied`.                                                  |
-| `PUT`                                | Applied; the protected field retains its stored value (or zero value on a new row). |
-| `DELETE`                             | Applied without restriction (field protection guards the value, not the row).       |
+| Option                    | Field       | Description                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access`                  | `allow`     | The rules (`syncplane.v1.AccessRule`). At least one. Two rules with the same operation flags, source and checks are refused.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| `access.allow[]`          | `read`      | Admits reading rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| `access.allow[]`          | `create`    | Admits creating rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `access.allow[]`          | `update`    | Admits changing rows that exist, which includes moving a row to another access parent.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| `access.allow[]`          | `delete`    | Admits deleting rows.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
+| `access.allow[]`          | `write`     | Admits `create`, `update` and `delete`, and each write operation that a later version of `options.proto` adds.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `access.allow[]`          | `requires`  | The source: a caller that holds every permission in this list at the workspace root, at the row, or at a row above the row through its access parents. Each permission can be held at a different one of these places. No permission twice. The text format writes one permission without brackets: `requires: "view_tasks"`. Set exactly one of `requires` and `admitted`. See [Several permissions together](#several-permissions-together).                                                                                                                                                                                                                                                                                                                |
+| `access.allow[]`          | `admitted`  | The source: every caller admitted to the workspace. Set it as `admitted: {}`. A caller is admitted when `CanAccessWorkspace` lets it in and, in a schema that declares a role, it holds at least one permission in the workspace.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| `access.allow[]`          | `caller_is` | A check: the named top-level, singular `string` field holds one of the caller's subjects. An empty value never matches.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `access.allow[]`          | `fields`    | A check: an update changes no top-level field or oneof outside this list. Only on a rule whose one operation is `update`. Cannot name a key field. A `PUT` keeps the stored value of each field the caller's rules do not list; see [Field guards](#field-guards).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `access.allow[]`          | `when`      | A check: the row matches this `syncplane.v1.Condition`, with paths from the row. A `rel` or `match` condition is refused. See [Conditions on the row](#conditions-on-the-row).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| `access.allow[]`          | `within`    | Checks: each entry (`syncplane.v1.AccessWithin`) holds. See [Checks on the rows above](#checks-on-the-rows-above).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `access.allow[].within[]` | `entity`    | The entity of the row the row must sit within, by name: an entity whose rows the rule's rows can sit below, or the rule's own entity when its rows sit below rows of their own.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| `access.allow[].within[]` | `caller_is` | A check: the named top-level, singular `string` field of that row holds one of the caller's subjects. An empty value never matches.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                           |
+| `access.allow[].within[]` | `when`      | A check: that row matches this `syncplane.v1.Condition`, with paths from that row. A `rel` or `match` condition is refused.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| `access`                  | `parents`   | The access parents: the names of the fields and oneofs whose references place each row below other rows. A field is top-level, outside any oneof, and a reference: its type is an entity message, or a reference message without a `workspace` field. It can be repeated, but not a map. A oneof is named by its name, and each of its members must be such a reference. A member of a oneof cannot be named alone. No name twice. The order has no effect. Empty means that the rows sit at the workspace root. A grant row anchors at the row its parent names, and a grant entity without parents anchors at the workspace root. A grant entity names at most one parent, and not a repeated field. See [Several access parents](#several-access-parents). |
+| `access`                  | `guard`     | The field guards (`syncplane.v1.FieldGuard`). Each restricts who reads and who writes a set of fields. See [Field guards](#field-guards).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
+| `access.guard[]`          | `fields`    | The top-level fields and oneofs the guard restricts. At least one. Cannot name a key field, an access parent or a `creator` field, or a field another guard names.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `access.guard[]`          | `allow`     | The guard's rules, with the fields of `access.allow[]` except `delete` and `fields`. Without a rule that names `read`, the guard hides its fields from every client. Can be empty.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `grant`                   | `subject`   | The name of the field or oneof that holds the subject the row grants to. A field is top-level and singular: a `string` field names one caller, and a reference to an entity with `members` names a team. See [Teams](#teams).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| `grant`                   | `role`      | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value. A row stores the number, so it holds the role declared on any name of that number, and adding an alias of a value changes no row's role A role cannot be declared on number 0: a row that leaves the field unset stores 0.                                                                                                                                                                                                                                                                                                                                            |
+| `grant`                   | `roles`     | The roles rows can grant. Each role has a `name`, the permissions it `grants`, and the names of the roles of the same `grant` it `includes`. A role grants every permission of each role it includes, through any number of steps.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| `members`                 | `entity`    | The name of the grant entity whose rows make the members of each row of this entity. See [Teams](#teams).                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
 
-A `PATCH` explicitly specifies its target fields, so targeting a protected field fails immediately. A `PUT` sends the entire row, so the engine preserves the stored value of protected fields to allow read-modify-write workflows when unrelated fields change.
+An entity whose rules use `admitted` is in the model like every other entity: it can have an access parent, be the access parent of other entities, and be a grant entity.
 
-Field masks match against the **first path segment**: protecting `audit` also protects `audit.size`. A oneof is protected as a unit; marking any member protects all variants in the oneof. Key fields cannot be marked with `write_policy` and fail schema registration.
+A grant row grants nothing when its subject is empty or names a team that does not exist, its role is not declared in `roles`, or its access parent is unset or names a row that does not exist. Every write path refuses to store a grant row with no subject, an undeclared role, or no access parent on an entity that names one.
 
-Clients cannot edit a protected collaborative-text field: collaborative edits require `PATCH`, and a `PUT` replaces the document with the stored server copy rather than merging client edits.
+A **subject** is one identity of a caller, such as a user id or a verified email address. The server maps each caller to its subjects with `WithCallerAccess` (see [Access model](server.md#access-model)). Three options name a field that holds a subject:
 
-The TypeScript client validates protected fields locally: `patch()` calls targeting a protected field throw an error, and `put()` calls substitute the local cached value into the optimistic overlay.
+| Option                              | Reads a field of                        | Meaning                                                |
+| ----------------------------------- | --------------------------------------- | ------------------------------------------------------ |
+| `grant.subject`                     | The grant row                           | Who receives the row's role: one subject, or a team.   |
+| `access.allow[].caller_is`          | The row that the rule decides           | A check: the field holds one of the caller's subjects. |
+| `access.allow[].within[].caller_is` | The row of `entity` at or above the row | The same check, on that row.                           |
 
-For caller-dependent rules (such as allowing owners to update a field while restricting viewers), configure the server's `FieldPermissions` hook. See [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
+### How rules admit an operation
 
-Mutator operations are authorized at the invocation level. A mutator can update protected fields when invoked by an authorized caller.
+An operation on a row is allowed when at least one rule names the operation, its source holds for the caller, and each check it sets holds on the row. The order of the rules has no effect, and no rule removes access that another rule gives. A `requires` source holds at a row when the caller holds each permission in the list at the workspace root, at the row, or at a row above the row through its access parents. An `admitted` source holds at every row.
+
+| Operation | The source and checks of one rule that names the operation must hold at                                                               |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| Read      | The row.                                                                                                                              |
+| Create    | The row as it will be stored.                                                                                                         |
+| Delete    | The stored row.                                                                                                                       |
+| Update    | The stored row and the row as it will be stored. One rule must hold at both. Two rules that each hold at one of them do not admit it. |
+
+A write that moves a row to another access parent also needs, where the stored row sits, the right to read every entity whose rows can sit below it. A delete of a row that a live row names as its access parent, or that a live grant row names as its subject, is refused. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
+
+### Several permissions together
+
+Rules join with OR: an operation is allowed when any rule admits it. The permissions in one rule's `requires` join with AND: the caller must hold each of them. Each permission holds at the workspace root, at the row, or at a row up the row's chain, and each can hold at a different one of these.
+
+```protobuf
+message Task {
+  option (syncplane.v1.entity) = {
+    name: "task" key_fields: ["id"]
+    access: {
+      parents: ["project"]
+      allow: [
+        { read: true requires: "view_tasks" },
+        { update: true requires: ["edit_tasks", "use_billing"] }
+      ]
+    }
+  };
+  string id = 1;
+  Project project = 2;
+}
+```
+
+A caller with `edit_tasks` at the task's project and `use_billing` at the workspace root updates the task. A caller with only one of the two does not. A move needs every permission of one rule at the old place and at the new one. To admit a caller that holds either of two permissions, declare two rules. A rule that must hold `A` and one of `B` and `C` is the two rules `["A", "B"]` and `["A", "C"]`.
+
+The order of `requires` has no effect: two rules that require the same permissions in another order are the same rule.
+
+A read rule that requires several permissions narrows bootstrap, resync and `Query` to the rows below the anchors of each permission that the caller does not hold at the workspace root. A cursor records the anchors of each of them, so a grant or a revoke of any one resyncs the rows it shows or hides.
+
+### Conditions on the row
+
+A `when` check admits only rows that match a condition. The condition is a `syncplane.v1.Condition`, the predicate language of queries and subscriptions, and reads only the row: a `rel` condition, which reads another row, and a `match` condition are refused at registration. A permission held at the workspace root does not skip the check.
+
+```protobuf
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{
+					update: true
+					requires: "edit_tasks"
+					when: {
+						cmp: {
+							path: [ "archived" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ update: true requires: "archive_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	bool archived = 2;
+}
+```
+
+A holder of `edit_tasks` edits a task while it is not archived. The update rule must admit the stored row and the row as it will be stored, so the rule also refuses the write that archives a task and the write that restores one. A holder of `archive_tasks` does both.
+
+| Operation | Effect of `when`                                                                                                                                                    |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read      | A row that a write makes fail the condition leaves every client that the rule alone let read it, as a delete. A row that a write makes match reaches those clients. |
+| Create    | The row as it will be stored must match.                                                                                                                            |
+| Delete    | The stored row must match.                                                                                                                                          |
+| Update    | The stored row and the row as it will be stored must match.                                                                                                         |
+
+A read rule with `when` does not narrow the rows that bootstrap, resync and `Query` read: they read the rows below the rule's anchors, or every row of the entity when the caller holds every permission of the rule at the workspace root, and test each one.
+
+### Checks on the rows above
+
+A `within` entry admits only rows that sit within a row that passes a check: the row itself, or a row above it on any path of access parents, is a row of the named entity, and that row passes every check the entry sets. A row with no such row at or above it fails the entry. The entries of a rule join with AND, and with the rule's other checks. A permission held at the workspace root does not skip the check.
+
+```protobuf
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{
+					read: true
+					requires: "view_open_tasks"
+					within: {
+						entity: "project"
+						when: {
+							cmp: {
+								path: [ "private" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				},
+				{
+					write: true
+					requires: "edit_tasks"
+					within: {
+						entity: "project"
+						when: {
+							cmp: {
+								path: [ "archived" ]
+								op: CMP_OP_EQ
+								value: { bool_value: false }
+							}
+						}
+					}
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+}
+
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "task" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{
+					read: true
+					write: true
+					admitted: {}
+					within: { entity: "project" caller_is: "owner_id" }
+				}
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2;
+}
+```
+
+A role at the workspace root that grants `view_open_tasks` reads the tasks of every project that is not private. A role at a project that grants `view_tasks` reads its tasks whether it is private or not. No caller writes a task of an archived project. The caller that a project names in its `owner_id` field reads and writes the comments of its tasks.
+
+| Operation | Effect of `within`                                                                                                                                                                                |
+| --------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Read      | A write to a row above that makes the row fail every entry that let a client read it removes the row from that client, as a delete. A write that makes it pass sends the row.                     |
+| Create    | The row as it will be stored must sit within a row that passes.                                                                                                                                   |
+| Delete    | The stored row must sit within a row that passes.                                                                                                                                                 |
+| Update    | The stored row and the row as it will be stored must sit within a row that passes. A move out of a row that fails, or into one, is refused.                                                       |
+| Above     | A write that changes whether a row passes an entry needs, where the row sits, a read rule of each entity whose rows can sit below it, as a move does. See [Access model](server.md#access-model). |
+
+The rows above a row are a graph when a row has several parents. One row that passes is enough, so a parent only adds. In an entity whose rows sit below rows of their own, such as a folder tree, a row that fails does not hide the rows below it from a caller when a row above it passes: a private inner folder below a folder that is not private does not hide its documents. Give the inner row grants of its own instead.
+
+A read rule with a `within` entry narrows bootstrap, resync and `Query` to the rows below the rule's anchors. When the caller holds every permission of the rule at the workspace root, or the rule uses `admitted`, an entry with `caller_is` narrows to the rows within the rows whose field names the caller, when that field has an index: mark it `indexed`. Otherwise the read tests every row of the entity.
+
+### Field guards
+
+The rules in `allow` decide whole rows. A **field guard** takes a set of fields away from every rule, and gives them back to the callers its own rules admit, for reading and for writing each. A write that sets a guarded field needs a rule in `allow` that admits the write, and a rule of the guard that admits the field operation: `create` for the value a create stores, `update` for a change to a row that exists. `write` admits both. A field operation that no rule of the guard names is open only to trusted writes.
+
+```proto
+message Expense {
+	option (syncplane.v1.entity) = {
+		name: "expense"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
+			]
+			guard: [
+				// Only server code sets the total.
+				{ fields: [ "total" ] allow: [ { read: true admitted: {} } ] },
+				// Only a caller with edit_projects sets the status.
+				{
+					fields: [ "status" ]
+					allow: [
+						{ read: true admitted: {} },
+						{ write: true requires: "edit_projects" }
+					]
+				},
+				// Only the reporter writes the notes.
+				{
+					fields: [ "notes" ]
+					allow: [
+						{ read: true admitted: {} },
+						{ write: true requires: "edit_tasks" caller_is: "reporter_id" }
+					]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	string title = 3;
+	string status = 4;
+	int64 total = 5;
+	string reporter_id = 6 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string notes = 7;
+}
+```
+
+A guard rule admits a field operation as a rule in `allow` admits a row operation: its source holds for the caller where the row sits, and each check it sets holds on the row as it will be stored and, for an update, on the stored row. A `caller_is` or `when` check of a guard rule reads only fields that no guard names.
+
+| Write                                    | Outcome when no guard rule admits the caller                      |
+| ---------------------------------------- | ----------------------------------------------------------------- |
+| `PATCH` whose mask writes into the field | Refused with `access_denied`. The rest of the mask does not land. |
+| `PUT` that updates a row                 | Applied. The field keeps its stored value.                        |
+| `PUT` that creates a row                 | Applied. The field gets its zero value.                           |
+| `DELETE`                                 | Not affected. A guard restricts a value, not the row.             |
+
+A mask path matches a guard by its first segment: a guard on `audit` covers `audit.size`. A guard on a oneof covers each of its members. A `PATCH` that names a field whose guard has no rule for `update` is refused before the row is read, and before `Permissions.CanMutate` runs.
+
+Clients edit a guarded collaborative-text field only where a guard rule admits an update: a `PUT` keeps the stored document.
+
+#### Who reads a guarded field
+
+A caller reads a guarded field of a row when a rule in `allow` admits reading the row, and a rule of the guard that names `read` admits reading the row too. A guard rule admits a read as a rule in `allow` does: its source holds where the row sits, and each check holds on the row. The rule `{ read: true admitted: {} }` shows the field to every caller that reads the row. A guard without a read rule hides its fields from every client.
+
+```proto
+message Staff {
+	option (syncplane.v1.entity) = {
+		name: "staff"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_staff" },
+				{ write: true requires: "edit_staff" }
+			]
+			guard: [
+				// Only HR reads and writes the salary.
+				{ fields: [ "salary" ] allow: [ { read: true write: true requires: "hr" } ] },
+				// Only the person a record is about reads the review.
+				{
+					fields: [ "review" ]
+					allow: [
+						{ read: true admitted: {} caller_is: "person_id" },
+						{ write: true requires: "hr" }
+					]
+				},
+				// No client reads or writes the bonus.
+				{ fields: [ "bonus" ] }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+	int64 salary = 3;
+	string review = 4;
+	string person_id = 5;
+	int64 bonus = 6;
+}
+```
+
+A guard decides per row and per caller. The server clears each field the caller may not read before the row leaves it, and names the field in `RowChange.hidden`. A cleared field reads as its zero value; the list tells it apart from a stored zero value. This applies to every path that sends a row: pull, bootstrap, `Subscribe`, `Query`, field history and the in-process `View` and `Apply` reads. In a field history record, a hidden field leaves the mask and the prior value, and a record of hidden fields alone is not shown. `seq`, `through_seq` and `writes` count only the writes that changed a field the caller reads.
+
+| Change                                                                         | What the client receives                                                  |
+| ------------------------------------------------------------------------------ | ------------------------------------------------------------------------- |
+| A grant, a role or a move above the row shows or hides a field                 | The row again, with its new `hidden` list. A text field arrives whole.    |
+| A write changes a field that a guard read rule checks, such as its `caller_is` | The row, as for any write.                                                |
+| A write changes a hidden field                                                 | The row, with the field still cleared. No text delta state for the field. |
+
+A request may not name a field that the caller does not read on every row it reads: a read rule of the guard that needs no permission and sets no check, or whose permissions the caller holds at the workspace root. Otherwise the server refuses it with `PermissionDenied`:
+
+- a `Query` predicate, `order_by`, `group_by` or facet, including the inner condition of a `rel` on the target entity;
+- the `Where` or `OrderBy` of a `query.Spec` that `ViewTx.Query` or `ApplyTx.Query` runs for a caller, including the inner condition of a `rel` on the target entity;
+- a subscription predicate, a window's `order_by`, or a reference that a `follow` path walks;
+- a `match` condition or a relevance order, when the guard restricts a search field.
+
+A subscription that the client's cursor already holds is not refused when a grant change hides a field it names. While the field stays hidden, it selects no row, its window holds no row, and its `follow` paths reach no row: the next pull removes the rows it selected, and sync goes on. Once the caller reads the field again, the next pull sends them again. A subscription that the cursor does not hold is refused.
+
+Reading and writing are separate, so a caller can write a field it may not read. A `PATCH` whose mask names the field sets it. A `PUT` that updates a row keeps the stored value of each such field that it leaves unset, so a client that writes back a row it received does not clear what it never saw. A `PUT` that sets such a field writes it, when a guard rule admits the caller. To clear a field the caller may not read, use a `PATCH`.
+
+Registration refuses a guard that can hide a field a client needs to decide access: a field that a rule in `allow` checks with `caller_is` or `when`, a field that a `within` entry of any rule reads, and the subject and role fields of a grant entity. A guard can hide a field only when some read rule of the guard does not admit every reader with no check.
+
+A rule's `fields` list and a guard work in opposite directions:
+
+| You want                                                                                   | Declare                                  |
+| ------------------------------------------------------------------------------------------ | ---------------------------------------- |
+| A caller who can change only some fields of a row, such as an assignee who sets the status | `fields` on an `update` rule in `allow`  |
+| A field that only some callers can change, whatever rule admits the update                 | A guard on the field                     |
+| A field that only server code changes                                                      | A guard whose only rule is the read rule |
+| A field that only some callers read                                                        | A guard with a narrower read rule        |
+| A field that no client reads                                                               | A guard without a read rule              |
+
+A `PUT` that updates a row also keeps the stored value of each field outside the `fields` lists of the update rules that admit the caller at the stored row, when each of those rules has a list. A `PATCH` that names such a field is refused, as before.
+
+The TypeScript client refuses at the call site a `patch()` that names a field whose guard has no rule for `update`, and keeps the local value of such a field on `put()`. Whether a guard rule admits the caller is decided on the server; `can()` predicts it, for an update and for a read that names `fields`. A row the client holds lists its hidden fields in `Row.hidden`; see the [TypeScript client reference](typescript-client.md). For a field that depends on facts outside the workspace's rows, use the server's `FieldPermissions` hook; see [Authentication and permissions](../how-to/authentication-and-permissions.md#protecting-fields-per-caller).
+
+### Operations no rule admits
+
+An operation that no rule of an entity names is open only to trusted writes: in-process writes under `server.Trusted`, connectors, effects, and the bodies of custom mutators. Before the write transaction opens, and before `Permissions.CanMutate` runs, the server refuses with `access_denied` a write that can only be such an operation. This check reads no row. It classifies the write from its operation and its `expected_version`, where version 0 means that the row does not exist:
+
+| Write                                  | The write is                                                        | Refused when no rule names  |
+| -------------------------------------- | ------------------------------------------------------------------- | --------------------------- |
+| `PATCH`                                | An update. A `PATCH` never creates a row.                           | `update`                    |
+| `DELETE`                               | A delete.                                                           | `delete`                    |
+| `PUT` with `expected_version: 0`       | A create.                                                           | `create`                    |
+| `PUT` with non-zero `expected_version` | An update.                                                          | `update`                    |
+| `PUT` with no `expected_version`       | A create when the row does not exist, and an update when it exists. | either `create` or `update` |
+
+The write transaction then checks a `PUT` with no `expected_version` as the operation it is on the stored row. The TypeScript client makes the same classification and rejects the write at the call site, so the write does not enter the pending queue.
+
+In a schema that does not use the access model, the server refuses no write for its operation. The application's `CanMutate` hook sees the entity and the operation of each write and can refuse it. See [Reserve an operation for trusted writes](../how-to/authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
+
+Additional constraints:
+
+- A rule reads the permissions the caller holds where the row sits, the fields of the row itself, and, through `within`, the fields of the rows at or above it. It never reads a field of a row below the row or beside it.
+- Rules in `allow` apply to whole rows. To restrict who writes one field of a writable row, use a [field guard](#field-guards).
+- The rows that a custom mutator body writes are not checked against the rules. The invocation is checked by its `MutatorAccess`; see [Access model](server.md#access-model). A mutator can therefore make a change that no rule admits to the caller:
+
+  ```go
+  server.WithMutator("archiveProject", &appv1.ArchiveArgs{},
+  	func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+  		// … whatever must happen first …
+  		return tx.Delete(&appv1.Project{}, args.(*appv1.ArchiveArgs).GetId())
+  	},
+  	server.MutatorAccess{Permission: "edit_projects", Entity: "project", KeyField: "id"})
+  ```
+- A batch applies its writes in sequence. A `DELETE(k)` followed by `PUT(k, expected_version: 0)` is a delete and a create, and replaces the row. A caller that a delete rule and a create rule admit can therefore replace a row without an update rule.
+- Clients edit collaborative-text fields with `PATCH`, so a client edits them only where an update rule admits it.
+
+### Several access parents
+
+A row can sit below several rows. Name several reference fields in `parents`, a repeated reference, or both. A permission held at any row a parent names, or at a row above it, reaches the row. The order of `parents` has no effect.
+
+```proto
+// A task in a project and in a milestone, with labels that each share it.
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "project", "milestone", "labels" ]
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" },
+				{
+					update: true
+					requires: "plan_tasks"
+					fields: [ "milestone" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	Milestone milestone = 3;
+	repeated Label labels = 4;
+}
+```
+
+| Rule           | Description                                                                                                                                                                                                                                                                                     |
+| -------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Parents        | The rows every parent names. A row named twice is one parent. A row whose parents name no row has no parent.                                                                                                                                                                                    |
+| Read           | The source of a read rule holds through any parent.                                                                                                                                                                                                                                             |
+| Create         | The source of the create rule must hold through each parent the row names: each permission at the workspace root, at the row, or at that parent or a row above it.                                                                                                                              |
+| Add, remove    | An update that adds or removes a parent needs the source of its rule through each parent it adds and each parent it removes, in addition to the update rules above. A move from one parent to another is one removed and one added. A rule with `fields` admits it only when it lists the unit. |
+| Other writes   | An update that leaves the parents as they are, and a delete, need the source through any parent.                                                                                                                                                                                                |
+| Lists          | A `PATCH` adds or removes one element with the mask path `labels.<key>`, and two concurrent additions both stay. A `PUT` replaces the list.                                                                                                                                                     |
+| Delete         | A row cannot be deleted while a live row names it as a parent, also when that row has other parents.                                                                                                                                                                                            |
+| Limits         | A write fails with `invalid_argument` when the row would name more rows than `Limits.MaxAccessParents`. `Limits.MaxAccessDepth` applies to the longest path above a row. See [Limits](server.md#limits).                                                                                        |
+| Grant entities | A grant entity names at most one parent: one singular field, or one oneof.                                                                                                                                                                                                                      |
+
+### Polymorphic access parents
+
+An access parent can point at one of several entities. Declare it in either shape of a [polymorphic reference](#polymorphic-references): name a oneof of references in `parents`, or name a field whose reference message holds a oneof of entities. A member of a oneof cannot be named alone.
+
+```proto
+// A comment on a task, or on a doc.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: {
+			parents: [ "subject" ]
+			allow: [
+				{ read: true requires: "view_comments" },
+				{ write: true requires: "edit_comments" }
+			]
+		}
+	};
+	string id = 1;
+	oneof subject {
+		Task task = 2;
+		Doc doc = 3;
+	}
+}
+```
+
+| Rule        | Description                                                                                                                                                                                                                    |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Parent row  | The case a row holds names the row it sits below. A row that holds no case, or holds a case that names no key, has no parent.                                                                                                  |
+| Permissions | The entity's rules apply in every case. A role reaches the rows below a target only when it grants the permissions of the rules, so grant `view_comments` both in the roles that reach tasks and in the roles that reach docs. |
+| Cases       | Every member of the oneof is a reference. A reference message with a `workspace` field is refused.                                                                                                                             |
+| Moves       | A write that changes the case or the key is a move, with the update rules above. A task and a doc with the same key are two rows.                                                                                              |
+| Masks       | A `PATCH` reaches the access parent when its mask names the oneof group (`subject`), or the field that holds the reference message.                                                                                            |
+| Depth       | `Limits.MaxAccessDepth` applies to the deepest chain of any case.                                                                                                                                                              |
+
+### Teams
+
+A grant row can name a team as its subject. The row then grants its role to every member of the team. Declare the team entity with `members`, which names the grant entity whose rows make members:
+
+```proto
+message Team {
+	option (syncplane.v1.entity) = {
+		name: "team"
+		key_fields: [ "id" ]
+		members: { entity: "team_member" }
+		access: {
+			allow: [
+				{ read: true requires: "view_teams" },
+				{ write: true requires: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+message TeamMember {
+	option (syncplane.v1.entity) = {
+		name: "team_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "team_member" grants: [ "view_teams" ] },
+				{ name: "team_lead" grants: [ "view_teams", "manage_teams" ] }
+			]
+		}
+		access: {
+			parents: [ "team" ]
+			allow: [
+				{ read: true requires: "view_teams" },
+				{ write: true requires: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+	Team team = 2;
+	string user_id = 3;
+	string role = 4;
+}
+
+// A role on one project for one user, or for every member of one team.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{ name: "project_reader" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "project_writer" grants: [ "view_projects", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: {
+			parents: [ "project" ]
+			allow: [
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" },
+				{ delete: true requires: "view_projects" caller_is: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2;
+	oneof member {
+		string user_id = 3;
+		Team team = 5;
+	}
+	string role = 4;
+}
+```
+
+| Rule          | Description                                                                                                                                                                                                                 |
+| ------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Membership    | A row of the member entity that grants its role at a team row also makes its subject a member of that team, whatever the role. A permission held at the workspace root, or at a row above the team, does not make a member. |
+| Subject       | `grant.subject` names a `string` field, a reference to an entity with `members`, or a oneof whose members are each one of these. A row that holds no case grants nothing.                                                   |
+| Member entity | A grant entity whose access parent points at the team entity alone, and whose subject is one `string` field. A team therefore cannot be a member of a team.                                                                 |
+| Subset rule   | Unchanged. A write to a grant row that names a team needs every permission of its role at its anchor. A write to a member row needs every permission of its role at the team.                                               |
+| Delegation    | A grant to a team gives its role to every caller added to the team later. A caller who can write rows of the member entity decides who receives it.                                                                         |
+| Delete        | A write that is not trusted cannot delete a team row while a live grant row names it as its subject. A trusted write can; the grant rows then grant nothing until a team row with that key exists again.                    |
+| `caller_is`   | An access rule's `caller_is` can name a `string` member of a oneof. A row that holds another case reads as empty there, so the check does not match it.                                                                     |
+
+### Registration rules
+
+A schema **uses the access model** when any of its entities declares `access` or `grant`. An entity in such a schema that declares no `access` is **outside the model**: every caller the workspace gate admits reads and writes its rows, the application hooks still apply, and no rule, access parent or resync does. In a schema that declares a role, registration logs a warning for each such entity, because the gate admits only callers that hold a permission and the entity is open to all of them. A server built with `server.WithStrictAccess()` refuses such an entity instead.
+
+Registration refuses a schema that uses the model when:
+
+- An entity declares no `access` and the server is built with `WithStrictAccess`.
+- An `access` declares no rule, or two rules with the same operation flags, source and checks.
+- A rule's `when` condition does not compile against the entity, uses a `rel` or `match` condition, or uses an operator value that the server does not know.
+- A rule's `within` entry names no entity, sets neither `caller_is` nor `when`, repeats another entry of the rule, names an entity that is not in the model or whose rows the rule's rows cannot sit below (the rule's own entity counts only when its rows sit below rows of their own), names a `caller_is` that is not a top-level, singular `string` field of that entity, or has a `when` condition that does not compile against that entity or uses a `rel` or `match` condition.
+- A rule sets no operation flag, sets neither `requires` nor `admitted`, sets both, or names one permission twice in `requires`.
+- An entry of `parents` names a field or oneof that does not exist, a member of a oneof, a map, a field that is not a reference, or a workspace-qualified reference, or names a field or oneof that another entry names.
+- A guard names no field, names a field that does not exist, a member of a oneof, a key field, an access parent, a `creator` field or a field another guard names.
+- A guard has a rule that names `delete` or sets `fields`, two rules with the same operation flags, source and checks, or a rule whose `caller_is` or `when` reads a guarded field.
+- A guard that can hide its fields names a field that a rule in `allow` checks with `caller_is` or `when`, a field that a `within` entry of any rule reads, or the subject or role field of a grant entity.
+- A grant entity names more than one parent, or names a repeated field.
+- A oneof that `parents` names has a member that is not a reference, or is a workspace-qualified reference.
+- A case of an access parent points at an entity that is not registered or declares no `access`.
+- An entity can sit more access parent hops below an entity without an access parent than `Limits.MaxAccessDepth` allows, through any case. A chain that comes back to an entity it passed, such as a folder inside a folder, has no such bound; its rows are bounded at write time instead (see [Access model](server.md#access-model)).
+- A grant entity declares no `access`.
+- A `grant` names a `subject` or `role` field that does not exist or has the wrong type, declares no roles, declares one role twice, declares an enum role that is not a value of the enum, declares two roles on names of one enum number, or declares a role on enum number 0.
+- A `grant` subject is a repeated field, a workspace-qualified reference, or a reference to an entity that declares no `members`.
+- An entity declares `members` without `access`, names no entity, or names an entity that is not registered, is not a grant entity, has an access parent that does not point at the team entity alone, or has a subject that is not one `string` field.
+- A role name is declared by two entities. Role names are unique across the schema.
+- A role grants no permissions and includes no role, or grants one permission twice.
+- A role includes a role that its own `grant` does not declare, includes one role twice, or includes itself, directly or through other roles.
+- A permission that a rule's `requires`, a guard rule's `requires` or a `MutatorAccess` names is granted by no role.
+- A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
+- The `access`, rule, `admitted`, `within`, `guard`, `grant`, role or `members` options carry fields the server does not know, which a newer `options.proto` can write.
+
+`RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so it accepts an entity that leaves the schema incomplete: the schema names an entity that is not registered yet, or a permission that no registered role grants yet. While the schema is incomplete, every request to the server fails with `failed_precondition`. Trusted writes still run, and the engine records their moves and refuses a cycle or a too deep chain under the last schema that compiled. `RegisterEntity` refuses an entity that breaks any other rule, and the server keeps serving the schema it served before.
+
+Registration logs a warning for each mutator that declares no `MutatorAccess`. In a schema that uses the model, only a trusted caller can invoke such a mutator, and every client invocation is refused with `access_denied`. Declare `server.MutatorAccess{TrustedOnly: true}` on a mutator that only trusted callers invoke: it is refused the same way, and registration logs nothing for it.
+
+Registration logs a warning when a rule never decides an operation, because another rule of the entity names it and admits every caller and row the first one admits. A rule that needs `edit_tasks` and `use_billing` never decides beside one that needs `edit_tasks` alone. It also logs a warning when a rule needs two permissions and every role that grants one grants the other: the rule then admits the same callers as a rule that needs the first alone.
+
+Registration logs a warning when one permission governs entities at different depths that do not sit below one another, such as `view_members` on `OrgMember` (at the workspace root) and on `ProjectMember` (below a project). A role that grants such a permission at the workspace root reaches the rows below every anchor. One permission for a row and the rows below it, such as `view_tasks` on `Task` and on a `Comment` below a task, logs nothing.
+
+Registration logs a warning when a role grants a permission that no rule and no `MutatorAccess` names. Only `EntityTx.Can` on the server and `hasPermission` on the client ask about such a permission, so the warning stays for a permission that only code checks. `EntityTx.Can` returns `server.ErrUnknownPermission` for a permission that no role grants.
+
+### Changing the access model
+
+A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access` (its guards and parents included), `grant` or `members` options, to which of its fields carry the `creator` mark, or to the numbers of the enum values its role field matches, which includes adding `access` to an entity that had none or removing it. On a server with `WithCallerAccess`, a role name that the served schema does not declare is also a change, in a new grant entity too: the hook can already return the name as a root role, which grants nothing until a schema declares it. A change to the order of the rules or of the parents is not a change, and neither is a change to `includes` that leaves each role with the same permissions. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet`, `RegisterEntity`, `RegisterDynamicEntity` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
+
+A registration that declares the first role of a schema that served callers without one, or removes its last role, is refused the same way, even when no entity that was registered before changes. This includes a schema that did not use the access model before. A schema without a role admits every caller that `CanAccessWorkspace` lets in, and a schema with one admits only a caller that holds a permission, so the change decides who enters every workspace. The first registration of a server that holds no entity yet needs no flag. A run of `RegisterEntity` calls that leaves the model incomplete for a time is compared with the last schema that served callers.
+
+Registration does not read stored rows. A stored grant row whose role the schema does not declare grants nothing, but keeps its value. When a registration declares that role, or adds `grant` to an entity that already holds rows, every stored row with that role value grants it. `New` has no earlier schema to compare with, so a schema compiled into the server applies such a change without `AllowAccessChange`.
+
+Clients follow a change on their next pull. A change to who the read rules of an entity admit, which is the permissions of its read rules and whether a read rule uses `admitted`, resets every client that holds a cursor. So does a change to its access parents or their cases, and an entity that joins or leaves the model. Every other change, such as a role that grants other permissions, directly or through a role it includes, sends only the rows whose visibility changed. A change to the rules for create, update or delete changes no visibility. See [Access model](server.md#access-model) for every case.
 
 ## Secondary indexes
 

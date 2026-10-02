@@ -37,6 +37,7 @@ import {
 	hasOption,
 	setExtension,
 	toBinary,
+	toJson,
 } from '@bufbuild/protobuf';
 import {
 	type DescriptorProto,
@@ -55,23 +56,44 @@ import {
 } from '@bufbuild/protobuf/wkt';
 
 import {
-	CreatePolicy,
-	DeletePolicy,
+	AccessOptionsSchema,
+	type AccessRule,
+	AccessRuleSchema,
+	AccessWithinSchema,
+	AdmittedCallerSchema,
+	CreatorOptionsSchema,
 	entity as entityExt,
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
 	FieldBehaviorSchema,
-	FieldWritePolicy,
+	FieldGuardSchema,
 	file_syncplane_v1_options,
+	GrantOptionsSchema,
 	IndexKeySchema,
 	IndexSpecSchema,
+	MembersOptionsSchema,
 	reference as referenceExt,
 	ReferenceOptionsSchema,
+	RoleSchema,
 	SearchFieldSchema,
 	SearchSpecSchema,
-	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
-import { validateEntityName, validateRelationName } from '../naming.js';
+import {
+	type Condition,
+	ConditionSchema,
+	file_syncplane_v1_query,
+} from '../gen/syncplane/v1/query_pb.js';
+import {
+	RESERVED_ENTITY_PREFIX,
+	validateEntityName,
+	validatePermissionName,
+	validateRelationName,
+	validateRoleName,
+} from '../naming.js';
+import type { Cond } from '../query/ast.js';
+import { condToProto } from '../query/proto.js';
+import { rootRef } from '../query/proxy.js';
+import type { QueryRef } from '../query/types.js';
 
 /**
  * Package the synthesized messages live in. Matches engine/server/dynamic.go's
@@ -164,8 +186,8 @@ interface FieldSpec {
 	indexed?: boolean;
 	/** Include this field in the entity's full-text search. */
 	searchable?: boolean;
-	/** Put this field out of a client's reach; see Field.protected. */
-	protectedField?: boolean;
+	/** Record who created the row in this field; see Field.creator. */
+	creator?: boolean;
 	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
 	reverseRelation?: string;
 }
@@ -197,11 +219,8 @@ export class Field<T> {
 			throw new Error('key() is only valid on a singular scalar field');
 		}
 		if (this.spec.repeated) throw new Error('a key field cannot be repeated');
-		if (this.spec.protectedField) {
-			throw new Error(
-				'a key field cannot be protected(): a patch can never move a key field, and a put that '
-					+ 'changed one would address a different row',
-			);
+		if (this.spec.creator) {
+			throw new Error('a key field cannot be creator(): a key field never changes after the create');
 		}
 		if (!SCALAR_CAN_KEY[this.spec.scalar!]) {
 			throw new Error(
@@ -305,27 +324,48 @@ export class Field<T> {
 	}
 
 	/**
-	 * Puts this field out of a client's reach while the rest of the row stays
-	 * writable — a status a server-side workflow advances, a counter an effect
-	 * maintains, an owner stamped at creation.
+	 * Records who created the row in this field: on a create that is not
+	 * trusted, the server stores the caller's primary subject in it, whatever
+	 * value the write carries. Afterwards no client changes it: a `patch()`
+	 * whose mask reaches it throws at the call site, and a `put()` keeps the
+	 * stored value. A trusted
+	 * server-side write stores the value it carries.
 	 *
-	 * A `patch()` whose mask reaches the field throws at the call site and is
-	 * rejected by the server; a `put()` is not refused, and the field keeps the
-	 * value the row already holds (its zero value on a new row). Only writes
-	 * under the server's `Trusted` bypass, and the rows a custom mutator writes,
-	 * can change it.
+	 * The local view shows the primary subject from the last access summary
+	 * on a row this client creates, and an empty value before the first
+	 * summary arrives. An access rule's `callerIs` check can name the field to
+	 * admit only the author.
 	 *
-	 * A key field cannot be protected. To protect a field for some callers only,
-	 * leave it unmarked here and implement the server's `FieldPermissions` hook.
+	 * Throws unless the field is a singular `text()` that is not a key. A field
+	 * guard cannot name it.
+	 *
+	 * @example
+	 * ```ts
+	 * const comment = schema.entity('comment', {
+	 *   id: schema.text().key(),
+	 *   task: schema.ref(() => task),
+	 *   authorId: schema.text().creator(),
+	 *   body: schema.text(),
+	 * }, {
+	 *   access: {
+	 *     parents: [ 'task' ],
+	 *     allow: [
+	 *       { read: true, requires: 'view_tasks' },
+	 *       { create: true, delete: true, requires: 'comment', callerIs: 'authorId' },
+	 *       { update: true, requires: 'comment', callerIs: 'authorId', fields: ['body'] },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
 	 */
-	protected(): Field<T> {
-		if (this.spec.key) {
-			throw new Error(
-				'protected() is not valid on a key field: a patch can never move a key field, and a put '
-					+ 'that changed one would address a different row',
-			);
+	creator(): Field<T> {
+		if (this.spec.kind !== 'scalar' || this.spec.scalar !== 'string' || this.spec.repeated) {
+			throw new Error('creator() is only valid on a singular text() field');
 		}
-		return new Field<T>({ ...this.spec, protectedField: true });
+		if (this.spec.key) {
+			throw new Error('creator() is not valid on a key field, which never changes after the create');
+		}
+		return new Field<T>({ ...this.spec, creator: true });
 	}
 
 	/**
@@ -588,31 +628,485 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly indexes: readonly IndexDecl[];
 	/** Full-text search declaration, when the entity has one. */
 	readonly search?: SearchOpts;
-	/** Who may create rows of this entity; see {@link EntityOptions.createPolicy}. */
-	readonly createPolicy: PolicyDecl;
-	/** Who may update rows of this entity; see {@link EntityOptions.updatePolicy}. */
-	readonly updatePolicy: PolicyDecl;
-	/** Who may delete rows of this entity; see {@link EntityOptions.deletePolicy}. */
-	readonly deletePolicy: PolicyDecl;
+	/** Who can read and write the entity's rows; see {@link EntityOptions.access}. */
+	readonly access?: AccessDecl;
+	/** The roles the entity's rows grant; see {@link EntityOptions.grant}. */
+	readonly grant?: GrantDecl;
+	/** Who the members of each row are; see {@link EntityOptions.members}. */
+	readonly members?: MembersDecl;
 	/** @internal synthesized proto full name, e.g. "sync.dynamic.Todo". */
 	readonly typeName: string;
 }
 
 /**
- * Who may perform one class of write on an entity, mirroring
- * syncplane.v1.CreatePolicy, UpdatePolicy and DeletePolicy.
+ * Who can read and write an entity's rows in the access model, mirroring
+ * syncplane.v1.AccessOptions.
  *
- * `'allow'` is the default and the behaviour of every other entity: anyone the
- * app's permission policy admits may write. `'trustedOnly'` refuses that write
- * to every caller the server authorizes — sync clients and the in-process API
- * alike, and the client refuses it locally rather than applying it optimistically
- * — leaving the write to trusted server-side code and to custom mutators, whose
- * rows are covered by the verdict on the invocation.
+ * An operation is allowed when at least one rule admits it, and the order of
+ * the rules has no effect. An operation no rule admits is open only to
+ * trusted server-side writes, such as connectors, effects and custom mutator
+ * bodies, and the client refuses a write that can only be such an operation
+ * at the call site.
+ *
+ * `allow` holds at least one rule, and no two rules the same.
+ *
+ * Within `entity()`, `parents`, a rule's `callerIs` and `fields`, and a
+ * grant's `subject` and `role`, accept only the names of the entity's fields. A declaration
+ * annotated as `AccessDecl` takes any name, and does not fit an entity's
+ * options; to share rules between entities, check them with `satisfies`.
+ *
+ * @example
+ * ```ts
+ * const readWrite = {
+ *   allow: [ { read: true, requires: 'view_tasks' }, { write: true, requires: 'edit_tasks' } ],
+ * } satisfies schema.AccessDecl;
+ * const task = schema.entity('task', { id: schema.text().key() }, { access: readWrite });
+ * ```
  */
-export type PolicyDecl = 'allow' | 'trustedOnly';
+export interface AccessDecl<F extends Fields = Fields> {
+	allow: readonly AccessRuleDecl<F>[];
+	/**
+	 * The access parents, by accessor name: the `ref()` and `refList()` fields
+	 * that place each row below the rows they point at. A permission held at a
+	 * referenced row, or at a row above it, applies to this row. A row sits
+	 * below every row its parents name. The referenced entity can have access
+	 * parents of its own, and an entity can be its own access parent. An
+	 * entity with no parents sits at the workspace root.
+	 *
+	 * No two entries are the same, and each referenced entity must declare
+	 * `access`. A `workspaceRef()` cannot be a parent. A grant entity names at
+	 * most one parent, and not a `refList()`. A field guard cannot name a
+	 * parent.
+	 *
+	 * A write that adds or removes a parent needs its rule where that parent
+	 * sits; see {@link AccessRuleDecl}. A write fails when the row would name
+	 * more rows than the server's `MaxAccessParents` limit allows, or would
+	 * sit below itself.
+	 *
+	 * @example
+	 * ```ts
+	 * const task = schema.entity('task', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project),
+	 *   labels: schema.refList(() => label),
+	 * }, {
+	 *   access: {
+	 *     parents: [ 'project', 'labels' ],
+	 *     allow: [
+	 *       { read: true, requires: 'view_tasks' },
+	 *       { write: true, requires: 'edit_tasks' },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
+	 */
+	parents?: readonly FieldKeys<F>[];
+	/**
+	 * The field guards: each one restricts who can read and who can write a
+	 * set of fields, whatever rule in `allow` admits the read or the write. A
+	 * field that no guard names follows `allow` alone. See
+	 * {@link FieldGuardDecl}.
+	 */
+	guard?: readonly FieldGuardDecl<F>[];
+}
 
-/** Alias of {@link PolicyDecl}, kept for the `deletePolicy` option it was named for. */
-export type DeletePolicyDecl = PolicyDecl;
+/**
+ * Restricts who can read and who can write a set of an entity's fields,
+ * mirroring syncplane.v1.FieldGuard.
+ *
+ * A caller reads a guarded field of a row when a rule in `allow` of the entity
+ * admits reading the row, and a guard rule that names `read` admits reading
+ * the row too. A guard without a read rule hides its fields from every client.
+ * The server clears each field a caller may not read before it sends the row,
+ * and {@link Row.hidden} names it. A query, a subscription or a facet that
+ * names a field the caller does not read on every row fails on the server.
+ *
+ * A write that sets a guarded field needs a rule in `allow` of the entity that
+ * admits the write, and a rule of the guard that admits the field operation:
+ * `create` for the value a create stores, `update` for a change of a row that
+ * exists, and `write` for both. A guard rule decides as an entity rule does,
+ * on the row as it will be stored and, for an update, on the stored row. A
+ * field operation that no guard rule admits is open only to trusted
+ * server-side writes.
+ *
+ * When the guard does not admit the caller, a `patch()` whose mask names a
+ * guarded field is refused, a `put()` that updates a row keeps the stored
+ * value of each guarded field, and a `put()` that creates a row stores the
+ * zero value. A `put()` that updates a row also keeps the stored value of each
+ * field the caller may not read and leaves unset; a `put()` that sets such a
+ * field, or a `patch()`, writes it when a guard rule admits the caller. The
+ * client refuses a patch at the call site, and keeps or clears the field on a
+ * put, only where no guard rule admits the operation to any caller; the server
+ * decides the rest, and a refused patch comes back as a rejection ack.
+ *
+ * `fields` names the guarded fields by accessor name. A field is in at most
+ * one guard, and cannot be a key field, a `.creator()` field or a field that
+ * `parents` names. A guard rule cannot name `delete` or `fields`,
+ * and its `callerIs` and `when` cannot read a guarded field. A guard that can
+ * hide its fields cannot name a field that a rule in `allow` reads with
+ * `callerIs` or `when`, or the subject or role field of a grant entity.
+ *
+ * To let a caller change only some fields of a row, set `fields` on an update
+ * rule in `allow` instead: that rule adds a narrow update, and a guard takes a
+ * field away from every rule.
+ *
+ * @example
+ * A total that only server code computes, a status that only managers set,
+ * and a salary that only HR reads and writes:
+ * ```ts
+ * const order = schema.entity('order', {
+ *   id: schema.text().key(),
+ *   total: schema.int64(),
+ *   status: schema.text(),
+ *   salary: schema.int64(),
+ * }, {
+ *   access: {
+ *     allow: [ { read: true, requires: 'view_orders' }, { write: true, requires: 'edit_orders' } ],
+ *     guard: [
+ *       { fields: [ 'total' ], allow: [ { read: true, admitted: true } ] },
+ *       {
+ *         fields: [ 'status' ],
+ *         allow: [ { read: true, admitted: true }, { write: true, requires: 'manage_orders' } ],
+ *       },
+ *       { fields: [ 'salary' ], allow: [ { read: true, write: true, requires: 'hr' } ] },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface FieldGuardDecl<F extends Fields = Fields> {
+	fields: readonly FieldKeys<F>[];
+	allow: readonly GuardRuleDecl<F>[];
+}
+
+/** The accessor names of the fields of F; any string where F is not known. */
+type FieldKeys<F extends Fields> = Fields extends F ? string : Extract<keyof F, string>;
+
+/** The accessor names of the `text()` fields of F; any string where F is not known. */
+type TextKeys<F extends Fields> = Fields extends F ? string
+	: {
+		[K in Extract<keyof F, string>]: F[K] extends Field<string> ? K : never;
+	}[Extract<keyof F, string>];
+
+/**
+ * The accessor names of the fields of F that can hold a grant subject: `text()`
+ * fields and singular references. Any string where F is not known.
+ */
+type SubjectKeys<F extends Fields> = Fields extends F ? string : {
+	[K in Extract<keyof F, string>]: F[K] extends Field<infer T> ? [T] extends [string] ? K
+		: T extends readonly unknown[] | Uint8Array ? never
+		: T extends object ? K
+		: never
+		: never;
+}[Extract<keyof F, string>];
+
+/**
+ * One rule of an {@link AccessDecl}, mirroring syncplane.v1.AccessRule: the
+ * operations it admits, who it admits them to, and the checks the row must
+ * pass.
+ *
+ * At least one operation must be `true`. `write` admits `create`, `update`
+ * and `delete`. The source is either `requires`, which admits a caller that
+ * holds every permission it names at the workspace root, at the row, or at a
+ * row above it through its access parents, each at any one of
+ * these places, or `admitted: true`, which admits every caller admitted to the
+ * workspace. `requires` names no permission twice. To admit a caller that
+ * holds either of two permissions, declare two rules. The server's workspace
+ * hook admits a caller; in a schema where some entity declares `grant`, the
+ * caller must also hold at least one permission in the workspace.
+ *
+ * `callerIs` names a singular `text()` field that must hold one of the
+ * caller's subjects; an empty value never matches, and a permission held at
+ * the root does not skip the check. `fields` names the fields an update may
+ * change, by accessor name; it is valid only on a rule whose one operation is
+ * `update`, and cannot name a key field. A move changes an access parent
+ * field, so a rule with `fields` admits a move only when it lists that field.
+ *
+ * `when` builds a condition the row must match, with the same field proxy a
+ * query's `where` takes. It reads only the row: a `matches` or a `match`
+ * condition is refused. A permission held at the root does not skip it.
+ *
+ * An update must be admitted by one rule for both the stored row and the row
+ * as it will be stored, so a rule admits moving a row to another access parent
+ * only when its source holds at both places, a rule with `callerIs` admits no
+ * update that writes someone else into that field, and a rule with
+ * `when` admits no update that makes the row fail the condition. A row with
+ * several access parents shows to the readers of each, so a rule admits a
+ * create, or an update that adds or removes a parent, only when its source
+ * holds through each parent the write adds or removes on its own.
+ *
+ * @example
+ * ```ts
+ * const allow: schema.AccessRuleDecl[] = [
+ *   { read: true, requires: 'view_tasks' },
+ *   { create: true, delete: true, requires: 'comment', callerIs: 'authorId' },
+ *   { update: true, requires: 'comment', callerIs: 'authorId', fields: ['body'] },
+ *   { update: true, delete: true, requires: 'moderate_comments' },
+ * ];
+ * ```
+ *
+ * @example
+ * Tasks that need a project role and a billing role at the root to edit:
+ * ```ts
+ * const allow: schema.AccessRuleDecl[] = [
+ *   { read: true, requires: 'view_tasks' },
+ *   { update: true, requires: ['edit_tasks', 'use_billing'] },
+ * ];
+ * ```
+ *
+ * @example
+ * Tasks a writer edits until someone archives them:
+ * ```ts
+ * const task = schema.entity('task', {
+ *   id: schema.text().key(),
+ *   archived: schema.bool(),
+ * }, {
+ *   access: {
+ *     allow: [
+ *       { read: true, requires: 'view_tasks' },
+ *       { update: true, requires: 'edit_tasks', when: (t) => t.archived.eq(false) },
+ *       { update: true, requires: 'archive_tasks' },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export type AccessRuleDecl<F extends Fields = Fields> =
+	& {
+		delete?: boolean;
+		fields?: readonly FieldKeys<F>[];
+	}
+	& GuardRuleDecl<F>;
+
+/**
+ * One rule of a {@link FieldGuardDecl}: an {@link AccessRuleDecl} without
+ * `delete` and `fields`. `write` admits `create` and `update`.
+ */
+export type GuardRuleDecl<F extends Fields = Fields> =
+	& {
+		read?: boolean;
+		create?: boolean;
+		update?: boolean;
+		write?: boolean;
+		callerIs?: TextKeys<F>;
+		when?(row: QueryRef<RowOf<F>>): Cond;
+		within?: WithinEntry<F> | readonly WithinEntry<F>[];
+	}
+	& (
+		| { requires: string | readonly [string, ...string[]]; admitted?: never }
+		| { admitted: true; requires?: never }
+	);
+
+/**
+ * One entry of an access rule's `within`, mirroring syncplane.v1.AccessWithin:
+ * the rule admits only rows that are, or sit below, a row of `entity` that
+ * passes every check the entry sets. A row passes when the row itself, or any
+ * row above it through access parents, is such a row.
+ *
+ * `entity` names an entity of the same schema whose rows the rule's rows can
+ * sit below, by its wire name or as a thunk that returns it. A thunk is
+ * called by `defineSchema()`, so it can name an entity declared later. For
+ * the rule's own entity, when its rows sit below rows of their own, use
+ * {@link SelfWithinDecl}. `callerIs` names a singular `text()` field of that
+ * entity, by accessor name, that must hold one of the caller's subjects;
+ * `when` is a condition that row must match, and reads only that row. At
+ * least one of the two is set. A rule takes the entry as {@link within}
+ * builds it, which types `callerIs` and `when` against the entity's fields. A
+ * permission held at the root does not skip the check.
+ *
+ * A write to a row that changes whether it passes changes what the rows below
+ * it show, as a move does, so it needs a read rule of each entity whose rows
+ * can sit below it. In a recursive entity, a row that fails does not hide the
+ * rows below it when a row above it passes.
+ *
+ * @example
+ * Comments the owner of their doc reads and writes:
+ * ```ts
+ * const comment = schema.entity('comment', {
+ *   id: schema.text().key(),
+ *   doc: schema.ref(() => doc),
+ * }, {
+ *   access: {
+ *     parents: [ 'doc' ],
+ *     allow: [
+ *       {
+ *         read: true,
+ *         write: true,
+ *         admitted: true,
+ *         within: schema.within(() => doc, { callerIs: 'ownerId' }),
+ *       },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface WithinDecl<F extends Fields = Fields> {
+	entity: string | (() => EntitySchema);
+	self?: never;
+	callerIs?: TextKeys<F>;
+	when?(row: QueryRef<RowOf<F>>): Cond;
+}
+
+declare const checkedWithin: unique symbol;
+
+/**
+ * A {@link WithinDecl} that {@link within} built, with its checks typed
+ * against the fields of the entity it names: the form an access rule takes.
+ */
+export type CheckedWithinDecl = WithinDecl & { readonly [checkedWithin]: true };
+
+/**
+ * A within entry on rows of the rule's own entity, for an entity whose rows
+ * sit below rows of their own through an access parent that references the
+ * entity itself. It means the same as a {@link WithinDecl} that names the entity,
+ * and types `callerIs` and `when` against the entity's fields.
+ *
+ * @example
+ * Folders that every caller reads when the folder, or a folder above it, is
+ * not private:
+ * ```ts
+ * const folder = schema.entity('folder', {
+ *   id: schema.text().key(),
+ *   parent: schema.ref(() => folder),
+ *   private: schema.bool(),
+ * }, {
+ *   access: {
+ *     parents: [ 'parent' ],
+ *     allow: [
+ *       { read: true, requires: 'view_private' },
+ *       { read: true, admitted: true, within: { self: true, when: (f) => f.private.eq(false) } },
+ *     ],
+ *   },
+ * });
+ * ```
+ */
+export interface SelfWithinDecl<F extends Fields = Fields> {
+	self: true;
+	entity?: never;
+	callerIs?: TextKeys<F>;
+	when?(row: QueryRef<RowOf<F>>): Cond;
+}
+
+/**
+ * One entry of an access rule's `within`: a {@link CheckedWithinDecl} from
+ * {@link within}, or a {@link SelfWithinDecl}.
+ */
+export type WithinEntry<F extends Fields = Fields> = CheckedWithinDecl | SelfWithinDecl<F>;
+
+/**
+ * Builds a within entry on rows of `target`, with `when` typed against its
+ * fields. See {@link WithinDecl}. Pass a thunk that returns the target when
+ * it is declared after the entity whose rule holds the entry.
+ *
+ * @example
+ * Tasks that clerks read unless their project is private, and that nobody
+ * edits while the project is archived:
+ * ```ts
+ * const task = schema.entity('task', {
+ *   id: schema.text().key(),
+ *   project: schema.ref(() => project),
+ * }, {
+ *   access: {
+ *     parents: [ 'project' ],
+ *     allow: [
+ *       { read: true, requires: 'view_tasks' },
+ *       {
+ *         read: true,
+ *         requires: 'view_open_tasks',
+ *         within: schema.within(() => project, { when: (p) => p.private.eq(false) }),
+ *       },
+ *       {
+ *         write: true,
+ *         requires: 'edit_tasks',
+ *         within: schema.within(() => project, { when: (p) => p.archived.eq(false) }),
+ *       },
+ *     ],
+ *   },
+ * });
+ * const project = schema.entity('project', {
+ *   id: schema.text().key(),
+ *   private: schema.bool(),
+ *   archived: schema.bool(),
+ * }, {
+ *   access: { allow: [ { read: true, requires: 'view_tasks' } ] },
+ * });
+ * ```
+ */
+export function within<F extends Fields>(
+	target: EntitySchema<F> | (() => EntitySchema<F>),
+	checks: Omit<WithinDecl<F>, 'entity' | 'self'>,
+): CheckedWithinDecl {
+	return {
+		...checks,
+		entity: typeof target === 'function' ? target : target.name,
+	} as WithinDecl as CheckedWithinDecl;
+}
+
+/**
+ * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
+ * row gives the subject in its `subject` field the role in its `role` field,
+ * at the row its access parent points at, or at the workspace root when the
+ * entity has no access parent.
+ */
+export interface GrantDecl<F extends Fields = Fields> {
+	/**
+	 * Accessor name of the field that holds the subject: a `text()` field,
+	 * which names one caller, or a singular `ref()` to an entity that declares
+	 * `members`, which names a team and grants to every member of it.
+	 */
+	subject: SubjectKeys<F>;
+	/** Accessor name of the `text()` field that holds the role. */
+	role: TextKeys<F>;
+	/** The roles rows can grant. At least one, with names unique across the schema. */
+	roles: readonly RoleDecl[];
+}
+
+/**
+ * The entity whose rows say who the members of each team row are, mirroring
+ * syncplane.v1.MembersOptions.
+ *
+ * Each live row of the member entity makes its subject a member of the team
+ * row its access parent points at, whatever its role. The member
+ * entity is a grant entity whose access parent is this entity alone, and whose
+ * subject is a `text()` field.
+ */
+export interface MembersDecl {
+	/** Wire name of the member entity. */
+	entity: string;
+}
+
+/**
+ * One role of a {@link GrantDecl}, mirroring syncplane.v1.Role. A role grants
+ * the permissions in `grants` and every permission of each role in
+ * `includes`.
+ *
+ * @example
+ * ```ts
+ * roles: [
+ *   { name: 'project_reader', grants: ['view_projects', 'view_tasks'] },
+ *   { name: 'project_writer', includes: ['project_reader'], grants: ['edit_tasks'] },
+ * ]
+ * ```
+ */
+export type RoleDecl =
+	& RoleFields
+	& ({ grants: readonly string[] } | { includes: readonly string[] });
+
+/** The fields of a {@link RoleDecl}. */
+interface RoleFields {
+	name: string;
+	/**
+	 * The permissions the role grants at its anchor, without duplicates. A
+	 * permission that an included role also grants is accepted.
+	 */
+	grants?: readonly string[];
+	/**
+	 * The names of roles of the same grant whose permissions this role also
+	 * grants, without duplicates. A role that includes itself, directly or
+	 * through other roles, is refused.
+	 */
+	includes?: readonly string[];
+}
 
 /**
  * One composite secondary index, mirroring syncplane.v1.IndexSpec. Declare one
@@ -673,11 +1167,17 @@ function assertFields(where: string, fields: Fields): void {
 export function entity<F extends Fields>(
 	name: string,
 	fields: F,
-	options?: EntityOptions,
+	options?: EntityOptions<NoInfer<F>>,
 ): EntitySchema<F> {
 	// The name reaches the wire, storage and the KV key layout, and is lowered to
 	// a proto message name below — the shared rule (naming.ts) covers all of it.
 	validateEntityName(name, 'entity()');
+	if (name.startsWith(RESERVED_ENTITY_PREFIX)) {
+		throw new Error(
+			`entity(): entity name "${name}" starts with "${RESERVED_ENTITY_PREFIX}", `
+				+ "which is reserved for the engine's own entities",
+		);
+	}
 	assertFields(`entity "${name}"`, fields);
 
 	let keyCount = 0;
@@ -690,14 +1190,18 @@ export function entity<F extends Fields>(
 
 	const indexes = options?.indexes ?? [];
 	assertIndexes(name, indexes);
+	// A rule's `when` is typed against F for the caller. Past this point only
+	// the builder calls it, with a field proxy that serves any row type.
+	const opts = options as EntityOptions | undefined;
+	assertAccess(name, fields, opts);
 	return {
 		name,
 		fields,
 		indexes,
 		...(options?.search === undefined ? {} : { search: options.search }),
-		createPolicy: options?.createPolicy ?? 'allow',
-		updatePolicy: options?.updatePolicy ?? 'allow',
-		deletePolicy: options?.deletePolicy ?? 'allow',
+		...(opts?.access === undefined ? {} : { access: opts.access }),
+		...(opts?.grant === undefined ? {} : { grant: opts.grant }),
+		...(options?.members === undefined ? {} : { members: options.members }),
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
 }
@@ -716,7 +1220,7 @@ export interface SearchOpts {
 }
 
 /** Optional per-entity settings, beyond the fields themselves. */
-export interface EntityOptions {
+export interface EntityOptions<F extends Fields = Fields> {
 	/**
 	 * Composite secondary indexes over this entity's fields. See
 	 * {@link IndexDecl}; for a single field, `.indexed()` is the simpler
@@ -732,38 +1236,835 @@ export interface EntityOptions {
 	 */
 	search?: SearchOpts;
 	/**
-	 * Who may delete rows of this entity. Defaults to `'allow'`.
+	 * Who can read and write rows of this entity in the access model; see
+	 * {@link AccessDecl}.
 	 *
-	 * `'trustedOnly'` takes DELETE away from clients entirely, which is worth
-	 * doing for the rows a cascade hangs off: it removes the only irreversible
-	 * verb the wire has, rather than making its damage recoverable after the
-	 * fact. Deletion stays reachable through a custom mutator, where the app
-	 * can put the cascade handling and checks it wants.
+	 * When omitted, the entity is outside the access model: every caller the
+	 * server admits to the workspace reads and writes its rows, subject only
+	 * to the app's permission policy, and `can()` answers `'yes'` for them.
+	 * A server built with `WithStrictAccess` refuses such an entity in a schema
+	 * where any entity declares `access` or `grant`.
+	 *
+	 * Collaborative-text fields are edited by PATCH, so a client edits them
+	 * only where a rule admits `update`.
+	 *
+	 * Permission names follow the identifier rule in docs/reference/naming.md.
+	 * The server refuses a permission no role grants, and logs a warning for a
+	 * role that grants a permission no rule uses.
+	 *
+	 * @example
+	 * Rows a client can post but not change or delete afterwards. A `put()`
+	 * that passes `expectedVersion: 0n` is a create; one that passes no
+	 * version could replace a stored row, and the server refuses it when the
+	 * row exists.
+	 * ```ts
+	 * const entry = schema.entity('entry', {
+	 *   id: schema.text().key(),
+	 *   body: schema.text(),
+	 * }, {
+	 *   access: {
+	 *     allow: [ { read: true, create: true, requires: 'post_entries' } ],
+	 *   },
+	 * });
+	 * ```
 	 */
-	deletePolicy?: PolicyDecl;
+	access?: AccessDecl<F>;
 	/**
-	 * Who may create rows of this entity. Defaults to `'allow'`.
+	 * Declares the entity's rows as grant rows; see {@link GrantDecl}. A grant
+	 * entity must also declare `access`.
 	 *
-	 * `'trustedOnly'` marks the entity server-owned: clients read its rows and
-	 * the server writes them, without every deployment's permission policy
-	 * having to remember to say so. A client that tries is refused at the call
-	 * site.
+	 * @example
+	 * ```ts
+	 * const projectMember = schema.entity('project_member', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project),
+	 *   userId: schema.text(),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: {
+	 *     subject: 'userId',
+	 *     role: 'role',
+	 *     roles: [
+	 *       { name: 'project_reader', grants: ['view_projects', 'view_tasks'] },
+	 *       { name: 'project_writer', includes: ['project_reader'], grants: ['edit_tasks'] },
+	 *     ],
+	 *   },
+	 *   access: {
+	 *     parents: [ 'project' ],
+	 *     allow: [
+	 *       { read: true, requires: 'view_members' },
+	 *       { write: true, requires: 'manage_members' },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
 	 */
-	createPolicy?: PolicyDecl;
+	grant?: GrantDecl<F>;
 	/**
-	 * Who may modify existing rows of this entity in place. Defaults to
-	 * `'allow'`.
+	 * Declares the entity's rows as teams; see {@link MembersDecl}. A grant
+	 * whose subject is a `ref()` to this entity grants to every member of the
+	 * team row it names. An entity with members must also declare `access`.
 	 *
-	 * `'trustedOnly'` alongside a permissive `createPolicy` makes an entity
-	 * append-only: a client may post a row but not silently edit one afterwards,
-	 * leaving edits to a custom mutator that can check who is asking. Such a
-	 * client must assert `expectedVersion: 0n` on its `put()` to say it means to
-	 * create — an unguarded put could replace a row, so it is refused.
+	 * A write that is not trusted cannot delete a team row while a live grant
+	 * row names it as its subject.
 	 *
-	 * Collaborative-text fields are edited by PATCH, so an entity carrying one
-	 * cannot have its text edited by clients while this is `'trustedOnly'`.
+	 * @example
+	 * ```ts
+	 * const team = schema.entity('team', { id: schema.text().key() }, {
+	 *   members: { entity: 'team_member' },
+	 *   access: { allow: [ { read: true, requires: 'view_teams' } ] },
+	 * });
+	 * const teamMember = schema.entity('team_member', {
+	 *   id: schema.text().key(),
+	 *   team: schema.ref(() => team),
+	 *   userId: schema.text(),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: { subject: 'userId', role: 'role', roles: [ { name: 'team_member', grants: ['view_teams'] } ] },
+	 *   access: { parents: [ 'team' ], allow: [ { read: true, requires: 'view_teams' } ] },
+	 * });
+	 * const projectTeam = schema.entity('project_team', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project),
+	 *   team: schema.ref(() => team),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: { subject: 'team', role: 'role', roles: [ { name: 'project_team_writer', grants: ['view_tasks', 'edit_tasks'] } ] },
+	 *   access: { parents: [ 'project' ], allow: [ { read: true, requires: 'view_tasks' } ] },
+	 * });
+	 * ```
 	 */
-	updatePolicy?: PolicyDecl;
+	members?: MembersDecl;
+}
+
+/**
+ * Validates the access declarations of one entity against the rules the
+ * engine enforces on one entity at registration. defineSchema() checks the
+ * rules that span the entities of one schema, and registration the rest, such
+ * as coverage of permissions and unique role names.
+ */
+function assertAccess(
+	entityName: string,
+	fields: Fields,
+	options: EntityOptions | undefined,
+): void {
+	const where = `entity "${entityName}"`;
+	const access = options?.access;
+	if (access !== undefined) {
+		assertParents(where, access, fields);
+		assertAccessRules(where, entityName, access, fields, false);
+	}
+	const parents = access?.parents ?? [];
+	const members = options?.members;
+	if (members !== undefined) {
+		if (access === undefined) throw new Error(`${where}: an entity with members must declare access`);
+		if (!members.entity) throw new Error(`${where}: members names no entity`);
+	}
+	const grant = options?.grant;
+	if (grant === undefined) return;
+	if (access === undefined) {
+		throw new Error(`${where}: a grant entity must declare access`);
+	}
+	// A grant row applies at one anchor.
+	if (parents.length > 1 || parents.some((key) => fields[key]!.spec.repeated)) {
+		throw new Error(
+			`${where}: a grant entity has at most one access parent: access.parents names one singular ref()`,
+		);
+	}
+	for (const part of [ 'subject', 'role' ] as const) {
+		const spec = fields[grant[part]]?.spec;
+		if (spec === undefined) {
+			throw new Error(`${where}: grant ${part} field "${grant[part]}" is not declared`);
+		}
+		const text = spec.kind === 'scalar' && spec.scalar === 'string' && !spec.repeated;
+		const team = spec.kind === 'ref' && !spec.repeated && !spec.refWorkspace;
+		if (part === 'subject' && !text && !team) {
+			throw new Error(
+				`${where}: grant subject field "${grant.subject}" must be a singular text() field or a singular ref()`,
+			);
+		}
+		if (part === 'role' && !text) {
+			throw new Error(`${where}: grant role field "${grant.role}" must be a singular text() field`);
+		}
+	}
+	if (grant.subject === grant.role) {
+		throw new Error(`${where}: grant names field "${grant.subject}" as both subject and role`);
+	}
+	const hideable = hideableFields(access.guard ?? []);
+	for (const name of [ grant.role, grant.subject ]) {
+		if (hideable.includes(name)) {
+			throw new Error(
+				`${where}: grant field "${name}" is restricted by a guard that can hide it; `
+					+ 'the subject and role of a grant row are read by every reader of the row',
+			);
+		}
+	}
+	if (grant.roles.length === 0) throw new Error(`${where}: grant declares no roles`);
+	const names = new Set<string>();
+	for (const role of grant.roles) {
+		validateRoleName(role.name, `${where} grant`);
+		if (names.has(role.name)) throw new Error(`${where}: grant declares role "${role.name}" twice`);
+		names.add(role.name);
+		const grants = role.grants ?? [];
+		if (grants.length === 0 && (role.includes ?? []).length === 0) {
+			throw new Error(`${where}: grant role "${role.name}" grants no permissions`);
+		}
+		const perms = new Set<string>();
+		for (const perm of grants) {
+			validatePermissionName(perm, `${where} grant role "${role.name}"`);
+			if (perms.has(perm)) {
+				throw new Error(`${where}: grant role "${role.name}" grants "${perm}" twice`);
+			}
+			perms.add(perm);
+		}
+	}
+	assertRoleIncludes(where, grant.roles, names);
+}
+
+/**
+ * Validates the access parents of one entity against the rules the engine
+ * enforces on syncplane.v1.AccessOptions at registration: each entry names a
+ * declared `ref()` or `refList()` field once. The schema-wide check that each
+ * target declares access is validateAccessTargets.
+ */
+function assertParents(where: string, access: AccessDecl, fields: Fields): void {
+	const parents = access.parents;
+	if (parents === undefined) return;
+	// A plain-JS caller can pass a shape the types refuse.
+	if (!Array.isArray(parents as unknown)) throw new Error(`${where}: access.parents must be a list`);
+	parents.forEach((name, i) => {
+		const at = `${where} access.parents[${i}]`;
+		const first = parents.indexOf(name);
+		if (first !== i) throw new Error(`${at} and access.parents[${first}] both name "${name}"`);
+		const spec = fields[name]?.spec;
+		if (spec === undefined) throw new Error(`${at}: names "${name}", which is not declared`);
+		if (spec.kind !== 'ref') {
+			throw new Error(`${at}: names "${name}", which is not a ref() or a refList() field`);
+		}
+		if (spec.refWorkspace) {
+			throw new Error(
+				`${at}: names "${name}", which is a workspace reference; an access parent is a ref() or a refList()`,
+			);
+		}
+	});
+}
+
+/**
+ * Validates the `includes` of every role of one grant against the rules the
+ * engine enforces at registration: each names a role of the same grant, once,
+ * and no role includes itself through any chain.
+ */
+function assertRoleIncludes(where: string, roles: readonly RoleDecl[], names: Set<string>): void {
+	const includes = new Map<string, readonly string[]>();
+	for (const role of roles) {
+		const seen = new Set<string>();
+		for (const inc of role.includes ?? []) {
+			if (!names.has(inc)) {
+				throw new Error(
+					`${where}: grant role "${role.name}" includes "${inc}", which is not a role of this grant; `
+						+ 'a role includes only roles declared beside it',
+				);
+			}
+			if (seen.has(inc)) {
+				throw new Error(`${where}: grant role "${role.name}" includes "${inc}" twice`);
+			}
+			seen.add(inc);
+		}
+		includes.set(role.name, role.includes ?? []);
+	}
+	const done = new Set<string>();
+	const visit = (name: string, path: string[]): void => {
+		if (done.has(name)) return;
+		const at = path.indexOf(name);
+		if (at >= 0) {
+			throw new Error(
+				`${where}: grant role "${name}" includes itself through ${
+					[ ...path.slice(at), name ].join(' → ')
+				}`,
+			);
+		}
+		for (const inc of includes.get(name)!) visit(inc, [ ...path, name ]);
+		done.add(name);
+	};
+	for (const role of roles) visit(role.name, []);
+}
+
+/** The operations of an {@link AccessRuleDecl}, in syncplane.v1.AccessRule field order. */
+const ACCESS_OPERATIONS = [ 'read', 'create', 'update', 'delete', 'write' ] as const;
+
+/**
+ * Validates the rules of entity `owner`'s access declaration, and its field
+ * guards, against the rules the engine enforces on syncplane.v1.AccessOptions
+ * at registration. A within thunk is called only when `resolve` is set; until
+ * then a rule that holds one skips the check for repeated rules, which needs
+ * the entity it names.
+ */
+function assertAccessRules(
+	where: string,
+	owner: string,
+	access: AccessDecl,
+	fields: Fields,
+	resolve: boolean,
+): void {
+	// A plain-JS caller can pass a shape the types refuse, such as one with no
+	// `allow` array.
+	if (!Array.isArray(access.allow) || access.allow.length === 0) {
+		throw new Error(`${where}: access.allow declares no rules`);
+	}
+	const seen = new Map<string, number>();
+	access.allow.forEach((rule, i) => {
+		const at = `${where} access.allow[${i}]`;
+		const key = assertAccessRule(at, owner, rule, fields, resolve);
+		if (key === undefined) return;
+		const first = seen.get(key);
+		if (first !== undefined) {
+			throw new Error(`${at}: the rule repeats access.allow[${first}]`);
+		}
+		seen.set(key, i);
+	});
+	if (access.guard !== undefined) {
+		assertGuards(where, owner, access, fields, resolve);
+	}
+}
+
+/**
+ * Validates one access rule by itself, and returns a key that is equal for two
+ * rules that are the same, or undefined when a within thunk that `resolve`
+ * does not allow to call leaves the key open. `at` names the rule in an error.
+ */
+function assertAccessRule(
+	at: string,
+	owner: string,
+	rule: AccessRuleDecl,
+	fields: Fields,
+	resolve: boolean,
+): string | undefined {
+	if (!ACCESS_OPERATIONS.some((op) => rule[op] === true)) {
+		throw new Error(
+			`${at}: the rule admits no operation; set read, create, update, delete or write`,
+		);
+	}
+	const requires = requiresOf(rule);
+	const hasAdmitted = rule.admitted !== undefined;
+	if (requires !== undefined && hasAdmitted) {
+		throw new Error(`${at}: the rule sets both requires and admitted; set exactly one`);
+	}
+	if (requires === undefined && !hasAdmitted) {
+		throw new Error(`${at}: the rule has no source; set requires or admitted: true`);
+	}
+	if (requires !== undefined) {
+		// A plain-JS caller can pass the empty list the types refuse.
+		if (requires.length === 0) throw new Error(`${at}: requires names no permission`);
+		const named = new Set<string>();
+		for (const permission of requires) {
+			validatePermissionName(permission, `${at} requires`);
+			if (named.has(permission)) throw new Error(`${at}: requires "${permission}" twice`);
+			named.add(permission);
+		}
+	} else if (rule.admitted !== true) {
+		throw new Error(`${at}: admitted must be true`);
+	}
+	if (rule.callerIs !== undefined) {
+		const spec = fields[rule.callerIs]?.spec;
+		if (spec === undefined) {
+			throw new Error(`${at}: callerIs field "${rule.callerIs}" is not declared`);
+		}
+		if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+			throw new Error(`${at}: callerIs field "${rule.callerIs}" must be a singular text() field`);
+		}
+	}
+	if (rule.fields !== undefined) {
+		if (
+			ACCESS_OPERATIONS.some((op) => op !== 'update' && rule[op] === true) || rule.update !== true
+		) {
+			throw new Error(`${at}: fields is valid only on a rule whose one operation is update`);
+		}
+		if (rule.fields.length === 0) throw new Error(`${at}: fields lists no field`);
+		const listed = new Set<string>();
+		for (const name of rule.fields) {
+			const spec = fields[name]?.spec;
+			if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
+			if (spec.key) {
+				throw new Error(`${at}: fields names key field "${name}", which no update changes`);
+			}
+			if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
+			listed.add(name);
+		}
+	}
+	const when = whenOf(at, rule.when, fields);
+	const within = withinKeysOf(at, owner, rule, resolve);
+	if (within === undefined) return undefined;
+	// The key is the rule as the proto message holds it: an operation left
+	// unset and one set to false encode the same, so they must collide, and
+	// the order of a requires, a fields or a within list does not count.
+	return JSON.stringify([
+		...ACCESS_OPERATIONS.map((op) => rule[op] === true),
+		requires === undefined ? null : [ ...requires ].sort(),
+		rule.callerIs ?? null,
+		rule.fields === undefined ? null : [ ...rule.fields ].sort(),
+		when === undefined ? null : toJson(ConditionSchema, when),
+		within,
+	]);
+}
+
+/**
+ * Validates the field guards of entity `owner` against the rules the engine
+ * enforces on syncplane.v1.FieldGuard at registration; see
+ * {@link FieldGuardDecl}.
+ */
+function assertGuards(
+	where: string,
+	owner: string,
+	access: AccessDecl,
+	fields: Fields,
+	resolve: boolean,
+): void {
+	const allow = access.allow;
+	const guards = access.guard!;
+	const parents = new Set<string>(access.parents ?? []);
+	// A plain-JS caller can pass a shape the types refuse.
+	if (!Array.isArray(guards as unknown)) throw new Error(`${where}: access.guard must be a list`);
+	const guardOf = new Map<string, number>();
+	guards.forEach((guard, i) => {
+		const at = `${where} access.guard[${i}]`;
+		if (!Array.isArray(guard.fields as unknown) || guard.fields.length === 0) {
+			throw new Error(`${at}: names no field; list the fields it restricts`);
+		}
+		const listed = new Set<string>();
+		for (const name of guard.fields) {
+			const spec = fields[name]?.spec;
+			if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
+			if (spec.key) {
+				throw new Error(`${at}: fields names key field "${name}", which no update changes`);
+			}
+			if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
+			listed.add(name);
+			if (parents.has(name)) {
+				throw new Error(
+					`${at}: names "${name}", which is an access parent; a guard cannot restrict it`,
+				);
+			}
+			if (spec.creator) {
+				throw new Error(`${at}: names "${name}", which is a creator field; a guard cannot restrict it`);
+			}
+			const other = guardOf.get(name);
+			if (other !== undefined) {
+				throw new Error(
+					`${at} and access.guard[${other}] both name "${name}"; a field has at most one guard`,
+				);
+			}
+			guardOf.set(name, i);
+		}
+		if (!Array.isArray(guard.allow as unknown)) throw new Error(`${at}: allow must be a list`);
+		const seen = new Map<string, number>();
+		guard.allow.forEach((rule, j) => {
+			const ruleAt = `${at}.allow[${j}]`;
+			// A plain-JS caller can set what the guard rule type leaves out.
+			const plain = rule as AccessRuleDecl;
+			if (plain.delete === true) {
+				throw new Error(
+					`${ruleAt}: names delete; a guard restricts writing a field, and a delete writes none`,
+				);
+			}
+			if (plain.fields !== undefined) {
+				throw new Error(`${ruleAt}: names fields; the guard's own fields are the ones it restricts`);
+			}
+			const key = assertAccessRule(ruleAt, owner, rule, fields, resolve);
+			if (key === undefined) return;
+			const first = seen.get(key);
+			if (first !== undefined) throw new Error(`${ruleAt}: the rule repeats ${at}.allow[${first}]`);
+			seen.set(key, j);
+		});
+	});
+	// Once every guard is known: a check that read a guarded field would depend
+	// on the value a guard decides about.
+	const guarded = new Set([ ...guardOf.keys() ].map(snakeCase));
+	guards.forEach((guard, i) => {
+		guard.allow.forEach((rule, j) => {
+			const reads = rule.callerIs === undefined ? [] : [ snakeCase(rule.callerIs) ];
+			const when = whenOf('', rule.when, fields);
+			if (when !== undefined) reads.push(...conditionHeads(when));
+			for (const name of reads) {
+				if (guarded.has(name)) {
+					throw new Error(
+						`${where} access.guard[${i}].allow[${j}]: reads "${name}", which a guard restricts; `
+							+ "a guard's checks read only fields that no guard restricts",
+					);
+				}
+			}
+		});
+	});
+	// A client decides access from the rows it holds, so a field a rule of the
+	// entity checks must reach every reader of the row.
+	const hideable = new Set(hideableFields(guards).map(snakeCase));
+	allow.forEach((rule, i) => {
+		const reads = rule.callerIs === undefined ? [] : [ snakeCase(rule.callerIs) ];
+		const when = whenOf('', rule.when, fields);
+		if (when !== undefined) reads.push(...conditionHeads(when));
+		for (const name of reads) {
+			if (hideable.has(name)) {
+				throw new Error(
+					`${where} access.allow[${i}]: reads "${name}", which a guard can hide; `
+						+ 'a field that a rule checks is one every reader of the row reads',
+				);
+			}
+		}
+	});
+}
+
+/**
+ * The accessor names of the fields that a guard of `guards` can hide from a
+ * caller that reads the row: each field of a guard without a read rule that
+ * admits every admitted caller and checks nothing.
+ */
+function hideableFields(guards: readonly FieldGuardDecl[]): string[] {
+	return guards
+		.filter((g) =>
+			!g.allow.some((r) =>
+				r.read === true && r.admitted === true && r.callerIs === undefined && r.when === undefined
+				&& r.within === undefined
+			)
+		)
+		.flatMap((g) => [ ...g.fields ]);
+}
+
+/**
+ * The first segment of each path that `cond` reads on the row. An exists
+ * condition reads the list at its path, and its inner condition reads that
+ * list's elements, so only its path counts.
+ */
+function conditionHeads(cond: Condition): string[] {
+	const out: string[] = [];
+	const walk = (value: unknown): void => {
+		if (value === null || typeof value !== 'object') return;
+		if (Array.isArray(value)) {
+			for (const v of value) walk(v);
+			return;
+		}
+		const rec = value as Record<string, unknown>;
+		const path = rec['path'];
+		if (Array.isArray(path) && typeof path[0] === 'string') out.push(path[0]);
+		if (rec['$typeName'] === 'syncplane.v1.ExistsCond') return;
+		for (const [ k, v ] of Object.entries(rec)) {
+			if (k !== 'path' && k !== '$typeName') walk(v);
+		}
+	};
+	walk(cond);
+	return out;
+}
+
+/** A rule's within entries as a list. */
+function withinListOf(rule: AccessRuleDecl): readonly WithinEntry[] {
+	const within = rule.within;
+	if (within === undefined) return [];
+	return Array.isArray(within) ? within : [ within as WithinEntry ];
+}
+
+/**
+ * The wire name of the entity that a within entry of a rule of entity `owner`
+ * names. A thunk is called only when `resolve` is set, because before
+ * defineSchema() the entity it returns can be one not declared yet; until then
+ * it reads as undefined, as does a thunk that returns nothing.
+ */
+function withinEntityOf(owner: string, w: WithinEntry, resolve: boolean): string | undefined {
+	if (w.self === true) return owner;
+	if (typeof w.entity !== 'function') return w.entity;
+	return resolve ? w.entity()?.name : undefined;
+}
+
+/**
+ * Checks what a rule's within entries say by themselves, and returns a key for
+ * each, sorted: an entity and at least one check, and no entry twice. Returns
+ * undefined when an entry names its entity with a thunk that `resolve` does
+ * not allow to call. That the entity is in the schema and its fields fit the
+ * checks is validateWithinTargets's to check. `at` names the rule in an error.
+ */
+function withinKeysOf(
+	at: string,
+	owner: string,
+	rule: AccessRuleDecl,
+	resolve: boolean,
+): string[] | undefined {
+	const keys: string[] = [];
+	let lazy = false;
+	withinListOf(rule).forEach((w, j) => {
+		const where = `${at} within[${j}]`;
+		// A plain-JS caller can set both, which the types refuse.
+		if (w.self !== undefined && w.entity !== undefined) {
+			throw new Error(`${where}: sets both self and entity; set one`);
+		}
+		if (w.self !== undefined && w.self !== true) throw new Error(`${where}: self must be true`);
+		if (w.self === undefined && !w.entity) throw new Error(`${where}: names no entity`);
+		const entity = withinEntityOf(owner, w, resolve);
+		if (entity !== undefined) validateEntityName(entity, where);
+		if (w.callerIs === undefined && w.when === undefined) {
+			throw new Error(`${where}: sets no check; set callerIs or when`);
+		}
+		if (entity === undefined) {
+			lazy = true;
+			return;
+		}
+		// The condition is keyed as built, before its paths are lowered, which
+		// needs the entity's fields.
+		const key = JSON.stringify([
+			entity,
+			w.callerIs ?? null,
+			w.when === undefined ? null : w.when(rootRef()),
+		]);
+		if (keys.includes(key)) throw new Error(`${where}: repeats an earlier entry`);
+		keys.push(key);
+	});
+	return lazy ? undefined : keys.sort();
+}
+
+/**
+ * Checks each within entry of every rule against the entity it names: one of
+ * `entities`, with a singular `text()` `callerIs` field, and a condition over
+ * its fields that reads only its row. Then checks the rules that hold a within
+ * thunk for repeats, which entity() could not. Whether the rule's rows can sit
+ * below that entity's rows is the server's to check at registration.
+ */
+function validateWithinTargets(entities: readonly EntitySchema[]): void {
+	const byName = new Map(entities.map((e) => [ e.name, e ]));
+	for (const e of entities) {
+		let lazy = false;
+		const rules: [string, AccessRuleDecl][] = [
+			...(e.access?.allow ?? []).map((
+				rule,
+				i,
+			): [string, AccessRuleDecl] => [ `access.allow[${i}]`, rule ]),
+			...(e.access?.guard ?? []).flatMap((g, i) =>
+				g.allow.map((rule, j): [string, AccessRuleDecl] => [ `access.guard[${i}].allow[${j}]`, rule ])
+			),
+		];
+		rules.forEach(([ at, rule ]) => {
+			withinListOf(rule).forEach((w, j) => {
+				const where = `entity "${e.name}" ${at} within[${j}]`;
+				const name = withinEntityOf(e.name, w, true);
+				const target = name === undefined ? undefined : byName.get(name);
+				if (target === undefined) {
+					throw new Error(
+						`${where}: names entity ${
+							name === undefined ? '<unresolved>' : `"${name}"`
+						}, which is not part of this schema`,
+					);
+				}
+				if (typeof w.entity === 'function') lazy = true;
+				if (w.callerIs !== undefined) {
+					const spec = target.fields[w.callerIs]?.spec;
+					if (spec === undefined) {
+						throw new Error(
+							`${where}: callerIs field "${w.callerIs}" is not declared on entity "${target.name}"`,
+						);
+					}
+					if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+						throw new Error(`${where}: callerIs field "${w.callerIs}" must be a singular text() field`);
+					}
+				}
+				const when = whenOf(where, w.when, target.fields);
+				// A client decides the entry from the rows it holds, so a field
+				// the entry checks must reach every reader of the target's rows.
+				const reads = when === undefined ? [] : conditionHeads(when);
+				if (w.callerIs !== undefined) reads.push(snakeCase(w.callerIs));
+				const hideable = new Set(hideableFields(target.access?.guard ?? []).map(snakeCase));
+				for (const field of reads) {
+					if (hideable.has(field)) {
+						throw new Error(
+							`${where}: reads "${field}" of entity "${target.name}", which a guard can hide; `
+								+ 'a field that a within entry checks is one every reader of the row reads',
+						);
+					}
+				}
+			});
+		});
+		if (lazy) assertAccessRules(`entity "${e.name}"`, e.name, e.access!, e.fields, true);
+	}
+}
+
+/**
+ * Checks the references that join entities in the access model, which the
+ * server refuses at registration: each access parent points at an entity that
+ * declares access, each grant subject that is a reference points at an entity
+ * that declares members, and each members option names a grant entity of the
+ * schema whose one access parent points at the team entity alone and whose
+ * subject is a `text()` field. Reference targets must already be checked.
+ */
+function validateAccessTargets(entities: readonly EntitySchema[]): void {
+	const byName = new Map(entities.map((e) => [ e.name, e ]));
+	for (const e of entities) {
+		for (const key of e.access?.parents ?? []) {
+			const target = e.fields[key]!.spec.ref!();
+			if (target.access === undefined) {
+				throw new Error(
+					`entity "${e.name}" access.parents names "${key}", which points at entity "${target.name}", `
+						+ `which declares no access; declare access on "${target.name}"`,
+				);
+			}
+		}
+		const subject = e.grant === undefined ? undefined : e.fields[e.grant.subject]!.spec;
+		if (subject?.kind === 'ref') {
+			const target = subject.ref!();
+			if (target.members === undefined) {
+				throw new Error(
+					`entity "${e.name}" grant subject field "${
+						e.grant!.subject
+					}" points at entity "${target.name}", `
+						+ `which declares no members; declare members on "${target.name}" to grant to its members`,
+				);
+			}
+		}
+		if (e.members !== undefined) validateMembers(e, byName);
+	}
+}
+
+/** Checks the members option of `team` against the entities of its schema; see validateAccessTargets. */
+function validateMembers(team: EntitySchema, byName: ReadonlyMap<string, EntitySchema>): void {
+	const where = `entity "${team.name}" members`;
+	const member = byName.get(team.members!.entity);
+	if (member === undefined) {
+		throw new Error(
+			`${where} names entity "${team.members!.entity}", which is not part of this schema`,
+		);
+	}
+	if (member.grant === undefined) {
+		throw new Error(
+			`${where} names entity "${member.name}", which is not a grant entity; `
+				+ 'its rows must grant a role at the team they make their subject a member of',
+		);
+	}
+	const parents = member.access?.parents ?? [];
+	if (parents.length !== 1 || member.fields[parents[0]!]!.spec.ref!().name !== team.name) {
+		throw new Error(
+			`${where} names entity "${member.name}", whose access.parents does not point at "${team.name}" alone`,
+		);
+	}
+	if (member.fields[member.grant.subject]!.spec.kind === 'ref') {
+		throw new Error(
+			`${where} names entity "${member.name}", whose grant subject is not a text() field; `
+				+ 'a team cannot be a member of a team',
+		);
+	}
+}
+
+/** The permissions a rule requires as a list, `undefined` when it sets none. */
+function requiresOf(rule: AccessRuleDecl): readonly string[] | undefined {
+	return typeof rule.requires === 'string' ? [ rule.requires ] : rule.requires;
+}
+
+/**
+ * Builds a `when` condition over the `fields` of the row it reads and lowers
+ * its accessor-name paths to proto names, as the server reads them. Refuses a
+ * condition that reads anything but the row, which the server refuses at
+ * registration. `at` names the rule in an error.
+ */
+function whenOf(
+	at: string,
+	build: ((row: QueryRef<RowOf<Fields>>) => Cond) | undefined,
+	fields: Fields,
+): Condition | undefined {
+	if (build === undefined) return undefined;
+	const cond = build(rootRef());
+	const refuse = (c: Cond): void => {
+		switch (c.kind) {
+			case 'rel':
+				throw new Error(
+					`${at}: when uses matches(), which reads another row; a when condition reads only the row`,
+				);
+			case 'match':
+				throw new Error(`${at}: when uses match(), which cannot decide access`);
+			case 'and':
+			case 'or':
+				c.conds.forEach(refuse);
+				break;
+			case 'not':
+				refuse(c.cond);
+				break;
+		}
+	};
+	refuse(cond);
+	return condToProto(condProtoNames(fields, cond));
+}
+
+/**
+ * Lowers the accessor-name paths of `cond`, scoped to a row of `fields`, to
+ * proto names. A segment that names no declared field keeps its spelling, for
+ * the server to report.
+ */
+function condProtoNames(fields: Fields | undefined, cond: Cond): Cond {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return { ...cond, conds: cond.conds.map((c) => condProtoNames(fields, c)) };
+		case 'not':
+			return { ...cond, cond: condProtoNames(fields, cond.cond) };
+		case 'match':
+			return cond;
+		case 'exists': {
+			const { path, spec } = pathProtoNames(fields, cond.path);
+			// The sub-condition reads the element: a message of a list, or an
+			// entry of a map, whose `key` and `value` are not field names.
+			if (spec?.kind === 'map') {
+				return { ...cond, path, cond: entryProtoNames(spec.mapMessage, cond.cond) };
+			}
+			return { ...cond, path, cond: condProtoNames(spec?.message, cond.cond) };
+		}
+		default:
+			// A rel condition keeps its sub-condition, which whenOf refuses.
+			return { ...cond, path: pathProtoNames(fields, cond.path).path };
+	}
+}
+
+/** condProtoNames inside a map entry whose value has `value` fields. */
+function entryProtoNames(value: Fields | undefined, cond: Cond): Cond {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return { ...cond, conds: cond.conds.map((c) => entryProtoNames(value, c)) };
+		case 'not':
+			return { ...cond, cond: entryProtoNames(value, cond.cond) };
+		case 'match':
+			return cond;
+		default: {
+			const [ head, ...rest ] = cond.path;
+			if (head !== 'value' || rest.length === 0) return cond;
+			return { ...cond, path: [ head, ...pathProtoNames(value, rest).path ] } as Cond;
+		}
+	}
+}
+
+/**
+ * Lowers one accessor-name path scoped to a row of `fields`, and returns the
+ * spec of the field it ends at. A map field's next segment is an entry key,
+ * which keeps its spelling.
+ */
+function pathProtoNames(
+	fields: Fields | undefined,
+	path: readonly string[],
+): { path: string[]; spec?: FieldSpec } {
+	const out: string[] = [];
+	let scope = fields;
+	let spec: FieldSpec | undefined;
+	for (let i = 0; i < path.length; i++) {
+		const seg = path[i]!;
+		spec = scope?.[seg]?.spec;
+		if (spec === undefined) {
+			out.push(seg);
+			scope = undefined;
+			continue;
+		}
+		out.push(snakeCase(seg));
+		if (spec.kind === 'map') {
+			if (i + 1 < path.length) out.push(path[++i]!);
+			scope = spec.mapMessage;
+			continue;
+		}
+		scope = spec.kind === 'message'
+			? spec.message
+			: spec.kind === 'ref'
+			? spec.ref!().fields
+			: undefined;
+	}
+	return { path: out, spec };
 }
 
 /**
@@ -816,8 +2117,9 @@ export interface SchemaBundle {
 
 /**
  * Assembles a self-contained FileDescriptorSet in topological order:
- * `google/protobuf/descriptor.proto`, then `syncplane/v1/options.proto` (which
- * extends it with the entity options), then ONE synthesized file holding every
+ * `google/protobuf/descriptor.proto` and `syncplane/v1/query.proto`, then
+ * `syncplane/v1/options.proto` (which extends the first with the entity
+ * options and imports the second), then ONE synthesized file holding every
  * entity (and its nested non-entity types). Bundling the framework's own files
  * means any consumer — a fresh TS client or a Go server — resolves the whole
  * schema from these bytes alone, with no `buf`, no codegen, and no published
@@ -827,6 +2129,7 @@ function buildSet(entities: readonly EntitySchema[]): FileDescriptorSet {
 	return create(FileDescriptorSetSchema, {
 		file: [
 			file_google_protobuf_descriptor.proto,
+			file_syncplane_v1_query.proto,
 			file_syncplane_v1_options.proto,
 			oneSchemaFile(entities),
 		],
@@ -842,6 +2145,8 @@ export function defineSchema(...entities: EntitySchema[]): SchemaBundle {
 		seen.add(e.name);
 	}
 	validateRefTargets(entities);
+	validateAccessTargets(entities);
+	validateWithinTargets(entities);
 
 	const fdset = buildSet(entities);
 	let registry: FileRegistry | undefined;
@@ -912,12 +2217,50 @@ function oneSchemaFile(entities: readonly EntitySchema[]): FileDescriptorProto {
 		package: DYNAMIC_PACKAGE,
 		syntax: 'proto3',
 		dependency: [ 'syncplane/v1/options.proto' ],
-		messageType: entities.map(entityMessageOf),
+		messageType: entities.map((e) => entityMessageOf(e, entities)),
 	});
 }
 
-/** Lowers one entity to a top-level DescriptorProto with (syncplane.v1.entity). */
-function entityMessageOf(e: EntitySchema): DescriptorProto {
+/**
+ * Lowers one access rule of entity `owner`, with `fields`, to its
+ * syncplane.v1.AccessRule. `entities` are the schema's, which within entries
+ * name.
+ */
+function accessRuleOf(
+	rule: AccessRuleDecl,
+	owner: string,
+	fields: Fields,
+	entities: readonly EntitySchema[],
+): AccessRule {
+	return create(AccessRuleSchema, {
+		read: rule.read === true,
+		create: rule.create === true,
+		update: rule.update === true,
+		delete: rule.delete === true,
+		write: rule.write === true,
+		requires: [ ...(requiresOf(rule) ?? []) ],
+		admitted: rule.requires === undefined ? create(AdmittedCallerSchema) : undefined,
+		// Accessor names lower to proto names, as a grant's fields do.
+		callerIs: rule.callerIs === undefined ? '' : snakeCase(rule.callerIs),
+		fields: (rule.fields ?? []).map(snakeCase),
+		when: whenOf('', rule.when, fields),
+		within: withinListOf(rule).map((w) => {
+			const entity = withinEntityOf(owner, w, true)!;
+			const target = entities.find((e) => e.name === entity)!;
+			return create(AccessWithinSchema, {
+				entity,
+				callerIs: w.callerIs === undefined ? '' : snakeCase(w.callerIs),
+				when: whenOf('', w.when, target.fields),
+			});
+		}),
+	});
+}
+
+/**
+ * Lowers one entity to a top-level DescriptorProto with (syncplane.v1.entity).
+ * `entities` are the schema's.
+ */
+function entityMessageOf(e: EntitySchema, entities: readonly EntitySchema[]): DescriptorProto {
 	const fullName = `${DYNAMIC_PACKAGE}.${pascalCase(e.name)}`;
 	const built = buildMessage(pascalCase(e.name), fullName, e.fields);
 
@@ -932,15 +2275,37 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 		create(EntityOptionsSchema, {
 			name: e.name,
 			keyFields: keyFieldNames,
-			createPolicy: e.createPolicy === 'trustedOnly'
-				? CreatePolicy.TRUSTED_ONLY
-				: CreatePolicy.ALLOW,
-			updatePolicy: e.updatePolicy === 'trustedOnly'
-				? UpdatePolicy.TRUSTED_ONLY
-				: UpdatePolicy.ALLOW,
-			deletePolicy: e.deletePolicy === 'trustedOnly'
-				? DeletePolicy.TRUSTED_ONLY
-				: DeletePolicy.ALLOW,
+			...(e.access === undefined ? {} : {
+				access: create(AccessOptionsSchema, {
+					allow: e.access.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
+					// Accessor names lower to proto names, as a guard's fields do.
+					parents: (e.access.parents ?? []).map(snakeCase),
+					guard: (e.access.guard ?? []).map((g) =>
+						create(FieldGuardSchema, {
+							// Accessor names lower to proto names, as a rule's fields do.
+							fields: g.fields.map(snakeCase),
+							allow: g.allow.map((r) => accessRuleOf(r, e.name, e.fields, entities)),
+						})
+					),
+				}),
+			}),
+			...(e.grant === undefined ? {} : {
+				grant: create(GrantOptionsSchema, {
+					// Accessor names lower to proto names, as a key field's does.
+					subject: snakeCase(e.grant.subject),
+					role: snakeCase(e.grant.role),
+					roles: e.grant.roles.map((r) =>
+						create(RoleSchema, {
+							name: r.name,
+							grants: [ ...(r.grants ?? []) ],
+							includes: [ ...(r.includes ?? []) ],
+						})
+					),
+				}),
+			}),
+			...(e.members === undefined ? {} : {
+				members: create(MembersOptionsSchema, { entity: e.members.entity }),
+			}),
 			// Paths are written in accessor names and lowered to proto names
 			// here, which is the same translation a query path takes on the way
 			// to the wire — so an index and a query naming one field agree.
@@ -1028,8 +2393,10 @@ function fieldProtoOf(
 	switch (spec.kind) {
 		case 'scalar': {
 			field.type = SCALAR_TO_TYPE[spec.scalar!];
-			if (spec.opaque) setOpaque(field, spec.indexed ?? false, spec.protectedField);
-			else if (spec.indexed || spec.searchable || spec.protectedField) setScalarMarks(field, spec);
+			if (spec.opaque) setOpaque(field, spec.indexed ?? false);
+			else if (spec.indexed || spec.searchable || spec.creator) {
+				setScalarMarks(field, spec);
+			}
 			break;
 		}
 		case 'message': {
@@ -1078,7 +2445,6 @@ function fieldProtoOf(
 			field.label = FieldDescriptorProto_Label.REPEATED;
 			field.type = FieldDescriptorProto_Type.MESSAGE;
 			field.typeName = `.${entryFull}`;
-			setWritePolicy(field, spec);
 			break;
 		}
 	}
@@ -1155,12 +2521,12 @@ function referenceMessageOf(simpleName: string, targetTypeName: string): Descrip
 }
 
 /** Sets (syncplane.v1.field_behavior).opaque on a field. */
-function setOpaque(field: FieldDescriptorProto, indexed = false, isProtected = false): void {
+function setOpaque(field: FieldDescriptorProto, indexed = false): void {
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { opaque: true, indexed, writePolicy: writePolicyOf(isProtected) }),
+		create(FieldBehaviorSchema, { opaque: true, indexed }),
 	);
 	field.options = fieldOptions;
 }
@@ -1174,48 +2540,24 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 		create(FieldBehaviorSchema, {
 			indexed: spec.indexed ?? false,
 			searchable: spec.searchable ?? false,
-			writePolicy: writePolicyOf(spec.protectedField),
+			...(spec.creator ? { creator: create(CreatorOptionsSchema) } : {}),
 		}),
 	);
 	field.options = fieldOptions;
 }
 
-function writePolicyOf(isProtected: boolean | undefined): FieldWritePolicy {
-	return isProtected ? FieldWritePolicy.TRUSTED_ONLY : FieldWritePolicy.UNSPECIFIED;
-}
-
 /**
- * Sets (syncplane.v1.field_behavior).write_policy alone, for the kinds that
- * carry no other mark. No-op on an unprotected field, which must keep its
- * options unset — a map or reference the builder annotated would be reporting a
- * behaviour it does not have.
- */
-function setWritePolicy(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (!spec.protectedField) return;
-	const fieldOptions = create(FieldOptionsSchema);
-	setExtension(
-		fieldOptions,
-		fieldBehaviorExt,
-		create(FieldBehaviorSchema, { writePolicy: FieldWritePolicy.TRUSTED_ONLY }),
-	);
-	field.options = fieldOptions;
-}
-
-/**
- * Sets the (syncplane.v1.field_behavior) marks a reference field carries: its
- * write policy and its reverse relation's name. No-op when neither is set, for
- * the reason setWritePolicy gives.
+ * Sets the (syncplane.v1.field_behavior) mark a reference field carries: its
+ * reverse relation's name. No-op when none is set: a reference the builder
+ * annotated would report a behaviour it does not have.
  */
 function setRefMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
-	if (!spec.protectedField && spec.reverseRelation === undefined) return;
+	if (spec.reverseRelation === undefined) return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
 		fieldBehaviorExt,
-		create(FieldBehaviorSchema, {
-			writePolicy: writePolicyOf(spec.protectedField),
-			reverseRelation: spec.reverseRelation ?? '',
-		}),
+		create(FieldBehaviorSchema, { reverseRelation: spec.reverseRelation }),
 	);
 	field.options = fieldOptions;
 }
@@ -1229,8 +2571,7 @@ function setBehavior(field: FieldDescriptorProto, spec: FieldSpec): void {
 	const keyField = spec.keyField ?? [];
 	const orderField = spec.orderField ?? '';
 	const indexed = spec.indexed ?? false;
-	const isProtected = spec.protectedField ?? false;
-	if (!spec.opaque && !indexed && !isProtected && keyField.length === 0 && orderField === '') return;
+	if (!spec.opaque && !indexed && keyField.length === 0 && orderField === '') return;
 	const fieldOptions = create(FieldOptionsSchema);
 	setExtension(
 		fieldOptions,
@@ -1240,7 +2581,6 @@ function setBehavior(field: FieldDescriptorProto, spec: FieldSpec): void {
 			keyField,
 			orderField,
 			indexed,
-			writePolicy: writePolicyOf(isProtected),
 		}),
 	);
 	field.options = fieldOptions;

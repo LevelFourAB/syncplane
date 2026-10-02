@@ -85,6 +85,9 @@ type groupRead struct {
 	visible  func(storage.Row) (bool, error)
 	emitter  *rowEmitter
 	limits   Limits
+	// rows narrows the read to the rows the access model lets the caller see,
+	// nil when it narrows nothing.
+	rows *accessRows
 
 	// byKey buckets groups by GroupValue.Key while they accumulate; the order
 	// the surface promises is imposed once, at the end.
@@ -142,13 +145,16 @@ func groupCounts(
 		filtered: filtered, visible: visible, emitter: emitter, limits: limits,
 		byKey: map[string]int{},
 	}
+	if r.rows, err = emitter.accessRowsOf(tx, info); err != nil {
+		return nil, false, err
+	}
 	served, err := r.byIndex(predicate)
 	if err != nil {
 		return nil, false, err
 	}
 	if !served {
 		r.reset()
-		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
+		if err := r.rows.scan(tx, info.name, func(row storage.Row) error {
 			return r.considerRow(row, predicate)
 		}); err != nil {
 			return nil, false, err
@@ -351,6 +357,9 @@ func (r *groupRead) walkGroup(
 			if *walked > budget {
 				return errIndexBudget
 			}
+			if !r.rows.admits(rowKey) {
+				return nil
+			}
 			if countable {
 				count++
 				if len(names) < groupNameCandidates {
@@ -429,6 +438,9 @@ type rowGroupRead struct {
 	visible func(storage.Row) (bool, error)
 	emitter *rowEmitter
 	limits  Limits
+	// rows narrows the read to the rows the access model lets the caller see,
+	// nil when it narrows nothing.
+	rows *accessRows
 
 	// byKey buckets groups by GroupValue.Key while they accumulate; the order
 	// the surface promises is imposed once, at the end.
@@ -475,13 +487,16 @@ func groupRows(
 		counted: counted, visible: visible, emitter: emitter, limits: limits,
 		byKey: map[string]int{},
 	}
+	if r.rows, err = emitter.accessRowsOf(tx, info); err != nil {
+		return nil, false, err
+	}
 	served, err := r.byIndex(predicate)
 	if err != nil {
 		return nil, false, err
 	}
 	if !served {
 		r.reset()
-		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
+		if err := r.rows.scan(tx, info.name, func(row storage.Row) error {
 			return r.considerRow(row, predicate)
 		}); err != nil {
 			return nil, false, err
@@ -741,6 +756,9 @@ func (r *rowGroupRead) walkRows(
 					return errGroupFilled
 				}
 				batch.size = min(room, maxRowBatch)
+			}
+			if !r.rows.admits(rowKey) {
+				return nil
 			}
 			// Each entry of a group names a distinct row: PlanGroupRows declines
 			// an index where a component past the partition fans out, so nothing

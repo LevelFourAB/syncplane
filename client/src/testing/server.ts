@@ -1,7 +1,9 @@
 import {
+	clearField,
 	create,
 	type DescMessage,
 	fromBinary,
+	isFieldSet,
 	type Message,
 	type MessageInitShape,
 	type MessageShape,
@@ -11,18 +13,33 @@ import { anyUnpack } from '@bufbuild/protobuf/wkt';
 import { Code, ConnectError, createRouterTransport, type Transport } from '@connectrpc/connect';
 
 import {
+	type AccessChain,
+	accessRowId,
+	AccessSummary,
+	decideRules,
+	MAX_ACCESS_CHAIN,
+	parentRefsOf,
+	type RuleRow,
+	ruleRowOf,
+} from '../access.js';
+import {
 	CodeConflict,
 	CodeInvalidArgument,
 	CodeMutationIdGap,
 	CodePermissionDenied,
 	CodeTextFullStateRequired,
 	CodeWorkspaceAccessRevoked,
+	CodeWorkspaceNoAccess,
 	ErrorCodeMetadataKey,
 } from '../codes.js';
 import { type CrudMutation, CrudOp, type Mutation } from '../gen/syncplane/v1/mutation_pb.js';
 import {
 	type BootstrapRequest,
 	BootstrapResponseSchema,
+	type CallerAccess,
+	type CallerAccessDelta,
+	CallerAccessDeltaSchema,
+	CallerAccessSchema,
 	MutationStatus,
 	type PullRequest,
 	type PushRequest,
@@ -32,6 +49,7 @@ import {
 	WorkspaceDropped_Reason,
 } from '../gen/syncplane/v1/service_pb.js';
 import {
+	type EntityDef,
 	EntityRegistry,
 	keyOf,
 	mergeMask,
@@ -39,6 +57,7 @@ import {
 	mergeTextFieldsInto,
 	textSchemaPathOf,
 } from '../mutations.js';
+import { accessDeltaOf, callerAccessOf, RoleTable, type TestCallerAccess } from './access.js';
 
 /** The workspace the kit reads and writes when none is named. */
 export const DEFAULT_WORKSPACE = 'main';
@@ -116,6 +135,25 @@ export interface TestServerOptions<E extends readonly DescMessage[] = readonly D
 	schemaRevision?: string;
 	/** Rows per bootstrap chunk. @defaultValue 100 */
 	chunkSize?: number;
+	/**
+	 * Which rows bootstrap and pull send. `'all'` sends every row.
+	 * `'readable'` sends a row of an entity with access rules only while a
+	 * read rule admits the caller that {@link TestServer.setCallerAccess} sets
+	 * for the workspace, and none before it is set. A field that a field guard
+	 * hides from the caller arrives cleared and named in `RowChange.hidden`. A
+	 * row the caller stops reading arrives as a tombstone, and one it starts
+	 * reading, or whose hidden fields change, arrives on the next pull, as on
+	 * the real server. Writes stay unchecked.
+	 * @defaultValue 'all'
+	 */
+	serve?: 'all' | 'readable';
+	/**
+	 * The server's `Limits.MaxAccessDepth`, which every CallerAccess the
+	 * server sends carries. The client's access predictions follow as many
+	 * access parent hops as it allows.
+	 * @defaultValue 32
+	 */
+	maxAccessDepth?: number;
 }
 
 /** How a push held back by {@link TestServer.holdPushes} is let through. */
@@ -154,6 +192,12 @@ class WorkspaceState {
 	horizon = 0n;
 	/** Subscribe streams parked on this workspace. */
 	wakers = new Set<() => void>();
+	/**
+	 * clientId → entity name → row key → the fields hidden in the value the
+	 * client was last sent of the row, joined by commas. Kept only when the
+	 * server serves readable rows.
+	 */
+	served = new Map<string, Map<string, Map<string, string>>>();
 
 	rowsOf(entity: string): Map<string, StoredRow> {
 		let m = this.rows.get(entity);
@@ -247,34 +291,104 @@ class MutatorTx implements TestMutatorTx {
 
 const cursorPrefix = 'tk:';
 
-function encodeCursor(seq: bigint): Uint8Array {
-	return new TextEncoder().encode(cursorPrefix + seq);
+/** Where a Subscribe scope is: its seq and the CallerAccess it holds, as `page` takes them. */
+interface StreamPosition {
+	seq: bigint;
+	held: bigint;
+	deltas: boolean;
 }
 
-/** undefined means the cursor was not minted by this server — answered as reset. */
-function decodeCursor(cursor: Uint8Array): bigint | undefined {
-	if (cursor.length === 0) return 0n;
+/**
+ * A cursor at `seq`, issued to a client that holds the CallerAccess whose
+ * version is `access`, 0 for none, as the real server's cursor records it.
+ */
+function encodeCursor(seq: bigint, access: bigint): Uint8Array {
+	return new TextEncoder().encode(`${cursorPrefix}${seq}:${access}`);
+}
+
+/**
+ * The position of `cursor` and the version of the CallerAccess it was issued
+ * under. An empty cursor is the start, issued under none. undefined means the
+ * cursor was not minted by this server — answered as reset.
+ */
+function decodeCursor(cursor: Uint8Array): { seq: bigint; access: bigint } | undefined {
+	if (cursor.length === 0) return { seq: 0n, access: 0n };
 	const text = new TextDecoder().decode(cursor);
 	if (!text.startsWith(cursorPrefix)) return undefined;
+	const [ seq, access, ...rest ] = text.slice(cursorPrefix.length).split(':');
+	if (seq === undefined || access === undefined || rest.length > 0) return undefined;
 	try {
-		return BigInt(text.slice(cursorPrefix.length));
+		return { seq: BigInt(seq), access: BigInt(access) };
 	} catch {
 		return undefined;
 	}
 }
 
-function rowChangeInit(entity: string, key: string, row: StoredRow) {
+function rowChangeInit(entity: string, key: string, row: StoredRow, hidden?: Hidden) {
+	if (row.value === undefined || hidden === undefined || hidden.units.length === 0) {
+		return {
+			entity,
+			key,
+			version: row.version,
+			body: row.value !== undefined
+				? { case: 'value' as const, value: row.value }
+				: { case: 'tombstone' as const, value: true },
+		};
+	}
+	const { schema } = hidden.def;
+	const msg = fromBinary(schema, row.value);
+	for (const unit of hidden.units) {
+		const oneof = schema.oneofs.find((o) => o.name === unit);
+		for (const field of oneof?.fields ?? schema.fields.filter((f) => f.name === unit)) {
+			clearField(msg, field);
+		}
+	}
 	return {
 		entity,
 		key,
 		version: row.version,
-		body: row.value !== undefined
-			? { case: 'value' as const, value: row.value }
-			: { case: 'tombstone' as const, value: true },
+		body: { case: 'value' as const, value: toBinary(schema, msg) },
+		hidden: [ ...hidden.units ],
 	};
 }
 
+/** The fields of a row a guard hides from the caller, by proto name, sorted. */
+interface Hidden {
+	def: EntityDef;
+	units: readonly string[];
+}
+
+/**
+ * What the caller of a workspace reads of the committed rows, decided over
+ * them; see TestServer.readableIn.
+ */
+interface ReadView {
+	/** Whether the caller reads the live row of `entity` with `key`. */
+	reads(entity: string, key: string): boolean;
+	/** The fields of that row a guard hides from the caller. */
+	hidden(entity: string, key: string): Hidden | undefined;
+}
+
+/** The fields `hidden` names, joined as WorkspaceState.served records them. */
+function hiddenSig(hidden: Hidden | undefined): string {
+	return hidden === undefined ? '' : hidden.units.join(',');
+}
+
 const opNames = { put: CrudOp.PUT, patch: CrudOp.PATCH, delete: CrudOp.DELETE } as const;
+
+/** Records in `served` what a client holds after it applies `changes`. */
+function markServed(
+	served: Map<string, Map<string, string>>,
+	changes: readonly { entity: string; key: string; row: StoredRow }[],
+	view: ReadView,
+): void {
+	for (const { entity, key, row } of changes) {
+		let keys = served.get(entity);
+		if (keys === undefined) served.set(entity, keys = new Map());
+		if (row.value === undefined) keys.delete(key);
+		else keys.set(key, hiddenSig(view.hidden(entity, key)));
+	}
+}
 
 /**
  * In-memory syncplane server for tests: the `SyncService` the real engine
@@ -290,8 +404,9 @@ const opNames = { put: CrudOp.PUT, patch: CrudOp.PATCH, delete: CrudOp.DELETE } 
  * compare-and-swap, atomic batches, tombstoned deletes.
  *
  * Not simulated: partial-sync subscriptions (predicates, windows and follows
- * are ignored — every row syncs), server queries (`queryServer` and friends
- * fail), presence rooms, and permission hooks beyond {@link TestServer.reject}
+ * are ignored — every row syncs, or every readable row under
+ * {@link TestServerOptions.serve}), server queries (`queryServer` and friends
+ * fail), presence rooms, and write checks beyond {@link TestServer.reject}
  * rules. Behavior that depends on those needs the integration suite's real
  * server.
  *
@@ -306,7 +421,15 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	private workspaces = new Map<string, WorkspaceState>();
 	private mutators = new Map<string, TestMutator>();
 	private rules = new Set<RejectRule>();
-	private revoked = new Set<string>();
+	/** Workspaces denied to the caller, by how: permanently, or until a grant. */
+	private denied = new Map<string, 'revoked' | 'none'>();
+	private callerAccess = new Map<string, CallerAccess>();
+	/** Every CallerAccess set so far, by version: the bases a delta can apply to. */
+	private accessVersions = new Map<bigint, CallerAccess>();
+	private summaries = new WeakMap<CallerAccess, AccessSummary>();
+	private roleTable: RoleTable;
+	private serve: 'all' | 'readable';
+	private maxAccessDepth: number;
 	private holds = 0;
 	private holdWaiters: (() => void)[] = [];
 	private schemaRevision: string;
@@ -322,6 +445,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		this.schemaRevision = opts.schemaRevision ?? '';
 		this.chunkSize = opts.chunkSize ?? 100;
+		this.roleTable = new RoleTable(opts.entities);
+		this.serve = opts.serve ?? 'all';
+		this.maxAccessDepth = opts.maxAccessDepth ?? MAX_ACCESS_CHAIN;
 	}
 
 	/**
@@ -420,13 +546,95 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	 * undoes it.
 	 */
 	revoke(workspaceId: string): void {
-		this.revoked.add(workspaceId);
+		this.denied.set(workspaceId, 'revoked');
 		this.ws(workspaceId).wake();
 	}
 
-	/** Lifts a {@link TestServer.revoke}. Clients notice on their next cycle. */
+	/**
+	 * Answers as the server does for a caller who holds no permission in a
+	 * workspace yet: pushes fail with `workspace_no_access`, pulls and
+	 * bootstraps fail as `permission_denied`, and a subscribe stream drops the
+	 * workspace with reason NO_ACCESS. The client surfaces it as
+	 * `status().workspaces[id].access === 'none'` and keeps its queue.
+	 * {@link TestServer.restore} stands for the grant that admits the caller.
+	 */
+	withholdAccess(workspaceId: string): void {
+		this.denied.set(workspaceId, 'none');
+		this.ws(workspaceId).wake();
+	}
+
+	/**
+	 * Lifts a {@link TestServer.revoke} or {@link TestServer.withholdAccess}.
+	 * Clients notice on their next cycle.
+	 */
 	restore(workspaceId: string): void {
-		this.revoked.delete(workspaceId);
+		this.denied.delete(workspaceId);
+	}
+
+	/** The wire code and drop reason of a denied workspace, or undefined. */
+	private denial(
+		workspaceId: string,
+	): { code: string; reason: WorkspaceDropped_Reason; message: string } | undefined {
+		switch (this.denied.get(workspaceId)) {
+			case 'revoked':
+				return {
+					code: CodeWorkspaceAccessRevoked,
+					reason: WorkspaceDropped_Reason.ACCESS_REVOKED,
+					message: `workspace "${workspaceId}": access denied`,
+				};
+			case 'none':
+				return {
+					code: CodeWorkspaceNoAccess,
+					reason: WorkspaceDropped_Reason.NO_ACCESS,
+					message: `workspace "${workspaceId}": the caller holds no permission`,
+				};
+			default:
+				return undefined;
+		}
+	}
+
+	/**
+	 * Sets what clients are told the caller holds in a workspace under the
+	 * access model, which `SyncClient.can`, `SyncClient.hasPermission` and the
+	 * React access hooks answer from. `subjects` are what the rules' subject
+	 * checks compare with, and the first is what a client stores in a creator
+	 * field of a row it creates. Each bootstrap after this call carries it,
+	 * and a pull or stream page carries it only when the client does not hold
+	 * it yet, as the real server sends it: whole, or as a CallerAccessDelta
+	 * from the summary the client holds when that is smaller. `undefined`
+	 * stops sending one; a client keeps the last one it received. Writes are
+	 * not checked against it: the server
+	 * still applies every write and stores a creator field as the client wrote
+	 * it. Rows are filtered by it only under {@link TestServerOptions.serve}
+	 * `'readable'`.
+	 *
+	 * Throws when a role is not declared by a registered entity, or is held at
+	 * a row of an entity that its grant rows cannot point at.
+	 *
+	 * @example
+	 * ```ts
+	 * server.setCallerAccess({
+	 *   subjects: [ 'ann' ],
+	 *   roles: [ { role: 'project_admin', at: [ ProjectSchema, 'p1' ] } ],
+	 *   permissions: [ { permission: 'view_labels', root: true } ],
+	 * });
+	 * ```
+	 */
+	setCallerAccess(access: TestCallerAccess | undefined, opts?: { workspace?: string }): void {
+		const workspace = opts?.workspace ?? DEFAULT_WORKSPACE;
+		if (access === undefined) {
+			this.callerAccess.delete(workspace);
+			this.ws(workspace).wake();
+			return;
+		}
+		const fromRoles = this.roleTable.permissionsOf(access.roles ?? []);
+		const summary = callerAccessOf({
+			...(access.subjects === undefined ? {} : { subjects: access.subjects }),
+			permissions: [ ...fromRoles, ...(access.permissions ?? []) ],
+		}, this.maxAccessDepth);
+		this.callerAccess.set(workspace, summary);
+		this.accessVersions.set(summary.version, summary);
+		this.ws(workspace).wake();
 	}
 
 	/** Registers a custom mutator; see {@link TestMutator}. */
@@ -544,9 +752,8 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			errorCode,
 			errorMessage,
 		});
-		if (this.revoked.has(workspaceId)) {
-			return fail(CodeWorkspaceAccessRevoked, `workspace "${workspaceId}": access denied`);
-		}
+		const denial = this.denial(workspaceId);
+		if (denial) return fail(denial.code, denial.message);
 		const state = this.ws(workspaceId);
 		const results = [];
 		let applied = false;
@@ -623,16 +830,17 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		}
 		const seq = state.seq + 1n;
 		const staging = new Staging(state);
+		const view = this.readableIn(workspaceId, state);
 		switch (mutation.payload.case) {
 			case 'crud':
-				this.applyCrud(staging, mutation.payload.value, seq);
+				this.applyCrud(staging, mutation.payload.value, seq, view);
 				break;
 			case 'batch': {
 				const cruds = mutation.payload.value.mutations;
 				if (cruds.length === 0) {
 					throw new Rejection(CodeInvalidArgument, 'batch must be non-empty');
 				}
-				for (const crud of cruds) this.applyCrud(staging, crud, seq);
+				for (const crud of cruds) this.applyCrud(staging, crud, seq, view);
 				break;
 			}
 			case 'custom': {
@@ -655,7 +863,18 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		return seq;
 	}
 
-	private applyCrud(staging: Staging, crud: CrudMutation, seq: bigint): void {
+	/**
+	 * Applies one CRUD. `view` is what the caller reads of the committed rows
+	 * when the server serves readable rows: a PUT that updates a row keeps the
+	 * stored value of each field a guard hides from the caller, as on the real
+	 * server.
+	 */
+	private applyCrud(
+		staging: Staging,
+		crud: CrudMutation,
+		seq: bigint,
+		view: ReadView | undefined,
+	): void {
 		const def = this.registry.get(crud.entity);
 		if (!def) throw new Rejection(CodeInvalidArgument, `unknown entity "${crud.entity}"`);
 		const current = staging.get(crud.entity, crud.key);
@@ -669,12 +888,34 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		switch (crud.op) {
 			case CrudOp.PUT: {
 				let value = crud.value;
+				const hidden = current?.value === undefined ? undefined : view?.hidden(crud.entity, crud.key);
+				if (hidden !== undefined) {
+					const stored = fromBinary(def.schema, current!.value!);
+					const next = fromBinary(def.schema, value);
+					// The caller received each hidden field cleared, so one the put
+					// leaves unset keeps its stored value, and a set one is a value
+					// the caller wrote.
+					const dst = next as Record<string, unknown>;
+					const src = stored as Record<string, unknown>;
+					for (const unit of hidden.units) {
+						const oneof = def.schema.oneofs.find((o) => o.name === unit);
+						if (oneof !== undefined) {
+							if ((dst[oneof.localName] as { case?: string }).case === undefined) {
+								dst[oneof.localName] = src[oneof.localName];
+							}
+							continue;
+						}
+						const field = def.schema.fields.find((f) => f.name === unit)!;
+						if (!isFieldSet(next, field)) dst[field.localName] = src[field.localName];
+					}
+					value = toBinary(def.schema, next);
+				}
 				// The PUT exception: collaborative-text fields union with the
 				// stored document instead of replacing it.
 				const textPaths = this.registry.textPathsOf(def.name);
 				if (textPaths.length > 0 && current?.value !== undefined) {
 					const base = fromBinary(def.schema, current.value);
-					const next = fromBinary(def.schema, crud.value);
+					const next = fromBinary(def.schema, value);
 					mergeTextFieldsInto(def.schema, textPaths, base, next);
 					value = toBinary(def.schema, next);
 				}
@@ -712,22 +953,129 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		}
 	}
 
+	/**
+	 * What the caller of `workspaceId` reads of the live rows, decided over the
+	 * committed rows; undefined when the server serves every row. The view
+	 * keeps each answer, so ask for a new one after a commit.
+	 */
+	private readableIn(
+		workspaceId: string,
+		state: WorkspaceState,
+	): ReadView | undefined {
+		if (this.serve !== 'readable') return undefined;
+		const access = this.callerAccess.get(workspaceId);
+		let summary: AccessSummary | undefined;
+		if (access !== undefined) {
+			summary = this.summaries.get(access);
+			if (summary === undefined) this.summaries.set(access, summary = new AccessSummary(access));
+		}
+		const decoded = new Map<string, Message | undefined>();
+		const rowOf = (def: EntityDef, key: string): Message | undefined => {
+			const id = accessRowId({ entity: def.name, key });
+			if (!decoded.has(id)) {
+				const value = state.rows.get(def.name)?.get(key)?.value;
+				decoded.set(id, value === undefined ? undefined : fromBinary(def.schema, value));
+			}
+			return decoded.get(id);
+		};
+		const verdicts = new Map<string, boolean>();
+		const hiddenRows = new Map<string, Hidden | undefined>();
+		// The rule row of a live row, as decideRules reads it.
+		const ruleRow = (def: EntityDef, key: string, row: Message): RuleRow => {
+			// The server holds every row, so a row it does not hold above
+			// this one does not exist and leads nowhere, where a client
+			// would read it as not known.
+			const chain: AccessChain = {
+				parents: parentRefsOf(def, row),
+				maxHops: summary!.maxAccessDepth,
+				above: (at) => {
+					const atDef = this.registry.get(at.entity);
+					const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
+					return atRow === undefined ? [] : parentRefsOf(atDef!, atRow) ?? [];
+				},
+				row: (at) => {
+					const atDef = this.registry.get(at.entity);
+					const atRow = atDef === undefined ? undefined : rowOf(atDef, at.key);
+					return atRow === undefined ? undefined : { def: atDef!, row: atRow };
+				},
+			};
+			return ruleRowOf(summary!, def, key, row, chain);
+		};
+		return {
+			reads: (entity, key) => {
+				const def = this.registry.get(entity);
+				// An entity outside the model is open to every caller in the workspace.
+				if (def?.accessRules === undefined) return true;
+				if (summary === undefined) return false;
+				const id = accessRowId({ entity, key });
+				let verdict = verdicts.get(id);
+				if (verdict === undefined) {
+					const row = rowOf(def, key);
+					verdict = row !== undefined
+						&& decideRules(def.accessRules, 'read', summary.subjects, ruleRow(def, key, row)) === 'yes';
+					verdicts.set(id, verdict);
+				}
+				return verdict;
+			},
+			hidden: (entity, key) => {
+				const def = this.registry.get(entity);
+				if (def === undefined || def.guards.length === 0 || summary === undefined) return undefined;
+				const id = accessRowId({ entity, key });
+				if (hiddenRows.has(id)) return hiddenRows.get(id);
+				const row = rowOf(def, key);
+				let hidden: Hidden | undefined;
+				if (row !== undefined) {
+					const at = ruleRow(def, key, row);
+					const units = def.guards
+						.filter((g) => decideRules(g.rules, 'read', summary.subjects, at) !== 'yes')
+						.flatMap((g) => g.units)
+						.sort();
+					if (units.length > 0) hidden = { def, units };
+				}
+				hiddenRows.set(id, hidden);
+				return hidden;
+			},
+		};
+	}
+
+	/** The rows a client was sent a value of, by entity; see WorkspaceState.served. */
+	private servedTo(state: WorkspaceState, clientId: string): Map<string, Map<string, string>> {
+		let served = state.served.get(clientId);
+		if (served === undefined) state.served.set(clientId, served = new Map());
+		return served;
+	}
+
 	private assertAccess(workspaceId: string): void {
-		if (!this.revoked.has(workspaceId)) return;
-		const err = new ConnectError(
-			`workspace "${workspaceId}": access denied`,
-			Code.PermissionDenied,
-		);
-		err.metadata.set(ErrorCodeMetadataKey, CodeWorkspaceAccessRevoked);
+		const denial = this.denial(workspaceId);
+		if (!denial) return;
+		const err = new ConnectError(denial.message, Code.PermissionDenied);
+		err.metadata.set(ErrorCodeMetadataKey, denial.code);
 		throw err;
 	}
 
-	/** One forward page from `from`, in commit order. */
-	private page(state: WorkspaceState, clientId: string, from: bigint, limit: number) {
+	/**
+	 * One forward page from `from`, in commit order, for a client that holds
+	 * the CallerAccess whose version is `held`, 0 for none. The page carries
+	 * the current CallerAccess only when its version is not `held`, and with
+	 * `deltas` as a CallerAccessDelta where one is smaller, as the real server
+	 * sends it.
+	 */
+	private page(
+		workspaceId: string,
+		state: WorkspaceState,
+		clientId: string,
+		from: bigint,
+		limit: number,
+		held: bigint,
+		deltas: boolean,
+	) {
+		const readable = this.readableIn(workspaceId, state);
 		const changed: { entity: string; key: string; row: StoredRow }[] = [];
 		for (const [ entity, rows ] of state.rows) {
 			for (const [ key, row ] of rows) {
-				if (row.version > from) changed.push({ entity, key, row });
+				if (row.version <= from) continue;
+				if (readable !== undefined && row.value !== undefined && !readable.reads(entity, key)) continue;
+				changed.push({ entity, key, row });
 			}
 		}
 		changed.sort((a, b) => (a.row.version < b.row.version ? -1 : 1));
@@ -739,25 +1087,89 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			: state.seq > from
 			? state.seq
 			: from;
+		// What the caller reads can change with no change to a row: a new
+		// access set, or a change to a row above. The rows whose answer moved
+		// since the client was last sent them go first, outside the limit.
+		const resync: { entity: string; key: string; row: StoredRow }[] = [];
+		if (readable !== undefined) {
+			const served = this.servedTo(state, clientId);
+			for (const [ entity, keys ] of served) {
+				for (const [ key, sig ] of keys) {
+					const row = state.rows.get(entity)?.get(key);
+					if (row?.value === undefined) {
+						// A delete after `from` is in `changed` already.
+						if (row === undefined || row.version <= from) {
+							resync.push({ entity, key, row: { version: state.seq, value: undefined } });
+						}
+					} else if (!readable.reads(entity, key)) {
+						resync.push({ entity, key, row: { version: row.version, value: undefined } });
+					} else if (row.version <= from && hiddenSig(readable.hidden(entity, key)) !== sig) {
+						resync.push({ entity, key, row });
+					}
+				}
+			}
+			for (const [ entity, rows ] of state.rows) {
+				for (const [ key, row ] of rows) {
+					if (
+						row.version <= from && row.value !== undefined && served.get(entity)?.has(key) !== true
+						&& readable.reads(entity, key)
+					) resync.push({ entity, key, row });
+				}
+			}
+			markServed(served, resync, readable);
+			markServed(served, included, readable);
+		}
+		const access = this.accessUpdate(workspaceId, held, deltas, through);
 		return {
 			patch: {
-				changes: included.map((c) => rowChangeInit(c.entity, c.key, c.row)),
+				changes: [ ...resync, ...included ].map((c) =>
+					rowChangeInit(c.entity, c.key, c.row, readable?.hidden(c.entity, c.key))
+				),
 				dropEntities: [],
 			},
-			nextCursor: encodeCursor(through),
+			nextCursor: encodeCursor(through, access.holds),
 			lastAckedMutationId: state.watermarks.get(clientId) ?? 0n,
 			reset: false,
 			hasMore,
 			seq: through,
 			schemaRevision: this.schemaRevision,
+			...(access.whole === undefined ? {} : { callerAccess: access.whole }),
+			...(access.delta === undefined ? {} : { callerAccessDelta: access.delta }),
 		};
+	}
+
+	/**
+	 * What a page current through `seq` sends of the CallerAccess of
+	 * `workspaceId` to a client that holds the one whose version is `held`:
+	 * nothing when the versions are equal or none is set, else the whole
+	 * summary, or with `deltas` the change from `held` when the server knows
+	 * that summary and the change is smaller. `holds` is the version the
+	 * client holds after the page.
+	 */
+	private accessUpdate(
+		workspaceId: string,
+		held: bigint,
+		deltas: boolean,
+		seq: bigint,
+	): { whole?: CallerAccess; delta?: CallerAccessDelta; holds: bigint } {
+		const now = this.callerAccess.get(workspaceId);
+		if (now === undefined || now.version === held) return { holds: held };
+		const whole = { ...now, seq };
+		const base = deltas && held !== 0n ? this.accessVersions.get(held) : undefined;
+		const delta = base === undefined ? undefined : accessDeltaOf(base, now);
+		if (
+			delta === undefined
+			|| toBinary(CallerAccessDeltaSchema, delta).length
+				>= toBinary(CallerAccessSchema, { ...now, seq: 0n, version: 0n }).length
+		) return { whole, holds: now.version };
+		return { delta: { ...delta, seq }, holds: now.version };
 	}
 
 	private handlePull(req: PullRequest) {
 		this.assertAccess(req.workspaceId);
 		const state = this.ws(req.workspaceId);
-		const from = decodeCursor(req.cursor);
-		if (from === undefined || from < state.horizon) {
+		const cursor = decodeCursor(req.cursor);
+		if (cursor === undefined || cursor.seq < state.horizon) {
 			return {
 				nextCursor: new Uint8Array(),
 				lastAckedMutationId: state.watermarks.get(req.clientId) ?? 0n,
@@ -767,7 +1179,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 				schemaRevision: this.schemaRevision,
 			};
 		}
-		return this.page(state, req.clientId, from, req.limit);
+		const deltas = req.callerAccessVersion !== undefined;
+		const held = req.callerAccessVersion ?? (req.cursor.length === 0 ? 0n : cursor.access);
+		return this.page(req.workspaceId, state, req.clientId, cursor.seq, req.limit, held, deltas);
 	}
 
 	private async *handleBootstrap(req: BootstrapRequest) {
@@ -780,26 +1194,38 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			body: {
 				case: 'begin',
 				value: {
-					cursor: encodeCursor(state.seq),
+					cursor: encodeCursor(state.seq, this.callerAccess.get(req.workspaceId)?.version ?? 0n),
 					lastAckedMutationId: state.watermarks.get(req.clientId) ?? 0n,
 					seq: state.seq,
 					schemaRevision: this.schemaRevision,
 					entities: order,
 					resumed: false,
+					...(this.callerAccess.has(req.workspaceId)
+						? { callerAccess: { ...this.callerAccess.get(req.workspaceId)!, seq: state.seq } }
+						: {}),
 				},
 			},
 		});
+		const readable = this.readableIn(req.workspaceId, state);
+		const served = readable === undefined ? undefined : new Map<string, Map<string, string>>();
+		if (served !== undefined) state.served.set(req.clientId, served);
 		for (const entity of order) {
 			const live = [ ...(state.rows.get(entity) ?? new Map<string, StoredRow>()) ]
-				.filter(([ , row ]) => row.value !== undefined)
+				.filter(([ key, row ]) => row.value !== undefined && (readable?.reads(entity, key) ?? true))
 				.sort(([ a ], [ b ]) => (a < b ? -1 : 1));
+			if (served !== undefined) {
+				served.set(
+					entity,
+					new Map(live.map(([ key ]) => [ key, hiddenSig(readable!.hidden(entity, key)) ])),
+				);
+			}
 			for (let i = 0; i < live.length; i += this.chunkSize) {
 				yield create(BootstrapResponseSchema, {
 					body: {
 						case: 'chunk',
 						value: {
 							rows: live.slice(i, i + this.chunkSize)
-								.map(([ key, row ]) => rowChangeInit(entity, key, row)),
+								.map(([ key, row ]) => rowChangeInit(entity, key, row, readable?.hidden(entity, key))),
 						},
 					},
 				});
@@ -809,7 +1235,7 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	private async *handleSubscribe(req: SubscribeRequest, signal: AbortSignal) {
-		const cursors = new Map<string, bigint>();
+		const cursors = new Map<string, StreamPosition>();
 		const pending = [ ...req.scopes ];
 		const drop = (workspaceId: string, reason: WorkspaceDropped_Reason, message: string) => {
 			cursors.delete(workspaceId);
@@ -822,20 +1248,21 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		// Catch-up: pages until drained, then caughtUp, per scope.
 		for (const scope of pending) {
 			const state = this.ws(scope.workspaceId);
-			if (this.revoked.has(scope.workspaceId)) {
-				yield drop(
-					scope.workspaceId,
-					WorkspaceDropped_Reason.ACCESS_REVOKED,
-					`workspace "${scope.workspaceId}": access denied`,
-				);
+			const denial = this.denial(scope.workspaceId);
+			if (denial) {
+				yield drop(scope.workspaceId, denial.reason, denial.message);
 				continue;
 			}
-			const from = decodeCursor(scope.cursor);
-			if (from === undefined || from < state.horizon) {
+			const cursor = decodeCursor(scope.cursor);
+			if (cursor === undefined || cursor.seq < state.horizon) {
 				yield drop(scope.workspaceId, WorkspaceDropped_Reason.RESET, 'cursor predates the horizon');
 				continue;
 			}
-			cursors.set(scope.workspaceId, from);
+			cursors.set(scope.workspaceId, {
+				seq: cursor.seq,
+				held: scope.callerAccessVersion ?? (scope.cursor.length === 0 ? 0n : cursor.access),
+				deltas: scope.callerAccessVersion !== undefined,
+			});
 			yield* this.pageFrames(scope.workspaceId, cursors, req);
 			yield create(SubscribeResponseSchema, {
 				workspaceId: scope.workspaceId,
@@ -859,12 +1286,9 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 			});
 			if (signal.aborted) return;
 			for (const workspaceId of [ ...cursors.keys() ]) {
-				if (this.revoked.has(workspaceId)) {
-					yield drop(
-						workspaceId,
-						WorkspaceDropped_Reason.ACCESS_REVOKED,
-						`workspace "${workspaceId}": access denied`,
-					);
+				const denial = this.denial(workspaceId);
+				if (denial) {
+					yield drop(workspaceId, denial.reason, denial.message);
 					continue;
 				}
 				yield* this.pageFrames(workspaceId, cursors, req);
@@ -874,13 +1298,22 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 
 	private *pageFrames(
 		workspaceId: string,
-		cursors: Map<string, bigint>,
+		cursors: Map<string, StreamPosition>,
 		req: SubscribeRequest,
 	) {
 		const state = this.ws(workspaceId);
-		while (state.seq > cursors.get(workspaceId)!) {
-			const page = this.page(state, req.clientId, cursors.get(workspaceId)!, req.limit);
-			cursors.set(workspaceId, page.seq);
+		for (;;) {
+			const at = cursors.get(workspaceId)!;
+			const page = this.page(workspaceId, state, req.clientId, at.seq, req.limit, at.held, at.deltas);
+			// A page can carry rows the caller started or stopped reading, or a
+			// new CallerAccess, with no new commit.
+			const access = page.callerAccess ?? page.callerAccessDelta;
+			if (page.seq === at.seq && page.patch.changes.length === 0 && access === undefined) return;
+			cursors.set(workspaceId, {
+				seq: page.seq,
+				held: access?.version ?? at.held,
+				deltas: at.deltas,
+			});
 			yield create(SubscribeResponseSchema, {
 				workspaceId,
 				schemaRevision: this.schemaRevision,

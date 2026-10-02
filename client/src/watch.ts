@@ -59,6 +59,7 @@ import {
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
+	rowOf,
 	scanMergedRows,
 	type ScopedRow,
 	type WorkspaceScope,
@@ -344,6 +345,12 @@ interface Watcher {
 	 * its own.
 	 */
 	workspaces?: readonly string[];
+	/**
+	 * The scan scope this watcher draws on (see scanScope). It is set once at
+	 * registration, because the entity and workspaces it comes from do not
+	 * change after that.
+	 */
+	scope: string;
 	cb: WatchCallback<unknown>;
 	/** When set, rows are filtered/ordered/sliced before the callback fires. */
 	query?: CompiledQuery;
@@ -498,6 +505,8 @@ interface KeyWatcher {
 	 * filter — each ref carries its own workspace regardless.
 	 */
 	workspaceId?: string;
+	/** The scan scope this watcher draws on; see Watcher.scope. */
+	scope: string;
 	/**
 	 * The watched refs, by row id (see rowId). Every map below is keyed the same
 	 * way, so a cross-workspace watcher holding the same key in two workspaces
@@ -749,6 +758,7 @@ export class WatcherHub {
 			entity: def.name,
 			workspaceId,
 			workspaces,
+			scope: scanScope({ entity: def.name, workspaceId, workspaces }),
 			cb: cb as WatchCallback<unknown>,
 			query,
 			predicates: named?.predicates,
@@ -770,7 +780,7 @@ export class WatcherHub {
 		return {
 			close: () => {
 				if (!this.watchers.delete(watcher)) return;
-				this.pruneScope(scanScope(watcher));
+				this.pruneScope(watcher.scope);
 			},
 			setWindow: (window) => void this.moveWindow(watcher, window),
 		};
@@ -938,6 +948,7 @@ export class WatcherHub {
 			schema,
 			entity: def.name,
 			workspaceId,
+			scope: scanScope({ entity: def.name, workspaceId }),
 			refs: initial,
 			added: new Set(initial.keys()),
 			flushing: false,
@@ -953,7 +964,7 @@ export class WatcherHub {
 		return {
 			close: () => {
 				if (!this.keyWatchers.delete(watcher)) return;
-				this.pruneScope(scanScope(watcher));
+				this.pruneScope(watcher.scope);
 			},
 			setRefs: (next) => this.setRefs(watcher, next),
 		};
@@ -980,7 +991,7 @@ export class WatcherHub {
 		watcher.refs = wanted;
 		// Released here rather than at the next commit: a screen swapping one long
 		// ref list for another would otherwise hold both until something is written.
-		if (dropped.size > 0) this.pruneScope(scanScope(watcher), dropped);
+		if (dropped.size > 0) this.pruneScope(watcher.scope, dropped);
 		if (grew) this.scheduleAdds(watcher);
 	}
 
@@ -1039,7 +1050,7 @@ export class WatcherHub {
 			wantedIds.push(id);
 		}
 		if (wanted.length === 0) return;
-		const scoped = this.scopeRows(scanScope(watcher));
+		const scoped = this.scopeRows(watcher.scope);
 		const merged = await readMergedRowsWithVersion(
 			tx,
 			this.registry,
@@ -1061,7 +1072,7 @@ export class WatcherHub {
 				scoped.rows.get(id),
 				id,
 				suffixOf(watcher, workspaceId, key),
-				{ v: view.v, version: view.version, workspaceId, key },
+				{ v: view.v, version: view.version, workspaceId, key, hidden: view.hidden },
 			);
 			scoped.rows.set(id, row);
 			// The same object means the same bytes and version, so nothing a
@@ -1158,7 +1169,7 @@ export class WatcherHub {
 		const byScope = new Map<string, Watcher[]>();
 		for (const w of this.watchers) {
 			if (!reaches(w, pairs)) continue;
-			const scope = scanScope(w);
+			const scope = w.scope;
 			const group = byScope.get(scope);
 			if (group === undefined) byScope.set(scope, [ w ]);
 			else group.push(w);
@@ -1254,13 +1265,15 @@ export class WatcherHub {
 				}
 				// After the scans above, so a keyed watcher sharing a scope with a
 				// rebuilt result reuses the rows that rebuild just decoded.
+				const prunes = new Map<string, Set<string>>();
 				for (const w of keyed) {
 					const refs = touchedRefs(w, pairs);
 					await this.readRefs(tx, w, refs, false);
 					keyedPending.push({ watcher: w, force: touchesInclude(w, pairs) });
 					if (this.verifyTouches) await this.verifyKeys(tx, w);
-					this.pruneScope(scanScope(w), new Set(refs));
+					addCandidates(prunes, w.scope, refs);
 				}
+				for (const [ scope, ids ] of prunes) this.pruneScope(scope, ids);
 				// Stamped inside the section: the order the mutex grants reads in
 				// IS the order of the views they saw.
 				return ++this.readSeq;
@@ -1309,7 +1322,7 @@ export class WatcherHub {
 			if (w.rel !== undefined || w.include !== undefined || w.matches === undefined) {
 				return undefined;
 			}
-			const scope = scanScope(w);
+			const scope = w.scope;
 			const group = byScope.get(scope);
 			if (group === undefined) byScope.set(scope, [ w ]);
 			else group.push(w);
@@ -1338,9 +1351,9 @@ export class WatcherHub {
 				}
 				this.pruneScope(scope, new Set(changed.keys()));
 			}
-			for (const w of keyed) {
-				this.pruneScope(scanScope(w), new Set(this.handedRefs(w, handed)));
-			}
+			const prunes = new Map<string, Set<string>>();
+			for (const w of keyed) addCandidates(prunes, w.scope, this.handedRefs(w, handed));
+			for (const [ scope, ids ] of prunes) this.pruneScope(scope, ids);
 			// Stamped here for the reason notify stamps inside its read section.
 			at = ++this.readSeq;
 			if (this.verifyTouches) await this.verifyHanded(byScope, keyed);
@@ -1398,7 +1411,7 @@ export class WatcherHub {
 	 * a ref answered for the first time comes through flushAdds, which reads).
 	 */
 	private handedRefs(watcher: KeyWatcher, handed: readonly HandedRow[]): string[] {
-		const scoped = this.scopeRows(scanScope(watcher));
+		const scoped = this.scopeRows(watcher.scope);
 		const named: string[] = [];
 		for (const { workspaceId, entity, key, view } of handed) {
 			if (entity !== watcher.entity || !inScope(watcher, workspaceId)) continue;
@@ -1468,7 +1481,7 @@ export class WatcherHub {
 				watcher.matches = await this.seedFromIndex(tx, watcher, report)
 					?? buildMatches(watcher, await this.scanScope(tx, watcher));
 				if (this.verifyTouches) await this.verifyMatches(tx, watcher);
-				this.pruneScope(scanScope(watcher));
+				this.pruneScope(watcher.scope);
 				return ++this.readSeq;
 			} finally {
 				tx.release();
@@ -1523,7 +1536,7 @@ export class WatcherHub {
 				scoped.rows.get(id),
 				id,
 				suffixOf(sample, workspaceId, key),
-				{ v: view.v, version: view.version, workspaceId, key },
+				{ v: view.v, version: view.version, workspaceId, key, hidden: view.hidden },
 			);
 			scoped.rows.set(id, row);
 			changed.set(id, row);
@@ -1534,7 +1547,7 @@ export class WatcherHub {
 	/** Rebuilds a scope's shared rows from a full merged-view scan, in scan order. */
 	private async scanScope(tx: KVRead, watcher: Watcher): Promise<ResultRow[]> {
 		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
-		const scoped = this.scopeRows(scanScope(watcher));
+		const scoped = this.scopeRows(watcher.scope);
 		const prev = scoped.rows;
 		const rows = new Map<string, ResultRow>();
 		const ordered: ResultRow[] = [];
@@ -1617,12 +1630,12 @@ export class WatcherHub {
 		// One read reports one index. Legs choose independently, so a set whose
 		// per-workspace predicates planned differently reports each name it used.
 		report.index = [ ...names ].join('+');
-		const scoped = this.scopeRows(scanScope(watcher));
+		const scoped = this.scopeRows(watcher.scope);
 		const ordered = legs.map((entry) => {
 			const id = rowId(entry.row.workspaceId, entry.row.key);
 			const prev = scoped.rows.get(id);
 			const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
-					&& prev.row.version === entry.row.version
+					&& prev.row.version === entry.row.version && sameHidden(prev.row.hidden, entry.row.hidden)
 				? prev
 				: {
 					id,
@@ -1778,12 +1791,12 @@ export class WatcherHub {
 		const holders: ReadonlyMap<string, ResultRow>[] = [];
 		let live = false;
 		for (const w of this.watchers) {
-			if (scanScope(w) !== scope) continue;
+			if (w.scope !== scope) continue;
 			live = true;
 			if (w.matches) holders.push(w.matches.byId);
 		}
 		for (const w of this.keyWatchers) {
-			if (scanScope(w) !== scope) continue;
+			if (w.scope !== scope) continue;
 			live = true;
 			holders.push(w.held);
 		}
@@ -1827,12 +1840,16 @@ export class WatcherHub {
 		if (watcher.matches === undefined) return;
 		const merged = await scanMergedRows(tx, this.registry, watcher.entity, readScope(watcher));
 		const bytes = new Map(merged.map((row) => [ rowId(row.workspaceId, row.key), row.v ]));
-		const scanned: Row<unknown>[] = merged.map((row) => ({
-			key: row.key,
-			value: decodeRow(watcher.schema, row.v),
-			workspaceId: row.workspaceId,
-			version: row.version,
-		}));
+		const scanned: Row<unknown>[] = merged.map((row) =>
+			rowOf(
+				watcher.schema,
+				row.key,
+				decodeRow(watcher.schema, row.v),
+				row.workspaceId,
+				row.version,
+				row.hidden,
+			)
+		);
 		// The definition, minus the page: a match set is the whole result, and the
 		// offset/limit slice happens on emit. A per-workspace predicate is applied
 		// before the sort rather than inside it, which is the same set — `runQuery`
@@ -1859,7 +1876,7 @@ export class WatcherHub {
 		const describe = (r: Row<unknown>): string => `${r.workspaceId}/${r.key}@${r.version}`;
 		const fail = (why: string): never => {
 			throw new Error(
-				`maintained watch result diverged for scope ${scanScope(watcher)}: ${why}\n`
+				`maintained watch result diverged for scope ${watcher.scope}: ${why}\n`
 					+ `  held: [${have.map((r) => describe(r.row)).join(', ')}]\n`
 					+ `  scan: [${want.map(describe).join(', ')}]\n`
 					+ 'Either a commit path changed a row without reporting it (see TouchSet),'
@@ -2145,7 +2162,7 @@ export class WatcherHub {
 						const id = rowId(entry.row.workspaceId, entry.row.key);
 						const prev = scoped.rows.get(id);
 						const row = prev !== undefined && bytesEqual(prev.bytes, entry.bytes)
-								&& prev.row.version === entry.row.version
+								&& prev.row.version === entry.row.version && sameHidden(prev.row.hidden, entry.row.hidden)
 							? prev
 							: {
 								id,
@@ -2273,6 +2290,28 @@ function touchedRefs(watcher: KeyWatcher, pairs: readonly TouchedPair[]): string
 		}
 	}
 	return [ ...out ];
+}
+
+/**
+ * Adds one keyed watcher's prune candidates to those of its scope, so that one
+ * update prunes each scope once. A prune visits every watcher of the hub, so
+ * one prune per scope keeps a commit linear in the number of keyed watchers —
+ * a screen of row views holds one watcher per row, all on one scope.
+ *
+ * A watcher with no candidates still adds its scope: an empty prune can still
+ * start the full walk (see pruneScope).
+ */
+function addCandidates(
+	into: Map<string, Set<string>>,
+	scope: string,
+	ids: Iterable<string>,
+): void {
+	let candidates = into.get(scope);
+	if (candidates === undefined) {
+		candidates = new Set();
+		into.set(scope, candidates);
+	}
+	for (const id of ids) candidates.add(id);
 }
 
 /** Every ref a forced emit re-delivers: what is held, with pending changes over it. */
@@ -2649,10 +2688,12 @@ function sameTail(
  * decode it avoids — cheaper too than trusting the row version, which would
  * serve wrong data on a stale hit.
  *
- * The Row wrapper is reused as well, but only when the version also held:
- * version can move without the bytes moving (an optimistic create acked to
- * byte-identical confirmed bytes), and that difference is exactly what a
- * compare-and-swap guard reads.
+ * The Row wrapper is reused as well, but only when the version and the hidden
+ * fields also held: version can move without the bytes moving (an optimistic
+ * create acked to byte-identical confirmed bytes), and that difference is
+ * exactly what a compare-and-swap guard reads. A field the server starts to
+ * hide can leave the bytes as they were too, when its value was the zero
+ * value.
  */
 function resultRow(
 	schema: DescMessage,
@@ -2662,16 +2703,24 @@ function resultRow(
 	row: ScopedRow,
 ): ResultRow {
 	if (prev !== undefined && bytesEqual(prev.bytes, row.v)) {
-		if (prev.row.version === row.version) return prev;
-		return { id, suffix, bytes: row.v, row: { ...prev.row, version: row.version } };
+		const next = rowOf(schema, row.key, prev.row.value, row.workspaceId, row.version, row.hidden);
+		if (prev.row.version === row.version && sameHidden(prev.row.hidden, next.hidden)) return prev;
+		return { id, suffix, bytes: row.v, row: next };
 	}
 	const value = decodeRow(schema, row.v);
 	return {
 		id,
 		suffix,
 		bytes: row.v,
-		row: { key: row.key, value, workspaceId: row.workspaceId, version: row.version },
+		row: rowOf(schema, row.key, value, row.workspaceId, row.version, row.hidden),
 	};
+}
+
+/** Whether two rows hide the same fields. */
+function sameHidden(a: readonly string[] | undefined, b: readonly string[] | undefined): boolean {
+	if (a === b) return true;
+	if (a === undefined || b === undefined || a.length !== b.length) return false;
+	return a.every((name, i) => name === b[i]);
 }
 
 function decodeRow(schema: DescMessage, bytes: Uint8Array): unknown {

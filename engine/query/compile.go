@@ -180,6 +180,14 @@ const (
 	mapEntryValueNumber protoreflect.FieldNumber = 2
 )
 
+// unknownOp is the error for an operator value of a kind of condition that
+// this build does not declare. A newer query.proto can add one, and reading it
+// as any known operator could widen what a condition, or a not around it,
+// admits.
+func unknownOp(kind string, op int32) error {
+	return fmt.Errorf("%s condition op %d is unknown to this server; upgrade the server before using it", kind, op)
+}
+
 func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Condition) (node, error) {
 	switch kind := cond.GetKind().(type) {
 	case *syncplanev1.Condition_Cmp:
@@ -188,8 +196,14 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		if err != nil {
 			return nil, err
 		}
-		if c.GetOp() == syncplanev1.CmpOp_CMP_OP_UNSPECIFIED {
+		switch c.GetOp() {
+		case syncplanev1.CmpOp_CMP_OP_EQ, syncplanev1.CmpOp_CMP_OP_NEQ,
+			syncplanev1.CmpOp_CMP_OP_GT, syncplanev1.CmpOp_CMP_OP_GTE,
+			syncplanev1.CmpOp_CMP_OP_LT, syncplanev1.CmpOp_CMP_OP_LTE:
+		case syncplanev1.CmpOp_CMP_OP_UNSPECIFIED:
 			return nil, fmt.Errorf("cmp condition needs an op")
+		default:
+			return nil, unknownOp("cmp", int32(c.GetOp()))
 		}
 		if err := requireComparable(c.GetPath(), fields); err != nil {
 			return nil, err
@@ -219,8 +233,12 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		if err != nil {
 			return nil, err
 		}
-		if c.GetOp() == syncplanev1.StrOp_STR_OP_UNSPECIFIED {
+		switch c.GetOp() {
+		case syncplanev1.StrOp_STR_OP_STARTS_WITH, syncplanev1.StrOp_STR_OP_ENDS_WITH, syncplanev1.StrOp_STR_OP_CONTAINS:
+		case syncplanev1.StrOp_STR_OP_UNSPECIFIED:
 			return nil, fmt.Errorf("str condition needs an op")
+		default:
+			return nil, unknownOp("str", int32(c.GetOp()))
 		}
 		if k := leafKind(fields); k != rvString {
 			return nil, fmt.Errorf("path %v: startsWith/endsWith/contains need a string or text field, got %s",
@@ -252,8 +270,10 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 				return nil, fmt.Errorf("rep has condition needs exactly one value")
 			}
 		case syncplanev1.RepOp_REP_OP_HAS_ANY, syncplanev1.RepOp_REP_OP_HAS_ALL, syncplanev1.RepOp_REP_OP_IS_EMPTY:
-		default:
+		case syncplanev1.RepOp_REP_OP_UNSPECIFIED:
 			return nil, fmt.Errorf("rep condition needs an op")
+		default:
+			return nil, unknownOp("rep", int32(c.GetOp()))
 		}
 		// isEmpty works on any element type, so it needs nothing below.
 		if isEmpty {
@@ -280,8 +300,12 @@ func compileCond(desc protoreflect.MessageDescriptor, cond *syncplanev1.Conditio
 		if err != nil {
 			return nil, err
 		}
-		if c.GetOp() == syncplanev1.PresentOp_PRESENT_OP_UNSPECIFIED {
+		switch c.GetOp() {
+		case syncplanev1.PresentOp_PRESENT_OP_IS_SET, syncplanev1.PresentOp_PRESENT_OP_IS_NOT_SET:
+		case syncplanev1.PresentOp_PRESENT_OP_UNSPECIFIED:
 			return nil, fmt.Errorf("present condition needs an op")
+		default:
+			return nil, unknownOp("present", int32(c.GetOp()))
 		}
 		return &presentNode{fields: fields, op: c.GetOp()}, nil
 	case *syncplanev1.Condition_And:

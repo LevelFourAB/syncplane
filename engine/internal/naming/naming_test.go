@@ -19,6 +19,20 @@ func widgetField(name string) protoreflect.FieldDescriptor {
 	return fd
 }
 
+var _ = Describe("IsReservedEntityName", func() {
+	It("reserves the names that start with the engine's prefix", func() {
+		for _, name := range []string{"syncplane_field_history", "syncplane_access_moves", "syncplane_"} {
+			Expect(naming.IsReservedEntityName(name)).To(BeTrue(), name)
+		}
+	})
+
+	It("leaves other names to the schema", func() {
+		for _, name := range []string{"syncplane", "Syncplane_x", "my_syncplane_x", "todo"} {
+			Expect(naming.IsReservedEntityName(name)).To(BeFalse(), name)
+		}
+	})
+})
+
 var _ = Describe("ValidateEntityName", func() {
 	It("accepts identifiers", func() {
 		for _, name := range []string{"todo", "Todo", "todo_list", "_private", "a1", "t2m"} {
@@ -69,6 +83,24 @@ var _ = Describe("ValidateRelationName", func() {
 		Expect(naming.ValidateRelationName("")).To(MatchError("reverse relation name is empty"))
 		Expect(naming.ValidateRelationName(strings.Repeat("a", naming.MaxEntityNameLength+1))).
 			To(MatchError(ContainSubstring("the limit is")))
+	})
+})
+
+var _ = Describe("ValidatePermissionName and ValidateRoleName", func() {
+	It("accept identifiers", func() {
+		for _, name := range []string{"view_tasks", "editTasks", "_internal", "v2"} {
+			Expect(naming.ValidatePermissionName(name)).To(Succeed(), name)
+			Expect(naming.ValidateRoleName(name)).To(Succeed(), name)
+		}
+	})
+
+	It("reject anything that is not an identifier", func() {
+		for _, name := range []string{"", "view-tasks", "view.tasks", "1view", "view tasks"} {
+			Expect(naming.ValidatePermissionName(name)).NotTo(Succeed(), name)
+			Expect(naming.ValidateRoleName(name)).NotTo(Succeed(), name)
+		}
+		Expect(naming.ValidatePermissionName("a-b")).To(MatchError(ContainSubstring(`permission name "a-b"`)))
+		Expect(naming.ValidateRoleName("a-b")).To(MatchError(ContainSubstring(`role name "a-b"`)))
 	})
 })
 

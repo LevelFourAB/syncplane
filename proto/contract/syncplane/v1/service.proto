@@ -188,6 +188,12 @@ message PullRequest {
 	// pull returns; the cursor still decides that. 0 (and clients predating
 	// the field) means no floor beyond the cursor's own position.
 	uint64 min_seq = 7;
+	// The CallerAccess.version of the summary the client holds for the
+	// workspace, 0 when it holds none. A client that sets the field can apply
+	// a CallerAccessDelta, and the response carries one only when it applies
+	// to this version. Without the field, the response carries a whole
+	// CallerAccess when the cursor was issued under another one.
+	optional fixed64 caller_access_version = 8;
 }
 
 message PullResponse {
@@ -220,6 +226,99 @@ message PullResponse {
 	// client configured with its own revision compares the two and reacts to a
 	// mismatch per its skew policy.
 	string schema_revision = 7;
+	// What the caller holds in the workspace under the access model. Present
+	// when it differs from what the request's cursor was issued under, and on
+	// a response to a request without a cursor. Absent otherwise, and in a
+	// schema without the access model: the client keeps the last one it
+	// received.
+	CallerAccess caller_access = 8;
+	// A change to the CallerAccess that PullRequest.caller_access_version
+	// names, in place of caller_access. At most one of the two is present,
+	// and only a request that sets caller_access_version receives this one.
+	CallerAccessDelta caller_access_delta = 9;
+}
+
+// What one caller holds in one workspace under the access model: the
+// permissions it holds at the workspace root, and the rows it holds
+// permissions at, grouped by the permissions held there.
+//
+// The caller holds a permission at a row when root_permissions lists it, or
+// when the anchor group that lists the row lists it. A permission held at a
+// row applies to the row and to every row whose access parent points at it.
+// A permission that no list names is held nowhere.
+//
+// Every list except subjects is sorted and holds no duplicates, so equal
+// access has one encoding, apart from seq and version.
+//
+// It is advisory. The server decides every read and every write itself, and a
+// client uses this to predict an answer, for example to hide a control the
+// caller cannot use.
+message CallerAccess {
+	// The workspace sequence this summary is current through.
+	uint64 seq = 2;
+	// The caller's subjects: the values grant rows and `subject` checks
+	// compare with. The first is the primary subject, which a create stores
+	// in each `creator` field. Empty for an anonymous caller.
+	repeated string subjects = 3;
+	// The permissions the caller holds at the workspace root, which covers
+	// every row. Sorted.
+	repeated string root_permissions = 4;
+	// One group for each distinct set of permissions the caller holds at rows,
+	// sorted by permission list: compared element by element, with a list
+	// before the longer lists it begins. A row is in at most one group, which
+	// lists all the permissions the caller's grants at the row give together.
+	repeated AnchorGroup anchor_groups = 5;
+	// Identifies what the summary holds: equal summaries have equal versions,
+	// whatever their seq. Never 0 in a summary from the server.
+	fixed64 version = 6;
+	// The most access parent hops the server follows up from a row: its
+	// MaxAccessDepth. A permission held at a row further up does not apply to
+	// the row. 0 from a server that does not send it, and a client then
+	// assumes 32, the default.
+	uint32 max_access_depth = 7;
+}
+
+// A change to a CallerAccess: applied to the summary whose version is
+// base_version, it gives the summary whose version is version. Subjects,
+// root_permissions and max_access_depth do not change.
+//
+// To apply it, put each row that anchor_groups lists in the group with the
+// permissions listed there, and take it out of the group it was in. Then
+// take each row that removed lists out of every group, and drop the groups
+// that hold no rows. A client whose summary has another version must not
+// apply it: when its summary already has version, the delta changes nothing,
+// and otherwise the client keeps its summary and pulls again with
+// PullRequest.caller_access_version, which gets it the change from there.
+message CallerAccessDelta {
+	// The workspace sequence the new summary is current through.
+	uint64 seq = 1;
+	// The version of the summary the delta applies to.
+	fixed64 base_version = 2;
+	// The version of the summary the delta gives.
+	fixed64 version = 3;
+	// The rows whose permissions changed, and rows the caller holds
+	// permissions at for the first time, each with all the permissions it now
+	// holds there. Ordered and grouped as in CallerAccess.anchor_groups.
+	repeated AnchorGroup anchor_groups = 4;
+	// The rows that are in no group of the new summary. Sorted by entity.
+	repeated AnchorRows removed = 5;
+}
+
+// Rows at which the caller holds the same set of permissions.
+message AnchorGroup {
+	// The permissions held at each row of the group. Sorted and never empty.
+	// It leaves out the permissions in CallerAccess.root_permissions, so a row
+	// whose permissions are all held at the root is in no group.
+	repeated string permissions = 1;
+	// The rows, per entity, sorted by entity.
+	repeated AnchorRows anchors = 2;
+}
+
+// Rows of one entity, by key.
+message AnchorRows {
+	string entity = 1;
+	// Row keys, sorted.
+	repeated string keys = 2;
 }
 
 message BootstrapRequest {
@@ -280,6 +379,9 @@ message BootstrapResponse {
 		// False means a fresh snapshot — whatever an earlier attempt staged
 		// belongs to a different one and must be discarded rather than merged.
 		bool resumed = 6;
+		// What the caller holds in the workspace under the access model, as of
+		// the snapshot. Absent in a schema without the access model.
+		CallerAccess caller_access = 7;
 	}
 	message Chunk {
 		repeated RowChange rows = 1;
@@ -461,6 +563,10 @@ message WorkspaceScope {
 	// PullRequest.min_seq, applied to every page this scope is served: the
 	// highest seq the client has seen a push acked at for this workspace.
 	uint64 min_seq = 4;
+	// PullRequest.caller_access_version, for the first page of this scope. A
+	// later page sends what changed since the CallerAccess or delta the scope
+	// sent last.
+	optional fixed64 caller_access_version = 5;
 }
 
 message SubscribeRequest {
@@ -510,6 +616,10 @@ message WorkspaceDropped {
 		// A failure scoped to this workspace that may not persist (storage
 		// error, a permission hook that could not decide). Reopen with backoff.
 		REASON_ERROR = 3;
+		// The caller holds no permission in the workspace's access model. A
+		// grant written later lifts it, so keep the local copy and the queue,
+		// and retry with backoff.
+		REASON_NO_ACCESS = 4;
 	}
 	Reason reason = 1;
 	// Human-readable detail for logs. Never parse it; branch on reason.

@@ -24,14 +24,20 @@ import (
 // apply. Results are value snapshots ordered by order_by (missing values
 // last, ties broken by the next key and finally the row key ascending, in
 // UTF-16 code-unit order — exactly the client evaluator's compareRows).
-func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.QueryRequest]) (*connect.Response[syncplanev1.QueryResponse], error) {
+func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.QueryRequest]) (res *connect.Response[syncplanev1.QueryResponse], err error) {
 	msg := req.Msg
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	if _, err := s.enterWorkspace(ctx, msg.GetWorkspaceId()); err != nil {
+	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
+	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+			res, err = nil, gerr
+		}
+	}()
 	info, ok := s.catalogPtr().entities[msg.GetEntity()]
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown entity %q", msg.GetEntity()))
@@ -117,12 +123,12 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// entity is reachable here even though nothing ever syncs it. Read filters
 	// still apply — this is not a permission bypass, only a sync one.
 	emitter.includeServerOnly = true
+	emitter.admit(adm)
 	// Resolve the entity's read filter BEFORE opening the snapshot (the hook
 	// must not run while the read tx is pinned); classify() inside the scan
 	// then hits the memoized filter. Query scans a single entity, so this is
 	// the only filter to warm.
-	filter, err := emitter.filterOf(info.name)
-	if err != nil {
+	if _, err := emitter.appFilterOf(info.name); err != nil {
 		return nil, err
 	}
 	// A rel pre-pass reads the TARGET entities too, under the same rule, so
@@ -132,7 +138,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		if err != nil {
 			return nil, connect.NewError(connect.CodeInvalidArgument, err)
 		}
-		if _, err := emitter.filterOf(target.name); err != nil {
+		if _, err := emitter.appFilterOf(target.name); err != nil {
 			return nil, err
 		}
 	}
@@ -146,21 +152,35 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 	}
 
-	// A row a filter or the history rule can hide is a row an index entry may
-	// not stand in for; the grouped walk needs that stated, because otherwise it
-	// counts entries without reading them.
-	filtered := filter != nil || history
-
 	var (
 		rows      []qrow
 		groups    []query.GroupCount
 		rowGroups []*rowGroup
 		more      bool
 		fold      *facetFold
+		// rowOut and groupOut are rows and the rows of rowGroups as the
+		// caller receives them, rendered inside the snapshot, where a guard
+		// reads the parent chains it decides on.
+		rowOut   []*syncplanev1.RowChange
+		groupOut [][]*syncplanev1.RowChange
 	)
 	// Anchored: query cursors are value-based and carry no seq to floor on,
 	// and a caller who just wrote expects the query to see it.
 	err = s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+		if err := emitter.bindAccess(tx); err != nil {
+			return err
+		}
+		if err := refuseHiddenQuery(emitter, info, msg); err != nil {
+			return err
+		}
+		filter, err := emitter.filterOf(info.name)
+		if err != nil {
+			return err
+		}
+		// A row a filter or the history rule can hide is a row an index entry
+		// may not stand in for; the grouped walk needs that stated, because
+		// otherwise it counts entries without reading them.
+		filtered := filter != nil || history
 		visible := func(row storage.Row) (bool, error) {
 			class, err := emitter.classify(row)
 			if err != nil {
@@ -188,12 +208,20 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 				return err
 			}
 		}
-		var err error
 		if group != nil {
 			if msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
 				rowGroups, more, err = groupRows(tx, info, pred, group, order,
 					perGroup, limit, msg.GetPerGroupTotal(), visible, emitter, s.limits)
-				return err
+				if err != nil {
+					return err
+				}
+				groupOut = make([][]*syncplanev1.RowChange, len(rowGroups))
+				for i, g := range rowGroups {
+					if groupOut[i], err = queryRowChanges(emitter, info, g.rows); err != nil {
+						return err
+					}
+				}
+				return nil
 			}
 			groups, more, err = groupCounts(tx, info, pred, group,
 				msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_DISTINCT,
@@ -201,6 +229,10 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 			return err
 		}
 		rows, more, fold, err = queryRowsFaceted(tx, info, pred, order, pg, visible, emitter, s.limits, facets)
+		if err != nil {
+			return err
+		}
+		rowOut, err = queryRowChanges(emitter, info, rows)
 		return err
 	})
 	if err != nil {
@@ -216,17 +248,13 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	}
 	if group != nil && msg.GetAggregate() == syncplanev1.AggregateOp_AGGREGATE_OP_ROWS {
 		resp.RowGroups = make([]*syncplanev1.QueryRowGroup, 0, len(rowGroups))
-		for _, g := range rowGroups {
-			out := &syncplanev1.QueryRowGroup{
+		for i, g := range rowGroups {
+			resp.RowGroups = append(resp.RowGroups, &syncplanev1.QueryRowGroup{
 				Value:   g.value.Proto(),
-				Rows:    make([]*syncplanev1.RowChange, 0, len(g.rows)),
+				Rows:    groupOut[i],
 				Total:   g.total,
 				HasMore: g.hasMore,
-			}
-			for _, r := range g.rows {
-				out.Rows = append(out.Rows, rowChange(r.row))
-			}
-			resp.RowGroups = append(resp.RowGroups, out)
+			})
 		}
 		return connect.NewResponse(resp), nil
 	}
@@ -240,9 +268,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		}
 		return connect.NewResponse(resp), nil
 	}
-	for _, r := range rows {
-		resp.Rows = append(resp.Rows, rowChange(r.row))
-	}
+	resp.Rows = append(resp.Rows, rowOut...)
 	if fold != nil {
 		resp.Facets = fold.proto(msg.GetFacets())
 	}
@@ -252,6 +278,72 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 		resp.EndCursor = order.EncodeCursor(msg.GetEntity(), last.msg.ProtoReflect(), last.row.Key)
 	}
 	return connect.NewResponse(resp), nil
+}
+
+// refuseHiddenQuery refuses a query that names a field a guard hides from the
+// bound caller on some row of info: in its predicate, its order, its grouping
+// or its facets. A field that decides which rows match, how they sort or how
+// they count would tell the caller something about values it does not read.
+func refuseHiddenQuery(e *rowEmitter, info *entityInfo, msg *syncplanev1.QueryRequest) error {
+	if err := e.refuseHiddenCond(info, "the predicate", msg.GetPredicate()); err != nil {
+		return err
+	}
+	var heads []string
+	relevance := false
+	for _, k := range msg.GetOrderBy() {
+		if k.GetRelevance() {
+			relevance = true
+		}
+		if len(k.GetPath()) > 0 {
+			heads = append(heads, k.GetPath()[0])
+		}
+	}
+	if err := e.refuseHiddenPaths(info, "order_by", heads); err != nil {
+		return err
+	}
+	if relevance {
+		if err := e.refuseHiddenMatch(info, "order_by"); err != nil {
+			return err
+		}
+	}
+	if path := msg.GetGroupBy(); len(path) > 0 {
+		if err := e.refuseHiddenPaths(info, "group_by", path[:1]); err != nil {
+			return err
+		}
+	}
+	for _, f := range msg.GetFacets() {
+		if path := f.GetPath(); len(path) > 0 {
+			if err := e.refuseHiddenPaths(info, "a facet", path[:1]); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// queryRowChanges renders rows of info as the bound caller receives them: a
+// field-history record as projectHistory left it, and any other row without
+// the fields a guard hides.
+func queryRowChanges(e *rowEmitter, info *entityInfo, rows []qrow) ([]*syncplanev1.RowChange, error) {
+	out := make([]*syncplanev1.RowChange, 0, len(rows))
+	for _, r := range rows {
+		if rec, ok := e.historyView(r.row.Key); ok && info.name == historyEntityName {
+			value, err := proto.Marshal(rec)
+			if err != nil {
+				return nil, err
+			}
+			rc := rowChange(r.row)
+			rc.Body = &syncplanev1.RowChange_Value{Value: value}
+			out = append(out, rc)
+			continue
+		}
+		rc, err := e.rowChange(r.row)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, rc)
+	}
+	return out, nil
 }
 
 // compileGrouping resolves a request's grouping key, or returns nil for an
@@ -478,10 +570,17 @@ func queryRowsFaceted(
 	// fall through to the scan below, and discard is how a decline hands the
 	// heap (and the fold) back empty: the scan re-offers every row the walk
 	// already offered, and neither dedupes.
-	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, consider, want, discard); err != nil {
+	//
+	// A caller the access model narrows considers only its candidate rows, on
+	// both paths.
+	narrowed, err := emitter.accessRowsOf(tx, info)
+	if err != nil {
+		return nil, false, nil, err
+	}
+	if served, err := queryByIndex(tx, info, predicate, order, pg, limits, narrowed, consider, want, discard); err != nil {
 		return nil, false, nil, err
 	} else if !served {
-		if err := tx.ScanEntity(info.name, func(row storage.Row) error {
+		if err := narrowed.scan(tx, info.name, func(row storage.Row) error {
 			return consider(row, predicate)
 		}); err != nil {
 			return nil, false, nil, err

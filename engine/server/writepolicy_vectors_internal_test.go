@@ -3,10 +3,15 @@ package server
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strconv"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -22,14 +27,25 @@ type writePolicyCase struct {
 	Name            string  `json:"name"`
 	Op              string  `json:"op"`
 	ExpectedVersion *string `json:"expectedVersion"`
-	Policies        struct {
-		Create string `json:"create"`
-		Update string `json:"update"`
-		Delete string `json:"delete"`
-	} `json:"policies"`
+	// Access is nil for an entity without access rules.
+	Access *struct {
+		Create bool `json:"create"`
+		Update bool `json:"update"`
+		Delete bool `json:"delete"`
+		// UpdateFields are the fields lists of the update rules when every
+		// update rule has one, and nil when some update rule has none.
+		UpdateFields [][]string `json:"updateFields"`
+	} `json:"access"`
+	KeyFields []string `json:"keyFields"`
 	Protected []string `json:"protected"`
-	Mask      []string `json:"mask"`
-	Want      string   `json:"want"`
+	// Guards are the entity's field guards: the units each restricts, and
+	// whether one of its rules names update.
+	Guards []struct {
+		Fields []string `json:"fields"`
+		Update bool     `json:"update"`
+	} `json:"guards"`
+	Mask []string `json:"mask"`
+	Want string   `json:"want"`
 }
 
 var _ = Describe("write policy conformance vectors", func() {
@@ -49,12 +65,42 @@ var _ = Describe("write policy conformance vectors", func() {
 	It("classifies every case the way the vectors say", func() {
 		for _, tc := range cases {
 			srv := &Server{}
-			info := &entityInfo{
-				name:            "vector",
-				createPolicy:    createPolicyFromVector(tc.Policies.Create),
-				updatePolicy:    updatePolicyFromVector(tc.Policies.Update),
-				deletePolicy:    deletePolicyFromVector(tc.Policies.Delete),
-				protectedFields: tc.Protected,
+			info := &entityInfo{name: "vector", protectedFields: tc.Protected}
+			for _, name := range tc.KeyFields {
+				info.keyFields = append(info.keyFields, vectorKeyField(name))
+			}
+			if a := tc.Access; a != nil {
+				info.access = &entityAccess{named: opRead, rules: []accessRule{{ops: opRead}}}
+				for _, op := range []struct {
+					set bool
+					op  accessOp
+				}{{a.Create, opCreate}, {a.Update, opUpdate}, {a.Delete, opDelete}} {
+					if !op.set {
+						continue
+					}
+					info.access.named |= op.op
+					if op.op != opUpdate || a.UpdateFields == nil {
+						info.access.rules = append(info.access.rules, accessRule{ops: op.op})
+						continue
+					}
+					for _, fields := range a.UpdateFields {
+						info.access.rules = append(info.access.rules, accessRule{ops: opUpdate, fields: slices.Sorted(slices.Values(fields))})
+					}
+				}
+			}
+			for _, g := range tc.Guards {
+				Expect(info.access).NotTo(BeNil(), "%s: a guard needs access", tc.Name)
+				guard := fieldGuard{units: slices.Sorted(slices.Values(g.Fields))}
+				if g.Update {
+					guard.named = opUpdate
+				}
+				if info.access.guardOf == nil {
+					info.access.guardOf = map[string]int{}
+				}
+				for _, u := range guard.units {
+					info.access.guardOf[u] = len(info.access.guards)
+				}
+				info.access.guards = append(info.access.guards, guard)
 			}
 			srv.cat.Store(&catalog{entities: map[string]*entityInfo{info.name: info}})
 
@@ -75,10 +121,39 @@ var _ = Describe("write policy conformance vectors", func() {
 			}
 			rej, ok := AsRejection(err)
 			Expect(ok).To(BeTrue(), "%s: got %v", tc.Name, err)
-			Expect(rej.Code).To(Equal(CodePermissionDenied), tc.Name)
+			// A protected field is a creator field, which refuses as the app's
+			// hooks do; every other refusal here is the access model's.
+			want := CodeAccessDenied
+			if refuseProtectedMask(info, crud, info.protectedFields) != nil {
+				want = CodePermissionDenied
+			}
+			Expect(rej.Code).To(Equal(want), tc.Name)
 		}
 	})
 })
+
+// vectorKeyField returns a string field descriptor named name, standing in for
+// a key field of the vector entity: the check reads only its name.
+func vectorKeyField(name string) protoreflect.FieldDescriptor {
+	fd, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name:    proto.String("vector_" + name + ".proto"),
+		Package: proto.String("vector"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("Vector"),
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:   proto.String(name),
+				Number: proto.Int32(1),
+				Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			}},
+		}},
+	}, nil)
+	if err != nil {
+		panic(err)
+	}
+	return fd.Messages().Get(0).Fields().Get(0)
+}
 
 func opFromVector(op string) syncplanev1.CrudOp {
 	switch op {
@@ -91,25 +166,4 @@ func opFromVector(op string) syncplanev1.CrudOp {
 	default:
 		return syncplanev1.CrudOp_CRUD_OP_UNSPECIFIED
 	}
-}
-
-func createPolicyFromVector(p string) syncplanev1.CreatePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.CreatePolicy_CREATE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.CreatePolicy_CREATE_POLICY_ALLOW
-}
-
-func updatePolicyFromVector(p string) syncplanev1.UpdatePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.UpdatePolicy_UPDATE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.UpdatePolicy_UPDATE_POLICY_ALLOW
-}
-
-func deletePolicyFromVector(p string) syncplanev1.DeletePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.DeletePolicy_DELETE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.DeletePolicy_DELETE_POLICY_ALLOW
 }

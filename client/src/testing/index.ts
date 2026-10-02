@@ -29,6 +29,7 @@ import { MemoryKVStore } from '../kv/memory.js';
 import type { RejectionInfo } from '../sync/coordinator.js';
 import { DEFAULT_WORKSPACE, TestServer } from './server.js';
 
+export type { TestCallerAccess, TestPermission, TestRole } from './access.js';
 export {
 	createTestServer,
 	DEFAULT_WORKSPACE,

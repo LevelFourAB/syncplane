@@ -109,13 +109,22 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return fail(CodeInternal, "workspace %q: %s failed", ws, phase)
 	}
 
-	principal, err := s.enterWorkspace(ctx, ws)
-	if err != nil {
+	// refused reports the workspace gate's error.
+	refused := func(err error) *syncplanev1.WorkspaceResults {
+		if errors.Is(err, ErrNoAccess) {
+			return fail(CodeWorkspaceNoAccess, "workspace %q: the caller holds no permission", ws)
+		}
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return fail(CodeWorkspaceAccessRevoked, "workspace %q: access denied", ws)
 		}
 		// Could not decide (a hook outage). Transient: the client retries.
 		return failInternal("resolving access", err)
+	}
+
+	adm, err := s.enterWorkspaceServed(ctx, ws, true)
+	principal := adm.principal
+	if err != nil {
+		return refused(err)
 	}
 
 	// Authorize every mutation BEFORE opening the write transaction. CanMutate
@@ -131,12 +140,15 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	// is read again by the apply below, so the hooks run out here with the rest
 	// of authorization rather than inside the transaction where a write needs
 	// their answers.
-	gate := s.newWriteGate(ctx, principal, ws, true)
+	gate := s.newWriteGate(ctx, adm, ws, true)
 	muts := batch.GetMutations()
 	authz := make([]error, len(muts))
 	for i, m := range muts {
 		if err := s.authorize(ctx, principal, ws, gate, m); err != nil {
 			if _, isRejection := AsRejection(err); !isRejection {
+				if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+					return refused(gerr)
+				}
 				return failInternal(fmt.Sprintf("authorizing mutation %d", m.GetMutationId()), err)
 			}
 			authz[i] = err
@@ -192,6 +204,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
 		rejectionsOf := func(key string) ([]storage.ClientRejection, error) {
 			if recs, ok := verdicts[key]; ok {
 				return recs, nil
@@ -303,8 +318,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 					// the batch again under savepoints.
 					return errNeedsSavepoints
 				}
-				// The savepoint already rolled the mutation's writes back; a
+				// The savepoint already rolled the mutation's writes back, and
+				// what the caller holds may have been read after them; a
 				// rejected mutation consumes no sequence.
+				gate.accessOf().invalidate()
 				result = &syncplanev1.MutationResult{
 					MutationId:   m.GetMutationId(),
 					Status:       syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED,
@@ -368,6 +385,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		guarded = true
 		s.tel().pushSavepointReruns.Add(ctx, 1)
 		err = s.store.WithWriteTx(ctx, ws, apply)
+	}
+	if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+		return refused(gerr)
 	}
 	switch {
 	case gap != "":
@@ -786,7 +806,7 @@ func (s *Server) applyMutation(
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Custom:
-		if err := s.applyCustom(ctx, ws, tx, payload.Custom, seq, actor); err != nil {
+		if err := s.applyCustom(ctx, ws, tx, g, payload.Custom, seq, actor); err != nil {
 			return 0, err
 		}
 	case *syncplanev1.Mutation_Batch:
@@ -958,6 +978,10 @@ func (s *Server) applyCrud(
 	}); err != nil {
 		return err
 	}
+	aw, err := g.beginAccessWrite(tx, info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), currentRow)
+	if err != nil {
+		return err
+	}
 
 	// Optional compare-and-swap: apply only if the row is still at the version
 	// the client read. An absent or deleted row reads as version 0 (so
@@ -1007,6 +1031,14 @@ func (s *Server) applyCrud(
 			if err := carryProtectedFields(info, protected, base, msg); err != nil {
 				return err
 			}
+			if base == nil {
+				stampCreatorFields(info, msg, g.creatorSubject())
+			}
+		}
+		// The fields the access model keeps from this caller get the same
+		// treatment, which depends on the caller and the row.
+		if err := aw.carryGuarded(tx, msg, nil); err != nil {
+			return err
 		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {
@@ -1043,6 +1075,20 @@ func (s *Server) applyCrud(
 		if err := info.projectRefs(msg.ProtoReflect()); err != nil {
 			return err
 		}
+		// On the row as it will be stored, so the access parent the checks
+		// read is the projected one.
+		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), nil, msg); err != nil {
+			return err
+		}
+		if err := aw.checkNewParentsRead(tx, msg); err != nil {
+			return err
+		}
+		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, msg); err != nil {
+			return err
+		}
+		if err := aw.finish(tx, msg); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(msg)
 		if err != nil {
 			return err
@@ -1052,6 +1098,16 @@ func (s *Server) applyCrud(
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
 			return err
+		}
+		if len(info.textFields) > 0 {
+			base, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
+			}
+			model := s.catalogPtr().access
+			if err := info.recordReadGaps(tx, model, crud.GetKey(), readInputsOf(model, info, base), msg, seq); err != nil {
+				return err
+			}
 		}
 		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),
 			prevText, msg.ProtoReflect()); err != nil {
@@ -1075,7 +1131,14 @@ func (s *Server) applyCrud(
 				return err
 			}
 		}
-		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, msg, seq, actor); err != nil {
+			return err
+		}
+		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
 		// PATCH modifies an existing row; it is NOT an upsert. A partial patch
@@ -1129,6 +1192,8 @@ func (s *Server) applyCrud(
 		// Snapshot the stored documents before the merge folds the patch into
 		// them; the delta log below describes the move from one to the other.
 		prevText := info.textSnapshot(base)
+		model := s.catalogPtr().access
+		prevRead := readInputsOf(model, info, base)
 		mergers := info.mergers
 		if live && len(info.textFields) > 0 {
 			tw, err := info.textWriteFor(s, ws, tx, crud.GetKey())
@@ -1159,6 +1224,18 @@ func (s *Server) applyCrud(
 		if err := info.projectRefs(base.ProtoReflect()); err != nil {
 			return err
 		}
+		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), base); err != nil {
+			return err
+		}
+		if err := aw.checkNewParentsRead(tx, base); err != nil {
+			return err
+		}
+		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, base); err != nil {
+			return err
+		}
+		if err := aw.finish(tx, base); err != nil {
+			return err
+		}
 		value, err := proto.Marshal(base)
 		if err != nil {
 			return err
@@ -1167,6 +1244,9 @@ func (s *Server) applyCrud(
 			return err
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {
+			return err
+		}
+		if err := info.recordReadGaps(tx, model, crud.GetKey(), prevRead, base, seq); err != nil {
 			return err
 		}
 		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),
@@ -1193,7 +1273,14 @@ func (s *Server) applyCrud(
 				return err
 			}
 		}
-		return tx.PutRow(info.name, crud.GetKey(), value, seq, actor)
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, base, seq, actor); err != nil {
+			return err
+		}
+		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
 		// Per-document side state is keyed by instance path, and the nested
@@ -1227,7 +1314,14 @@ func (s *Server) applyCrud(
 		if err := s.purgeHistory(tx, info, crud.GetKey()); err != nil {
 			return err
 		}
-		return tx.DeleteRow(info.name, crud.GetKey(), seq, actor)
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, nil, seq, actor); err != nil {
+			return err
+		}
+		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {
+			return err
+		}
+		g.accessOf().noteWrite(info)
+		return nil
 
 	default:
 		return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q: unknown op", info.name))
@@ -1263,7 +1357,19 @@ func maskNamesPath(paths []string) func(string) bool {
 	}
 }
 
-func (s *Server) applyCustom(ctx context.Context, ws string, tx storage.WriteTx, custom *syncplanev1.CustomMutation, seq uint64, actor storage.Actor) error {
+// applyCustom runs one custom mutation. g is the push's gate: its access is
+// the invoking caller's, which the invocation is checked against (see
+// MutatorAccess) and which the body's EntityTx.Can answers from. The body's
+// own writes pass no gate, and the writes of its AsCaller view pass g.
+func (s *Server) applyCustom(
+	ctx context.Context,
+	ws string,
+	tx storage.WriteTx,
+	g *writeGate,
+	custom *syncplanev1.CustomMutation,
+	seq uint64,
+	actor storage.Actor,
+) error {
 	mi, ok := s.mutators[custom.GetName()]
 	if !ok {
 		return Reject(CodeInvalidArgument, fmt.Sprintf("unknown mutator %q", custom.GetName()))
@@ -1279,5 +1385,10 @@ func (s *Server) applyCustom(ctx context.Context, ws string, tx storage.WriteTx,
 			}
 		}
 	}
-	return mi.fn(markWriteTx(ctx), &EntityTx{srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor}, args)
+	if err := s.checkInvocation(ctx, ws, tx, g.accessOf(), mi, args); err != nil {
+		return err
+	}
+	return mi.fn(markWriteTx(ctx), &EntityTx{
+		srv: s, ctx: ctx, ws: ws, tx: tx, seq: seq, actor: actor, access: g.accessOf(), caller: g,
+	}, args)
 }

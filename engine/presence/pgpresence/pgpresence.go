@@ -334,20 +334,26 @@ func (b *Bus) serves(topic presence.Topic) bool {
 // address. Field names are short because every one of them is repeated in every
 // cursor movement, and the payload budget is shared with the app's own state.
 // []byte marshals to base64, which is what the NOTIFY text payload requires.
+//
+// Issuer is written on every event, the empty issuer included, so its absence
+// marks an event from a node that predates it (see decode).
 type body struct {
-	Kind     uint8  `json:"k"`
-	Session  string `json:"sid"`
-	Subject  string `json:"sub,omitempty"`
-	Revision uint64 `json:"rev,omitempty"`
-	Seq      uint64 `json:"seq,omitempty"`
-	State    []byte `json:"st,omitempty"`
-	Payload  []byte `json:"pl,omitempty"`
+	Kind     uint8   `json:"k"`
+	Session  string  `json:"sid"`
+	Issuer   *string `json:"iss"`
+	Subject  string  `json:"sub,omitempty"`
+	Revision uint64  `json:"rev,omitempty"`
+	Seq      uint64  `json:"seq,omitempty"`
+	State    []byte  `json:"st,omitempty"`
+	Payload  []byte  `json:"pl,omitempty"`
 }
 
 func encodeBody(ev presence.Event) (string, error) {
+	issuer := ev.Participant.Issuer
 	raw, err := json.Marshal(body{
 		Kind:     uint8(ev.Kind),
 		Session:  ev.Participant.SessionID,
+		Issuer:   &issuer,
 		Subject:  ev.Participant.Subject,
 		Revision: ev.Participant.Revision,
 		Seq:      ev.Participant.Seq,
@@ -367,15 +373,31 @@ func routingPrefix(t presence.Topic) string {
 }
 
 // decode splits one notification back into the node that sent it, its topic
-// and its event.
-func decode(payload string) (node string, ev presence.Event, err error) {
+// and its event. ok is false for an event to drop: a state or a leave from a
+// node that sends no issuer.
+//
+// Such a node predates the issuer, so its event names a record of an unknown
+// issuer. Read as the empty issuer, it could change or withdraw the record of
+// a principal with no issuer and the same subject. Dropping it costs a rolling
+// deploy nothing durable: the old node's sessions are missing from the rosters
+// of the new nodes until the deploy ends and their streams reconnect. A
+// broadcast names no record, so it is delivered.
+func decode(payload string) (node string, ev presence.Event, ok bool, err error) {
 	parts := strings.SplitN(payload, fieldSep, 6)
 	if len(parts) != 6 {
-		return "", presence.Event{}, fmt.Errorf("payload has %d fields, want 6", len(parts))
+		return "", presence.Event{}, false, fmt.Errorf("payload has %d fields, want 6", len(parts))
 	}
 	var b body
 	if err := json.Unmarshal([]byte(parts[5]), &b); err != nil {
-		return "", presence.Event{}, err
+		return "", presence.Event{}, false, err
+	}
+	kind := presence.Kind(b.Kind)
+	if b.Issuer == nil && kind != presence.KindMessage {
+		return parts[0], presence.Event{}, false, nil
+	}
+	var issuer string
+	if b.Issuer != nil {
+		issuer = *b.Issuer
 	}
 	return parts[0], presence.Event{
 		Topic: presence.Topic{
@@ -384,16 +406,17 @@ func decode(payload string) (node string, ev presence.Event, err error) {
 			Entity:      parts[3],
 			Key:         parts[4],
 		},
-		Kind: presence.Kind(b.Kind),
+		Kind: kind,
 		Participant: presence.Participant{
 			SessionID: b.Session,
+			Issuer:    issuer,
 			Subject:   b.Subject,
 			State:     b.State,
 			Revision:  b.Revision,
 			Seq:       b.Seq,
 		},
 		Payload: b.Payload,
-	}, nil
+	}, true, nil
 }
 
 // publishLoop drains the queue onto the database. Publishing happens here
@@ -426,12 +449,12 @@ func (b *Bus) deliver(payload string) {
 	if node, _, found := strings.Cut(payload, fieldSep); found && node == b.nodeID {
 		return
 	}
-	node, ev, err := decode(payload)
+	node, ev, ok, err := decode(payload)
 	if err != nil {
 		b.logger.Warn("pgpresence: undecodable event", "error", err)
 		return
 	}
-	if node == b.nodeID {
+	if !ok || node == b.nodeID {
 		return
 	}
 	if !b.serves(ev.Topic) {
@@ -447,6 +470,7 @@ func (b *Bus) deliver(payload string) {
 type queued struct {
 	topic    presence.Topic
 	session  string
+	issuer   string
 	subject  string
 	revision uint64
 	kind     presence.Kind
@@ -454,20 +478,22 @@ type queued struct {
 }
 
 func (q *queued) key() pendingKey {
-	return pendingKey{topic: q.topic, session: q.session, subject: q.subject}
+	return pendingKey{topic: q.topic, session: q.session, issuer: q.issuer, subject: q.subject}
 }
 
 // pendingKey identifies the queued state of one session in one room, as one
-// subject wrote it. A receiver keeps a record for the subject that wrote it, so
-// state from another subject is not a newer version of it and must not fold in.
+// owner, an issuer and a subject, wrote it. A receiver keeps a record for the
+// owner that wrote it, so state from another owner is not a newer version of
+// it and must not fold in.
 type pendingKey struct {
 	topic   presence.Topic
 	session string
+	issuer  string
 	subject string
 }
 
 // queue is the publish backlog: a FIFO in which STATE folds per (topic,
-// session, subject) and nothing else does. A fold keeps the higher revision.
+// session, issuer, subject) and nothing else does. A fold keeps the higher revision.
 //
 // Folding is what bounds it. State is last-writer-wins by revision, so a second
 // update from a session whose first has not been published yet buys nothing —
@@ -495,6 +521,7 @@ func (q *queue) push(ev presence.Event, line string) {
 	item := &queued{
 		topic:    ev.Topic,
 		session:  ev.Participant.SessionID,
+		issuer:   ev.Participant.Issuer,
 		subject:  ev.Participant.Subject,
 		revision: ev.Participant.Revision,
 		kind:     ev.Kind,

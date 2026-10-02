@@ -8,7 +8,11 @@
 //   - PATCH    → inverse PATCH(prev snapshot, same mask) or DELETE
 //   - DELETE   → inverse PUT(prev) guarded by expectedVersion 0 (so it fails
 //                rather than overwrite a row that took the key since), or
-//                nothing when the row did not exist
+//                nothing when the row did not exist; refused when the row had
+//                fields the server did not send, which the restore would
+//                recreate as zero values
+//   - a field the server did not send leaves a PATCH inverse's mask: the
+//     client holds no value of it to restore
 //   - text-field edits (a state CRDT, where a snapshot inverse would merge to
 //     a no-op) → a SYMBOLIC inverse (src/text/undo-ops.ts) materialised
 //     against the then-current document at undo time; only local ops are
@@ -37,7 +41,21 @@ import type { TextInverseOp } from './text/undo-ops.js';
  */
 export type Inverse =
 	| { kind: 'crud'; crud: CrudMutation }
-	| { kind: 'text'; entity: string; key: string; field: string; ops: TextInverseOp[] };
+	| { kind: 'text'; entity: string; key: string; field: string; ops: TextInverseOp[] }
+	| { kind: 'refused'; reason: string };
+
+/**
+ * The rejection of an undo or a redo whose step cannot be replayed: undoing
+ * the delete of a row that had fields the server did not send to this caller,
+ * which a restore would recreate as zero values. The step is used up, so the
+ * next undo replays the step before it.
+ */
+export class UndoRefusedError extends Error {
+	constructor(message: string) {
+		super(message);
+		this.name = 'UndoRefusedError';
+	}
+}
 
 export interface UndoOptions {
 	/** Default true when the `undo` option object is present. */
@@ -71,10 +89,15 @@ export type StackName = 'undo' | 'redo';
  * a row that did not exist). The inverse of a DELETE asserts
  * `expectedVersion` 0, so restoring the row is refused rather than silently
  * replacing a row that took the key in the meantime.
+ *
+ * `hidden` names, by proto name, the fields of `prev` that the server did not
+ * send (see ConfirmedRecord.h). A PATCH inverse leaves them out of its mask,
+ * and is undefined when nothing is left to restore.
  */
 export function invertCrud(
 	crud: CrudMutation,
 	prev: Uint8Array | undefined,
+	hidden: readonly string[] = [],
 ): CrudMutation | undefined {
 	switch (crud.op) {
 		case CrudOp.PUT:
@@ -95,6 +118,17 @@ export function invertCrud(
 			}
 			// Restoring the masked fields from the previous snapshot inverts the
 			// patch; unmasked fields stay untouched either way.
+			if (hidden.length > 0) {
+				const paths = (crud.fieldMask?.paths ?? []).filter((p) => !hidden.includes(p.split('.')[0]!));
+				if (paths.length === 0) return undefined;
+				return create(CrudMutationSchema, {
+					entity: crud.entity,
+					key: crud.key,
+					op: CrudOp.PATCH,
+					value: prev,
+					fieldMask: { paths },
+				});
+			}
 			return create(CrudMutationSchema, {
 				entity: crud.entity,
 				key: crud.key,
@@ -108,7 +142,8 @@ export function invertCrud(
 			}
 			// Version 0 means "row must not exist". The restore is a create, so
 			// asserting that conflicts instead of overwriting whatever took the
-			// key since, and keeps the undo legal where updates are trustedOnly.
+			// key since, and keeps the undo legal where no access rule admits an
+			// update.
 			return create(CrudMutationSchema, {
 				entity: crud.entity,
 				key: crud.key,

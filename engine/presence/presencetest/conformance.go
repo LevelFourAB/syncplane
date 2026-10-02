@@ -116,6 +116,22 @@ func Conformance(name string, newBus func() presence.Bus) bool {
 			Expect(got.Participant.Subject).To(Equal("acct:acme:svc-sync"))
 		})
 
+		// A record belongs to its issuer and subject together, so a bus that
+		// lost the issuer would let two issuers' callers with one subject
+		// change each other's records.
+		It("carries the server-stamped issuer verbatim", func() {
+			t := topic("issuer")
+			ch, _ := subscribe(t)
+			ev := state(t, "s1", 1, "")
+			ev.Participant.Issuer = "https://id.example.com"
+			publish(ev)
+
+			var got presence.Event
+			Eventually(ch).Should(Receive(&got))
+			Expect(got.Participant.Issuer).To(Equal("https://id.example.com"))
+			Expect(got.Participant.Subject).To(Equal("u1"))
+		})
+
 		It("carries the authoring sequence", func() {
 			t := topic("seq")
 			ch, _ := subscribe(t)
@@ -283,6 +299,33 @@ func Conformance(name string, newBus func() presence.Bus) bool {
 					select {
 					case ev := <-ch:
 						if ev.Participant.SessionID == "s1" && ev.Participant.Subject == "u1" {
+							return true
+						}
+					default:
+						return false
+					}
+				}
+			}, "5s", "10ms").Should(BeTrue(), "the owner's state must arrive")
+		})
+
+		// The same holds for two issuers whose callers share a subject: they
+		// are two owners, not two versions of one record.
+		It("does not fold state from two issuers that name one session with one subject", func() {
+			t := topic("issuers")
+			ch, _ := subscribe(t)
+			publish(state(t, "s0", 1, "other"))
+			owner := state(t, "s1", 5, "mine")
+			owner.Participant.Issuer = "a"
+			publish(owner)
+			stranger := state(t, "s1", 9, "spoofed")
+			stranger.Participant.Issuer = "b"
+			publish(stranger)
+
+			Eventually(func() bool {
+				for {
+					select {
+					case ev := <-ch:
+						if ev.Participant.SessionID == "s1" && ev.Participant.Issuer == "a" {
 							return true
 						}
 					default:

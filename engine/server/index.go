@@ -432,6 +432,9 @@ const maxRowBatch = 256
 // proportional to candidates/batch rather than one per candidate. consider
 // receives each live row together with the predicate it still has to satisfy —
 // the part of the query the index range did not already decide.
+//
+// A key rows does not admit is dropped unread, so the scan a caller falls back
+// to must be rows.scan for the two paths to offer the same rows.
 func queryByIndex(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -439,13 +442,14 @@ func queryByIndex(
 	order *query.Order,
 	pg page,
 	limits Limits,
+	rows *accessRows,
 	consider func(storage.Row, *query.Compiled) error,
 	want func() int,
 	discard func(),
 ) (bool, error) {
 	return indexWalk(tx, info, predicate, order, pg, limits, want, discard,
 		func(residual *query.Compiled) candidateSink {
-			return &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
+			return admitSink{a: rows, candidateSink: &rowBatch{tx: tx, entity: info.name, size: maxRowBatch, emit: func(row storage.Row) error {
 				if row.Deleted {
 					// Entries are cleared on delete, so this means an entry
 					// outlived its row. Skipping keeps the answer identical to
@@ -453,7 +457,7 @@ func queryByIndex(
 					return nil
 				}
 				return consider(row, residual)
-			}}
+			}}}
 		})
 }
 

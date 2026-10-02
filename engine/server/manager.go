@@ -2,18 +2,27 @@ package server
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
+
 	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/prefixstore"
+	"github.com/levelfourab/syncplane/internal/protoopts"
 )
 
 // Manager hosts multiple apps on one engine, mapping each app to its own
@@ -95,6 +104,13 @@ type Manager struct {
 type hostedApp struct {
 	srv     *Server
 	handler http.Handler
+
+	// regMu serializes the registrations of the app, so that each one
+	// merges over the schema the one before it stored.
+	regMu sync.Mutex
+	// schema is the descriptor set of the schema srv serves, as the catalog
+	// stores it; nil before the app's first registration. regMu guards it.
+	schema []byte
 }
 
 // ManagerOption configures a Manager.
@@ -169,16 +185,18 @@ func NewManager(ctx context.Context, root storage.Adapter, opts ...ManagerOption
 		return nil, fmt.Errorf("server: manager boot: list app schemas: %w", err)
 	}
 	for _, sc := range schemas {
-		srv, err := m.appServer(sc.AppID)
+		app, err := m.host(sc.AppID)
 		if err != nil {
 			_ = m.Close()
 			return nil, fmt.Errorf("server: manager boot: create app %q: %w", sc.AppID, err)
 		}
+		srv := app.srv
 		r, err := srv.registerDescriptorSet(sc.DescriptorSet)
 		if err != nil {
 			_ = m.Close()
 			return nil, fmt.Errorf("server: manager boot: re-register app %q: %w", sc.AppID, err)
 		}
+		app.schema = sc.DescriptorSet
 		srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema reloaded on boot",
 			slog.String("component", "schema"),
 			slog.String("app", sc.AppID),
@@ -399,20 +417,35 @@ type ManagerRegisterResult struct {
 // rejects conflicts) runs first, so a rejected set never reaches storage; an
 // identical set is a no-op and is not re-persisted. It does NOT check the
 // authorizer — that gate lives on the admin RPC, which calls this after
-// admitting the caller.
-func (m *Manager) Register(ctx context.Context, appID string, set []byte) (ManagerRegisterResult, error) {
+// admitting the caller. opts apply as they do to Server.RegisterDescriptorSet.
+//
+// A set adds and replaces entities and keeps the others the app registered
+// before. The app's schema, which the catalog stores, is the merge of every
+// set it registered: the definitions of set, and every definition of the
+// schema before it that set does not replace. A restart serves that schema,
+// and the revision is the revision of that schema. Entities in the result are
+// the entities set declares. Registrations of one app run one at a time.
+func (m *Manager) Register(ctx context.Context, appID string, set []byte, opts ...RegisterOption) (ManagerRegisterResult, error) {
 	if appID == "" {
 		return ManagerRegisterResult{}, fmt.Errorf("server: register needs an app_id")
 	}
-	srv, err := m.appServer(appID)
+	app, err := m.host(appID)
+	if err != nil {
+		return ManagerRegisterResult{}, err
+	}
+	app.regMu.Lock()
+	defer app.regMu.Unlock()
+	srv := app.srv
+	merged, entities, err := mergeDescriptorSets(app.schema, set)
 	if err != nil {
 		return ManagerRegisterResult{}, err
 	}
 	prevRev := srv.SchemaRevision()
-	r, err := srv.registerDescriptorSet(set)
+	r, err := srv.registerDescriptorSet(merged, opts...)
 	if err != nil {
 		return ManagerRegisterResult{}, err
 	}
+	r.Entities = entities
 	status := RegisterUnchanged
 	if r.Changed {
 		if prevRev == "" {
@@ -420,9 +453,10 @@ func (m *Manager) Register(ctx context.Context, appID string, set []byte) (Manag
 		} else {
 			status = RegisterUpdated
 		}
-		if err := m.catalog.PutCatalogEntry(ctx, appID, set, r.Revision); err != nil {
+		if err := m.catalog.PutCatalogEntry(ctx, appID, merged, r.Revision); err != nil {
 			return ManagerRegisterResult{}, fmt.Errorf("server: persist app schema: %w", err)
 		}
+		app.schema = merged
 		srv.log().LogAttrs(ctx, slog.LevelInfo, "app schema registered",
 			slog.String("component", "schema"),
 			slog.String("app", appID),
@@ -478,4 +512,193 @@ func splitAppPrefix(path string) (appID, rest string) {
 	}
 	// "/app" with no trailing service path: nothing to route to.
 	return trimmed, "/"
+}
+
+// mergedFilePrefix starts the path of a file that mergeDescriptorSets keeps
+// from the registered schema under a new path, because the incoming set holds
+// another file at its own path.
+const mergedFilePrefix = "syncplane/registered/"
+
+// mergeDescriptorSets returns the descriptor set of the schema an app serves
+// once it registers next over prev, the descriptor set of the schema it
+// serves now: every definition of next, and every top-level definition of
+// prev that next does not replace. A definition of prev is replaced when next
+// declares the same full name, or an entity of the same name. entities are the
+// names of the entities next declares, sorted.
+//
+// A file of prev that next holds unchanged is dropped, and a file whose path
+// next holds with other content keeps what next does not replace under a path
+// below mergedFilePrefix. Each file kept from prev imports every file of
+// next, so that a reference to a definition that next replaced resolves to
+// the replacement. Merging the result with next again gives the result.
+//
+// prev nil returns next unchanged.
+func mergeDescriptorSets(prev, next []byte) (merged []byte, entities []string, err error) {
+	var nextSet descriptorpb.FileDescriptorSet
+	if err := proto.Unmarshal(next, &nextSet); err != nil {
+		return nil, nil, fmt.Errorf("server: decode FileDescriptorSet: %w", err)
+	}
+	nextFiles, err := protodesc.NewFiles(&nextSet)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server: build descriptor files: %w", err)
+	}
+	entityNames := map[string]bool{}
+	nextFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
+		msgs := fd.Messages()
+		for i := 0; i < msgs.Len(); i++ {
+			if name := protoopts.Entity(msgs.Get(i)).GetName(); name != "" {
+				entityNames[name] = true
+			}
+		}
+		return true
+	})
+	for name := range entityNames {
+		entities = append(entities, name)
+	}
+	sort.Strings(entities)
+	if len(prev) == 0 {
+		return next, entities, nil
+	}
+
+	var prevSet descriptorpb.FileDescriptorSet
+	if err := proto.Unmarshal(prev, &prevSet); err != nil {
+		return nil, nil, fmt.Errorf("server: decode registered FileDescriptorSet: %w", err)
+	}
+	prevFiles, err := protodesc.NewFiles(&prevSet)
+	if err != nil {
+		return nil, nil, fmt.Errorf("server: build registered descriptor files: %w", err)
+	}
+
+	nextByPath := map[string]*descriptorpb.FileDescriptorProto{}
+	defined := map[string]bool{}
+	for _, f := range nextSet.GetFile() {
+		nextByPath[f.GetName()] = f
+		for _, name := range topLevelNames(f) {
+			defined[name] = true
+		}
+	}
+	// replaced reports whether next replaces the top-level definition name of
+	// a file of prev.
+	replaced := func(name string) bool {
+		if defined[name] {
+			return true
+		}
+		md, err := prevFiles.FindDescriptorByName(protoreflect.FullName(name))
+		if err != nil {
+			return false
+		}
+		msg, ok := md.(protoreflect.MessageDescriptor)
+		return ok && entityNames[protoopts.Entity(msg).GetName()]
+	}
+
+	renamed := map[string]string{}
+	dropped := map[string]bool{}
+	var kept []*descriptorpb.FileDescriptorProto
+	for _, f := range prevSet.GetFile() {
+		path := f.GetName()
+		other, clash := nextByPath[path]
+		if clash && proto.Equal(f, other) {
+			continue
+		}
+		c := proto.Clone(f).(*descriptorpb.FileDescriptorProto)
+		prefix := ""
+		if pkg := c.GetPackage(); pkg != "" {
+			prefix = pkg + "."
+		}
+		c.MessageType = slices.DeleteFunc(c.MessageType, func(m *descriptorpb.DescriptorProto) bool { return replaced(prefix + m.GetName()) })
+		c.EnumType = slices.DeleteFunc(c.EnumType, func(e *descriptorpb.EnumDescriptorProto) bool { return replaced(prefix + e.GetName()) })
+		c.Service = slices.DeleteFunc(c.Service, func(s *descriptorpb.ServiceDescriptorProto) bool { return replaced(prefix + s.GetName()) })
+		c.Extension = slices.DeleteFunc(c.Extension, func(x *descriptorpb.FieldDescriptorProto) bool { return replaced(prefix + x.GetName()) })
+		if len(c.MessageType)+len(c.EnumType)+len(c.Service)+len(c.Extension) == 0 {
+			dropped[path] = true
+			continue
+		}
+		if clash {
+			raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(f)
+			if err != nil {
+				return nil, nil, err
+			}
+			sum := sha256.Sum256(raw)
+			renamed[path] = mergedFilePrefix + hex.EncodeToString(sum[:8]) + "/" + path
+			c.Name = proto.String(renamed[path])
+		}
+		kept = append(kept, c)
+	}
+
+	out := &descriptorpb.FileDescriptorSet{File: slices.Clone(nextSet.GetFile())}
+	for _, c := range kept {
+		rewireDependencies(c, renamed, dropped, nextSet.GetFile())
+		out.File = append(out.File, c)
+	}
+	merged, err = proto.MarshalOptions{Deterministic: true}.Marshal(out)
+	if err != nil {
+		return nil, nil, err
+	}
+	return merged, entities, nil
+}
+
+// topLevelNames returns the full names of the top-level definitions of f.
+func topLevelNames(f *descriptorpb.FileDescriptorProto) []string {
+	prefix := ""
+	if pkg := f.GetPackage(); pkg != "" {
+		prefix = pkg + "."
+	}
+	var out []string
+	for _, m := range f.GetMessageType() {
+		out = append(out, prefix+m.GetName())
+	}
+	for _, e := range f.GetEnumType() {
+		out = append(out, prefix+e.GetName())
+	}
+	for _, s := range f.GetService() {
+		out = append(out, prefix+s.GetName())
+	}
+	for _, x := range f.GetExtension() {
+		out = append(out, prefix+x.GetName())
+	}
+	return out
+}
+
+// rewireDependencies points the imports of c, a file kept from a registered
+// schema, at the files of the merged schema: an import of a renamed file
+// follows the rename, an import of a dropped file goes, and every file of
+// next is imported. Public and weak imports keep their kind.
+func rewireDependencies(c *descriptorpb.FileDescriptorProto, renamed map[string]string, dropped map[string]bool, next []*descriptorpb.FileDescriptorProto) {
+	public := map[int32]bool{}
+	for _, i := range c.GetPublicDependency() {
+		public[i] = true
+	}
+	weak := map[int32]bool{}
+	for _, i := range c.GetWeakDependency() {
+		weak[i] = true
+	}
+	var deps []string
+	var pub, wk []int32
+	seen := map[string]bool{}
+	add := func(dep string, isPublic, isWeak bool) {
+		if seen[dep] || dep == c.GetName() {
+			return
+		}
+		seen[dep] = true
+		if isPublic {
+			pub = append(pub, int32(len(deps)))
+		}
+		if isWeak {
+			wk = append(wk, int32(len(deps)))
+		}
+		deps = append(deps, dep)
+	}
+	for i, dep := range c.GetDependency() {
+		if dropped[dep] {
+			continue
+		}
+		if to, ok := renamed[dep]; ok {
+			dep = to
+		}
+		add(dep, public[int32(i)], weak[int32(i)])
+	}
+	for _, f := range next {
+		add(f.GetName(), false, false)
+	}
+	c.Dependency, c.PublicDependency, c.WeakDependency = deps, pub, wk
 }

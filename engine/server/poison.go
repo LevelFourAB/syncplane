@@ -108,10 +108,14 @@ func (s *Server) reportPoison(ctx context.Context, workspace string, row storage
 // decodeMatchable decodes a row a query scan is about to match against its
 // predicate. A nil emitter marks the trusted in-process scan, whose Go caller
 // gets the decode error; a client-facing scan quarantines instead, returning
-// (nil, nil) for a row the scan must skip.
+// (nil, nil) for a row the scan must skip. A field-history record decodes as
+// the caller receives it (see projectHistory).
 func decodeMatchable(e *rowEmitter, info *entityInfo, row storage.Row) (proto.Message, error) {
 	if e == nil {
 		return info.decode(row.Value)
+	}
+	if rec, ok := e.historyView(row.Key); ok && info.name == historyEntityName {
+		return rec, nil
 	}
 	msg, ok := e.decodeRow(info, row)
 	if !ok {

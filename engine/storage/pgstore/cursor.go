@@ -3,6 +3,7 @@ package pgstore
 import (
 	"fmt"
 	"hash/fnv"
+	"slices"
 
 	"github.com/jackc/pgx/v5"
 )
@@ -35,9 +36,16 @@ const maxDirectScan = 8192
 // yield executes, the connection is idle and free for the re-entrant read.
 //
 // limit is the scan's own LIMIT, and decides how the rows are read: a bounded
-// one small enough to hold at once takes a single query, and everything else —
-// an unlimited scan, or a limit past maxDirectScan — pages through a
-// server-side cursor at three round trips or more.
+// one small enough to hold at once takes a single query. Everything else — an
+// unlimited scan, or a limit past maxDirectScan — first reads one batch and one
+// row more in a single query, and only a scan that gets the extra row pages
+// through a server-side cursor. A result that fits in one batch so costs one
+// round trip; a cursor adds at least two, for its DECLARE and its CLOSE.
+//
+// The last element of args must be the value of query's LIMIT placeholder: the
+// first read replaces it. query's ORDER BY must also fix the position of every
+// row it returns, because the cursor reads the result again and skips the rows
+// the first read gave.
 //
 // decode runs with the result set open and must only Scan; yield runs with it
 // closed and may do anything a ReadTx can.
@@ -56,20 +64,50 @@ func scanRows[T any](
 		}
 		return yieldAll(batch, yield)
 	}
-	return scanCursor(t, query, args, decode, yield)
+	firstArgs := slices.Clone(args)
+	firstArgs[len(firstArgs)-1] = int64(scanBatch + 1)
+	first, err := queryBatch(t, query, firstArgs, scanBatch+1, decode)
+	if err != nil {
+		return err
+	}
+	if len(first) <= scanBatch {
+		return yieldAll(first, yield)
+	}
+	return scanCursor(t, query, args, first[:scanBatch], decode, yield)
 }
 
 // scanCursor streams query's rows to yield through a server-side cursor, one
-// FETCH at a time. See scanRows for when a scan comes here.
+// FETCH at a time, after it yields first. first holds the rows a direct read of
+// the same query has already returned, which the cursor skips. See scanRows
+// for when a scan comes here.
 func scanCursor[T any](
 	t *pgTx,
 	query string,
 	args []any,
+	first []T,
 	decode func(pgx.Rows) (T, error),
 	yield func(T) error,
 ) error {
+	// The cursor is declared before any row reaches yield, so a write a
+	// callback makes is not in the rows the cursor returns later. A read
+	// transaction's snapshot and a write transaction's workspace lock give the
+	// direct read and the cursor the same rows, which makes the MOVE land on
+	// the row after first.
+	//
+	// Neither statement returns rows, so both travel in one batch through the
+	// queue, and a failure fails the transaction as any queued statement does.
+	// The first FETCH cannot join that batch: pgx can describe every statement
+	// of a batch before it runs any of them, and a FETCH described before its
+	// cursor exists has no columns, and in pgx's default mode it stays cached
+	// that way.
 	name := t.nextCursorName(query)
-	if _, err := t.exec("DECLARE "+name+" NO SCROLL CURSOR FOR "+query, args...); err != nil {
+	if err := t.queue("DECLARE "+name+" NO SCROLL CURSOR FOR "+query, args...); err != nil {
+		return err
+	}
+	if err := t.queue(fmt.Sprintf("MOVE FORWARD %d IN %s", len(first), name)); err != nil {
+		return err
+	}
+	if err := t.send(); err != nil {
 		return err
 	}
 	defer func() {
@@ -80,6 +118,9 @@ func scanCursor[T any](
 		_, _ = t.exec("CLOSE " + name)
 	}()
 
+	if err := yieldAll(first, yield); err != nil {
+		return err
+	}
 	fetch := fmt.Sprintf("FETCH FORWARD %d FROM %s", scanBatch, name)
 	for {
 		batch, err := queryBatch(t, fetch, nil, scanBatch, decode)

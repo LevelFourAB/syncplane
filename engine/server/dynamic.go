@@ -52,13 +52,21 @@ type DynamicEntity struct {
 	// Names must be unique within the entity and must not start with "__",
 	// which is reserved for indexes the engine derives for itself.
 	Indexes []DynamicIndex
-	// CreatePolicy, UpdatePolicy and DeletePolicy mirror the same-named
-	// (syncplane.v1.entity) options, enforced identically for a dynamic entity
-	// and a compiled one. The zero value of each admits any caller the app's
-	// permission policy admits.
-	CreatePolicy syncplanev1.CreatePolicy
-	UpdatePolicy syncplanev1.UpdatePolicy
-	DeletePolicy syncplanev1.DeletePolicy
+	// Access mirrors (syncplane.v1.entity).access: the rules that decide who
+	// reads and writes the entity's rows in the access model. Nil declares
+	// none. The entity keeps the pointer, so do not modify it after
+	// registration.
+	Access *syncplanev1.AccessOptions
+	// Grant mirrors (syncplane.v1.entity).grant and declares the entity's rows
+	// as grant rows. Nil declares none. A dynamic entity has no enum fields, so
+	// its role field is a string field. The entity keeps the pointer, so do
+	// not modify it after registration.
+	Grant *syncplanev1.GrantOptions
+	// Members mirrors (syncplane.v1.entity).members and declares the entity's
+	// rows as teams, whose members are the rows of the entity it names. Nil
+	// declares none. The entity keeps the pointer, so do not modify it after
+	// registration.
+	Members *syncplanev1.MembersOptions
 }
 
 // DynamicIndex is one declared secondary index of a dynamic entity, mirroring
@@ -138,6 +146,11 @@ type DynamicField struct {
 	// compiled path honours). Empty means <plural(entity)>By<Field>, such as
 	// postsByAuthor. Valid only with Ref, on a field of the entity itself.
 	ReverseRelation string
+	// Creator makes the field record who created the row: an enforced create
+	// stores the caller's primary subject in it, and only a trusted write
+	// changes it afterwards (the same (syncplane.v1.field_behavior).creator
+	// the compiled path honours). Valid only on a singular string field.
+	Creator bool
 	// KeyField names the identity field(s) of a keyed message list (composite
 	// allowed). OrderField names the element's fractional position field,
 	// promoting it to a movable list. Both lower to (syncplane.v1.field_behavior).
@@ -161,15 +174,23 @@ func (f DynamicField) isMap() bool { return f.MapKey != 0 }
 
 // RegisterDynamicEntity builds spec into a dynamicpb message type and registers
 // it as a syncable entity, serving full CRUD through the existing sync
-// machinery. It is the runtime-schema counterpart of RegisterEntity. Use
-// RegisterDynamicEntities when entities reference one another, so they share a
-// single file and the references resolve.
-func (s *Server) RegisterDynamicEntity(spec DynamicEntity) error {
-	return s.RegisterDynamicEntities(spec)
+// machinery. It is the runtime-schema counterpart of RegisterEntity, and takes
+// the same opts. Use RegisterDynamicEntities when entities reference one
+// another, so they share a single file and the references resolve.
+func (s *Server) RegisterDynamicEntity(spec DynamicEntity, opts ...RegisterOption) error {
+	fd, err := BuildDynamicFile(spec)
+	if err != nil {
+		return err
+	}
+	return s.RegisterEntity(dynamicpb.NewMessageType(fd.Messages().Get(0)).New().Interface(), opts...)
 }
 
 // RegisterDynamicEntities builds several entities into one file (so intra-set
-// references resolve) and registers each as a syncable entity.
+// references resolve) and registers each as a syncable entity, in order, as
+// RegisterEntity without options does. It stops at the first entity that fails
+// and keeps the ones registered before it. To declare the first role of a
+// schema that serves callers, use RegisterDescriptorSet with
+// AllowAccessChange.
 func (s *Server) RegisterDynamicEntities(specs ...DynamicEntity) error {
 	fd, err := BuildDynamicFile(specs...)
 	if err != nil {
@@ -298,12 +319,12 @@ func dynamicEntityProto(
 		return nil, err
 	}
 	proto.SetExtension(mopts, syncplanev1.E_Entity, &syncplanev1.EntityOptions{
-		Name:         spec.Name,
-		KeyFields:    spec.KeyFields,
-		Index:        indexes,
-		CreatePolicy: spec.CreatePolicy,
-		UpdatePolicy: spec.UpdatePolicy,
-		DeletePolicy: spec.DeletePolicy,
+		Name:      spec.Name,
+		KeyFields: spec.KeyFields,
+		Index:     indexes,
+		Access:    spec.Access,
+		Grant:     spec.Grant,
+		Members:   spec.Members,
 	})
 	dp.Options = mopts
 
@@ -388,6 +409,9 @@ func dynamicFieldProto(
 	if f.ReverseRelation != "" && !f.isRef() {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: reverse_relation is only valid on a Ref field", ctx, f.Name)
 	}
+	if f.Creator && (f.Kind != protoreflect.StringKind || f.Repeated || f.isMap() || f.isRef() || f.isMessage()) {
+		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: creator is only valid on a singular string field", ctx, f.Name)
+	}
 
 	switch {
 	case f.isMap():
@@ -454,10 +478,13 @@ func dynamicFieldProto(
 				return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: opaque is only valid on a singular bytes field", ctx, f.Name)
 			}
 		}
-		if f.Opaque || f.Text || f.Indexed {
+		if f.Opaque || f.Text || f.Indexed || f.Creator {
+			b := &syncplanev1.FieldBehavior{Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed}
+			if f.Creator {
+				b.Creator = &syncplanev1.CreatorOptions{}
+			}
 			fopts := &descriptorpb.FieldOptions{}
-			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior,
-				&syncplanev1.FieldBehavior{Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed})
+			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, b)
 			fdp.Options = fopts
 		}
 		return fdp, nil, nil

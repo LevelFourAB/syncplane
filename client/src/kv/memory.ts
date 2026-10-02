@@ -186,11 +186,13 @@ class MemoryWrite extends MemoryRead implements KVWrite {
 		this.note(key);
 	}
 
-	/** Records the generation `key` belongs to, if any. */
+	/** Records the generations `key` belongs to, if any. */
 	private note(key: string): void {
 		const at = this.generationOf?.(key);
 		if (at === undefined) return;
-		(this.stampAt ??= new Set()).add(at);
+		const stampAt = (this.stampAt ??= new Set());
+		if (typeof at === 'string') stampAt.add(at);
+		else for (const k of at) stampAt.add(k);
 	}
 
 	async commit(): Promise<void> {

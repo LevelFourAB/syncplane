@@ -161,15 +161,19 @@ func (s *Server) relTargets(
 		targets = append(targets, query.TargetKeyValues(node, decoded.ProtoReflect()))
 		return nil
 	}
+	narrowed, err := emitter.accessRowsOf(tx, info)
+	if err != nil {
+		return nil, err
+	}
 	// want is unbounded and discard is the un-offer half of queryByIndex's
 	// contract: a walk that declines after offering rows hands them back, and
 	// the scan below offers them again.
-	served, err := queryByIndex(tx, info, inner, order, page{}, s.limits, consider,
+	served, err := queryByIndex(tx, info, inner, order, page{}, s.limits, narrowed, consider,
 		func() int { return math.MaxInt },
 		func() { targets = targets[:0] },
 	)
 	if err == nil && !served {
-		err = tx.ScanEntity(info.name, func(row storage.Row) error {
+		err = narrowed.scan(tx, info.name, func(row storage.Row) error {
 			return consider(row, inner)
 		})
 	}

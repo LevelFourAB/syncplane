@@ -345,6 +345,28 @@ var _ = Describe("Compile", func() {
 		Expect(err).To(MatchError(ContainSubstring("no kind")))
 	})
 
+	// A newer query.proto can add an operator. Reading its value as false
+	// would make a not around it true on every row.
+	DescribeTable("rejects an operator value this build does not declare",
+		func(cond *syncplanev1.Condition, kind string) {
+			_, err := query.Compile(widgetDesc, cond)
+			Expect(err).To(MatchError(ContainSubstring(kind + " condition op 99 is unknown")))
+		},
+		Entry("cmp", &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+			Path: []string{"label"}, Op: syncplanev1.CmpOp(99),
+			Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: "x"}},
+		}}}, "cmp"),
+		Entry("str", &syncplanev1.Condition{Kind: &syncplanev1.Condition_Str{Str: &syncplanev1.StrCond{
+			Path: []string{"label"}, Op: syncplanev1.StrOp(99), Value: "x",
+		}}}, "str"),
+		Entry("rep", &syncplanev1.Condition{Kind: &syncplanev1.Condition_Rep{Rep: &syncplanev1.RepCond{
+			Path: []string{"tags"}, Op: syncplanev1.RepOp(99),
+		}}}, "rep"),
+		Entry("present", &syncplanev1.Condition{Kind: &syncplanev1.Condition_Present{Present: &syncplanev1.PresentCond{
+			Path: []string{"label"}, Op: syncplanev1.PresentOp(99),
+		}}}, "present"),
+	)
+
 	It("rejects a query value without a kind", func() {
 		cond := &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
 			Path:  []string{"label"},

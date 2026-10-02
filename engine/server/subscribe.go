@@ -274,14 +274,18 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool, sparseCursor bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
 	ws := want.GetWorkspaceId()
 
-	principal, err := s.enterWorkspace(ctx, ws)
+	adm, err := s.enterWorkspace(ctx, ws)
+	principal := adm.principal
 	if err != nil {
+		if errors.Is(err, ErrNoAccess) {
+			return nil, syncplanev1.WorkspaceDropped_REASON_NO_ACCESS, err
+		}
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return nil, syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED, err
 		}
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
-	cur, err := s.decodeCursor(ctx, ws, want.GetCursor())
+	cur, err := s.decodeCursor(ctx, ws, want.GetCursor(), adm.verdict)
 	if err != nil {
 		// An undecodable cursor cannot be advanced from; a clean snapshot can.
 		return nil, syncplanev1.WorkspaceDropped_REASON_RESET, err
@@ -297,6 +301,10 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
 	emitter.noDeltaEntities = noDeltas
+	emitter.callerAccessDeltas = want.CallerAccessVersion != nil
+	emitter.heldCallerAccess = want.GetCallerAccessVersion()
+	emitter.admit(adm)
+	emitter.heldSubs = cur.subs
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
@@ -341,6 +349,9 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 		return err
 	}
 	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
+	emitter.callerAccessDeltas, emitter.heldCallerAccess = sc.emitter.callerAccessDeltas, sc.emitter.heldCallerAccess
+	emitter.caller, emitter.prior = sc.emitter.caller, sc.emitter.prior
+	emitter.heldSubs, emitter.subsAdmitted = sc.emitter.heldSubs, sc.emitter.subsAdmitted
 	if err := emitter.warmFilters(); err != nil {
 		return err
 	}
@@ -360,9 +371,9 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 // notification: a hook on that path would run per change, which is the cost the
 // rest of the scope's state is resolved once at open to avoid.
 //
-// A settled denial drops the scope as ACCESS_REVOKED — the same permanent,
-// actionable verdict openScope sends, so a client reacts to a revocation
-// identically whenever it arrives. A gate that cannot DECIDE drops it as ERROR:
+// A settled denial drops the scope as ACCESS_REVOKED, or as NO_ACCESS for a
+// caller who holds no permission yet — the same verdict openScope sends, so a
+// client reacts to a denial identically whenever it arrives. A gate that cannot DECIDE drops it as ERROR:
 // an outage must never read as revocation (the client would discard good data),
 // but continuing to stream a workspace whose access can no longer be affirmed
 // is the wrong side to fail on. That scope's client reopens with backoff and
@@ -372,12 +383,17 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 		if !sc.live {
 			continue
 		}
-		_, err := s.enterWorkspace(ctx, sc.ws)
+		adm, err := s.enterWorkspace(ctx, sc.ws)
 		if err == nil {
+			// The hooks may answer differently now, and the next drain binds
+			// the caller's access from what they say.
+			sc.emitter.admit(adm)
 			continue
 		}
 		reason := syncplanev1.WorkspaceDropped_REASON_ERROR
-		if _, denied := AsWorkspaceDenial(err); denied {
+		if errors.Is(err, ErrNoAccess) {
+			reason = syncplanev1.WorkspaceDropped_REASON_NO_ACCESS
+		} else if _, denied := AsWorkspaceDenial(err); denied {
 			reason = syncplanev1.WorkspaceDropped_REASON_ACCESS_REVOKED
 		}
 		sc.logger.LogAttrs(ctx, slog.LevelInfo, "subscribe scope dropped by access re-check",
@@ -437,9 +453,9 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		var page *syncplanev1.PullResponse
 		var next cursorState
 		var reason resetReason
-		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
+		if err := s.readTx(ctx, sc.ws, sc.cur.readFloor(sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
-			page, next, reason, e = s.servePullPage(tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
+			page, next, reason, e = s.servePullPage(ctx, tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
 			return e
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.
@@ -453,12 +469,19 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		sc.rawCursor = page.GetNextCursor()
 		last := !page.GetHasMore()
 		hasRows := len(page.GetPatch().GetChanges()) > 0 || len(page.GetPatch().GetDropEntities()) > 0
-		if hasRows || (keepalive && last) {
+		// The scope now records that the client holds this CallerAccess, so a
+		// page carrying one or a delta to it goes out even without rows, or no
+		// later page resends it.
+		hasAccess := page.GetCallerAccess() != nil || page.GetCallerAccessDelta() != nil
+		if hasRows || hasAccess || (keepalive && last) {
 			// The scope carries its own position, so the cursor on the frame is
 			// the client's resume point and nothing else — it can be left off
-			// when it would cost more than the re-delivery it saves.
+			// when it would cost more than the re-delivery it saves. A frame
+			// that changes the CallerAccess always carries it: the cursor
+			// references the stored copy of that summary, which the next change
+			// is sent as a delta from.
 			pageBytes := proto.Size(page.GetPatch())
-			if sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
+			if hasAccess || sc.checkpointDue(pageBytes, len(page.GetNextCursor())) {
 				sc.owedBytes = 0
 				sc.cursorSent = true
 			} else {

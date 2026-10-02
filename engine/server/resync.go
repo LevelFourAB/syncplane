@@ -30,6 +30,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"slices"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
@@ -60,9 +61,20 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		// field is gone after a server upgrade).
 		return nil, false, nil
 	}
+	// The caller's access binds inside the read transaction, where Pull hands
+	// the old side the set it bound for the new one.
+	oldEm.caller = newEm.caller
 	if cur.epoch != currentEpoch {
 		erf, implemented := s.perms.(EpochReadFilters)
 		if !implemented {
+			return nil, false, nil
+		}
+		// The client can edit the cursor's epoch and seq. A lower epoch would
+		// show rows the client never held as visible on the old side, and a
+		// higher seq would let the diff reach rows written after the cursor,
+		// so either would tombstone rows the client cannot read and tell it
+		// their keys.
+		if len(cur.setsKey) == 0 || cur.epochTag != epochTag(cur.setsKey, cur.seq, cur.epoch) {
 			return nil, false, nil
 		}
 		oldEm.filterSource = func(entity string) (RowFilter, error) {
@@ -85,7 +97,7 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		if !oldEm.subscribed(entity) {
 			continue
 		}
-		if _, err := oldEm.filterOf(entity); err != nil {
+		if _, err := oldEm.appFilterOf(entity); err != nil {
 			if errors.Is(err, ErrEpochUnavailable) {
 				return nil, false, nil
 			}
@@ -189,15 +201,28 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		}
 		// Same state lineage, new entry: the sets moved with the scope, but
 		// they are still this client's succession of cursors.
-		st.stateID, st.stateGen, st.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
+		st.stateID, st.stateGen, st.stateBlob, st.setsKey = cur.stateID, cur.stateGen, cur.stateBlob, cur.setsKey
+		// The client now holds what the new access shows.
+		newEm.stampAccess(&st, cur)
+		current, err := tx.CurrentSeq()
+		if err != nil {
+			return cursorState{}, err
+		}
+		resp.CallerAccess, resp.CallerAccessDelta = newEm.callerAccessUpdate(cur, true, current)
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
+		// Mid-resync the cursor keeps the access it was issued under, which
+		// is the old side the next page diffs from.
 		st = cur
 		st.resync = &syncplanecursorv1.ResyncState{
 			Entity:        next.entity,
 			AfterKey:      next.afterKey,
 			ToSubHash:     wantHash,
 			ToFilterEpoch: epoch,
+		}
+		if newEm.caller != nil {
+			_, st.resync.ToAccessHash = newEm.boundReadAccess()
+			st.resync.ToMovesThrough = newEm.movesThrough
 		}
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	}
@@ -206,6 +231,40 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	resp.HasMore = true
 	resp.Seq = cur.seq
 	return st, nil
+}
+
+// hiddenDiff returns the change that sends row as the new side shows it, and
+// whether the two sides hide different fields of it. Both sides show the
+// row.
+func hiddenDiff(oldEm, newEm *rowEmitter, row storage.Row) (*syncplanev1.RowChange, bool, error) {
+	info, ok := newEm.srv.catalogPtr().entities[row.Entity]
+	if !ok || !info.access.hidesFields() {
+		return nil, false, nil
+	}
+	oldHides, err := oldEm.mayHide(info)
+	if err != nil {
+		return nil, false, err
+	}
+	newHides, err := newEm.mayHide(info)
+	if err != nil || (!oldHides && !newHides) {
+		return nil, false, err
+	}
+	msg, err := info.decode(row.Value)
+	if err != nil {
+		// classify quarantines a row that does not decode, so neither side
+		// shows it.
+		return nil, false, nil
+	}
+	was, err := oldEm.hiddenUnits(info, row.Key, msg)
+	if err != nil {
+		return nil, false, err
+	}
+	now, err := newEm.hiddenUnits(info, row.Key, msg)
+	if err != nil || slices.Equal(was, now) {
+		return nil, false, err
+	}
+	rc, err := newEm.rowChange(row)
+	return rc, err == nil, err
 }
 
 // resyncScanBatch is the number of rows one storage scan call in a resync
@@ -267,7 +326,19 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 			patch.Changes = append(patch.Changes, hiddenChange(row))
 			emitted++
 		case !oldVis && newVis:
-			patch.Changes = append(patch.Changes, rowChange(row))
+			rc, err := newEm.rowChange(row)
+			if err != nil {
+				return err
+			}
+			patch.Changes = append(patch.Changes, rc)
+			emitted++
+		case oldVis && !row.Deleted:
+			// Visible on both sides, but a guard can hide other fields on each.
+			rc, changed, err := hiddenDiff(oldEm, newEm, row)
+			if err != nil || !changed {
+				return err
+			}
+			patch.Changes = append(patch.Changes, rc)
 			emitted++
 		}
 		return nil
@@ -284,10 +355,26 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		if emitted >= emitLimit || scanned >= scanLimit {
 			return resyncPos{entity: entity, afterKey: afterKey}, false, nil
 		}
-		if entityScopeUnchanged(oldEm, newEm, entity) {
-			continue
+		var (
+			keys     []string
+			narrowed bool
+			err      error
+		)
+		if oldEm.accessOnly {
+			// Same scope on both sides, so only the rows below the anchors
+			// that moved can differ.
+			if readAccessUnchanged(oldEm, newEm, entity) && !slices.Contains(oldEm.hiddenEntities, entity) &&
+				!oldEm.movedBelow[entity] {
+				continue
+			}
+			keys, narrowed, err = accessDeltaCandidates(tx, oldEm, newEm, newEm.srv.catalogPtr().entities[entity], scanLimit)
+		} else {
+			if entityScopeUnchanged(oldEm, newEm, entity) && readAccessUnchanged(oldEm, newEm, entity) &&
+				!slices.Contains(oldEm.hiddenEntities, entity) && !oldEm.movedBelow[entity] {
+				continue
+			}
+			keys, narrowed, err = resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)
 		}
-		keys, narrowed, err := resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)
 		if err != nil {
 			return resyncPos{}, false, err
 		}

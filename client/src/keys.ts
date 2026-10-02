@@ -175,6 +175,86 @@ export const metaServerSeq = (workspaceId: string): string =>
  * swap could sit above the new head forever.
  */
 export const metaAckedSeq = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}ackedSeq`;
+/**
+ * What the caller holds in one workspace under the access model: the last
+ * CallerAccess the server sent, binary-encoded. Written in the same
+ * transaction as the cursor it arrived with, because the server sends it only
+ * when it differs from what that cursor was issued under. Absent for a
+ * workspace whose schema does not use the access model.
+ */
+export const metaCallerAccess = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}callerAccess`;
+
+/**
+ * The CallerAccess.version of one workspace's {@link metaCallerAccess}, as a
+ * decimal string, so a pull can name the summary it holds
+ * (PullRequest.caller_access_version) without decoding it. Written and
+ * deleted in the same transaction as the summary. Absent when the summary
+ * is, and when the server sent the summary without a version.
+ */
+export const metaCallerAccessVersion = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}callerAccessVersion`;
+
+/**
+ * How many mutations of one workspace's pending queue can change the
+ * caller's grants (see access.ts pendingChangesAccess), counted when its
+ * {@link metaLastMutationId} held the value the record names. Written in the
+ * same transaction as each change to the queue, so a prediction reads one
+ * small record rather than the whole queue. A record whose counter value
+ * differs from the stored counter, or an absent record, tells nothing: a
+ * build that predates the record writes the queue and mints ids without it.
+ * See optimistic/queue.ts pendingAccessOf.
+ */
+export const metaPendingAccess = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}pendingAccess`;
+
+/**
+ * The access generation of one workspace: a token restamped by every
+ * committed transaction that writes or deletes its {@link metaCallerAccess},
+ * anything in its pending queue or its {@link metaPendingAccess}, the inputs
+ * `can()` decides from besides the rows. Like {@link overlayGeneration}, the
+ * stamp rides in the writer's own transaction, and an ABSENT token means
+ * unknown.
+ */
+export const accessGeneration = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}agen`;
+
+/**
+ * The CallerAccess generation of one workspace: a token restamped by every
+ * committed transaction that writes or deletes its {@link metaCallerAccess},
+ * and by no other. A reader that finds the token it read before knows that
+ * the stored CallerAccess holds the bytes it read then, with no read of the
+ * bytes. Like {@link overlayGeneration}, the stamp rides in the writer's own
+ * transaction, and an ABSENT token means unknown.
+ */
+export const callerAccessGeneration = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}cagen`;
+
+/**
+ * The generations a write at `key` restamps: {@link accessGeneration} for a
+ * pending-queue entry or a {@link metaPendingAccess}, that and
+ * {@link callerAccessGeneration} for a stored CallerAccess, and none for every
+ * other key.
+ */
+export const accessGenerationFor = (key: string): string | string[] | undefined => {
+	const root = key.startsWith(PENDING_ROOT)
+		? PENDING_ROOT
+		: key.startsWith(META_WS_PREFIX)
+		? META_WS_PREFIX
+		: undefined;
+	if (root === undefined) return undefined;
+	const segmentEnd = key.indexOf('/', root.length);
+	if (segmentEnd === -1) return undefined;
+	const prefix = `${META_WS_PREFIX}${key.slice(root.length, segmentEnd)}/`;
+	if (root === PENDING_ROOT) return `${prefix}agen`;
+	switch (key.slice(segmentEnd + 1)) {
+		case 'pendingAccess':
+			return `${prefix}agen`;
+		case 'callerAccess':
+			return [ `${prefix}agen`, `${prefix}cagen` ];
+		default:
+			return undefined;
+	}
+};
 
 /**
  * Version of this KV layout. On mismatch the client tries to push the
@@ -650,6 +730,12 @@ export interface ConfirmedRecord {
 	 * from a snapshot that is not installed yet (see promoteStaged).
 	 */
 	ix?: string[];
+	/**
+	 * The fields the server did not send, by proto name, sorted: what
+	 * RowChange.hidden named. The server cleared each one in `v`, so it reads
+	 * as its zero value. Absent when the caller reads every field.
+	 */
+	h?: string[];
 }
 
 /** Optimistic overlay record stored at o/ keys. */

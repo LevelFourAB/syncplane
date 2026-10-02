@@ -43,12 +43,12 @@ type bootstrapResume struct {
 // decodeBootstrapResume parses the client's resume request. A token this
 // server cannot parse is a client error rather than a reason to silently start
 // over: it can only come from a client corrupting what it was handed, and
-// failing loudly is what surfaces that.
-func (s *Server) decodeBootstrapResume(ctx context.Context, ws string, r *syncplanev1.BootstrapResume) (*bootstrapResume, error) {
+// failing loudly is what surfaces that. verdict is handed to decodeCursor.
+func (s *Server) decodeBootstrapResume(ctx context.Context, ws string, r *syncplanev1.BootstrapResume, verdict *pendingVerdict) (*bootstrapResume, error) {
 	if r == nil || len(r.GetCursor()) == 0 {
 		return nil, nil
 	}
-	cur, err := s.decodeCursor(ctx, ws, r.GetCursor())
+	cur, err := s.decodeCursor(ctx, ws, r.GetCursor(), verdict)
 	if err != nil {
 		return nil, err
 	}

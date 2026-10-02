@@ -1,6 +1,6 @@
 import { createConnectTransport } from '@connectrpc/connect-node';
 import { type ChildProcess, execFileSync, spawn } from 'node:child_process';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,11 +73,20 @@ let adminUrl = '';
 
 beforeAll(async () => {
 	const repoRoot = fileURLToPath(new URL('../../..', import.meta.url));
-	const bin = join(mkdtempSync(join(tmpdir(), 'syncplaned-')), 'syncplaned');
-	execFileSync('go', [ 'build', '-o', bin, './cmd/syncplaned' ], {
-		cwd: repoRoot,
-		stdio: 'inherit',
-	});
+	const dir = mkdtempSync(join(tmpdir(), 'syncplaned-'));
+	const bin = join(dir, 'syncplaned');
+	// The running process keeps its executable after the unlink; see
+	// startTestServer.
+	const removeBuild = () => rmSync(dir, { recursive: true, force: true });
+	try {
+		execFileSync('go', [ 'build', '-o', bin, './cmd/syncplaned' ], {
+			cwd: repoRoot,
+			stdio: 'inherit',
+		});
+	} catch (err) {
+		removeBuild();
+		throw err;
+	}
 
 	proc = spawn(bin, [ `-token=${TOKEN}`, '-heartbeat=250ms', '-chunk-size=8' ], {
 		stdio: [ 'ignore', 'pipe', 'inherit' ],
@@ -96,7 +105,7 @@ beforeAll(async () => {
 		});
 		proc.on('error', reject);
 		proc.on('exit', (code) => reject(new Error(`syncplaned exited with ${code} before listening`)));
-	});
+	}).finally(removeBuild);
 });
 
 afterAll(() => {
@@ -276,5 +285,148 @@ describe('runtime app schema registration', () => {
 		expect(((await a.get(fetched, 'f1')) as Todo | undefined)?.title).toBe('from fetched schema');
 
 		await a.close();
+	});
+});
+
+// The access-model declarations are lowered by the builder and judged by the
+// engine, so only a round trip shows that the two agree on what was declared.
+describe('runtime registration of an access-model schema', () => {
+	function makeAccessBundle(opts: { orgViewerRole?: boolean; unusedGrant?: boolean } = {}) {
+		const project = entity('project', { id: text().key(), name: text() }, {
+			access: {
+				allow: [
+					{ read: true, requires: 'view_projects' },
+					{ write: true, requires: 'edit_projects' },
+				],
+			},
+		});
+		const orgMember = entity('org_member', { id: text().key(), userId: text(), role: text() }, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [
+					{
+						name: 'org_admin',
+						grants: [
+							'view_members',
+							'manage_members',
+							'view_projects',
+							'edit_projects',
+							'view_tasks',
+							'edit_tasks',
+							...(opts.unusedGrant ? [ 'delete_org' ] : []),
+						],
+					},
+					...(opts.orgViewerRole ? [ { name: 'org_viewer', grants: [ 'view_tasks' ] } ] : []),
+				],
+			},
+			access: {
+				allow: [
+					{ read: true, requires: 'view_members' },
+					{ write: true, requires: 'manage_members' },
+				],
+			},
+		});
+		const task = entity('task', { id: text().key(), project: ref(() => project) }, {
+			access: {
+				parents: [ 'project' ],
+				allow: [
+					{ read: true, requires: 'view_tasks' },
+					{ create: true, update: true, requires: 'edit_tasks' },
+					{ delete: true, requires: 'manage_members' },
+				],
+			},
+		});
+		const label = entity('label', { id: text().key() }, {
+			access: { allow: [ { read: true, write: true, admitted: true } ] },
+		});
+		return defineSchema(project, orgMember, task, label);
+	}
+
+	it('registers a schema that uses the access model', async () => {
+		const res = await registerSchema(adminTransport(), 'access-ok', makeAccessBundle(), {
+			token: TOKEN,
+		});
+		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
+	});
+
+	// Only server code and hasPermission() ask about such a permission.
+	it('registers a role that grants a permission no rule uses', async () => {
+		const res = await registerSchema(
+			adminTransport(),
+			'access-unused',
+			makeAccessBundle({ unusedGrant: true }),
+			{
+				token: TOKEN,
+			},
+		);
+		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
+	});
+
+	it("changes an entity's access model only when the registration allows it", async () => {
+		await registerSchema(adminTransport(), 'access-evolve', makeAccessBundle(), { token: TOKEN });
+		const changed = makeAccessBundle({ orgViewerRole: true });
+		await expect(registerSchema(adminTransport(), 'access-evolve', changed, { token: TOKEN }))
+			.rejects.toThrow(/entity "org_member" changes its access model/);
+		const res = await registerSchema(adminTransport(), 'access-evolve', changed, {
+			token: TOKEN,
+			allowAccessChange: true,
+		});
+		expect(res.entityNames).toContain('org_member');
+	});
+
+	// Without a grant entity the schema declares no role, so the app's
+	// workspace hook alone admits a caller, and the rules still decide what
+	// each caller can do. syncplaned admits every caller.
+	function makeNoRoleBundle(opts: { withMembers?: boolean } = {}) {
+		const entry = entity('entry', { id: text().key(), body: text() }, {
+			access: { allow: [ { read: true, create: true, admitted: true } ] },
+		});
+		if (!opts.withMembers) return defineSchema(entry);
+		const member = entity('member', { id: text().key(), userId: text(), role: text() }, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [ { name: 'admin', grants: [ 'view_members' ] } ],
+			},
+			access: { allow: [ { read: true, requires: 'view_members' } ] },
+		});
+		return defineSchema(entry, member);
+	}
+
+	it('syncs a schema that declares no role, and holds writes to its rules', async () => {
+		const noRole = makeNoRoleBundle();
+		await registerSchema(adminTransport(), 'access-norole', noRole, { token: TOKEN });
+		const Entry = noRole.descMessage('entry');
+		const ws = freshWorkspace();
+
+		const a = appClient('access-norole', ws, noRole.descMessages());
+		await a.start();
+		await a.mutate.put(Entry, { id: 'e1', body: 'posted' }, { expectedVersion: 0n });
+		await a.syncNow();
+		expect(await a.pendingCount()).toBe(0);
+
+		const b = appClient('access-norole', ws, noRole.descMessages());
+		await b.start();
+		await b.syncNow();
+		expect(((await b.get(Entry, 'e1')) as Record<string, any> | undefined)?.body).toBe('posted');
+		await expect(b.mutate.patch(Entry, 'e1', { body: 'edited' }))
+			.rejects.toThrow(/no access rule admits update/);
+		await expect(b.mutate.del(Entry, 'e1')).rejects.toThrow(/no access rule admits delete/);
+
+		await a.close();
+		await b.close();
+	});
+
+	it('declares the first role of a schema only when the registration allows it', async () => {
+		await registerSchema(adminTransport(), 'access-first-role', makeNoRoleBundle(), { token: TOKEN });
+		const withMembers = makeNoRoleBundle({ withMembers: true });
+		await expect(registerSchema(adminTransport(), 'access-first-role', withMembers, { token: TOKEN }))
+			.rejects.toThrow(/the schema declares its first role/);
+		const res = await registerSchema(adminTransport(), 'access-first-role', withMembers, {
+			token: TOKEN,
+			allowAccessChange: true,
+		});
+		expect(res.entityNames).toContain('member');
 	});
 });

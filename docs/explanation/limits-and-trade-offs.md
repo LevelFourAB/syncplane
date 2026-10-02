@@ -187,7 +187,7 @@ A `ReadFilter` controls which rows a client can read, but does not hide the exis
 - **Deletions:** A tombstone containing the entity name, key, and version is sent to all subscribed clients when a row is deleted. Because the value is removed, the read filter cannot be evaluated against it.
 - **Revocation:** If an update modifies a row such that it no longer passes the read filter, the server sends a tombstone to ensure clients drop their cached copy. If the server cannot determine whether a client previously held the row, it sends a tombstone conservatively. Bootstrap sync skips denied rows entirely, and permission-change resync evaluates the client's prior filter to tombstone only previously visible rows.
 
-Writes disclose existence too, whatever the subscription. A write to a row that the caller may not read is refused with `permission_denied`, while a `PATCH` of a missing row is refused with `conflict` and a `PUT` or `DELETE` of one applies. A caller that guesses a key can therefore learn that a row exists, but not its fields or its version.
+Writes disclose existence too, whatever the subscription. A write to a row that the caller may not read is refused with `permission_denied`, while a `PATCH` of a missing row is refused with `conflict` and a `PUT` or `DELETE` of one applies. A caller that guesses a key can therefore learn that a row exists, but not its fields or its version. An entity in the access model gives a `PATCH` or `DELETE` of a hidden row and of a missing row the same answer, `access_denied` (see [the access model](access-model.md#writes-are-checked-inside-the-transaction)).
 
 Because row keys are visible in tombstones, keys must not contain sensitive data such as email addresses, slugs, or invite codes. Use surrogate keys (such as UUIDs) and store sensitive data in entity fields protected by the read filter.
 
@@ -242,7 +242,7 @@ Quarantined rows are not deleted from storage:
 
 - A `PUT` request with valid data replaces the corrupt bytes and restores normal sync.
 - A `PATCH` request is rejected with a `conflict` error because a field mask cannot be applied to undecodable base bytes.
-- When the entity has a row check (a read filter or a write filter), the check cannot run on the corrupt bytes, so the engine refuses every client write to the row with `permission_denied`. A trusted write repairs the row. Admitting the write would let any caller overwrite or delete a row that nobody can show they may change.
+- When the entity has a row check (a read filter or a write filter), the check cannot run on the corrupt bytes, so the engine refuses every client write to the row with `permission_denied` (`access_denied` on an entity in the access model). A trusted write repairs the row. Admitting the write would let any caller overwrite or delete a row that nobody can show they may change.
 
 Full sync operations without read filters or predicates transmit raw bytes without decoding them, allowing corrupt rows to reach clients where decoding errors surface on read. In-process methods (`ViewTx`, `ApplyTx`, and `EntityTx`) return decode errors directly to Go callers rather than quarantining rows.
 
@@ -277,7 +277,7 @@ A restore operation is an optimistic mutation: it is queueable offline, undoable
 To track deletions and audit events:
 
 - Use a soft-delete field (such as `deleted_at`) updated via `PATCH`. This captures the timestamp and modifying actor in field history and allows restoration by clearing the field.
-- Configure [`DELETE_POLICY_TRUSTED_ONLY`](../reference/proto-options.md#write-policies) to reserve hard `DELETE` operations for permanent data erasure.
+- Reserve hard `DELETE` operations for trusted writes that erase data permanently: give the entity no [access rule](../reference/proto-options.md#operations-no-rule-admits) that admits `delete`, or, in a schema without the access model, refuse the delete in `CanMutate`.
 - For immutable audit trails, write dedicated event log rows; see [Change feed](effects-and-the-change-feed.md#state-reporting-versus-event-logging) and [Recover a deleted row](../how-to/recover-a-deleted-row.md).
 
 ## Soft delete trade-offs
@@ -294,17 +294,17 @@ Soft deletes carry the following trade-offs:
 - **Every read must filter:** A query that omits `deletedAtMs.eq(0n)` returns removed rows. A `ReadFilter` enforces filtering on the server, but hides the rows from the restore path as well.
 - **Erasure requires a job:** Soft-deleted rows are not automatically collected. Configure retention and execute trusted deletes to purge expired rows.
 
-## Write policies classify a write, not its effect
+## The early write check classifies a write, not its effect
 
-Write policies (`create_policy`, `update_policy`, and `delete_policy`) evaluate mutation syntax and version constraints before opening a storage transaction, without reading the underlying row.
+Before the write transaction opens, the server refuses a write that can only be an operation that no access rule of its entity names. This check reads no row, so it classifies the write from its operation and its `expected_version` alone. The rules themselves are checked inside the write transaction, against the stored row and the row as it will be stored.
 
-Because policy checks are syntactic rather than semantic:
+Because the early check is syntactic:
 
-- An unguarded `PUT` (without `expected_version`) can either create or replace a row. To prevent unauthorized creations when updates are permitted, unguarded `PUT` requests must satisfy both `create_policy` and `update_policy`.
-- Inside a batch transaction, `DELETE(k)` followed by `PUT(k, expected_version: 0)` evaluates as a valid delete and create, replacing the row. Use `delete_policy` in combination with `update_policy` to restrict row modifications.
-- Policies evaluate caller roles, not row-level ownership rules. Ownership rules (such as "only the author may edit this comment") belong in a write filter, which sees the stored row, or in a custom mutator when the rule depends on who last wrote the row.
-- Undo operations convert a `DELETE` into an unguarded `PUT`, which fails if the entity restricts updates.
-- Collaborative text edits execute as `PATCH` operations and require update permissions on the entity.
+- A `PUT` without `expected_version` can create or replace a row. The early check lets it through when a rule names create or update. The write transaction then checks it as the operation it is on the stored row.
+- Inside a batch, `DELETE(k)` followed by `PUT(k, expected_version: 0)` is a delete and a create, and replaces the row. A caller that a delete rule and a create rule admit can therefore replace a row without an update rule.
+- Rules decide from the permissions a caller holds where a row sits, not from the other fields of the row. Ownership rules (such as "only the author may edit this comment") belong in a write filter, which sees the stored row, or in a custom mutator when the rule depends on who last wrote the row.
+- Undoing a `DELETE` sends a `PUT` with `expected_version: 0`. That is a create, so it needs a create rule.
+- Collaborative text edits are `PATCH` operations, so they need an update rule.
 
 ## Custom mergers must satisfy the contract
 

@@ -374,6 +374,11 @@ func (s *Server) CollectGarbage(ctx context.Context, workspaceID string) error {
 			return err
 		}
 		horizon = h
+		// A cursor below the horizon resets, so the access moves it could
+		// have needed go with the tombstones.
+		if _, err := purgeAccessMoves(tx, horizon); err != nil {
+			return err
+		}
 		// Verdicts go on the tombstone retention; the watermark they sit next to
 		// only goes when the operator opted in. The order matters: an expiry
 		// must not refresh the record, or the prune below would never see it

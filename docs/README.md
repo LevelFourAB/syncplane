@@ -33,6 +33,9 @@ Task-oriented recipes. Each assumes you already have something running.
 **Server**
 
 - [Authentication and permissions](how-to/authentication-and-permissions.md)
+- [Declare roles and permissions (access model)](how-to/declare-roles-and-permissions.md)
+- [Share a project with the whole workspace or with chosen teams](how-to/share-with-the-workspace-or-chosen-teams.md)
+- [Create a workspace and invite people](how-to/create-a-workspace-and-invite-people.md)
 - [Write from server-side code](how-to/server-side-writes.md)
 - [Query from server-side code](how-to/server-side-queries.md)
 - [React to changes (server-side effects)](how-to/react-to-changes.md)
@@ -90,6 +93,9 @@ Understanding-oriented. Read these when a behaviour surprises you.
 
 - [The convergence model](explanation/convergence-model.md) — sequences,
   per-field last-writer-wins, rebase, tombstones, compare-and-swap.
+- [The access model](explanation/access-model.md) — grants, roles and anchors,
+  teams, how access rules combine, why access is declared in the schema, how grant changes reach clients, and
+  what the model costs.
 - [Partial sync and coverage](explanation/partial-sync-and-coverage.md) — why
   windows exist and why every result carries a coverage report.
 - [Relational queries](explanation/relational-queries.md) — the one-hop

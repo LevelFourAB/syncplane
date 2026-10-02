@@ -6,9 +6,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -54,14 +56,6 @@ type entityInfo struct {
 	// indexes, under the reserved searchIndexName.
 	search  *searchIndex
 	mergers lww.Mergers
-	// createPolicy, updatePolicy and deletePolicy are the entity's
-	// (syncplane.v1.entity) write policies. The engine checks them alongside
-	// CanMutate (see Server.authorizeWrite); they are held here rather than
-	// re-read from the descriptor because they are consulted once per
-	// authorized write.
-	createPolicy syncplanev1.CreatePolicy
-	updatePolicy syncplanev1.UpdatePolicy
-	deletePolicy syncplanev1.DeletePolicy
 	// serverOnly is (syncplane.v1.entity).server_only: the entity's rows never
 	// reach a client. Enforced at the row emitter, which is the chokepoint
 	// bootstrap, pull and resync share, and at the two doors a client could name
@@ -78,11 +72,21 @@ type entityInfo struct {
 	// separately on the recorded prior value — see the field option's doc for
 	// why a mask must never name one.
 	historyFields []string
-	// protectedFields are the top-level units no authorized caller may write:
-	// the fields marked (field_behavior).write_policy TRUSTED_ONLY, with a
-	// oneof contributing its group name. Empty for almost every entity, which
-	// is what keeps the check off the hot path — see writeGate.
+	// protectedFields are the top-level units no caller may change after the
+	// create: the creator fields. Empty for almost every entity, which is what
+	// keeps the check off the hot path — see writeGate. The access model's
+	// field guards are per caller and per row; see accessWrite.carryGuarded.
 	protectedFields []string
+	// creatorFields are the fields marked (field_behavior).creator, in field
+	// order: an enforced create stores the caller's primary subject in each.
+	creatorFields []protoreflect.FieldDescriptor
+	// access is the entity's place in the access model, nil when it declares
+	// no access option. grant is set on an entity whose rows grant roles, and
+	// members on a team entity, naming the entity whose rows make its
+	// members. See access.go.
+	access  *entityAccess
+	grant   *grantSpec
+	members string
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -136,16 +140,21 @@ const (
 	fieldIndexPrefix = reservedIndexPrefix + "field_"
 )
 
-// refIndexName is the index over one reference's stored target key. A case
-// of a polymorphic reference message shares its field with its sibling cases
-// and is told apart by the case's own name — joined with a dot, which no
-// field name contains, so it cannot spell another field's index.
+// refIndexName is the index over one reference's stored target key, named
+// by refCasePath.
 func refIndexName(ref *lww.Ref) string {
-	name := refIndexPrefix + string(ref.Field.Name())
+	return refIndexPrefix + refCasePath(ref)
+}
+
+// refCasePath names one case of a reference: its field, and for a case of a
+// polymorphic reference message, which shares its field with its sibling
+// cases, the case's own name after a dot. No field name contains a dot, so
+// the path of a case cannot spell the path of another field.
+func refCasePath(ref *lww.Ref) string {
 	if ref.InnerCase() {
-		name += "." + string(ref.Value.Name())
+		return string(ref.Field.Name()) + "." + string(ref.Value.Name())
 	}
-	return name
+	return string(ref.Field.Name())
 }
 
 // textField is one collaborative-text field: its dotted proto path and the
@@ -472,6 +481,22 @@ type Limits struct {
 	// Conditions selecting the same target rows share one pass, so the limit
 	// counts what a predicate WRITES rather than what it costs. Default 8.
 	MaxRelConditions int
+	// Maximum access parent hops from a row up to a row without an access
+	// parent, in a schema that uses the access model. Registration refuses an
+	// entity with a longer chain of parent entities, through any case of a
+	// polymorphic access parent. In a recursive chain,
+	// such as a folder inside a folder, a write that would put a row deeper is
+	// refused, and a read stops walking at this depth: a row deeper than it
+	// is read as anchored at nothing above that point. A row with several
+	// access parents counts its longest path for a write, and a read reaches
+	// an anchor through any path of at most this many hops. Default 32.
+	MaxAccessDepth int
+	// Maximum distinct rows that the access parents of one row may name, in
+	// a schema that uses the access model. A write that changes a row's access
+	// parents to more rows than this fails with CodeInvalidArgument, on every
+	// write path. A row that holds more from before the limit was lowered
+	// keeps them until a write changes them. Default 64.
+	MaxAccessParents int
 	// Maximum facet axes one Query may carry. Each axis costs a bucket per
 	// distinct value and a lookup per matching row, and a request carrying any
 	// walks every match rather than the page. Default 8.
@@ -513,6 +538,20 @@ func (l Limits) maxQueryFacets() int {
 		return 8
 	}
 	return l.MaxQueryFacets
+}
+
+func (l Limits) maxAccessDepth() int {
+	if l.MaxAccessDepth <= 0 {
+		return 32
+	}
+	return l.MaxAccessDepth
+}
+
+func (l Limits) maxAccessParents() int {
+	if l.MaxAccessParents <= 0 {
+		return 64
+	}
+	return l.MaxAccessParents
 }
 
 func (l Limits) maxRelKeys() int {
@@ -620,6 +659,46 @@ type catalog struct {
 	// move with it.
 	indexMarkOnce sync.Once
 	indexMark     string
+	// access is the compiled access model, nil for a schema that does not use
+	// it. accessErr is set instead while the catalog breaks a rule of the
+	// model, which RegisterEntity can leave behind because it adds one entity
+	// at a time; see accessModelOrErr.
+	access    *accessModel
+	accessErr error
+	// lastAccess is the last access model that compiled without an error,
+	// carried across the catalogs a run of RegisterEntity calls passes
+	// through, and nil before one did. The engine's own bookkeeping of a
+	// Trusted write runs against it while accessErr is set; see
+	// Server.trackedAccess.
+	lastAccess *accessModel
+	// gate is how the workspace gate admits callers, as settleGate last
+	// recorded it. Registration refuses to change it without
+	// AllowAccessChange.
+	gate gateState
+	// gateRoles are the roles the model declared when settleGate last
+	// recorded gate. The map is the model's and is never written.
+	gateRoles map[string]*modelRole
+}
+
+// accessModelOrErr returns the catalog's access model, nil when the schema
+// does not use one. It fails while the schema breaks a rule of the model, so
+// a request against such a schema is refused rather than served with access
+// that nothing checked.
+func (c *catalog) accessModelOrErr() (*accessModel, error) {
+	if c.accessErr != nil {
+		return nil, connect.NewError(connect.CodeFailedPrecondition, c.accessErr)
+	}
+	return c.access, nil
+}
+
+// recompileAccess compiles the access model for the catalog's current
+// entities and the server's mutators and strictness. Every swap that adds or
+// replaces an entity calls it.
+func (c *catalog) recompileAccess(s *Server) {
+	c.access, c.accessErr = compileAccessModel(c, s.mutators, s.limits.maxAccessDepth(), s.strictAccess)
+	if c.accessErr == nil {
+		c.lastAccess = c.access
+	}
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -656,9 +735,14 @@ func (c *catalog) indexBuildMark() string {
 // over; callers override it when the schema changes.
 func (c *catalog) clone() *catalog {
 	nc := &catalog{
-		entities:  make(map[string]*entityInfo, len(c.entities)+1),
-		byType:    make(map[protoreflect.FullName]*entityInfo, len(c.byType)+1),
-		schemaRev: c.schemaRev,
+		entities:   make(map[string]*entityInfo, len(c.entities)+1),
+		byType:     make(map[protoreflect.FullName]*entityInfo, len(c.byType)+1),
+		schemaRev:  c.schemaRev,
+		access:     c.access,
+		accessErr:  c.accessErr,
+		lastAccess: c.lastAccess,
+		gate:       c.gate,
+		gateRoles:  c.gateRoles,
 	}
 	for k, v := range c.entities {
 		nc.entities[k] = v
@@ -777,6 +861,12 @@ type Server struct {
 	// poison dedupes the quarantine log for rows that will not decode (see
 	// poison.go).
 	poison poisonReports
+	// callerAccess is the WithCallerAccess hook, nil when not installed. Fixed
+	// once New returns.
+	callerAccess CallerAccessFunc
+	// strictAccess is WithStrictAccess: registration refuses an entity outside
+	// the access model in a schema that uses it.
+	strictAccess bool
 }
 
 // catalogPtr returns the current immutable catalog snapshot.
@@ -1111,6 +1201,18 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	if err := s.applyDeclarations(); err != nil {
 		return nil, err
 	}
+	// Entities register one at a time and mutators after them, so the model is
+	// judged once both are in.
+	if err := s.swapCatalog(func(c *catalog) error {
+		c.recompileAccess(s)
+		if c.accessErr != nil {
+			return c.accessErr
+		}
+		return c.settleGate(true, s.callerAccess != nil)
+	}); err != nil {
+		return nil, err
+	}
+	s.logAccessWarnings(s.catalogPtr())
 	if s.gc != nil {
 		s.gc.start(s)
 	}
@@ -1137,13 +1239,15 @@ func (s *Server) Leases() lease.Locker {
 // mutators, then mergers. That is what lets an app list its options in
 // whatever order reads best.
 func (s *Server) applyDeclarations() error {
+	// The schema New registers has no schema before it to change, so its
+	// first role is not an access change.
 	for _, msg := range s.pendingEntities {
-		if err := s.RegisterEntity(msg); err != nil {
+		if err := s.RegisterEntity(msg, AllowAccessChange()); err != nil {
 			return err
 		}
 	}
 	for _, m := range s.pendingMutators {
-		if err := s.registerMutator(m.name, m.args, m.fn); err != nil {
+		if err := s.registerMutator(m.name, m.args, m.fn, m.opts...); err != nil {
 			return err
 		}
 	}
@@ -1246,8 +1350,23 @@ func (s *Server) HTTPHandler() http.Handler {
 }
 
 // RegisterEntity registers a message type carrying syncplane.v1.entity options as
-// a syncable entity.
-func (s *Server) RegisterEntity(msg proto.Message) error {
+// a syncable entity. It returns an error for an entity whose name is already
+// registered, whose name starts with the reserved prefix "syncplane_", or
+// whose entity options or field behaviors carry a field this server does not
+// know, such as a write policy that the access model replaced.
+//
+// The access model is judged once the schema is complete, so RegisterEntity
+// accepts an entity that leaves the model incomplete because it names an
+// entity, or a permission whose role, no registered entity declares yet; until
+// a later call completes it, every request fails with failed_precondition. It
+// returns an error for an entity that breaks any other rule of the model, and
+// the server keeps serving the schema it served before. An entity that
+// declares the first role of a schema that served callers without one is
+// refused unless opts include AllowAccessChange: it makes the workspace gate
+// refuse every caller that holds no permission. The entities New registers,
+// and those of a server that has none yet, need no flag.
+func (s *Server) RegisterEntity(msg proto.Message, opts ...RegisterOption) error {
+	cfg := registerConfigOf(opts)
 	info, err := buildEntityInfo(msg.ProtoReflect().Type())
 	if err != nil {
 		return err
@@ -1258,7 +1377,18 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		}
 		c.entities[info.name] = info
 		c.byType[info.msgType.Descriptor().FullName()] = info
-		return ensureHistoryEntity(c)
+		if err := ensureHistoryEntity(c); err != nil {
+			return err
+		}
+		c.recompileAccess(s)
+		// Only an entity that a later call adds can repair the model. Any other
+		// error stays until a descriptor set replaces the schema, and every
+		// request fails while it does.
+		var missing *missingEntityError
+		if c.accessErr != nil && !errors.As(c.accessErr, &missing) {
+			return c.accessErr
+		}
+		return c.settleGate(cfg.allowAccessChange, s.callerAccess != nil)
 	}); err != nil {
 		return err
 	}
@@ -1298,17 +1428,25 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if err := naming.ValidateEntityName(eo.GetName()); err != nil {
 		return nil, fmt.Errorf("server: %s: %w", desc.FullName(), err)
 	}
+	// The engine keeps rows of its own entities beside the schema's, under
+	// names with the reserved prefix. The field history type is the one
+	// such entity that goes through registration.
+	if naming.IsReservedEntityName(eo.GetName()) &&
+		desc.FullName() != (&syncplanev1.FieldHistory{}).ProtoReflect().Descriptor().FullName() {
+		return nil, fmt.Errorf("server: %s: entity name %q starts with %q, which is reserved for the engine's own entities",
+			desc.FullName(), eo.GetName(), naming.ReservedEntityPrefix)
+	}
+	if err := refuseStaleOptions(desc, eo); err != nil {
+		return nil, err
+	}
 	if len(eo.GetKeyFields()) == 0 {
 		return nil, fmt.Errorf("server: entity %q declares no key_fields", eo.GetName())
 	}
 	info := &entityInfo{
-		name:         eo.GetName(),
-		msgType:      mt,
-		createPolicy: eo.GetCreatePolicy(),
-		updatePolicy: eo.GetUpdatePolicy(),
-		deletePolicy: eo.GetDeletePolicy(),
-		serverOnly:   eo.GetServerOnly(),
-		history:      eo.GetHistory(),
+		name:       eo.GetName(),
+		msgType:    mt,
+		serverOnly: eo.GetServerOnly(),
+		history:    eo.GetHistory(),
 	}
 	for _, kf := range eo.GetKeyFields() {
 		fd := desc.Fields().ByName(protoreflect.Name(kf))
@@ -1375,6 +1513,17 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if err := validateListIdentities(desc, info.name); err != nil {
 		return nil, err
 	}
+	access, err := accessOf(desc, eo, info)
+	if err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	info.access = access
+	if info.grant, err = grantOf(desc, eo, info); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if info.members, err = membersOf(eo, info.access); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
 	// Derive one index per reference field, over the target key the row
 	// stores. This is not a schema decision: a reverse lookup is what every
 	// follow spec does on every pull, the engine already knows the exact
@@ -1386,6 +1535,9 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	// Then the schema's own: a field-level `indexed` mark and an entity-level
 	// `index` declaration desugar to the same compiled shape.
 	if err := buildDeclaredIndexes(info, eo); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if err := buildSubjectIndexes(info); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Search: a field-level `searchable` mark and an entity-level `search`
@@ -1415,11 +1567,20 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 			info.mergers[tf.path] = lww.Merger{Fn: text.Merge, MergeAbsentBase: true}
 		}
 	}
-	protected, err := protectedFieldsOf(desc, info.keyFields)
-	if err != nil {
+	if info.creatorFields, err = creatorFieldsOf(desc, info.keyFields); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
-	info.protectedFields = protected
+	// After every reader of an option message has refused what it does not
+	// know with its own path, so that those errors keep naming the rule.
+	if err := refuseUnknownNestedOptions(desc, eo); err != nil {
+		return nil, err
+	}
+	// After the create, no caller changes a creator field: a PATCH naming it is
+	// refused and a PUT keeps the stored value. Only the create differs, where
+	// the gate stamps it instead of clearing it.
+	for _, fd := range info.creatorFields {
+		info.protectedFields = append(info.protectedFields, string(fd.Name()))
+	}
 	if info.history != nil {
 		info.historyFields = historyFieldsOf(desc, info.keyFields)
 		if len(info.historyFields) == 0 {
@@ -1520,52 +1681,33 @@ func historyFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protorefle
 	return marked
 }
 
-// protectedFieldsOf resolves an entity's protected set: the top-level units a
-// client-authorized write may not change, which are exactly the fields marked
-// (field_behavior).write_policy TRUSTED_ONLY.
-//
-// A oneof contributes its GROUP name, once, however many members are marked.
-// That is the only form a mask may name it in (see engine/internal/lww), and a
-// group is replaced whole, so protecting one member and not its siblings would
-// be a rule no write could observe. Marking any member therefore marks the
-// group.
-//
-// A marked key field is refused rather than dropped. History drops one because
-// a capture set that cannot be masked is still a coherent thing to ask for; here
-// the mark states a restriction, and one that can never take effect — a PATCH
-// may not move a key field, and a PUT that changed one would address a different
-// row — is a schema mistake worth naming.
-func protectedFieldsOf(
-	desc protoreflect.MessageDescriptor,
-	keyFields []protoreflect.FieldDescriptor,
-) ([]string, error) {
-	isKey := make(map[protoreflect.Name]bool, len(keyFields))
-	for _, fd := range keyFields {
-		isKey[fd.Name()] = true
-	}
+// creatorFieldsOf returns the fields marked (field_behavior).creator, in field
+// order. A marked field must be a top-level, singular string field outside any
+// oneof, and cannot be a key field, which never changes.
+func creatorFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) ([]protoreflect.FieldDescriptor, error) {
+	var out []protoreflect.FieldDescriptor
 	fields := desc.Fields()
-	var marked []string
-	seen := make(map[string]bool, fields.Len())
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		if fieldBehaviorOf(fd).GetWritePolicy() != syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY {
+		b := fieldBehaviorOf(fd)
+		if b.GetCreator() == nil {
 			continue
 		}
-		if isKey[fd.Name()] {
-			return nil, fmt.Errorf("key field %q is marked (syncplane.v1.field_behavior).write_policy "+
-				"TRUSTED_ONLY; a key field can never be modified in place, so the mark cannot take effect", fd.Name())
+		if err := refuseUnknownOptionFields(fmt.Sprintf("field %q creator", fd.Name()), b.GetCreator()); err != nil {
+			return nil, err
 		}
-		name := string(fd.Name())
-		if od := lww.OneofOf(fd); od != nil {
-			name = string(od.Name())
+		if _, err := singularStringField(desc, string(fd.Name())); err != nil {
+			return nil, fmt.Errorf("creator: %w", err)
 		}
-		if seen[name] {
-			continue
+		if slices.Contains(keyFields, fd) {
+			return nil, fmt.Errorf("key field %q is marked creator; a key field never changes after the create", fd.Name())
 		}
-		seen[name] = true
-		marked = append(marked, name)
+		out = append(out, fd)
 	}
-	return marked, nil
+	if err := refuseNestedMarks(desc, "creator", func(b *syncplanev1.FieldBehavior) bool { return b.GetCreator() != nil }); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // collectTextFields walks a message's fields (descending through singular,

@@ -1,6 +1,7 @@
 import { create, fromBinary, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
+import { ACCESS_TOUCH_ENTITY } from '../../src/access.js';
 import { type Todo, TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import { CrudOp, type Mutation, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
@@ -8,10 +9,11 @@ import {
 	type RowChange,
 	RowChangeSchema,
 } from '../../src/gen/syncplane/v1/patch_pb.js';
-import { PullResponseSchema } from '../../src/gen/syncplane/v1/service_pb.js';
+import { CallerAccessSchema, PullResponseSchema } from '../../src/gen/syncplane/v1/service_pb.js';
 import {
 	confirmedKey,
 	metaBootstrapGen,
+	metaCallerAccess,
 	metaCursor,
 	overlayKey,
 	STAGING_ROOT,
@@ -414,6 +416,22 @@ describe('rebase', () => {
 		expect(todos.get('t1')?.completed).toBe(true);
 		expect(touched.tokens().has(touchKey(WS, 'todo'))).toBe(true);
 		expect(pendingCount).toBe(1);
+	});
+
+	it('announces the caller-access summary a wipe removes', async () => {
+		const kv = new MemoryKVStore();
+		let tx = await kv.write();
+		await tx.put(metaCallerAccess(WS), toBinary(CallerAccessSchema, create(CallerAccessSchema, {})));
+		await tx.commit();
+
+		// can() answers from the summary, so its listeners must learn that it
+		// is gone, or useCan keeps an answer the store no longer backs.
+		const touched = new TouchSet();
+		tx = await kv.write();
+		await wipeConfirmedState(tx, registry, WS, touched);
+		await tx.commit();
+
+		expect(touched.tokens().has(touchKey(WS, ACCESS_TOUCH_ENTITY))).toBe(true);
 	});
 
 	it('split functions compose to the same result as rebase', async () => {

@@ -93,6 +93,17 @@ func ValidateEntityName(name string) error {
 	return validateIdentifier("entity name", name)
 }
 
+// ReservedEntityPrefix starts the name of each entity the engine keeps for
+// itself, such as the field history and the access move log. A schema cannot
+// declare an entity whose name starts with it; see IsReservedEntityName.
+const ReservedEntityPrefix = "syncplane_"
+
+// IsReservedEntityName reports whether name starts with ReservedEntityPrefix.
+// The match is case-sensitive: "Syncplane_x" is not reserved.
+func IsReservedEntityName(name string) bool {
+	return strings.HasPrefix(name, ReservedEntityPrefix)
+}
+
 // ValidateRelationName checks the name a schema gives a reverse relation —
 // (syncplane.v1.field_behavior).reverse_relation. It follows the entity-name
 // rule: an ASCII letter or underscore followed by letters, digits or
@@ -102,6 +113,21 @@ func ValidateEntityName(name string) error {
 // name on the client's refs facade (`db.user.refs.assignedIssues`).
 func ValidateRelationName(name string) error {
 	return validateIdentifier("reverse relation name", name)
+}
+
+// ValidatePermissionName checks a permission name of the access model —
+// the permission of a rule in (syncplane.v1.entity).access.allow, and the
+// grants of a role. It
+// follows the entity-name rule: an ASCII letter or underscore followed by
+// letters, digits or underscores, at most MaxEntityNameLength of them.
+func ValidatePermissionName(name string) error {
+	return validateIdentifier("permission name", name)
+}
+
+// ValidateRoleName checks a role name of the access model —
+// (syncplane.v1.entity).grant.roles[].name. It follows the entity-name rule.
+func ValidateRoleName(name string) error {
+	return validateIdentifier("role name", name)
 }
 
 // validateIdentifier applies the identifier rule entity and relation names

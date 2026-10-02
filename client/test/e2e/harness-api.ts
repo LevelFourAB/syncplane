@@ -44,6 +44,13 @@ export interface OpenOptions {
 	subscriptions?: ('todo' | 'widget')[];
 	/** How long a released hold keeps its row, in ms. Default 0 here: drop at once. */
 	holdGraceMs?: number;
+	/**
+	 * Opens the tab as this user of the access-model schema. Every call carries
+	 * `Authorization: Bearer <user>`, the tab registers the access-model
+	 * entities in place of `entities`, and Tab.open points it at the
+	 * access-model testserver. Default unset: the todo/widget schema, anonymous.
+	 */
+	user?: string;
 }
 
 export interface TodoView {
@@ -96,6 +103,52 @@ export interface PeerView {
 	subject: string;
 	state: string | undefined;
 	self: boolean;
+}
+
+/** Access-model entities a prediction can name. */
+export type AccessEntity = 'project' | 'task';
+
+/**
+ * A prediction as one string: `'yes'`, `'no'`, or `'unknown:'` and the
+ * client's UnknownReason, so a spec that sees an unknown answer also sees why.
+ */
+export type AccessView = 'yes' | 'no' | `unknown:${string}`;
+
+/** What a sampler saw, from startSampling to stopSampling. */
+export interface AccessSamples {
+	/** How many predictions it made. */
+	samples: number;
+	/** How many predictions gave each answer. */
+	answers: Partial<Record<AccessView, number>>;
+}
+
+/**
+ * The CallerAccess traffic a tab received, as the transport saw it. The
+ * client keeps no record of which form a summary arrived in, so this is what
+ * tells a spec that the delta path ran at all.
+ */
+export interface AccessWireView {
+	/** Pull responses that carried a whole CallerAccess. */
+	pullWhole: number;
+	/** Pull responses that carried a CallerAccessDelta. */
+	pullDelta: number;
+	/** Subscribe pages that carried a whole CallerAccess. */
+	streamWhole: number;
+	/** Subscribe pages that carried a CallerAccessDelta. */
+	streamDelta: number;
+	/**
+	 * syncNow calls that pulled once more than their pages asked for. The
+	 * client does that when a pull's delta applies to another summary than
+	 * the stored one, which is the race between tabs that share a store.
+	 */
+	repulls: number;
+	/**
+	 * Pull requests sent outside a syncNow call. In a tab that leads the
+	 * stream, has no poll and makes no writes, a pull after the stream is open
+	 * is the one the client sends when a stream page's delta applies to
+	 * another summary than the stored one.
+	 */
+	backgroundPulls: number;
 }
 
 export interface HarnessApi {
@@ -235,6 +288,23 @@ export interface HarnessApi {
 	status(): Promise<StatusView>;
 	/** Messages from onMutationRejected — expected to stay empty. */
 	rejections(): Promise<string[]>;
+
+	/**
+	 * The client's prediction (hasPermission) for `permission` at a row of an
+	 * access-model entity. Requires open({ user }).
+	 */
+	hasPermission(entity: AccessEntity, key: string, permission: string): Promise<AccessView>;
+	/**
+	 * Starts asking hasPermission over and over in the page, one prediction
+	 * after the other, until stopSampling. A spec that asked from Node would
+	 * see one answer per round trip and miss a short gap between two of them.
+	 * One sampler per tab.
+	 */
+	startSampling(entity: AccessEntity, key: string, permission: string): Promise<void>;
+	/** Stops the sampler and returns what it saw. Rejects when a prediction did. */
+	stopSampling(): Promise<AccessSamples>;
+	/** CallerAccess traffic since open. Requires open({ user }). */
+	accessWire(): Promise<AccessWireView>;
 
 	/**
 	 * Overrides `document.visibilityState` and fires `visibilitychange`, which

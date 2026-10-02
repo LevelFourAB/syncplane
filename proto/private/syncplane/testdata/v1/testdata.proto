@@ -97,33 +97,37 @@ message StringList {
 
 // Fields a client may not write, one per shape the carry-over and the mask
 // refusal have to handle: a scalar, a message a mask can descend into, a
-// collaborative-text field whose union must not run, and a oneof protected as a
+// collaborative-text field whose union must not run, and a oneof guarded as a
 // group. `label` and `settings` stay writable so a test can tell "this write
-// landed except for the protected part" from "this write was refused".
+// landed except for the guarded part" from "this write was refused".
 message Guarded {
 	option (syncplane.v1.entity) = {
 		name: "guarded"
 		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+			guard: [ {
+				fields: [ "owner", "audit", "summary", "state" ]
+				allow: [ {
+					read: true
+					admitted: {}
+				} ]
+			} ]
+		}
 	};
 
 	string id = 1;
 	string label = 2;
-	string owner = 3 [(syncplane.v1.field_behavior) = {
-		write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY
-	}];
-	Settings audit = 4 [(syncplane.v1.field_behavior) = {
-		write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY
-	}];
-	bytes summary = 5 [(syncplane.v1.field_behavior) = {
-		text: true
-		write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY
-	}];
+	string owner = 3;
+	Settings audit = 4;
+	bytes summary = 5 [(syncplane.v1.field_behavior) = { text: true }];
 	Settings settings = 6;
-	// Marked on one member; the whole group is protected.
 	oneof state {
-		string state_name = 7 [(syncplane.v1.field_behavior) = {
-			write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY
-		}];
+		string state_name = 7;
 		int32 state_code = 8;
 	}
 }
@@ -147,17 +151,29 @@ message OneofKeyEntity {
 	}
 }
 
-// A protected key field: a PATCH can never move a key field and a PUT that
-// changed one would address a different row, so the mark could only mislead.
+// A guarded key field: a PATCH can never move a key field and a PUT that
+// changed one would address a different row, so the guard could only mislead.
 message ProtectedKeyEntity {
 	option (syncplane.v1.entity) = {
 		name: "protected_key"
 		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+			guard: [ {
+				fields: [ "id" ]
+				allow: [ {
+					read: true
+					admitted: {}
+				} ]
+			} ]
+		}
 	};
 
-	string id = 1 [(syncplane.v1.field_behavior) = {
-		write_policy: FIELD_WRITE_POLICY_TRUSTED_ONLY
-	}];
+	string id = 1;
 	string label = 2;
 }
 
@@ -622,51 +638,6 @@ message SearchEmptyEntity {
 
 	string id = 1;
 	string title = 2;
-}
-
-// Delete-policy fixture: an entity whose rows only a trusted write may delete.
-// Stands in for the root objects a cascade hangs off, where deletion is meant
-// to be a considered server-side act rather than a verb clients hold.
-message Ledger {
-	option (syncplane.v1.entity) = {
-		name: "ledger"
-		key_fields: [ "id" ]
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string label = 2;
-}
-
-// Write-policy fixture for a server-owned entity: the server records these
-// rows and clients only read them. Stands in for an activity feed written by
-// effects and connectors.
-message Activity {
-	option (syncplane.v1.entity) = {
-		name: "activity"
-		key_fields: [ "id" ]
-		create_policy: CREATE_POLICY_TRUSTED_ONLY
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string what = 2;
-}
-
-// Write-policy fixture for an append-only entity: a client may post a row but
-// not edit or remove it afterwards. Stands in for comments, where edits go
-// through a mutator that checks authorship.
-message Comment {
-	option (syncplane.v1.entity) = {
-		name: "comment"
-		key_fields: [ "id" ]
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string body = 2;
 }
 
 // History fixture with a NARROWED capture set: `title` and `body` are marked,

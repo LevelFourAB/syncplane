@@ -12,21 +12,28 @@ import "sync"
 const maxQueued = 256
 
 // stateSlot identifies the queued state of one session in one topic, as one
-// subject wrote it. An outbox serving a single topic still keys on the topic,
-// because the Registry hands one outbox every topic a stream watches.
+// owner, an issuer and a subject, wrote it. An outbox serving a single topic
+// still keys on the topic, because the Registry hands one outbox every topic a
+// stream watches.
 //
-// The subject is part of the key because a receiver keeps a record for the
-// subject that wrote it: state from another subject that names the same session
+// The owner is part of the key because a receiver keeps a record for the
+// owner that wrote it: state from another owner that names the same session
 // is not a newer version of that record, and folding it in would lose the
 // owner's update.
 type stateSlot struct {
 	topic   Topic
 	session string
+	issuer  string
 	subject string
 }
 
 func slotOf(ev *Event) stateSlot {
-	return stateSlot{topic: ev.Topic, session: ev.Participant.SessionID, subject: ev.Participant.Subject}
+	return stateSlot{
+		topic:   ev.Topic,
+		session: ev.Participant.SessionID,
+		issuer:  ev.Participant.Issuer,
+		subject: ev.Participant.Subject,
+	}
 }
 
 // outbox is a non-blocking, coalescing delivery queue: a queue of undelivered

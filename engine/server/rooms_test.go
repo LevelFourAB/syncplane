@@ -877,11 +877,11 @@ var _ = Describe("Rooms on two nodes", func() {
 		}
 	})
 
-	// openOn opens a stream on its own context, reads its snapshot and drains
-	// the rest in the background. The returned func ends the stream without a
-	// leave.
-	openOn := func(
-		c syncplanev1connect.PresenceServiceClient, subject, session string, fronted ...string,
+	// openAsOn opens a stream for the caller of issuer and subject on its own
+	// context, reads its snapshot and drains the rest in the background. The
+	// returned func ends the stream without a leave.
+	openAsOn := func(
+		c syncplanev1connect.PresenceServiceClient, issuer, subject, session string, fronted ...string,
 	) (<-chan *syncplanev1.WatchResponse, context.CancelFunc) {
 		GinkgoHelper()
 		sctx, scancel := context.WithCancel(ctx)
@@ -890,6 +890,7 @@ var _ = Describe("Rooms on two nodes", func() {
 			FrontedSessionIds: fronted,
 			Topics:            []*syncplanev1.Topic{t},
 		})
+		r.Header().Set("X-Test-Issuer", issuer)
 		r.Header().Set("X-Test-Subject", subject)
 		stream, err := c.Watch(sctx, r)
 		Expect(err).NotTo(HaveOccurred())
@@ -907,6 +908,50 @@ var _ = Describe("Rooms on two nodes", func() {
 			func(m *syncplanev1.WatchResponse) bool { return m.GetSnapshot() != nil }, BeTrue())))
 		return out, scancel
 	}
+
+	openOn := func(
+		c syncplanev1connect.PresenceServiceClient, subject, session string, fronted ...string,
+	) (<-chan *syncplanev1.WatchResponse, context.CancelFunc) {
+		GinkgoHelper()
+		return openAsOn(c, "", subject, session, fronted...)
+	}
+
+	// publishAs publishes one item as the caller of issuer and subject.
+	publishAs := func(c syncplanev1connect.PresenceServiceClient, issuer, subject, session string, item *syncplanev1.PublishItem) {
+		GinkgoHelper()
+		r := connect.NewRequest(&syncplanev1.PublishRequest{SessionId: session, Items: []*syncplanev1.PublishItem{item}})
+		r.Header().Set("X-Test-Issuer", issuer)
+		r.Header().Set("X-Test-Subject", subject)
+		_, err := c.Publish(ctx, r)
+		Expect(err).NotTo(HaveOccurred())
+	}
+
+	// Two issuers can each have a caller with one subject. On a node that
+	// holds no stream for the session, nothing but the record's owner stops
+	// one of them from writing as the other.
+	It("keeps a record from a caller of another issuer with the same subject on another node", func() {
+		first, other := node(), node()
+		_, _ = openAsOn(first, "a", "u1", "s1")
+		seen, _ := openOn(first, "u3", "s3")
+
+		state := func(body string, rev uint64) *syncplanev1.PublishItem {
+			return &syncplanev1.PublishItem{Topic: t, Body: &syncplanev1.PublishItem_Presence{
+				Presence: &syncplanev1.PresenceUpdate{State: []byte(body), Revision: rev},
+			}}
+		}
+		publishAs(first, "a", "u1", "s1", state("mine", 1))
+		Eventually(seen).Should(Receive(WithTransform(
+			func(m *syncplanev1.WatchResponse) string { return string(m.GetUpdated().GetPresence().GetState()) },
+			Equal("mine"))))
+
+		// When issuer "b"'s user u1 writes and withdraws s1 through the other node
+		publishAs(other, "b", "u1", "s1", state("spoofed", 1<<40))
+		publishAs(other, "b", "u1", "s1", &syncplanev1.PublishItem{Topic: t, Body: &syncplanev1.PublishItem_Leave{Leave: true}})
+
+		// Then the watcher sees neither
+		Consistently(seen, "200ms").ShouldNot(Receive(),
+			"a caller of another issuer changed or withdrew the record")
+	})
 
 	It("forgets a departed session that a stranger on another node fronts", func() {
 		first, other := node(), node()
@@ -948,12 +993,12 @@ func subjectHeader(subject string) http.Header {
 	return h
 }
 
-// subjectAuthenticator trusts a header, which is what lets a spec drive several
-// identities through one server.
+// subjectAuthenticator trusts the X-Test-Issuer and X-Test-Subject headers,
+// which is what lets a spec drive several identities through one server.
 type subjectAuthenticator struct{}
 
 func (subjectAuthenticator) Authenticate(_ context.Context, h http.Header) (server.Principal, error) {
-	return server.Principal{Subject: h.Get("X-Test-Subject")}, nil
+	return server.Principal{Issuer: h.Get("X-Test-Issuer"), Subject: h.Get("X-Test-Subject")}, nil
 }
 
 // hideTodo denies reads of one todo key and allows everything else.

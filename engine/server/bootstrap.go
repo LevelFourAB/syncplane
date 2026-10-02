@@ -68,7 +68,7 @@ import (
 // difference (or resets when it cannot); it also records the window and
 // closure key-sets, so the first pull can diff against what the snapshot
 // actually shipped.
-func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1.BootstrapRequest], stream *connect.ServerStream[syncplanev1.BootstrapResponse]) error {
+func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1.BootstrapRequest], stream *connect.ServerStream[syncplanev1.BootstrapResponse]) (err error) {
 	msg := req.Msg
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
@@ -76,10 +76,12 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err := checkClientID(msg.GetClientId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
 	if err != nil {
 		return err
 	}
+	defer func() { err = adm.verdict.settle(ctx, err) }()
+	principal := adm.principal
 	wantHash, err := subscriptionHash(msg.GetSubscriptions())
 	if err != nil {
 		return err
@@ -88,6 +90,14 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err != nil {
 		return err
 	}
+	// callerAccessDeltas stays false, so the Begin cursor stores no
+	// CallerAccess: BootstrapRequest has no caller_access_version, so nothing
+	// says the client applies deltas. A stored summary that the client never
+	// uses can evict a ReadAccess entry from a bounded cursor-state store,
+	// and losing that entry resets a client. The first pull that names a
+	// version stores the summary, so only an access change before that pull
+	// costs the whole summary.
+	emitter.admit(adm)
 	epoch, err := s.perms.FilterEpoch(ctx, principal, msg.GetWorkspaceId())
 	if err != nil {
 		return err
@@ -102,7 +112,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// what survives is a snapshot this request could actually continue (see
 	// bootstrapresume.go). Whether the cursor is still servable needs the
 	// workspace position, so that half waits for the tx below.
-	resume, err := s.decodeBootstrapResume(ctx, msg.GetWorkspaceId(), msg.GetResume())
+	resume, err := s.decodeBootstrapResume(ctx, msg.GetWorkspaceId(), msg.GetResume(), adm.verdict)
 	if err != nil {
 		return err
 	}
@@ -127,6 +137,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// must not sit behind writes the client has already been acked — and the
 	// anchor is at least any resume's own floor.
 	if err := s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+		// The whole snapshot is filtered under the access read here, with the
+		// Begin position: every later page reads at or above it. First, so a
+		// grant check the gate left to this transaction comes before any
+		// other read.
+		if err := emitter.bindAccess(tx); err != nil {
+			return err
+		}
 		current, err := tx.CurrentSeq()
 		if err != nil {
 			return err
@@ -137,6 +154,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		storeEpoch, err := tx.StoreEpoch()
 		if err != nil {
 			return err
+		}
+		if emitter.caller != nil && emitter.caller.model.moving {
+			// Every page classifies rows with the parents they have at or
+			// after this point.
+			if _, emitter.movesThrough, _, err = readAccessMoves(tx, ^uint64(0), 0); err != nil {
+				return err
+			}
 		}
 		emitter.windowMembers, err = emitter.buildWindows(tx)
 		if err != nil {
@@ -161,7 +185,18 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			if err != nil {
 				return err
 			}
-			if resume.servable(horizon, current, storeEpoch) {
+			// A snapshot is filtered by one access throughout, so one begun
+			// under other grants cannot be continued. One behind more moves
+			// than a pull reads would reset on the pull that follows it.
+			movesFit, err := s.movesFit(tx, emitter, resume.cur)
+			if err != nil {
+				return err
+			}
+			sameAccess, err := emitter.accessUnchanged(resume.cur)
+			if err != nil {
+				return err
+			}
+			if sameAccess && resume.servable(horizon, current, storeEpoch) && movesFit {
 				begin.Cursor = resume.rawCursor
 				begin.Seq = resume.cur.seq
 				begin.Resumed = true
@@ -179,9 +214,15 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				closure:    closureSet,
 				windows:    emitter.windowStates(),
 			}
+			emitter.stampAccess(&st, cursorState{})
 			begin.Cursor = s.encodeCursor(ctx, msg.GetWorkspaceId(), &st)
 			begin.Seq = current
 		}
+		// Sent on a resumed snapshot too: an earlier attempt's Begin may not
+		// have reached the client's store, and the CallerAccess may have
+		// changed since. The resumed cursor then names an older one, which
+		// only stops a later pull from sending a delta.
+		begin.CallerAccess, _ = emitter.callerAccessUpdate(cursorState{}, false, current)
 		if msg.GetClientId() != "" {
 			acked, err := tx.ClientLastMutationID(watermarkKey(principal, msg.GetClientId()))
 			if err != nil {
@@ -218,21 +259,41 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return err
 	}
 
-	// ship buffers one row if the client may see it, and records the position
-	// that a resumed attempt continues from. Both delivery paths below go
-	// through it, which is what keeps their output — and their resume tokens —
-	// indistinguishable.
-	ship := func(entity string, row storage.Row) error {
-		class, err := emitter.classify(row)
-		if err != nil {
-			return err
+	pins := chainPins{through: begin.GetSeq()}
+	// visibleOf renders the rows of a page the client may see, without the
+	// fields it may not read. It runs inside the page's read transaction,
+	// which is where the parent chains of the access model are read;
+	// snapshots never need tombstones, so it drops every other row.
+	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]*syncplanev1.RowChange, error) {
+		emitter.readChainsFrom(tx)
+		if err := s.pinChains(tx, emitter, begin.GetSeq(), &pins); err != nil {
+			return nil, err
 		}
-		if class != rowVisible {
-			return nil // snapshots never need tombstones
+		var out []*syncplanev1.RowChange
+		for _, row := range page {
+			class, err := emitter.classify(row)
+			if err != nil {
+				return nil, err
+			}
+			if class != rowVisible {
+				continue
+			}
+			rc, err := emitter.rowChange(row)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, rc)
 		}
-		chunk = append(chunk, rowChange(row))
+		return out, nil
+	}
+
+	// ship buffers one visible row and records the position that a resumed
+	// attempt continues from. Both delivery paths below go through it, which
+	// is what keeps their output — and their resume tokens — indistinguishable.
+	ship := func(entity string, rc *syncplanev1.RowChange) error {
+		chunk = append(chunk, rc)
 		rowsSent++
-		pos.row(entity, row.Key)
+		pos.row(entity, rc.GetKey())
 		if len(chunk) >= s.chunkSize {
 			return flush()
 		}
@@ -259,23 +320,31 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			candidates = candidates[sort.Search(len(candidates), func(i int) bool { return candidates[i] > afterKey }):]
 			for start := 0; start < len(candidates); start += maxRowBatch {
 				batch := candidates[start:min(start+maxRowBatch, len(candidates))]
-				var page []storage.Row
+				var (
+					page    []storage.Row
+					visible []*syncplanev1.RowChange
+				)
 				if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
-					return tx.GetRows(entity, batch, func(row storage.Row) error {
-						page = append(page, row)
+					page = page[:0]
+					if err := tx.GetRows(entity, batch, func(row storage.Row) error {
+						// GetRows yields tombstones and skips keys with no row
+						// at all. A snapshot ships neither, for the same reason
+						// the scan below never sees one.
+						if !row.Deleted {
+							page = append(page, row)
+						}
 						return nil
-					})
+					}); err != nil {
+						return err
+					}
+					var err error
+					visible, err = visibleOf(tx, page)
+					return err
 				}); err != nil {
 					return err
 				}
-				for _, row := range page {
-					// GetRows yields tombstones and skips keys with no row at
-					// all. A snapshot ships neither, for the same reason the
-					// scan below never sees one.
-					if row.Deleted {
-						continue
-					}
-					if err := ship(entity, row); err != nil {
+				for _, rc := range visible {
+					if err := ship(entity, rc); err != nil {
 						return err
 					}
 				}
@@ -284,21 +353,30 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			continue
 		}
 		for {
-			// Short tx per page: collect raw rows only; classification and
-			// stream writes happen outside so the tx stays brief.
-			var page []storage.Row
+			// Short tx per page: stream writes happen outside so the tx stays
+			// brief.
+			var (
+				page    []storage.Row
+				visible []*syncplanev1.RowChange
+			)
 			// Floored at the Begin seq: pages of one snapshot must not read
 			// from before the position the Begin frame promised.
 			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
-				return tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
+				page = page[:0]
+				if err := tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
 					page = append(page, row)
 					return nil
-				})
+				}); err != nil {
+					return err
+				}
+				var err error
+				visible, err = visibleOf(tx, page)
+				return err
 			}); err != nil {
 				return err
 			}
-			for _, row := range page {
-				if err := ship(entity, row); err != nil {
+			for _, rc := range visible {
+				if err := ship(entity, rc); err != nil {
 					return err
 				}
 			}
@@ -333,17 +411,29 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 // client's first pull from the Begin cursor delivers it; that is the same
 // guarantee the scan path relies on for rows written mid-stream (see the
 // Bootstrap doc comment).
+//
+// The caller's access is a second source of candidates. A row the access model
+// hides is hidden whatever the scope says, closure and window members
+// included, since they were filtered when built. So when both sources narrow,
+// the candidates are the keys both name.
 func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq uint64, e *rowEmitter, entity string) (keys []string, narrowed bool, err error) {
-	scope, ok := bootstrapNarrowable(e, entity)
-	if !ok {
-		return nil, false, nil
-	}
 	info, registered := s.catalogPtr().entities[entity]
 	if !registered {
 		return nil, false, nil
 	}
+	scope, scoped := bootstrapNarrowable(e, entity)
+	if !scoped && !e.accessNarrows(info) {
+		return nil, false, nil
+	}
 	err = s.readTx(ctx, ws, beginSeq, func(tx storage.ReadTx) error {
-		var err error
+		accessKeys, byAccess, err := e.accessCandidates(tx, info, s.limits.MaxResyncScan)
+		if err != nil {
+			return err
+		}
+		if !scoped {
+			keys, narrowed = accessKeys, byAccess
+			return nil
+		}
 		keys, narrowed, err = candidateKeys(tx, info,
 			[]*entityScope{scope},
 			// A closure member and a window member are visible whatever the
@@ -352,12 +442,39 @@ func (s *Server) bootstrapCandidates(ctx context.Context, ws string, beginSeq ui
 			// can therefore treat it as the explicit key set it is.
 			[]closureRows{e.closure, e.windowMembers},
 			s.limits.MaxResyncScan, s.limits)
-		return err
+		if err != nil {
+			return err
+		}
+		switch {
+		case byAccess && narrowed:
+			keys = intersectSorted(keys, accessKeys)
+		case byAccess:
+			keys, narrowed = accessKeys, true
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, false, err
 	}
 	return keys, narrowed, nil
+}
+
+// intersectSorted returns the keys present in both sorted slices, sorted.
+func intersectSorted(a, b []string) []string {
+	out := make([]string, 0, min(len(a), len(b)))
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] == b[j]:
+			out = append(out, a[i])
+			i++
+			j++
+		case a[i] < b[j]:
+			i++
+		default:
+			j++
+		}
+	}
+	return out
 }
 
 // bootstrapNarrowable reports this entity's base scope when a snapshot's
@@ -389,4 +506,99 @@ func bootstrapNarrowable(e *rowEmitter, entity string) (*entityScope, bool) {
 		return nil, false
 	}
 	return scope, true
+}
+
+// pinChains makes the parent-chain walker bound on e read each row that moved
+// after seq with the parents, and what within entries read of it, that it had
+// at seq, and read a row created after seq as one that does not exist. A
+// snapshot that reads its pages in transactions of their own classifies every
+// page as of its Begin position this way, which is the position the pull from
+// its cursor compares the moves after it with (see compareMoves). With more
+// moves than Limits.MaxResyncScan after seq it pins no more moves: that pull
+// resets. When rows moved after seq, or the pins overflowed, it also binds a
+// walker over the rows as tx reads them (rowEmitter.nowChains), and the
+// emitter's filters then admit a row or a guarded unit only when both walkers
+// do.
+//
+// pins carries what the pages before this one read of the log, so that each
+// page reads only the moves after the newest one an earlier page read. Writes
+// to a workspace commit in sequence order, so no move can appear later below
+// that one.
+func (s *Server) pinChains(tx storage.ReadTx, e *rowEmitter, seq uint64, pins *chainPins) error {
+	if e.caller == nil || !e.caller.model.moving || e.chains == nil {
+		return nil
+	}
+	if !pins.overflow {
+		if err := s.pinMoves(tx, e, seq, pins); err != nil {
+			return err
+		}
+	}
+	// The pinned chains admit a row that has moved out of what the caller
+	// reads since seq, and the page ships what was written to it after the
+	// move. So the page also walks the chains as they are now, and a row
+	// ships only when both admit it. That is safe for the pull from the
+	// Begin cursor: it tombstones a row that moved out, which the client
+	// does not hold, and ships a row that moved in. The walker is new on
+	// each page because an earlier page memoized the chains of an earlier
+	// transaction. After an overflow the pinned chains miss moves, and their
+	// memo can be as old as the first page.
+	e.nowChains = nil
+	if len(e.chains.overrides) > 0 || len(e.chains.withinOverrides) > 0 || pins.overflow {
+		e.nowChains = newAccessChains(e.chains.model, tx, e.chains.maxDepth, e.chains.report)
+	}
+	return nil
+}
+
+// pinMoves reads the moves after pins.through and pins the rows they name on
+// the chains bound on e (see pinChains).
+func (s *Server) pinMoves(tx storage.ReadTx, e *rowEmitter, seq uint64, pins *chainPins) error {
+	moves, newest, overflow, err := readAccessMoves(tx, pins.through, s.limits.MaxResyncScan-pins.read)
+	if err != nil {
+		return err
+	}
+	if overflow {
+		pins.overflow = true
+		return nil
+	}
+	pins.through = max(pins.through, newest)
+	pins.read += len(moves)
+	// A row keeps the state from before its first move after seq, which an
+	// earlier page has already pinned when the row moved again since.
+	if e.chains.overrides == nil {
+		e.chains.overrides = map[anchorRow]chainEdge{}
+		e.chains.withinOverrides = map[anchorRow]rowWithin{}
+	}
+	for _, m := range moves {
+		if _, seen := e.chains.overrides[m.row]; !seen {
+			e.chains.overrides[m.row] = m.from
+		}
+	}
+	for row, st := range firstWithins(e.caller.model, moves) {
+		if _, seen := e.chains.withinOverrides[row]; !seen {
+			e.chains.withinOverrides[row] = st
+		}
+	}
+	e.chains.createdAfter = seq
+	return nil
+}
+
+// chainPins is what pinChains has read of the access move log for one
+// snapshot.
+type chainPins struct {
+	// through is the newest move read, or the Begin position before any.
+	through uint64
+	// read counts the moves read after the Begin position.
+	read     int
+	overflow bool
+}
+
+// movesFit reports whether a pull from cur reads every access move after it,
+// rather than reset on more than Limits.MaxResyncScan of them (see
+// compareMoves).
+func (s *Server) movesFit(tx storage.ReadTx, e *rowEmitter, cur cursorState) (bool, error) {
+	if e.caller == nil || !e.caller.model.moving {
+		return true, nil
+	}
+	_, _, overflow, err := readAccessMoves(tx, max(cur.seq, cur.movesThrough), s.limits.MaxResyncScan)
+	return !overflow, err
 }

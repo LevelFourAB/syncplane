@@ -8,12 +8,24 @@
  * own, and it is precisely those defaults this tier exists to exercise. The one
  * exception is `measureWrites`, which hands the client the same IDBKVStore
  * wrapped in a counter (see write-meter.ts) so a spec can ask what a write cost.
+ * A tab opened as a user of the access-model schema is the other: it hands
+ * the client a transport, because a transport is the only place to set the
+ * bearer token the access-model testserver takes as the caller.
  */
 
-import { fromBinary } from '@bufbuild/protobuf';
+import { type DescMessage, fromBinary } from '@bufbuild/protobuf';
+import type { Interceptor, StreamResponse } from '@connectrpc/connect';
+import { createConnectTransport } from '@connectrpc/connect-web';
 
 import { TodoSchema } from '../../../src/gen/example/todo/v1/todo_pb.js';
+import {
+	OrgMemberSchema,
+	ProjectMemberSchema,
+	ProjectSchema,
+	TaskSchema,
+} from '../../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { WidgetSchema } from '../../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+import type { PullResponse, SubscribeResponse } from '../../../src/gen/syncplane/v1/service_pb.js';
 import {
 	decodeTextDoc,
 	type HoldHandle,
@@ -30,13 +42,33 @@ import { IDBKVStore } from '../../../src/kv/idb.js';
 import { entityDefOf } from '../../../src/mutations.js';
 import { compactDoc } from '../../../src/text/index.js';
 import type { WatchHandle } from '../../../src/watch.js';
-import type { HarnessApi, MarkView, StatusView, TodoView } from '../harness-api.js';
+import type {
+	AccessEntity,
+	AccessSamples,
+	AccessView,
+	AccessWireView,
+	HarnessApi,
+	MarkView,
+	StatusView,
+	TodoView,
+} from '../harness-api.js';
 import { WriteMeter } from './write-meter.js';
 
 /** The spawned testserver's address, handed over as ?server=... by Tab.open. */
 const serverUrl = new URLSearchParams(location.search).get('server');
 
 const WIDGET_ENTITY = entityDefOf(WidgetSchema).name;
+
+/**
+ * What a tab opened as a user registers: the grant rows and the rows they
+ * sit on, which is all the access specs write and predict for.
+ */
+const ACCESS_ENTITIES = [ OrgMemberSchema, ProjectSchema, ProjectMemberSchema, TaskSchema ];
+
+const ACCESS_SCHEMAS: Record<AccessEntity, DescMessage> = {
+	project: ProjectSchema,
+	task: TaskSchema,
+};
 
 let client: SyncClient | undefined;
 /** The workspace `open` was called with — needed to address confirmed rows. */
@@ -61,6 +93,18 @@ const rooms = new Map<number, { room: Room<string>; received: string[] }>();
 let nextRoom = 1;
 /** Set only for a tab opened with measureWrites; see writeBytes. */
 let meter: WriteMeter | undefined;
+/** Set only for a tab opened with a user; see accessWire. */
+let wire: AccessWireView | undefined;
+/**
+ * Pull requests the transport sent, and Pull pages that asked for another
+ * page (has_more), since open. syncNow compares the two to count repulls.
+ */
+let pullsSent = 0;
+let pullsWithMore = 0;
+/** syncNow calls in progress; a pull sent while there are none counts as background. */
+let syncing = 0;
+/** The running sampler; see startSampling. */
+let sampler: { stopped: boolean; samples: AccessSamples; done: Promise<void> } | undefined;
 
 function current(): SyncClient {
 	if (client === undefined) throw new Error('harness: no client open');
@@ -142,6 +186,66 @@ function markViews(spans: readonly TextSpan[]): MarkView[] {
 	return spans.map((s) => ({ start: s.start, end: s.end, key: s.key, value: String(s.value) }));
 }
 
+/** A tab's view of what CallerAccess one page carried; see AccessWireView. */
+function countAccess(page: PullResponse, via: 'pull' | 'stream'): void {
+	if (wire === undefined) return;
+	if (page.callerAccess !== undefined) {
+		if (via === 'pull') wire.pullWhole++;
+		else wire.streamWhole++;
+	}
+	if (page.callerAccessDelta !== undefined) {
+		if (via === 'pull') wire.pullDelta++;
+		else wire.streamDelta++;
+	}
+}
+
+/** Counts the CallerAccess of every Subscribe page as the client reads it. */
+async function* countFrames(
+	frames: AsyncIterable<SubscribeResponse>,
+): AsyncIterable<SubscribeResponse> {
+	for await (const frame of frames) {
+		if (frame.body.case === 'page') countAccess(frame.body.value, 'stream');
+		yield frame;
+	}
+}
+
+/**
+ * Sets the bearer token the access-model testserver takes as the caller, and
+ * counts the CallerAccess traffic for accessWire.
+ */
+function asUser(user: string): Interceptor {
+	return (next) => async (req) => {
+		req.header.set('Authorization', `Bearer ${user}`);
+		if (req.method.name === 'Pull') {
+			pullsSent++;
+			if (syncing === 0 && wire !== undefined) wire.backgroundPulls++;
+		}
+		const res = await next(req);
+		if (req.method.name === 'Pull' && !res.stream) {
+			const page = res.message as PullResponse;
+			if (page.hasMore) pullsWithMore++;
+			countAccess(page, 'pull');
+		}
+		if (req.method.name === 'Subscribe' && res.stream) {
+			const frames = res.message as AsyncIterable<SubscribeResponse>;
+			return { ...res, message: countFrames(frames) } as StreamResponse<DescMessage, DescMessage>;
+		}
+		return res;
+	};
+}
+
+/** One prediction as the JSON the boundary carries; see AccessView. */
+async function accessView(
+	entity: AccessEntity,
+	key: string,
+	permission: string,
+): Promise<AccessView> {
+	const detail = await current().hasPermission(ACCESS_SCHEMAS[entity], key, permission, {
+		detail: true,
+	});
+	return detail.answer === 'unknown' ? `unknown:${detail.reason}` : detail.answer;
+}
+
 function todoView(
 	row: { id: string; title: string; completed: boolean } | undefined,
 ): TodoView | null {
@@ -155,6 +259,18 @@ const harness: HarnessApi = {
 		notificationCount = 0;
 		watched.clear();
 		rejections.length = 0;
+		pullsSent = 0;
+		pullsWithMore = 0;
+		syncing = 0;
+		const user = opts.user;
+		wire = user === undefined ? undefined : {
+			pullWhole: 0,
+			pullDelta: 0,
+			streamWhole: 0,
+			streamDelta: 0,
+			repulls: 0,
+			backgroundPulls: 0,
+		};
 
 		// The metered store is the one the client would have opened for itself,
 		// under the name it would have used — the meter only counts what goes past,
@@ -164,13 +280,24 @@ const harness: HarnessApi = {
 			: undefined;
 
 		const opened = new SyncClient({
-			url: serverUrl,
+			...(user === undefined
+				? { url: serverUrl }
+				: {
+					// The binary format the client picks for itself from a url.
+					transport: createConnectTransport({
+						baseUrl: serverUrl,
+						useBinaryFormat: true,
+						interceptors: [ asUser(user) ],
+					}),
+				}),
 			workspaceId: opts.workspaceId,
 			accountId: opts.accountId,
 			kvStore: meter,
-			entities: (opts.entities ?? [ 'todo', 'widget' ]).map((name) =>
-				name === 'todo' ? TodoSchema : WidgetSchema
-			),
+			entities: user === undefined
+				? (opts.entities ?? [ 'todo', 'widget' ]).map((name) =>
+					name === 'todo' ? TodoSchema : WidgetSchema
+				)
+				: ACCESS_ENTITIES,
 			subscriptions: opts.subscriptions?.map((name) =>
 				subscription(name === 'todo' ? TodoSchema : WidgetSchema)
 			),
@@ -194,10 +321,25 @@ const harness: HarnessApi = {
 	},
 
 	async syncNow() {
-		await current().syncNow();
+		const sent = pullsSent;
+		const withMore = pullsWithMore;
+		syncing++;
+		try {
+			await current().syncNow();
+		} finally {
+			syncing--;
+		}
+		// One cycle pulls one page, plus one per page that asked for more. A
+		// further pull is the one the client sends when a delta did not apply.
+		if (wire !== undefined && pullsSent - sent > 1 + (pullsWithMore - withMore)) wire.repulls++;
 	},
 
 	async close() {
+		if (sampler !== undefined) {
+			sampler.stopped = true;
+			await sampler.done.catch(() => undefined);
+			sampler = undefined;
+		}
 		unwatch?.close();
 		unwatch = undefined;
 		for (const hold of holds.values()) hold.release();
@@ -214,6 +356,7 @@ const harness: HarnessApi = {
 		client = undefined;
 		workspaceId = undefined;
 		meter = undefined;
+		wire = undefined;
 	},
 
 	clientId() {
@@ -429,6 +572,44 @@ const harness: HarnessApi = {
 
 	async rejections() {
 		return [ ...rejections ];
+	},
+
+	hasPermission(entity, key, permission) {
+		return accessView(entity, key, permission);
+	},
+
+	async startSampling(entity, key, permission) {
+		if (sampler !== undefined) throw new Error('harness: a sampler is already running');
+		const running: { stopped: boolean; samples: AccessSamples; done: Promise<void> } = {
+			stopped: false,
+			samples: { samples: 0, answers: {} },
+			done: Promise.resolve(),
+		};
+		running.done = (async () => {
+			while (!running.stopped) {
+				const view = await accessView(entity, key, permission);
+				running.samples.samples++;
+				running.samples.answers[view] = (running.samples.answers[view] ?? 0) + 1;
+				// Yields to the event loop, so the sync work the sampler watches
+				// runs between two predictions.
+				await new Promise((resolve) => setTimeout(resolve, 0));
+			}
+		})();
+		sampler = running;
+	},
+
+	async stopSampling() {
+		const running = sampler;
+		if (running === undefined) throw new Error('harness: no sampler running');
+		sampler = undefined;
+		running.stopped = true;
+		await running.done;
+		return running.samples;
+	},
+
+	async accessWire() {
+		if (wire === undefined) throw new Error('harness: open with a user to count access traffic');
+		return { ...wire };
 	},
 
 	async setVisibility(state) {

@@ -628,6 +628,16 @@ var _ = Describe("Field history", func() {
 			Expect(recs[0].GetThroughSeq()).To(BeNumerically(">", recs[0].GetSeq()),
 				"the record spans the writes it folded")
 			Expect(recs[0].GetActorSystem()).To(Equal("editor"))
+			Expect(recs[0].GetWriteGroups()).To(HaveExactElements(
+				And(
+					HaveField("Fields", Equal([]string{"title"})),
+					HaveField("Writes", BeEquivalentTo(3)),
+					HaveField("FirstSeq", Equal(recs[0].GetSeq())),
+					HaveField("LastSeq", Equal(recs[0].GetThroughSeq())),
+				),
+			), "writes of the same fields share one group")
+			Expect(recs[1].GetWriteGroups()).To(HaveExactElements(HaveField("Fields", BeEmpty())),
+				"the creation is a group of no fields")
 		})
 
 		It("keeps a typing session to one record", func() {
@@ -1442,6 +1452,9 @@ var _ = Describe("Field history", func() {
 			var newest syncplanev1.FieldHistory
 			Expect(proto.Unmarshal(resp.Msg.GetRows()[0].GetValue(), &newest)).To(Succeed())
 			Expect(newest.GetMask().GetPaths()).To(Equal([]string{"title"}))
+			Expect(newest.GetWriteGroups()).To(BeEmpty(), "the groups never leave the server")
+			Expect(historyOf(srv, ws, "historied", "h1")[0].GetWriteGroups()).To(HaveLen(1),
+				"server-side reads return the groups as stored")
 		})
 
 		It("serves the history query from its declared index", func() {
