@@ -39,14 +39,11 @@ type entityAccess struct {
 	parentEntity string
 }
 
-// depth is the number of access_parent hops from a row to the anchor that
-// carries no parent of its own. The model accepts depths 0 and 1.
-func (a *entityAccess) depth() int {
-	if a.parent == nil {
-		return 0
-	}
-	return 1
-}
+// depthUnbounded is the access depth of an entity whose chain of parent
+// entities runs into a cycle, such as a folder whose parent is a folder. Its
+// rows can sit any number of hops below the root, up to
+// Limits.MaxAccessDepth.
+const depthUnbounded = -1
 
 // grantSpec is an entity's (syncplane.v1.entity).grant option, checked and
 // resolved at registration: which fields of a grant row hold its subject and
@@ -354,6 +351,22 @@ type accessModel struct {
 	// change what a caller holds.
 	parents map[string]*entityInfo
 	anchors map[string]bool
+	// entities maps the name of each entity in the model, unrestricted ones
+	// left out, to its definition.
+	entities map[string]*entityInfo
+	// children maps the name of each anchor entity to the entities whose
+	// access parent points at it, sorted by name. below maps it to every
+	// entity whose rows can sit any number of hops below its rows, sorted by
+	// name, itself included when the chain is recursive.
+	children map[string][]*entityInfo
+	below    map[string][]string
+	// depths maps each model entity to the number of access_parent hops from
+	// its rows to an entity without a parent, or depthUnbounded.
+	depths map[string]int
+	// moving is set when some entity has an access parent and rows that can
+	// sit below its rows, so moving one of its rows moves rows below it (see
+	// the access move log).
+	moving bool
 	// readPerms are the permissions model entities read by, sorted. They are
 	// what a cursor records of a caller's access.
 	readPerms []string
@@ -386,8 +399,10 @@ type modelRole struct {
 // catalog.accessErr).
 //
 // mutators are the server's mutators. A MutatorAccess counts as a use of its
-// permission, and is checked against the model here.
-func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessModel, error) {
+// permission, and is checked against the model here. maxDepth is
+// Limits.MaxAccessDepth: an entity whose chain of parent entities is longer
+// is refused, since none of its rows could anchor anywhere.
+func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth int) (*accessModel, error) {
 	names := make([]string, 0, len(c.entities))
 	inUse := false
 	for name, info := range c.entities {
@@ -404,9 +419,15 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 	}
 	sort.Strings(names)
 
-	m := &accessModel{roles: map[string]*modelRole{}, parents: map[string]*entityInfo{}, anchors: map[string]bool{}}
-	used := map[string][]string{}       // permission → entities that name it
-	depths := map[string]map[int]bool{} // permission → anchor depths of those entities
+	m := &accessModel{
+		roles:    map[string]*modelRole{},
+		entities: map[string]*entityInfo{},
+		parents:  map[string]*entityInfo{},
+		anchors:  map[string]bool{},
+		children: map[string][]*entityInfo{},
+		depths:   map[string]int{},
+	}
+	used := map[string][]string{} // permission → entities that name it
 	for _, name := range names {
 		info := c.entities[name]
 		a := info.access
@@ -417,6 +438,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 		if a.unrestricted {
 			continue
 		}
+		m.entities[name] = info
 		if a.parent != nil {
 			target, ok := c.byType[a.parent.ref.Target.FullName()]
 			if !ok {
@@ -427,21 +449,14 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which is not in the access model; "+
 					"declare access with a read and a write permission on %q", name, a.parent.fd.Name(), target.name, target.name)
 			}
-			if target.access.parent != nil {
-				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which has an access_parent of its own; "+
-					"an access parent must anchor at the workspace root", name, a.parent.fd.Name(), target.name)
-			}
 			m.parents[name] = target
 			m.anchors[target.name] = true
+			m.children[target.name] = append(m.children[target.name], info)
 		}
 		for _, p := range []string{a.read, a.write} {
 			if !slices.Contains(used[p], name) {
 				used[p] = append(used[p], name)
 			}
-			if depths[p] == nil {
-				depths[p] = map[int]bool{}
-			}
-			depths[p][a.depth()] = true
 		}
 		if info.grant == nil {
 			continue
@@ -453,6 +468,24 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 					role, prev.entity, name)
 			}
 			m.roles[role] = &modelRole{name: role, entity: name, perms: info.grant.roles[role]}
+		}
+	}
+
+	for _, name := range names {
+		if a := c.entities[name].access; a == nil || a.unrestricted {
+			continue
+		}
+		d := m.depthOf(name)
+		if d > maxDepth {
+			return nil, fmt.Errorf("server: entity %q sits %d access_parent hops below an entity without a parent, "+
+				"more than MaxAccessDepth (%d) allows", name, d, maxDepth)
+		}
+	}
+	m.below = map[string][]string{}
+	for anchor := range m.anchors {
+		m.below[anchor] = m.entitiesBelow(anchor)
+		if m.parents[anchor] != nil {
+			m.moving = true
 		}
 	}
 
@@ -509,12 +542,28 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 		}
 	}
 	sort.Strings(m.readPerms)
+	// One permission on a row and on the rows below it is the common case: a
+	// comment is read with its task. Two entities that are not on one chain
+	// and sit at different depths are the likely mistake, such as one
+	// view_members for the org's roster and for every project's.
 	for _, p := range perms {
-		if len(depths[p]) > 1 {
+		users := entitiesOnly(used[p])
+		apart := false
+		for i := 0; i < len(users) && !apart; i++ {
+			for _, v := range users[i+1:] {
+				u := users[i]
+				if m.depths[u] != m.depths[v] && !slices.Contains(m.below[u], v) && !slices.Contains(m.below[v], u) {
+					apart = true
+					break
+				}
+			}
+		}
+		if apart {
 			m.warnings = append(m.warnings, fmt.Sprintf(
-				"permission %q governs entities at different anchor depths (%s): a role that grants it at the workspace root "+
-					"reaches the rows below every anchor, so give each depth a permission of its own unless that is intended",
-				p, strings.Join(entitiesOnly(used[p]), ", ")))
+				"permission %q governs entities at different anchor depths that do not sit below one another (%s): "+
+					"a role that grants it above one of them reaches the rows of the others below every anchor, "+
+					"so give each a permission of its own unless that is intended",
+				p, strings.Join(users, ", ")))
 		}
 	}
 
@@ -523,6 +572,88 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo) (*accessMo
 	}
 	m.fingerprint = readPolicyOf(m.readRules)
 	return m, nil
+}
+
+// depthOf returns the number of access_parent hops from rows of the named
+// entity to an entity without a parent, or depthUnbounded when the chain of
+// parent entities runs into a cycle. It memoizes into m.depths, so it runs
+// once m.parents is complete.
+func (m *accessModel) depthOf(name string) int {
+	if d, ok := m.depths[name]; ok {
+		return d
+	}
+	seen := map[string]bool{}
+	var chain []string
+	d := 0
+	for at := name; ; {
+		if known, ok := m.depths[at]; ok {
+			if known != depthUnbounded {
+				d += known
+			} else {
+				d = depthUnbounded
+			}
+			break
+		}
+		if seen[at] {
+			d = depthUnbounded
+			break
+		}
+		seen[at] = true
+		chain = append(chain, at)
+		parent := m.parents[at]
+		if parent == nil {
+			break
+		}
+		d++
+		at = parent.name
+	}
+	// Every entity on the walk sits a known number of hops above the end of
+	// it, or on a chain that never ends.
+	for i, at := range chain {
+		switch {
+		case d == depthUnbounded:
+			m.depths[at] = depthUnbounded
+		default:
+			m.depths[at] = d - i
+		}
+	}
+	return m.depths[name]
+}
+
+// entitiesBelow returns, sorted, every entity whose rows can sit below rows
+// of anchor: its children, their children, and so on.
+func (m *accessModel) entitiesBelow(anchor string) []string {
+	seen := map[string]bool{}
+	queue := []string{anchor}
+	for len(queue) > 0 {
+		at := queue[0]
+		queue = queue[1:]
+		for _, child := range m.children[at] {
+			if !seen[child.name] {
+				seen[child.name] = true
+				queue = append(queue, child.name)
+			}
+		}
+	}
+	out := make([]string, 0, len(seen))
+	for name := range seen {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// readPermsBelow returns, sorted and without repeats, the read permissions of
+// the entities whose rows can sit below rows of the named entity.
+func (m *accessModel) readPermsBelow(name string) []string {
+	var out []string
+	for _, below := range m.below[name] {
+		if p := m.entities[below].access.read; !slices.Contains(out, p) {
+			out = append(out, p)
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // readRuleOf renders what decides which rows of a model entity a caller

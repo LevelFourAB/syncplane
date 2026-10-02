@@ -156,6 +156,10 @@ func (s *Server) Changes(ctx context.Context, workspaceID string, after Cursor, 
 		scanned := 0
 		var last storage.Row
 		if err := tx.ScanChanges(after.Seq, after.Entity, after.Key, limit+1, func(row storage.Row) error {
+			// The engine's own record of a write, not a change of the data.
+			if row.Entity == accessMovesEntity {
+				return nil
+			}
 			scanned++
 			if scanned > limit {
 				more = true

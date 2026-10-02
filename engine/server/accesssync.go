@@ -118,10 +118,11 @@ func (e *rowEmitter) boundReadAccess() (*syncplanecursorv1.ReadAccess, uint64) {
 // the stored entry it names is reused rather than written again.
 func (e *rowEmitter) stampAccess(st *cursorState, cur cursorState) {
 	st.accessPolicy, st.accessHash, st.accessID, st.accessGen, st.accessPending = 0, 0, 0, 0, nil
-	st.callerAccessHash = 0
+	st.callerAccessHash, st.movesThrough = 0, 0
 	if e.caller == nil {
 		return
 	}
+	st.movesThrough = e.movesThrough
 	_, st.callerAccessHash = e.boundCallerAccess()
 	ra, hash := e.boundReadAccess()
 	st.accessPolicy = e.caller.model.fingerprint
@@ -165,6 +166,7 @@ func (s *Server) storeAccess(ctx context.Context, ws string, st *cursorState, c 
 	c.AccessPolicy = st.accessPolicy
 	c.AccessHash = st.accessHash
 	c.CallerAccessHash = st.callerAccessHash
+	c.AccessMovesThrough = st.movesThrough
 	if st.accessGen != 0 {
 		c.AccessRef = &syncplanecursorv1.StateRef{Id: st.accessID, Gen: st.accessGen}
 	}
@@ -180,18 +182,33 @@ type accessComparison struct {
 	// old is what the cursor was issued under when that differs from what is
 	// bound now, nil when it does not.
 	old *accessSet
+	// oldChains walks parent chains as the client's rows reflect them: with
+	// the parent each row moved since then had before its first move. Nil
+	// when no row moved.
+	oldChains *accessChains
+	// moved are the rows whose moves change what the caller can read, in the
+	// order they first moved.
+	moved []anchorRow
+}
+
+// resyncs reports whether the client's rows must be resynced: the caller's
+// anchors changed, or a row moved in a way that changes what it can read.
+func (c accessComparison) resyncs() bool {
+	return c.old != nil || len(c.moved) > 0
 }
 
 const (
 	resetAccessPolicy      resetReason = "access_policy_changed"
 	resetAccessUnavailable resetReason = "access_state_unavailable"
+	resetAccessMoves       resetReason = "access_moves_overflow"
 )
 
 // compareAccess compares the access bound on e with what cur was issued
-// under. haveCursor is false for a request without a cursor, which has
-// nothing to compare. Runs inside the request's read transaction, after
+// under, and finds the access moves after cur that change what the caller can
+// read. haveCursor is false for a request without a cursor, which has nothing
+// to compare. Runs inside the request's read transaction tx, after
 // bindAccess.
-func (s *Server) compareAccess(ctx context.Context, ws string, cur cursorState, haveCursor bool, e *rowEmitter) (accessComparison, error) {
+func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, haveCursor bool, e *rowEmitter) (accessComparison, error) {
 	var cmp accessComparison
 	policy := uint64(0)
 	if e.caller != nil {
@@ -199,6 +216,15 @@ func (s *Server) compareAccess(ctx context.Context, ws string, cur cursorState, 
 		_, cmp.hash = e.boundReadAccess()
 	}
 	if !haveCursor {
+		if e.caller != nil && e.caller.model.moving {
+			// The rows the client is about to receive are classified with the
+			// parents rows have now.
+			_, newest, _, err := readAccessMoves(tx, ^uint64(0), 0)
+			if err != nil {
+				return cmp, err
+			}
+			e.movesThrough = newest
+		}
 		return cmp, nil
 	}
 	// A schema that adopted or dropped the model has no rules to compare.
@@ -213,24 +239,144 @@ func (s *Server) compareAccess(ctx context.Context, ws string, cur cursorState, 
 		cmp.reset = resetStaleResync
 		return cmp, nil
 	}
-	if cur.accessPolicy == policy && cur.accessHash == cmp.hash {
-		return cmp, nil
+	if cur.accessPolicy != policy || cur.accessHash != cmp.hash {
+		old, err := s.loadReadAccess(ctx, ws, cur, e.caller)
+		if err != nil {
+			return cmp, err
+		}
+		switch {
+		case old == nil && cur.accessPolicy != policy:
+			cmp.reset = resetAccessPolicy
+		case old == nil:
+			cmp.reset = resetAccessUnavailable
+		case cur.accessPolicy != policy && !sameSharedReadRules(old.GetRules(), e.caller.model.readRules):
+			cmp.reset = resetAccessPolicy
+		case cur.accessHash != cmp.hash:
+			cmp.old = accessSetOf(old)
+		}
+		if cmp.reset != resetNone {
+			return cmp, nil
+		}
 	}
-	old, err := s.loadReadAccess(ctx, ws, cur, e.caller)
+	return cmp, s.compareMoves(ctx, ws, tx, cur, e, &cmp)
+}
+
+// compareMoves reads the access moves the client's rows do not reflect yet,
+// the ones after the greater of the cursor's seq and its movesThrough, and
+// records on cmp the rows whose moves change what the caller can read. It
+// sets e.movesThrough to the newest move it read.
+//
+// A move changes what the caller can read when, for the read permission of
+// some entity whose rows can sit below the moved row, the caller held it on
+// the moved row's chain as the client's rows reflect it and does not hold it
+// on the chain now, or the other way around. The first side reads with the
+// cursor's access and with each moved row's parent from before its first
+// move; the second with the access and parents bound now.
+func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, e *rowEmitter, cmp *accessComparison) error {
+	model := e.caller.model
+	e.movesThrough = cur.movesThrough
+	if !model.moving {
+		return nil
+	}
+	floor := max(cur.seq, cur.movesThrough)
+	moves, newest, overflow, err := readAccessMoves(tx, floor, s.limits.MaxResyncScan)
 	if err != nil {
-		return cmp, err
+		return err
 	}
-	switch {
-	case old == nil && cur.accessPolicy != policy:
-		cmp.reset = resetAccessPolicy
-	case old == nil:
-		cmp.reset = resetAccessUnavailable
-	case cur.accessPolicy != policy && !sameSharedReadRules(old.GetRules(), e.caller.model.readRules):
-		cmp.reset = resetAccessPolicy
-	case cur.accessHash != cmp.hash:
-		cmp.old = accessSetOf(old)
+	if overflow {
+		cmp.reset = resetAccessMoves
+		return nil
 	}
-	return cmp, nil
+	e.movesThrough = max(cur.movesThrough, newest)
+	if len(moves) == 0 {
+		return nil
+	}
+	report := func(row storage.Row, err error) { s.reportPoison(ctx, ws, row, err) }
+	oldSet := cmp.old
+	if oldSet == nil {
+		oldSet = e.access
+	}
+	cmp.oldChains = newAccessChains(model, tx, s.limits.maxAccessDepth(), report)
+	cmp.oldChains.overrides, _ = firstMoves(moves)
+	cmp.moved, err = movedForCaller(model, cmp.oldChains, oldSet, e.chains, e.access, moves)
+	if err != nil {
+		return err
+	}
+	// A resync in flight has diffed part of the rows against the parents rows
+	// had when it began. A later move that changes what the caller reads
+	// relative to those parents leaves those rows wrong, even when it undoes
+	// an earlier move and changes nothing relative to the cursor. The access
+	// itself cannot have changed: compareAccess resets on that first.
+	if cur.resync != nil {
+		var later []accessMove
+		for _, m := range moves {
+			if m.version > cur.resync.GetToMovesThrough() {
+				later = append(later, m)
+			}
+		}
+		if len(later) > 0 {
+			began := newAccessChains(model, tx, s.limits.maxAccessDepth(), report)
+			began.overrides, _ = firstMoves(later)
+			stale, err := movedForCaller(model, began, e.access, e.chains, e.access, later)
+			if err != nil {
+				return err
+			}
+			if len(stale) > 0 {
+				cmp.reset = resetStaleResync
+			}
+		}
+	}
+	return nil
+}
+
+// firstMoves returns, for each row that moves, the parent it had before its
+// first move, and the rows in the order they first moved.
+func firstMoves(moves []accessMove) (map[anchorRow]chainEdge, []anchorRow) {
+	first := map[anchorRow]chainEdge{}
+	var rows []anchorRow
+	for _, m := range moves {
+		if _, seen := first[m.row]; !seen {
+			first[m.row] = m.from
+			rows = append(rows, m.row)
+		}
+	}
+	return first, rows
+}
+
+// movedForCaller returns, in the order they first moved, the rows of moves
+// whose chains hold the read permission of some entity below them on one side
+// and not on the other: was and wasSet read the chains before the moves, is
+// and isSet now.
+func movedForCaller(
+	model *accessModel,
+	was *accessChains,
+	wasSet *accessSet,
+	is *accessChains,
+	isSet *accessSet,
+	moves []accessMove,
+) ([]anchorRow, error) {
+	_, rows := firstMoves(moves)
+	var out []anchorRow
+	for _, row := range rows {
+		if model.entities[row.entity] == nil {
+			continue // the entity left the model, which a change of policy resets
+		}
+		for _, perm := range model.readPermsBelow(row.entity) {
+			before, err := was.holdsAt(wasSet.perms[perm], row)
+			if err != nil {
+				return nil, err
+			}
+			after, err := is.holdsAt(isSet.perms[perm], row)
+			if err != nil {
+				return nil, err
+			}
+			if before != after {
+				out = append(out, row)
+				break
+			}
+		}
+	}
+	return out, nil
 }
 
 // accessUnchanged reports whether cur was issued under the access model and
@@ -328,9 +474,8 @@ func rootLost(c *catalog, entities []string, old, now *accessSet) []string {
 	return out
 }
 
-// denyAll is the read filter of an entity the old side of a resync treats as
-// holding nothing.
-func denyAll(string, proto.Message) bool { return false }
+// denyAll is the read filter of an entity the caller reads no row of.
+func denyAll(string, proto.Message) (bool, error) { return false, nil }
 
 // hideOnOldSide makes oldEm read nothing of the entities named, so a resync
 // sends every row of them the new side can read. It must run after the old
@@ -346,9 +491,9 @@ func (e *rowEmitter) hideOnOldSide(entities []string) {
 // whose visibility can differ between the two sides of a resync whose scopes
 // are the same and whose access differs: the anchors of the entity's read
 // permission that one side holds and the other does not, the rows below
-// those anchors, and both sides' window members. ok is false when the entity
-// must be scanned instead: the root was gained, an index is not ready, or the
-// set is larger than maxCandidates.
+// those anchors (see rowsBelow), and both sides' window members. ok is false
+// when the entity must be scanned instead: the root was gained, an index is
+// not ready, or the set is larger than maxCandidates.
 //
 // An entity the old side reads nothing of (see hideOnOldSide) takes the new
 // side's candidates instead: every row the new side can read.
@@ -362,7 +507,12 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	}
 	a := info.access
 	o, n := oldEm.access.perms[a.read], newEm.access.perms[a.read]
-	if (o != nil && o.root) || (n != nil && n.root) {
+	oRoot, nRoot := o != nil && o.root, n != nil && n.root
+	if oRoot && nRoot {
+		// Every row is readable on both sides, wherever its parents are.
+		return withWindowMembers(nil, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)
+	}
+	if oRoot || nRoot {
 		return nil, false, nil
 	}
 	changed := map[anchorRow]struct{}{}
@@ -380,55 +530,16 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 			}
 		}
 	}
-	found := map[string]struct{}{}
-	var probes [][]protoreflect.Value
-	parentInfo := newEm.caller.model.parents[info.name]
+	from := make([]anchorRow, 0, len(changed)+len(oldEm.movedRows))
 	for at := range changed {
-		switch {
-		case at.entity == info.name:
-			found[at.key] = struct{}{}
-		case a.parent != nil && at.entity == a.parentEntity:
-			values, ok := keyValuesOf(parentInfo, at.key)
-			if !ok {
-				return nil, false, nil
-			}
-			probes = append(probes, values)
-		}
+		from = append(from, at)
 	}
-	if len(probes) > 0 {
-		ci := info.indexByName(refIndexName(a.parent.ref))
-		if ci == nil || newEm.srv.limits.DisableIndexes {
-			return nil, false, nil
-		}
-		if ready, err := ci.ready(tx, info.name); err != nil || !ready {
-			return nil, false, err
-		}
-		// Stops inside the scan, so one anchor with many rows below it costs
-		// the bound rather than every key it holds.
-		over := errors.New("access candidate bound")
-		for _, values := range probes {
-			lo, hi, err := ci.probeRefIndex(values)
-			if err != nil {
-				return nil, false, err
-			}
-			err = tx.ScanIndex(info.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
-				found[rowKey] = struct{}{}
-				if len(found) > maxCandidates {
-					return over
-				}
-				return nil
-			})
-			if errors.Is(err, over) {
-				return nil, false, nil
-			}
-			if err != nil {
-				return nil, false, err
-			}
-		}
-	}
-	keys = make([]string, 0, len(found))
-	for key := range found {
-		keys = append(keys, key)
+	// A row below a moved row sits below it on both sides, so the rows below
+	// it now are the ones its move can show or hide.
+	from = append(from, oldEm.movedRows...)
+	keys, ok, err = rowsBelow(tx, newEm.caller.model, info, from, maxCandidates, newEm.srv.limits)
+	if err != nil || !ok {
+		return nil, false, err
 	}
 	return withWindowMembers(keys, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)
 }
@@ -569,7 +680,7 @@ func (s *Server) bindResyncAccess(
 	resync, ok bool,
 	newEm *rowEmitter,
 ) (*rowEmitter, bool, bool, error) {
-	if old == nil && acc.old != nil && !resync {
+	if old == nil && acc.resyncs() && !resync {
 		var err error
 		if old, err = newRowEmitter(ctx, s, ws, newEm.subs); err != nil {
 			return nil, false, false, err
@@ -587,11 +698,22 @@ func (s *Server) bindResyncAccess(
 	if cur.resync != nil && cur.resync.GetToSubHash() == cur.subHash && cur.resync.GetToFilterEpoch() == cur.epoch {
 		old.accessOnly = true
 	}
+	chains := newEm.chains
+	if acc.oldChains != nil {
+		chains = acc.oldChains
+	}
+	old.movedRows = acc.moved
+	old.movedBelow = map[string]bool{}
+	for _, row := range acc.moved {
+		for _, name := range newEm.caller.model.below[row.entity] {
+			old.movedBelow[name] = true
+		}
+	}
 	if acc.old == nil {
-		old.useAccess(newEm.access)
+		old.useAccess(newEm.access, chains)
 		return old, resync, ok, nil
 	}
-	old.useAccess(acc.old)
+	old.useAccess(acc.old, chains)
 	old.hideOnOldSide(rootLost(s.catalogPtr(), newEm.entities(), acc.old, newEm.access))
 	return old, resync, ok, nil
 }

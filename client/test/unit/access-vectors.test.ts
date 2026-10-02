@@ -11,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
-import { AccessSummary, type CanAnswer, canAt, type ParentRef } from '../../src/access.js';
+import { AccessSummary, type CanAnswer, canAt } from '../../src/access.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
 
 interface AccessCase {
@@ -20,7 +20,7 @@ interface AccessCase {
 	permission: string;
 	entity: string;
 	key: string;
-	parent: { entity: string; key: string } | null | 'unknown';
+	chain: ({ entity: string; key: string } | 'unknown')[];
 	want: CanAnswer;
 }
 
@@ -44,8 +44,11 @@ function summaryOf(access: AccessCase['access']): AccessSummary | undefined {
 describe('access conformance vectors', () => {
 	for (const c of vectors.cases) {
 		it(c.name, () => {
-			const parent: ParentRef = c.parent === 'unknown' ? undefined : c.parent;
-			expect(canAt(summaryOf(c.access), c.permission, c.entity, c.key, parent)).toBe(c.want);
+			const rows = c.chain.filter((r) => r !== 'unknown');
+			const complete = !c.chain.includes('unknown');
+			expect(canAt(summaryOf(c.access), c.permission, c.entity, c.key, { rows, complete })).toBe(
+				c.want,
+			);
 		});
 	}
 });

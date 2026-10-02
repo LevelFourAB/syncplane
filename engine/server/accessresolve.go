@@ -332,42 +332,54 @@ func parentKeyOf(msg protoreflect.Message, a *entityAccess, parentInfo *entityIn
 	return key, key != ""
 }
 
-// modelReadFilter returns the row filter the access model puts on reads of
-// info for this caller, or nil when the model hides no row of it: the entity
+// modelReadFilter returns the filter the access model puts on reads of info
+// for the bound caller, or nil when the model hides no row of it: the entity
 // is outside the model, or the caller holds its read permission at the root.
-func (s *accessSet) modelReadFilter(model *accessModel, info *entityInfo) RowFilter {
+// A row is readable when the caller holds the permission at the row or at a
+// row up its parent chain.
+func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
 	if a == nil || a.unrestricted {
 		return nil
 	}
-	anchors := s.perms[a.read]
+	anchors := e.access.perms[a.read]
 	if anchors != nil && anchors.root {
 		return nil
 	}
 	if anchors == nil || len(anchors.rows) == 0 {
-		return func(string, proto.Message) bool { return false }
+		return denyAll
 	}
-	parentInfo := model.parents[info.name]
-	return func(key string, row proto.Message) bool {
-		if anchors.holds(info.name, key) {
-			return true
-		}
-		parentKey, ok := parentKeyOf(row.ProtoReflect(), a, parentInfo)
-		return ok && anchors.holds(a.parentEntity, parentKey)
+	chains := e.chains
+	return func(key string, row proto.Message) (bool, error) {
+		return chains.holds(anchors, info, key, row.ProtoReflect())
+	}
+}
+
+// appReadFilter adapts an application's RowFilter to a readFilter.
+func appReadFilter(f RowFilter) readFilter {
+	if f == nil {
+		return nil
+	}
+	return func(key string, row proto.Message) (bool, error) {
+		return f(key, row), nil
 	}
 }
 
 // andFilters returns a filter that admits a row only when both a and b do. A
 // nil filter admits every row.
-func andFilters(a, b RowFilter) RowFilter {
+func andFilters(a, b readFilter) readFilter {
 	switch {
 	case a == nil:
 		return b
 	case b == nil:
 		return a
 	}
-	return func(key string, row proto.Message) bool {
-		return a(key, row) && b(key, row)
+	return func(key string, row proto.Message) (bool, error) {
+		ok, err := a(key, row)
+		if err != nil || !ok {
+			return false, err
+		}
+		return b(key, row)
 	}
 }
 
@@ -413,62 +425,117 @@ func (e *rowEmitter) accessNarrows(info *entityInfo) bool {
 
 // accessCandidates returns, in key order, the keys of the rows of info that the
 // bound access set can let the caller read: the anchors of its read permission
-// that are rows of info, and the rows whose access parent is such an anchor.
-// It is a superset of the rows the model's filter admits, so reading these
-// keys and classifying each row gives what a scan would. ok is false when the
-// set does not narrow the entity, or when narrowing would cost more than
-// maxCandidates keys or needs an index that is not ready; the caller scans.
+// that are rows of info, and the rows of info below such an anchor (see
+// rowsBelow). It is a superset of the rows the model's filter admits, so
+// reading these keys and classifying each row gives what a scan would. ok is
+// false when the set does not narrow the entity, or when narrowing would cost
+// more than maxCandidates keys or needs an index that is not ready; the caller
+// scans.
 func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCandidates int) (keys []string, ok bool, err error) {
 	if !e.accessNarrows(info) {
 		return nil, false, nil
 	}
-	a := info.access
-	anchors := e.access.perms[a.read]
-	found := map[string]struct{}{}
-	var probes [][]protoreflect.Value
-	if anchors != nil {
-		parentInfo := e.caller.model.parents[info.name]
+	var from []anchorRow
+	if anchors := e.access.perms[info.access.read]; anchors != nil {
 		for at := range anchors.rows {
-			switch {
-			case at.entity == info.name:
-				found[at.key] = struct{}{}
-			case a.parent != nil && at.entity == a.parentEntity:
-				values, ok := keyValuesOf(parentInfo, at.key)
-				if !ok {
-					return nil, false, nil
-				}
-				probes = append(probes, values)
-			}
+			from = append(from, at)
 		}
 	}
-	if len(probes) > 0 {
-		ci := info.indexByName(refIndexName(a.parent.ref))
-		if ci == nil || e.srv.limits.DisableIndexes {
-			return nil, false, nil
+	return rowsBelow(tx, e.caller.model, info, from, maxCandidates, e.srv.limits)
+}
+
+// errCandidateBound stops an index walk that has found more rows than its
+// caller would read by key.
+var errCandidateBound = errors.New("server: access candidate bound")
+
+// rowsBelow returns, in key order, the keys of the rows of target that are
+// one of from or sit at most Limits.MaxAccessDepth hops below one of them. It
+// walks down from each row through the reference indexes of the access
+// parents, entering only the entities that lead to target, so it reads index
+// entries and no rows.
+//
+// The walk follows the parents rows hold now. It is a superset of the rows a
+// caller holding a permission at from can read, as long as the caller
+// classifies each row it reads. ok is false when the walk would visit more
+// than maxCandidates rows, or needs an index that is not ready.
+func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from []anchorRow, maxCandidates int, limits Limits) (keys []string, ok bool, err error) {
+	leads := func(entity string) bool {
+		return entity == target.name || slices.Contains(model.below[entity], target.name)
+	}
+	found := map[string]struct{}{}
+	visited := map[anchorRow]struct{}{}
+	var frontier []anchorRow
+	for _, at := range from {
+		if _, dup := visited[at]; !dup && leads(at.entity) {
+			visited[at] = struct{}{}
+			frontier = append(frontier, at)
 		}
-		if ready, err := ci.ready(tx, info.name); err != nil || !ready {
+	}
+	readyIndex := map[string]*compiledIndex{}
+	indexOf := func(child *entityInfo) (*compiledIndex, bool, error) {
+		if ci, known := readyIndex[child.name]; known {
+			return ci, ci != nil, nil
+		}
+		ci := child.indexByName(refIndexName(child.access.parent.ref))
+		if ci == nil || limits.DisableIndexes {
+			ci = nil
+		} else if ready, err := ci.ready(tx, child.name); err != nil {
 			return nil, false, err
+		} else if !ready {
+			ci = nil
 		}
-		over := errors.New("access candidate bound")
-		for _, values := range probes {
-			lo, hi, err := ci.probeRefIndex(values)
-			if err != nil {
-				return nil, false, err
+		readyIndex[child.name] = ci
+		return ci, ci != nil, nil
+	}
+	maxDepth := limits.maxAccessDepth()
+	for level := 0; len(frontier) > 0; level++ {
+		var next []anchorRow
+		for _, at := range frontier {
+			if at.entity == target.name {
+				found[at.key] = struct{}{}
 			}
-			err = tx.ScanIndex(info.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
-				found[rowKey] = struct{}{}
-				if len(found) > maxCandidates {
-					return over
+			if level == maxDepth {
+				continue
+			}
+			for _, child := range model.children[at.entity] {
+				if !leads(child.name) {
+					continue
 				}
-				return nil
-			})
-			if errors.Is(err, over) {
-				return nil, false, nil
-			}
-			if err != nil {
-				return nil, false, err
+				values, parsed := keyValuesOf(model.entities[at.entity], at.key)
+				if !parsed {
+					return nil, false, nil
+				}
+				ci, ready, err := indexOf(child)
+				if err != nil || !ready {
+					return nil, false, err
+				}
+				lo, hi, err := ci.probeRefIndex(values)
+				if err != nil {
+					return nil, false, err
+				}
+				// Stops inside the scan, so one row with many rows below it costs
+				// the bound rather than every key it holds.
+				err = tx.ScanIndex(child.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+					below := anchorRow{entity: child.name, key: rowKey}
+					if _, dup := visited[below]; dup {
+						return nil
+					}
+					visited[below] = struct{}{}
+					if len(visited) > maxCandidates {
+						return errCandidateBound
+					}
+					next = append(next, below)
+					return nil
+				})
+				if errors.Is(err, errCandidateBound) {
+					return nil, false, nil
+				}
+				if err != nil {
+					return nil, false, err
+				}
 			}
 		}
+		frontier = next
 	}
 	if len(found) > maxCandidates {
 		return nil, false, nil

@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import {
+	CommentSchema,
 	LabelSchema,
 	NoteSchema,
 	OrgMemberSchema,
@@ -30,6 +31,7 @@ const entities = [
 	ProjectSchema,
 	ProjectMemberSchema,
 	TaskSchema,
+	CommentSchema,
 	LabelSchema,
 	NoteSchema,
 ];
@@ -183,5 +185,29 @@ describe('access model on the client', () => {
 		expect(await admin.can(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
 		await admin.syncNow();
 		expect(await admin.can(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+	});
+
+	it('moves the comments of a task that moves to another project', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		await trusted(ws, [ {
+			entity: 'comment',
+			value: { id: 'c1', task: { id: 't1' }, body: 'on one' },
+		} ]);
+		const guest = await synced(clientAs('guest', ws));
+		const writer = await synced(clientAs('writer', ws));
+		expect((await guest.get(CommentSchema, 'c1'))?.body).toBe('on one');
+		expect(await guest.can(CommentSchema, 'c1', 'view_tasks')).toBe('yes');
+		expect(await writer.get(CommentSchema, 'c1')).toBeUndefined();
+
+		await trusted(ws, [ {
+			entity: 'task',
+			value: { id: 't1', project: { id: 'p2' }, title: 'one' },
+		} ]);
+		await guest.syncNow();
+		await writer.syncNow();
+		expect(await guest.get(CommentSchema, 'c1')).toBeUndefined();
+		expect((await writer.get(CommentSchema, 'c1'))?.body).toBe('on one');
+		expect(await writer.can(CommentSchema, 'c1', 'edit_tasks')).toBe('yes');
 	});
 });

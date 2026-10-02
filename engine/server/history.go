@@ -707,7 +707,7 @@ func (e *rowEmitter) historySourceReadable(
 	tx storage.ReadTx,
 	src *entityInfo,
 	key string,
-	filter RowFilter,
+	filter readFilter,
 ) (bool, error) {
 	memo := historySourceKey{entity: src.name, key: key}
 	if verdict, known := e.historySources[memo]; known {
@@ -730,7 +730,7 @@ func (e *rowEmitter) computeHistorySourceReadable(
 	tx storage.ReadTx,
 	src *entityInfo,
 	key string,
-	filter RowFilter,
+	filter readFilter,
 ) (bool, error) {
 	srcRow, err := tx.GetRow(src.name, key)
 	if err == storage.ErrNotFound {
@@ -746,7 +746,7 @@ func (e *rowEmitter) computeHistorySourceReadable(
 	if !ok {
 		return false, nil
 	}
-	return filter(srcRow.Key, srcMsg), nil
+	return filter(srcRow.Key, srcMsg)
 }
 
 // historyKeySeqWidth is the widest a rendered sequence can be — math.MaxUint64

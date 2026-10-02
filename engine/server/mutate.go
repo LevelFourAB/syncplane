@@ -200,7 +200,9 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 	if err := s.authorizeWrite(ctx, p, workspaceID, nil, Write{Custom: custom}); err != nil {
 		return nil, err
 	}
-	return newTxAccess(adm.caller, s.limits), nil
+	return newTxAccess(adm.caller, s.limits, func(row storage.Row, err error) {
+		s.reportPoison(ctx, workspaceID, row, err)
+	}), nil
 }
 
 // mutatorFor resolves a registered mutator and returns the args its body is to

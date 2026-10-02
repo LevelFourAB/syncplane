@@ -599,7 +599,7 @@ func (e *rowEmitter) readable(row storage.Row) (bool, error) {
 	if !ok {
 		return false, nil // quarantined: no filter can clear it
 	}
-	return filter(row.Key, msg), nil
+	return filter(row.Key, msg)
 }
 
 // recencyTopK keeps the cap rows with the highest versions, ties broken by

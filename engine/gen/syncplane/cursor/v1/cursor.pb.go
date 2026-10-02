@@ -142,8 +142,13 @@ type Cursor struct {
 	// caller holds, not only the ones entities read by. A response carries a
 	// new CallerAccess when the hash differs. 0 for a schema without the model.
 	CallerAccessHash uint64 `protobuf:"fixed64,18,opt,name=caller_access_hash,json=callerAccessHash,proto3" json:"caller_access_hash,omitempty"`
-	unknownFields    protoimpl.UnknownFields
-	sizeCache        protoimpl.SizeCache
+	// The sequence through which the rows the client holds reflect every
+	// access move (see AccessMove). A pull compares the client's rows with
+	// the moves after the greater of seq and this, so the pull that follows a
+	// resync does not resync the same moves again. 0 when seq alone says it.
+	AccessMovesThrough uint64 `protobuf:"varint,19,opt,name=access_moves_through,json=accessMovesThrough,proto3" json:"access_moves_through,omitempty"`
+	unknownFields      protoimpl.UnknownFields
+	sizeCache          protoimpl.SizeCache
 }
 
 func (x *Cursor) Reset() {
@@ -302,6 +307,146 @@ func (x *Cursor) GetCallerAccessHash() uint64 {
 	return 0
 }
 
+func (x *Cursor) GetAccessMovesThrough() uint64 {
+	if x != nil {
+		return x.AccessMovesThrough
+	}
+	return 0
+}
+
+// AccessMove is one change of the access parent of a row that other rows sit
+// below: a move to another parent, or the row's creation or deletion. The
+// rows below it change visibility without being written, so the server
+// records the change in the transaction that makes it, as a row of an entity
+// no schema declares, at the change's sequence. A pull reads the moves after
+// its cursor and resyncs the rows below each one that changes what the client
+// can read.
+type AccessMove struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The row whose access parent changed.
+	Entity string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	Key    string `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	// The row's access parent before the change, as of the start of the
+	// sequence; absent when the row did not exist or anchored at nothing.
+	From *AnchorRef `protobuf:"bytes,3,opt,name=from,proto3" json:"from,omitempty"`
+	// The row's access parent after the change; absent when the row was
+	// deleted or anchors at nothing.
+	To            *AnchorRef `protobuf:"bytes,4,opt,name=to,proto3" json:"to,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccessMove) Reset() {
+	*x = AccessMove{}
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccessMove) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccessMove) ProtoMessage() {}
+
+func (x *AccessMove) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccessMove.ProtoReflect.Descriptor instead.
+func (*AccessMove) Descriptor() ([]byte, []int) {
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{1}
+}
+
+func (x *AccessMove) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *AccessMove) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *AccessMove) GetFrom() *AnchorRef {
+	if x != nil {
+		return x.From
+	}
+	return nil
+}
+
+func (x *AccessMove) GetTo() *AnchorRef {
+	if x != nil {
+		return x.To
+	}
+	return nil
+}
+
+// AnchorRef names one row of a workspace.
+type AnchorRef struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entity        string                 `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	Key           string                 `protobuf:"bytes,2,opt,name=key,proto3" json:"key,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AnchorRef) Reset() {
+	*x = AnchorRef{}
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AnchorRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AnchorRef) ProtoMessage() {}
+
+func (x *AnchorRef) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AnchorRef.ProtoReflect.Descriptor instead.
+func (*AnchorRef) Descriptor() ([]byte, []int) {
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *AnchorRef) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
+func (x *AnchorRef) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
 // ReadAccess is what a caller could read when a cursor was issued, stored in
 // the cursor-state store under Cursor.access_ref. Encoded deterministically,
 // with every list sorted, so equal access produces equal bytes.
@@ -322,7 +467,7 @@ type ReadAccess struct {
 
 func (x *ReadAccess) Reset() {
 	*x = ReadAccess{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -334,7 +479,7 @@ func (x *ReadAccess) String() string {
 func (*ReadAccess) ProtoMessage() {}
 
 func (x *ReadAccess) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[1]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -347,7 +492,7 @@ func (x *ReadAccess) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReadAccess.ProtoReflect.Descriptor instead.
 func (*ReadAccess) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{1}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{3}
 }
 
 func (x *ReadAccess) GetSubjects() []string {
@@ -384,7 +529,7 @@ type EntityReadRule struct {
 
 func (x *EntityReadRule) Reset() {
 	*x = EntityReadRule{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -396,7 +541,7 @@ func (x *EntityReadRule) String() string {
 func (*EntityReadRule) ProtoMessage() {}
 
 func (x *EntityReadRule) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[2]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -409,7 +554,7 @@ func (x *EntityReadRule) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use EntityReadRule.ProtoReflect.Descriptor instead.
 func (*EntityReadRule) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{2}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *EntityReadRule) GetEntity() string {
@@ -440,7 +585,7 @@ type PermissionAnchors struct {
 
 func (x *PermissionAnchors) Reset() {
 	*x = PermissionAnchors{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -452,7 +597,7 @@ func (x *PermissionAnchors) String() string {
 func (*PermissionAnchors) ProtoMessage() {}
 
 func (x *PermissionAnchors) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[3]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -465,7 +610,7 @@ func (x *PermissionAnchors) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PermissionAnchors.ProtoReflect.Descriptor instead.
 func (*PermissionAnchors) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{3}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PermissionAnchors) GetPermission() string {
@@ -505,7 +650,7 @@ type StateRef struct {
 
 func (x *StateRef) Reset() {
 	*x = StateRef{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -517,7 +662,7 @@ func (x *StateRef) String() string {
 func (*StateRef) ProtoMessage() {}
 
 func (x *StateRef) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[4]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -530,7 +675,7 @@ func (x *StateRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StateRef.ProtoReflect.Descriptor instead.
 func (*StateRef) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *StateRef) GetId() uint64 {
@@ -570,7 +715,7 @@ type StoredSets struct {
 
 func (x *StoredSets) Reset() {
 	*x = StoredSets{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -582,7 +727,7 @@ func (x *StoredSets) String() string {
 func (*StoredSets) ProtoMessage() {}
 
 func (x *StoredSets) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[5]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -595,7 +740,7 @@ func (x *StoredSets) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StoredSets.ProtoReflect.Descriptor instead.
 func (*StoredSets) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *StoredSets) GetSubscriptions() []*v1.Subscription {
@@ -655,7 +800,7 @@ type WindowState struct {
 
 func (x *WindowState) Reset() {
 	*x = WindowState{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -667,7 +812,7 @@ func (x *WindowState) String() string {
 func (*WindowState) ProtoMessage() {}
 
 func (x *WindowState) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[6]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -680,7 +825,7 @@ func (x *WindowState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WindowState.ProtoReflect.Descriptor instead.
 func (*WindowState) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WindowState) GetSubscription() uint32 {
@@ -718,7 +863,7 @@ type ClosureSet struct {
 
 func (x *ClosureSet) Reset() {
 	*x = ClosureSet{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -730,7 +875,7 @@ func (x *ClosureSet) String() string {
 func (*ClosureSet) ProtoMessage() {}
 
 func (x *ClosureSet) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[7]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -743,7 +888,7 @@ func (x *ClosureSet) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClosureSet.ProtoReflect.Descriptor instead.
 func (*ClosureSet) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *ClosureSet) GetEntries() []*ClosureSet_Entry {
@@ -771,14 +916,17 @@ type ResyncState struct {
 	ToFilterEpoch uint64 `protobuf:"varint,4,opt,name=to_filter_epoch,json=toFilterEpoch,proto3" json:"to_filter_epoch,omitempty"`
 	// The access hash the resync converges on (see Cursor.access_hash). A pull
 	// that finds the caller's access moved again mid-resync resets.
-	ToAccessHash  uint64 `protobuf:"fixed64,5,opt,name=to_access_hash,json=toAccessHash,proto3" json:"to_access_hash,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	ToAccessHash uint64 `protobuf:"fixed64,5,opt,name=to_access_hash,json=toAccessHash,proto3" json:"to_access_hash,omitempty"`
+	// The newest access move the resync accounts for (see AccessMove). A pull
+	// that finds a later move that changes what the client can read resets.
+	ToMovesThrough uint64 `protobuf:"varint,6,opt,name=to_moves_through,json=toMovesThrough,proto3" json:"to_moves_through,omitempty"`
+	unknownFields  protoimpl.UnknownFields
+	sizeCache      protoimpl.SizeCache
 }
 
 func (x *ResyncState) Reset() {
 	*x = ResyncState{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[8]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -790,7 +938,7 @@ func (x *ResyncState) String() string {
 func (*ResyncState) ProtoMessage() {}
 
 func (x *ResyncState) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[8]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -803,7 +951,7 @@ func (x *ResyncState) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResyncState.ProtoReflect.Descriptor instead.
 func (*ResyncState) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ResyncState) GetEntity() string {
@@ -841,6 +989,13 @@ func (x *ResyncState) GetToAccessHash() uint64 {
 	return 0
 }
 
+func (x *ResyncState) GetToMovesThrough() uint64 {
+	if x != nil {
+		return x.ToMovesThrough
+	}
+	return 0
+}
+
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside
 // the opaque BootstrapResume.token. It records the delivered set by NAME rather
 // than as a position in the delivery order, because that order is not stable
@@ -864,7 +1019,7 @@ type BootstrapPosition struct {
 
 func (x *BootstrapPosition) Reset() {
 	*x = BootstrapPosition{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[9]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -876,7 +1031,7 @@ func (x *BootstrapPosition) String() string {
 func (*BootstrapPosition) ProtoMessage() {}
 
 func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[9]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -889,7 +1044,7 @@ func (x *BootstrapPosition) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use BootstrapPosition.ProtoReflect.Descriptor instead.
 func (*BootstrapPosition) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *BootstrapPosition) GetDone() []string {
@@ -923,7 +1078,7 @@ type ClosureSet_Entry struct {
 
 func (x *ClosureSet_Entry) Reset() {
 	*x = ClosureSet_Entry{}
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[10]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -935,7 +1090,7 @@ func (x *ClosureSet_Entry) String() string {
 func (*ClosureSet_Entry) ProtoMessage() {}
 
 func (x *ClosureSet_Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[10]
+	mi := &file_syncplane_cursor_v1_cursor_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -948,7 +1103,7 @@ func (x *ClosureSet_Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ClosureSet_Entry.ProtoReflect.Descriptor instead.
 func (*ClosureSet_Entry) Descriptor() ([]byte, []int) {
-	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{7, 0}
+	return file_syncplane_cursor_v1_cursor_proto_rawDescGZIP(), []int{9, 0}
 }
 
 func (x *ClosureSet_Entry) GetEntity() string {
@@ -969,7 +1124,7 @@ var File_syncplane_cursor_v1_cursor_proto protoreflect.FileDescriptor
 
 const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\n" +
-	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\x9e\x06\n" +
+	" syncplane/cursor/v1/cursor.proto\x12\x13syncplane.cursor.v1\x1a\x18syncplane/v1/patch.proto\"\xd0\x06\n" +
 	"\x06Cursor\x12\x10\n" +
 	"\x03seq\x18\x01 \x01(\x04R\x03seq\x12\x19\n" +
 	"\bsub_hash\x18\x02 \x01(\x06R\asubHash\x12!\n" +
@@ -993,7 +1148,17 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"accessHash\x12<\n" +
 	"\n" +
 	"access_ref\x18\x11 \x01(\v2\x1d.syncplane.cursor.v1.StateRefR\taccessRef\x12,\n" +
-	"\x12caller_access_hash\x18\x12 \x01(\x06R\x10callerAccessHash\"\xad\x01\n" +
+	"\x12caller_access_hash\x18\x12 \x01(\x06R\x10callerAccessHash\x120\n" +
+	"\x14access_moves_through\x18\x13 \x01(\x04R\x12accessMovesThrough\"\x9a\x01\n" +
+	"\n" +
+	"AccessMove\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\x122\n" +
+	"\x04from\x18\x03 \x01(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x04from\x12.\n" +
+	"\x02to\x18\x04 \x01(\v2\x1e.syncplane.cursor.v1.AnchorRefR\x02to\"5\n" +
+	"\tAnchorRef\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x10\n" +
+	"\x03key\x18\x02 \x01(\tR\x03key\"\xad\x01\n" +
 	"\n" +
 	"ReadAccess\x12\x1a\n" +
 	"\bsubjects\x18\x01 \x03(\tR\bsubjects\x12H\n" +
@@ -1026,13 +1191,14 @@ const file_syncplane_cursor_v1_cursor_proto_rawDesc = "" +
 	"\aentries\x18\x01 \x03(\v2%.syncplane.cursor.v1.ClosureSet.EntryR\aentries\x1a3\n" +
 	"\x05Entry\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x12\n" +
-	"\x04keys\x18\x02 \x03(\tR\x04keys\"\xb0\x01\n" +
+	"\x04keys\x18\x02 \x03(\tR\x04keys\"\xda\x01\n" +
 	"\vResyncState\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x1b\n" +
 	"\tafter_key\x18\x02 \x01(\tR\bafterKey\x12\x1e\n" +
 	"\vto_sub_hash\x18\x03 \x01(\x06R\ttoSubHash\x12&\n" +
 	"\x0fto_filter_epoch\x18\x04 \x01(\x04R\rtoFilterEpoch\x12$\n" +
-	"\x0eto_access_hash\x18\x05 \x01(\x06R\ftoAccessHash\"\\\n" +
+	"\x0eto_access_hash\x18\x05 \x01(\x06R\ftoAccessHash\x12(\n" +
+	"\x10to_moves_through\x18\x06 \x01(\x04R\x0etoMovesThrough\"\\\n" +
 	"\x11BootstrapPosition\x12\x12\n" +
 	"\x04done\x18\x01 \x03(\tR\x04done\x12\x16\n" +
 	"\x06entity\x18\x02 \x01(\tR\x06entity\x12\x1b\n" +
@@ -1050,42 +1216,46 @@ func file_syncplane_cursor_v1_cursor_proto_rawDescGZIP() []byte {
 	return file_syncplane_cursor_v1_cursor_proto_rawDescData
 }
 
-var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
+var file_syncplane_cursor_v1_cursor_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_syncplane_cursor_v1_cursor_proto_goTypes = []any{
 	(*Cursor)(nil),            // 0: syncplane.cursor.v1.Cursor
-	(*ReadAccess)(nil),        // 1: syncplane.cursor.v1.ReadAccess
-	(*EntityReadRule)(nil),    // 2: syncplane.cursor.v1.EntityReadRule
-	(*PermissionAnchors)(nil), // 3: syncplane.cursor.v1.PermissionAnchors
-	(*StateRef)(nil),          // 4: syncplane.cursor.v1.StateRef
-	(*StoredSets)(nil),        // 5: syncplane.cursor.v1.StoredSets
-	(*WindowState)(nil),       // 6: syncplane.cursor.v1.WindowState
-	(*ClosureSet)(nil),        // 7: syncplane.cursor.v1.ClosureSet
-	(*ResyncState)(nil),       // 8: syncplane.cursor.v1.ResyncState
-	(*BootstrapPosition)(nil), // 9: syncplane.cursor.v1.BootstrapPosition
-	(*ClosureSet_Entry)(nil),  // 10: syncplane.cursor.v1.ClosureSet.Entry
-	(*v1.Subscription)(nil),   // 11: syncplane.v1.Subscription
+	(*AccessMove)(nil),        // 1: syncplane.cursor.v1.AccessMove
+	(*AnchorRef)(nil),         // 2: syncplane.cursor.v1.AnchorRef
+	(*ReadAccess)(nil),        // 3: syncplane.cursor.v1.ReadAccess
+	(*EntityReadRule)(nil),    // 4: syncplane.cursor.v1.EntityReadRule
+	(*PermissionAnchors)(nil), // 5: syncplane.cursor.v1.PermissionAnchors
+	(*StateRef)(nil),          // 6: syncplane.cursor.v1.StateRef
+	(*StoredSets)(nil),        // 7: syncplane.cursor.v1.StoredSets
+	(*WindowState)(nil),       // 8: syncplane.cursor.v1.WindowState
+	(*ClosureSet)(nil),        // 9: syncplane.cursor.v1.ClosureSet
+	(*ResyncState)(nil),       // 10: syncplane.cursor.v1.ResyncState
+	(*BootstrapPosition)(nil), // 11: syncplane.cursor.v1.BootstrapPosition
+	(*ClosureSet_Entry)(nil),  // 12: syncplane.cursor.v1.ClosureSet.Entry
+	(*v1.Subscription)(nil),   // 13: syncplane.v1.Subscription
 }
 var file_syncplane_cursor_v1_cursor_proto_depIdxs = []int32{
-	11, // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
-	8,  // 1: syncplane.cursor.v1.Cursor.resync:type_name -> syncplane.cursor.v1.ResyncState
-	7,  // 2: syncplane.cursor.v1.Cursor.closure:type_name -> syncplane.cursor.v1.ClosureSet
-	7,  // 3: syncplane.cursor.v1.Cursor.window:type_name -> syncplane.cursor.v1.ClosureSet
-	6,  // 4: syncplane.cursor.v1.Cursor.windows:type_name -> syncplane.cursor.v1.WindowState
-	4,  // 5: syncplane.cursor.v1.Cursor.sets_ref:type_name -> syncplane.cursor.v1.StateRef
-	4,  // 6: syncplane.cursor.v1.Cursor.access_ref:type_name -> syncplane.cursor.v1.StateRef
-	3,  // 7: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
-	2,  // 8: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
-	10, // 9: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	11, // 10: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
-	7,  // 11: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
-	6,  // 12: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
-	7,  // 13: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
-	10, // 14: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
-	15, // [15:15] is the sub-list for method output_type
-	15, // [15:15] is the sub-list for method input_type
-	15, // [15:15] is the sub-list for extension type_name
-	15, // [15:15] is the sub-list for extension extendee
-	0,  // [0:15] is the sub-list for field type_name
+	13, // 0: syncplane.cursor.v1.Cursor.subscriptions:type_name -> syncplane.v1.Subscription
+	10, // 1: syncplane.cursor.v1.Cursor.resync:type_name -> syncplane.cursor.v1.ResyncState
+	9,  // 2: syncplane.cursor.v1.Cursor.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	9,  // 3: syncplane.cursor.v1.Cursor.window:type_name -> syncplane.cursor.v1.ClosureSet
+	8,  // 4: syncplane.cursor.v1.Cursor.windows:type_name -> syncplane.cursor.v1.WindowState
+	6,  // 5: syncplane.cursor.v1.Cursor.sets_ref:type_name -> syncplane.cursor.v1.StateRef
+	6,  // 6: syncplane.cursor.v1.Cursor.access_ref:type_name -> syncplane.cursor.v1.StateRef
+	2,  // 7: syncplane.cursor.v1.AccessMove.from:type_name -> syncplane.cursor.v1.AnchorRef
+	2,  // 8: syncplane.cursor.v1.AccessMove.to:type_name -> syncplane.cursor.v1.AnchorRef
+	5,  // 9: syncplane.cursor.v1.ReadAccess.permissions:type_name -> syncplane.cursor.v1.PermissionAnchors
+	4,  // 10: syncplane.cursor.v1.ReadAccess.rules:type_name -> syncplane.cursor.v1.EntityReadRule
+	12, // 11: syncplane.cursor.v1.PermissionAnchors.rows:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	13, // 12: syncplane.cursor.v1.StoredSets.subscriptions:type_name -> syncplane.v1.Subscription
+	9,  // 13: syncplane.cursor.v1.StoredSets.closure:type_name -> syncplane.cursor.v1.ClosureSet
+	8,  // 14: syncplane.cursor.v1.StoredSets.windows:type_name -> syncplane.cursor.v1.WindowState
+	9,  // 15: syncplane.cursor.v1.StoredSets.window:type_name -> syncplane.cursor.v1.ClosureSet
+	12, // 16: syncplane.cursor.v1.ClosureSet.entries:type_name -> syncplane.cursor.v1.ClosureSet.Entry
+	17, // [17:17] is the sub-list for method output_type
+	17, // [17:17] is the sub-list for method input_type
+	17, // [17:17] is the sub-list for extension type_name
+	17, // [17:17] is the sub-list for extension extendee
+	0,  // [0:17] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_cursor_v1_cursor_proto_init() }
@@ -1099,7 +1269,7 @@ func file_syncplane_cursor_v1_cursor_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_cursor_v1_cursor_proto_rawDesc), len(file_syncplane_cursor_v1_cursor_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   11,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

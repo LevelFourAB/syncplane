@@ -89,9 +89,46 @@ message Task {
 }
 ```
 
+A row can sit below a row that sits below another row. A comment below a task is below the task's project, so a role on the project reaches the comment. Give the comment the task's permissions when a caller who reads a task should read its comments:
+
+```proto
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: { read: "view_tasks" write: "edit_tasks" }
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string body = 3;
+}
+```
+
+An entity can also be its own access parent, for folders inside folders. A grant row whose access parent is a folder gives its role on that folder and on everything below it:
+
+```proto
+message Folder {
+	option (syncplane.v1.entity) = {
+		name: "folder"
+		key_fields: [ "id" ]
+		access: { read: "view_folders" write: "edit_folders" }
+	};
+	string id = 1;
+	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+```
+
+A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself or below a chain that is already that long.
+
 An entity that every member of the workspace may read and write declares `access: { unrestricted: true }`. Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
 
 The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model).
+
+### Moving and deleting rows that other rows sit below
+
+Rows below a row move with it. To move a task to another project, the caller needs `edit_tasks` at both projects and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.
+
+A client cannot delete a row while a live row names it as its access parent. Delete or move the comments first; one batch can delete the comments and the task together. Trusted code can delete the task anyway, and its comments then sit below nothing, so only a caller who holds `view_tasks` at the workspace root reads them.
 
 ## 4. Tell the server who the caller is
 

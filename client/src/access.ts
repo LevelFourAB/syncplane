@@ -29,6 +29,12 @@ import {
 export type CanAnswer = 'yes' | 'no' | 'unknown';
 
 /**
+ * How many rows up a row's chain of access parents `can` walks before it
+ * answers `'unknown'`: the server's default `MaxAccessDepth`.
+ */
+export const MAX_ACCESS_CHAIN = 32;
+
+/**
  * The entity name a summary write is announced under, in the touch tokens
  * that reach watchers and other tabs. Not an identifier, so it never names a
  * real entity.
@@ -74,29 +80,41 @@ function anchorId(entity: string, key: string): string {
 }
 
 /**
- * The parent a row sits below for `canAt`: the entity and key its access
- * parent names, `null` for a row whose entity has no access parent or whose
+ * What a row's access parent names: the entity and key of the row it sits
+ * below, `null` for a row whose entity has no access parent or whose
  * reference is unset, and `undefined` when the row is not known.
  */
 export type ParentRef = { entity: string; key: string } | null | undefined;
 
 /**
- * Decides `permission` at the row of `entity` with `key`, given what the
- * row's access parent names. The rule the server applies, with `'unknown'`
- * where the client lacks an input.
+ * The rows above a row for `canAt`, nearest first: the row its access parent
+ * names, the row that row's access parent names, and so on. `complete` is
+ * false when the walk stopped at a row the client does not hold, so rows
+ * further up are not known.
+ */
+export interface AccessChain {
+	readonly rows: readonly { entity: string; key: string }[];
+	readonly complete: boolean;
+}
+
+/**
+ * Decides `permission` at the row of `entity` with `key`, given the rows
+ * above it. The rule the server applies, with `'unknown'` where the client
+ * lacks an input.
  */
 export function canAt(
 	summary: AccessSummary | undefined,
 	permission: string,
 	entity: string,
 	key: string,
-	parent: ParentRef,
+	chain: AccessChain,
 ): CanAnswer {
 	if (summary === undefined) return 'unknown';
 	if (summary.holds(permission, entity, key)) return 'yes';
-	if (parent === undefined) return 'unknown';
-	if (parent === null) return 'no';
-	return summary.holds(permission, parent.entity, parent.key) ? 'yes' : 'no';
+	for (const row of chain.rows) {
+		if (summary.holds(permission, row.entity, row.key)) return 'yes';
+	}
+	return chain.complete ? 'no' : 'unknown';
 }
 
 const parentFields = new WeakMap<DescMessage, DescField | null>();
@@ -112,8 +130,8 @@ export function accessParentField(schema: DescMessage): DescField | undefined {
 }
 
 /**
- * What a row's access parent names, for `canAt`. `row` is the row's value, or
- * undefined when the row is not held locally.
+ * What a row's access parent names. `row` is the row's value, or undefined
+ * when the row is not held locally.
  */
 export function parentRefOf(def: EntityDef, row: Message | undefined): ParentRef {
 	const field = accessParentField(def.schema);
@@ -127,6 +145,16 @@ export function parentRefOf(def: EntityDef, row: Message | undefined): ParentRef
 	const target = targetDefOf(shape.targetSchema);
 	const key = keyOf(target, stub);
 	return key === '' ? null : { entity: target.name, key };
+}
+
+/**
+ * The entity the access parent of `def` points at, or undefined when it has
+ * no access parent.
+ */
+export function parentDefOf(def: EntityDef): EntityDef | undefined {
+	const field = accessParentField(def.schema);
+	const shape = field === undefined ? undefined : refShape(field);
+	return shape === undefined ? undefined : targetDefOf(shape.targetSchema);
 }
 
 const targetDefs = new WeakMap<DescMessage, EntityDef>();

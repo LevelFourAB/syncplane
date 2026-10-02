@@ -94,6 +94,9 @@ type cursorState struct {
 	// callerAccessHash is the hash of the CallerAccess the client last
 	// received (Cursor.caller_access_hash).
 	callerAccessHash uint64
+	// movesThrough is the sequence through which the client's rows reflect
+	// every access move (Cursor.access_moves_through).
+	movesThrough uint64
 	// stateEvicted marks a cursor whose referenced entry the store no longer
 	// holds. The sets above are then empty and unusable, and pullPreamble
 	// turns the cursor into a reset — the same recovery as falling below the
@@ -179,6 +182,7 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (curso
 		accessID:         c.GetAccessRef().GetId(),
 		accessGen:        c.GetAccessRef().GetGen(),
 		callerAccessHash: c.GetCallerAccessHash(),
+		movesThrough:     c.GetAccessMovesThrough(),
 	}
 	ref := c.GetSetsRef()
 	if ref.GetId() == 0 {
@@ -509,7 +513,7 @@ func (s *Server) servePullPage(ctx context.Context, tx storage.ReadTx, route pul
 	// What the caller can read moves with its grants, which the cursor
 	// recorded, so a change of access diverts the page into a resync the same
 	// way a change of scope does. Only this snapshot can tell.
-	acc, err := s.compareAccess(ctx, emitter.ws, cur, len(rawCursor) > 0, emitter)
+	acc, err := s.compareAccess(ctx, emitter.ws, tx, cur, len(rawCursor) > 0, emitter)
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}

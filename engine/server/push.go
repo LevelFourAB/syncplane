@@ -1056,6 +1056,9 @@ func (s *Server) applyCrud(
 		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), nil, msg); err != nil {
 			return err
 		}
+		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, msg); err != nil {
+			return err
+		}
 		if err := aw.finish(tx, msg); err != nil {
 			return err
 		}
@@ -1090,6 +1093,9 @@ func (s *Server) applyCrud(
 			if err := s.captureHistory(ctx, tx, ws, info, crud.GetKey(), row, live, msg, nil, seq, actor); err != nil {
 				return err
 			}
+		}
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, msg, seq, actor); err != nil {
+			return err
 		}
 		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
 			return err
@@ -1182,6 +1188,9 @@ func (s *Server) applyCrud(
 		if err := s.checkGrantRow(info, crud.GetKey(), crud.GetOp(), crud.GetFieldMask().GetPaths(), base); err != nil {
 			return err
 		}
+		if err := s.checkAccessChain(ctx, ws, tx, info, crud.GetKey(), currentRow, base); err != nil {
+			return err
+		}
 		if err := aw.finish(tx, base); err != nil {
 			return err
 		}
@@ -1219,6 +1228,9 @@ func (s *Server) applyCrud(
 				return err
 			}
 		}
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, base, seq, actor); err != nil {
+			return err
+		}
 		if err := tx.PutRow(info.name, crud.GetKey(), value, seq, actor); err != nil {
 			return err
 		}
@@ -1255,6 +1267,9 @@ func (s *Server) applyCrud(
 		// tombstone, and a row later re-created under this key must not inherit
 		// the old one's log. See Server.purgeHistory.
 		if err := s.purgeHistory(tx, info, crud.GetKey()); err != nil {
+			return err
+		}
+		if err := s.recordAccessMove(ctx, ws, tx, info, crud.GetKey(), currentRow, nil, seq, actor); err != nil {
 			return err
 		}
 		if err := tx.DeleteRow(info.name, crud.GetKey(), seq, actor); err != nil {

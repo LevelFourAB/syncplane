@@ -1484,13 +1484,13 @@ client.ws(id).can(schema, key, permission): Promise<CanAnswer>;
 client.onAccessChange((workspaceId) => { ... }): () => void;
 ```
 
-`can` predicts whether the caller holds `permission` at a row: at the workspace root, at the row itself, or at the row its access parent points at. It answers from the `CallerAccess` summary the server sends when the caller's grants change; the client stores it with the cursor, so it survives a restart.
+`can` predicts whether the caller holds `permission` at a row: at the workspace root, at the row itself, or at a row up its chain of access parents, which it reads from the rows held locally, queued writes included. It walks at most 32 rows up. It answers from the `CallerAccess` summary the server sends when the caller's grants change; the client stores it with the cursor, so it survives a restart.
 
-| Answer      | When                                                                                                                                                                                 |
-| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `'yes'`     | The summary holds the permission at the root, the row, or the row's access parent.                                                                                                   |
-| `'no'`      | It does not, and the client holds the row, or the row's entity has no access parent.                                                                                                 |
-| `'unknown'` | No summary has arrived, the answer depends on the access parent of a row the client does not hold, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
+| Answer      | When                                                                                                                                                                                                                                     |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `'yes'`     | The summary holds the permission at the root, the row, or a row up its chain.                                                                                                                                                            |
+| `'no'`      | It does not, and the client holds every row of the chain up to a row without an access parent or with its reference unset.                                                                                                               |
+| `'unknown'` | No summary has arrived, the answer depends on a row of the chain the client does not hold (the row itself included) or on a chain longer than 32 rows, or a local write to a grant row (or a delete of an anchor row) waits for its ack. |
 
 The answer is advisory. The client does not refuse writes from it: every write is queued, and a write the server refuses comes back as a rejection ack. A row the caller lost access to keeps showing a pending local write until that ack arrives.
 

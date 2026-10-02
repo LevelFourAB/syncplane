@@ -19,6 +19,7 @@ var accessPrototypes = map[string]proto.Message{
 	"project":        &accessv1.Project{},
 	"project_member": &accessv1.ProjectMember{},
 	"task":           &accessv1.Task{},
+	"comment":        &accessv1.Comment{},
 	"label":          &accessv1.Label{},
 	"note":           &accessv1.Note{},
 }

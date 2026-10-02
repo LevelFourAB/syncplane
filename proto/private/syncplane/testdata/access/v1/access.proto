@@ -86,6 +86,10 @@ message ProjectMember {
 					]
 				},
 				{
+					name: "project_editor"
+					grants: [ "view_projects", "edit_tasks" ]
+				},
+				{
 					name: "project_owner"
 					grants: [
 						"view_projects",
@@ -115,6 +119,19 @@ message Task {
 	string id = 1;
 	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
+}
+
+// A comment on a task, two access_parent hops below its project. Registered
+// with the org schema by the specs that walk chains deeper than one level.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: { read: "view_tasks" write: "edit_tasks" }
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string body = 3;
 }
 
 // Readable by every org member, writable only through trusted writes.
@@ -189,4 +206,60 @@ message Team {
 		access: { read: "view_team" write: "edit_team" }
 	};
 	string id = 1;
+}
+
+// A folder inside a folder, or at the top when parent is unset. Registered
+// with FolderMember and Doc, apart from the org schema above.
+message Folder {
+	option (syncplane.v1.entity) = {
+		name: "folder"
+		key_fields: [ "id" ]
+		access: { read: "view_folders" write: "edit_folders" }
+	};
+	string id = 1;
+	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string name = 3;
+}
+
+// A role on one folder and everything below it.
+message FolderMember {
+	option (syncplane.v1.entity) = {
+		name: "folder_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "folder_viewer"
+					grants: [ "view_folders" ]
+				},
+				{
+					name: "folder_editor"
+					grants: [ "view_folders", "edit_folders" ]
+				},
+				{
+					name: "folder_manager"
+					grants: [ "view_folders", "edit_folders", "manage_folders" ]
+				}
+			]
+		}
+		access: { read: "view_folders" write: "manage_folders" }
+	};
+	string id = 1;
+	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A document in a folder.
+message Doc {
+	option (syncplane.v1.entity) = {
+		name: "doc"
+		key_fields: [ "id" ]
+		access: { read: "view_folders" write: "edit_folders" }
+	};
+	string id = 1;
+	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
 }

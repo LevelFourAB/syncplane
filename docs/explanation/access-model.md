@@ -24,11 +24,17 @@ A grant row grants nothing when its anchor row does not exist. Without this rule
 
 A grant row also grants nothing when the schema does not declare its role, and every write path refuses an undeclared role. Rows stored before the schema declared a role are the exception: when a registration adds the role, or adds `grant` to an entity that already holds rows, those rows start to grant it. Registration does not look for such rows, because that reads the grant entity in every workspace on each registration, and the rows were written under the rules the application had at that time. A runtime registration must pass `AllowAccessChange` for such a change, and that flag is where the operator accepts the stored values.
 
-## One level deep
+## Chains of parents
 
-In this version, an `access_parent` must point at an entity without an `access_parent` of its own. A task can sit below a project, but a comment cannot sit below a task. One level is enough to compute visibility as a predicate on one reference field: a row is visible when its parent key is one of the caller's anchors. The engine already keeps an index for each reference field, so a caller with a few projects reads the rows below those projects by key and does not scan the entity.
+A row's access parent can have an access parent of its own. A comment sits below a task, and the task below a project, so a permission held at the project reaches the comment. An entity can also be its own access parent, as in a folder tree. A caller holds a permission at a row when it holds it at the root, at the row, or at any row up the row's chain.
 
-Deeper trees need each level resolved before the next, and a move of an intermediate row changes the visibility of every row below it without a write to those rows. These need a move log and a different read path, and are not supported yet.
+The engine walks a chain upward from the row, one parent at a time, inside the read snapshot. It reads each row on a chain once per read, so the rows below one task cost one read of the task. For a chain of one level, the walk reads nothing: the row names its parent, and the parent has no parent to read.
+
+To find the rows a caller can read without scanning an entity, the engine walks the other way: from the caller's anchors down through the index of each access-parent reference, entering only the entities that lead to the one it reads. A guest in one project reads the tasks of that project and the comments of those tasks, and nothing else.
+
+Two limits keep the walks bounded. `Limits.MaxAccessDepth` caps how many rows a chain has: registration refuses a schema whose entities chain deeper, a write refuses a row that would sit deeper in a recursive chain, and a read stops walking at that depth. A write that would place a row below itself is refused on every write path, so the data never holds a cycle.
+
+There is no stored chain. A stored chain for each row would have to be rewritten for every row below a row that moves, under the write lock, and that write would show the keys of those rows to clients that cannot read them. The engine reads the chain when it needs it instead, and records moves (see below).
 
 ## Reads use one snapshot
 
@@ -44,11 +50,15 @@ A write needs the entity's `write` permission where the row sits. The engine che
 - A create is checked against the new row after merges, carried-over fields and reference projection.
 - An update that moves a row to another parent is checked at both parents. Otherwise a caller could move a task into a project it can write and out of one it cannot.
 
+A move carries every row below the moved row with it. A move therefore also needs, where the row is before the move, the read permission of every entity whose rows can sit below it. Without that rule, a caller who may edit tasks but not read their comments could move a task to a project where other people read comments.
+
+A client cannot delete a row while a live row names it as its access parent. If it could, the rows below would anchor at nothing, and a caller who creates a row with the same key later would take them over. Trusted writes may delete such a row, because a connector or a mutator body sometimes must. The rows below it then anchor at nothing until a row with that key exists again.
+
 Grant rows have a further rule: a write that can change what a grant row grants needs every permission of the role at the grant's anchor, before and after the write. A caller can therefore only grant or revoke what it holds itself. This stops a caller from raising its own role, from giving a grant to another subject by changing the subject field, from moving a grant to a project it does not manage, and from demoting a caller with a stronger role.
 
 A custom mutator writes rows that the engine does not check one by one. In a schema that uses the model, an invocation needs a `MutatorAccess` that names the permission and the row it is checked at, or it is refused. The body can call `EntityTx.Can` to apply the model to the rows it writes. Mutators stay unchecked by default because some writes must break the subset rule on purpose, for example accepting an invitation or making the creator of a project its first admin.
 
-## How grant changes reach clients
+## How changes of access reach clients
 
 When a grant changes, the visibility of rows changes without a write to those rows, and a pull from the old cursor would not find them. Each cursor therefore records what its caller could read: a hash of the read anchors per permission, and a reference to the full record in the cursor-state store.
 
@@ -62,17 +72,27 @@ On the next pull, the engine compares the caller's current read anchors with the
 
 The record lives in the store and never in the cursor itself. A resync tombstones rows by the anchors the record names, so a client that could write its own record could name anchors it never held and receive the keys of hidden rows.
 
+### Moves
+
+A move changes visibility without a grant change. When a task moves to another project, every comment below it changes visibility, but no comment is written, and neither the grants nor the change scan show it. The engine therefore keeps a move log: every write that changes the access parent of a row that rows sit below, or creates or deletes such a row, records the row and its parent before the write, in the same transaction. A row without rows below it moves nothing but itself, and the change scan already sends it.
+
+On the next pull, the engine reads the moves after the cursor. For each moved row it compares the chain above the row as the client's rows reflect it with the chain now: if the caller holds the read permission of an entity below the row on one side and not on the other, the pull resyncs the rows below the moved row. The old side of that resync reads with the cursor's grants and with each moved row's parent from before its first move. A move that changes nothing the caller reads, such as a task moved between two projects the caller is not in, costs that caller one read of the log. After the resync the cursor records the newest move it reflects, so the next pull does not resync the same moves again.
+
+A move during a resync resets the client when it changes what the caller reads, as a grant change during a resync does. A cursor that has more moves after it than `Limits.MaxResyncScan` also resets. Garbage collection removes moves at or below the tombstone horizon, where every cursor resets anyway.
+
 ## What the client knows
 
-The client receives a `CallerAccess` summary: every permission the caller holds and its anchors. The server sends it when it changes, and the client stores it with the cursor. `can()` and `useCan` answer `'yes'`, `'no'` or `'unknown'` from it.
+The client receives a `CallerAccess` summary: every permission the caller holds and its anchors. To answer for a row below an anchor, the client walks the row's chain through the rows it holds locally, its own queued writes included. When a row of the chain is not held locally, for example a task the caller cannot read above a comment it can, the answer is `'unknown'`. The server sends it when it changes, and the client stores it with the cursor. `can()` and `useCan` answer `'yes'`, `'no'` or `'unknown'` from it.
 
 The answer is advisory. The client does not refuse writes locally, because the rule depends on rows and grants that the client may not hold. Every write is queued, and a refused write comes back as a rejection acknowledgement. A row the caller lost access to keeps showing a pending local write until that acknowledgement arrives.
 
 ## Costs and limits
 
 - **Grant resolution.** Each request and each stream drain reads the caller's grant rows: one probe of the subject index for each grant entity, or a scan of the grant entity until the index is built.
+- **Chain walks.** A read below the root reads each row on the chains of the rows it classifies once. A write reads the chain of the row it writes, and a move of a row in a recursive chain reads the chain of the new parent to refuse a cycle.
+- **Moves.** A move of a row that rows sit below writes one log row. Every pull and stream drain reads the moves after its cursor, which is one row read when nothing moved. A delete of such a row probes the reference index of each entity that can sit below it.
 - **Root changes.** Gaining or losing a permission at the root affects every row of the entities that use it, so the resync scans those entities.
-- **Shared permission names.** A permission used at two depths, such as `view_members` for org members and for project members, lets a role that grants it at the root read the rosters of every project. Registration logs a warning for this case.
+- **Shared permission names.** A permission used at two depths that do not sit below one another, such as `view_members` for org members and for project members, lets a role that grants it at the root read the rosters of every project. Registration logs a warning for this case. A permission shared by a row and the rows below it, such as `view_tasks` for tasks and their comments, is the common case and logs nothing.
 - **Tombstones reveal keys.** A tombstone for a hidden row still shows the row's entity, key and version. Use keys that are not secret.
 - **Text deltas.** A caller who does not hold an entity's read permission at the root receives collaborative-text fields as whole documents, not as deltas.
 - **Query.** For a caller below the root, the `Query` RPC reads only the rows below the caller's anchors, which it finds through the reference index, and an index walk skips the entries of other rows without reading them. When the caller has more such rows than `MaxIndexScanCandidates`, the query reads like one from a caller at the root: through an index walk or a scan of the entity, with the model as a filter.

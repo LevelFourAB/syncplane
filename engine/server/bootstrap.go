@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"log/slog"
+	"slices"
 	"sort"
 
 	"connectrpc.com/connect"
@@ -139,6 +140,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		if err := emitter.bindAccess(tx); err != nil {
 			return err
 		}
+		if emitter.caller != nil && emitter.caller.model.moving {
+			// Every page classifies rows with the parents they have at or
+			// after this point.
+			if _, emitter.movesThrough, _, err = readAccessMoves(tx, ^uint64(0), 0); err != nil {
+				return err
+			}
+		}
 		emitter.windowMembers, err = emitter.buildWindows(tx)
 		if err != nil {
 			return err
@@ -225,18 +233,29 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		return err
 	}
 
-	// ship buffers one row if the client may see it, and records the position
-	// that a resumed attempt continues from. Both delivery paths below go
-	// through it, which is what keeps their output — and their resume tokens —
-	// indistinguishable.
+	// visibleOf keeps the rows of a page the client may see. It runs inside
+	// the page's read transaction, which is where the parent chains of the
+	// access model are read; snapshots never need tombstones, so it drops
+	// every other row.
+	visibleOf := func(tx storage.ReadTx, page []storage.Row) ([]storage.Row, error) {
+		emitter.readChainsFrom(tx)
+		out := page[:0]
+		for _, row := range page {
+			class, err := emitter.classify(row)
+			if err != nil {
+				return nil, err
+			}
+			if class == rowVisible {
+				out = append(out, row)
+			}
+		}
+		return out, nil
+	}
+
+	// ship buffers one visible row and records the position that a resumed
+	// attempt continues from. Both delivery paths below go through it, which
+	// is what keeps their output — and their resume tokens — indistinguishable.
 	ship := func(entity string, row storage.Row) error {
-		class, err := emitter.classify(row)
-		if err != nil {
-			return err
-		}
-		if class != rowVisible {
-			return nil // snapshots never need tombstones
-		}
 		chunk = append(chunk, rowChange(row))
 		rowsSent++
 		pos.row(entity, row.Key)
@@ -268,20 +287,25 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 				batch := candidates[start:min(start+maxRowBatch, len(candidates))]
 				var page []storage.Row
 				if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
-					return tx.GetRows(entity, batch, func(row storage.Row) error {
-						page = append(page, row)
+					page = page[:0]
+					if err := tx.GetRows(entity, batch, func(row storage.Row) error {
+						// GetRows yields tombstones and skips keys with no row
+						// at all. A snapshot ships neither, for the same reason
+						// the scan below never sees one.
+						if !row.Deleted {
+							page = append(page, row)
+						}
 						return nil
-					})
+					}); err != nil {
+						return err
+					}
+					var err error
+					page, err = visibleOf(tx, page)
+					return err
 				}); err != nil {
 					return err
 				}
 				for _, row := range page {
-					// GetRows yields tombstones and skips keys with no row at
-					// all. A snapshot ships neither, for the same reason the
-					// scan below never sees one.
-					if row.Deleted {
-						continue
-					}
 					if err := ship(entity, row); err != nil {
 						return err
 					}
@@ -291,20 +315,26 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			continue
 		}
 		for {
-			// Short tx per page: collect raw rows only; classification and
-			// stream writes happen outside so the tx stays brief.
-			var page []storage.Row
+			// Short tx per page: stream writes happen outside so the tx stays
+			// brief.
+			var page, visible []storage.Row
 			// Floored at the Begin seq: pages of one snapshot must not read
 			// from before the position the Begin frame promised.
 			if err := s.readTx(ctx, msg.GetWorkspaceId(), begin.GetSeq(), func(tx storage.ReadTx) error {
-				return tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
+				page = page[:0]
+				if err := tx.ScanEntityAfter(entity, afterKey, s.chunkSize, func(row storage.Row) error {
 					page = append(page, row)
 					return nil
-				})
+				}); err != nil {
+					return err
+				}
+				var err error
+				visible, err = visibleOf(tx, slices.Clone(page))
+				return err
 			}); err != nil {
 				return err
 			}
-			for _, row := range page {
+			for _, row := range visible {
 				if err := ship(entity, row); err != nil {
 					return err
 				}

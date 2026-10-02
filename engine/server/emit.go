@@ -110,13 +110,15 @@ type rowEmitter struct {
 	// that does not use it; modelInUse records that the catalog had a model
 	// when the emitter was built, so a path that forgot to set caller fails
 	// instead of reading without the model. access is what the caller holds,
-	// bound inside the read snapshot by bindAccess. combined memoizes, per
-	// entity, the model's filter joined with the application's, and is
-	// cleared whenever access is bound again.
+	// bound inside the read snapshot by bindAccess, and chains walks parent
+	// chains over the same rows. combined memoizes, per entity, the model's
+	// filter joined with the application's, and is cleared whenever access is
+	// bound again.
 	caller     *accessCaller
 	modelInUse bool
 	access     *accessSet
-	combined   map[string]RowFilter
+	chains     *accessChains
+	combined   map[string]readFilter
 	// readAccess and readAccessHash render access as a cursor records it,
 	// once per binding (see boundReadAccess). hiddenEntities are the entities
 	// the old side of a resync reads nothing of (see hideOnOldSide).
@@ -130,6 +132,16 @@ type rowEmitter struct {
 	// accessOnly marks the old side of a resync whose scope and filter epoch
 	// match the new side's, so only the caller's access differs between them.
 	accessOnly bool
+	// movesThrough is the sequence through which the rows this emitter
+	// classifies reflect every access move: the newest move the read has
+	// accounted for. A cursor issued from the emitter records it.
+	movesThrough uint64
+	// movedBelow holds, on the old side of a resync, the entities whose rows
+	// can sit below a row whose move changed what the caller can read, and
+	// movedRows those rows. A resync cannot skip such an entity even when its
+	// scope and anchors did not change.
+	movedBelow map[string]bool
+	movedRows  []anchorRow
 	// subs is the subscription set this emitter was built from, as given; nil
 	// for full sync. A resync compares the two sides' sets per entity to skip
 	// the entities whose scope did not change.
@@ -195,7 +207,7 @@ func newRowEmitter(ctx context.Context, srv *Server, ws string, subs []*syncplan
 		filters:     map[string]RowFilter{},
 		filterKnown: map[string]bool{},
 		modelInUse:  srv.catalogPtr().access != nil,
-		combined:    map[string]RowFilter{},
+		combined:    map[string]readFilter{},
 	}
 	e.filterSource = func(entity string) (RowFilter, error) {
 		return srv.perms.ReadFilter(ctx, principalOf(ctx), ws, entity)
@@ -383,16 +395,31 @@ func (e *rowEmitter) warmFilters() error {
 	return nil
 }
 
+// readFilter decides whether the caller may read one row. It fails only when
+// a read it needs fails, and the read path then fails the request: a row the
+// filter could not decide is neither shown nor tombstoned. A nil readFilter
+// admits every row.
+type readFilter func(key string, row proto.Message) (bool, error)
+
+// admits applies f to one row.
+func (f readFilter) admits(key string, row proto.Message) (bool, error) {
+	if f == nil {
+		return true, nil
+	}
+	return f(key, row)
+}
+
 // filterOf returns the read filter for rows of entity: the access model's
 // filter for this caller joined with the application's ReadFilter, or nil when
 // neither hides a row. In a schema that uses the access model it fails until
 // bindAccess has run.
-func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
+func (e *rowEmitter) filterOf(entity string) (readFilter, error) {
 	if e.caller == nil {
 		if e.modelInUse {
 			return nil, errAccessUnbound
 		}
-		return e.appFilterOf(entity)
+		app, err := e.appFilterOf(entity)
+		return appReadFilter(app), err
 	}
 	if f, ok := e.combined[entity]; ok {
 		return f, nil
@@ -404,19 +431,20 @@ func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 	if err != nil {
 		return nil, err
 	}
-	var model RowFilter
+	var model readFilter
 	if info, ok := e.srv.catalogPtr().entities[entity]; ok {
-		model = e.access.modelReadFilter(e.caller.model, info)
+		model = e.modelReadFilter(info)
 	}
-	f := andFilters(model, app)
+	f := andFilters(model, appReadFilter(app))
 	e.combined[entity] = f
 	return f, nil
 }
 
 // bindAccess resolves what the caller holds from the grant rows in tx. A read
 // path calls it at the start of every read transaction whose rows it
-// classifies, so the grants it reads and the rows it filters come from one
-// snapshot. It is a no-op for a schema that does not use the access model.
+// classifies, so the grants it reads, the parent chains it walks and the rows
+// it filters come from one snapshot. It is a no-op for a schema that does not
+// use the access model.
 func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	if e.caller == nil {
 		return nil
@@ -425,14 +453,33 @@ func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	if err != nil {
 		return err
 	}
-	e.useAccess(set)
+	e.useAccess(set, e.chainsOver(tx.GetRow))
 	return nil
 }
 
-// useAccess binds an access set resolved elsewhere: the one the workspace gate
-// read, or the one another emitter of the same request bound.
-func (e *rowEmitter) useAccess(set *accessSet) {
+// chainsOver returns a parent-chain walker over the rows get reads, for the
+// caller's model.
+func (e *rowEmitter) chainsOver(get func(entity, key string) (storage.Row, error)) *accessChains {
+	return newAccessChainsFrom(e.caller.model, get, e.srv.limits.maxAccessDepth(), func(row storage.Row, err error) {
+		e.srv.reportPoison(e.ctx, e.ws, row, err)
+	})
+}
+
+// readChainsFrom makes the bound parent-chain walker read from tx. A read path
+// whose read transactions are shorter than the binding, such as a bootstrap
+// that reads each page in a transaction of its own, calls it in each of them.
+// The rows the walker has read already stay memoized.
+func (e *rowEmitter) readChainsFrom(tx storage.ReadTx) {
+	if e.chains != nil {
+		e.chains.get = tx.GetRow
+	}
+}
+
+// useAccess binds an access set resolved elsewhere, such as the one the
+// workspace gate read, and the walker that reads parent chains for it.
+func (e *rowEmitter) useAccess(set *accessSet, chains *accessChains) {
 	e.access = set
+	e.chains = chains
 	e.readAccess, e.readAccessHash = nil, 0
 	e.callerAccess, e.callerAccessHash = nil, 0
 	clear(e.combined)
@@ -558,7 +605,9 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 		// for every other row in the workspace (see poison.go).
 		return rowHidden, nil
 	}
-	if filter != nil && !filter(row.Key, msg) {
+	if ok, err := filter.admits(row.Key, msg); err != nil {
+		return 0, err
+	} else if !ok {
 		return rowHidden, nil
 	}
 	if needPred && !scope.matches(msg.ProtoReflect()) {

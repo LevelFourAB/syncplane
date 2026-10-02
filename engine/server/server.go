@@ -477,6 +477,13 @@ type Limits struct {
 	// Conditions selecting the same target rows share one pass, so the limit
 	// counts what a predicate WRITES rather than what it costs. Default 8.
 	MaxRelConditions int
+	// Maximum access_parent hops from a row up to a row without an access
+	// parent, in a schema that uses the access model. Registration refuses an
+	// entity whose chain of parent entities is longer. In a recursive chain,
+	// such as a folder inside a folder, a write that would put a row deeper is
+	// refused, and a read stops walking at this depth: a row deeper than it
+	// is read as anchored at nothing above that point. Default 32.
+	MaxAccessDepth int
 	// Maximum facet axes one Query may carry. Each axis costs a bucket per
 	// distinct value and a lookup per matching row, and a request carrying any
 	// walks every match rather than the page. Default 8.
@@ -518,6 +525,13 @@ func (l Limits) maxQueryFacets() int {
 		return 8
 	}
 	return l.MaxQueryFacets
+}
+
+func (l Limits) maxAccessDepth() int {
+	if l.MaxAccessDepth <= 0 {
+		return 32
+	}
+	return l.MaxAccessDepth
 }
 
 func (l Limits) maxRelKeys() int {
@@ -647,8 +661,8 @@ func (c *catalog) accessModelOrErr() (*accessModel, error) {
 // recompileAccess compiles the access model for the catalog's current
 // entities and the server's mutators. Every swap that adds or replaces an
 // entity calls it.
-func (c *catalog) recompileAccess(mutators map[string]*mutatorInfo) {
-	c.access, c.accessErr = compileAccessModel(c, mutators)
+func (c *catalog) recompileAccess(mutators map[string]*mutatorInfo, limits Limits) {
+	c.access, c.accessErr = compileAccessModel(c, mutators, limits.maxAccessDepth())
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -1149,7 +1163,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	// Entities register one at a time and mutators after them, so the model is
 	// judged once both are in.
 	if err := s.swapCatalog(func(c *catalog) error {
-		c.recompileAccess(s.mutators)
+		c.recompileAccess(s.mutators, s.limits)
 		return c.accessErr
 	}); err != nil {
 		return nil, err
@@ -1305,7 +1319,7 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		if err := ensureHistoryEntity(c); err != nil {
 			return err
 		}
-		c.recompileAccess(s.mutators)
+		c.recompileAccess(s.mutators, s.limits)
 		return nil
 	}); err != nil {
 		return err

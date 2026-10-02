@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -16,20 +17,27 @@ import (
 // writes of one request see each other, so a grant row written early in a
 // batch counts for the writes after it: the set is resolved from the
 // transaction itself, and resolved again after a write that can change it.
+// The parent chains it walks are read the same way.
 type txAccess struct {
 	caller *accessCaller
 	limits Limits
+	report func(storage.Row, error)
 	tx     storage.ReadTx
 	set    *accessSet
+	// chains walks parent chains over chainsTx, and is dropped after a write
+	// to a row that can sit on a chain.
+	chainsTx storage.ReadTx
+	chains   *accessChains
 }
 
 // newTxAccess returns the access of caller for its write transactions, or nil
-// for a caller outside the access model.
-func newTxAccess(caller *accessCaller, limits Limits) *txAccess {
+// for a caller outside the access model. report is told about a row on a
+// parent chain that does not decode.
+func newTxAccess(caller *accessCaller, limits Limits, report func(storage.Row, error)) *txAccess {
 	if caller == nil {
 		return nil
 	}
-	return &txAccess{caller: caller, limits: limits}
+	return &txAccess{caller: caller, limits: limits, report: report}
 }
 
 // get returns what the caller holds as of tx.
@@ -45,19 +53,37 @@ func (a *txAccess) get(tx storage.ReadTx) (*accessSet, error) {
 	return set, nil
 }
 
-// invalidate drops the resolved set. A write path calls it when writes it
-// made are rolled back, since the set may have been read after them.
+// chainsOf returns a parent-chain walker over tx.
+func (a *txAccess) chainsOf(tx storage.ReadTx) *accessChains {
+	if a.chains == nil || a.chainsTx != tx {
+		a.chains = newAccessChains(a.caller.model, tx, a.limits.maxAccessDepth(), a.report)
+		a.chainsTx = tx
+	}
+	return a.chains
+}
+
+// invalidate drops the resolved set and the chains read so far. A write path
+// calls it when writes it made are rolled back, since both may have been read
+// after them.
 func (a *txAccess) invalidate() {
 	if a != nil {
-		a.set = nil
+		a.set, a.chains = nil, nil
 	}
 }
 
-// noteWrite drops the resolved set after a write to info that can change what
-// the caller holds: a grant row, or a row that can be an anchor.
+// noteWrite drops what a write to info can change: the resolved set after a
+// write to a grant row or to a row that can be an anchor, and the chains read
+// so far after a write to a row that can sit on a chain.
 func (a *txAccess) noteWrite(info *entityInfo) {
-	if a != nil && (info.grant != nil || a.caller.model.anchors[info.name]) {
+	if a == nil {
+		return
+	}
+	anchor := a.caller.model.anchors[info.name]
+	if info.grant != nil || anchor {
 		a.set = nil
+	}
+	if anchor {
+		a.chains = nil
 	}
 }
 
@@ -66,46 +92,31 @@ func (a *txAccess) model() *accessModel {
 	return a.caller.model
 }
 
-// holdsAt reports whether the set holds perm at the row of info with key: at
-// the workspace root, at the row itself, or at the row its access parent
-// points at. row is the row's decoded value, or nil for a row that does not
+// holds reports whether the caller holds perm at the row of info with key, as
+// of tx: at the workspace root, at the row itself, or at a row up its parent
+// chain. row is the row's decoded value, or nil for a row that does not
 // exist, which has no parent.
-func (s *accessSet) holdsAt(model *accessModel, perm string, info *entityInfo, key string, row protoreflect.Message) bool {
-	var parent *anchorRow
-	if row != nil && info.access != nil && info.access.parent != nil {
-		if parentKey, ok := parentKeyOf(row, info.access, model.parents[info.name]); ok {
-			parent = &anchorRow{entity: info.access.parentEntity, key: parentKey}
-		}
+func (a *txAccess) holds(tx storage.ReadTx, perm string, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	set, err := a.get(tx)
+	if err != nil {
+		return false, err
 	}
-	return s.holdsUnder(perm, anchorRow{entity: info.name, key: key}, parent)
+	return a.chainsOf(tx).holds(set.perms[perm], info, key, row)
 }
 
-// holdsUnder reports whether the set holds perm at row: at the workspace
-// root, at the row itself, or at parent when it is non-nil. It is the rule
-// the client's canAt mirrors; testdata/access/can.json pins both.
-func (s *accessSet) holdsUnder(perm string, row anchorRow, parent *anchorRow) bool {
-	anchors := s.perms[perm]
-	if anchors.holds(row.entity, row.key) {
-		return true
+// holdsAt reports whether the caller holds perm at one anchor, as of tx: at
+// the workspace root, at the anchor, or up its parent chain. A nil anchor is
+// the workspace root, where only the root counts.
+func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool, error) {
+	set, err := a.get(tx)
+	if err != nil {
+		return false, err
 	}
-	return parent != nil && anchors.holds(parent.entity, parent.key)
-}
-
-// heldAt reports whether the set holds perm at one anchor; a nil anchor is the
-// workspace root.
-func (s *accessSet) heldAt(perm string, at *anchorRow) bool {
-	a := s.perms[perm]
-	if a == nil {
-		return false
-	}
-	if a.root {
-		return true
-	}
+	anchors := set.perms[perm]
 	if at == nil {
-		return false
+		return anchors != nil && anchors.root, nil
 	}
-	_, ok := a.rows[*at]
-	return ok
+	return a.chainsOf(tx).holdsAt(anchors, *at)
 }
 
 // grantAnchorOf returns the anchor a grant row applies at, nil for the
@@ -152,20 +163,24 @@ func touchesGrant(info *entityInfo, op syncplanev1.CrudOp, mask []string) bool {
 // role, move a grant to an anchor it does not manage, or change a grant that
 // holds more than it does.
 //
-// A row whose role is undeclared, or whose anchor is missing, grants nothing,
-// and so passes.
-func checkGrantSubset(set *accessSet, model *accessModel, info *entityInfo, key string, row protoreflect.Message) error {
+// A row whose role is undeclared, or whose access parent is unset, grants
+// nothing, and so passes.
+func checkGrantSubset(tx storage.ReadTx, access *txAccess, info *entityInfo, key string, row protoreflect.Message) error {
 	role := grantRoleOf(info.grant, row)
 	perms := info.grant.roles[role]
 	if len(perms) == 0 {
 		return nil
 	}
-	at, ok := grantAnchorOf(model, info, row)
+	at, ok := grantAnchorOf(access.model(), info, row)
 	if !ok {
 		return nil
 	}
 	for _, p := range perms {
-		if !set.heldAt(p, at) {
+		held, err := access.holdsAt(tx, p, at)
+		if err != nil {
+			return err
+		}
+		if !held {
 			return Reject(CodePermissionDenied, fmt.Sprintf(
 				"entity %q: row %q grants role %q, which holds permissions this caller does not hold where the row applies",
 				info.name, key, role))
@@ -205,6 +220,60 @@ func (s *Server) checkGrantRow(info *entityInfo, key string, op syncplanev1.Crud
 	return nil
 }
 
+// checkAccessChain refuses a write that would put a row on a parent chain the
+// model cannot walk: a row below itself, or a row more than
+// Limits.MaxAccessDepth hops below a row without an access parent. Every
+// write path runs it, Trusted ones included, on the row as it will be stored.
+// Only an entity whose chain of parent entities is recursive can do either,
+// since registration bounds every other chain, and only a write that changes
+// the row's access parent is walked.
+func (s *Server) checkAccessChain(
+	ctx context.Context,
+	ws string,
+	tx storage.ReadTx,
+	info *entityInfo,
+	key string,
+	load func() (storage.Row, bool, error),
+	final proto.Message,
+) error {
+	model := s.catalogPtr().access
+	if model == nil || info.access == nil || info.access.parent == nil || model.depths[info.name] != depthUnbounded {
+		return nil
+	}
+	report := func(row storage.Row, err error) { s.reportPoison(ctx, ws, row, err) }
+	e := edgeOf(model, info, final.ProtoReflect())
+	if !e.ok {
+		return nil
+	}
+	row, live, err := load()
+	if err != nil {
+		return err
+	}
+	if live {
+		if stored, err := info.decode(row.Value); err == nil && edgeOf(model, info, stored.ProtoReflect()) == e {
+			return nil
+		}
+	}
+	maxDepth := s.limits.maxAccessDepth()
+	chains := newAccessChains(model, tx, maxDepth, report)
+	self := anchorRow{entity: info.name, key: key}
+	for hops := 1; e.ok; hops++ {
+		if e.parent == self {
+			return Reject(CodeInvalidArgument, fmt.Sprintf(
+				"entity %q: row %q would sit below itself in the access model", info.name, key))
+		}
+		if hops > maxDepth {
+			return Reject(CodeInvalidArgument, fmt.Sprintf(
+				"entity %q: row %q would sit more than MaxAccessDepth (%d) hops below a row without an access parent",
+				info.name, key, maxDepth))
+		}
+		if e, err = chains.edge(e.parent); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // accessWrite carries one enforced CRUD write of a model entity through the
 // access model's two checks. A nil accessWrite checks nothing, which is what a
 // write outside the model, an unenforced write and a Trusted one get.
@@ -214,9 +283,10 @@ type accessWrite struct {
 	key    string
 	op     syncplanev1.CrudOp
 	mask   []string
-	// live and storedParent describe the row before the write: whether one
-	// existed, and the key its access parent named.
+	// live, stored and storedParent describe the row before the write:
+	// whether one existed, its value, and the key its access parent named.
 	live         bool
+	stored       protoreflect.Message
 	storedParent string
 }
 
@@ -227,7 +297,10 @@ type accessWrite struct {
 // An update or a delete needs the entity's write permission where the stored
 // row sits. On a grant entity, a write that can change what the row grants
 // also needs every permission of the stored role at the stored anchor, so a
-// caller cannot demote or remove a grant stronger than its own.
+// caller cannot demote or remove a grant stronger than its own. A delete of a
+// row that other rows name as their access parent is refused while one of
+// them is live: deleting it would leave them anchored at nothing, and a row
+// created later with the same key would take them over.
 func (g *writeGate) beginAccessWrite(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -251,21 +324,32 @@ func (g *writeGate) beginAccessWrite(
 		g.srv.reportPoison(g.ctx, g.ws, row, err)
 		return nil, refuseRow(info, key)
 	}
-	set, err := g.access.get(tx)
+	model := g.access.model()
+	sr := stored.ProtoReflect()
+	ok, err := g.access.holds(tx, info.access.write, info, key, sr)
 	if err != nil {
 		return nil, err
 	}
-	model := g.access.model()
-	sr := stored.ProtoReflect()
-	if !set.holdsAt(model, info.access.write, info, key, sr) {
+	if !ok {
 		return nil, refuseRow(info, key)
 	}
 	if touchesGrant(info, op, mask) {
-		if err := checkGrantSubset(set, model, info, key, sr); err != nil {
+		if err := checkGrantSubset(tx, g.access, info, key, sr); err != nil {
 			return nil, err
 		}
 	}
-	w.live = true
+	if op == syncplanev1.CrudOp_CRUD_OP_DELETE && model.anchors[info.name] {
+		below, err := liveRowBelow(tx, model, info, key, g.srv.limits)
+		if err != nil {
+			return nil, err
+		}
+		if below != "" {
+			return nil, Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: row %q is the access parent of a live %s row; delete or move the rows below it first",
+				info.name, key, below))
+		}
+	}
+	w.live, w.stored = true, sr
 	w.storedParent, _ = parentKeyOf(sr, info.access, model.parents[info.name])
 	return w, nil
 }
@@ -275,29 +359,100 @@ func (g *writeGate) beginAccessWrite(
 // projection, before the index update.
 //
 // A create needs the write permission where the new row sits, and so does an
-// update that moves the row to another access parent. On a grant entity, a
-// write that can change what the row grants also needs every permission of
-// the new role at the new anchor, so a caller cannot grant more than it holds.
+// update that moves the row to another access parent. A move also needs, where
+// the row sits before it, the read permission of every entity whose rows can
+// sit below it: the rows below move with it, and the caller would otherwise
+// show them to whoever reads at the new parent. On a grant entity, a write
+// that can change what the row grants also needs every permission of the new
+// role at the new anchor, so a caller cannot grant more than it holds.
 func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	if w == nil {
 		return nil
 	}
-	set, err := w.access.get(tx)
-	if err != nil {
-		return err
-	}
 	model := w.access.model()
 	fr := final.ProtoReflect()
 	parent, _ := parentKeyOf(fr, w.info.access, model.parents[w.info.name])
-	if !w.live || parent != w.storedParent {
-		if !set.holdsAt(model, w.info.access.write, w.info, w.key, fr) {
+	moved := w.live && parent != w.storedParent
+	if !w.live || moved {
+		ok, err := w.access.holds(tx, w.info.access.write, w.info, w.key, fr)
+		if err != nil {
+			return err
+		}
+		if !ok {
 			return refuseRow(w.info, w.key)
 		}
 	}
+	if moved {
+		for _, perm := range model.readPermsBelow(w.info.name) {
+			ok, err := w.access.holds(tx, perm, w.info, w.key, w.stored)
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return Reject(CodePermissionDenied, fmt.Sprintf(
+					"entity %q: moving row %q needs permission %q where it is now, to carry the rows below it",
+					w.info.name, w.key, perm))
+			}
+		}
+	}
 	if touchesGrant(w.info, w.op, w.mask) {
-		return checkGrantSubset(set, model, w.info, w.key, fr)
+		return checkGrantSubset(tx, w.access, w.info, w.key, fr)
 	}
 	return nil
+}
+
+// liveRowBelow returns the name of an entity with a live row whose access
+// parent is the row of info with key, or "" when there is none. It probes the
+// reference index of each child entity, and scans the entity while that index
+// is not ready.
+func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key string, limits Limits) (string, error) {
+	values, ok := keyValuesOf(info, key)
+	if !ok {
+		return "", nil
+	}
+	for _, child := range model.children[info.name] {
+		found := false
+		stop := func() error {
+			found = true
+			return errCandidateBound
+		}
+		ci := child.indexByName(refIndexName(child.access.parent.ref))
+		ready := false
+		if ci != nil && !limits.DisableIndexes {
+			var err error
+			if ready, err = ci.ready(tx, child.name); err != nil {
+				return "", err
+			}
+		}
+		var err error
+		if ready {
+			lo, hi, perr := ci.probeRefIndex(values)
+			if perr != nil {
+				return "", perr
+			}
+			err = tx.ScanIndex(child.name, ci.name, lo, hi, 1, storage.ScanAsc, func([]byte, string) error {
+				return stop()
+			})
+		} else {
+			err = tx.ScanEntity(child.name, func(row storage.Row) error {
+				msg, derr := child.decode(row.Value)
+				if derr != nil {
+					return nil
+				}
+				if parentKey, ok := parentKeyOf(msg.ProtoReflect(), child.access, info); ok && parentKey == key {
+					return stop()
+				}
+				return nil
+			})
+		}
+		if err != nil && !errors.Is(err, errCandidateBound) {
+			return "", err
+		}
+		if found {
+			return child.name, nil
+		}
+	}
+	return "", nil
 }
 
 // checkInvocation refuses a mutator invocation that the caller's access does
@@ -319,12 +474,12 @@ func (s *Server) checkInvocation(
 		return Reject(CodePermissionDenied, fmt.Sprintf(
 			"mutator %q declares no MutatorAccess, so only a trusted caller may invoke it", mi.name))
 	}
-	set, err := access.get(tx)
-	if err != nil {
-		return err
-	}
 	if ma.Entity == "" {
-		if set.heldAt(ma.Permission, nil) {
+		held, err := access.holdsAt(tx, ma.Permission, nil)
+		if err != nil {
+			return err
+		}
+		if held {
 			return nil
 		}
 		return Reject(CodePermissionDenied, fmt.Sprintf("mutator %q may not be invoked by this caller", mi.name))
@@ -350,7 +505,11 @@ func (s *Server) checkInvocation(
 		s.reportPoison(ctx, ws, row, err)
 		return refuse(key)
 	}
-	if !set.holdsAt(access.model(), ma.Permission, info, key, msg.ProtoReflect()) {
+	held, err := access.holds(tx, ma.Permission, info, key, msg.ProtoReflect())
+	if err != nil {
+		return err
+	}
+	if !held {
 		return refuse(key)
 	}
 	return nil
@@ -358,8 +517,8 @@ func (s *Server) checkInvocation(
 
 // Can reports whether the caller of this transaction holds permission at the
 // row of the entity prototype names, with the given key: at the row itself,
-// at the row its access parent points at, or at the workspace root. For a row
-// that does not exist only the root counts.
+// at a row up its chain of access parents, or at the workspace root. For a
+// row that does not exist only the root counts.
 //
 // The caller is the one a mutator was invoked by, or the one Mutate, Apply or
 // a push runs for. A Trusted transaction, and any transaction in a schema
@@ -372,10 +531,6 @@ func (e *EntityTx) Can(permission string, prototype proto.Message, key string) (
 		return true, nil
 	}
 	info, err := e.info(prototype)
-	if err != nil {
-		return false, err
-	}
-	set, err := e.access.get(e.tx)
 	if err != nil {
 		return false, err
 	}
@@ -392,5 +547,5 @@ func (e *EntityTx) Can(permission string, prototype proto.Message, key string) (
 		}
 		msg = decoded.ProtoReflect()
 	}
-	return set.holdsAt(e.access.model(), permission, info, key, msg), nil
+	return e.access.holds(e.tx, permission, info, key, msg)
 }

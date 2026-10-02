@@ -56,6 +56,47 @@ func orgSpecs() []server.DynamicEntity {
 	}
 }
 
+// commentSpec is a comment below a task, two hops below the project, for
+// orgSpecs.
+func commentSpec() server.DynamicEntity {
+	return server.DynamicEntity{
+		Name: "comment", KeyFields: []string{"id"},
+		Fields: []server.DynamicField{
+			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
+			{Name: "task", Number: 2, Ref: "task", AccessParent: true},
+		},
+		Access: &syncplanev1.AccessOptions{Read: "view_tasks", Write: "edit_tasks"},
+	}
+}
+
+// withFolders adds to org specs a folder tree whose folders sit below folders
+// and whose files sit below a folder, read and written by permissions of
+// their own that org admins hold.
+func withFolders(specs []server.DynamicEntity) []server.DynamicEntity {
+	GinkgoHelper()
+	admin := specNamed(specs, "org_member").Grant.Roles[0]
+	admin.Grants = append(admin.Grants, "view_files", "edit_files")
+	str := protoreflect.StringKind
+	return append(specs,
+		server.DynamicEntity{
+			Name: "folder", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{
+				{Name: "id", Number: 1, Kind: str},
+				{Name: "parent", Number: 2, Ref: "folder", AccessParent: true},
+			},
+			Access: &syncplanev1.AccessOptions{Read: "view_files", Write: "edit_files"},
+		},
+		server.DynamicEntity{
+			Name: "file", KeyFields: []string{"id"},
+			Fields: []server.DynamicField{
+				{Name: "id", Number: 1, Kind: str},
+				{Name: "folder", Number: 2, Ref: "folder", AccessParent: true},
+			},
+			Access: &syncplanev1.AccessOptions{Read: "view_files", Write: "edit_files"},
+		},
+	)
+}
+
 // specNamed returns the spec of the named entity, for a spec to change in
 // place.
 func specNamed(specs []server.DynamicEntity, name string) *server.DynamicEntity {
@@ -157,6 +198,43 @@ var _ = Describe("Access model registration", func() {
 			Expect(register(orgSpecs())).To(Succeed())
 			Expect(logs.count("access model warning")).To(BeZero())
 		})
+
+		It("does not warn when one permission governs a row and the rows below it", func() {
+			logs := &recordingHandler{}
+			srv = newBareServer(server.WithLogger(slog.New(logs)))
+			Expect(register(append(orgSpecs(), commentSpec()))).To(Succeed())
+			Expect(logs.count("access model warning")).To(BeZero())
+		})
+
+		It("registers an access parent with an access parent of its own", func() {
+			Expect(register(append(orgSpecs(), commentSpec()))).To(Succeed())
+		})
+
+		It("registers an entity that is its own access parent, and rows below it", func() {
+			Expect(register(withFolders(orgSpecs()))).To(Succeed())
+		})
+
+		It("refuses a chain of parent entities longer than MaxAccessDepth", func() {
+			srv = newBareServer(server.WithLimits(server.Limits{MaxAccessDepth: 1}))
+			Expect(register(append(orgSpecs(), commentSpec()))).To(MatchError(ContainSubstring(
+				`entity "comment" sits 2 access_parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
+		})
+
+		It("accepts a recursive chain whatever MaxAccessDepth is", func() {
+			srv = newBareServer(server.WithLimits(server.Limits{MaxAccessDepth: 1}))
+			Expect(register(withFolders(orgSpecs()))).To(Succeed())
+		})
+
+		It("warns when one permission governs a recursive entity and one at a fixed depth", func() {
+			logs := &recordingHandler{}
+			srv = newBareServer(server.WithLogger(slog.New(logs)))
+			specs := withFolders(orgSpecs())
+			specNamed(specs, "file").Access.Read = "view_tasks"
+			Expect(register(specs)).To(Succeed())
+			Expect(logs.attrs("access model warning", "finding")).To(ConsistOf(
+				ContainSubstring(`permission "view_tasks"`),
+			))
+		})
 	})
 
 	DescribeTable("refuses a schema that breaks a rule of one entity",
@@ -248,26 +326,6 @@ var _ = Describe("Access model registration", func() {
 			specNamed(s, "project").Access = &syncplanev1.AccessOptions{Unrestricted: true}
 			return s
 		}, `points at entity "project", which is not in the access model`),
-		Entry("an access parent with an access parent of its own", func(s []server.DynamicEntity) []server.DynamicEntity {
-			return append(s, server.DynamicEntity{
-				Name: "comment", KeyFields: []string{"id"},
-				Fields: []server.DynamicField{
-					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
-					{Name: "task", Number: 2, Ref: "task", AccessParent: true},
-				},
-				Access: &syncplanev1.AccessOptions{Read: "view_tasks", Write: "edit_tasks"},
-			})
-		}, `points at entity "task", which has an access_parent of its own`),
-		Entry("an entity that is its own access parent", func(s []server.DynamicEntity) []server.DynamicEntity {
-			return append(s, server.DynamicEntity{
-				Name: "folder", KeyFields: []string{"id"},
-				Fields: []server.DynamicField{
-					{Name: "id", Number: 1, Kind: protoreflect.StringKind},
-					{Name: "parent", Number: 2, Ref: "folder", AccessParent: true},
-				},
-				Access: &syncplanev1.AccessOptions{Read: "view_tasks", Write: "edit_tasks"},
-			})
-		}, `points at entity "folder", which has an access_parent of its own`),
 		Entry("a role declared by two entities", func(s []server.DynamicEntity) []server.DynamicEntity {
 			guest := specNamed(s, "org_member")
 			return append(s, server.DynamicEntity{

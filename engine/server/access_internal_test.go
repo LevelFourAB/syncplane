@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -13,6 +14,7 @@ import (
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
@@ -58,7 +60,7 @@ var _ = Describe("access model fingerprint", func() {
 			c.entities[info.name] = info
 			c.byType[info.msgType.Descriptor().FullName()] = info
 		}
-		m, err := compileAccessModel(c, nil)
+		m, err := compileAccessModel(c, nil, 32)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(m).NotTo(BeNil())
 		return m
@@ -134,7 +136,7 @@ type accessVector struct {
 	Permission string                      `json:"permission"`
 	Entity     string                      `json:"entity"`
 	Key        string                      `json:"key"`
-	Parent     json.RawMessage             `json:"parent"`
+	Chain      []json.RawMessage           `json:"chain"`
 	Want       string                      `json:"want"`
 }
 
@@ -155,7 +157,7 @@ var _ = Describe("access conformance vectors", func() {
 		panic(err)
 	}
 	for _, c := range file.Cases {
-		if c.Access == nil || string(c.Parent) == `"unknown"` {
+		if c.Access == nil || slices.ContainsFunc(c.Chain, func(r json.RawMessage) bool { return string(r) == `"unknown"` }) {
 			continue // only a client can lack these inputs
 		}
 		It(c.Name, func() {
@@ -172,14 +174,24 @@ var _ = Describe("access conformance vectors", func() {
 				}
 				set.perms[perm] = a
 			}
-			var parent *anchorRow
-			if string(c.Parent) != "null" {
-				parent = &anchorRow{}
+			// The chain is the whole of what the walker reads: every edge is
+			// an override, and the last row's edge is unset.
+			chains := newAccessChainsFrom(nil, func(string, string) (storage.Row, error) {
+				Fail("the walk read a row the chain does not name")
+				return storage.Row{}, nil
+			}, 32, nil)
+			chains.overrides = map[anchorRow]chainEdge{}
+			at := anchorRow{entity: c.Entity, key: c.Key}
+			for _, raw := range c.Chain {
 				var p struct{ Entity, Key string }
-				Expect(json.Unmarshal(c.Parent, &p)).To(Succeed())
-				parent.entity, parent.key = p.Entity, p.Key
+				Expect(json.Unmarshal(raw, &p)).To(Succeed())
+				next := anchorRow{entity: p.Entity, key: p.Key}
+				chains.overrides[at] = chainEdge{parent: next, ok: true}
+				at = next
 			}
-			got := set.holdsUnder(c.Permission, anchorRow{entity: c.Entity, key: c.Key}, parent)
+			chains.overrides[at] = chainEdge{}
+			got, err := chains.holds(set.perms[c.Permission], &entityInfo{name: c.Entity}, c.Key, nil)
+			Expect(err).NotTo(HaveOccurred())
 			Expect(got).To(Equal(c.Want == "yes"))
 		})
 	}
@@ -203,7 +215,7 @@ var _ = Describe("rowEmitter access binding", func() {
 		Expect(err).NotTo(HaveOccurred())
 		e.caller = &accessCaller{model: srv.catalogPtr().access}
 
-		e.useAccess(&accessSet{perms: map[string]*permAnchors{"view_tasks": {root: true}}})
+		e.useAccess(&accessSet{perms: map[string]*permAnchors{"view_tasks": {root: true}}}, nil)
 		safe, err := e.deltaSafe("task")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(safe).To(BeTrue(), "every task is visible to a caller who reads tasks at the root")
@@ -212,7 +224,7 @@ var _ = Describe("rowEmitter access binding", func() {
 		// the first time can arrive in a forward page and must ship whole.
 		e.useAccess(&accessSet{perms: map[string]*permAnchors{"view_tasks": {
 			rows: map[anchorRow]struct{}{{entity: "project", key: "p1"}: {}},
-		}}})
+		}}}, nil)
 		safe, err = e.deltaSafe("task")
 		Expect(err).NotTo(HaveOccurred())
 		Expect(safe).To(BeFalse())

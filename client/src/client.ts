@@ -14,6 +14,8 @@ import {
 	AccessSummary,
 	type CanAnswer,
 	canAt,
+	MAX_ACCESS_CHAIN,
+	parentDefOf,
 	parentRefOf,
 	pendingChangesAccess,
 } from './access.js';
@@ -3075,8 +3077,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/**
 	 * Predicts whether the caller holds `permission` at the row of `schema`
 	 * with `key` in the default workspace, from the CallerAccess the server
-	 * last sent: held at the workspace root, at the row itself, or at the row
-	 * its access parent points at.
+	 * last sent: held at the workspace root, at the row itself, or at a row up
+	 * its chain of access parents, as the rows held locally name it.
 	 *
 	 * The answer is advisory. The server decides every read and write itself,
 	 * and a write this predicts as allowed can still come back as a rejection
@@ -3084,9 +3086,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * write queued against it until that ack arrives.
 	 *
 	 * Resolves to `'unknown'` before the first summary arrives, in a schema
-	 * without the access model, when the row is not held locally and the
-	 * answer depends on its access parent, and while a local write to a grant
-	 * row, or a delete of a row other rows sit below, waits for its ack.
+	 * without the access model, when the answer depends on a row up the chain
+	 * that is not held locally (the row itself included), and while a local
+	 * write to a grant row, or a delete of a row other rows sit below, waits
+	 * for its ack.
 	 */
 	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer> {
 		return this.canIn(this.defaultScope().workspaceId, schema, key, permission);
@@ -3108,9 +3111,29 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const summary = await this.accessSummaryIn(tx, workspaceId);
 				if (summary === undefined) return 'unknown';
 				if (summary.holds(permission, def.name, key)) return 'yes';
-				const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
-				const row = bytes === undefined ? undefined : fromBinary(schema, bytes);
-				return canAt(summary, permission, def.name, key, parentRefOf(def, row));
+				const rows: { entity: string; key: string }[] = [];
+				let complete = true;
+				let at: EntityDef = def;
+				let atKey = key;
+				for (;;) {
+					// Read through the merged view, so a queued move counts
+					// where the row will be once the server accepts it.
+					const bytes = this.entityRegistry.get(at.name) === undefined
+						? undefined
+						: await readMergedRow(tx, this.entityRegistry, at.name, workspaceId, atKey);
+					const parent = parentRefOf(at, bytes === undefined ? undefined : fromBinary(at.schema, bytes));
+					const parentDef = parentDefOf(at);
+					if (parent === null || parentDef === undefined) break;
+					if (parent === undefined || rows.length === MAX_ACCESS_CHAIN) {
+						complete = false;
+						break;
+					}
+					rows.push(parent);
+					if (summary.holds(permission, parent.entity, parent.key)) return 'yes';
+					at = parentDef;
+					atKey = parent.key;
+				}
+				return canAt(summary, permission, def.name, key, { rows, complete });
 			} finally {
 				tx.release();
 			}

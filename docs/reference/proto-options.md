@@ -450,21 +450,21 @@ message Label {
 }
 ```
 
-A caller holds a permission at an **anchor**: the workspace root, or one row that a grant row's `access_parent` field points at. A permission held at an anchor applies to the anchor row and to every row whose `access_parent` field points at it.
+A caller holds a permission at an **anchor**: the workspace root, or one row that a grant row's `access_parent` field points at. A permission held at an anchor applies to the anchor row and to every row below it: the rows whose `access_parent` field points at it, the rows whose `access_parent` field points at those, and so on. A comment whose parent is a task, whose parent is a project, is below the project. An entity can be its own access parent, such as a folder inside a folder.
 
-| Option                         | Field          | Description                                                                                                                                                                                  |
-| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access`                       | `read`         | The permission that lets a caller read rows. Required unless `unrestricted` is set.                                                                                                          |
-| `access`                       | `write`        | The permission that lets a caller create, update and delete rows. Required unless `unrestricted` is set.                                                                                     |
-| `access`                       | `unrestricted` | Puts the entity outside the model: every caller admitted to the workspace reads and writes its rows, subject to the application permission hooks. Cannot be combined with `read` or `write`. |
-| `grant`                        | `subject`      | The name of the field that holds the subject the row grants to: a top-level, singular `string` field outside any oneof.                                                                      |
-| `grant`                        | `role`         | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.      |
-| `grant`                        | `roles`        | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                            |
-| `field_behavior.access_parent` | (none)         | Marks the reference that places each row below another row. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root.                     |
+| Option                         | Field          | Description                                                                                                                                                                                                          |
+| ------------------------------ | -------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access`                       | `read`         | The permission that lets a caller read rows. Required unless `unrestricted` is set.                                                                                                                                  |
+| `access`                       | `write`        | The permission that lets a caller create, update and delete rows. Required unless `unrestricted` is set.                                                                                                             |
+| `access`                       | `unrestricted` | Puts the entity outside the model: every caller admitted to the workspace reads and writes its rows, subject to the application permission hooks. Cannot be combined with `read` or `write`.                         |
+| `grant`                        | `subject`      | The name of the field that holds the subject the row grants to: a top-level, singular `string` field outside any oneof.                                                                                              |
+| `grant`                        | `role`         | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.                              |
+| `grant`                        | `roles`        | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                                                    |
+| `field_behavior.access_parent` | (none)         | Marks the reference that places each row below another row, which can have an access parent of its own. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root. |
 
 A grant row grants nothing when its subject is empty, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist. Every write path refuses to store a grant row with an empty subject, an undeclared role, or no `access_parent` on an entity that has one.
 
-A caller can create a row where it holds the entity's `write` permission, and update or delete a row where the stored row sits. A write that moves a row to another access parent needs `write` at both. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
+A caller can create a row where it holds the entity's `write` permission, and update or delete a row where the stored row sits. A write that moves a row to another access parent needs `write` at both, and the `read` permission of every entity whose rows can sit below it where the row is before the move. A delete of a row that a live row names as its access parent is refused. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
 
 ### Registration rules
 
@@ -473,7 +473,8 @@ A schema **uses the access model** when any of its entities declares `access` or
 - An entity declares no `access`. Declare `access: { unrestricted: true }` for an entity outside the model.
 - An `access` sets `unrestricted` together with a permission, or names only one of `read` and `write`.
 - An entity marks more than one `access_parent` field, or marks one that is repeated, a member of a oneof, nested inside a message field, a workspace-qualified or polymorphic reference, or protected by `write_policy`.
-- An `access_parent` points at an entity that is not registered, is outside the model, or has an `access_parent` of its own.
+- An `access_parent` points at an entity that is not registered or is outside the model.
+- An entity sits more `access_parent` hops below an entity without an access parent than `Limits.MaxAccessDepth` allows. A chain that comes back to an entity it passed, such as a folder inside a folder, has no such bound; its rows are bounded at write time instead (see [Access model](server.md#access-model)).
 - A grant entity does not declare `access` with `read` and `write`.
 - A `grant` names a `subject` or `role` field that does not exist or has the wrong type, declares no roles, declares one role twice, or declares an enum role that is not a value of the enum.
 - A role name is declared by two entities. Role names are unique across the schema.
@@ -484,7 +485,7 @@ A schema **uses the access model** when any of its entities declares `access` or
 
 `RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so a schema it builds can break a rule until its last entity is registered. While it does, every request to the server fails with `failed_precondition`.
 
-Registration logs a warning when one permission governs entities at different depths, such as `view_members` on `OrgMember` (at the workspace root) and on `ProjectMember` (below a project). A role that grants such a permission at the workspace root reaches the rows below every anchor.
+Registration logs a warning when one permission governs entities at different depths that do not sit below one another, such as `view_members` on `OrgMember` (at the workspace root) and on `ProjectMember` (below a project). A role that grants such a permission at the workspace root reaches the rows below every anchor. One permission for a row and the rows below it, such as `view_tasks` on `Task` and on a `Comment` below a task, logs nothing.
 
 ### Changing the access model
 

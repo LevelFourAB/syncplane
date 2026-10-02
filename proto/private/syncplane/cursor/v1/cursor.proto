@@ -124,6 +124,36 @@ message Cursor {
 	// caller holds, not only the ones entities read by. A response carries a
 	// new CallerAccess when the hash differs. 0 for a schema without the model.
 	fixed64 caller_access_hash = 18;
+	// The sequence through which the rows the client holds reflect every
+	// access move (see AccessMove). A pull compares the client's rows with
+	// the moves after the greater of seq and this, so the pull that follows a
+	// resync does not resync the same moves again. 0 when seq alone says it.
+	uint64 access_moves_through = 19;
+}
+
+// AccessMove is one change of the access parent of a row that other rows sit
+// below: a move to another parent, or the row's creation or deletion. The
+// rows below it change visibility without being written, so the server
+// records the change in the transaction that makes it, as a row of an entity
+// no schema declares, at the change's sequence. A pull reads the moves after
+// its cursor and resyncs the rows below each one that changes what the client
+// can read.
+message AccessMove {
+	// The row whose access parent changed.
+	string entity = 1;
+	string key = 2;
+	// The row's access parent before the change, as of the start of the
+	// sequence; absent when the row did not exist or anchored at nothing.
+	AnchorRef from = 3;
+	// The row's access parent after the change; absent when the row was
+	// deleted or anchors at nothing.
+	AnchorRef to = 4;
+}
+
+// AnchorRef names one row of a workspace.
+message AnchorRef {
+	string entity = 1;
+	string key = 2;
 }
 
 // ReadAccess is what a caller could read when a cursor was issued, stored in
@@ -242,6 +272,9 @@ message ResyncState {
 	// The access hash the resync converges on (see Cursor.access_hash). A pull
 	// that finds the caller's access moved again mid-resync resets.
 	fixed64 to_access_hash = 5;
+	// The newest access move the resync accounts for (see AccessMove). A pull
+	// that finds a later move that changes what the client can read resets.
+	uint64 to_moves_through = 6;
 }
 
 // BootstrapPosition is how far an interrupted Bootstrap got: what rides inside

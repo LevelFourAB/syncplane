@@ -9,6 +9,8 @@ import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import {
+	CommentSchema,
+	FolderSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
 	TaskSchema,
@@ -173,5 +175,46 @@ describe('can()', () => {
 		expect(await c.can(TaskSchema, 't2', 'view_tasks')).toBe('no');
 		expect(await c.can(TaskSchema, 't3', 'view_tasks')).toBe('unknown');
 		await c.close();
+	});
+
+	it('walks the chain of access parents through the rows held locally', async () => {
+		const t = await createTestClient({ entities: [ ProjectSchema, TaskSchema, CommentSchema ] });
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.put(TaskSchema, { id: 't2', project: { id: 'p2' } });
+		t.server.put(CommentSchema, { id: 'c1', task: { id: 't1' } });
+		t.server.put(CommentSchema, { id: 'c2', task: { id: 't2' } });
+		t.server.put(CommentSchema, { id: 'c9', task: { id: 't9' } });
+		t.server.setCallerAccess({
+			permissions: [ {
+				permission: 'view_tasks',
+				anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+			} ],
+		});
+		await t.sync();
+		expect(await t.client.can(CommentSchema, 'c1', 'view_tasks')).toBe('yes');
+		expect(await t.client.can(CommentSchema, 'c2', 'view_tasks')).toBe('no');
+		expect(await t.client.can(CommentSchema, 'c9', 'view_tasks')).toBe('unknown');
+
+		// A queued move counts where the row will be once the server accepts it.
+		await t.client.mutate.patch(TaskSchema, 't2', { project: { id: 'p1' } });
+		expect(await t.client.can(CommentSchema, 'c2', 'view_tasks')).toBe('yes');
+		await t.client.close();
+	});
+
+	it('walks a recursive chain', async () => {
+		const t = await createTestClient({ entities: [ FolderSchema ] });
+		t.server.put(FolderSchema, { id: 'top' });
+		t.server.put(FolderSchema, { id: 'mid', parent: { id: 'top' } });
+		t.server.put(FolderSchema, { id: 'low', parent: { id: 'mid' } });
+		t.server.setCallerAccess({
+			permissions: [ {
+				permission: 'view_folders',
+				anchors: [ { entity: 'folder', keys: [ 'mid' ] } ],
+			} ],
+		});
+		await t.sync();
+		expect(await t.client.can(FolderSchema, 'low', 'view_folders')).toBe('yes');
+		expect(await t.client.can(FolderSchema, 'top', 'view_folders')).toBe('no');
+		await t.client.close();
 	});
 });

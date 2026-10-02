@@ -318,6 +318,68 @@ func (x *Task) GetTitle() string {
 	return ""
 }
 
+// A comment on a task, two access_parent hops below its project. Registered
+// with the org schema by the specs that walk chains deeper than one level.
+type Comment struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Task          *Task                  `protobuf:"bytes,2,opt,name=task,proto3" json:"task,omitempty"`
+	Body          string                 `protobuf:"bytes,3,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Comment) Reset() {
+	*x = Comment{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Comment) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Comment) ProtoMessage() {}
+
+func (x *Comment) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Comment.ProtoReflect.Descriptor instead.
+func (*Comment) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *Comment) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Comment) GetTask() *Task {
+	if x != nil {
+		return x.Task
+	}
+	return nil
+}
+
+func (x *Comment) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
 // Readable by every org member, writable only through trusted writes.
 type Label struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -329,7 +391,7 @@ type Label struct {
 
 func (x *Label) Reset() {
 	*x = Label{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[4]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -341,7 +403,7 @@ func (x *Label) String() string {
 func (*Label) ProtoMessage() {}
 
 func (x *Label) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[4]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -354,7 +416,7 @@ func (x *Label) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Label.ProtoReflect.Descriptor instead.
 func (*Label) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{4}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *Label) GetId() string {
@@ -382,7 +444,7 @@ type Note struct {
 
 func (x *Note) Reset() {
 	*x = Note{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -394,7 +456,7 @@ func (x *Note) String() string {
 func (*Note) ProtoMessage() {}
 
 func (x *Note) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -407,7 +469,7 @@ func (x *Note) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Note.ProtoReflect.Descriptor instead.
 func (*Note) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Note) GetId() string {
@@ -434,7 +496,7 @@ type TaskArgs struct {
 
 func (x *TaskArgs) Reset() {
 	*x = TaskArgs{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -446,7 +508,7 @@ func (x *TaskArgs) String() string {
 func (*TaskArgs) ProtoMessage() {}
 
 func (x *TaskArgs) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -459,7 +521,7 @@ func (x *TaskArgs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskArgs.ProtoReflect.Descriptor instead.
 func (*TaskArgs) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *TaskArgs) GetTaskId() string {
@@ -483,7 +545,7 @@ type TeamMember struct {
 
 func (x *TeamMember) Reset() {
 	*x = TeamMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -495,7 +557,7 @@ func (x *TeamMember) String() string {
 func (*TeamMember) ProtoMessage() {}
 
 func (x *TeamMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -508,7 +570,7 @@ func (x *TeamMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamMember.ProtoReflect.Descriptor instead.
 func (*TeamMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *TeamMember) GetId() string {
@@ -548,7 +610,7 @@ type Team struct {
 
 func (x *Team) Reset() {
 	*x = Team{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -560,7 +622,7 @@ func (x *Team) String() string {
 func (*Team) ProtoMessage() {}
 
 func (x *Team) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -573,12 +635,204 @@ func (x *Team) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Team.ProtoReflect.Descriptor instead.
 func (*Team) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Team) GetId() string {
 	if x != nil {
 		return x.Id
+	}
+	return ""
+}
+
+// A folder inside a folder, or at the top when parent is unset. Registered
+// with FolderMember and Doc, apart from the org schema above.
+type Folder struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Parent        *Folder                `protobuf:"bytes,2,opt,name=parent,proto3" json:"parent,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Folder) Reset() {
+	*x = Folder{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Folder) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Folder) ProtoMessage() {}
+
+func (x *Folder) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Folder.ProtoReflect.Descriptor instead.
+func (*Folder) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *Folder) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Folder) GetParent() *Folder {
+	if x != nil {
+		return x.Parent
+	}
+	return nil
+}
+
+func (x *Folder) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// A role on one folder and everything below it.
+type FolderMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Folder        *Folder                `protobuf:"bytes,2,opt,name=folder,proto3" json:"folder,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *FolderMember) Reset() {
+	*x = FolderMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *FolderMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*FolderMember) ProtoMessage() {}
+
+func (x *FolderMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use FolderMember.ProtoReflect.Descriptor instead.
+func (*FolderMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{11}
+}
+
+func (x *FolderMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *FolderMember) GetFolder() *Folder {
+	if x != nil {
+		return x.Folder
+	}
+	return nil
+}
+
+func (x *FolderMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *FolderMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A document in a folder.
+type Doc struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Folder        *Folder                `protobuf:"bytes,2,opt,name=folder,proto3" json:"folder,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Doc) Reset() {
+	*x = Doc{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Doc) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Doc) ProtoMessage() {}
+
+func (x *Doc) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Doc.ProtoReflect.Descriptor instead.
+func (*Doc) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{12}
+}
+
+func (x *Doc) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Doc) GetFolder() *Folder {
+	if x != nil {
+		return x.Folder
+	}
+	return nil
+}
+
+func (x *Doc) GetTitle() string {
+	if x != nil {
+		return x.Title
 	}
 	return ""
 }
@@ -606,14 +860,14 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
 	"\x04name\x18\x02 \x01(\tR\x04name:1\xa2\xbb\x18-\n" +
 	"\aproject\x12\x02idR\x1e\n" +
-	"\rview_projects\x12\redit_projects\"\xa0\x04\n" +
+	"\rview_projects\x12\redit_projects\"\xcd\x04\n" +
 	"\rProjectMember\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
 	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\x88\x03\xa2\xbb\x18\x83\x03\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xb5\x03\xa2\xbb\x18\xb0\x03\n" +
 	"\x0eproject_member\x12\x02idR\x1e\n" +
-	"\fview_members\x12\x0emanage_membersZ\xcc\x02\n" +
+	"\fview_members\x12\x0emanage_membersZ\xf9\x02\n" +
 	"\auser_id\x12\x04role\x1a9\n" +
 	"\x0eproject_reader\x12\rview_projects\x12\fview_members\x12\n" +
 	"view_tasks\x1aE\n" +
@@ -622,6 +876,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"edit_tasks\x1aT\n" +
 	"\rproject_admin\x12\rview_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
 	"view_tasks\x12\n" +
+	"edit_tasks\x1a+\n" +
+	"\x0eproject_editor\x12\rview_projects\x12\n" +
 	"edit_tasks\x1ac\n" +
 	"\rproject_owner\x12\rview_projects\x12\redit_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
 	"view_tasks\x12\n" +
@@ -631,6 +887,14 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x14\n" +
 	"\x05title\x18\x03 \x01(\tR\x05title:(\xa2\xbb\x18$\n" +
 	"\x04task\x12\x02idR\x18\n" +
+	"\n" +
+	"view_tasks\x12\n" +
+	"edit_tasks\"\x9a\x01\n" +
+	"\aComment\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskB\x06\xaa\xbb\x18\x02Z\x00R\x04task\x12\x12\n" +
+	"\x04body\x18\x03 \x01(\tR\x04body:+\xa2\xbb\x18'\n" +
+	"\acomment\x12\x02idR\x18\n" +
 	"\n" +
 	"view_tasks\x12\n" +
 	"edit_tasks\"^\n" +
@@ -659,7 +923,30 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04Team\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:&\xa2\xbb\x18\"\n" +
 	"\x04team\x12\x02idR\x16\n" +
-	"\tview_team\x12\tedit_team*Q\n" +
+	"\tview_team\x12\tedit_team\"\xa2\x01\n" +
+	"\x06Folder\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06parent\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06parent\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name:.\xa2\xbb\x18*\n" +
+	"\x06folder\x12\x02idR\x1c\n" +
+	"\fview_folders\x12\fedit_folders\"\xe8\x02\n" +
+	"\fFolderMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06folder\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xd4\x01\xa2\xbb\x18\xcf\x01\n" +
+	"\rfolder_member\x12\x02idR\x1e\n" +
+	"\fview_folders\x12\x0emanage_foldersZ\x99\x01\n" +
+	"\auser_id\x12\x04role\x1a\x1d\n" +
+	"\rfolder_viewer\x12\fview_folders\x1a+\n" +
+	"\rfolder_editor\x12\fview_folders\x12\fedit_folders\x1a<\n" +
+	"\x0efolder_manager\x12\fview_folders\x12\fedit_folders\x12\x0emanage_folders\"\x9e\x01\n" +
+	"\x03Doc\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06folder\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:+\xa2\xbb\x18'\n" +
+	"\x03doc\x12\x02idR\x1c\n" +
+	"\fview_folders\x12\fedit_folders*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -678,29 +965,37 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
 	(*Project)(nil),       // 2: syncplane.testdata.access.v1.Project
 	(*ProjectMember)(nil), // 3: syncplane.testdata.access.v1.ProjectMember
 	(*Task)(nil),          // 4: syncplane.testdata.access.v1.Task
-	(*Label)(nil),         // 5: syncplane.testdata.access.v1.Label
-	(*Note)(nil),          // 6: syncplane.testdata.access.v1.Note
-	(*TaskArgs)(nil),      // 7: syncplane.testdata.access.v1.TaskArgs
-	(*TeamMember)(nil),    // 8: syncplane.testdata.access.v1.TeamMember
-	(*Team)(nil),          // 9: syncplane.testdata.access.v1.Team
+	(*Comment)(nil),       // 5: syncplane.testdata.access.v1.Comment
+	(*Label)(nil),         // 6: syncplane.testdata.access.v1.Label
+	(*Note)(nil),          // 7: syncplane.testdata.access.v1.Note
+	(*TaskArgs)(nil),      // 8: syncplane.testdata.access.v1.TaskArgs
+	(*TeamMember)(nil),    // 9: syncplane.testdata.access.v1.TeamMember
+	(*Team)(nil),          // 10: syncplane.testdata.access.v1.Team
+	(*Folder)(nil),        // 11: syncplane.testdata.access.v1.Folder
+	(*FolderMember)(nil),  // 12: syncplane.testdata.access.v1.FolderMember
+	(*Doc)(nil),           // 13: syncplane.testdata.access.v1.Doc
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
-	2, // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
-	2, // 1: syncplane.testdata.access.v1.Task.project:type_name -> syncplane.testdata.access.v1.Project
-	9, // 2: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
-	0, // 3: syncplane.testdata.access.v1.TeamMember.role:type_name -> syncplane.testdata.access.v1.TeamRole
-	4, // [4:4] is the sub-list for method output_type
-	4, // [4:4] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
+	2,  // 1: syncplane.testdata.access.v1.Task.project:type_name -> syncplane.testdata.access.v1.Project
+	4,  // 2: syncplane.testdata.access.v1.Comment.task:type_name -> syncplane.testdata.access.v1.Task
+	10, // 3: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
+	0,  // 4: syncplane.testdata.access.v1.TeamMember.role:type_name -> syncplane.testdata.access.v1.TeamRole
+	11, // 5: syncplane.testdata.access.v1.Folder.parent:type_name -> syncplane.testdata.access.v1.Folder
+	11, // 6: syncplane.testdata.access.v1.FolderMember.folder:type_name -> syncplane.testdata.access.v1.Folder
+	11, // 7: syncplane.testdata.access.v1.Doc.folder:type_name -> syncplane.testdata.access.v1.Folder
+	8,  // [8:8] is the sub-list for method output_type
+	8,  // [8:8] is the sub-list for method input_type
+	8,  // [8:8] is the sub-list for extension type_name
+	8,  // [8:8] is the sub-list for extension extendee
+	0,  // [0:8] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -714,7 +1009,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   9,
+			NumMessages:   13,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

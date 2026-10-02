@@ -615,8 +615,8 @@ func (e *rowEmitter) closureSeeds(tx storage.ReadTx, sub *syncplanev1.Subscripti
 			return nil // quarantined: it seeds nothing
 		}
 		m := msg.ProtoReflect()
-		if filter != nil && !filter(row.Key, msg) {
-			return nil
+		if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+			return err
 		}
 		if p != nil && !p.Eval(m) {
 			return nil
@@ -883,8 +883,8 @@ func (e *rowEmitter) followForward(tx storage.ReadTx, g *refGraph, holders []fro
 			if !ok {
 				return nil // quarantined: dropped like an orphan, and unfollowable
 			}
-			if filter != nil && !filter(row.Key, msg) {
-				return nil // permission prune — and we cannot follow through it
+			if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+				return err // permission prune — and we cannot follow through it
 			}
 			rows[closureKey{row.Entity, row.Key}] = resolved{
 				row:   row,
@@ -957,8 +957,8 @@ func (e *rowEmitter) followReverse(tx storage.ReadTx, holder frontierRow, rr *re
 	var out []resolved
 	matched := 0
 	collect := func(row storage.Row, m protoreflect.Message, msg proto.Message) error {
-		if filter != nil && !filter(row.Key, msg) {
-			return nil
+		if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+			return err
 		}
 		matched++
 		if matched > limits.MaxReverseFanOut {
@@ -1563,8 +1563,8 @@ func (m *closureMaint) resolveSeed(hop *reverseHop, ck closureKey) (bool, error)
 	if err != nil {
 		return false, err
 	}
-	if filter != nil && !filter(row.Key, msg) {
-		return false, nil
+	if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+		return false, err
 	}
 	return hop.seedPred == nil || hop.seedPred.Eval(msg.ProtoReflect()), nil
 }
@@ -1805,8 +1805,8 @@ func (m *closureMaint) seedRow(hop *forwardHop, row storage.Row, msg proto.Messa
 	if err != nil {
 		return false, err
 	}
-	if filter != nil && !filter(row.Key, msg) {
-		return false, nil
+	if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+		return false, err
 	}
 	return hop.seedPred == nil || hop.seedPred.Eval(msg.ProtoReflect()), nil
 }
@@ -1986,8 +1986,8 @@ func (m *closureMaint) addForwardTargets(hop *forwardHop, keys []string) error {
 		if !ok {
 			return nil // quarantined: followForward drops it too
 		}
-		if filter != nil && !filter(row.Key, msg) {
-			return nil // permission prune — and we cannot follow through it
+		if ok, err := filter.admits(row.Key, msg); err != nil || !ok {
+			return err // permission prune — and we cannot follow through it
 		}
 		// Resolved against this snapshot and read-filtered, so these are
 		// members and recheckForwardTargets can skip them.

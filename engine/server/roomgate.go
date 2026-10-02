@@ -110,7 +110,11 @@ func (s *Server) checkAnchor(ctx context.Context, t presence.Topic, adm admissio
 	}
 	if adm.caller != nil {
 		emitter.caller = adm.caller
-		emitter.useAccess(adm.access)
+		// The anchor's ancestors come through the same cache as the anchor,
+		// for the same reason: every watcher of a document gates on them.
+		emitter.useAccess(adm.access, emitter.chainsOver(func(entity, key string) (storage.Row, error) {
+			return s.roomAnchors.get(ctx, s, presence.Topic{WorkspaceID: t.WorkspaceID, Entity: entity, Key: key})
+		}))
 	}
 	ok, err = emitter.readable(row)
 	if err != nil {

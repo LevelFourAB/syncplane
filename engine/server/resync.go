@@ -206,6 +206,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		}
 		if newEm.caller != nil {
 			_, st.resync.ToAccessHash = newEm.boundReadAccess()
+			st.resync.ToMovesThrough = newEm.movesThrough
 		}
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	}
@@ -300,13 +301,14 @@ func runResync(tx storage.ReadTx, oldEm, newEm *rowEmitter, seq uint64, pos resy
 		if oldEm.accessOnly {
 			// Same scope on both sides, so only the rows below the anchors
 			// that moved can differ.
-			if readAccessUnchanged(oldEm, newEm, entity) && !slices.Contains(oldEm.hiddenEntities, entity) {
+			if readAccessUnchanged(oldEm, newEm, entity) && !slices.Contains(oldEm.hiddenEntities, entity) &&
+				!oldEm.movedBelow[entity] {
 				continue
 			}
 			keys, narrowed, err = accessDeltaCandidates(tx, oldEm, newEm, newEm.srv.catalogPtr().entities[entity], scanLimit)
 		} else {
 			if entityScopeUnchanged(oldEm, newEm, entity) && readAccessUnchanged(oldEm, newEm, entity) &&
-				!slices.Contains(oldEm.hiddenEntities, entity) {
+				!slices.Contains(oldEm.hiddenEntities, entity) && !oldEm.movedBelow[entity] {
 				continue
 			}
 			keys, narrowed, err = resyncCandidates(tx, oldEm, newEm, entity, scanLimit, limits)

@@ -479,6 +479,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PUT, nil, msg); err != nil {
 		return err
 	}
+	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key, currentRow, msg); err != nil {
+		return err
+	}
 	if err := aw.finish(e.tx, msg); err != nil {
 		return err
 	}
@@ -507,6 +510,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	// capture set and narrows it to what `msg` actually moves against the row
 	// read above.
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, msg, nil, seq, e.actor); err != nil {
+		return err
+	}
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key, currentRow, msg, seq, e.actor); err != nil {
 		return err
 	}
 	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
@@ -673,6 +679,10 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	if err := e.srv.checkGrantRow(info, key, syncplanev1.CrudOp_CRUD_OP_PATCH, mask, base); err != nil {
 		return err
 	}
+	if err := e.srv.checkAccessChain(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return row, live, nil }, base); err != nil {
+		return err
+	}
 	if err := aw.finish(e.tx, base); err != nil {
 		return err
 	}
@@ -708,6 +718,10 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	// that overwrite one. `row` still carries the encoded before-state — `base`
 	// was merged in place, and is therefore the after-state to diff against.
 	if err := e.srv.captureHistory(e.ctx, e.tx, e.ws, info, key, row, live, base, mask, seq, e.actor); err != nil {
+		return err
+	}
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return row, live, nil }, base, seq, e.actor); err != nil {
 		return err
 	}
 	if err := e.tx.PutRow(info.name, key, value, seq, e.actor); err != nil {
@@ -769,6 +783,10 @@ func (e *EntityTx) Delete(prototype proto.Message, key string) error {
 	}
 	// Same as the wire DELETE: the row's history goes with the row.
 	if err := e.srv.purgeHistory(e.tx, info, key); err != nil {
+		return err
+	}
+	if err := e.srv.recordAccessMove(e.ctx, e.ws, e.tx, info, key,
+		func() (storage.Row, bool, error) { return e.liveRow(info, key) }, nil, seq, e.actor); err != nil {
 		return err
 	}
 	if err := e.tx.DeleteRow(info.name, key, seq, e.actor); err != nil {
