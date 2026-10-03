@@ -117,12 +117,18 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 	}
 
 	opaque := isOpaque(fd)
+	collection := fd.IsMap() || fd.IsList()
+	// An empty item key encodes as the empty segment, so the path of that item
+	// ends in the separator ("attrs."). Only the absence of any separator makes
+	// a bare path: reading "attrs." as "attrs" would replace the whole
+	// collection with the writer's view of it.
+	bare := rest == "" && (len(seg) == len(path) || !collection)
 	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
 	// replaced/merged whole even when the mask names a sub-path into it), or a
 	// singular reference message, whose workspace and key must never split
 	// across a masked write. A repeated one falls through to mergeItem, which
 	// keeps the two together by addressing each element as one value.
-	if rest == "" || opaque || (IsRefMessageField(fd) && !fd.IsList()) {
+	if bare || opaque || (IsRefMessageField(fd) && !fd.IsList()) {
 		mg, hasMerger := m[prefix+seg]
 		if hasMerger && opaque && src.Has(fd) && (dst.Has(fd) || mg.MergeAbsentBase) {
 			fn := mg.Fn
@@ -138,9 +144,9 @@ func mergePath(dst, src protoreflect.Message, path, prefix, instPrefix string, m
 		return nil
 	}
 
-	// rest != "" and non-opaque: a collection merges per item, a singular
+	// An item path and non-opaque: a collection merges per item, a singular
 	// message descends, a scalar cannot be sub-pathed.
-	if fd.IsMap() || fd.IsList() {
+	if collection {
 		return mergeItem(dst, src, fd, seg, rest, prefix, instPrefix, m)
 	}
 	if fd.Kind() != protoreflect.MessageKind {
@@ -398,6 +404,9 @@ func listRemoveAt(l protoreflect.List, idx int) {
 // SplitPath splits a mask path into the segments mergePath would walk. Segments
 // keep their escape sequences intact, exactly as the merge sees them: a field
 // name never carries one, and an item key is decoded by whoever consumes it.
+// A path that ends in the separator gives no empty last segment, though the
+// merge reads it as the empty key of a collection: "attrs." splits as "attrs",
+// which names more of the row than the merge writes, never less.
 //
 // Exported for callers that need to reason about where a mask POINTS without
 // applying it — index maintenance skips a row rewrite when no mask path can

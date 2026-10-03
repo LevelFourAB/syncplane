@@ -132,6 +132,62 @@ var _ = Describe("Per-item merge", func() {
 		})
 	})
 
+	// The empty key encodes as the empty segment, so its item path ends in the
+	// separator ("attrs."). That is not the bare field ("attrs").
+	Describe("the empty item key", func() {
+		It("sets the map entry with the empty key without disturbing others", func() {
+			dst := &testdatav1.Widget{Attrs: map[string]string{"k": "new"}}
+			src := &testdatav1.Widget{Attrs: map[string]string{"k": "old", "": "x"}}
+			Expect(lww.Merge(dst, src, []string{"attrs."})).To(Succeed())
+			Expect(dst.GetAttrs()).To(Equal(map[string]string{"k": "new", "": "x"}))
+		})
+
+		It("clears the map entry with the empty key when the source lacks it", func() {
+			dst := &testdatav1.Widget{Attrs: map[string]string{"k": "v", "": "x"}}
+			src := &testdatav1.Widget{Attrs: map[string]string{"k": "stale"}}
+			Expect(lww.Merge(dst, src, []string{"attrs."})).To(Succeed())
+			Expect(dst.GetAttrs()).To(Equal(map[string]string{"k": "v"}))
+		})
+
+		It("refuses the empty key on a map whose keys are integers", func() {
+			dst := &testdatav1.Widget{ById: map[int64]string{1: "one"}}
+			src := &testdatav1.Widget{ById: map[int64]string{2: "two"}}
+			Expect(lww.Merge(dst, src, []string{"by_id."})).To(MatchError(ContainSubstring("invalid int64 map key")))
+		})
+
+		It("adds the empty-string element to a scalar set without disturbing others", func() {
+			dst := &testdatav1.Widget{Tags: []string{"a", "b"}}
+			src := &testdatav1.Widget{Tags: []string{"a", ""}}
+			Expect(lww.Merge(dst, src, []string{"tags."})).To(Succeed())
+			Expect(dst.GetTags()).To(Equal([]string{"a", "b", ""}))
+		})
+
+		It("removes the empty-string element from a scalar set when the source lacks it", func() {
+			dst := &testdatav1.Widget{Tags: []string{"a", "", "b"}}
+			src := &testdatav1.Widget{Tags: []string{"a"}}
+			Expect(lww.Merge(dst, src, []string{"tags."})).To(Succeed())
+			Expect(dst.GetTags()).To(Equal([]string{"a", "b"}))
+		})
+
+		It("replaces the keyed-list element with the empty key without disturbing others", func() {
+			dst := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "u1", Role: 2}, {Uid: "", Role: 1}}}
+			src := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "u1", Role: 1}, {Uid: "", Role: 3}}}
+			Expect(lww.Merge(dst, src, []string{"members."})).To(Succeed())
+			Expect(dst.GetMembers()).To(HaveLen(2))
+			Expect(dst.GetMembers()[0].GetRole()).To(BeEquivalentTo(2))
+			Expect(dst.GetMembers()[1].GetRole()).To(BeEquivalentTo(3))
+		})
+
+		It("descends into the keyed-list element with the empty key", func() {
+			dst := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "", Name: "A", Role: 1}}}
+			src := &testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "", Name: "B", Role: 9}}}
+			Expect(lww.Merge(dst, src, []string{"members..name"})).To(Succeed())
+			Expect(dst.GetMembers()).To(HaveLen(1))
+			Expect(dst.GetMembers()[0].GetName()).To(Equal("B"))
+			Expect(dst.GetMembers()[0].GetRole()).To(BeEquivalentTo(1))
+		})
+	})
+
 	Describe("opaque + bare collection paths", func() {
 		It("replaces an opaque list whole at a bare path", func() {
 			dst := &testdatav1.Widget{AtomicTags: []string{"a", "b"}}

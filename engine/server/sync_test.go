@@ -189,6 +189,61 @@ var _ = Describe("SyncService", func() {
 	})
 
 	Describe("PATCH / LWW", func() {
+		Describe("an item with the empty key", func() {
+			// widget pulls the one widget row back.
+			widget := func() *testdatav1.Widget {
+				GinkgoHelper()
+				for _, rc := range pull(nil).GetPatch().GetChanges() {
+					if rc.GetEntity() == "widget" && !rc.GetTombstone() {
+						var w testdatav1.Widget
+						Expect(proto.Unmarshal(rc.GetValue(), &w)).To(Succeed())
+						return &w
+					}
+				}
+				Fail("widget not found")
+				return nil
+			}
+
+			It("keeps a concurrent edit of another map entry", func() {
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Attrs: map[string]string{"k": "old"}}))
+				push(patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Attrs: map[string]string{"k": "new"}}, "attrs.k"))
+
+				// c2 has not seen c1's edit and adds the entry "" = "x".
+				results := push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Attrs: map[string]string{"k": "old", "": "x"}}, "attrs."))
+				Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+
+				Expect(widget().GetAttrs()).To(Equal(map[string]string{"k": "new", "": "x"}))
+			})
+
+			It("keeps a concurrent addition to a scalar set", func() {
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Tags: []string{"a"}}))
+				push(patchMutation("c1", 2, "widget", "w1", &testdatav1.Widget{Tags: []string{"a", "b"}}, "tags.b"))
+
+				push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Tags: []string{"a", ""}}, "tags."))
+
+				Expect(widget().GetTags()).To(ConsistOf("a", "b", ""))
+			})
+
+			It("keeps a concurrent edit of another keyed-list element", func() {
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Members: []*testdatav1.Member{
+					{Uid: "u1", Role: 1}, {Uid: "", Role: 1},
+				}}))
+				push(patchMutation("c1", 2, "widget", "w1",
+					&testdatav1.Widget{Members: []*testdatav1.Member{{Uid: "u1", Role: 2}}}, "members.u1"))
+
+				push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Members: []*testdatav1.Member{
+					{Uid: "u1", Role: 1}, {Uid: "", Role: 3},
+				}}, "members."))
+
+				roles := map[string]int32{}
+				for _, m := range widget().GetMembers() {
+					roles[m.GetUid()] = m.GetRole()
+				}
+				Expect(roles).To(Equal(map[string]int32{"u1": 2, "": 3}))
+			})
+		})
+
 		It("merges interleaved patches from two clients per field, last writer wins", func() {
 			push(putMutation("c1", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "original", Completed: false}))
 			// c2 sets completed, then c1 renames: both must survive.

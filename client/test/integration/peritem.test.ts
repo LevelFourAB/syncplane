@@ -69,6 +69,42 @@ describe('per-item collection merge (sync)', () => {
 		await b.close();
 	});
 
+	it('one client edits the empty-key map entry, another a different entry → both survive', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		const b = newClient(ws);
+		await a.start();
+		await b.start();
+
+		await a.mutate.put(WidgetSchema, { id: 'w1', attrs: { k: 'old' }, tags: [ 'base' ] });
+		await a.syncNow();
+		await b.syncNow();
+
+		const ar = (await a.get(WidgetSchema, 'w1'))!;
+		await a.mutate.patch(WidgetSchema, 'w1', {
+			attrs: { ...ar.attrs, k: 'new' },
+			tags: [ 'base', 'a' ],
+		});
+		await a.syncNow();
+		// b has not seen a's edits, and adds the entry and the element "".
+		const br = (await b.get(WidgetSchema, 'w1'))!;
+		await b.mutate.patch(WidgetSchema, 'w1', {
+			attrs: { ...br.attrs, '': 'x' },
+			tags: [ ...br.tags, '' ],
+		});
+		await b.syncNow();
+		await a.syncNow();
+
+		for (const client of [ a, b ]) {
+			const row = (await client.get(WidgetSchema, 'w1'))!;
+			expect(row.attrs).toEqual({ k: 'new', '': 'x' });
+			expect([ ...row.tags ].sort()).toEqual([ '', 'a', 'base' ]);
+		}
+
+		await a.close();
+		await b.close();
+	});
+
 	it('two clients add disjoint scalar set values offline → both survive', async () => {
 		const ws = freshWorkspace();
 		const a = newClient(ws);

@@ -1386,13 +1386,19 @@ function mergePath(
 	}
 
 	const opaque = isOpaque(field);
+	const collection = field.fieldKind === 'list' || field.fieldKind === 'map';
+	// An empty item key encodes as the empty segment, so the path of that item
+	// ends in the separator ('attrs.'). Only the absence of any separator makes
+	// a bare path: reading 'attrs.' as 'attrs' would replace the whole
+	// collection with the writer's view of it. Mirrors lww.go.
+	const bare = rest === '' && (seg.length === path.length || !collection);
 	// Whole-replace cases: a bare path, an opaque field (the escape hatch —
 	// replaced/merged whole even when the mask names a sub-path into it), or a
 	// singular reference message, whose workspace and key must never split
 	// across a masked write. A repeated one falls through to mergeItem, which
 	// keeps the two together by addressing each element as one value. Mirrors
 	// lww.go.
-	if (rest === '' || opaque || (isRefMessageField(field) && field.fieldKind !== 'list')) {
+	if (bare || opaque || (isRefMessageField(field) && field.fieldKind !== 'list')) {
 		const merge = mergers?.get(prefix + seg);
 		if (merge && opaque && applyMerger(dst, src, field, merge)) {
 			return;
@@ -1401,9 +1407,9 @@ function mergePath(
 		return;
 	}
 
-	// rest !== '' and non-opaque: a collection merges per item, a singular
+	// An item path and non-opaque: a collection merges per item, a singular
 	// message descends, a scalar cannot be sub-pathed.
-	if (field.fieldKind === 'list' || field.fieldKind === 'map') {
+	if (collection) {
 		mergeItem(dst, src, field, seg, rest, prefix, mergers);
 		return;
 	}
@@ -2683,8 +2689,9 @@ function copyField(dst: Rec, src: Rec, field: DescField): void {
  */
 export function maskNeedsExpansion(schema: DescMessage, paths: readonly string[]): boolean {
 	for (const path of paths) {
-		const [ seg, rest ] = splitSeg(path);
-		if (rest !== '') continue;
+		const [ seg ] = splitSeg(path);
+		// Any separator, a trailing one included, makes an item path.
+		if (seg.length !== path.length) continue;
 		const field = schema.fields.find((f) => f.name === seg);
 		if (!field || isOpaque(field)) continue;
 		if (field.fieldKind === 'list' || field.fieldKind === 'map') return true;
@@ -2702,8 +2709,10 @@ export function expandCollectionMask(
 	const nextRec = next as unknown as Rec;
 	const out: string[] = [];
 	for (const path of paths) {
-		const [ seg, rest ] = splitSeg(path);
-		const field = rest === '' ? schema.fields.find((f) => f.name === seg) : undefined;
+		const [ seg ] = splitSeg(path);
+		// Only a bare path names the whole collection; 'attrs.' already names
+		// the item with the empty key.
+		const field = seg.length === path.length ? schema.fields.find((f) => f.name === seg) : undefined;
 		if (
 			!field || isOpaque(field)
 			|| (field.fieldKind !== 'list' && field.fieldKind !== 'map')

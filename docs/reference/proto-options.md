@@ -556,6 +556,8 @@ custom                      The entire map (checked with isEmpty)
 
 Keys containing dots must be escaped with a backslash in string path representations (for example, `custom.due\.date.text`). Wire representations transmit path segments as discrete elements and require no escaping.
 
+In a field mask, the empty key is the empty segment. `custom.` names the entry with the empty key, and `custom` names the whole map. The same rule applies to a keyed-list element and to a scalar-set element whose key is the empty string, so a client that edits only that item leaves the other items to concurrent writers. `custom..text` descends into the entry with the empty key.
+
 Queries reference the specific oneof variant intended. If an entry holds a different variant, the condition evaluates to false and sort clauses rank the entry last.
 
 Sorting across different variants of a custom field is not supported (`order by custom.priority.number` is valid; `order by custom.priority` is not).

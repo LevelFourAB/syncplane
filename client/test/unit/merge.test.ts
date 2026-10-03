@@ -10,6 +10,8 @@ import {
 import {
 	type EntityMergers,
 	EntityRegistry,
+	expandCollectionMask,
+	maskNeedsExpansion,
 	type MergeFn,
 	mergeMask,
 } from '../../src/mutations.js';
@@ -361,6 +363,62 @@ describe('mergeMask per-item', () => {
 			const dst = w({ tags: [ 'a', 'b', 'a' ] });
 			merge(dst, w({}), [ 'tags.a' ]);
 			expect(dst.tags).toEqual([ 'b' ]);
+		});
+	});
+
+	// The empty key encodes as the empty segment, so its item path ends in the
+	// separator ('attrs.'). That is not the bare field ('attrs').
+	describe('the empty item key', () => {
+		it('sets the map entry with the empty key without disturbing others', () => {
+			const dst = w({ attrs: { k: 'new' } });
+			merge(dst, w({ attrs: { k: 'old', '': 'x' } }), [ 'attrs.' ]);
+			expect(dst.attrs).toEqual({ k: 'new', '': 'x' });
+		});
+
+		it('clears the map entry with the empty key when the source lacks it', () => {
+			const dst = w({ attrs: { k: 'v', '': 'x' } });
+			merge(dst, w({ attrs: { k: 'stale' } }), [ 'attrs.' ]);
+			expect(dst.attrs).toEqual({ k: 'v' });
+		});
+
+		it('adds the empty-string element to a scalar set without disturbing others', () => {
+			const dst = w({ tags: [ 'a', 'b' ] });
+			merge(dst, w({ tags: [ 'a', '' ] }), [ 'tags.' ]);
+			expect(dst.tags).toEqual([ 'a', 'b', '' ]);
+		});
+
+		it('removes the empty-string element from a scalar set when the source lacks it', () => {
+			const dst = w({ tags: [ 'a', '', 'b' ] });
+			merge(dst, w({ tags: [ 'a' ] }), [ 'tags.' ]);
+			expect(dst.tags).toEqual([ 'a', 'b' ]);
+		});
+
+		it('replaces the keyed-list element with the empty key without disturbing others', () => {
+			const dst = w({ members: [ { uid: 'u1', role: 2 }, { uid: '', role: 1 } ] });
+			merge(dst, w({ members: [ { uid: 'u1', role: 1 }, { uid: '', role: 3 } ] }), [ 'members.' ]);
+			expect(dst.members.map((m) => [ m.uid, m.role ])).toEqual([ [ 'u1', 2 ], [ '', 3 ] ]);
+		});
+
+		it('descends into the keyed-list element with the empty key', () => {
+			const dst = w({ members: [ { uid: '', name: 'A', role: 1 } ] });
+			merge(dst, w({ members: [ { uid: '', name: 'B', role: 9 } ] }), [ 'members..name' ]);
+			expect(dst.members).toHaveLength(1);
+			expect(dst.members[0]).toMatchObject({ name: 'B', role: 1 });
+		});
+
+		it('expands an edit of the empty-key entry to its item path only', () => {
+			const prior = w({ attrs: { k: 'old' }, tags: [ 'a' ] });
+			const next = w({ attrs: { k: 'old', '': 'x' }, tags: [ 'a', '' ] });
+			expect(maskNeedsExpansion(WidgetSchema, [ 'attrs.', 'tags.' ])).toBe(false);
+			expect(expandCollectionMask(WidgetSchema, prior, next, [ 'attrs', 'tags' ])).toEqual([
+				'attrs.',
+				'tags.',
+			]);
+			// An item path is already narrow, so expansion leaves it as it is.
+			expect(expandCollectionMask(WidgetSchema, prior, w({ tags: [ 'a', '', 'z' ] }), [ 'tags.' ]))
+				.toEqual([
+					'tags.',
+				]);
 		});
 	});
 
