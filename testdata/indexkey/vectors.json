@@ -3411,6 +3411,244 @@
 			"want": "scan"
 		},
 		{
+			"name": "a negative literal against a uint64 column bounds nothing",
+			"indexes": [
+				{
+					"name": "by_ubig",
+					"key": [
+						{
+							"path": [
+								"ubig"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ubig"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"intValue": "-1"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ubig": "0"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ubig": "1"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ubig": "9223372036854775808"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ubig": "18446744073709551615"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "an equality below a uint64 column's range matches no row",
+			"indexes": [
+				{
+					"name": "by_ubig",
+					"key": [
+						{
+							"path": [
+								"ubig"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ubig"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"intValue": "-1"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ubig": "0"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ubig": "1"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ubig": "9223372036854775808"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ubig": "18446744073709551615"
+					}
+				}
+			],
+			"matches": [],
+			"want": "scan"
+		},
+		{
+			"name": "a literal above an int64 column's range bounds nothing",
+			"indexes": [
+				{
+					"name": "by_big",
+					"key": [
+						{
+							"path": [
+								"big"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"big"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"uintValue": "9223372036854775808"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"big": "-9223372036854775808"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"big": "-1"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"big": "5"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"big": "9223372036854775807"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4"
+			],
+			"want": "scan"
+		},
+		{
+			"name": "a literal at the edge of a 64-bit column's range still bounds it",
+			"indexes": [
+				{
+					"name": "by_ubig",
+					"key": [
+						{
+							"path": [
+								"ubig"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ubig"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"uintValue": "9223372036854775808"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ubig": "0"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ubig": "1"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ubig": "9223372036854775808"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ubig": "18446744073709551615"
+					}
+				}
+			],
+			"matches": [
+				"r3",
+				"r4"
+			],
+			"want": {
+				"index": "by_ubig",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
 			"name": "a negated term stays residual and pins nothing",
 			"indexes": [
 				{

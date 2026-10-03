@@ -1201,6 +1201,9 @@ func coerceLiteral(want rvKind, leaf protoreflect.FieldDescriptor, v condValue) 
 			// useful bound.
 			return rowValue{}, false
 		}
+		if want == rvBigint && !fitsColumn(leaf, v.big) {
+			return rowValue{}, false
+		}
 		return v, true
 	}
 	switch {

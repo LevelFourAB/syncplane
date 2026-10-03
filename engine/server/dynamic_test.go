@@ -238,7 +238,7 @@ var _ = Describe("Dynamic entity", func() {
 
 // buildNote constructs a dynamic note message from a field map and returns it
 // as a proto.Message ready to marshal. Values must match the field kind:
-// string, int64, bool, []string (repeated string), or []byte.
+// string, int64, uint64, bool, []string (repeated string), or []byte.
 func buildNote(mt protoreflect.MessageType, fields map[string]any) proto.Message {
 	GinkgoHelper()
 	m := mt.New()
@@ -251,6 +251,8 @@ func buildNote(mt protoreflect.MessageType, fields map[string]any) proto.Message
 			m.Set(fd, protoreflect.ValueOfString(val))
 		case int64:
 			m.Set(fd, protoreflect.ValueOfInt64(val))
+		case uint64:
+			m.Set(fd, protoreflect.ValueOfUint64(val))
 		case bool:
 			m.Set(fd, protoreflect.ValueOfBool(val))
 		case []byte:
