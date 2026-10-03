@@ -352,6 +352,8 @@ Set `d` well past the longest time a client can stay away and still hold unpushe
 
 Wire cursors are opaque tokens. Clients must not parse or interpret cursor structure.
 
+Opaque does not mean sealed. A cursor is not signed, so a hostile client can edit it, for example to claim that it holds rows it never received. Such an edit can change which rows a pull examines and which tombstones it sends. It cannot get a value past the read filter: the server applies `ReadFilter` to every row it ships, and this includes rows that a cursor names as already held.
+
 ## Browser connection limits
 
 Web browsers limit concurrent HTTP/1.1 connections to approximately six per host. Client connections scale with the number of planes in use rather than the number of active workspaces:

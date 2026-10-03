@@ -86,6 +86,21 @@ func (p *epochPermissions) forget() {
 	p.forgotten = true
 }
 
+// hiddenProjects hides every project whose name is the given one.
+type hiddenProjects struct {
+	server.AllowAll
+	name string
+}
+
+func (p hiddenProjects) ReadFilter(_ context.Context, _ server.Principal, _ string, entity string) (server.RowFilter, error) {
+	if entity != "project" {
+		return nil, nil
+	}
+	return func(_ string, row proto.Message) bool {
+		return row.(*testdatav1.Project).GetName() != p.name
+	}, nil
+}
+
 var _ = Describe("Delta resync", func() {
 	var (
 		ctx    context.Context
@@ -500,6 +515,42 @@ var _ = Describe("Delta resync", func() {
 			perms.forget()
 			resp := pull(cursor, 0)
 			Expect(resp.GetReset_()).To(BeTrue())
+		})
+	})
+
+	// Cursor bytes are plain protobuf in the client's hands, so the membership
+	// sets a cursor carries are the client's claim. A resync classifies with
+	// the closure the cursor carries, and the read filter must still decide
+	// what ships.
+	Describe("a cursor the client edited", func() {
+		BeforeEach(func() {
+			ctx = context.Background()
+			start(newTestServer(server.WithPermissions(hiddenProjects{name: "hidden"})))
+			push(
+				putMutation("c1", 1, "project", "p-secret", &testdatav1.Project{Id: "p-secret", Name: "hidden"}),
+				putMutation("c1", 2, "project", "p-open", &testdatav1.Project{Id: "p-open", Name: "open"}),
+			)
+		})
+
+		It("ships no read-filtered row through a resync from an untampered cursor", func() {
+			first := pull(nil, 0, &syncplanev1.Subscription{Entity: "issue"})
+
+			changes, _, _ := drain(first.GetNextCursor(), &syncplanev1.Subscription{Entity: "project"})
+			Expect(valueKeys(changes, "project")).To(Equal([]string{"p-open"}))
+		})
+
+		It("ships no read-filtered row that a forged closure names", func() {
+			first := pull(nil, 0, &syncplanev1.Subscription{Entity: "issue"})
+			var cur syncplanecursorv1.Cursor
+			Expect(proto.Unmarshal(first.GetNextCursor(), &cur)).To(Succeed())
+			Expect(cur.GetSetsRef().GetId()).To(BeZero(), "the test server inlines its sets")
+			cur.Closure = &syncplanecursorv1.ClosureSet{Entries: []*syncplanecursorv1.ClosureSet_Entry{
+				{Entity: "project", Keys: []string{"p-secret"}},
+			}}
+
+			changes, _, _ := drain(mustMarshal(&cur), &syncplanev1.Subscription{Entity: "project"})
+			Expect(valueKeys(changes, "project")).To(Equal([]string{"p-open"}),
+				"the forged closure got a read-filtered row past the filter")
 		})
 	})
 

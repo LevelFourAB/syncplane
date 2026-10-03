@@ -366,7 +366,8 @@ func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 //	entity is server-only                → unsubscribed (skip)
 //	real tombstone                       → visible (pull passes it through)
 //	entity unsubscribed (subs non-empty) → unsubscribed (skip)
-//	follow-closure or window member      → visible (already read-filtered)
+//	follow-closure or window member      → in scope (skips the base-scope
+//	                                       checks below, not the read filter)
 //	outside a purely windowed or keyed
 //	scope, or a follow-only entity's
 //	closure                              → hidden-non-member (pull: tombstone
@@ -410,21 +411,19 @@ func (e *rowEmitter) classify(row storage.Row) (rowClass, error) {
 		// Tombstones pass through unfiltered: they carry only the key.
 		return rowVisible, nil
 	}
-	// A closure member is visible regardless of base scope — its read filter
-	// was applied when the closure was built. This is the OR half of
-	// "visible if base-scope matches OR follow-reachable".
-	if e.closure.has(row.Entity, row.Key) {
-		return rowVisible, nil
-	}
-	// Same shape for a window member, and for the same reason: membership was
-	// decided (and read-filtered) at build time. The closure is ADDITIVE to
-	// base scope while a window RESTRICTS it, which is why they stay separate
-	// sets instead of being folded into entityScope.
-	if e.windowMembers.has(row.Entity, row.Key) {
-		return rowVisible, nil
-	}
+	// A closure member is in scope regardless of base scope. This is the OR
+	// half of "visible if base-scope matches OR follow-reachable". A window
+	// member is in scope the same way. The closure is ADDITIVE to base scope
+	// while a window RESTRICTS it, which is why they stay separate sets instead
+	// of being folded into entityScope.
+	//
+	// Membership skips the base-scope checks but not the read filter. A build
+	// applies the filter to every member it adds, but the sets classified with
+	// here can come off the client's cursor — a resync classifies with the
+	// closure the cursor carries — and cursor bytes are the client's to edit.
+	member := e.closure.has(row.Entity, row.Key) || e.windowMembers.has(row.Entity, row.Key)
 	var scope *entityScope
-	if e.scopes != nil {
+	if e.scopes != nil && !member {
 		scope = e.scopes[row.Entity]
 		if scope == nil {
 			// An active subscription set that names this entity only via a follow
