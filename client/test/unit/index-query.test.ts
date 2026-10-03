@@ -62,6 +62,9 @@ const issue = entity('issue', {
 	indexes: [
 		{ name: 'by_state_rank', key: [ { path: 'state' }, { path: 'rank', desc: true } ] },
 		{ name: 'by_due', key: [ { path: 'meta.due' } ] },
+		// A descending string component, which a prefix reads through its
+		// inverted bytes: the "Z to A" list with type-ahead.
+		{ name: 'by_title_desc', key: [ { path: 'title', desc: true } ] },
 		// A fan-out component pinned by the equality prefix, followed by an
 		// ordinary one: the shape that serves "labelled X, ordered by rank".
 		{ name: 'by_label_rank', key: [ { path: 'labels' }, { path: 'rank', desc: true } ] },
@@ -343,6 +346,7 @@ describe('the index path is actually taken', () => {
 				where: (i) => i.custom.any((e) => and(e.key.eq('priority'), e.value.number.eq(5))),
 			}),
 		).toBe(true);
+		expect(await served(true, { where: (i) => i.title.startsWith('t') })).toBe(true);
 		// startsWith over keys is not an equality, and no range bounds an
 		// existential from inside — so this one honestly falls back.
 		expect(await served(true, { where: (i) => i.custom.any((e) => e.key.startsWith('pri')) }))
@@ -406,6 +410,10 @@ describe('index-served local queries', () => {
 	same('matching the empty string is not matching nothing', {
 		where: (i) => i.state.eq(''),
 	}, [ 'i6' ]);
+
+	same('startsWith on a descending component', {
+		where: (i) => i.title.startsWith('t'),
+	}, [ 'i2', 'i3' ]);
 
 	same('contains is never index-servable and falls back', {
 		where: (i) => i.title.contains('hre'),

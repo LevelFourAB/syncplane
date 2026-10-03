@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, and whether anything is left to re-check. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does, and only in the direction it declared — which is why the descending read claims the ordering and the ascending one merely narrows. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another.",
+	"comment": "Shared conformance vectors for the index-entry encoding: engine/query/indexkey.go and client/src/query/indexkey.ts must produce byte-identical entries. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; spec.key paths use proto field names (Widget's localNames coincide). encodeCases pin the bytes themselves, as testdata/text does, so a change to either encoder that is not mirrored in the other fails here rather than silently corrupting stored indexes. orderCases pin the property that actually matters: sorting rows by their encoded entry must give the SAME order as the row comparator (Order.Compare / compareRows) over an ordering with the same keys, which both loaders assert against each other rather than only against `want`. probeCases pin the PLANNER's decisions — which index it picks, how many ranges it produces, whether it claims the ordering, and whether anything is left to re-check. Both planners must agree: a planner that chose differently would still return the right rows, just at a different cost, so nothing else in either suite would notice the divergence. `want` is \"scan\" when the query must fall back. A probeCase with `rows` also pins what the plan READS: the rows whose entries fall in its ranges, re-checked by the residual where there is one, must be `matches`, and a scan with the condition must give the same keys. The shape alone cannot see a range that selects the wrong rows, and a bug both planners share passes every shape assertion. groupCases pin the GROUP planner in the same way: which index partitions the match set, whether anything is left to re-check, whether the partition component is stored descending (so the walk reads the range backward to yield groups in ascending value order), and whether one entry inside a group is one row (so a count can be read off entries with no row read). groupBy is a row path, not an index path, so it names a map entry by key where a component writes `*`. Ranges are not compared byte-for-byte here — encodeCases already pin the encoding, and the bounds are derived from it. A component whose path runs through a repeated field fans out: the row takes one entry per element, an empty list still takes one entry tagged missing so every live row stays reachable, and duplicate elements collapse. Components sharing a list fan out TOGETHER, element by element — the cross-product pairing is what a co-referring query would silently get wrong, so \"two components on one list stay paired per element\" is the case that pins it. A `*` segment in a spec path means FAN OUT over every entry of that map, and expands to TWO components: the entry key ascending, then the leaf in the declared direction. That is what makes a probe on one user-defined field a contiguous range. A row's entries come out in KEY order on both sides — Go randomizes map iteration and JS orders integer-like properties first, so both sort explicitly, and the encodeCases pin the result. A `*` may be followed by a repeated field inside one entry (multi-select), which yields one entry per (key, element) and is not a cross product: the second fan lives inside ONE position of the first. There are no orderCases for a `*` spec: an orderCase asserts that sorting by the encoded entry equals sorting by the COMPARATOR over the same paths, and a comparator path cannot contain a `*` — an ordering within one custom field is only meaningful once the entry key is pinned, which is a planner question. The differential index-vs-scan suites on both sides cover it instead. The field_history cases pin the one shape the engine itself depends on: a history row key renders `seq` as unpadded decimal, so the keyspace sorts \"10\" < \"100\" < \"9\" and a bare scan does not give sequence order. Only the declared by_source index does, and only in the direction it declared — which is why the descending read claims the ordering and the ascending one merely narrows. cursorCases pin the QUERY CURSOR, which is the same entry encoding with the query's order keys as its components, framed as 0x01 ++ a 16-hex shape fingerprint ++ the entry. Unlike an index entry a cursor CROSSES THE WIRE — minted on one side and replayed on the other — so its bytes and its shape are pinned here for the same reason encodeCases pin theirs, and both loaders additionally assert the property the feature rests on: sorting rows by cursor equals sorting them by the comparator, and filtering by after or before (a byte comparison against one row's cursor) selects exactly the rows the comparator ranks after or before that row. Two shapes exist only here and cannot appear in encodeCases: an order key over a COLLABORATIVE TEXT field, which an index refuses because a keystroke would rewrite the stored entry, and an order key naming ONE ENTRY of a map by key (custom.priority.number), where an index path fans out over every entry instead — which is why the shape folds the entry key in, so a cursor for one custom field is not accepted for another.",
 	"encodeCases": [
 		{
 			"name": "ascending string",
@@ -2690,6 +2690,427 @@
 					"value": "ab"
 				}
 			},
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "startsWith reads the rows the prefix names",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "a"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "abc"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r6",
+					"row": {
+						"label": "`"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3"
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "startsWith on a descending component reads the rows the prefix names",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "a"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "abc"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": ""
+					}
+				},
+				{
+					"key": "r6",
+					"row": {
+						"label": "`"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3"
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "startsWith on a descending component after an equality prefix",
+			"indexes": [
+				{
+					"name": "by_flag_label",
+					"key": [
+						{
+							"path": [
+								"flag"
+							],
+							"desc": false
+						},
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"and": {
+					"conds": [
+						{
+							"cmp": {
+								"path": [
+									"flag"
+								],
+								"op": "CMP_OP_EQ",
+								"value": {
+									"boolValue": true
+								}
+							}
+						},
+						{
+							"str": {
+								"path": [
+									"label"
+								],
+								"op": "STR_OP_STARTS_WITH",
+								"value": "a"
+							}
+						}
+					]
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"flag": true,
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"flag": true,
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "abc"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"flag": true,
+						"label": "b"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2"
+			],
+			"want": {
+				"index": "by_flag_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "startsWith on a descending component with a prefix ending in NUL",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "a\u0000"
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "a\u0000"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "a\u0000b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "a\u0001"
+					}
+				}
+			],
+			"matches": [
+				"r2",
+				"r3"
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an inequality on a descending component reads the rows below the bound",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"stringValue": "b"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2"
+			],
+			"want": {
+				"index": "by_label",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an equality on a descending component reads its rows",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"label"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "ab"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "c"
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
 			"want": {
 				"index": "by_label",
 				"ranges": 1,
@@ -6121,6 +6542,77 @@
 				"index": "by_tags_count",
 				"residual": false,
 				"desc": false,
+				"entriesAreRows": true
+			}
+		},
+		{
+			"name": "a group partitioned on a descending component reads the rows startsWith names",
+			"indexes": [
+				{
+					"name": "by_label",
+					"key": [
+						{
+							"path": [
+								"label"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"str": {
+					"path": [
+						"label"
+					],
+					"op": "STR_OP_STARTS_WITH",
+					"value": "a"
+				}
+			},
+			"groupBy": [
+				"label"
+			],
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"label": "a"
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"label": "ab"
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"label": "b"
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"label": "`"
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3"
+			],
+			"want": {
+				"index": "by_label",
+				"residual": false,
+				"desc": true,
 				"entriesAreRows": true
 			}
 		}

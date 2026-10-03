@@ -1104,13 +1104,11 @@ func inequalityBoundsFor(c IndexComponent, terms []node, taken []bool, only int)
 			raw = raw[:len(raw)-2] // drop the terminator
 			pre := append([]byte{tagPresent}, raw...)
 			if c.desc {
-				// Under desc the payload is inverted, which reverses the range:
-				// the successor becomes the lower bound.
-				inv := append([]byte(nil), raw...)
-				invert(inv)
-				lo := append([]byte{tagPresent}, UpperBound(inv)...)
-				hi := append([]byte{tagPresent}, inv...)
-				return lo, UpperBound(hi), i, named, true
+				// Under desc the payload is inverted byte by byte. That reverses
+				// the ORDER of the entries, but a string that starts with the
+				// prefix still has an entry that starts with the inverted
+				// prefix, so the range keeps the ascending shape.
+				invert(pre[1:])
 			}
 			return pre, UpperBound(pre), i, named, true
 		}

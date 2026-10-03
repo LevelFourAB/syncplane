@@ -10,20 +10,33 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { type DescMessage, fromJson, type JsonValue } from '@bufbuild/protobuf';
+import { type DescMessage, fromJson, type JsonValue, type Message } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import { IssueSchema, WidgetSchema } from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
 import { FieldHistorySchema } from '../../src/gen/syncplane/v1/history_pb.js';
 import { ConditionSchema, OrderKeySchema } from '../../src/gen/syncplane/v1/query_pb.js';
-import type { OrderKey, Path } from '../../src/query/ast.js';
+import type { Cond, OrderKey, Path } from '../../src/query/ast.js';
 import { cursorToBytes, OrderCursors } from '../../src/query/cursor.js';
-import { compareRows } from '../../src/query/evaluate.js';
+import { compareRows, evalCond } from '../../src/query/evaluate.js';
 import { compileIndexComponent, IndexEncoder } from '../../src/query/indexkey.js';
-import { planGroup, planGroupRows, planQuery } from '../../src/query/plan.js';
+import {
+	type GroupPlan,
+	type IndexRange,
+	planGroup,
+	planGroupRows,
+	planQuery,
+	type QueryPlan,
+} from '../../src/query/plan.js';
 import { condFromProto, orderKeyFromProto } from '../../src/query/proto.js';
 import { localPathOf, prepareGroupQuery } from '../../src/query/wire.js';
 import { toLocalNames } from '../support/vector-paths.js';
+
+/** One row of a read-checking vector case. */
+interface VectorRow {
+	key: string;
+	row: JsonValue;
+}
 
 interface SpecVector {
 	name: string;
@@ -216,6 +229,9 @@ interface ProbeCase {
 	indexes: SpecVector[];
 	cond?: JsonValue;
 	orderBy?: JsonValue[];
+	/** With `matches`, pins what the plan reads; see expectReads. */
+	rows?: VectorRow[];
+	matches?: string[];
 	want: 'scan' | {
 		index: string;
 		ranges: number;
@@ -228,6 +244,62 @@ interface ProbeCase {
 }
 
 const probeVectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { probeCases: ProbeCase[] };
+
+/**
+ * Asserts that a scan with `where` admits exactly `matches` of `rows`, and,
+ * unless `reads` is undefined, that `reads` admits the same rows. `reads` is a
+ * plan's read: whether one of the row's entries lies in the plan's ranges and
+ * the row passes its residual. A shape assertion cannot see a range that
+ * selects the wrong rows, and a bug both planners share passes every one of
+ * them.
+ */
+function expectReads(
+	schema: DescMessage,
+	rows: VectorRow[],
+	matches: string[] | undefined,
+	where: Cond | undefined,
+	reads: ((row: Message, key: string) => boolean) | undefined,
+): void {
+	const scanned: string[] = [];
+	const read: string[] = [];
+	for (const r of rows) {
+		const row = fromJson(schema, r.row);
+		if (!where || evalCond(row, where, schema)) scanned.push(r.key);
+		if (reads?.(row, r.key)) read.push(r.key);
+	}
+	expect(scanned, 'the scan').toEqual(matches);
+	if (reads) expect(read, 'the index read').toEqual(matches);
+}
+
+const inRange = (entries: string[], ranges: IndexRange[]): boolean =>
+	entries.some((entry) =>
+		ranges.some((r) => (r.lo === undefined || entry >= r.lo) && (r.hi === undefined || entry < r.hi))
+	);
+
+/** A row plan's read for expectReads; undefined for a scan. */
+function planReads(
+	schema: DescMessage,
+	plan: QueryPlan | undefined,
+	encoders: Map<string, IndexEncoder>,
+): ((row: Message, key: string) => boolean) | undefined {
+	if (!plan) return undefined;
+	const branches = plan.union ?? [ { index: plan.index, ranges: plan.ranges } ];
+	return (row, key) =>
+		(!plan.residual || evalCond(row, plan.residual, schema))
+		&& branches.some((b) => inRange(encoders.get(b.index)!.encode(row, key, schema), b.ranges));
+}
+
+/** planReads for a group plan, which reads one range of one index. */
+function groupReads(
+	schema: DescMessage,
+	plan: GroupPlan | undefined,
+	encoders: Map<string, IndexEncoder>,
+): ((row: Message, key: string) => boolean) | undefined {
+	if (!plan) return undefined;
+	return (row, key) =>
+		(!plan.residual || evalCond(row, plan.residual, schema))
+		&& inRange(encoders.get(plan.index)!.encode(row, key, schema), [ plan.range ]);
+}
 
 // The planner's decisions are shared because a planner that chose differently
 // would still return the right rows, just at a different cost — so nothing
@@ -253,6 +325,10 @@ describe('planner conformance vectors', () => {
 			});
 
 			const plan = planQuery(candidates, where, orderBy);
+			if (tc.rows) {
+				const encoders = new Map(candidates.map((c) => [ c.name, c.encoder ]));
+				expectReads(schema, tc.rows, tc.matches, where, planReads(schema, plan, encoders));
+			}
 			if (tc.want === 'scan') {
 				expect(plan).toBeUndefined();
 				return;
@@ -288,6 +364,9 @@ interface GroupCase {
 	groupBy: string[];
 	orderBy?: JsonValue[];
 	perGroup?: number;
+	/** With `matches`, pins what the plan reads; see expectReads. */
+	rows?: VectorRow[];
+	matches?: string[];
 	want: 'scan' | { index: string; residual: boolean; desc: boolean; entriesAreRows: boolean };
 }
 
@@ -326,6 +405,10 @@ describe('group planner conformance vectors', () => {
 			const plan = tc.perGroup === undefined
 				? planGroup(candidates, compiled.where, compiled.by, compiled.multi)
 				: planGroupRows(candidates, compiled.where, compiled.by, compiled.multi, orderBy ?? []);
+			if (tc.rows) {
+				const encoders = new Map(candidates.map((c) => [ c.name, c.encoder ]));
+				expectReads(schema, tc.rows, tc.matches, compiled.where, groupReads(schema, plan, encoders));
+			}
 			if (tc.want === 'scan') {
 				expect(plan).toBeUndefined();
 				return;

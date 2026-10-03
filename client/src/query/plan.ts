@@ -1315,12 +1315,12 @@ function prefixBounds(c: IndexComponent, prefix: string): { lo?: string; hi?: st
 	const raw = new IndexEncoder([ { ...c, desc: false } ])
 		.encodePrefix([ prefix ])
 		.slice(1, -2);
-	if (!c.desc) {
-		const lo = TAG_PRESENT + raw;
-		return { lo, hi: upperBound(lo) };
-	}
-	const inv = invert(raw);
-	return { lo: TAG_PRESENT + (upperBound(inv) ?? ''), hi: upperBound(TAG_PRESENT + inv) };
+	// Under desc the payload is inverted byte by byte. That reverses the ORDER
+	// of the entries, but a string that starts with the prefix still has an
+	// entry that starts with the inverted prefix, so the range keeps the
+	// ascending shape.
+	const lo = TAG_PRESENT + (c.desc ? invert(raw) : raw);
+	return { lo, hi: upperBound(lo) };
 }
 
 const invert = (s: string): string => {

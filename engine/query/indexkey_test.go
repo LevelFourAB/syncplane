@@ -57,9 +57,9 @@ type indexOrderCase struct {
 // TS loader (client/test/unit/indexkey-vectors.test.ts) asserts the same
 // literals against the same rows.
 type cursorCase struct {
-	Name    string    `json:"name"`
-	Type    string    `json:"type"`
-	Entity  string    `json:"entity"`
+	Name    string `json:"name"`
+	Type    string `json:"type"`
+	Entity  string `json:"entity"`
 	OrderBy []struct {
 		Path []string `json:"path"`
 		Desc bool     `json:"desc"`
@@ -652,14 +652,104 @@ var _ = Describe("EncodePrefix", func() {
 // probeCase pins one planner decision. The ranges themselves are not compared
 // byte-for-byte — encodeCases already pin the encoding, and the bounds are
 // derived from it — so what is shared is the SHAPE of the decision, which is
-// the part that could silently diverge between the two planners.
+// the part that could silently diverge between the two planners. A case with
+// Rows also pins what the plan reads (see expectReads).
 type probeCase struct {
 	Name    string            `json:"name"`
 	Type    string            `json:"type"`
 	Indexes []indexSpecVector `json:"indexes"`
 	Cond    json.RawMessage   `json:"cond"`
 	OrderBy []json.RawMessage `json:"orderBy"`
+	Rows    []vectorRow       `json:"rows"`
+	Matches []string          `json:"matches"`
 	Want    json.RawMessage   `json:"want"`
+}
+
+// vectorRow is one row of a read-checking vector case.
+type vectorRow struct {
+	Key string          `json:"key"`
+	Row json.RawMessage `json:"row"`
+}
+
+// expectReads asserts that a scan with pred admits exactly matches of rows,
+// and, unless reads is nil, that reads admits the same rows. reads is a plan's
+// read: whether one of the row's entries lies in the plan's ranges and the row
+// passes its residual. A shape assertion cannot see a range that selects the
+// wrong rows, and a bug both planners share passes every one of them.
+func expectReads(typ string, rows []vectorRow, matches []string, pred *query.Compiled, reads func(m protoreflect.Message, key string) bool) {
+	GinkgoHelper()
+	scanned, read := []string{}, []string{}
+	for _, r := range rows {
+		msg := msgForType(typ)
+		Expect(protojson.Unmarshal(r.Row, msg)).To(Succeed())
+		m := msg.ProtoReflect()
+		if pred.Eval(m) {
+			scanned = append(scanned, r.Key)
+		}
+		if reads != nil && reads(m, r.Key) {
+			read = append(read, r.Key)
+		}
+	}
+	Expect(scanned).To(Equal(matches), "the scan")
+	if reads != nil {
+		Expect(read).To(Equal(matches), "the index read")
+	}
+}
+
+// inRange reports whether any of entries lies inside one of ranges.
+func inRange(entries [][]byte, ranges ...query.Range) bool {
+	for _, entry := range entries {
+		for _, r := range ranges {
+			if (r.Lo == nil || bytes.Compare(entry, r.Lo) >= 0) && (r.Hi == nil || bytes.Compare(entry, r.Hi) < 0) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// planReads is a row plan's read for expectReads: the rows with an entry in
+// the ranges of any branch, re-checked by the residual. A nil plan is a scan
+// and reads nothing of its own.
+func planReads(plan *query.Plan, candidates []query.Index) func(protoreflect.Message, string) bool {
+	if plan == nil {
+		return nil
+	}
+	encoders := make(map[string]*query.IndexEncoder, len(candidates))
+	for _, c := range candidates {
+		encoders[c.Name] = c.Encoder
+	}
+	return func(m protoreflect.Message, key string) bool {
+		if plan.Residual != nil && !plan.Residual.Eval(m) {
+			return false
+		}
+		for _, b := range plan.Branches() {
+			if inRange(encoders[b.Index].Encode(m, key), b.Ranges...) {
+				return true
+			}
+		}
+		return false
+	}
+}
+
+// groupReads is planReads for a group plan, which reads one range of one
+// index.
+func groupReads(plan *query.GroupPlan, candidates []query.Index) func(protoreflect.Message, string) bool {
+	if plan == nil {
+		return nil
+	}
+	var enc *query.IndexEncoder
+	for _, c := range candidates {
+		if c.Name == plan.Index {
+			enc = c.Encoder
+		}
+	}
+	return func(m protoreflect.Message, key string) bool {
+		if plan.Residual != nil && !plan.Residual.Eval(m) {
+			return false
+		}
+		return inRange(enc.Encode(m, key), plan.Range)
+	}
 }
 
 // probeWant is the non-"scan" form of a probeCase's expectation. A case with
@@ -681,7 +771,8 @@ type branchWant struct {
 // groupCase pins one group-planner decision. A case carrying `perGroup` is a
 // grouped ROW read and runs the rows planner, whose extra requirement is that
 // the components past the partition supply `orderBy`; one without it is a
-// counted read, where an ordering has no meaning.
+// counted read, where an ordering has no meaning. A case with Rows also pins
+// what the plan reads (see expectReads).
 type groupCase struct {
 	Name     string            `json:"name"`
 	Type     string            `json:"type"`
@@ -690,6 +781,8 @@ type groupCase struct {
 	GroupBy  []string          `json:"groupBy"`
 	OrderBy  []json.RawMessage `json:"orderBy"`
 	PerGroup int               `json:"perGroup"`
+	Rows     []vectorRow       `json:"rows"`
+	Matches  []string          `json:"matches"`
 	Want     json.RawMessage   `json:"want"`
 }
 
@@ -746,6 +839,9 @@ var _ = Describe("Planner conformance vectors", func() {
 			}
 
 			plan := query.PlanQuery(candidates, pred, order)
+			if len(tc.Rows) > 0 {
+				expectReads(tc.Type, tc.Rows, tc.Matches, pred, planReads(plan, candidates))
+			}
 
 			var scan string
 			if json.Unmarshal(tc.Want, &scan) == nil {
@@ -825,6 +921,9 @@ var _ = Describe("Group planner conformance vectors", func() {
 				order, err := query.CompileOrder(desc, keys)
 				Expect(err).NotTo(HaveOccurred())
 				plan = query.PlanGroupRows(candidates, pred, group, order)
+			}
+			if len(tc.Rows) > 0 {
+				expectReads(tc.Type, tc.Rows, tc.Matches, pred, groupReads(plan, candidates))
 			}
 
 			var scan string
