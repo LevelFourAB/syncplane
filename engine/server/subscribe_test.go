@@ -235,6 +235,22 @@ var _ = Describe("Subscribe", func() {
 		Expect(w.GetId()).To(Equal("w2"))
 	})
 
+	// A heartbeat that is not positive keeps the default, as WithChunkSize and
+	// WithRoomAnnounce do for theirs. Every binary in cmd/ passes its
+	// -heartbeat flag straight through.
+	DescribeTable("keeps the default heartbeat for a value that is not positive",
+		func(hb time.Duration) {
+			client = start(newTestServer(server.WithHeartbeat(hb)))
+			stream := subscribe(&syncplanev1.SubscribeRequest{ClientId: "c1", Scopes: scopes(ws)})
+			Expect(drainToCaughtUp(stream, ws)).To(BeEmpty())
+
+			push(putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "live"}))
+			Expect(titles(recv(stream).GetPage().GetPatch().GetChanges())).To(Equal([]string{"live"}))
+		},
+		Entry("zero", time.Duration(0)),
+		Entry("negative", -time.Second),
+	)
+
 	It("sends a content-free keepalive on the heartbeat", func() {
 		client = start(newTestServer(server.WithHeartbeat(50 * time.Millisecond)))
 		stream := subscribe(&syncplanev1.SubscribeRequest{ClientId: "c1", Scopes: scopes(ws)})

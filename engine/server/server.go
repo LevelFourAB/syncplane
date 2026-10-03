@@ -914,13 +914,19 @@ func WithLeases(l lease.Locker) Option {
 }
 
 // WithHeartbeat sets the Subscribe stream heartbeat interval (default 30s).
+// Zero or negative keeps the default.
 //
 // The heartbeat is also when a live stream re-checks workspace access, so this
 // bounds how long a revoked member keeps receiving a workspace's changes.
 // Shortening it tightens that window at the cost of one CanAccessWorkspace call
 // per live workspace per tick, per stream.
 func WithHeartbeat(d time.Duration) Option {
-	return func(s *Server) error { s.heartbeat = d; return nil }
+	return func(s *Server) error {
+		if d > 0 {
+			s.heartbeat = d
+		}
+		return nil
+	}
 }
 
 // WithNotifyCoalescing sets the per-workspace change-notification coalescing

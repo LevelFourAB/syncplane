@@ -318,6 +318,23 @@ var _ = Describe("Rooms", func() {
 				Expect(recv(stream).GetHeartbeat()).To(BeTrue())
 			})
 		})
+
+		// A heartbeat that is not positive keeps the default, as it does for
+		// Subscribe.
+		for _, hb := range []time.Duration{0, -time.Second} {
+			Context("with WithHeartbeat("+hb.String()+")", func() {
+				BeforeEach(func() { opts = []server.Option{server.WithHeartbeat(hb)} })
+
+				It("keeps the stream open after the snapshot", func() {
+					t := roomTopic("cursors")
+					stream := watch("s1", t)
+					Expect(recvBody(stream).GetSnapshot()).NotTo(BeNil())
+
+					publishOK("s2", stateItem(t, 1, ""))
+					Expect(recvBody(stream).GetUpdated().GetSessionId()).To(Equal("s2"))
+				})
+			})
+		}
 	})
 
 	Describe("Watch validation", func() {
