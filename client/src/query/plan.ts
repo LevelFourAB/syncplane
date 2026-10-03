@@ -1257,7 +1257,7 @@ function cmpBounds(
 	op: string,
 	value: Scalar,
 ): { lo?: string; hi?: string } | undefined {
-	const v = encodeLiteral(idx, compIndex, value);
+	const v = encodeLiteral(idx, compIndex, value) ?? encodeNeighbour(idx, compIndex, op, value);
 	if (v === undefined) return undefined;
 	// Every real value carries the present tag, so the bounds stay inside the
 	// real values and never reach the NaN or missing tags — which is right: a
@@ -1347,6 +1347,57 @@ function encodeLiteral(
 }
 
 /**
+ * Encodes the bound for an inequality whose literal is a bigint no double
+ * holds, against a number column.
+ *
+ * No stored value equals such a literal, so each inequality is equivalent to
+ * one on a neighbouring double: `x > L` and `x <= L` hold exactly where they
+ * hold for the largest double below L, and `x >= L` and `x < L` exactly where
+ * they hold for the smallest double above L. The bound stays exact and needs no
+ * re-check, where a scan would read every row — and the literal is common: a
+ * bigint nanosecond timestamp against a number column is almost never a double
+ * itself.
+ */
+function encodeNeighbour(
+	idx: PlannableIndex,
+	compIndex: number,
+	op: string,
+	value: Scalar,
+): string | undefined {
+	const c = idx.encoder.components[compIndex]!;
+	if (c.kind !== 'number' || typeof value !== 'bigint') return undefined;
+	const n = Number(value);
+	// Beyond the largest double the rounding direction is unknowable from n.
+	if (!Number.isFinite(n)) return undefined;
+	const above = BigInt(n) > value;
+	let bound: number;
+	switch (op) {
+		case 'gt':
+		case 'lte':
+			bound = above ? nextDouble(n, false) : n;
+			break;
+		case 'gte':
+		case 'lt':
+			bound = above ? n : nextDouble(n, true);
+			break;
+		default:
+			return undefined;
+	}
+	return new IndexEncoder([ c ]).encodePrefix([ bound ]);
+}
+
+/** The double next to a finite, non-zero `n`, toward +∞ or toward −∞. */
+function nextDouble(n: number, up: boolean): number {
+	const view = new DataView(new ArrayBuffer(8));
+	view.setFloat64(0, n);
+	// The bits below the sign are the magnitude: one more moves away from zero,
+	// which is up for a positive n and down for a negative one.
+	const bits = view.getBigUint64(0);
+	view.setBigUint64(0, (n > 0) === up ? bits + 1n : bits - 1n);
+	return view.getFloat64(0);
+}
+
+/**
  * Converts a query literal into the shape the column stores, mirroring what
  * compareValues does across the same kind pair. Undefined means no exact
  * conversion exists, which leaves the term residual — and a residual gives the
@@ -1358,12 +1409,16 @@ function coerceLiteral(c: IndexComponent, v: Scalar): Scalar | undefined {
 			return typeof v === 'string' ? v : undefined;
 		case 'bool':
 			return typeof v === 'boolean' ? v : undefined;
-		case 'number':
+		case 'number': {
 			if (typeof v === 'number') return Number.isNaN(v) ? undefined : v;
-			// A bigint literal against a number column compares as Number, with
-			// the same precision loss `Number(bigint)` has — which is what the
-			// evaluator does too, so the bound and the re-check agree.
-			return typeof v === 'bigint' ? Number(v) : undefined;
+			if (typeof v !== 'bigint') return undefined;
+			// The evaluator compares a number and a bigint exactly, so a bound
+			// built from a rounded literal would take in or leave out the number
+			// it rounded to. A bigint no double holds sits between two stored
+			// values, and no exact bound exists at this component.
+			const n = Number(v);
+			return Number.isFinite(n) && BigInt(n) === v ? n : undefined;
+		}
 		case 'bigint':
 			if (typeof v === 'bigint') return fitsColumn(c, v) ? v : undefined;
 			if (typeof v !== 'number' || !Number.isInteger(v)) {

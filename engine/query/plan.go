@@ -2,6 +2,7 @@ package query
 
 import (
 	"bytes"
+	"math"
 	"math/big"
 
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -1125,7 +1126,9 @@ func inequalityBoundsFor(c IndexComponent, terms []node, taken []bool, only int)
 func cmpBounds(c IndexComponent, n *cmpNode) (lo, hi []byte, ok bool) {
 	v, ok := literalBytes(c, n.value)
 	if !ok {
-		return nil, nil, false
+		if v, ok = neighbourBytes(c, n); !ok {
+			return nil, nil, false
+		}
 	}
 	// Every real value carries tagPresent, so the bounds stay inside the real
 	// values and never reach the NaN or missing tags — which is exactly right:
@@ -1219,9 +1222,50 @@ func coerceLiteral(want rvKind, leaf protoreflect.FieldDescriptor, v condValue) 
 		}
 		return rowValue{kind: rvBigint, big: b}, true
 	case want == rvNumber && v.kind == rvBigint:
-		return rowValue{kind: rvNumber, num: floatFromBig(v.big)}, true
+		// The evaluator compares a double and an integer exactly, so a bound
+		// built from a rounded literal would take in or leave out the double it
+		// rounded to. An integer no double holds sits between two stored
+		// values, and no exact bound exists at this component.
+		f, acc := new(big.Float).SetInt(v.big).Float64()
+		if acc != big.Exact {
+			return rowValue{}, false
+		}
+		return rowValue{kind: rvNumber, num: f}, true
 	}
 	return rowValue{}, false
+}
+
+// neighbourBytes encodes the bound for an inequality whose literal is an
+// integer no double holds, against a double column.
+//
+// No stored value equals such a literal, so each inequality is equivalent to
+// one on a neighbouring double: x > L and x <= L hold exactly where they hold
+// for the largest double below L, and x >= L and x < L exactly where they hold
+// for the smallest double above L. The bound stays exact and needs no
+// re-check, where a scan would read every row — and the literal is common: an
+// integer nanosecond timestamp against a double column is almost never a
+// double itself.
+func neighbourBytes(c IndexComponent, n *cmpNode) ([]byte, bool) {
+	if singularKind(c.leafField()) != rvNumber || n.value.kind != rvBigint {
+		return nil, false
+	}
+	f, acc := new(big.Float).SetInt(n.value.big).Float64()
+	if acc == big.Exact || math.IsInf(f, 0) {
+		return nil, false
+	}
+	switch n.op {
+	case syncplanev1.CmpOp_CMP_OP_GT, syncplanev1.CmpOp_CMP_OP_LTE:
+		if acc == big.Above {
+			f = math.Nextafter(f, math.Inf(-1))
+		}
+	case syncplanev1.CmpOp_CMP_OP_GTE, syncplanev1.CmpOp_CMP_OP_LT:
+		if acc == big.Below {
+			f = math.Nextafter(f, math.Inf(1))
+		}
+	default:
+		return nil, false
+	}
+	return appendComponent(nil, c, rowValue{kind: rvNumber, num: f}, true), true
 }
 
 // fitsColumn rejects a literal outside the column's 64-bit range. The encoder

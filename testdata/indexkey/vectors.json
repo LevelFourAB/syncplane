@@ -3649,6 +3649,621 @@
 			}
 		},
 		{
+			"name": "an equality with an integer no double holds matches no row of a double column",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [],
+			"want": "scan"
+		},
+		{
+			"name": "gt an integer no double holds bounds a double column at the double below it",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "gte an integer no double holds bounds a double column at the double above it",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "lt an integer no double holds bounds a double column at the double above it",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3",
+				"r4",
+				"r5"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "lte an integer no double holds bounds a double column at the double below it",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_LTE",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r3",
+				"r4",
+				"r5"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a negative integer no double holds bounds a double column on the right side (gt)",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GT",
+					"value": {
+						"intValue": "-9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2",
+				"r3",
+				"r4"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "a negative integer no double holds bounds a double column on the right side (lt)",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_LT",
+					"value": {
+						"intValue": "-9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r5"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an integer no double holds bounds a descending double column",
+			"indexes": [
+				{
+					"name": "by_ratio_desc",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": true
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"intValue": "9007199254740993"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r2"
+			],
+			"want": {
+				"index": "by_ratio_desc",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
+			"name": "an integer literal a double holds exactly bounds a double column",
+			"indexes": [
+				{
+					"name": "by_ratio",
+					"key": [
+						{
+							"path": [
+								"ratio"
+							],
+							"desc": false
+						}
+					]
+				}
+			],
+			"cond": {
+				"cmp": {
+					"path": [
+						"ratio"
+					],
+					"op": "CMP_OP_GTE",
+					"value": {
+						"intValue": "9007199254740992"
+					}
+				}
+			},
+			"rows": [
+				{
+					"key": "r1",
+					"row": {
+						"ratio": 9007199254740992
+					}
+				},
+				{
+					"key": "r2",
+					"row": {
+						"ratio": 9007199254740994
+					}
+				},
+				{
+					"key": "r3",
+					"row": {
+						"ratio": 1.5
+					}
+				},
+				{
+					"key": "r4",
+					"row": {
+						"ratio": -9007199254740992
+					}
+				},
+				{
+					"key": "r5",
+					"row": {
+						"ratio": -9007199254740994
+					}
+				}
+			],
+			"matches": [
+				"r1",
+				"r2"
+			],
+			"want": {
+				"index": "by_ratio",
+				"ranges": 1,
+				"ordered": false,
+				"residual": false
+			}
+		},
+		{
 			"name": "a negated term stays residual and pins nothing",
 			"indexes": [
 				{
