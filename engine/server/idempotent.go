@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -41,11 +42,14 @@ type WriteOutcome struct {
 // page after a crash by design), any integration with its own backoff.
 //
 // The key's scope is the workspace, matching the partitioning of sequences,
-// write exclusion and client watermarks. Two callers must not share a key
-// space by accident, so derive keys from something the caller owns — the
-// request's Idempotency-Key header, the feed cursor position being handled,
-// the upstream event id — and prefix them per source when several sources
-// write to one workspace.
+// write exclusion and client watermarks, and the caller. Each principal has its
+// own key space, so a key one principal claimed is a new key for another: that
+// call runs fn under its own authorization, and never gets the first caller's
+// Result. Trusted callers share one key space, apart from every principal's.
+// Two trusted sources must not share keys by accident, so derive keys from
+// something the caller owns — the feed cursor position being handled, the
+// upstream event id — and prefix them per source when several sources write
+// to one workspace.
 //
 // The check and the write commit together. The ledger read, fn's writes and the
 // record all happen in ONE transaction under the workspace's write exclusion,
@@ -84,10 +88,12 @@ type WriteOutcome struct {
 //     arrives after its key expired applies again — set the retention above the
 //     longest retry window your callers use.
 //
-// Everything else matches Mutate: CanMutate is bypassed, all writes share one
-// lazily allocated sequence, clients are notified on commit, and fn may run
-// more than once if the adapter retries the transaction, so keep side effects
-// out of it until the call returns.
+// Everything else matches Mutate: each write fn makes is authorized for the ctx
+// principal (CanMutate, the schema's write rules and the row check) unless ctx
+// is Trusted, all writes share one lazily allocated sequence, clients are
+// notified on commit, and fn may run more than once if the adapter retries the
+// transaction, so keep side effects out of it until the call returns. A replay
+// runs no hook: the record is the outcome of a call the same principal made.
 func (s *Server) MutateIdempotent(
 	ctx context.Context,
 	workspaceID, key string,
@@ -106,12 +112,24 @@ func (s *Server) MutateIdempotent(
 	if err != nil {
 		return WriteOutcome{}, err
 	}
+	return s.mutateIdempotent(ctx, workspaceID, ledgerKey(p, enforced, key), p, enforced, fn)
+}
+
+// mutateIdempotent is the body of MutateIdempotent once the call is validated
+// and gated: key is the ledger key, already scoped to the caller.
+func (s *Server) mutateIdempotent(
+	ctx context.Context,
+	workspaceID, key string,
+	p Principal,
+	enforced bool,
+	fn func(tx *EntityTx) ([]byte, error),
+) (WriteOutcome, error) {
 	authz, gate := s.writeAuthorizer(ctx, p, workspaceID, enforced)
 	var (
 		out   WriteOutcome
 		wrote bool
 	)
-	err = s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
+	err := s.store.WithWriteTx(ctx, workspaceID, func(tx storage.WriteTx) error {
 		// Reset per attempt: the closure is re-runnable (see the storage.Adapter
 		// contract), and a captured outcome from an abandoned attempt would
 		// report a sequence that rolled back.
@@ -182,11 +200,41 @@ func (s *Server) InvokeIdempotent(
 	if err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args); err != nil {
 		return WriteOutcome{}, err
 	}
+	if workspaceID == "" {
+		return WriteOutcome{}, fmt.Errorf("server: workspace id is required")
+	}
+	if err := validateIdempotencyKey(key); err != nil {
+		return WriteOutcome{}, err
+	}
 	// Authorized on the verb, exactly as Invoke — the body writes as
-	// server-authoritative logic, so the inner call must not re-gate.
-	return s.MutateIdempotent(Trusted(ctx), workspaceID, key, func(tx *EntityTx) ([]byte, error) {
-		return nil, mi.fn(markWriteTx(ctx), tx, bodyArgs)
-	})
+	// server-authoritative logic, so the inner call must not re-gate. The key
+	// stays the caller's, though: the body runs trusted, but the record must
+	// not replay to another principal.
+	key = ledgerKey(principalOf(ctx), !isTrusted(ctx), key)
+	return s.mutateIdempotent(Trusted(ctx), workspaceID, key, Principal{}, false,
+		func(tx *EntityTx) ([]byte, error) {
+			return nil, mi.fn(markWriteTx(ctx), tx, bodyArgs)
+		})
+}
+
+// ledgerKey is the key the idempotency ledger stores for one caller's key.
+//
+// An enforced caller's key starts with callerPrefix, anonymous callers
+// included, so two principals never share a record, and no principal shares
+// one with a trusted caller. Anonymous callers share one key space: there is no
+// identity to divide them by.
+//
+// A trusted caller's key is stored as given, so every trusted caller shares one
+// key space. One that starts with U+001F gets a second U+001F: a principal's
+// key has a digit after the first, so the two forms cannot meet.
+func ledgerKey(p Principal, enforced bool, key string) string {
+	if !enforced {
+		if strings.HasPrefix(key, "\u001f") {
+			return "\u001f" + key
+		}
+		return key
+	}
+	return callerPrefix(p) + key
 }
 
 // validateIdempotencyKey rejects keys the ledger cannot store meaningfully. An

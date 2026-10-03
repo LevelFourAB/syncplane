@@ -96,9 +96,10 @@ func (s *Server) Apply(ctx context.Context, workspaceID string, fn func(tx *Appl
 // an HTTP handler behind a retrying client, or an at-least-once effects handler
 // reacting to the change feed.
 //
-// The key semantics are MutateIdempotent's exactly — per workspace, claimed in
-// the same transaction as the writes, not recorded for a failed call, collected
-// on WithIdempotencyRetention. See MutateIdempotent for the full contract.
+// The key semantics are MutateIdempotent's exactly — per workspace and per
+// caller, claimed in the same transaction as the writes, not recorded for a
+// failed call, collected on WithIdempotencyRetention. See MutateIdempotent for
+// the full contract.
 //
 // The bytes fn returns are the recorded response, replayed verbatim on every
 // later call with the same key:
@@ -139,6 +140,9 @@ func (s *Server) apply(
 	p, enforced, err := s.gate(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
+	}
+	if key != "" {
+		key = ledgerKey(p, enforced, key)
 	}
 	visible, err := s.readGate(ctx, workspaceID, enforced)
 	if err != nil {

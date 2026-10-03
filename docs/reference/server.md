@@ -256,7 +256,7 @@ In-process writes do not update or consult client watermarks. See [Write from se
 
 ### Choosing idempotency keys
 
-Keys are per workspace. Derive keys from data the caller owns, and prefix keys per source when multiple systems write to the same workspace.
+Keys are per workspace and per caller. Each principal has its own key space, identified by issuer and subject, and all anonymous callers share one. A key that one principal claimed is a new key for another principal: the call runs its closure under its own authorization and never receives the first caller's result. Calls with a `Trusted` context share one key space, separate from every principal's. Derive trusted keys from data the caller owns, and prefix them per source when multiple systems write to the same workspace.
 
 Key considerations:
 

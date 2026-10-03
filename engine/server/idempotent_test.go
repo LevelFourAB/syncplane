@@ -328,6 +328,139 @@ var _ = Describe("Server.MutateIdempotent", func() {
 		})
 	})
 
+	// A key is the caller's own: an Idempotency-Key header names one client's
+	// request, and nothing makes it unique across callers. A record replayed to
+	// another principal would hand it the first caller's response and drop its
+	// own write.
+	Describe("keys of different callers", func() {
+		var (
+			alice   context.Context
+			bob     context.Context
+			mallory context.Context
+		)
+
+		as := func(subject string) context.Context {
+			return server.WithPrincipal(ctx, server.Principal{Subject: subject})
+		}
+
+		BeforeEach(func() {
+			srv = mustNewServer(store,
+				server.WithEntities(&todov1.Todo{}),
+				server.WithPermissions(refuseSubject{subject: "mallory"}),
+				server.WithMutator("complete", &todov1.Todo{},
+					func(ctx context.Context, tx *server.EntityTx, args proto.Message) error {
+						runs++
+						todo := args.(*todov1.Todo)
+						todo.Completed = true
+						return tx.Put(todo)
+					}))
+			alice, bob, mallory = as("alice"), as("bob"), as("mallory")
+		})
+
+		It("replays a record to the principal that claimed the key", func() {
+			_, err := srv.MutateIdempotent(alice, ws, "req-1", put("t1", "one"))
+			Expect(err).NotTo(HaveOccurred())
+
+			out, err := srv.MutateIdempotent(alice, ws, "req-1", put("t1", "rewritten"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeFalse())
+			Expect(runs).To(Equal(1))
+		})
+
+		It("refuses a caller CanMutate refuses, instead of replaying another principal's record", func() {
+			_, err := srv.MutateIdempotent(alice, ws, "req-1", put("t1", "one"))
+			Expect(err).NotTo(HaveOccurred())
+
+			out, err := srv.MutateIdempotent(mallory, ws, "req-1", put("t1", "taken"))
+			rej, ok := server.AsRejection(err)
+			Expect(ok).To(BeTrue(), "got err=%v result=%q", err, out.Result)
+			Expect(rej.Code).To(Equal(server.CodePermissionDenied))
+			Expect(out.Result).To(BeNil())
+			Expect(titleOf("t1")).To(Equal("one"))
+		})
+
+		It("applies the write of another allowed principal that reuses the key", func() {
+			_, err := srv.MutateIdempotent(alice, ws, "req-1", put("t1", "one"))
+			Expect(err).NotTo(HaveOccurred())
+
+			out, err := srv.MutateIdempotent(bob, ws, "req-1", put("t2", "two"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeTrue())
+			Expect(out.Result).To(Equal([]byte("created t2")))
+			Expect(titleOf("t2")).To(Equal("two"))
+		})
+
+		It("keeps the trusted key space apart from every principal's", func() {
+			_, err := srv.MutateIdempotent(server.Trusted(ctx), ws, "req-1", put("t1", "one"))
+			Expect(err).NotTo(HaveOccurred())
+
+			out, err := srv.MutateIdempotent(alice, ws, "req-1", put("t2", "two"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeTrue())
+
+			anonymous, err := srv.MutateIdempotent(ctx, ws, "req-1", put("t3", "three"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(anonymous.Applied).To(BeTrue(), "an anonymous caller is enforced, not trusted")
+
+			again, err := srv.MutateIdempotent(server.Trusted(ctx), ws, "req-1", put("t1", "rewritten"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.Applied).To(BeFalse(), "trusted callers share one key space")
+		})
+
+		It("keeps a trusted key apart from a principal's even when it starts with \\u001f", func() {
+			_, err := srv.MutateIdempotent(alice, ws, "req-1", put("t1", "one"))
+			Expect(err).NotTo(HaveOccurred())
+			// How alice's key is stored: U+001F, then her issuer and subject,
+			// each after its length.
+			lookalike := "\u001f0:5:alicereq-1"
+
+			out, err := srv.MutateIdempotent(server.Trusted(ctx), ws, lookalike, put("t2", "two"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeTrue())
+			again, err := srv.MutateIdempotent(server.Trusted(ctx), ws, lookalike, put("t2", "rewritten"))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.Applied).To(BeFalse())
+		})
+
+		It("scopes ApplyIdempotent keys to the caller the same way", func() {
+			apply := func(ctx context.Context, id string) (server.WriteOutcome, error) {
+				return srv.ApplyIdempotent(ctx, ws, "req-1", func(tx *server.ApplyTx) ([]byte, error) {
+					runs++
+					return []byte("created " + id), tx.Put(&todov1.Todo{Id: id, Title: id})
+				})
+			}
+			_, err := apply(alice, "t1")
+			Expect(err).NotTo(HaveOccurred())
+
+			_, err = apply(mallory, "t9")
+			_, refused := server.AsRejection(err)
+			Expect(refused).To(BeTrue(), "got err=%v", err)
+
+			out, err := apply(bob, "t2")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeTrue())
+			Expect(out.Result).To(Equal([]byte("created t2")))
+
+			again, err := apply(alice, "t1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.Applied).To(BeFalse())
+		})
+
+		It("scopes InvokeIdempotent keys to the caller the same way", func() {
+			_, err := srv.InvokeIdempotent(alice, ws, "evt-1", "complete", &todov1.Todo{Id: "t1"})
+			Expect(err).NotTo(HaveOccurred())
+
+			out, err := srv.InvokeIdempotent(bob, ws, "evt-1", "complete", &todov1.Todo{Id: "t2"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(out.Applied).To(BeTrue())
+			Expect(runs).To(Equal(2))
+
+			again, err := srv.InvokeIdempotent(alice, ws, "evt-1", "complete", &todov1.Todo{Id: "t1"})
+			Expect(err).NotTo(HaveOccurred())
+			Expect(again.Applied).To(BeFalse())
+		})
+	})
+
 	Describe("InvokeIdempotent", func() {
 		BeforeEach(func() {
 			srv = mustNewServer(store,
@@ -372,3 +505,17 @@ var _ = Describe("Server.MutateIdempotent", func() {
 		})
 	})
 })
+
+// refuseSubject admits every caller except subject, whose writes CanMutate
+// refuses.
+type refuseSubject struct {
+	server.AllowAll
+	subject string
+}
+
+func (p refuseSubject) CanMutate(_ context.Context, who server.Principal, _ string, _ server.Write) error {
+	if who.Subject == p.subject {
+		return server.Reject(server.CodePermissionDenied, p.subject+" may not write")
+	}
+	return nil
+}

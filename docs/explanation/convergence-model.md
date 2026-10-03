@@ -188,8 +188,9 @@ Syncplane achieves idempotency through per-client mutation ID watermarks,
 checked for contiguity per `(workspace, caller, client_id)`. The caller is the
 authenticated principal, by issuer and subject, and every anonymous caller
 counts as one caller. In-process writes that support retries use a separate
-ledger keyed by a caller-supplied idempotency key. Caller-supplied keys do not
-require contiguity and survive idle-client garbage collection.
+ledger keyed by a caller-supplied idempotency key, scoped to the caller in the
+same way; trusted calls share one key space of their own. Caller-supplied keys
+do not require contiguity and survive idle-client garbage collection.
 
 The `client_id` parameter is an unauthenticated handle asserted by the client.
 It does not represent identity; do not use it for authorization decisions. The

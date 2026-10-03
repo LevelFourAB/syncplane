@@ -24,8 +24,16 @@ func watermarkKey(p Principal, clientID string) string {
 	if clientID == "" || p.IsAnonymous() {
 		return clientID
 	}
+	return callerPrefix(p) + clientID
+}
+
+// callerPrefix names a principal at the start of a storage key: U+001F, then
+// the issuer and the subject, each after its length. A digit always follows
+// the U+001F, and the length prefixes make the result injective across
+// (issuer, subject, rest of the key).
+func callerPrefix(p Principal) string {
 	return "\u001f" + strconv.Itoa(len(p.Issuer)) + ":" + p.Issuer +
-		strconv.Itoa(len(p.Subject)) + ":" + p.Subject + clientID
+		strconv.Itoa(len(p.Subject)) + ":" + p.Subject
 }
 
 // checkClientID refuses a client_id that holds a C0 control character
