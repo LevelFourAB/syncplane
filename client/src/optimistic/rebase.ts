@@ -961,6 +961,11 @@ export interface FinalizeInput {
 	 * would transiently regress its row mid-drain. The drop runs on the final
 	 * page (`!has_more`); replaying still-queued mutations on top of their own
 	 * confirmed writes is idempotent, so holding them a few pages longer is safe.
+	 *
+	 * Also used, by a pull or a bootstrap swap, while a push of the workspace is
+	 * unanswered: the server's watermark then covers mutations whose verdicts
+	 * only a re-push can collect, and dropping a rejected one would lose its
+	 * rejection.
 	 */
 	deferAcked?: boolean;
 }

@@ -2807,6 +2807,9 @@ export class Coordinator {
 							lastAckedMutationId: lastAcked,
 							serverSeq: snapshotSeq,
 							baseline: true,
+							// The snapshot's watermark covers an unanswered push as a
+							// pull's does (see rebaseTx), so the same hold applies.
+							deferAcked: this.unresolvedPush.has(workspaceId),
 						},
 						touched,
 					);

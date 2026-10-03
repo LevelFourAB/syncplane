@@ -9,7 +9,11 @@ import {
 	type Mutation,
 	MutationSchema,
 } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { MutationStatus, SyncService } from '../../src/gen/syncplane/v1/service_pb.js';
+import {
+	BootstrapResponseSchema,
+	MutationStatus,
+	SyncService,
+} from '../../src/gen/syncplane/v1/service_pb.js';
 import { metaCursor, metaLastMutationId } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import { EntityRegistry } from '../../src/mutations.js';
@@ -315,6 +319,75 @@ describe('coordinator push: compaction + chunking', () => {
 		// which must not retire it.
 		await expect(coord.syncNow()).rejects.toThrow();
 		expect(pulls).toBe(1);
+		expect(await pendingIds()).toEqual([ 1n ]);
+
+		// The re-push collects the verdict, and only then is it dropped.
+		await coord.syncNow();
+		expect(pushes).toHaveLength(2);
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'conflict' ]);
+		expect(await pendingIds()).toEqual([]);
+
+		await coord.stop();
+	});
+
+	it('keeps an unanswered push queued past a reset that re-bootstraps the workspace', async () => {
+		// The same lost response, but the pull that follows answers reset (a
+		// cursor behind the GC horizon, say), so the cycle re-bootstraps. The
+		// snapshot's watermark covers the mutation just as the pull's did, and
+		// installing it must not retire the mutation either.
+		await seed([ put(1n, 't1') ]);
+		let pulls = 0;
+		let bootstraps = 0;
+		let seen = 0;
+		const transport = createRouterTransport(({ service }) => {
+			service(SyncService, {
+				push(req) {
+					pushes.push(pushedMutations(req));
+					if (seen++ === 0) throw new Error('push response lost');
+					return pushResults(
+						req,
+						pushedMutations(req).map((m) => ({
+							mutationId: m.mutationId,
+							status: MutationStatus.REJECTED,
+							errorCode: 'conflict',
+							errorMessage: 'stale version',
+						})),
+					);
+				},
+				pull() {
+					pulls++;
+					return {
+						patch: { changes: [], dropEntities: [] },
+						nextCursor: new Uint8Array([ 1 ]),
+						lastAckedMutationId: 1n,
+						reset: pulls === 1,
+						hasMore: false,
+						seq: 5n,
+					};
+				},
+				async *bootstrap() {
+					bootstraps++;
+					yield create(BootstrapResponseSchema, {
+						body: {
+							case: 'begin',
+							value: { cursor: new Uint8Array([ 2 ]), lastAckedMutationId: 1n, seq: 5n },
+						},
+					});
+					yield create(BootstrapResponseSchema, { body: { case: 'end', value: {} } });
+				},
+				query() {
+					return { rows: [] };
+				},
+			});
+		});
+		const rejections: RejectionInfo[] = [];
+		const coord = newCoordinator(transport, {
+			onMutationRejected: (info) => rejections.push(info),
+		});
+
+		await expect(coord.syncNow()).rejects.toThrow();
+		expect(pulls).toBe(1);
+		expect(bootstraps).toBe(1);
 		expect(await pendingIds()).toEqual([ 1n ]);
 
 		// The re-push collects the verdict, and only then is it dropped.
