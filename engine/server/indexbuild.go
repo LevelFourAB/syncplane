@@ -190,6 +190,11 @@ func (s *Server) buildAllIndexes(ctx context.Context) error {
 // happens — so the workspace stays selected until a pass finishes under one
 // catalog.
 //
+// An entity whose indexes cannot be built stays unready, and queries on its
+// indexes scan. A stored row past an index limit is the lasting cause (see
+// storage.MaxIndexEntryBytes). The other entities still build, and the
+// returned error joins one error for each entity that did not.
+//
 // It is safe to call at any time: the build is idempotent, and readiness is
 // only claimed once the whole entity has been walked. Callers do not normally
 // need it — the background loop covers every workspace — but a test or a
@@ -203,15 +208,24 @@ func (s *Server) BuildIndexes(ctx context.Context, workspaceID string) error {
 	}
 	cat := s.catalogPtr()
 	allReady := true
+	var errs []error
 	for _, info := range cat.entities {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		ready, err := s.buildEntityIndexes(ctx, workspaceID, info)
 		if err != nil {
-			return fmt.Errorf("entity %q: %w", info.name, err)
+			// The others still build: an entity that cannot (a stored row
+			// past an index limit fails every pass) must not hold back the
+			// indexes of entities that can.
+			errs = append(errs, fmt.Errorf("entity %q: %w", info.name, err))
+			allReady = false
+			continue
 		}
 		allReady = allReady && ready
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
 	}
 	if !allReady {
 		return nil

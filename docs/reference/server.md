@@ -95,7 +95,7 @@ The following table lists request and data bounds in `server.Limits`:
 | `MaxReverseFanOut`        | 1000    | Maximum source rows matched by a single reverse-follow hop.                                                                                                      |
 | `MaxWindowSize`           | 1000    | Maximum rows held in a single `Subscription.window`. Must remain smaller than `MaxPullChanges`.                                                                  |
 | `MaxSubscriptionKeys`     | 1000    | Maximum keys named by a single `Subscription.key_set`. A larger set is rejected. The set rides on every pull, so this also bounds request size.                  |
-| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. Exceeding this limit fails the write.                                 |
+| `MaxIndexEntriesPerRow`   | 1024    | Maximum secondary-index entries a single row can occupy across all indexes for its entity. A write exceeding this limit is rejected with `invalid_argument`.     |
 | `MaxIndexScanCandidates`  | 10000   | Maximum index entries evaluated during a range scan while a read filter rejects candidates. Exceeding this limit falls back to a table scan.                     |
 | `MaxRelConditions`        | 8       | Maximum `matches()` conditions permitted in a single query predicate.                                                                                            |
 | `MaxQueryFacets`          | 8       | Maximum facet axes permitted in a single `Query`. A request carrying any facet walks every matching row rather than the page.                                    |

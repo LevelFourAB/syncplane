@@ -490,7 +490,13 @@ func (s *Server) compactRow(
 	// reasoned it need not", which is the version that rots when what
 	// compaction rewrites changes.
 	if err := info.updateRowIndexes(tx, s.limits, row.Key, msg); err != nil {
-		return false, err
+		// A rejection means the row breaks an index limit it was written
+		// before. Its components are as stored, so the entries it already has
+		// are still the right ones, and the compaction goes on without them
+		// being rewritten.
+		if _, rejected := AsRejection(err); !rejected {
+			return false, err
+		}
 	}
 	// Carry the row's recorded actor through unchanged. Compaction purges
 	// tombstones from a document; it makes no semantic change to the row, so

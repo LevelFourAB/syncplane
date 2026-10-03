@@ -436,7 +436,8 @@ Secondary indexes do not support the following query shapes:
 - **Index availability**: A newly declared index is not available immediately. A background process indexes existing records first. Queries perform table scans until indexing finishes. On the client, the `indexing` event fires after bootstrap when indexing completes (see [Telemetry](telemetry.md#local-reads)).
 - **Query results**: Using an index produces the same results as a full scan.
 - **Local queries**: Local indexes cover confirmed rows for workspace-scoped queries. The engine merges the optimistic overlay over the range.
-- **Write costs**: Each write updates the row's position in all defined indexes on both client and server. For repeated fields, the engine creates one entry per element, bounded by `MaxIndexEntriesPerRow`. Writes exceeding this limit fail.
+- **Write costs**: Each write updates the row's position in all defined indexes on both client and server. For repeated fields, the engine creates one entry per element, bounded by `MaxIndexEntriesPerRow`. Writes exceeding this limit are rejected with `invalid_argument`.
+- **Value length**: One index entry holds the indexed values of the row and its key, and is at most 1536 bytes (`storage.MaxIndexEntryBytes`) on every store. A write whose entry would be longer is rejected with `invalid_argument`, so index a long string, such as a URL or a token, only when its values stay short. An index declared over rows that already hold longer values never becomes ready, and queries on it scan.
 - **Diagnostics**: The `onSyncEvent` callback reports a `query` event with the execution `path` (`index` or `scan`), the active index name, and any decline reason. For details on decline reasons, see [Telemetry](telemetry.md#local-reads).
 
 ## Full-text search

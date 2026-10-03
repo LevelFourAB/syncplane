@@ -34,6 +34,7 @@
   - **Support bidirectional scans:** `ScanIndex` accepts `ScanAsc` or `ScanDesc`. A descending scan traverses the range in reverse order, taking `limit` items starting from `hi`.
   - **Replace full entry set on write:** `PutIndexEntries` replaces all index entries for the specified row across all indexes. Passing an empty slice is equivalent to calling `DeleteIndexEntries`.
   - **Store entries for live rows only:** The engine deletes index entries when deleting a row. Tombstones do not hold index entries.
+  - **Hold entries up to the size limit:** A sort key is at most `storage.MaxIndexEntryBytes` (1536) bytes, and the engine never passes a longer one. The adapter must store it together with the longest workspace id, entity name, index name and row key. The conformance suite writes such an entry.
 
   Index entries are derived and disposable. `IndexState` returns the spec fingerprint and a boolean indicating whether the index build finished. A missing index returns `("", false, nil)`.
 - **`ScanEntityByVersionDesc`.** Yields live rows for an entity ordered by version descending, breaking ties by row key ascending.

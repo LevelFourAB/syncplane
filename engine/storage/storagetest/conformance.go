@@ -6,14 +6,18 @@
 package storagetest
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
@@ -3199,6 +3203,34 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				}
 				return out
 			}
+
+			It("stores and scans back an entry at the size limit under the longest names", func() {
+				// The longest workspace id a store sees is an app-prefixed one
+				// (see prefixstore), and every name and key is at its limit.
+				ws := strings.Repeat("w", naming.MaxAppIDBytes+1+naming.MaxWorkspaceIDBytes)
+				entity := strings.Repeat("e", naming.MaxEntityNameLength)
+				idx := strings.Repeat("i", naming.MaxEntityNameLength)
+				rowKey := strings.Repeat("k", naming.MaxRowKeyBytes)
+				// Bytes that do not compress, so a store that compresses
+				// stored values cannot make the entry fit by shrinking it.
+				k := make([]byte, storage.MaxIndexEntryBytes)
+				_, _ = rand.New(rand.NewSource(1)).Read(k)
+
+				write(ws, func(tx storage.WriteTx) {
+					Expect(tx.PutIndexEntries(entity, rowKey, []storage.IndexEntry{{Index: idx, Key: k}})).To(Succeed())
+				})
+				read(ws, func(tx storage.ReadTx) {
+					var entries [][]byte
+					var keys []string
+					Expect(tx.ScanIndex(entity, idx, nil, nil, 0, storage.ScanAsc, func(e []byte, rk string) error {
+						entries = append(entries, bytes.Clone(e))
+						keys = append(keys, rk)
+						return nil
+					})).To(Succeed())
+					Expect(keys).To(Equal([]string{rowKey}))
+					Expect(entries).To(Equal([][]byte{k}))
+				})
+			})
 
 			It("reads an index nobody has written as empty", func() {
 				read("ws1", func(tx storage.ReadTx) {

@@ -959,7 +959,19 @@ type WriteTx interface {
 // costs a rebuild, never correctness, and nothing in a request or response
 // mentions an index — which is what lets an adapter treat this table as
 // regenerable and, if it must, drop it.
+//
+// Key is at most MaxIndexEntryBytes long.
 type IndexEntry struct {
 	Index string
 	Key   []byte
 }
+
+// MaxIndexEntryBytes caps IndexEntry.Key. An adapter must store and scan back
+// an entry of this length under the longest workspace id, entity name, index
+// name and row key the engine allows. The engine rejects a write whose entries
+// would be longer, so an adapter is never handed one.
+//
+// The bound comes from Postgres, whose b-tree holds at most 2704 bytes in one
+// index row with 8 KiB pages, and that row also carries the ids and names
+// above.
+const MaxIndexEntryBytes = 1536

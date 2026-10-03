@@ -240,8 +240,20 @@ func (info *entityInfo) updateRowIndexes(tx storage.WriteTx, limits Limits, key 
 		// disagrees with the scan it is supposed to be indistinguishable from,
 		// which would turn a size limit into wrong query results — so the limit
 		// surfaces where it can be acted on, as a rejected write naming the row.
-		return fmt.Errorf("server: entity %q row %q: %d index entries exceeds the limit of %d; a repeated field indexed by this entity has too many elements, or too many indexes are declared",
-			info.name, key, len(entries), max)
+		// A rejection, not a plain error: the same write fails the same way
+		// every time, and a push would otherwise retry it until it is
+		// dead-lettered.
+		return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q row %q: %d index entries exceeds the limit of %d; a repeated field indexed by this entity has too many elements, or too many indexes are declared",
+			info.name, key, len(entries), max))
+	}
+	// Refused for the same reason, and on every store: the bound is what
+	// Postgres can hold, and a store that holds more would accept a value
+	// that a move to Postgres then breaks.
+	for _, e := range entries {
+		if len(e.Key) > storage.MaxIndexEntryBytes {
+			return Reject(CodeInvalidArgument, fmt.Sprintf("entity %q row %q: an entry of index %q is %d bytes, the limit is %d; a value this index holds is too long",
+				info.name, key, e.Index, len(e.Key), storage.MaxIndexEntryBytes))
+		}
 	}
 	return tx.PutIndexEntries(info.name, key, entries)
 }
