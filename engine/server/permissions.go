@@ -617,7 +617,9 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 // Two things deliberately pass. An unknown entity does — applyCrud rejects it
 // with a message about the entity, and re-deciding that here would only give
 // the two paths a chance to disagree; an unspecified op passes for the same
-// reason. So does a custom mutation: a mutator body's rows are covered by the
+// reason. An entity registered after this check and before the write applies
+// is known by then, so applyCrud runs writePolicyOf again against the entity it
+// applies with. So does a custom mutation: a mutator body's rows are covered by the
 // Write{Custom} verdict on its invocation rather than authorized one by one,
 // which is the escape hatch the options are designed around (see DeletePolicy).
 func (s *Server) checkWritePolicy(w Write) error {
@@ -629,6 +631,11 @@ func (s *Server) checkWritePolicy(w Write) error {
 	if !ok {
 		return nil
 	}
+	return writePolicyOf(info, crud)
+}
+
+// writePolicyOf is checkWritePolicy for one entity, as info declares it.
+func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 	if err := refuseProtectedMask(info, crud, info.protectedFields); err != nil {
 		return err
 	}

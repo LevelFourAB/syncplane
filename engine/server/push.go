@@ -865,6 +865,25 @@ func (s *Server) applyCrud(
 		return Reject(CodeInvalidArgument,
 			fmt.Sprintf("entity %q is server-only and cannot be written from a client", info.name))
 	}
+	// Authorization ran before the write lock, and passed every write to an
+	// entity it did not know: applying it is what refuses an unknown entity.
+	// An entity registered while the push waited for the lock is known here, so
+	// its schema rules and protected fields are checked again against the info
+	// this write applies with. The checks are pure, and the gate already holds
+	// the protected fields of every entity authorization knew, so they cost
+	// nothing worth skipping when the catalog did not change.
+	if g != nil {
+		if err := writePolicyOf(info, crud); err != nil {
+			return err
+		}
+		protected, err := g.protected(info)
+		if err != nil {
+			return err
+		}
+		if err := refuseProtectedMask(info, crud, protected); err != nil {
+			return err
+		}
+	}
 	// The key addresses a row in storage and, on the client, a KV key built by
 	// pasting it after the entity prefix; a key breaking the shared naming rules
 	// is a client bug that would otherwise be discovered as a missing or
