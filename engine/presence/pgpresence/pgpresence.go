@@ -84,8 +84,8 @@ import (
 const DefaultChannel = "syncplane_presence"
 
 // publishQueue bounds what is waiting to reach the database. State folds per
-// (topic, session), so it is sized by active PARTICIPANTS rather than by
-// publish rate; only broadcasts accumulate.
+// (topic, session, subject), so it is sized by active PARTICIPANTS rather than
+// by publish rate; only broadcasts accumulate.
 const publishQueue = 4096
 
 // fieldSep separates the routing prefix's fields. Every field it separates —
@@ -445,23 +445,33 @@ func (b *Bus) deliver(payload string) {
 // queued is one entry waiting for the database: what it takes to coalesce and
 // log it, plus the line already rendered so the publish loop only does I/O.
 type queued struct {
-	topic   presence.Topic
-	session string
-	kind    presence.Kind
-	line    string
+	topic    presence.Topic
+	session  string
+	subject  string
+	revision uint64
+	kind     presence.Kind
+	line     string
 }
 
-// pendingKey identifies the queued state of one session in one room.
+func (q *queued) key() pendingKey {
+	return pendingKey{topic: q.topic, session: q.session, subject: q.subject}
+}
+
+// pendingKey identifies the queued state of one session in one room, as one
+// subject wrote it. A receiver keeps a record for the subject that wrote it, so
+// state from another subject is not a newer version of it and must not fold in.
 type pendingKey struct {
 	topic   presence.Topic
 	session string
+	subject string
 }
 
 // queue is the publish backlog: a FIFO in which STATE folds per (topic,
-// session) and nothing else does.
+// session, subject) and nothing else does. A fold keeps the higher revision.
 //
-// Folding is what bounds it. State is last-writer-wins, so a second update from
-// a session whose first has not been published yet buys nothing — which means
+// Folding is what bounds it. State is last-writer-wins by revision, so a second
+// update from a session whose first has not been published yet buys nothing —
+// which means
 // the backlog is sized by how many participants are active, not by how fast
 // they move their cursors, and a hundred users at 10 Hz cost a hundred
 // pg_notify round trips per drain rather than a thousand. Broadcasts are each
@@ -482,19 +492,26 @@ func (q *queue) init() {
 }
 
 func (q *queue) push(ev presence.Event, line string) {
-	key := pendingKey{topic: ev.Topic, session: ev.Participant.SessionID}
 	item := &queued{
-		topic:   ev.Topic,
-		session: ev.Participant.SessionID,
-		kind:    ev.Kind,
-		line:    line,
+		topic:    ev.Topic,
+		session:  ev.Participant.SessionID,
+		subject:  ev.Participant.Subject,
+		revision: ev.Participant.Revision,
+		kind:     ev.Kind,
+		line:     line,
 	}
+	key := item.key()
 
 	q.mu.Lock()
 	switch ev.Kind {
 	case presence.KindState:
 		if waiting, ok := q.pending[key]; ok {
-			*waiting = *item
+			// Arrival order is not revision order (a Registry re-announces
+			// after releasing its lock), and every receiver drops a lower
+			// revision, so a lower one in the slot would lose the higher one.
+			if item.revision >= waiting.revision {
+				*waiting = *item
+			}
 			q.mu.Unlock()
 			return
 		}
@@ -539,9 +556,8 @@ func (q *queue) pop(ctx context.Context) (queued, bool) {
 			} else {
 				q.items = q.items[1:]
 			}
-			key := pendingKey{topic: item.topic, session: item.session}
-			if item.kind == presence.KindState && q.pending[key] == item {
-				delete(q.pending, key)
+			if item.kind == presence.KindState && q.pending[item.key()] == item {
+				delete(q.pending, item.key())
 			}
 			out := *item
 			q.mu.Unlock()

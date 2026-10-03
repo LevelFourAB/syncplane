@@ -73,4 +73,4 @@ When the listener reconnects, it re-notifies every workspace with a live subscri
 - Broadcast messages sent during a connection gap are dropped.
 - Payloads exceeding the 8000-byte `NOTIFY` limit return an error at `Publish`. Keep application state and broadcast messages within `MaxPresenceStateBytes` and `MaxBroadcastBytes`.
 
-Presence updates fold state per `(topic, session)` in the publish queue before sending to the database, which reduces `pg_notify` round trips. Broadcast messages are not folded.
+Presence updates fold state per `(topic, session, subject)` in the publish queue before sending to the database, which reduces `pg_notify` round trips. A fold keeps the highest revision, not the latest arrival: a node re-announces a record after it releases the lock it read the record under, so an older revision can arrive after a newer one. Broadcast messages are not folded.

@@ -175,9 +175,14 @@ type Event struct {
 // subscriber sees events published on any node, including its own, and
 // including its own publishes.
 //
-// An implementation MAY coalesce successive KindState events for one (topic,
-// session) down to the latest, because they are last-writer-wins. It must NOT
-// coalesce KindMessage events, which are each distinct — it may only drop them.
+// An implementation MAY coalesce KindState events for one (topic, session,
+// subject) down to the one with the highest revision, keeping the later of two
+// equal revisions, because a receiver keeps only the highest anyway. It must
+// NOT keep a lower revision in place of a higher one — events do not always
+// arrive in revision order — and must NOT fold together events of two
+// subjects, because a receiver keeps a record for the subject that wrote it.
+// It must NOT coalesce KindMessage events, which are each distinct — it may
+// only drop them.
 //
 // Every method is safe for concurrent use.
 type Bus interface {

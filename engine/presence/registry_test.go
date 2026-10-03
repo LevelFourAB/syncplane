@@ -14,9 +14,16 @@ import (
 // clock is the injected time source. Every liveness rule the Registry has is
 // expressed in elapsed time, so a fake clock is what lets the specs assert
 // expiry and re-announcement without waiting for either.
+//
+// It can also stop the next caller of now until the spec lets it go. The
+// Registry reads the clock while it applies a state event, so a stopped clock
+// holds the Registry's forwarder still, and what the bus delivers in that time
+// waits in the bus's queue together.
 type clock struct {
-	mu sync.Mutex
-	at time.Time
+	mu      sync.Mutex
+	at      time.Time
+	blocked chan struct{}
+	release chan struct{}
 }
 
 func newClock() *clock {
@@ -25,8 +32,29 @@ func newClock() *clock {
 
 func (c *clock) now() time.Time {
 	c.mu.Lock()
+	blocked, release := c.blocked, c.release
+	c.blocked, c.release = nil, nil
+	c.mu.Unlock()
+	if blocked != nil {
+		close(blocked)
+		<-release
+	}
+	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.at
+}
+
+// stop makes the next call to now wait. It returns a channel that closes when a
+// caller is waiting, and a func that lets that caller go; the func is safe to
+// call twice.
+func (c *clock) stop() (<-chan struct{}, func()) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.blocked = make(chan struct{})
+	c.release = make(chan struct{})
+	release := c.release
+	var once sync.Once
+	return c.blocked, func() { once.Do(func() { close(release) }) }
 }
 
 func (c *clock) advance(d time.Duration) {
@@ -401,6 +429,53 @@ var _ = Describe("Registry", func() {
 			}
 			Consistently(other.Events(), "100ms").ShouldNot(Receive())
 			Expect(join(open("late"), topic)).To(HaveLen(1))
+		})
+
+		// A sweep reads a record under the Registry's lock and publishes it
+		// after the lock is released, so a newer publish can reach the bus
+		// first and the re-announcement then arrives behind it.
+		It("keeps a newer state that a re-announcement arrives behind", func() {
+			w := open("s1")
+			join(w, topic)
+			publishState(topic, "s1", 4, "line 4")
+			receive(w)
+
+			// Straight to the bus: Registry.Publish takes the lock that the
+			// held forwarder keeps.
+			onBus := func(session string, rev uint64) {
+				GinkgoHelper()
+				Expect(bus.Publish(ctx, presence.Event{
+					Topic: topic,
+					Kind:  presence.KindState,
+					Participant: presence.Participant{
+						SessionID: session,
+						Subject:   "u:" + session,
+						Revision:  rev,
+					},
+				})).To(Succeed())
+			}
+			blocked, release := clk.stop()
+			DeferCleanup(release)
+			onBus("s0", 1)
+			Eventually(blocked).Should(BeClosed())
+			// The forwarder is held while it applies s0, and s2 waits at the
+			// head of its bus queue, so the next two wait in the queue
+			// together.
+			onBus("s2", 1)
+			onBus("s1", 5)
+			onBus("s1", 4)
+			release()
+
+			clk.advance(announce)
+			reg.Sweep(ctx)
+			Eventually(func() uint64 {
+				for _, p := range join(open("late"), topic) {
+					if p.SessionID == "s1" {
+						return p.Revision
+					}
+				}
+				return 0
+			}).Should(Equal(uint64(5)))
 		})
 
 		It("stops re-announcing once the session's stream closes", func() {

@@ -11,12 +11,22 @@ import "sync"
 // behind to hold this many of them has lost the room's timing anyway.
 const maxQueued = 256
 
-// stateSlot identifies the queued state of one session in one topic. An outbox
-// serving a single topic still keys on both, because the Registry hands one
-// outbox every topic a stream watches.
+// stateSlot identifies the queued state of one session in one topic, as one
+// subject wrote it. An outbox serving a single topic still keys on the topic,
+// because the Registry hands one outbox every topic a stream watches.
+//
+// The subject is part of the key because a receiver keeps a record for the
+// subject that wrote it: state from another subject that names the same session
+// is not a newer version of that record, and folding it in would lose the
+// owner's update.
 type stateSlot struct {
 	topic   Topic
 	session string
+	subject string
+}
+
+func slotOf(ev *Event) stateSlot {
+	return stateSlot{topic: ev.Topic, session: ev.Participant.SessionID, subject: ev.Participant.Subject}
 }
 
 // outbox is a non-blocking, coalescing delivery queue: a queue of undelivered
@@ -35,7 +45,7 @@ type outbox struct {
 	mu    sync.Mutex
 	queue []*Event
 	// stateAt points at each session's queued state event, so a burst from one
-	// session overwrites its slot instead of lengthening the queue. Entries are
+	// session folds into its slot instead of lengthening the queue. Entries are
 	// cleared when the event is handed over, and when a leave for that session
 	// is queued behind it — otherwise a state published after the leave would
 	// fold into a slot that sits in front of it and resurrect the record.
@@ -56,14 +66,21 @@ func newOutbox() *outbox {
 }
 
 // push queues an event, folding a state update into the one already waiting for
-// that session. It never blocks, so it is safe to call under another lock.
+// that session; the higher revision of the two stays. It never blocks, so it is
+// safe to call under another lock.
 func (o *outbox) push(ev Event) {
-	slot := stateSlot{topic: ev.Topic, session: ev.Participant.SessionID}
+	slot := slotOf(&ev)
 	o.mu.Lock()
 	switch ev.Kind {
 	case KindState:
 		if waiting, ok := o.stateAt[slot]; ok {
-			*waiting = ev
+			// Arrival order is not revision order: a Registry re-announces a
+			// record after releasing the lock it read it under, so a newer
+			// publish can be queued first. The receiver drops a lower revision
+			// anyway, and putting one in the slot would lose the higher one.
+			if ev.Participant.Revision >= waiting.Participant.Revision {
+				*waiting = ev
+			}
 			o.mu.Unlock()
 			return
 		}
@@ -130,7 +147,7 @@ func (o *outbox) pump() {
 		} else {
 			o.queue = o.queue[1:]
 		}
-		slot := stateSlot{topic: queued.Topic, session: queued.Participant.SessionID}
+		slot := slotOf(queued)
 		if queued.Kind == KindState && o.stateAt[slot] == queued {
 			delete(o.stateAt, slot)
 		}

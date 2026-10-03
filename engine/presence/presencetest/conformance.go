@@ -238,6 +238,60 @@ func Conformance(name string, newBus func() presence.Bus) bool {
 			}, "5s", "10ms").Should(Equal(uint64(burst)), "the newest state must arrive, coalesced or not")
 		})
 
+		// A Registry re-announces a record it read under its lock after the
+		// lock is released, so a newer publish can reach the bus first. A bus
+		// that folds by arrival would then put the older revision in place of
+		// the newer one, and the receiver could never get the newer one back.
+		It("delivers the highest revision when a lower one is published after it", func() {
+			t := topic("overtake")
+			ch, _ := subscribe(t)
+			// The first event holds the delivery path, so the next two wait
+			// together where a bus would fold them.
+			publish(state(t, "s0", 1, "other"))
+			publish(state(t, "s1", 5, "v5"))
+			publish(state(t, "s1", 4, "v4"))
+
+			var highest uint64
+			Eventually(func() uint64 {
+				for {
+					select {
+					case ev := <-ch:
+						if ev.Participant.SessionID == "s1" && ev.Participant.Revision > highest {
+							highest = ev.Participant.Revision
+						}
+					default:
+						return highest
+					}
+				}
+			}, "5s", "10ms").Should(Equal(uint64(5)), "a lower revision must not take the place of a higher one")
+		})
+
+		// A receiver keeps a record for the subject that wrote it, so state
+		// from another subject that names the same session is not a newer
+		// version of it. Folded together, the owner's update is lost.
+		It("does not fold state from two subjects that name one session", func() {
+			t := topic("subjects")
+			ch, _ := subscribe(t)
+			publish(state(t, "s0", 1, "other"))
+			publish(state(t, "s1", 5, "mine"))
+			stranger := state(t, "s1", 9, "spoofed")
+			stranger.Participant.Subject = "u2"
+			publish(stranger)
+
+			Eventually(func() bool {
+				for {
+					select {
+					case ev := <-ch:
+						if ev.Participant.SessionID == "s1" && ev.Participant.Subject == "u1" {
+							return true
+						}
+					default:
+						return false
+					}
+				}
+			}, "5s", "10ms").Should(BeTrue(), "the owner's state must arrive")
+		})
+
 		// Broadcasts are each distinct, so they may be dropped but never folded
 		// into one another. A handful with an attentive reader must all land.
 		It("does not coalesce broadcasts", func() {
