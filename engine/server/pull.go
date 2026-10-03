@@ -873,7 +873,15 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 			}
 			resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
 		case rowUnsubscribed:
-			// Skip: the client holds no state for this entity.
+			// Skip: the client holds no state for this entity, unless the
+			// cursor's closure names the row. Then an earlier follow spec
+			// delivered it, this request's specs no longer reach its entity,
+			// and the membership diff below leaves rows past cur.seq to this
+			// scan.
+			ck := closureKey{entity: row.Entity, key: row.Key}
+			if priorClosure[ck] && emitter.syncable(row.Entity) {
+				resp.Patch.Changes = append(resp.Patch.Changes, hiddenChange(row))
+			}
 		}
 		return nil
 	}
@@ -913,6 +921,20 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 				return nil, cursorState{}, resetNone, err
 			}
 			next.closure = emitter.closure.keySet()
+		} else if len(priorClosure) > 0 {
+			// This request follows nothing, so its closure is empty: every
+			// row the cursor's closure names drops unless base scope holds it.
+			// A server-only member never reached the client, so it is left
+			// out rather than revoked.
+			held := make(map[closureKey]bool, len(priorClosure))
+			for ck := range priorClosure {
+				if emitter.syncable(ck.entity) {
+					held[ck] = true
+				}
+			}
+			if err := emitter.emitMembershipDiff(tx, held, nil, cur.seq, resp.Patch); err != nil {
+				return nil, cursorState{}, resetNone, err
+			}
 		}
 		if len(emitter.windows) > 0 {
 			if err := emitter.emitMembershipDiff(tx, oldWindow, emitter.windowMembers, cur.seq, resp.Patch); err != nil {

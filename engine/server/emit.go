@@ -267,6 +267,13 @@ func (e *rowEmitter) subscribed(entity string) bool {
 	return e.scopes[entity] != nil || e.followEntities[entity]
 }
 
+// syncable reports whether a client can hold rows of entity at all: the
+// entity is registered and is not server-only.
+func (e *rowEmitter) syncable(entity string) bool {
+	info, ok := e.srv.catalogPtr().entities[entity]
+	return ok && !info.serverOnly
+}
+
 // entities returns the subscribed registered entity names in stable order.
 // Follow-reachable entities are included so the scan and resync diff cover
 // them. The order is SORTED, which resync depends on to resume a paused diff

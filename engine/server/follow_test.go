@@ -408,6 +408,99 @@ var _ = Describe("Reference-following subscriptions", func() {
 			Expect(r2.GetReset_()).To(BeFalse())
 			Expect(values(r2.GetPatch())).To(ContainElement("issue/i3"))
 		})
+
+		// drain pulls until the page is the last one and returns every change.
+		drain := func(cursor []byte, subs ...*syncplanev1.Subscription) (*syncplanev1.Patch, []byte) {
+			GinkgoHelper()
+			all := &syncplanev1.Patch{}
+			for range 20 {
+				r := pull(cursor, subs...)
+				Expect(r.GetReset_()).To(BeFalse())
+				all.Changes = append(all.Changes, r.GetPatch().GetChanges()...)
+				all.DropEntities = append(all.DropEntities, r.GetPatch().GetDropEntities()...)
+				cursor = r.GetNextCursor()
+				if !r.GetHasMore() {
+					return all, cursor
+				}
+			}
+			Fail("pull never drained")
+			return nil, nil
+		}
+
+		// followingP1 pushes issue i1 pointing at project p1 and returns the
+		// cursor of a client that holds both through issue→project.
+		followingP1 := func() []byte {
+			GinkgoHelper()
+			push(
+				putMutation("c1", 1, "project", "p1", &testdatav1.Project{Id: "p1", Name: "Apollo"}),
+				putMutation("c1", 2, "issue", "i1", issue("i1", "one", "p1")),
+			)
+			r := pull(nil, followProject(1))
+			Expect(values(r.GetPatch())).To(ConsistOf("issue/i1", "project/p1"))
+			return r.GetNextCursor()
+		}
+
+		It("removing the follow spec drops the rows only the closure held", func() {
+			cursor := followingP1()
+
+			p, next := drain(cursor, &syncplanev1.Subscription{Entity: "issue"})
+			Expect(tombstones(p)).To(ConsistOf("project/p1"))
+			Expect(values(p)).To(BeEmpty())
+
+			// The drop is settled: the next pull does not repeat it.
+			p, _ = drain(next, &syncplanev1.Subscription{Entity: "issue"})
+			Expect(p.GetChanges()).To(BeEmpty())
+		})
+
+		It("removing the follow spec drops a closure row that was deleted since the cursor", func() {
+			cursor := followingP1()
+			push(deleteMutation("c1", 3, "project", "p1"))
+
+			p, _ := drain(cursor, &syncplanev1.Subscription{Entity: "issue"})
+			Expect(tombstones(p)).To(ContainElement("project/p1"))
+		})
+
+		It("removing the follow spec drops a closure row that changed since the cursor, without its new value", func() {
+			cursor := followingP1()
+			push(putMutation("c1", 3, "project", "p1", &testdatav1.Project{Id: "p1", Name: "Artemis"}))
+
+			p, _ := drain(cursor, &syncplanev1.Subscription{Entity: "issue"})
+			Expect(tombstones(p)).To(ContainElement("project/p1"))
+			Expect(values(p)).NotTo(ContainElement("project/p1"))
+		})
+
+		It("re-targeting the follow spec drops a closure row that changed since the cursor", func() {
+			cursor := followingP1()
+			push(putMutation("c1", 3, "project", "p1", &testdatav1.Project{Id: "p1", Name: "Artemis"}))
+
+			p, _ := drain(cursor, &syncplanev1.Subscription{
+				Entity: "issue",
+				Follow: &syncplanev1.FollowSpec{Paths: []*syncplanev1.RefPath{{Segments: []string{"blockedBy"}}}, Depth: 1},
+			})
+			Expect(tombstones(p)).To(ContainElement("project/p1"))
+			Expect(values(p)).NotTo(ContainElement("project/p1"))
+		})
+
+		It("replacing the follow spec with a base predicate that does not admit the closure row drops it", func() {
+			cursor := followingP1()
+
+			p, _ := drain(cursor,
+				&syncplanev1.Subscription{Entity: "issue"},
+				&syncplanev1.Subscription{Entity: "project", Predicate: &syncplanev1.Condition{Kind: &syncplanev1.Condition_Cmp{Cmp: &syncplanev1.CmpCond{
+					Path:  []string{"name"},
+					Op:    syncplanev1.CmpOp_CMP_OP_EQ,
+					Value: &syncplanev1.QueryValue{Kind: &syncplanev1.QueryValue_StringValue{StringValue: "Zeus"}},
+				}}}},
+			)
+			Expect(tombstones(p)).To(ContainElement("project/p1"))
+		})
+
+		It("replacing the follow spec with a base scope that holds the closure row keeps it", func() {
+			cursor := followingP1()
+
+			p, _ := drain(cursor, &syncplanev1.Subscription{Entity: "issue"}, &syncplanev1.Subscription{Entity: "project"})
+			Expect(tombstones(p)).NotTo(ContainElement("project/p1"))
+		})
 	})
 
 	Describe("what a following pull costs", func() {

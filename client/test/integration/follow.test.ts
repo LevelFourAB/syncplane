@@ -74,6 +74,30 @@ describe('reference-following subscriptions', () => {
 		await reader.close();
 	});
 
+	it('drops a followed target when the subscription stops following it', async () => {
+		const ws = freshWorkspace();
+		const writer = newClient(ws, refEntities);
+		await writer.start();
+		await writer.mutate.put(ProjectSchema, { id: 'A', name: 'alpha' });
+		await writer.mutate.put(IssueSchema, { id: 'i1', title: 'one', project: { id: 'A' } });
+		await writer.syncNow();
+
+		const reader = newClient(ws, { ...refEntities, subscriptions: [ followProject ] });
+		await reader.start();
+		await reader.syncNow();
+		expect(await reader.get(ProjectSchema, 'A')).toBeDefined();
+
+		// Keep the issues, stop following issue→project.
+		reader.setSubscriptions([ subscription(IssueSchema) ]);
+		await reader.syncNow();
+
+		expect(await reader.get(ProjectSchema, 'A')).toBeUndefined();
+		expect(await reader.get(IssueSchema, 'i1')).toBeDefined();
+
+		await writer.close();
+		await reader.close();
+	});
+
 	it('reverse-follows a subscribed parent to its children', async () => {
 		const ws = freshWorkspace();
 		const writer = newClient(ws, refEntities);
