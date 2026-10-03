@@ -17,21 +17,24 @@ import (
 
 // subScope is one workspace's state on a multiplexed Subscribe stream.
 //
-// Everything here is resolved once, at open, and then reused for the life of
-// the stream: the emitter, the filter epoch and the warmed read filters must
-// never be re-resolved per notification (a slow hook would then run on every
-// change and, worse, inside a snapshot). The subscription set is fixed for the
-// stream, so that warming stays valid.
+// The subscription set is fixed for the stream. The emitter and its warmed
+// read filters are resolved at open and reused for as long as the filter epoch
+// stays where it was: drainScope reads the epoch again before every page, as
+// Pull does on every call, and rebuilds the emitter when it moved (see
+// refreshEpoch). Every hook still runs outside the read snapshot.
 //
-// The workspace-access gate is the one exception, and it is re-run on the
-// heartbeat rather than per notification — see regateScopes.
+// The workspace-access gate is re-run on the heartbeat rather than per page —
+// see regateScopes.
 type subScope struct {
-	ws string
+	ws        string
+	principal Principal
 	// clientID is the stream's idempotency handle. Watermarks are keyed
 	// (workspace, client_id), so one handle serves every scope and each page
 	// still reports last_acked_mutation_id for its own workspace.
 	clientID string
 	emitter  *rowEmitter
+	// epoch is the filter epoch the emitter's read filters were resolved
+	// under.
 	epoch    uint64
 	wantHash uint64
 	subs     []*syncplanev1.Subscription
@@ -86,6 +89,12 @@ type subScope struct {
 // project drops that scope within one heartbeat interval instead of whenever
 // the client next reconnects. Authentication is NOT re-run — a credential that
 // expires mid-stream still rides to the end of the stream (see authn.go).
+//
+// Row visibility follows the filter epoch page by page, as it does for Pull.
+// A scope reads FilterEpoch again before each page it sends, and when the
+// epoch moved, or the scope opened with a cursor issued for another
+// subscription set or epoch, it runs the same delta resync a Pull would (or
+// drops the scope with RESET where Pull would reset).
 //
 // Each stream is its own goroutine doing its own scans, so a slow client blocks
 // only its own Send, never another client. With the default in-process notifier
@@ -255,10 +264,9 @@ func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
 //
 // Ordering is load-bearing and mirrors Pull. enterWorkspace runs FIRST, so a
 // refused caller leaves no epoch lookup or warmed filter behind in a
-// workspace they cannot see. Then every Permissions hook resolves ONCE,
-// outside any read snapshot and outside the tail loop: FilterEpoch up front,
-// then the emitter's per-entity read filters are warmed so classify() inside
-// each per-notify scan is a pure cache hit.
+// workspace they cannot see. Then every Permissions hook resolves outside any
+// read snapshot: FilterEpoch up front, then the emitter's per-entity read
+// filters are warmed so classify() inside each scan is a pure cache hit.
 func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope, clientID string, noDeltas map[string]bool, sparseCursor bool) (*subScope, syncplanev1.WorkspaceDropped_Reason, error) {
 	ws := want.GetWorkspaceId()
 
@@ -278,6 +286,8 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
+	// Built before the epoch lookup so a subscription set that does not
+	// validate costs no hook call.
 	emitter, err := newRowEmitter(ctx, s, ws, want.GetSubscriptions())
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
@@ -287,14 +297,13 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
-	for _, e := range emitter.entities() {
-		if _, err := emitter.filterOf(e); err != nil {
-			return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
-		}
+	if err := emitter.warmFilters(); err != nil {
+		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
 
 	return &subScope{
 		ws:           ws,
+		principal:    principal,
 		clientID:     clientID,
 		emitter:      emitter,
 		epoch:        epoch,
@@ -308,6 +317,31 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		logger:       s.reqLog(ctx, "subscribe", ws, clientID),
 		live:         true,
 	}, syncplanev1.WorkspaceDropped_REASON_UNSPECIFIED, nil
+}
+
+// refreshEpoch reads the scope's filter epoch again and, when it moved,
+// replaces the emitter with one whose read filters are resolved under the new
+// epoch. The scope's cursor keeps the epoch it was issued under, so the next
+// page routes into a delta resync from it.
+//
+// The epoch is read before the filters, as at open. The other order could
+// stamp the new epoch onto filters resolved under the old one, and a row the
+// new filters hide would then ship without a resync ever revisiting it.
+func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
+	epoch, err := s.perms.FilterEpoch(ctx, sc.principal, sc.ws)
+	if err != nil || epoch == sc.epoch {
+		return err
+	}
+	emitter, err := newRowEmitter(ctx, s, sc.ws, sc.subs)
+	if err != nil {
+		return err
+	}
+	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
+	if err := emitter.warmFilters(); err != nil {
+		return err
+	}
+	sc.emitter, sc.epoch = emitter, epoch
+	return nil
 }
 
 // regateScopes re-runs the workspace-access gate for every live scope and drops
@@ -377,22 +411,31 @@ func (sc *subScope) checkpointDue(pageBytes, cursorBytes int) bool {
 // always sent; an empty page is sent only when keepalive is set, which is how
 // catch-up reports last_acked and the cursor position on a quiet workspace.
 //
-// A reset verdict drops the scope instead of ending the stream: the client
-// re-bootstraps that workspace and reopens. The scope's cursor advances as a
-// side effect of every page sent; whether that cursor also goes out on the
-// frame is checkpointDue's call.
+// Each page is routed as a Pull page is (routePull): a forward page, a delta
+// resync step when the epoch or the subscription set no longer matches the
+// scope's cursor, or a reset. A reset verdict drops the scope instead of
+// ending the stream: the client re-bootstraps that workspace and reopens. The
+// scope's cursor advances as a side effect of every page sent; whether that
+// cursor also goes out on the frame is checkpointDue's call.
 //
 // It returns an error only when the STREAM cannot continue (a failed Send, or
 // a cancelled context). A failure scoped to the workspace drops the scope and
 // returns nil.
 func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[syncplanev1.SubscribeResponse], sc *subScope, limit int, keepalive bool) error {
 	for {
+		if err := s.refreshEpoch(ctx, sc); err != nil {
+			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+		}
+		route, err := s.routePull(ctx, sc.ws, sc.cur, sc.rawCursor, sc.wantHash, sc.epoch, sc.emitter)
+		if err != nil {
+			return s.dropScope(stream, sc, syncplanev1.WorkspaceDropped_REASON_ERROR, err)
+		}
 		var page *syncplanev1.PullResponse
 		var next cursorState
 		var reason resetReason
 		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
-			page, next, reason, e = s.pullPage(tx, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.clientID, sc.rawCursor, limit)
+			page, next, reason, e = s.servePullPage(tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.clientID, sc.rawCursor, limit)
 			return e
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.

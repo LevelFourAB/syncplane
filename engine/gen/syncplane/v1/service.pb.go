@@ -1371,8 +1371,11 @@ func (x *QueryRowGroup) GetHasMore() bool {
 
 // WorkspaceScope is one workspace's slice of a Subscribe stream: where to
 // resume from and what to sync. The subscription set is fixed for the life of
-// the stream, so the catch-up and the live tail both run under this exact set
-// and the tail never delta-resyncs.
+// the stream. A cursor issued under another subscription set or filter epoch
+// delta-resyncs on the stream before the scope reports caught_up, and a filter
+// epoch that moves while the stream is open delta-resyncs the scope then, both
+// exactly as a Pull would. Where a Pull would reset, the scope is dropped with
+// reason RESET.
 type WorkspaceScope struct {
 	state       protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`

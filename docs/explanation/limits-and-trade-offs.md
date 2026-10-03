@@ -169,6 +169,7 @@ The `client_id` parameter is an unauthenticated idempotency handle, not an ident
 Active streams re-check access permissions periodically, but do not re-verify credentials:
 
 - `Subscribe` re-evaluates `CanAccessWorkspace` for open scopes on each heartbeat (default 30 seconds). A user whose access is revoked is disconnected within one heartbeat interval.
+- `Subscribe` reads `FilterEpoch` again before each page it sends, as `Pull` does on each call. When the epoch moved, the scope resyncs before the stream sends more rows, so a row that the new read filter hides does not reach the client.
 - Authentication occurs only when opening the stream. If credentials expire while a stream is open, the connection remains active until closed. Limit stream lifetimes if strict credential expiration is required.
 
 The engine limits request costs through `Limits`, but does not rate-limit request frequency or cap concurrent streams per caller. Rate limiting and connection limits must be implemented in the HTTP reverse proxy or gateway in front of the engine handlers. The ephemeral plane follows the same model; see [Rooms](rooms.md#what-is-not-guaranteed).

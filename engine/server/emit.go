@@ -337,6 +337,17 @@ func (e *rowEmitter) bootstrapEntities(subs []*syncplanev1.Subscription, priorit
 	return out
 }
 
+// warmFilters resolves the read filter of every entity in scope, so classify
+// inside a read snapshot only applies predicates and never calls a hook.
+func (e *rowEmitter) warmFilters() error {
+	for _, entity := range e.entities() {
+		if _, err := e.filterOf(entity); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (e *rowEmitter) filterOf(entity string) (RowFilter, error) {
 	if !e.filterKnown[entity] {
 		filter, err := e.filterSource(entity)

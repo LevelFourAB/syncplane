@@ -109,8 +109,8 @@ type resyncPos struct {
 	afterKey string
 }
 
-// resyncStep advances a delta resync by one pull page and encodes the
-// resulting cursor: mid-resync cursors keep the old scope (which still
+// resyncStep advances a delta resync by one pull page, encodes the resulting
+// cursor onto resp and returns it: mid-resync cursors keep the old scope (which still
 // describes the bulk of the client's rows) plus the diff position; on
 // completion the new scope swaps in at the ORIGINAL seq so the next pull
 // catches up on everything written since, under the new visibility.
@@ -132,25 +132,26 @@ type resyncPos struct {
 // the original one: a member whose holder moved after seq but before the
 // rebuild would then be in the stored set without the client ever having
 // received it, and the catch-up pull would skip it as already held.
-func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, pos resyncPos, limit int, resp *syncplanev1.PullResponse) error {
+func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, pos resyncPos, limit int, resp *syncplanev1.PullResponse) (cursorState, error) {
 	var err error
 	if oldEm.windowMembers, err = oldEm.buildWindows(tx); err != nil {
-		return err
+		return cursorState{}, err
 	}
 	if newEm.windowMembers, err = newEm.buildWindows(tx); err != nil {
-		return err
+		return cursorState{}, err
 	}
 	oldEm.closure = closureSetRows(cur.closure)
 	newEm.closure = oldEm.closure
 	next, done, err := runResync(tx, oldEm, newEm, cur.seq, pos, limit, s.limits, resp.Patch)
 	if err != nil {
-		return err
+		return cursorState{}, err
 	}
+	var st cursorState
 	if done {
 		// Keep any same-version sub-position from the cursor that entered the
 		// resync: the catch-up pull resumes from the original seq under the
 		// new scope and must not skip the undelivered tail of a split group.
-		st := cursorState{
+		st = cursorState{
 			seq:     cur.seq,
 			subHash: wantHash,
 			epoch:   epoch,
@@ -183,7 +184,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 		st.stateID, st.stateGen, st.stateBlob = cur.stateID, cur.stateGen, cur.stateBlob
 		resp.NextCursor = s.encodeCursor(newEm.ctx, newEm.ws, &st)
 	} else {
-		st := cur
+		st = cur
 		st.resync = &syncplanecursorv1.ResyncState{
 			Entity:        next.entity,
 			AfterKey:      next.afterKey,
@@ -196,7 +197,7 @@ func (s *Server) resyncStep(tx storage.ReadTx, cur cursorState, oldEm, newEm *ro
 	// diff, after completion to catch up from the original seq.
 	resp.HasMore = true
 	resp.Seq = cur.seq
-	return nil
+	return st, nil
 }
 
 // resyncScanBatch is the number of rows one storage scan call in a resync

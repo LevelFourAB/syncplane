@@ -360,42 +360,13 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		}
 	}
 
-	// Classify the pull path from the cursor alone (no tx needed) and, when a
-	// delta resync applies, reconstruct the cursor's old visibility now — that
-	// resolution calls ReadFilter/ReadFilterAt (resync.go), which must also run
-	// outside the snapshot. The scan/resync dispatch still happens inside the
-	// tx, but by then every filter is memoized. staleResync and !resyncOK both
-	// fall through to a reset inside the tx (after LastAckedMutationId is set).
-	var (
-		oldEm       *rowEmitter
-		resyncOK    bool
-		doResync    bool
-		dropEnts    []string
-		staleResync bool
-	)
-	switch {
-	case cur.resync != nil:
-		// Mid-resync: a FURTHER scope change invalidates the diff in flight.
-		if cur.resync.GetToSubHash() != wantHash || cur.resync.GetToFilterEpoch() != epoch {
-			staleResync = true
-		} else {
-			oldEm, resyncOK, err = s.oldVisibility(ctx, msg.GetWorkspaceId(), cur, epoch, emitter)
-			if err != nil {
-				return nil, err
-			}
-			doResync = true
-		}
-	case len(msg.GetCursor()) > 0 && (cur.subHash != wantHash || cur.epoch != epoch):
-		oldEm, resyncOK, err = s.oldVisibility(ctx, msg.GetWorkspaceId(), cur, epoch, emitter)
-		if err != nil {
-			return nil, err
-		}
-		if resyncOK {
-			// Entities that left the subscription set drop wholesale, once, on
-			// the first resync page; the scan covers the rest.
-			dropEnts = s.leavingEntities(oldEm, emitter)
-		}
-		doResync = true
+	// Route the page from the cursor alone (no tx needed). A delta resync
+	// reconstructs the cursor's old visibility here, which calls
+	// ReadFilter/ReadFilterAt (resync.go) and so must also run outside the
+	// snapshot.
+	route, err := s.routePull(ctx, msg.GetWorkspaceId(), cur, msg.GetCursor(), wantHash, epoch, emitter)
+	if err != nil {
+		return nil, err
 	}
 
 	limit := s.limits.MaxPullChanges
@@ -412,50 +383,9 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// min_seq is untrusted wire input whose worst effect is forcing the read
 	// onto the primary — the behavior every pull had before replicas.
 	err = s.readTx(ctx, msg.GetWorkspaceId(), max(cur.seq, msg.GetMinSeq()), func(tx storage.ReadTx) error {
-		// A delta resync (or a stale one) takes precedence over the normal
-		// forward page, but still runs the shared reset checks first: a cursor
-		// below the horizon or from a foreign store resets rather than resyncs.
-		// An empty cursor never resyncs: it decodes to seq 0 with no prior
-		// scope to diff against, so it either replays the workspace from the
-		// beginning or resets on the horizon (see pullPreamble). A non-empty
-		// cursor whose subscription set or filter epoch changed enters a delta
-		// resync (classified above), falling back to reset when the old scope
-		// cannot be reconstructed. Mid-resync the client's rows are a mixture of
-		// old and new scope; a FURTHER change invalidates the diff in flight,
-		// and only a re-bootstrap recovers.
-		if staleResync || doResync {
-			resp = &syncplanev1.PullResponse{Patch: &syncplanev1.Patch{}}
-			_, _, doReset, err := s.pullPreamble(tx, cur, msg.GetClientId(), msg.GetCursor(), resp)
-			if err != nil {
-				return err
-			}
-			if doReset != resetNone || staleResync || !resyncOK {
-				resp.Reset_ = true
-				resp.NextCursor = msg.GetCursor()
-				switch {
-				case doReset != resetNone:
-					resetSeen = doReset
-				case staleResync:
-					resetSeen = resetStaleResync
-				default:
-					resetSeen = resetResyncUnavailable
-				}
-				return nil
-			}
-			if cur.resync != nil {
-				pos := resyncPos{entity: cur.resync.GetEntity(), afterKey: cur.resync.GetAfterKey()}
-				return s.resyncStep(tx, cur, oldEm, emitter, wantHash, epoch, msg.GetSubscriptions(), pos, limit, resp)
-			}
-			resp.Patch.DropEntities = dropEnts
-			return s.resyncStep(tx, cur, oldEm, emitter, wantHash, epoch, msg.GetSubscriptions(), resyncPos{}, limit, resp)
-		}
-		page, _, reason, err := s.pullPage(tx, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), msg.GetClientId(), msg.GetCursor(), limit)
-		if err != nil {
-			return err
-		}
-		resetSeen = reason
-		resp = page
-		return nil
+		var e error
+		resp, _, resetSeen, e = s.servePullPage(tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), msg.GetClientId(), msg.GetCursor(), limit)
+		return e
 	})
 	if err != nil {
 		return nil, err
@@ -482,6 +412,98 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		slog.Uint64("seq", resp.GetSeq()),
 	)
 	return connect.NewResponse(resp), nil
+}
+
+// pullRoute is the path one pull page takes from its cursor. routePull decides
+// it before the read snapshot opens; servePullPage follows it inside one.
+type pullRoute struct {
+	// resync is set when the cursor's subscription set or filter epoch no
+	// longer matches the request, or the cursor is inside a delta resync.
+	resync bool
+	// reset is why a resync cannot run, or resetNone. The storage checks in
+	// pullPreamble still run first, and their reason wins.
+	reset resetReason
+	// oldEm classifies rows under the visibility the cursor was issued with.
+	oldEm *rowEmitter
+	// dropEnts are the entities that left the subscription set. The first
+	// page of a resync drops them whole.
+	dropEnts []string
+}
+
+// routePull decides whether the page from cur is a forward page or a delta
+// resync step. A resync needs the cursor's old visibility, and rebuilding it
+// calls ReadFilterAt, so this runs outside the read snapshot.
+//
+// An empty cursor never resyncs: it decodes to seq 0 with no prior scope to
+// diff against, so it either replays the workspace from the beginning or
+// resets on the horizon (see pullPreamble). A non-empty cursor whose
+// subscription set or filter epoch changed enters a delta resync, and falls
+// back to reset when the old scope cannot be reconstructed. Mid-resync the
+// client's rows are a mixture of old and new scope, so a FURTHER change
+// invalidates the diff in flight and only a re-bootstrap recovers.
+func (s *Server) routePull(ctx context.Context, ws string, cur cursorState, rawCursor []byte, wantHash, epoch uint64, emitter *rowEmitter) (pullRoute, error) {
+	switch {
+	case cur.resync != nil:
+		if cur.resync.GetToSubHash() != wantHash || cur.resync.GetToFilterEpoch() != epoch {
+			return pullRoute{resync: true, reset: resetStaleResync}, nil
+		}
+		oldEm, ok, err := s.oldVisibility(ctx, ws, cur, epoch, emitter)
+		if err != nil {
+			return pullRoute{}, err
+		}
+		if !ok {
+			return pullRoute{resync: true, reset: resetResyncUnavailable}, nil
+		}
+		return pullRoute{resync: true, oldEm: oldEm}, nil
+	case len(rawCursor) > 0 && (cur.subHash != wantHash || cur.epoch != epoch):
+		oldEm, ok, err := s.oldVisibility(ctx, ws, cur, epoch, emitter)
+		if err != nil {
+			return pullRoute{}, err
+		}
+		if !ok {
+			return pullRoute{resync: true, reset: resetResyncUnavailable}, nil
+		}
+		// Entities that left the subscription set drop wholesale, once, on the
+		// first resync page; the scan covers the rest.
+		return pullRoute{resync: true, oldEm: oldEm, dropEnts: s.leavingEntities(oldEm, emitter)}, nil
+	}
+	return pullRoute{}, nil
+}
+
+// servePullPage serves one page along route under tx: a forward page
+// (pullPage), a delta resync step, or a reset. The returned cursorState is the
+// position the page advanced to; Subscribe carries it forward across pages.
+//
+// A resync still runs the shared reset checks first, so a cursor below the
+// horizon or from a foreign store resets rather than resyncs.
+func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, clientID string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
+	if !route.resync {
+		return s.pullPage(tx, cur, emitter, wantHash, epoch, subs, clientID, rawCursor, limit)
+	}
+	resp := &syncplanev1.PullResponse{Patch: &syncplanev1.Patch{}}
+	_, _, reset, err := s.pullPreamble(tx, cur, clientID, rawCursor, resp)
+	if err != nil {
+		return nil, cursorState{}, resetNone, err
+	}
+	if reset == resetNone {
+		reset = route.reset
+	}
+	if reset != resetNone {
+		resp.Reset_ = true
+		resp.NextCursor = rawCursor
+		return resp, cur, reset, nil
+	}
+	pos := resyncPos{}
+	if cur.resync != nil {
+		pos = resyncPos{entity: cur.resync.GetEntity(), afterKey: cur.resync.GetAfterKey()}
+	} else {
+		resp.Patch.DropEntities = route.dropEnts
+	}
+	next, err := s.resyncStep(tx, cur, route.oldEm, emitter, wantHash, epoch, subs, pos, limit, resp)
+	if err != nil {
+		return nil, cursorState{}, resetNone, err
+	}
+	return resp, next, resetNone, nil
 }
 
 // belowHorizon reports whether a change-feed position may have missed a
@@ -668,8 +690,8 @@ func deliverPage(tx storage.ReadTx, cur cursorState, changes []storage.Row, comp
 // pullPage serves one forward pull page from cur under a read snapshot: the
 // shared reset checks + last_acked (pullPreamble), the window and closure
 // refresh, the classify pass over the page's rows, the membership diffs at a
-// clean version boundary, and the next cursor. It does NOT handle delta resync — callers dispatch that
-// before invoking pullPage. The returned cursorState is the position the page
+// clean version boundary, and the next cursor. It does NOT handle delta resync —
+// servePullPage routes that before invoking pullPage. The returned cursorState is the position the page
 // advanced to (meaningful only when the response is neither reset nor closes
 // the stream early); Subscribe carries it forward across notifications.
 func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, clientID string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {

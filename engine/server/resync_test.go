@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
+	"time"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -23,9 +25,11 @@ import (
 // epochPermissions hides todos whose title contains the CURRENT epoch's
 // hidden word. Past epochs stay evaluable via ReadFilterAt, which opts the
 // server into delta resync for permission changes; forget() drops the
-// history to exercise the reset fallback.
+// history to exercise the reset fallback. The mutex lets a spec change the
+// policy while a Subscribe stream reads it.
 type epochPermissions struct {
 	server.AllowAll
+	mu        sync.Mutex
 	words     []string // index = epoch
 	forgotten bool
 }
@@ -35,20 +39,27 @@ func newEpochPermissions(word string) *epochPermissions {
 }
 
 func (p *epochPermissions) ReadFilter(_ context.Context, _ server.Principal, _ string, entity string) (server.RowFilter, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return p.filterAt(entity, uint64(len(p.words)-1))
 }
 
 func (p *epochPermissions) FilterEpoch(context.Context, server.Principal, string) (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	return uint64(len(p.words) - 1), nil
 }
 
 func (p *epochPermissions) ReadFilterAt(_ context.Context, _ server.Principal, _ string, entity string, epoch uint64) (server.RowFilter, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	if p.forgotten || epoch >= uint64(len(p.words)) {
 		return nil, server.ErrEpochUnavailable
 	}
 	return p.filterAt(entity, epoch)
 }
 
+// filterAt needs p.mu held.
 func (p *epochPermissions) filterAt(entity string, epoch uint64) (server.RowFilter, error) {
 	if entity != "todo" {
 		return nil, nil
@@ -62,7 +73,18 @@ func (p *epochPermissions) filterAt(entity string, epoch uint64) (server.RowFilt
 
 // setHiddenWord installs a new filter and bumps the epoch, like a membership
 // change would in a real app.
-func (p *epochPermissions) setHiddenWord(word string) { p.words = append(p.words, word) }
+func (p *epochPermissions) setHiddenWord(word string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.words = append(p.words, word)
+}
+
+// forget makes every past epoch unavailable to ReadFilterAt.
+func (p *epochPermissions) forget() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.forgotten = true
+}
 
 var _ = Describe("Delta resync", func() {
 	var (
@@ -475,9 +497,111 @@ var _ = Describe("Delta resync", func() {
 			cursor, _ := bootstrap()
 
 			perms.setHiddenWord("beta")
-			perms.forgotten = true
+			perms.forget()
 			resp := pull(cursor, 0)
 			Expect(resp.GetReset_()).To(BeTrue())
+		})
+	})
+
+	// A Subscribe stream routes every page the way Pull does, so a scope
+	// change reaches it through the same delta resync: when the epoch moves
+	// while it is open, and when it opens with a cursor issued for another
+	// subscription set or epoch.
+	Describe("on a Subscribe stream", func() {
+		var perms *epochPermissions
+
+		BeforeEach(func() {
+			perms = newEpochPermissions("alpha")
+			// No heartbeat inside a spec, so only a write or the open itself can
+			// make the stream read the epoch.
+			start(newTestServer(server.WithPermissions(perms), server.WithHeartbeat(time.Hour)))
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(context.Background(), 10*time.Second)
+			// Registered after start's ts.Close, so it runs first: an open
+			// stream would otherwise hold ts.Close forever.
+			DeferCleanup(cancel)
+		})
+
+		subscribe := func(scope *syncplanev1.WorkspaceScope) *connect.ServerStreamForClient[syncplanev1.SubscribeResponse] {
+			GinkgoHelper()
+			scope.WorkspaceId = ws
+			stream, err := client.Subscribe(ctx, connect.NewRequest(&syncplanev1.SubscribeRequest{
+				ClientId: "c1",
+				Scopes:   []*syncplanev1.WorkspaceScope{scope},
+			}))
+			Expect(err).NotTo(HaveOccurred())
+			return stream
+		}
+
+		// receive reads frames until done reports true for the rows received so
+		// far, and returns those rows. A dropped scope fails the spec: the
+		// stream must resync where Pull would.
+		receive := func(stream *connect.ServerStreamForClient[syncplanev1.SubscribeResponse], done func(*syncplanev1.SubscribeResponse, []*syncplanev1.RowChange) bool) []*syncplanev1.RowChange {
+			GinkgoHelper()
+			var rows []*syncplanev1.RowChange
+			for {
+				Expect(stream.Receive()).To(BeTrue(), "stream closed early: %v", stream.Err())
+				msg := stream.Msg()
+				Expect(msg.GetDropped()).To(BeNil(), "the stream must resync, not drop the scope")
+				rows = append(rows, msg.GetPage().GetPatch().GetChanges()...)
+				if done(msg, rows) {
+					return rows
+				}
+			}
+		}
+
+		caughtUp := func(msg *syncplanev1.SubscribeResponse, _ []*syncplanev1.RowChange) bool {
+			return msg.GetCaughtUp()
+		}
+
+		It("revokes the rows an epoch change hides while the stream is open", func() {
+			push(putTodo(1, "t-beta", "beta thing"), putTodo(2, "t-plan", "plan"))
+			stream := subscribe(&syncplanev1.WorkspaceScope{})
+			Expect(valueKeys(receive(stream, caughtUp), "todo")).To(ConsistOf("t-beta", "t-plan"))
+
+			// The policy starts to hide "beta", and then a write moves t-plan
+			// under it.
+			perms.setHiddenWord("beta")
+			push(putTodo(3, "t-plan", "beta plan"))
+
+			rows := receive(stream, func(_ *syncplanev1.SubscribeResponse, rows []*syncplanev1.RowChange) bool {
+				return len(tombstoneKeys(rows)) == 2
+			})
+			Expect(tombstoneKeys(rows)).To(ConsistOf("t-beta", "t-plan"))
+			Expect(valueKeys(rows, "todo")).To(BeEmpty(), "the stream shipped a row the new epoch hides")
+		})
+
+		It("revokes a row an epoch change hid while the stream was closed", func() {
+			push(putTodo(1, "t-beta", "beta thing"), putTodo(2, "t-plain", "plain thing"))
+			cursor, _ := bootstrap()
+
+			perms.setHiddenWord("beta")
+			rows := receive(subscribe(&syncplanev1.WorkspaceScope{Cursor: cursor}), caughtUp)
+			Expect(tombstoneKeys(rows)).To(Equal([]string{"t-beta"}))
+			Expect(valueKeys(rows, "todo")).To(BeEmpty())
+		})
+
+		It("delivers the rows a wider subscription set adds when the stream opens", func() {
+			push(putWidget(1, "w-low", 5), putWidget(2, "w-high", 50))
+			cursor, rows := bootstrap(widgetSub(countGte(10)))
+			Expect(valueKeys(rows, "widget")).To(Equal([]string{"w-high"}))
+
+			streamed := receive(subscribe(&syncplanev1.WorkspaceScope{
+				Cursor:        cursor,
+				Subscriptions: []*syncplanev1.Subscription{widgetSub(countGte(1))},
+			}), caughtUp)
+			Expect(valueKeys(streamed, "widget")).To(Equal([]string{"w-low"}), "rows already held must not be resent")
+		})
+
+		It("drops the scope for a reset when the old epoch is no longer evaluable", func() {
+			push(putTodo(1, "t1", "plain thing"))
+			cursor, _ := bootstrap()
+
+			perms.setHiddenWord("beta")
+			perms.forget()
+			stream := subscribe(&syncplanev1.WorkspaceScope{Cursor: cursor})
+			Expect(stream.Receive()).To(BeTrue(), "stream closed early: %v", stream.Err())
+			Expect(stream.Msg().GetDropped().GetReason()).To(Equal(syncplanev1.WorkspaceDropped_REASON_RESET))
 		})
 	})
 

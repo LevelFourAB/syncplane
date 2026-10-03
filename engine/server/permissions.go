@@ -238,7 +238,9 @@ type Permissions interface {
 	// FilterEpoch returns the workspace's visibility epoch (0 if unused). It
 	// is stamped into cursors; a later mismatch forces clients to
 	// re-bootstrap, dropping rows that became invisible. Resolved before the
-	// read snapshot opens — keep it fast (see the interface doc).
+	// read snapshot opens — keep it fast (see the interface doc). Pull calls
+	// it once per request, and an open Subscribe stream once per page it
+	// sends, live-tail pages included.
 	//
 	// Contract: row visibility normally propagates through row versions —
 	// editing a row re-evaluates its filter on the next pull and hides it
