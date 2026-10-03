@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
@@ -1204,8 +1205,8 @@ func purgeWhere(ws, entity, keyPrefix string, before time.Time) (string, []any) 
 		where += " AND key >= " + next(keyPrefix)
 		// Both halves are needed: ">= prefix" alone also matches every key that
 		// merely sorts after it. The upper bound is missing only for a prefix of
-		// nothing but 0xff bytes, which no UTF-8 key can contain — so in
-		// practice this branch always runs.
+		// nothing but U+10FFFF, and every key at or above such a prefix starts
+		// with it.
 		if hi, bounded := prefixUpperBound(keyPrefix); bounded {
 			where += " AND key < " + next(hi)
 		}
@@ -1217,15 +1218,25 @@ func purgeWhere(ws, entity, keyPrefix string, before time.Time) (string, []any) 
 }
 
 // prefixUpperBound returns the least string greater than every string starting
-// with prefix, and whether one exists. Increment the last byte that can be
-// incremented and drop everything after it; a prefix of nothing but 0xff bytes
-// has no upper bound.
+// with prefix, and whether one exists. Replace the last code point that has a
+// successor with that successor and drop everything after it; a prefix of
+// nothing but U+10FFFF has no upper bound.
+//
+// Postgres receives the bound as TEXT, so it must be valid UTF-8, and one more
+// than the last byte often is not (U+043F is d0 bf). UTF-8 byte order is
+// code-point order, so the next code point is also the least bound bytewise.
 func prefixUpperBound(prefix string) (string, bool) {
-	b := []byte(prefix)
-	for i := len(b) - 1; i >= 0; i-- {
-		if b[i] < 0xff {
-			b[i]++
-			return string(b[:i+1]), true
+	for end := len(prefix); end > 0; {
+		r, size := utf8.DecodeLastRuneInString(prefix[:end])
+		end -= size
+		switch r {
+		case utf8.MaxRune:
+			continue
+		case 0xd7ff:
+			// U+D800 to U+DFFF are surrogates, which UTF-8 cannot encode.
+			return prefix[:end] + "\ue000", true
+		default:
+			return prefix[:end] + string(r+1), true
 		}
 	}
 	return "", false

@@ -1456,6 +1456,40 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			// Each prefix ends on a code point whose successor is not one byte
+			// higher. An adapter that binds the end of the range as text must
+			// still send valid UTF-8 there.
+			DescribeTable("keeps only the rows under a non-ASCII key prefix",
+				func(prefix string, under, outside []string) {
+					write("ws1", func(tx storage.WriteTx) {
+						for i, k := range append(append([]string{}, under...), outside...) {
+							Expect(tx.PutRow("hist", k, []byte("v"), uint64(i+1), storage.Actor{})).To(Succeed())
+						}
+					})
+					write("ws1", func(tx storage.WriteTx) {
+						removed, _, err := tx.PurgeEntityRows("hist", prefix, time.Time{}, 0)
+						Expect(err).NotTo(HaveOccurred())
+						Expect(removed).To(Equal(len(under)))
+					})
+					read("ws1", func(tx storage.ReadTx) {
+						var left []string
+						Expect(tx.ScanEntity("hist", func(r storage.Row) error {
+							left = append(left, r.Key)
+							return nil
+						})).To(Succeed())
+						Expect(left).To(ConsistOf(outside))
+					})
+				},
+				Entry("a last byte of 0xbf", "п",
+					[]string{"п1", "п2"}, []string{"о1", "р1"}),
+				Entry("the last code point below the surrogates", "퟿",
+					[]string{"퟿1"}, []string{"퟾1", ""}),
+				Entry("the highest code point after another", "a\U0010ffff",
+					[]string{"a\U0010ffff1"}, []string{"a\U0010fffe", "b"}),
+				Entry("nothing but the highest code point", "\U0010ffff",
+					[]string{"\U0010ffff", "\U0010ffff\U0010ffff"}, []string{"\U0010fffe"}),
+			)
+
 			It("treats the zero time as no age bound at all", func() {
 				// Not "before the epoch", which is what a naive UnixMilli() of
 				// the zero time would say — and would delete nothing, silently.
