@@ -118,4 +118,36 @@ describe('string writes over the wire', () => {
 		expect(row?.body?.length ?? 0).toBe(0);
 		await client.close();
 	});
+
+	// U+FEFF is also the UTF-8 byte-order mark. A decoder that strips a
+	// leading BOM drops it from the head of a run, and the run no longer
+	// matches its item count.
+	it('a Go string write that starts with U+FEFF reads back unchanged', async () => {
+		const ws = freshWorkspace();
+		// The text a connector copies from a file saved with a byte-order mark.
+		await serverTextString(ws, 'w1', '﻿# Notes');
+
+		const client = newClient(ws);
+		await client.start();
+		await client.syncNow();
+		const row = await client.get(WidgetSchema, 'w1');
+		expect(plainTextOf(row?.body)).toBe('﻿# Notes');
+		await client.close();
+	});
+
+	it('text one client writes with a leading U+FEFF reads back unchanged on another', async () => {
+		const ws = freshWorkspace();
+		const a = newClient(ws);
+		await a.start();
+		await a.mutate.put(WidgetSchema, { id: 'w1', body: '﻿hello' });
+		await a.syncNow();
+		await a.close();
+
+		const b = newClient(ws);
+		await b.start();
+		await b.syncNow();
+		const row = await b.get(WidgetSchema, 'w1');
+		expect(plainTextOf(row?.body)).toBe('﻿hello');
+		await b.close();
+	});
 });

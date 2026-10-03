@@ -39,7 +39,9 @@ export const FRAGMENT_VERSION = 2;
 export const PLAIN_STRING_VERSION = 3;
 
 const utf8Encoder = new TextEncoder();
-const utf8Decoder = new TextDecoder('utf-8', { fatal: true });
+// ignoreBOM keeps a leading U+FEFF as content. The default removes it, and a
+// run, mark value or plain string can start with that code point.
+const utf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
 /** Decodes UTF-8, restating the platform's decoder error as the message the
  * Go decoder uses for the same bytes (see `text: invalid UTF-8 ...` there). */

@@ -139,6 +139,179 @@
 			]
 		},
 		{
+			"name": "a leading U+FEFF is an ordinary code point, not a byte-order mark",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "﻿hi"
+				},
+				{
+					"op": "fragment",
+					"of": "a",
+					"as": "f"
+				},
+				{
+					"op": "new",
+					"doc": "b",
+					"peer": "bob"
+				},
+				{
+					"op": "applyFragment",
+					"doc": "b",
+					"frag": "f"
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "﻿hi"
+				},
+				{
+					"check": "len",
+					"doc": "a",
+					"value": 3
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636503010001030605efbbbf686900"
+				},
+				{
+					"check": "fragmentHex",
+					"frag": "f",
+					"value": "020105616c69636503010001030605efbbbf686900"
+				},
+				{
+					"check": "text",
+					"doc": "b",
+					"value": "﻿hi"
+				}
+			]
+		},
+		{
+			"name": "a delete makes a mid-text U+FEFF the head of a run",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "a﻿b"
+				},
+				{
+					"op": "delete",
+					"doc": "a",
+					"index": 0,
+					"len": 1
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "﻿b"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c696365030200010107016100020204000104efbbbf6200"
+				}
+			]
+		},
+		{
+			"name": "compaction keeps a deleted leading U+FEFF that positions live text",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "﻿hi"
+				},
+				{
+					"op": "setString",
+					"doc": "a",
+					"text": "hi"
+				},
+				{
+					"op": "compact",
+					"doc": "a",
+					"purged": 0
+				}
+			],
+			"checks": [
+				{
+					"check": "text",
+					"doc": "a",
+					"value": "hi"
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c69636503020001010703efbbbf00020204000102686900"
+				}
+			]
+		},
+		{
+			"name": "a mark value keeps a leading U+FEFF",
+			"steps": [
+				{
+					"op": "new",
+					"doc": "a",
+					"peer": "alice"
+				},
+				{
+					"op": "insert",
+					"doc": "a",
+					"index": 0,
+					"text": "hello"
+				},
+				{
+					"op": "mark",
+					"doc": "a",
+					"start": 0,
+					"end": 5,
+					"key": "link",
+					"value": "﻿https://example.com",
+					"expand": "none"
+				}
+			],
+			"checks": [
+				{
+					"check": "marks",
+					"doc": "a",
+					"value": [
+						{
+							"start": 0,
+							"end": 5,
+							"key": "link",
+							"value": "﻿https://example.com"
+						}
+					]
+				},
+				{
+					"check": "encodedHex",
+					"doc": "a",
+					"value": "010105616c6963650601000105060568656c6c6f010006046c696e6b0316efbbbf68747470733a2f2f6578616d706c652e636f6d02000103000500"
+				}
+			]
+		},
+		{
 			"name": "tombstones split runs canonically",
 			"steps": [
 				{
@@ -3735,6 +3908,11 @@
 			"name": "newline",
 			"text": "line1\nline2",
 			"hex": "036c696e65310a6c696e6532"
+		},
+		{
+			"name": "leading U+FEFF",
+			"text": "\ufeffx",
+			"hex": "03efbbbf78"
 		}
 	]
 }
