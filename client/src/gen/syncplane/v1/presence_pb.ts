@@ -337,10 +337,11 @@ export type WatchRequest = Message<"syncplane.v1.WatchRequest"> & {
    * Naming them here is what stops a room emptying out to whichever tab
    * happens to hold the lock.
    *
-   * Every id must belong to the same principal as session_id; one that does
-   * not fails the stream. The list is fixed for the life of the stream, so a
-   * tab that opens or closes is a reopen — the same reopen a room change
-   * already costs.
+   * A stream keeps alive only the records its own principal wrote. Naming a
+   * session whose record another principal wrote does not fail the stream,
+   * and does not keep that record alive. The list is fixed for the life of
+   * the stream, so a tab that opens or closes is a reopen — the same reopen a
+   * room change already costs.
    *
    * @generated from field: repeated string fronted_session_ids = 4;
    */
@@ -504,8 +505,9 @@ export const PublishItemSchema: GenMessage<PublishItem> = /*@__PURE__*/
  */
 export type PublishRequest = Message<"syncplane.v1.PublishRequest"> & {
   /**
-   * The publishing session, as named on this account's Watch stream. A
-   * session bound to a different principal is rejected.
+   * The publishing session, as named on this account's Watch stream. When
+   * the serving node holds Watch streams for the session and none of them
+   * is the caller's, the request is rejected with permission_denied.
    *
    * @generated from field: string session_id = 1;
    */

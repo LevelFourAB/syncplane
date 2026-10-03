@@ -517,10 +517,11 @@ type WatchRequest struct {
 	// Naming them here is what stops a room emptying out to whichever tab
 	// happens to hold the lock.
 	//
-	// Every id must belong to the same principal as session_id; one that does
-	// not fails the stream. The list is fixed for the life of the stream, so a
-	// tab that opens or closes is a reopen — the same reopen a room change
-	// already costs.
+	// A stream keeps alive only the records its own principal wrote. Naming a
+	// session whose record another principal wrote does not fail the stream,
+	// and does not keep that record alive. The list is fixed for the life of
+	// the stream, so a tab that opens or closes is a reopen — the same reopen a
+	// room change already costs.
 	FrontedSessionIds []string `protobuf:"bytes,4,rep,name=fronted_session_ids,json=frontedSessionIds,proto3" json:"fronted_session_ids,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
@@ -879,8 +880,9 @@ func (*PublishItem_Leave) isPublishItem_Body() {}
 // notices for a session.
 type PublishRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The publishing session, as named on this account's Watch stream. A
-	// session bound to a different principal is rejected.
+	// The publishing session, as named on this account's Watch stream. When
+	// the serving node holds Watch streams for the session and none of them
+	// is the caller's, the request is rejected with permission_denied.
 	SessionId string `protobuf:"bytes,1,opt,name=session_id,json=sessionId,proto3" json:"session_id,omitempty"`
 	// The writes, applied in order. At least one, and at most
 	// Limits.MaxPublishItems. Items are independent: there is no atomicity

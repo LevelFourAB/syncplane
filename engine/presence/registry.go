@@ -146,9 +146,10 @@ type record struct {
 // Close runs or the Registry shuts down, which is how a stream learns to end.
 type Watch struct {
 	reg       *Registry
+	subject   string
 	sessionID string
 	// fronted is every session this stream keeps alive, sessionID included. It
-	// is fixed for the stream's life and read without a lock.
+	// is fixed for the stream's life and read without a lock, as is subject.
 	fronted map[string]struct{}
 	out     *outbox
 
@@ -157,9 +158,15 @@ type Watch struct {
 	closed bool
 }
 
-// Open registers a stream for sessionID, plus any further sessions it is
-// responsible for. Those ids are what records are keyed on, and holding them
-// here is what makes this node re-announce them.
+// Open registers a stream that subject opened for sessionID, plus any further
+// sessions it is responsible for. Those ids are what records are keyed on, and
+// holding them here is what makes this node re-announce them.
+//
+// The stream keeps alive only the records written under subject. A session id
+// is shown to every watcher of a room, so naming one is no proof of owning it:
+// a stream that names a session whose record another subject wrote does not
+// re-announce that record, and the record expires when its owner's streams are
+// gone.
 //
 // A browser shares one stream across an account's tabs and the tabs that are
 // not holding it still publish, so fronting several sessions is the normal
@@ -168,7 +175,7 @@ type Watch struct {
 //
 // The returned Watch must be closed when the stream ends; leaving it open
 // leaves this node re-announcing records for sessions that are gone.
-func (r *Registry) Open(sessionID string, fronted ...string) *Watch {
+func (r *Registry) Open(subject, sessionID string, fronted ...string) *Watch {
 	all := make(map[string]struct{}, len(fronted)+1)
 	all[sessionID] = struct{}{}
 	for _, id := range fronted {
@@ -176,6 +183,7 @@ func (r *Registry) Open(sessionID string, fronted ...string) *Watch {
 	}
 	return &Watch{
 		reg:       r,
+		subject:   subject,
 		sessionID: sessionID,
 		fronted:   all,
 		out:       newOutbox(),
@@ -297,8 +305,8 @@ func (r *Registry) Publish(ctx context.Context, ev Event) error {
 // Sweep advances the liveness machinery to now. It is meant to be called every
 // Announce interval, and does two things in one pass:
 //
-//   - Re-announces every record whose session has a Watch stream on this node,
-//     so the other nodes keep it alive. The record's own revision is carried
+//   - Re-announces every record whose session has a Watch stream on this node
+//     opened by the record's subject, so the other nodes keep it alive. The record's own revision is carried
 //     unchanged, so an announcement that overtakes a newer state is discarded
 //     by revision rather than winning.
 //   - Drops every record that has gone an expiry window without being written
@@ -321,7 +329,7 @@ func (r *Registry) Sweep(ctx context.Context) {
 	var announce []Event
 	for _, rm := range r.rooms {
 		for sid, rec := range rm.participants {
-			if rm.ownsLocked(sid) {
+			if rm.ownsLocked(sid, rec.p.Subject) {
 				rec.seenAt = now
 				announce = append(announce, Event{
 					Topic:       rm.topic,
@@ -558,12 +566,20 @@ func (rm *room) fanOutLocked(ev Event) {
 	}
 }
 
-// ownsLocked reports whether a local stream for this session is watching this
-// topic, which is what makes this node responsible for re-announcing the
-// session's record here. Membership in watchers IS the answer: a stream is
-// added on Join and removed on Leave and Close.
-func (rm *room) ownsLocked(sid string) bool {
+// ownsLocked reports whether a local stream of subject for this session is
+// watching this topic, which is what makes this node responsible for
+// re-announcing the session's record here. Membership in watchers IS the
+// answer: a stream is added on Join and removed on Leave and Close.
+//
+// The subject is part of the match because every watcher learns every session
+// id in its rooms. Matched on the id alone, a stranger's stream that names an
+// id would keep the record of a departed session alive for as long as the
+// stranger stays connected.
+func (rm *room) ownsLocked(sid, subject string) bool {
 	for w := range rm.watchers {
+		if w.subject != subject {
+			continue
+		}
 		if _, fronted := w.fronted[sid]; fronted {
 			return true
 		}

@@ -171,10 +171,11 @@ message WatchRequest {
 	// Naming them here is what stops a room emptying out to whichever tab
 	// happens to hold the lock.
 	//
-	// Every id must belong to the same principal as session_id; one that does
-	// not fails the stream. The list is fixed for the life of the stream, so a
-	// tab that opens or closes is a reopen — the same reopen a room change
-	// already costs.
+	// A stream keeps alive only the records its own principal wrote. Naming a
+	// session whose record another principal wrote does not fail the stream,
+	// and does not keep that record alive. The list is fixed for the life of
+	// the stream, so a tab that opens or closes is a reopen — the same reopen a
+	// room change already costs.
 	repeated string fronted_session_ids = 4;
 }
 
@@ -233,8 +234,9 @@ message PublishItem {
 // Request to publish presence updates, broadcast messages, or departure
 // notices for a session.
 message PublishRequest {
-	// The publishing session, as named on this account's Watch stream. A
-	// session bound to a different principal is rejected.
+	// The publishing session, as named on this account's Watch stream. When
+	// the serving node holds Watch streams for the session and none of them
+	// is the caller's, the request is rejected with permission_denied.
 	string session_id = 1;
 	// The writes, applied in order. At least one, and at most
 	// Limits.MaxPublishItems. Items are independent: there is no atomicity

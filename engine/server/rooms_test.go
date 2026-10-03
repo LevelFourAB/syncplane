@@ -683,15 +683,112 @@ var _ = Describe("Rooms", func() {
 			Expect(publishAs("u1", "s1", t)).To(Succeed())
 		})
 
-		It("refuses a second stream claiming a session another principal holds", func() {
-			t := roomTopic("cursors")
-			recvBody(watchAs("u1", "s1", t))
-			stream, err := watchReq(
-				&syncplanev1.WatchRequest{SessionId: "s1", Topics: []*syncplanev1.Topic{t}},
-				subjectHeader("u2"))
-			Expect(err).NotTo(HaveOccurred())
-			Expect(stream.Receive()).To(BeFalse())
-			Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodePermissionDenied))
+		// A session id is shown to every watcher of a room, so any member can
+		// name it. Naming it must give a stranger no hold on the session.
+		Describe("a session id another principal names", func() {
+			// openAs opens a stream on its own context and reads its snapshot.
+			// The returned func ends the stream without a leave, which is what
+			// a killed tab or a dropped connection looks like.
+			openAs := func(subject, session string, t *syncplanev1.Topic, fronted ...string) (*connect.ServerStreamForClient[syncplanev1.WatchResponse], context.CancelFunc) {
+				GinkgoHelper()
+				sctx, scancel := context.WithCancel(ctx)
+				r := connect.NewRequest(&syncplanev1.WatchRequest{
+					SessionId:         session,
+					FrontedSessionIds: fronted,
+					Topics:            []*syncplanev1.Topic{t},
+				})
+				r.Header().Set("X-Test-Subject", subject)
+				stream, err := presence.Watch(sctx, r)
+				Expect(err).NotTo(HaveOccurred())
+				Expect(recvBody(stream).GetSnapshot()).NotTo(BeNil(), "stream ended: %v", stream.Err())
+				return stream, scancel
+			}
+
+			leftOf := func(m *syncplanev1.WatchResponse) string { return m.GetLeft() }
+
+			It("forgets a departed session while a stranger's stream fronts it", func() {
+				t := roomTopic("cursors")
+				_, closeOwner := openAs("u1", "s1", t)
+				observer, _ := openAs("u3", "s3", t)
+				seen := frames(observer)
+				Expect(publishAs("u1", "s1", t)).To(Succeed())
+				Eventually(seen).Should(Receive(WithTransform(
+					func(m *syncplanev1.WatchResponse) string { return m.GetUpdated().GetSessionId() },
+					Equal("s1"))))
+
+				openAs("u2", "s2", t, "s1")
+				closeOwner()
+
+				Eventually(seen, "2s").Should(Receive(WithTransform(leftOf, Equal("s1"))),
+					"a stream of another principal must not keep the record alive")
+			})
+
+			It("forgets a departed session while a stranger's stream claims it as its own", func() {
+				t := roomTopic("cursors")
+				_, closeOwner := openAs("u1", "s1", t)
+				observer, _ := openAs("u3", "s3", t)
+				seen := frames(observer)
+				Expect(publishAs("u1", "s1", t)).To(Succeed())
+				Eventually(seen).Should(Receive(WithTransform(
+					func(m *syncplanev1.WatchResponse) string { return m.GetUpdated().GetSessionId() },
+					Equal("s1"))))
+
+				openAs("u2", "s1", t)
+				closeOwner()
+
+				Eventually(seen, "2s").Should(Receive(WithTransform(leftOf, Equal("s1"))))
+			})
+
+			It("lets the owner reopen its session after a stranger named it", func() {
+				t := roomTopic("cursors")
+				_, closeOwner := openAs("u1", "s1", t)
+				closeOwner()
+				openAs("u2", "s2", t, "s1")
+				openAs("u2", "s1", t)
+
+				// The owner is back: its stream opens and it may publish as s1
+				// again, although the stranger's streams still name s1.
+				Eventually(func() error {
+					sctx, scancel := context.WithCancel(ctx)
+					defer scancel()
+					r := connect.NewRequest(&syncplanev1.WatchRequest{
+						SessionId: "s1",
+						Topics:    []*syncplanev1.Topic{t},
+					})
+					r.Header().Set("X-Test-Subject", "u1")
+					stream, err := presence.Watch(sctx, r)
+					if err != nil {
+						return err
+					}
+					if !stream.Receive() {
+						return stream.Err()
+					}
+					return publishAs("u1", "s1", t)
+				}, "2s").Should(Succeed())
+			})
+
+			It("does not let a stranger's stream change the owner's record", func() {
+				t := roomTopic("cursors")
+				openAs("u1", "s1", t)
+				observer, _ := openAs("u3", "s3", t)
+				seen := frames(observer)
+				Expect(publishAs("u1", "s1", t)).To(Succeed())
+				Eventually(seen).Should(Receive(WithTransform(
+					func(m *syncplanev1.WatchResponse) string { return m.GetUpdated().GetSubject() },
+					Equal("u1"))))
+
+				openAs("u2", "s1", t)
+				// The stranger now holds a stream for s1, so its publish is
+				// accepted; the record still belongs to u1 and is not changed.
+				Expect(publishReq(&syncplanev1.PublishRequest{
+					SessionId: "s1",
+					Items:     []*syncplanev1.PublishItem{stateItem(t, 99, "spoofed")},
+				}, subjectHeader("u2"))).To(Succeed())
+
+				Consistently(seen, "200ms").ShouldNot(Receive(WithTransform(
+					func(m *syncplanev1.WatchResponse) string { return m.GetUpdated().GetSubject() },
+					Equal("u2"))))
+			})
 		})
 	})
 
@@ -722,6 +819,108 @@ var _ = Describe("Rooms", func() {
 				return ids
 			}, "5s").Should(Equal([]string{"s1", "s2"}))
 		})
+	})
+})
+
+// Two nodes on one bus each hold their own session bindings, so a stranger on
+// one node can name a session whose owner is connected to the other. Only the
+// registry can keep that from mattering.
+var _ = Describe("Rooms on two nodes", func() {
+	var (
+		ctx  context.Context
+		bus  *presence.Local
+		t    *syncplanev1.Topic
+		node func() syncplanev1connect.PresenceServiceClient
+	)
+
+	BeforeEach(func() {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithCancel(context.Background())
+		DeferCleanup(cancel)
+		bus = presence.NewLocal()
+		t = roomTopic("cursors")
+		node = func() syncplanev1connect.PresenceServiceClient {
+			srv := newTestServer(
+				server.WithRoomAnnounce(roomAnnounce),
+				server.WithAuthenticator(subjectAuthenticator{}),
+				server.WithPresenceBus(bus),
+			)
+			mux := http.NewServeMux()
+			for path, h := range srv.Handlers() {
+				mux.Handle(path, h)
+			}
+			ts := httptest.NewServer(mux)
+			DeferCleanup(func() {
+				cancel()
+				ts.CloseClientConnections()
+				ts.Close()
+				Expect(srv.Close()).To(Succeed())
+			})
+			return syncplanev1connect.NewPresenceServiceClient(ts.Client(), ts.URL)
+		}
+	})
+
+	// openOn opens a stream on its own context, reads its snapshot and drains
+	// the rest in the background. The returned func ends the stream without a
+	// leave.
+	openOn := func(
+		c syncplanev1connect.PresenceServiceClient, subject, session string, fronted ...string,
+	) (<-chan *syncplanev1.WatchResponse, context.CancelFunc) {
+		GinkgoHelper()
+		sctx, scancel := context.WithCancel(ctx)
+		r := connect.NewRequest(&syncplanev1.WatchRequest{
+			SessionId:         session,
+			FrontedSessionIds: fronted,
+			Topics:            []*syncplanev1.Topic{t},
+		})
+		r.Header().Set("X-Test-Subject", subject)
+		stream, err := c.Watch(sctx, r)
+		Expect(err).NotTo(HaveOccurred())
+		out := make(chan *syncplanev1.WatchResponse, 64)
+		go func() {
+			defer GinkgoRecover()
+			defer close(out)
+			for stream.Receive() {
+				if msg := stream.Msg(); !msg.GetHeartbeat() {
+					out <- msg
+				}
+			}
+		}()
+		Eventually(out).Should(Receive(WithTransform(
+			func(m *syncplanev1.WatchResponse) bool { return m.GetSnapshot() != nil }, BeTrue())))
+		return out, scancel
+	}
+
+	It("forgets a departed session that a stranger on another node fronts", func() {
+		first, other := node(), node()
+		_, closeOwner := openOn(first, "u1", "s1")
+		seen, _ := openOn(first, "u3", "s3")
+		elsewhere, _ := openOn(other, "u2", "s2", "s1")
+
+		r := connect.NewRequest(&syncplanev1.PublishRequest{
+			SessionId: "s1",
+			Items: []*syncplanev1.PublishItem{{
+				Topic: t,
+				Body: &syncplanev1.PublishItem_Presence{Presence: &syncplanev1.PresenceUpdate{
+					State: []byte("cursor"), Revision: 1,
+				}},
+			}},
+		})
+		r.Header().Set("X-Test-Subject", "u1")
+		_, err := first.Publish(ctx, r)
+		Expect(err).NotTo(HaveOccurred())
+		updatedS1 := Receive(WithTransform(
+			func(m *syncplanev1.WatchResponse) string { return m.GetUpdated().GetSessionId() }, Equal("s1")))
+		Eventually(seen).Should(updatedS1)
+		Eventually(elsewhere).Should(updatedS1, "the other node holds the record before the owner leaves")
+
+		closeOwner()
+
+		leftS1 := Receive(WithTransform(
+			func(m *syncplanev1.WatchResponse) string { return m.GetLeft() }, Equal("s1")))
+		Eventually(seen, "2s").Should(leftS1,
+			"the other node must not re-announce a record its stream does not own")
+		Eventually(elsewhere, "2s").Should(leftS1)
 	})
 })
 

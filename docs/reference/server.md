@@ -513,7 +513,11 @@ Implement `RoomPermissions` to enforce room policies. Embed `server.AllowAllRoom
 
 ### Identity
 
-`Participant.Subject` is derived from the authenticated request principal. `session_id` is assigned by the client and bound by the server to the opening principal. A `Publish` request referencing a session ID owned by another principal on that node is rejected.
+`Participant.Subject` is derived from the authenticated request principal. `session_id` is assigned by the client, and the server binds each `Watch` stream to the principal that opened it.
+
+- A presence record belongs to the subject that first wrote it. A state or departure for the same session ID from another subject is ignored, on every node.
+- A `Watch` stream keeps alive only the records of its own principal. A stream may name a session ID that another principal holds; it is admitted, but it does not keep that principal's records alive.
+- A `Publish` request is rejected with `permission_denied` when the serving node holds `Watch` streams for the session ID and none of them belongs to the caller.
 
 ### The bus
 

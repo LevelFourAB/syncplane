@@ -194,87 +194,101 @@ func (c *anchorCache) expire(now time.Time) {
 	}
 }
 
-// sessionBindings ties a session id to the principal that opened its Watch
-// stream on THIS node, so a Publish naming a session it does not own is
-// refused.
+// sessionBindings records which principals hold a Watch stream for a session
+// id on THIS node, so a Publish naming a session that only other principals
+// hold here is refused.
+//
+// Holding a session id is not exclusive. The id is echoed to every watcher of
+// a room, so any member can learn it, and a first-come claim would let that
+// member take the id while its owner's stream is down — a room change or a
+// network blip — and lock the owner out when it reconnects. Every principal
+// that opens a stream naming the id holds it, and holding it gives a principal
+// nothing over records another principal wrote.
 //
 // It is node-local by construction: a Publish that lands on a node holding no
 // stream for the session has nothing to check against and is admitted on its
-// own principal. That alone would let a caller on another node evict or
-// overwrite a session it does not own, since the session id is echoed to every
-// watcher. The cluster-wide backstop is in the registry, not here: a presence
-// record belongs to its subject, and the registry ignores a bus event that
-// would change or withdraw a record under a different subject (see
-// presence.Registry). With that in place the worst an unbound publish can do is
-// occupy an as-yet-unclaimed session slot under its own name — never touch
-// another subject's record.
+// own principal. The cluster-wide backstop is in the registry, not here: a
+// presence record belongs to its subject, the registry ignores a bus event that
+// would change or withdraw a record under a different subject, and it
+// re-announces a record only for a stream of the record's subject (see
+// presence.Registry). With that in place the worst a stranger can do with a
+// session id is occupy a slot its owner has not yet written in a room, under
+// the stranger's own name — never change another subject's record, and never
+// keep one alive.
 type sessionBindings struct {
 	mu    sync.Mutex
 	bound map[string]*sessionBinding
 }
 
 type sessionBinding struct {
-	subject string
-	// streams are the session's open Watch streams. Usually one; a client that
-	// reconnects before the old stream's teardown lands briefly holds two,
-	// which is also why this is a set rather than a single reference.
-	streams map[*presence.Watch]struct{}
+	// streams are the session's open Watch streams, by the subject that opened
+	// each. Usually one subject with one stream; a client that reconnects
+	// before the old stream's teardown lands briefly holds two, which is also
+	// why each subject has a set rather than a single reference.
+	streams map[string]map[*presence.Watch]struct{}
 }
 
 func newSessionBindings() *sessionBindings {
 	return &sessionBindings{bound: make(map[string]*sessionBinding)}
 }
 
-// bind claims a session for a subject and its stream. It reports false when the
-// session is already held by a different subject.
-func (b *sessionBindings) bind(sessionID, subject string, w *presence.Watch) bool {
+// bind records that subject holds a stream for the session.
+func (b *sessionBindings) bind(sessionID, subject string, w *presence.Watch) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	held, ok := b.bound[sessionID]
 	if !ok {
-		b.bound[sessionID] = &sessionBinding{
-			subject: subject,
-			streams: map[*presence.Watch]struct{}{w: {}},
-		}
-		return true
+		held = &sessionBinding{streams: make(map[string]map[*presence.Watch]struct{}, 1)}
+		b.bound[sessionID] = held
 	}
-	if held.subject != subject {
-		return false
+	mine, ok := held.streams[subject]
+	if !ok {
+		mine = make(map[*presence.Watch]struct{}, 1)
+		held.streams[subject] = mine
 	}
-	held.streams[w] = struct{}{}
-	return true
+	mine[w] = struct{}{}
 }
 
 // release drops one stream's claim, forgetting the session with the last.
-func (b *sessionBindings) release(sessionID string, w *presence.Watch) {
+func (b *sessionBindings) release(sessionID, subject string, w *presence.Watch) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	held, ok := b.bound[sessionID]
 	if !ok {
 		return
 	}
-	delete(held.streams, w)
+	mine := held.streams[subject]
+	delete(mine, w)
+	if len(mine) == 0 {
+		delete(held.streams, subject)
+	}
 	if len(held.streams) == 0 {
 		delete(b.bound, sessionID)
 	}
 }
 
-// check reports whether subject may publish as this session. An unbound session
-// is allowed: this node holds no stream for it, so it has nothing to say.
+// check reports whether subject may publish as this session: it holds a stream
+// for the session, or nobody on this node does.
 func (b *sessionBindings) check(sessionID, subject string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	held, ok := b.bound[sessionID]
-	return !ok || held.subject == subject
+	if !ok {
+		return true
+	}
+	_, mine := held.streams[subject]
+	return mine
 }
 
-// joined reports whether one of this session's streams on this node has already
-// been admitted to the topic.
-func (b *sessionBindings) joined(sessionID string, t presence.Topic) bool {
+// joined reports whether one of subject's streams for this session on this
+// node has already been admitted to the topic. Another subject's stream that
+// names the same session does not count: its admission says nothing about
+// whether subject may enter the room.
+func (b *sessionBindings) joined(sessionID, subject string, t presence.Topic) bool {
 	b.mu.Lock()
 	streams := make([]*presence.Watch, 0, 1)
 	if held, ok := b.bound[sessionID]; ok {
-		for w := range held.streams {
+		for w := range held.streams[subject] {
 			streams = append(streams, w)
 		}
 	}

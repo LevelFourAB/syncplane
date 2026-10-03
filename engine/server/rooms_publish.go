@@ -25,8 +25,8 @@ import (
 //
 // Every item is stamped with the caller's own principal. Nothing in the payload
 // names the publisher, so presence cannot be used to impersonate. The
-// session_id is self-asserted like a client id, and is checked against the
-// principal that opened that session's Watch stream when this node holds one.
+// session_id is self-asserted like a client id. When this node holds Watch
+// streams for the session, the caller must have opened one of them.
 //
 // # Authorization
 //
@@ -55,7 +55,7 @@ func (s *Server) Publish(
 	principal := principalOf(ctx)
 	if !s.roomSessions.check(msg.GetSessionId(), principal.Subject) {
 		return nil, connect.NewError(connect.CodePermissionDenied,
-			errors.New("session id belongs to a different principal"))
+			errors.New("session id is held on this node by a different principal only"))
 	}
 
 	for _, item := range msg.GetItems() {
@@ -127,7 +127,7 @@ func (s *Server) publishEvent(
 	item *syncplanev1.PublishItem,
 ) (presence.Event, error) {
 	t := topicOf(item.GetTopic())
-	if !s.roomSessions.joined(sessionID, t) {
+	if !s.roomSessions.joined(sessionID, principal.Subject, t) {
 		if _, _, err := s.openRoom(ctx, t); err != nil {
 			if connect.CodeOf(err) != connect.CodeUnknown {
 				return presence.Event{}, err

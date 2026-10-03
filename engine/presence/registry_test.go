@@ -59,11 +59,18 @@ var _ = Describe("Registry", func() {
 		topic = presence.Topic{WorkspaceID: "ws", Name: "cursors"}
 	})
 
-	open := func(session string) *presence.Watch {
+	// openAs opens a stream for subject. open uses the subject publishState
+	// stamps, so a stream opened with it owns its session's record.
+	openAs := func(subject, session string, fronted ...string) *presence.Watch {
 		GinkgoHelper()
-		w := reg.Open(session)
+		w := reg.Open(subject, session, fronted...)
 		DeferCleanup(w.Close)
 		return w
+	}
+
+	open := func(session string) *presence.Watch {
+		GinkgoHelper()
+		return openAs("u:"+session, session)
 	}
 
 	join := func(w *presence.Watch, t presence.Topic) []presence.Participant {
@@ -341,6 +348,61 @@ var _ = Describe("Registry", func() {
 			Expect(string(ev.Participant.State)).To(Equal("hello"))
 		})
 
+		// Every watcher learns every session id in its rooms, so naming one
+		// proves nothing about who wrote its record.
+		It("does not keep alive a record that only another subject's stream names", func() {
+			w := open("s1")
+			join(w, topic)
+			publishState(topic, "s1", 1, "")
+			receive(w)
+
+			stranger := openAs("stranger", "s9", "s1")
+			join(stranger, topic)
+			w.Close()
+
+			clk.advance(4 * announce)
+			reg.Sweep(ctx)
+			ev := receive(stranger)
+			Expect(ev.Kind).To(Equal(presence.KindLeave))
+			Expect(ev.Participant.SessionID).To(Equal("s1"))
+		})
+
+		It("does not re-announce a record that only another subject's stream names", func() {
+			w := open("s2")
+			join(w, topic)
+			publishState(topic, "s1", 1, "")
+			receive(w)
+			stranger := openAs("stranger", "s1")
+			join(stranger, topic)
+
+			elsewhere, cancel := bus.Subscribe(topic)
+			DeferCleanup(cancel)
+			clk.advance(announce)
+			reg.Sweep(ctx)
+
+			Consistently(elsewhere, "100ms").ShouldNot(Receive(),
+				"a stream of another subject must not announce the record")
+		})
+
+		It("keeps a record alive for a stream of its own subject that fronts it", func() {
+			w := open("s1")
+			join(w, topic)
+			publishState(topic, "s1", 1, "")
+			receive(w)
+
+			// Another tab of the same account holds the stream now.
+			other := openAs("u:s1", "s2", "s1")
+			join(other, topic)
+			w.Close()
+
+			for i := 0; i < 6; i++ {
+				clk.advance(announce)
+				reg.Sweep(ctx)
+			}
+			Consistently(other.Events(), "100ms").ShouldNot(Receive())
+			Expect(join(open("late"), topic)).To(HaveLen(1))
+		})
+
 		It("stops re-announcing once the session's stream closes", func() {
 			w := open("s1")
 			join(w, topic)
@@ -422,7 +484,7 @@ var _ = Describe("Registry", func() {
 			events, cancel := shared.Subscribe(presence.Topic{WorkspaceID: "app-a/ws", Name: "cursors"})
 			DeferCleanup(cancel)
 
-			w := a.Open("s1")
+			w := a.Open("u:s1", "s1")
 			DeferCleanup(w.Close)
 			_, _, err := w.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -439,7 +501,7 @@ var _ = Describe("Registry", func() {
 		})
 
 		It("hands its own watchers the topic they joined", func() {
-			w := a.Open("s1")
+			w := a.Open("u:s1", "s1")
 			DeferCleanup(w.Close)
 			_, _, err := w.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -457,12 +519,12 @@ var _ = Describe("Registry", func() {
 		})
 
 		It("keeps two prefixes of one workspace id apart", func() {
-			wa := a.Open("s1")
+			wa := a.Open("u:s1", "s1")
 			DeferCleanup(wa.Close)
 			_, _, err := wa.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
 
-			wb := b.Open("s2")
+			wb := b.Open("u:s2", "s2")
 			DeferCleanup(wb.Close)
 			_, _, err = wb.Join(topic)
 			Expect(err).NotTo(HaveOccurred())
@@ -511,7 +573,7 @@ var _ = Describe("Registry", func() {
 		It("refuses a publish and a join once closed", func() {
 			reg.Close()
 			Expect(reg.Publish(ctx, presence.Event{Topic: topic})).To(MatchError(presence.ErrClosed))
-			_, _, err := reg.Open("s1").Join(topic)
+			_, _, err := reg.Open("u:s1", "s1").Join(topic)
 			Expect(err).To(MatchError(presence.ErrClosed))
 		})
 

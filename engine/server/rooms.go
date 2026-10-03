@@ -63,26 +63,23 @@ func (s *Server) Watch(
 		return err
 	}
 
-	watch := s.rooms.Open(msg.GetSessionId(), msg.GetFrontedSessionIds()...)
+	subject := principalOf(ctx).Subject
+	watch := s.rooms.Open(subject, msg.GetSessionId(), msg.GetFrontedSessionIds()...)
 	defer watch.Close()
 
 	// Every session this stream speaks for is bound to the principal that
-	// opened it, so a Publish naming one has to come from the same caller.
-	// Bound before any room is entered, released when the stream ends.
-	subject := principalOf(ctx).Subject
-	bound := make([]string, 0, 1+len(msg.GetFrontedSessionIds()))
+	// opened it, so a Publish naming one is refused to a caller holding no
+	// stream for it while this one runs. Bound before any room is entered,
+	// released when the stream ends.
+	sessions := append([]string{msg.GetSessionId()}, msg.GetFrontedSessionIds()...)
+	for _, id := range sessions {
+		s.roomSessions.bind(id, subject, watch)
+	}
 	defer func() {
-		for _, id := range bound {
-			s.roomSessions.release(id, watch)
+		for _, id := range sessions {
+			s.roomSessions.release(id, subject, watch)
 		}
 	}()
-	for _, id := range append([]string{msg.GetSessionId()}, msg.GetFrontedSessionIds()...) {
-		if !s.roomSessions.bind(id, subject, watch) {
-			return connect.NewError(connect.CodePermissionDenied,
-				errors.New("session id is already held by a different principal"))
-		}
-		bound = append(bound, id)
-	}
 
 	s.tel().roomStreams.Add(ctx, 1)
 	defer s.tel().roomStreams.Add(ctx, -1)
