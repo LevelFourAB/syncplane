@@ -238,6 +238,17 @@ describe('planCompaction', () => {
 		await expectSameOverlay(registry, original, plan.mutations);
 	});
 
+	it('keeps a PUT after a DELETE separate, even under one guard', async () => {
+		// The PUT re-creates the row, and the server treats a PUT on a tombstone
+		// differently from one on a live row: text does not union with the deleted
+		// document, and protected fields do not keep their stored values. One PUT
+		// would land on the live row and get the second treatment.
+		const original = [ del(1n, 't1', 5n), put(2n, { id: 't1', title: 'back' }, 5n) ];
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+		expect(plan.changed).toBe(false);
+		expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+	});
+
 	it('keeps a PATCH after a DELETE separate (delete-wins)', () => {
 		const original = [ del(1n, 't1'), patch(2n, 't1', { title: 'x' }, [ 'title' ]) ];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);

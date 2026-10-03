@@ -194,8 +194,13 @@ function foldCrud(
 ): CrudMutation | 'barrier' {
 	switch (incoming.op) {
 		case CrudOp.PUT:
-			// A PUT overwrites whatever came before (including a tombstone): the row
-			// ends at the PUT value either way.
+			// A PUT after a DELETE re-creates the row, which the server treats
+			// differently from a PUT on the live row: text does not union with the
+			// deleted document, and protected fields do not keep their stored
+			// values. Folded, the PUT would reach the live row.
+			if (base.op === CrudOp.DELETE) return 'barrier';
+			// Otherwise a PUT overwrites whatever came before: the row ends at the
+			// PUT value either way.
 			return clone(CrudMutationSchema, incoming);
 		case CrudOp.DELETE:
 			// A DELETE wins over any prior PUT/PATCH on the key.
