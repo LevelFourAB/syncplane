@@ -329,7 +329,7 @@ Skipping replay prevents workspace stalls during pulls, rollbacks, and bootstrap
 
 Client writes wait for a debounce interval (`pushDebounceMs`, default 50ms; capped by `pushMaxDelayMs`, default 250ms) before pushing to the server. Rapid consecutive edits reset the debounce timer up to the maximum delay ceiling.
 
-This delay allows the client to compact the pending queue, folding bursts of edits (such as typing or drag operations) into a single `PATCH` mutation.
+This delay allows the client to compact the pending queue, folding bursts of edits to the same fields (such as typing or drag operations) into a single `PATCH` mutation. Writes to one row that differ in operation or in fields stay separate mutations, unless they carry the same compare-and-swap guard: the server can refuse one of them for a reason the client cannot see, and a folded write would take the accepted edits with it.
 
 Debouncing delays when peers receive updates by up to the maximum delay plus network latency. It does not risk data loss: mutations are committed to local storage and the pending queue immediately before the debounce timer starts. If a browser tab closes before the timer expires, pending mutations push when the tab restarts. Inbound sync operations, reconnects, and scope changes trigger immediate sync cycles. To push immediately without waiting for debouncing (such as on form submission or blur events), call `syncNow()`.
 

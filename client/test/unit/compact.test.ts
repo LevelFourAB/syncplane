@@ -135,22 +135,30 @@ function ids(mutations: Mutation[]): bigint[] {
 }
 
 describe('planCompaction', () => {
-	it('merges successive PATCHes to the same key into one, unioning masks', async () => {
+	it('keeps unguarded PATCHes of different fields separate', () => {
+		// The server can accept one and refuse the other — a permission hook, a
+		// field protected for this caller only — and it gives a folded write one
+		// verdict, so a refusal would take the accepted edit with it.
 		const original = [
 			patch(1n, 't1', { title: 'a' }, [ 'title' ]),
 			patch(2n, 't1', { completed: true }, [ 'completed' ]),
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+		expect(plan.changed).toBe(false);
+		expect(ids(plan.mutations)).toEqual([ 1n, 2n ]);
+	});
 
-		expect(plan.changed).toBe(true);
+	it('folds unguarded PATCHes whose masks name the same fields in another order', async () => {
+		const original = [
+			patch(1n, 't1', { title: 'a', completed: true }, [ 'title', 'completed' ]),
+			patch(2n, 't1', { title: 'b', completed: false }, [ 'completed', 'title' ]),
+		];
+		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
+
 		expect(plan.mutations).toHaveLength(1);
-		const crud = plan.mutations[0]!.payload.value as CrudMutation;
-		expect(crud.op).toBe(CrudOp.PATCH);
-		expect(new Set(crud.fieldMask?.paths)).toEqual(new Set([ 'title', 'completed' ]));
 		// Both originals renumber onto the single surviving id 1.
 		expect(plan.remap.get(1n)).toBe(1n);
 		expect(plan.remap.get(2n)).toBe(1n);
-
 		await expectSameOverlay(registry, original, plan.mutations, {
 			[confirmedKey('todo', WS, 't1')]: {
 				v: toBinary(TodoSchema, create(TodoSchema, { id: 't1' })),
@@ -175,11 +183,38 @@ describe('planCompaction', () => {
 		});
 	});
 
-	it('collapses PUT followed by PATCHes into one PUT', async () => {
+	it('keeps unguarded writes of different ops separate', () => {
+		// A refused PATCH must not cancel the PUT that created the row, and a
+		// refused DELETE must not take the edits queued before it.
+		const pairs = [
+			[ put(1n, { id: 't1', title: 'orig' }), patch(2n, 't1', { title: 'x' }, [ 'title' ]) ],
+			[ patch(1n, 't1', { title: 'x' }, [ 'title' ]), put(2n, { id: 't1', title: 'y' }) ],
+			[ put(1n, { id: 't1', title: 'orig' }), del(2n, 't1') ],
+			[ patch(1n, 't1', { title: 'x' }, [ 'title' ]), del(2n, 't1') ],
+			[ del(1n, 't1'), put(2n, { id: 't1', title: 'back' }) ],
+		];
+		for (const original of pairs) {
+			expect(planCompaction(registry, original, 0n, NO_PROTECTED).changed).toBe(false);
+		}
+	});
+
+	it('folds repeated unguarded PUTs, and repeated DELETEs, of one row', async () => {
+		const puts = [ put(1n, { id: 't1', title: 'a' }), put(2n, { id: 't1', title: 'b' }) ];
+		const plan = planCompaction(registry, puts, 0n, NO_PROTECTED);
+		expect(plan.mutations).toHaveLength(1);
+		const crud = plan.mutations[0]!.payload.value as CrudMutation;
+		expect(fromBinary(TodoSchema, crud.value).title).toBe('b');
+		await expectSameOverlay(registry, puts, plan.mutations);
+
+		const dels = [ del(1n, 't1'), del(2n, 't1') ];
+		expect(planCompaction(registry, dels, 0n, NO_PROTECTED).mutations).toHaveLength(1);
+	});
+
+	it('collapses a guarded PUT and the PATCHes after it into one PUT', async () => {
 		const original = [
-			put(1n, { id: 't1', title: 'orig' }),
-			patch(2n, 't1', { title: 'edited' }, [ 'title' ]),
-			patch(3n, 't1', { completed: true }, [ 'completed' ]),
+			put(1n, { id: 't1', title: 'orig' }, 5n),
+			patch(2n, 't1', { title: 'edited' }, [ 'title' ], 5n),
+			patch(3n, 't1', { completed: true }, [ 'completed' ], 5n),
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		expect(plan.mutations).toHaveLength(1);
@@ -191,29 +226,16 @@ describe('planCompaction', () => {
 		await expectSameOverlay(registry, original, plan.mutations);
 	});
 
-	it('collapses PUT/PATCH then DELETE into one DELETE', async () => {
+	it('collapses a guarded PUT/PATCH then DELETE into one DELETE', async () => {
 		const original = [
-			put(1n, { id: 't1', title: 'orig' }),
-			patch(2n, 't1', { title: 'x' }, [ 'title' ]),
-			del(3n, 't1'),
+			put(1n, { id: 't1', title: 'orig' }, 5n),
+			patch(2n, 't1', { title: 'x' }, [ 'title' ], 5n),
+			del(3n, 't1', 5n),
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		expect(plan.mutations).toHaveLength(1);
 		expect((plan.mutations[0]!.payload.value as CrudMutation).op).toBe(CrudOp.DELETE);
 		await expectSameOverlay(registry, original, plan.mutations);
-	});
-
-	it('collapses DELETE then PUT into one resurrecting PUT', async () => {
-		const original = [ del(1n, 't1'), put(2n, { id: 't1', title: 'back' }) ];
-		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
-		expect(plan.mutations).toHaveLength(1);
-		expect((plan.mutations[0]!.payload.value as CrudMutation).op).toBe(CrudOp.PUT);
-		await expectSameOverlay(registry, original, plan.mutations, {
-			[confirmedKey('todo', WS, 't1')]: {
-				v: toBinary(TodoSchema, create(TodoSchema, { id: 't1', title: 'old' })),
-				ver: '1',
-			},
-		});
 	});
 
 	it('keeps a PATCH after a DELETE separate (delete-wins)', () => {
@@ -227,7 +249,7 @@ describe('planCompaction', () => {
 		const original = [
 			patch(1n, 't1', { title: 'a' }, [ 'title' ]),
 			patch(2n, 't2', { title: 'b' }, [ 'title' ]),
-			patch(3n, 't1', { completed: true }, [ 'completed' ]),
+			patch(3n, 't1', { title: 'c' }, [ 'title' ]),
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		// t1's two patches merge; t2's stays. Two survivors, renumbered 1,2.
@@ -261,8 +283,8 @@ describe('planCompaction', () => {
 		const original = [
 			patch(1n, 't1', { title: 'a' }, [ 'title' ]), // pushed
 			patch(2n, 't1', { title: 'b' }, [ 'title' ]), // tail
-			patch(3n, 't1', { completed: true }, [ 'completed' ]), // tail
-			patch(4n, 't2', { title: 'c' }, [ 'title' ]), // tail
+			patch(3n, 't1', { title: 'c' }, [ 'title' ]), // tail
+			patch(4n, 't2', { title: 'd' }, [ 'title' ]), // tail
 		];
 		const plan = planCompaction(registry, original, 1n, NO_PROTECTED);
 		// id 1 stays; ids 2,3 (same key) merge → new id 2; id 4 → new id 3.
@@ -363,7 +385,7 @@ describe('planCompaction', () => {
 		// remap reflects it.
 		const withDrop = [
 			put(1n, { id: 't2', title: 'x' }),
-			del(2n, 't2'), // merges with id 1 → one DELETE
+			put(2n, { id: 't2', title: 'y' }), // merges with id 1 → one PUT
 			patch(3n, 't1', { title: 'c' }, [ 'title' ]), // protected, survives, renumbered
 		];
 		const plan2 = planCompaction(registry, withDrop, 0n, new Set([ 3n ]));
@@ -374,8 +396,8 @@ describe('planCompaction', () => {
 
 	it('does not merge a PATCH that touches a key field into a PUT', () => {
 		const original = [
-			put(1n, { id: 't1', title: 'x' }),
-			patch(2n, 't1', { id: 't1' }, [ 'id' ]), // mask touches the key field
+			put(1n, { id: 't1', title: 'x' }, 5n),
+			patch(2n, 't1', { id: 't1' }, [ 'id' ], 5n), // mask touches the key field
 		];
 		const plan = planCompaction(registry, original, 0n, NO_PROTECTED);
 		expect(plan.mutations).toHaveLength(2);
@@ -415,6 +437,7 @@ describe('planCompaction with mergers', () => {
 	function widgetPut(
 		id: bigint,
 		init: MessageInitShape<typeof WidgetSchema> & { id: string },
+		expectedVersion?: bigint,
 	): Mutation {
 		return mutation(
 			id,
@@ -423,6 +446,7 @@ describe('planCompaction with mergers', () => {
 				key: init.id,
 				op: CrudOp.PUT,
 				value: toBinary(WidgetSchema, create(WidgetSchema, init)),
+				expectedVersion,
 			}),
 		);
 	}
@@ -432,6 +456,7 @@ describe('planCompaction with mergers', () => {
 		key: string,
 		init: MessageInitShape<typeof WidgetSchema>,
 		paths: string[],
+		expectedVersion?: bigint,
 	): Mutation {
 		return mutation(
 			id,
@@ -441,6 +466,7 @@ describe('planCompaction with mergers', () => {
 				op: CrudOp.PATCH,
 				value: toBinary(WidgetSchema, create(WidgetSchema, init)),
 				fieldMask: { paths },
+				expectedVersion,
 			}),
 		);
 	}
@@ -449,7 +475,7 @@ describe('planCompaction with mergers', () => {
 		const reg = widgetRegistry();
 		const original = [
 			widgetPatch(1n, 'w1', { label: 'a' }, [ 'label' ]),
-			widgetPatch(2n, 'w1', { count: 7 }, [ 'count' ]),
+			widgetPatch(2n, 'w1', { label: 'b' }, [ 'label' ]),
 		];
 		const plan = planCompaction(reg, original, 0n, NO_PROTECTED);
 		expect(plan.changed).toBe(false);
@@ -459,8 +485,8 @@ describe('planCompaction with mergers', () => {
 	it('still absorbs a PATCH into a PUT on a merger entity (single merge is safe)', async () => {
 		const reg = widgetRegistry();
 		const original = [
-			widgetPut(1n, { id: 'w1', label: 'orig', count: 1 }),
-			widgetPatch(2n, 'w1', { count: 9 }, [ 'count' ]),
+			widgetPut(1n, { id: 'w1', label: 'orig', count: 1 }, 5n),
+			widgetPatch(2n, 'w1', { count: 9 }, [ 'count' ], 5n),
 		];
 		const plan = planCompaction(reg, original, 0n, NO_PROTECTED);
 		expect(plan.mutations).toHaveLength(1);
@@ -482,7 +508,7 @@ describe('compactPending', () => {
 	it('rewrites the queue and lowers the mutation-id counter', async () => {
 		const kv = await seedQueue([
 			patch(1n, 't1', { title: 'a' }, [ 'title' ]),
-			patch(2n, 't1', { completed: true }, [ 'completed' ]),
+			patch(2n, 't1', { title: 'b' }, [ 'title' ]),
 			patch(3n, 't1', { title: 'c' }, [ 'title' ]),
 		]);
 		const result = await compactPending(kv, registry, {}, WS, () => NO_PROTECTED);
@@ -540,7 +566,12 @@ describe('compactPending', () => {
 describe('text field compaction', () => {
 	const widgetRegistry = new EntityRegistry([ WidgetSchema ]);
 
-	function widgetBodyPatch(id: bigint, key: string, body: Uint8Array): Mutation {
+	function widgetBodyPatch(
+		id: bigint,
+		key: string,
+		body: Uint8Array,
+		expectedVersion?: bigint,
+	): Mutation {
 		return mutation(
 			id,
 			create(CrudMutationSchema, {
@@ -549,6 +580,7 @@ describe('text field compaction', () => {
 				op: CrudOp.PATCH,
 				value: toBinary(WidgetSchema, create(WidgetSchema, { body })),
 				fieldMask: { paths: [ 'body' ] },
+				expectedVersion,
 			}),
 		);
 	}
@@ -594,6 +626,7 @@ describe('text field compaction', () => {
 		/** Confirmed 'hello', then two keystrokes queued as fragments from `firstId`. */
 		function burst(
 			firstId = 1n,
+			expectedVersion?: bigint,
 		): { confirmed: Uint8Array; queue: Mutation[]; final: Uint8Array } {
 			const base = new TextDoc('c1');
 			base.insert(0, 'hello');
@@ -608,8 +641,8 @@ describe('text field compaction', () => {
 			return {
 				confirmed,
 				queue: [
-					widgetBodyPatch(firstId, 'w1', f1),
-					widgetBodyPatch(firstId + 1n, 'w1', f2),
+					widgetBodyPatch(firstId, 'w1', f1, expectedVersion),
+					widgetBodyPatch(firstId + 1n, 'w1', f2, expectedVersion),
 				],
 				final: encodeTextDoc(doc),
 			};
@@ -636,8 +669,8 @@ describe('text field compaction', () => {
 			});
 		});
 
-		it('absorbs a delta into a PUT queued before it', async () => {
-			const { confirmed, queue, final } = burst(2n);
+		it('absorbs a delta into a PUT queued before it under the same guard', async () => {
+			const { confirmed, queue, final } = burst(2n, 5n);
 			const put = mutation(
 				1n,
 				create(CrudMutationSchema, {
@@ -645,6 +678,7 @@ describe('text field compaction', () => {
 					key: 'w1',
 					op: CrudOp.PUT,
 					value: toBinary(WidgetSchema, create(WidgetSchema, { id: 'w1', body: confirmed })),
+					expectedVersion: 5n,
 				}),
 			);
 			const plan = planCompaction(widgetRegistry, [ put, ...queue ], 0n, NO_PROTECTED);

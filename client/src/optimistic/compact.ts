@@ -24,9 +24,10 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  * Pending-queue compaction. Offline, every edit enqueues its own mutation, so a
  * long offline burst leaves a queue that costs O(pending × pages) to replay on
  * the first rebase after reconnect and ships in many push batches. Compaction
- * squashes successive CRUDs to the same (entity, key) — merging PATCH field
- * masks/values, collapsing PUT+PATCHes into one PUT, and PUT/PATCH+DELETE into
- * one DELETE — so the queue the rebase replays and the push ships is short.
+ * squashes successive CRUDs to the same (entity, key) — a burst of PATCHes to
+ * the same fields, repeated PUTs or DELETEs, and under one compare-and-swap
+ * guard also PATCHes with different masks, PUT+PATCHes and PUT/PATCH+DELETE —
+ * so the queue the rebase replays and the push ships is short.
  *
  * The merge is overlay-preserving by construction (per-field LWW, applied in
  * order), so the merged view a reader sees is the same either side of it. The
@@ -57,6 +58,15 @@ import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
  *    pulls all name the same one. Folding them is what keeps the second from
  *    reaching the server after the first has already pushed the row past the
  *    guard, which is a conflict the client raised against nobody but itself.
+ *  - Unguarded ops fold only when they are the same op and, for a PATCH, carry
+ *    the same field mask (see sameWrite). The server can refuse a write for
+ *    reasons the client cannot see — a permission hook, a field protected for
+ *    this caller only, validation — and it gives the folded write one verdict.
+ *    Folding a write it would accept with one it refuses therefore loses the
+ *    accepted one, and nothing ever pushes it again. Writes of the same op to
+ *    the same fields get the same verdict from every check that does not read
+ *    values; for a check that does, the fold keeps the later value of each
+ *    field, which is the one the user last asked for.
  */
 export interface CompactionPlan {
 	/** New queue in id order: the untouched pushed prefix + renumbered tail. */
@@ -117,11 +127,12 @@ export function planCompaction(
 			continue;
 		}
 		const open = openByKey.get(keyStr);
-		// Guards must agree to fold; see the safety rails above. Disagreement is
-		// not a barrier, though — the incoming op opens a fresh slot that later
-		// ops sharing ITS guard can still extend.
+		// Guards must agree to fold, and without a guard the two must be the same
+		// write; see the safety rails above. Neither is a barrier, though — the
+		// incoming op opens a fresh slot that later ops can still extend.
 		const foldable = open?.crud !== undefined
-			&& open.crud.expectedVersion === crud.expectedVersion;
+			&& open.crud.expectedVersion === crud.expectedVersion
+			&& (crud.expectedVersion !== undefined || sameWrite(open.crud, crud));
 		const folded = foldable ? foldCrud(registry, def, open!.crud!, crud) : undefined;
 		if (open?.crud && folded && folded !== 'barrier') {
 			open.crud = folded;
@@ -297,6 +308,19 @@ function foldMergers(mergers: EntityMergers | undefined): EntityMergers | undefi
 		if (fn === mergeText) out.set(path, mergeQueuedText);
 	}
 	return out;
+}
+
+/**
+ * Whether `incoming` is the same op as `base` and, for a PATCH, carries the
+ * same set of mask paths — the writes a server check that does not read
+ * values gives the same verdict.
+ */
+function sameWrite(base: CrudMutation, incoming: CrudMutation): boolean {
+	if (base.op !== incoming.op) return false;
+	if (incoming.op !== CrudOp.PATCH) return true;
+	const a = new Set(base.fieldMask?.paths ?? []);
+	const b = new Set(incoming.fieldMask?.paths ?? []);
+	return a.size === b.size && [ ...b ].every((p) => a.has(p));
 }
 
 function patchTouchesKey(def: EntityDef, crud: CrudMutation): boolean {

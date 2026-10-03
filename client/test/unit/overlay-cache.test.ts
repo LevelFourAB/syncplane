@@ -210,10 +210,11 @@ describe('overlay cache across clients sharing a store', () => {
 		const { kv, a, b } = await twoClients();
 		try {
 			await b.mutate.put(NoteSchema, nine as never);
-			await b.mutate.patch(NoteSchema, 'n9', { rank: 0 } as never);
+			await b.mutate.put(NoteSchema, { ...nine, rank: 0 } as never);
 			expect(await open(a)).toEqual([ 'n9', 'n1', 'n2' ]);
 
-			await compactPending(kv, registry, {}, WS, () => new Set<bigint>());
+			const result = await compactPending(kv, registry, {}, WS, () => new Set<bigint>());
+			expect(result.changed).toBe(true);
 
 			// Folding two mutations into one rewrites the overlay row from the
 			// queue without changing what it holds, so this is the other side of

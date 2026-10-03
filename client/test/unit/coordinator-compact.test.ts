@@ -152,13 +152,13 @@ describe('coordinator push: compaction + chunking', () => {
 	}
 
 	it('compacts the never-pushed tail before pushing', async () => {
-		// Five PATCHes to the same key collapse to one mutation.
+		// Five PATCHes to the same field of one key collapse to one mutation.
 		await seed([
 			patch(1n, 't1', [ 'title' ]),
-			patch(2n, 't1', [ 'completed' ]),
+			patch(2n, 't1', [ 'title' ]),
 			patch(3n, 't1', [ 'title' ]),
-			patch(4n, 't1', [ 'sort_key' ]),
-			patch(5n, 't1', [ 'completed' ]),
+			patch(4n, 't1', [ 'title' ]),
+			patch(5n, 't1', [ 'title' ]),
 		]);
 		const coord = newCoordinator(transport());
 
@@ -372,7 +372,7 @@ describe('coordinator push: compaction + chunking', () => {
 	it('does not recompact mutations once pushed', async () => {
 		// The pull acks nothing, so the compacted mutation stays queued. A second
 		// cycle must NOT compact it again (it has now been pushed).
-		await seed([ patch(1n, 't1', [ 'title' ]), patch(2n, 't1', [ 'completed' ]) ]);
+		await seed([ patch(1n, 't1', [ 'title' ]), patch(2n, 't1', [ 'title' ]) ]);
 		const coord = newCoordinator(transport());
 
 		await coord.syncNow(); // compacts 2 → 1, pushes it, advances pushedThrough
