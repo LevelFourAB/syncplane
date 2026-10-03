@@ -318,6 +318,14 @@ export function decodeTextDoc(data: Uint8Array | undefined, peer: string): TextD
 	for (let i = 0; i < runCount; i++) {
 		const p = peerAt(r.uvarint());
 		const start = r.uvarint();
+		if (start === 0) {
+			// Counter 0 belongs to the root sentinel. An item holding it would
+			// share the root's id, and bumpVV never records a peer whose highest
+			// counter is 0, so the encoder would find no peer-table entry for
+			// the item. Only a run head can hold it: later items count up from
+			// the head.
+			throw new Error(`text: item ${p}:0 uses reserved counter 0`);
+		}
 		const itemCount = r.uvarint();
 		if (itemCount === 0) throw new Error('text: empty run');
 		const flags = r.byte();
@@ -420,6 +428,8 @@ export function decodeTextDoc(data: Uint8Array | undefined, peer: string): TextD
 	for (let i = 0; i < markCount; i++) {
 		const p = peerAt(r.uvarint());
 		const id: ItemID = { peer: p, counter: r.uvarint() };
+		// Reserved for the same reason as an item's counter 0 above.
+		if (id.counter === 0) throw new Error(`text: mark op ${p}:0 uses reserved counter 0`);
 		if (seenMarks.has(idKey(id))) {
 			throw new Error(`text: duplicate mark op ${p}:${id.counter}`);
 		}

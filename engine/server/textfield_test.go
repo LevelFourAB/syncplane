@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 
@@ -177,6 +178,28 @@ var _ = Describe("Text fields", func() {
 			Expect(results).To(HaveLen(1))
 			Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
 			Expect(results[0].GetErrorCode()).To(Equal("invalid_argument"))
+		})
+
+		It("rejects a PATCH whose item uses counter 0 and keeps the stored text readable", func() {
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: bodyDoc("seed", "hello")}))
+
+			// Item mallory:0 "a" under the root, and zed:1 "b" as its right
+			// child. Every byte is well formed; only the counter is not.
+			hostile, err := hex.DecodeString(
+				"0102076d616c6c6f7279037a6564000102000001060161010101040000016200")
+			Expect(err).NotTo(HaveOccurred())
+			results := push(patchMutation("c2", 1, "widget", "w1", &testdatav1.Widget{Body: hostile}, "body"))
+			Expect(results).To(HaveLen(1))
+			Expect(results[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			Expect(results[0].GetErrorCode()).To(Equal("invalid_argument"))
+
+			// A later honest write must still merge into the stored document.
+			push(patchMutation("c3", 1, "widget", "w1", &testdatav1.Widget{
+				Body: editBody(getWidget("w1").GetBody(), "alice", func(d *text.Doc) {
+					Expect(d.Insert(5, "!")).To(Succeed())
+				}),
+			}, "body"))
+			Expect(plainBody(getWidget("w1").GetBody())).To(Equal("hello!"))
 		})
 
 		Describe("delta-state PATCHes", func() {

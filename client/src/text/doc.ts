@@ -19,7 +19,8 @@ export interface ItemID {
 	peer: string;
 	/**
 	 * Unique per peer within a document, allocated Lamport-style (past every
-	 * counter seen at allocation time). Never zero.
+	 * counter seen at allocation time). Never zero: the root sentinel holds
+	 * zero, and the decoders refuse an item or mark op that does.
 	 */
 	counter: number;
 }

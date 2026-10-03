@@ -92,7 +92,7 @@ Annotations — such as comments on a range — combine marks, anchors, and an e
 
 ## Both decoders accept exactly the same documents
 
-Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling), strings must be valid UTF-8, float mark values must be finite, and a mark anchored to an item that the document does not contain is an error rather than a guessed range.
+Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling), strings must be valid UTF-8, float mark values must be finite, and a mark anchored to an item that the document does not contain is an error rather than a guessed range. Counter 0 belongs to the root sentinel, so an item or a mark operation that holds it is refused. Without that rule, one write could store a document that no reader can decode.
 
 Shared test vectors pin all refusals by payload and exact error message, preventing the engine from storing a document that fails only in the browser.
 

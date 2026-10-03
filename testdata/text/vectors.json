@@ -3679,6 +3679,18 @@
 			"error": "text: fragment vv does not cover item alice:2"
 		},
 		{
+			"name": "fragment item with the root sentinel's counter 0",
+			"kind": "fragment",
+			"hex": "020105616c696365010100000106016100",
+			"error": "text: item alice:0 uses reserved counter 0"
+		},
+		{
+			"name": "fragment mark op with the root sentinel's counter 0",
+			"kind": "fragment",
+			"hex": "020105616c696365010001000004626f6c6402000100",
+			"error": "text: mark op alice:0 uses reserved counter 0"
+		},
+		{
 			"name": "fragment varint above the safe-integer ceiling",
 			"kind": "fragment",
 			"hex": "02808080808080808040",
@@ -3753,6 +3765,21 @@
 			"name": "item counter above the ceiling",
 			"hex": "010105616c696365050100808080808080801001060161",
 			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "item with the root sentinel's counter 0",
+			"hex": "010105616c696365010100000106016100",
+			"error": "text: item alice:0 uses reserved counter 0"
+		},
+		{
+			"name": "item with the root sentinel's id",
+			"hex": "010100010100000106016100",
+			"error": "text: item :0 uses reserved counter 0"
+		},
+		{
+			"name": "mark op with the root sentinel's counter 0",
+			"hex": "010105616c6963650501000105060568656c6c6f01000004626f6c640202000103000500",
+			"error": "text: mark op alice:0 uses reserved counter 0"
 		},
 		{
 			"name": "varint longer than ten bytes",

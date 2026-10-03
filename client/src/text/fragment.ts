@@ -353,6 +353,9 @@ export function decodeFragment(data: Uint8Array): TextFragment {
 	for (let i = 0; i < runCount; i++) {
 		const p = peerAt(r.uvarint());
 		const start = r.uvarint();
+		// Reserved for the root sentinel (see decodeTextDoc). Under peer '' it
+		// is also ROOT_ID, which here means "child of the root".
+		if (start === 0) throw new Error(`text: item ${p}:0 uses reserved counter 0`);
 		const itemCount = r.uvarint();
 		if (itemCount === 0) throw new Error('text: empty run');
 		const flags = r.byte();
@@ -408,6 +411,7 @@ export function decodeFragment(data: Uint8Array): TextFragment {
 	for (let i = 0; i < markCount; i++) {
 		const p = peerAt(r.uvarint());
 		const id: ItemID = { peer: p, counter: r.uvarint() };
+		if (id.counter === 0) throw new Error(`text: mark op ${p}:0 uses reserved counter 0`);
 		if (seenMarks.has(idKey(id))) {
 			throw new Error(`text: duplicate mark op ${p}:${id.counter}`);
 		}

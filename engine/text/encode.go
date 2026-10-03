@@ -390,6 +390,14 @@ func Decode(data []byte, peer string) (*Doc, error) {
 		if err != nil {
 			return nil, err
 		}
+		if start == 0 {
+			// Counter 0 belongs to the root sentinel. An item holding it would
+			// share the root's id, and bumpVV never records a peer whose
+			// highest counter is 0, so Encode would leave the item, and every
+			// item parented on it, out of the peer table. Only a run head can
+			// hold it: later items count up from the head.
+			return nil, fmt.Errorf("text: item %s:0 uses reserved counter 0", p)
+		}
 		itemCount, err := r.uvarint()
 		if err != nil {
 			return nil, err
@@ -556,6 +564,10 @@ func Decode(data []byte, peer string) (*Doc, error) {
 		c, err := r.uvarint()
 		if err != nil {
 			return nil, err
+		}
+		if c == 0 {
+			// Reserved for the same reason as an item's counter 0 above.
+			return nil, fmt.Errorf("text: mark op %s:0 uses reserved counter 0", p)
 		}
 		id := ID{Peer: p, Counter: c}
 		if seenMarks[id] {

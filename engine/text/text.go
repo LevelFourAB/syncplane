@@ -71,7 +71,8 @@ type ID struct {
 	// table, so peers are cheap but not free.
 	Peer string
 	// Counter is unique per peer within a document, allocated Lamport-style
-	// (past every counter seen at allocation time). Never zero.
+	// (past every counter seen at allocation time). Never zero: the root
+	// sentinel holds zero, and Decode refuses an item or mark op that does.
 	Counter uint64
 }
 

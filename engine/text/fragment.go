@@ -402,6 +402,11 @@ func decodeFragment(data []byte) (*Fragment, error) {
 		if err != nil {
 			return nil, err
 		}
+		if start == 0 {
+			// Reserved for the root sentinel (see Decode). Under peer "" it
+			// is also the zero parent id, which here means "child of the root".
+			return nil, fmt.Errorf("text: item %s:0 uses reserved counter 0", p)
+		}
 		itemCount, err := r.uvarint()
 		if err != nil {
 			return nil, err
@@ -516,6 +521,9 @@ func decodeFragment(data []byte) (*Fragment, error) {
 		c, err := r.uvarint()
 		if err != nil {
 			return nil, err
+		}
+		if c == 0 {
+			return nil, fmt.Errorf("text: mark op %s:0 uses reserved counter 0", p)
 		}
 		id := ID{Peer: p, Counter: c}
 		if seenMarks[id] {
