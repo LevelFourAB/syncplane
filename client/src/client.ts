@@ -1076,6 +1076,20 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 		cb: WatchCallback<MessageShape<D>, TotalOf<Q>, FacetsOf<Q>>,
 		opts?: WatchOptions,
 	): WatchHandle;
+	/** {@link SyncClient.watchGroupCount}, in this workspace. */
+	watchGroupCount<D extends DescMessage>(
+		schema: D,
+		q: GroupQuery<MessageShape<D>>,
+		cb: (groups: Group[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
+	/** {@link SyncClient.watchGroupRows}, in this workspace. */
+	watchGroupRows<D extends DescMessage>(
+		schema: D,
+		q: GroupRowsQuery<MessageShape<D>>,
+		cb: (groups: RowGroup<MessageShape<D>>[]) => void,
+		opts?: { onError?: (error: unknown) => void },
+	): WatchHandle;
 	/**
 	 * Watches rows by key, delivering each key as it is first read and again
 	 * whenever it moves (see KeyedWatchCallback).

@@ -156,6 +156,54 @@ describe('useGroupRows', () => {
 	});
 });
 
+describe('a grouped read in a named workspace', () => {
+	// The workspace the hook resolves is the one it must read. A client that
+	// holds several reads its default one only when the hook names no other.
+	function twoWorkspaces(): SyncClient<readonly [typeof TodoSchema]> {
+		return new SyncClient({
+			workspaces: [ 'ws1', 'ws2' ],
+			accountId: 'acct',
+			defaultWorkspace: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ TodoSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+	}
+
+	it('counts the groups of the workspace it names, not the default one', async () => {
+		const client = twoWorkspaces();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'a', completed: false });
+		await client.ws('ws2').mutate.put(TodoSchema, { id: 'b', title: 'b', completed: true });
+		const { result } = renderHook(
+			() => db.todo.useGroupCount({ by: (t) => t.completed }, { workspaceId: 'ws2' }),
+			{ wrapper: providerWrapper(client) },
+		);
+		await flush();
+		expect([ ...result.current ]).toEqual([ { value: true, count: 1 } ]);
+		await client.close();
+	});
+
+	it('reads the group heads of the workspace it names, not the default one', async () => {
+		const client = twoWorkspaces();
+		await client.ws('ws1').mutate.put(TodoSchema, { id: 'a', title: 'a', completed: false });
+		await client.ws('ws2').mutate.put(TodoSchema, { id: 'b', title: 'b', completed: true });
+		const { result } = renderHook(
+			() =>
+				db.todo.useGroupRows(
+					{ by: (t) => t.completed, orderBy: (t) => [ t.title.asc() ], perGroup: 1 },
+					{ workspaceId: 'ws2' },
+				),
+			{ wrapper: providerWrapper(client) },
+		);
+		await flush();
+		expect([ ...result.current ].map((g) => [ g.value, g.rows.map((r) => r.key) ])).toEqual([
+			[ true, [ 'b' ] ],
+		]);
+		await client.close();
+	});
+});
+
 describe('useDistinct', () => {
 	it('reports the values alone, in ascending order', async () => {
 		const client = newClient();

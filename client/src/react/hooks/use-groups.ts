@@ -9,7 +9,7 @@ import type {
 	Scalar,
 } from '../../query/index.js';
 import type { WatchHandle } from '../../watch.js';
-import { useSyncClient, useWorkspaceScope } from '../context.js';
+import { useWorkspaceScope } from '../context.js';
 import { asError, type WatchState } from '../result.js';
 import { groupHash, groupRowsHash } from '../stable-hash.js';
 import type { UseWorkspaceOptions } from '../types.js';
@@ -75,7 +75,6 @@ export function useGroupRowsHook<D extends DescMessage>(
 	query: GroupRowsQuery<MessageShape<D>>,
 	opts?: UseWorkspaceOptions,
 ): RowGroupResult<MessageShape<D>> {
-	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId);
 	// The workspace belongs in the identity for useGroups' reason: one client
 	// holds every workspace, and two of them running the same read must not
@@ -91,7 +90,9 @@ export function useGroupRowsHook<D extends DescMessage>(
 		cell.current = { identity, value: EMPTY as RowGroupResult<MessageShape<D>> };
 	}
 	const subscribe = useCallback((onChange: () => void): () => void => {
-		const handle: WatchHandle = client.watchGroupRows(
+		// Through the scope for useGroups' reason: the client's own watch reads
+		// its default workspace.
+		const handle: WatchHandle = scope.watchGroupRows(
 			schema,
 			query as GroupRowsQuery<MessageShape<DescMessage>>,
 			(groups) => {
@@ -117,7 +118,7 @@ export function useGroupRowsHook<D extends DescMessage>(
 		// The identity is the resubscribe key; the query and workspace it was
 		// derived from move together with it.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [ client, schema, identity ]);
+	}, [ scope, schema, identity ]);
 	const getSnapshot = useCallback(() => cell.current.value, []);
 	const server = useMemo(() => EMPTY as RowGroupResult<MessageShape<D>>, []);
 	return useSyncExternalStore(subscribe, getSnapshot, () => server);
@@ -139,7 +140,6 @@ function useGroups<D extends DescMessage>(
 	opts: UseWorkspaceOptions | undefined,
 	distinct: boolean,
 ): GroupResult {
-	const client = useSyncClient();
 	const scope = useWorkspaceScope(opts?.workspaceId);
 	// The workspace belongs in the identity: one client holds every workspace, so
 	// two of them running the same read would otherwise share one another's
@@ -153,7 +153,11 @@ function useGroups<D extends DescMessage>(
 		cell.current = { identity, value: EMPTY as GroupResult };
 	}
 	const subscribe = useCallback((onChange: () => void): () => void => {
-		const handle: WatchHandle = client.watchGroupCount(
+		// Through the scope, not the client: the client's own watch reads its
+		// default workspace, which is not always the workspace the identity
+		// names. Through the client, a read in another workspace would count
+		// the default workspace's rows.
+		const handle: WatchHandle = scope.watchGroupCount(
 			schema,
 			query as GroupQuery<MessageShape<DescMessage>>,
 			(groups) => {
@@ -177,7 +181,7 @@ function useGroups<D extends DescMessage>(
 		// The identity is the resubscribe key; the query and workspace it was
 		// derived from move together with it.
 		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [ client, schema, identity ]);
+	}, [ scope, schema, identity ]);
 	const getSnapshot = useCallback(() => cell.current.value, []);
 	const server = useMemo(() => EMPTY as GroupResult, []);
 	return useSyncExternalStore(subscribe, getSnapshot, () => server);
