@@ -72,6 +72,11 @@ const (
 	// watcher of a room the session is in, and rides the presence bus with the
 	// room name and the app's state. 128 holds a UUID with room to spare.
 	MaxSessionIDBytes = 128
+	// MaxClientIDBytes caps the client_id a push, pull, bootstrap or
+	// subscription carries. It is a storage key on every store, prefixed with
+	// the caller's issuer and subject, and Postgres refuses an index entry
+	// longer than about 2.7 KB. 128 holds a UUID with room to spare.
+	MaxClientIDBytes = 128
 )
 
 // ValidateEntityName checks an entity's wire name — (syncplane.v1.entity).name,

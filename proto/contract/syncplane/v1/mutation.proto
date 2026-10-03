@@ -10,9 +10,11 @@ option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;sy
 // Encloses a single client-originated write operation.
 message Mutation {
 	// Identifies the originating client, such as a device or browser tab. Use
-	// a stable identifier across requests from the same client. It must not
-	// hold a control character (U+0000 to U+001F): the server refuses the
-	// whole batch with invalid_argument.
+	// a stable identifier across requests from the same client. It must be at
+	// most 128 bytes and must not hold a control character (U+0000 to U+001F):
+	// the server refuses the whole batch with invalid_argument otherwise. Pull,
+	// Bootstrap and Subscribe refuse a client_id that breaks these rules the
+	// same way.
 	string client_id = 1;
 	// Tracks sequence order with a monotonically increasing ID for the client,
 	// starting at 1. The server tracks the last applied ID per client and

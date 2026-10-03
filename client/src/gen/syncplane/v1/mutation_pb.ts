@@ -22,9 +22,11 @@ export const file_syncplane_v1_mutation: GenFile = /*@__PURE__*/
 export type Mutation = Message<"syncplane.v1.Mutation"> & {
   /**
    * Identifies the originating client, such as a device or browser tab. Use
-   * a stable identifier across requests from the same client. It must not
-   * hold a control character (U+0000 to U+001F): the server refuses the
-   * whole batch with invalid_argument.
+   * a stable identifier across requests from the same client. It must be at
+   * most 128 bytes and must not hold a control character (U+0000 to U+001F):
+   * the server refuses the whole batch with invalid_argument otherwise. Pull,
+   * Bootstrap and Subscribe refuse a client_id that breaks these rules the
+   * same way.
    *
    * @generated from field: string client_id = 1;
    */

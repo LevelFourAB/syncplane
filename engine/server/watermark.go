@@ -3,6 +3,8 @@ package server
 import (
 	"fmt"
 	"strconv"
+
+	"github.com/levelfourab/syncplane/engine/internal/naming"
 )
 
 // watermarkKey is the storage key of a client's idempotency watermark and of
@@ -36,11 +38,15 @@ func callerPrefix(p Principal) string {
 		strconv.Itoa(len(p.Subject)) + ":" + p.Subject
 }
 
-// checkClientID refuses a client_id that holds a C0 control character
-// (U+0000 to U+001F). U+001F opens every authenticated watermarkKey, and none
-// of the range belongs in an installation handle. A byte compare is enough: no
-// byte of a multi-byte UTF-8 sequence is below 0x80.
+// checkClientID refuses a client_id longer than naming.MaxClientIDBytes, or one
+// that holds a C0 control character (U+0000 to U+001F). U+001F opens every
+// authenticated watermarkKey, and none of the range belongs in an installation
+// handle. A byte compare is enough: no byte of a multi-byte UTF-8 sequence is
+// below 0x80.
 func checkClientID(clientID string) error {
+	if len(clientID) > naming.MaxClientIDBytes {
+		return fmt.Errorf("client_id is %d bytes, the limit is %d", len(clientID), naming.MaxClientIDBytes)
+	}
 	for i := 0; i < len(clientID); i++ {
 		if clientID[i] < 0x20 {
 			return fmt.Errorf("client_id holds control character %U at byte %d", rune(clientID[i]), i)

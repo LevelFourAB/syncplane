@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 
 	"connectrpc.com/connect"
 	. "github.com/onsi/ginkgo/v2"
@@ -249,6 +250,53 @@ var _ = Describe("Client watermarks", func() {
 			DeferCleanup(func() { _ = stream.Close() })
 			Expect(stream.Receive()).To(BeFalse())
 			Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeInvalidArgument))
+		})
+
+		// The client_id is a storage key on every store: Postgres fails a key
+		// longer than its b-tree row limit as an internal error the client
+		// would retry.
+		Describe("length", func() {
+			longest := strings.Repeat("c", 128)
+			tooLong := strings.Repeat("c", 129)
+
+			It("refuses a push whose client_id is longer than 128 bytes", func() {
+				res := pushAs(anonymous, putMutation(tooLong, 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+				Expect(res.GetErrorCode()).To(Equal("invalid_argument"))
+				Expect(res.GetErrorMessage()).To(ContainSubstring("129 bytes"))
+				Expect(res.GetResults()).To(BeEmpty())
+			})
+
+			It("applies a push whose client_id is 128 bytes", func() {
+				res := pushAs(anonymous, putMutation(longest, 1, "todo", "t1", &todov1.Todo{Id: "t1"}))
+				Expect(res.GetErrorCode()).To(BeEmpty(), "message: %s", res.GetErrorMessage())
+				Expect(res.GetResults()[0].GetStatus()).To(Equal(applied))
+			})
+
+			It("refuses a pull whose client_id is longer than 128 bytes", func() {
+				_, err := pullAs(anonymous, tooLong)
+				Expect(connect.CodeOf(err)).To(Equal(connect.CodeInvalidArgument))
+			})
+
+			It("refuses a Bootstrap whose client_id is longer than 128 bytes", func() {
+				stream, err := client.Bootstrap(ctx, connect.NewRequest(&syncplanev1.BootstrapRequest{
+					WorkspaceId: ws, ClientId: tooLong,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { _ = stream.Close() })
+				Expect(stream.Receive()).To(BeFalse())
+				Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeInvalidArgument))
+			})
+
+			It("refuses a Subscribe stream whose client_id is longer than 128 bytes", func() {
+				stream, err := client.Subscribe(ctx, connect.NewRequest(&syncplanev1.SubscribeRequest{
+					ClientId: tooLong,
+					Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: ws}},
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				DeferCleanup(func() { _ = stream.Close() })
+				Expect(stream.Receive()).To(BeFalse())
+				Expect(connect.CodeOf(stream.Err())).To(Equal(connect.CodeInvalidArgument))
+			})
 		})
 	})
 })
