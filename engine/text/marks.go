@@ -147,7 +147,8 @@ func validateValue(v any) (any, error) {
 // Mark applies key=value over the visible range [start, end). expand decides
 // whether text later typed at a boundary joins the mark; it is baked into the
 // anchor sides at creation time. The returned ID identifies the operation
-// (higher-id operations on the same key win where ranges overlap).
+// (higher-id operations on the same key win where ranges overlap). It fails
+// with ErrCounterCeiling when the document has no counter left.
 //
 // start == end is a COLLAPSED mark: it covers no character and Marks never
 // reports it, but MarksAt does, and with ExpandBoth the first character typed
@@ -222,7 +223,11 @@ func (d *Doc) markOpAt(start, end int, key string, value any, expand Expand) (ID
 		}
 	}
 
-	id := ID{Peer: d.peer, Counter: d.nextCounter()}
+	counter, err := d.allocate(1)
+	if err != nil {
+		return ID{}, err
+	}
+	id := ID{Peer: d.peer, Counter: counter}
 	d.marks = append(d.marks, &markOp{
 		id:     id,
 		key:    key,

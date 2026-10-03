@@ -3697,6 +3697,12 @@
 			"error": "text: varint overflows safe integer"
 		},
 		{
+			"name": "fragment run whose last item counter passes the ceiling",
+			"kind": "fragment",
+			"hex": "020105616c696365ffffffffffffff0f0100ffffffffffffff0f020602616200",
+			"error": "text: run alice:9007199254740991 of 2 items passes the counter ceiling"
+		},
+		{
 			"name": "fragment applied where its parent cannot resolve",
 			"kind": "applyFragment",
 			"docHex": "",
@@ -3765,6 +3771,11 @@
 			"name": "item counter above the ceiling",
 			"hex": "010105616c696365050100808080808080801001060161",
 			"error": "text: varint overflows safe integer"
+		},
+		{
+			"name": "run whose last item counter passes the ceiling",
+			"hex": "010105616c696365ffffffffffffff0f0100ffffffffffffff0f020602616200",
+			"error": "text: run alice:9007199254740991 of 2 items passes the counter ceiling"
 		},
 		{
 			"name": "item with the root sentinel's counter 0",

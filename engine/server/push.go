@@ -1042,6 +1042,9 @@ func (s *Server) applyCrud(
 		if err != nil {
 			return err
 		}
+		if err := info.checkTextCounterSteps(prevText, msg.ProtoReflect()); err != nil {
+			return err
+		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
 			return err
 		}
@@ -1153,6 +1156,9 @@ func (s *Server) applyCrud(
 		}
 		value, err := proto.Marshal(base)
 		if err != nil {
+			return err
+		}
+		if err := info.checkTextCounterSteps(prevText, base.ProtoReflect()); err != nil {
 			return err
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {

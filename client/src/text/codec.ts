@@ -43,6 +43,19 @@ const utf8Encoder = new TextEncoder();
 // run, mark value or plain string can start with that code point.
 const utf8Decoder = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
 
+/**
+ * Refuses a run whose items count past the counter ceiling (2^53−1, the largest
+ * varint the format carries). Only a run's first counter is a varint on the
+ * wire, but every later one becomes one when the document is encoded again, and
+ * every decoder refuses it then. The Go counterpart is checkRunCeiling in
+ * engine/text/encode.go.
+ */
+export function checkRunCeiling(peer: string, start: number, itemCount: number): void {
+	if (itemCount - 1 > Number.MAX_SAFE_INTEGER - start) {
+		throw new Error(`text: run ${peer}:${start} of ${itemCount} items passes the counter ceiling`);
+	}
+}
+
 /** Decodes UTF-8, restating the platform's decoder error as the message the
  * Go decoder uses for the same bytes (see `text: invalid UTF-8 ...` there). */
 export function decodeUtf8(b: Uint8Array, what: string): string {
@@ -328,6 +341,7 @@ export function decodeTextDoc(data: Uint8Array | undefined, peer: string): TextD
 		}
 		const itemCount = r.uvarint();
 		if (itemCount === 0) throw new Error('text: empty run');
+		checkRunCeiling(p, start, itemCount);
 		const flags = r.byte();
 		const deleted = (flags & 1) !== 0;
 		const rootParent = (flags & 2) !== 0;

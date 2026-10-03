@@ -14,6 +14,7 @@
 import {
 	ByteReader,
 	ByteWriter,
+	checkRunCeiling,
 	decodeTextDoc,
 	decodeUtf8,
 	encodeTextDoc,
@@ -358,6 +359,7 @@ export function decodeFragment(data: Uint8Array): TextFragment {
 		if (start === 0) throw new Error(`text: item ${p}:0 uses reserved counter 0`);
 		const itemCount = r.uvarint();
 		if (itemCount === 0) throw new Error('text: empty run');
+		checkRunCeiling(p, start, itemCount);
 		const flags = r.byte();
 		const deleted = (flags & 1) !== 0;
 		const rootParent = (flags & 2) !== 0;

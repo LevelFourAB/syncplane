@@ -42,6 +42,7 @@
 package text
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"unicode/utf8"
@@ -293,15 +294,27 @@ func (d *Doc) visibleAt(index int) *node {
 	return nil
 }
 
-// nextCounter allocates the next Lamport counter: one past everything seen.
-func (d *Doc) nextCounter() uint64 {
+// ErrCounterCeiling is returned by an edit that needs a counter above 2^53−1,
+// the largest the format carries. Every edit takes a counter above every
+// counter the document has seen, from any peer, so a document whose version
+// vector reaches the ceiling cannot be edited again. Nothing is changed by an
+// edit that fails with it.
+var ErrCounterCeiling = errors.New("text: no counters left below the ceiling")
+
+// allocate reserves n consecutive Lamport counters, one past everything seen,
+// and returns the first. It refuses rather than wrap: a counter above
+// maxVarint would give bytes no decoder accepts.
+func (d *Doc) allocate(n uint64) (uint64, error) {
 	var max uint64
 	for _, c := range d.vv {
 		if c > max {
 			max = c
 		}
 	}
-	return max + 1
+	if max > maxVarint || n > maxVarint-max {
+		return 0, ErrCounterCeiling
+	}
+	return max + 1, nil
 }
 
 func (d *Doc) bumpVV(peer string, counter uint64) {
@@ -366,7 +379,9 @@ func InvalidUTF8Offset(s string) int {
 }
 
 // Insert inserts s at the given visible code-point index (0..Len). s must be
-// valid UTF-8; the API is not byte-transparent (see requireWellFormed).
+// valid UTF-8; the API is not byte-transparent (see requireWellFormed). It
+// fails with ErrCounterCeiling when the document has too few counters left for
+// the code points of s.
 func (d *Doc) Insert(index int, s string) error {
 	if d.peer == "" {
 		return fmt.Errorf("text: document has no peer; SetPeer before editing")
@@ -397,7 +412,10 @@ func (d *Doc) Insert(index int, s string) error {
 		}
 	}
 
-	counter := d.nextCounter()
+	counter, err := d.allocate(uint64(utf8.RuneCountInString(s)))
+	if err != nil {
+		return err
+	}
 	prev := a
 	first := true
 	for _, r := range s {

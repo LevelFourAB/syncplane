@@ -429,6 +429,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	if err != nil {
 		return err
 	}
+	if err := info.checkTextCounterSteps(prevText, msg.ProtoReflect()); err != nil {
+		return err
+	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
 		return err
 	}
@@ -603,6 +606,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	seq, err := e.writeSeq()
 	if err != nil {
+		return err
+	}
+	if err := info.checkTextCounterSteps(prevText, base.ProtoReflect()); err != nil {
 		return err
 	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {

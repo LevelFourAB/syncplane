@@ -414,6 +414,9 @@ func decodeFragment(data []byte) (*Fragment, error) {
 		if itemCount == 0 {
 			return nil, fmt.Errorf("text: empty run")
 		}
+		if err := checkRunCeiling(p, start, itemCount); err != nil {
+			return nil, err
+		}
 		flags, err := r.byte()
 		if err != nil {
 			return nil, err

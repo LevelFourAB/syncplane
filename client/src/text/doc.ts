@@ -98,6 +98,10 @@ export interface Point {
 export const SIDE_L = 0;
 export const SIDE_R = 1;
 
+/** The message of the error an edit throws when it needs a counter above
+ * 2^53−1. It matches Go's ErrCounterCeiling. */
+const COUNTER_CEILING = 'text: no counters left below the ceiling';
+
 /** One item of the Fugue tree (internal, exposed for the codec). */
 export interface TextNode {
 	id: ItemID;
@@ -549,11 +553,18 @@ export class TextDoc {
 		addChild(n.parent!, n);
 	}
 
-	private nextCounter(): number {
+	/**
+	 * Reserves n consecutive Lamport counters, one past everything seen, and
+	 * returns the first. It throws rather than go past 2^53−1: above it a
+	 * number no longer holds every integer, so two items would share an id, and
+	 * no decoder accepts the bytes. The Go counterpart is Doc.allocate.
+	 */
+	private allocate(n: number): number {
 		let max = 0;
 		for (const c of this.vv.values()) {
 			if (c > max) max = c;
 		}
+		if (n > Number.MAX_SAFE_INTEGER - max) throw new Error(COUNTER_CEILING);
 		return max + 1;
 	}
 
@@ -597,7 +608,9 @@ export class TextDoc {
 	 * range of the created items (counters are consecutive) so callers can
 	 * record an exact op-level inverse ("delete these ids").
 	 *
-	 * s must contain no unpaired surrogate (see requireWellFormed).
+	 * s must contain no unpaired surrogate (see requireWellFormed). Throws, and
+	 * changes nothing, when the document has too few counters left below
+	 * 2^53−1 for the code points of s; every later edit throws the same way.
 	 */
 	insert(index: number, s: string): InsertedRange {
 		this.requirePeer();
@@ -620,7 +633,9 @@ export class TextDoc {
 			a = at;
 		}
 
-		let counter = this.nextCounter();
+		let points = 0;
+		for (const _ of s) points++;
+		let counter = this.allocate(points);
 		const range: InsertedRange = { peer: this.peer, start: counter, count: 0 };
 		let prev = a;
 		let first = true;
@@ -785,6 +800,9 @@ export class TextDoc {
 	 * "press Cmd-B, then type", and with ExpandNone the zero-width annotation
 	 * that attaches a note to a position rather than a span. See
 	 * collapsedAnchors.
+	 *
+	 * Throws, and changes nothing, when the document has no counter left below
+	 * 2^53−1.
 	 */
 	mark(
 		start: number,
@@ -857,7 +875,7 @@ export class TextDoc {
 			}
 		}
 
-		const id: ItemID = { peer: this.peer, counter: this.nextCounter() };
+		const id: ItemID = { peer: this.peer, counter: this.allocate(1) };
 		this.marks.push({ id, key, value, start: startAnchor, end: endAnchor, expand });
 		this.bumpVV(id.peer, id.counter);
 		return id;

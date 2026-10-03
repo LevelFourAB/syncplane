@@ -64,6 +64,18 @@ const formatVersion = 1
 // like a client bug.
 const maxVarint = 1<<53 - 1
 
+// checkRunCeiling refuses a run whose items count past maxVarint. Only a run's
+// first counter is a varint on the wire, but every later one becomes one when
+// the document is encoded again — in the version vector, or as a run head or a
+// parent reference — and every decoder refuses it then. A document must not
+// decode when its own encoding would not.
+func checkRunCeiling(peer string, start, itemCount uint64) error {
+	if itemCount-1 > maxVarint-start {
+		return fmt.Errorf("text: run %s:%d of %d items passes the counter ceiling", peer, start, itemCount)
+	}
+	return nil
+}
+
 type encoder struct{ buf []byte }
 
 func (e *encoder) byte(b byte)      { e.buf = append(e.buf, b) }
@@ -307,6 +319,46 @@ func (r *decoder) count(what string, minBytes int) (uint64, error) {
 	return n, nil
 }
 
+// MaxCounter reports the highest counter in an encoded document's version
+// vector, reading only the header. For bytes Encode produced that is the
+// highest counter the document holds or has seen; for other bytes it is the
+// highest the header declares, which Decode raises to the items' counters.
+// Empty input reports 0, as Decode reads it as an empty document. It fails for
+// anything but a format-version-1 document, and for a malformed header.
+func MaxCounter(data []byte) (uint64, error) {
+	if len(data) == 0 {
+		return 0, nil
+	}
+	r := &decoder{buf: data}
+	v, err := r.byte()
+	if err != nil {
+		return 0, err
+	}
+	if v != formatVersion {
+		return 0, fmt.Errorf("text: unsupported format version %d", v)
+	}
+	peerCount, err := r.count("peer count", 2)
+	if err != nil {
+		return 0, err
+	}
+	for i := uint64(0); i < peerCount; i++ {
+		if _, err := r.str(); err != nil {
+			return 0, err
+		}
+	}
+	var max uint64
+	for i := uint64(0); i < peerCount; i++ {
+		c, err := r.uvarint()
+		if err != nil {
+			return 0, err
+		}
+		if c > max {
+			max = c
+		}
+	}
+	return max, nil
+}
+
 // Decode parses an encoded document. peer becomes the writer identity for
 // subsequent edits (pass "" for read-only use). Empty input decodes to an
 // empty document — an absent bytes field is a document nobody wrote yet.
@@ -404,6 +456,9 @@ func Decode(data []byte, peer string) (*Doc, error) {
 		}
 		if itemCount == 0 {
 			return nil, fmt.Errorf("text: empty run")
+		}
+		if err := checkRunCeiling(p, start, itemCount); err != nil {
+			return nil, err
 		}
 		flags, err := r.byte()
 		if err != nil {

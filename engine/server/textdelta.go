@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"fmt"
 	"sort"
 
 	"google.golang.org/protobuf/proto"
@@ -103,6 +104,45 @@ func (info *entityInfo) recordTextDeltas(
 	for _, path := range dropped {
 		if err := info.putTextDelta(tx, key, path, seq, nil); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+// maxTextCounterStep is how far one write may move the highest counter of a
+// text document. Every edit takes a counter above every counter the document
+// has seen, and none may pass 2^53−1, so a document whose counters reach that
+// ceiling can never be edited again. The step is far above what honest edits
+// move — one counter per inserted code point or mark — and makes reaching the
+// ceiling take millions of writes rather than one.
+const maxTextCounterStep = 1 << 32
+
+// checkTextCounterSteps refuses a write that moves the highest counter of any
+// text document of next more than maxTextCounterStep above the same document in
+// prev (zero for a document prev does not hold). next holds the documents about
+// to be stored, which every write path has decoded and encoded again, so their
+// headers are exact.
+func (info *entityInfo) checkTextCounterSteps(prev map[string][]byte, next protoreflect.Message) error {
+	for _, tf := range info.textFields {
+		for _, ti := range tf.instances(next) {
+			after := ti.bytes()
+			before := prev[ti.path]
+			if len(after) == 0 || bytes.Equal(before, after) {
+				continue
+			}
+			hi, err := text.MaxCounter(after)
+			if err != nil {
+				return fmt.Errorf("server: entity %q text field %q: %w", info.name, ti.path, err)
+			}
+			lo, err := text.MaxCounter(before)
+			if err != nil {
+				return fmt.Errorf("server: entity %q text field %q: stored document: %w", info.name, ti.path, err)
+			}
+			if hi > lo && hi-lo > maxTextCounterStep {
+				return Reject(CodeInvalidArgument, fmt.Sprintf(
+					"entity %q text field %q: the write moves the document's counters up by %d, and one write may move them by at most %d",
+					info.name, ti.path, hi-lo, uint64(maxTextCounterStep)))
+			}
 		}
 	}
 	return nil

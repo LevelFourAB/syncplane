@@ -2,6 +2,7 @@ package server_test
 
 import (
 	"context"
+	"encoding/binary"
 	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
@@ -200,6 +201,82 @@ var _ = Describe("Text fields", func() {
 				}),
 			}, "body"))
 			Expect(plainBody(getWidget("w1").GetBody())).To(Equal("hello!"))
+		})
+
+		// Every edit takes a counter above every counter the document has seen,
+		// and none may pass 2^53−1. One write that moved the counters to the
+		// ceiling would leave no counter for anyone's next edit.
+		Describe("how far one write may move a document's counters", func() {
+			const step = 1 << 32
+
+			// seenUpTo is a document with no items whose version vector holds
+			// peer "mallory" at counter.
+			seenUpTo := func(counter uint64) []byte {
+				buf := []byte{1, 1, 7}
+				buf = append(buf, "mallory"...)
+				buf = binary.AppendUvarint(buf, counter)
+				return append(buf, 0, 0)
+			}
+
+			status := func(r []*syncplanev1.MutationResult) syncplanev1.MutationStatus {
+				GinkgoHelper()
+				Expect(r).To(HaveLen(1))
+				return r[0].GetStatus()
+			}
+
+			appendBang := func(key string) {
+				GinkgoHelper()
+				Expect(status(push(patchMutation("c3", 1, "widget", key, &testdatav1.Widget{
+					Body: editBody(getWidget(key).GetBody(), "alice", func(d *text.Doc) {
+						Expect(d.Insert(5, "!")).To(Succeed())
+					}),
+				}, "body")))).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				Expect(plainBody(getWidget(key).GetBody())).To(Equal("hello!"))
+			}
+
+			BeforeEach(func() {
+				// "seed" writes counters 1 to 5.
+				push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: bodyDoc("seed", "hello")}))
+			})
+
+			It("refuses a PATCH that moves them to the ceiling, and the field stays writable", func() {
+				results := push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Body: seenUpTo(1<<53 - 1)}, "body"))
+
+				Expect(status(results)).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+				Expect(results[0].GetErrorCode()).To(Equal("invalid_argument"))
+				appendBang("w1")
+			})
+
+			It("accepts a PATCH that moves them up by 2^32", func() {
+				Expect(status(push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Body: seenUpTo(5 + step)}, "body")))).
+					To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				appendBang("w1")
+			})
+
+			It("refuses a PATCH that moves them up by one more than 2^32", func() {
+				Expect(status(push(patchMutation("c2", 1, "widget", "w1",
+					&testdatav1.Widget{Body: seenUpTo(6 + step)}, "body")))).
+					To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			})
+
+			It("measures a new row's document from zero", func() {
+				Expect(status(push(putMutation("c2", 1, "widget", "w2",
+					&testdatav1.Widget{Id: "w2", Body: seenUpTo(step)})))).
+					To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				Expect(status(push(putMutation("c2", 2, "widget", "w3",
+					&testdatav1.Widget{Id: "w3", Body: seenUpTo(step + 1)})))).
+					To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			})
+
+			It("refuses a trusted write that moves them past the limit too", func() {
+				err := srv.Mutate(server.Trusted(ctx), ws, func(tx *server.EntityTx) error {
+					return tx.Put(&testdatav1.Widget{Id: "w1", Body: seenUpTo(1<<53 - 1)})
+				})
+				Expect(err).To(MatchError(ContainSubstring("counters")))
+				appendBang("w1")
+			})
 		})
 
 		Describe("delta-state PATCHes", func() {

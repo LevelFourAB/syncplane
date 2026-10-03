@@ -141,6 +141,88 @@ var _ = Describe("Decode of hostile input", func() {
 	})
 })
 
+// Every edit takes a counter above every counter the document has seen, and the
+// format carries none above 2^53−1. A version vector that reaches it leaves no
+// counter for the next edit.
+var _ = Describe("Edits at the counter ceiling", func() {
+	const ceiling = 1<<53 - 1
+
+	// seenUpTo is a document with no items whose version vector holds one peer
+	// at counter, as another writer may leave it.
+	seenUpTo := func(counter uint64) []byte {
+		buf := []byte{1, 1, 7}
+		buf = append(buf, "mallory"...)
+		buf = binary.AppendUvarint(buf, counter)
+		return append(buf, 0, 0) // no runs, no marks
+	}
+
+	open := func(data []byte) *text.Doc {
+		GinkgoHelper()
+		d, err := text.Decode(data, "alice")
+		Expect(err).NotTo(HaveOccurred())
+		return d
+	}
+
+	It("refuses an insert, and changes nothing", func() {
+		d := open(seenUpTo(ceiling))
+		before := d.Encode()
+
+		Expect(d.Insert(0, "x")).To(MatchError(text.ErrCounterCeiling))
+		Expect(d.Encode()).To(Equal(before))
+	})
+
+	It("refuses a mark, and changes nothing", func() {
+		d := open(seenUpTo(ceiling))
+		before := d.Encode()
+
+		_, err := d.Mark(0, 0, "bold", true, text.ExpandBoth)
+		Expect(err).To(MatchError(text.ErrCounterCeiling))
+		Expect(d.Encode()).To(Equal(before))
+	})
+
+	It("uses the counters up to the ceiling, and its encoding decodes", func() {
+		d := open(seenUpTo(ceiling - 2))
+
+		Expect(d.Insert(0, "ab")).To(Succeed())
+		Expect(text.Decode(d.Encode(), "")).Error().NotTo(HaveOccurred())
+		Expect(d.Insert(2, "c")).To(MatchError(text.ErrCounterCeiling))
+		Expect(d.PlainText()).To(Equal("ab"))
+	})
+
+	It("refuses an insert that needs more counters than are left", func() {
+		d := open(seenUpTo(ceiling - 1))
+
+		Expect(d.Insert(0, "ab")).To(MatchError(text.ErrCounterCeiling))
+		Expect(d.PlainText()).To(BeEmpty())
+	})
+})
+
+var _ = Describe("MaxCounter", func() {
+	It("reports the highest counter of the version vector", func() {
+		a := text.New("a")
+		Expect(a.Insert(0, "hello")).To(Succeed())
+		b := text.New("b")
+		Expect(b.Insert(0, "hi")).To(Succeed())
+		merged, err := text.Merge(a.Encode(), b.Encode())
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(text.MaxCounter(merged)).To(Equal(uint64(5)))
+	})
+
+	It("reports 0 for empty input, which decodes as an empty document", func() {
+		Expect(text.MaxCounter(nil)).To(Equal(uint64(0)))
+	})
+
+	It("refuses a fragment", func() {
+		d := text.New("a")
+		Expect(d.Insert(0, "x")).To(Succeed())
+		frag, err := text.EncodeFragment(d, nil)
+		Expect(err).NotTo(HaveOccurred())
+
+		Expect(text.MaxCounter(frag)).Error().To(MatchError(ContainSubstring("unsupported format version 2")))
+	})
+})
+
 // fork decodes a's current state as a new replica owned by peer.
 func fork(d *text.Doc, peer string) *text.Doc {
 	nd, err := text.Decode(d.Encode(), peer)

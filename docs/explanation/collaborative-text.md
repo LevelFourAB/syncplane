@@ -92,9 +92,15 @@ Annotations — such as comments on a range — combine marks, anchors, and an e
 
 ## Both decoders accept exactly the same documents
 
-Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling), strings must be valid UTF-8, float mark values must be finite, and a mark anchored to an item that the document does not contain is an error rather than a guessed range. Counter 0 belongs to the root sentinel, so an item or a mark operation that holds it is refused. Without that rule, one write could store a document that no reader can decode.
+Varints are capped at 2^53−1 (the JavaScript safe-integer ceiling), strings must be valid UTF-8, float mark values must be finite, and a mark anchored to an item that the document does not contain is an error rather than a guessed range. Counter 0 belongs to the root sentinel, so an item or a mark operation that holds it is refused. Without that rule, one write could store a document that no reader can decode. A run whose last item counter passes 2^53−1 is refused for the same reason: the encoder writes that counter as a varint in the version vector.
 
 Shared test vectors pin all refusals by payload and exact error message, preventing the engine from storing a document that fails only in the browser.
+
+## The counter ceiling
+
+Every edit takes a counter above every counter the document has seen, from any peer. An insert takes one counter for each code point, and a mark or an unmark takes one. When the next counter would pass 2^53−1, an edit fails and changes nothing: Go returns `text.ErrCounterCeiling`, and TypeScript throws `text: no counters left below the ceiling`. A union never lowers the version vector, so a document whose counters reach the ceiling stays readable but can never be edited again.
+
+Honest edits cannot get there. The danger is one write that puts a very high counter in the version vector. For this reason the server refuses, with `invalid_argument`, a write that moves the highest counter of a text document more than 2^32 above the stored document; for a new document it measures from 0. The rule covers client pushes and trusted writes. A step of 2^32 is far more than any honest write needs, and reaching the ceiling takes millions of writes to one row instead of one.
 
 ## The write boundary takes text, not bytes
 

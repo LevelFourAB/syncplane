@@ -187,6 +187,57 @@ describe('TextDoc', () => {
 	});
 });
 
+// Every edit takes a counter above every counter the document has seen, and a
+// number holds every integer only up to 2^53−1. A version vector that reaches
+// it leaves no counter for the next edit. Mirrors the Go "Edits at the counter
+// ceiling" specs in engine/text.
+describe('edits at the counter ceiling', () => {
+	/** A document with no items whose version vector holds peer "mallory" at
+	 * counter (hex), as another writer may leave it. */
+	const seenUpTo = {
+		ceiling: '0101076d616c6c6f7279ffffffffffffff0f0000',
+		oneBelow: '0101076d616c6c6f7279feffffffffffff0f0000',
+		twoBelow: '0101076d616c6c6f7279fdffffffffffff0f0000',
+	};
+	const open = (hex: string): TextDoc =>
+		decodeTextDoc(Uint8Array.from(hex.match(/../g)!.map((b) => parseInt(b, 16))), 'alice');
+
+	it('refuses an insert, and changes nothing', () => {
+		const d = open(seenUpTo.ceiling);
+		const before = encodeTextDoc(d);
+
+		expect(() => d.insert(0, 'x')).toThrow('text: no counters left below the ceiling');
+		expect(encodeTextDoc(d)).toEqual(before);
+	});
+
+	it('refuses a mark, and changes nothing', () => {
+		const d = open(seenUpTo.ceiling);
+		const before = encodeTextDoc(d);
+
+		expect(() => d.mark(0, 0, 'bold', true, ExpandNone)).toThrow(
+			'text: no counters left below the ceiling',
+		);
+		expect(encodeTextDoc(d)).toEqual(before);
+	});
+
+	it('uses the counters up to the ceiling, each item with its own id, and its encoding decodes', () => {
+		const d = open(seenUpTo.twoBelow);
+
+		const range = d.insert(0, 'ab');
+		expect(range.start).toBe(Number.MAX_SAFE_INTEGER - 1);
+		expect(range.count).toBe(2);
+		expect(decodeTextDoc(encodeTextDoc(d), '').plainText()).toBe('ab');
+		expect(() => d.insert(2, 'c')).toThrow('text: no counters left below the ceiling');
+	});
+
+	it('refuses an insert that needs more counters than are left', () => {
+		const d = open(seenUpTo.oneBelow);
+
+		expect(() => d.insert(0, 'ab')).toThrow('text: no counters left below the ceiling');
+		expect(d.length).toBe(0);
+	});
+});
+
 describe('mergeText', () => {
 	it('merges concurrent inserts at different positions', () => {
 		const a = new TextDoc('a');
