@@ -85,11 +85,13 @@ func (CrudOp) EnumDescriptor() ([]byte, []int) {
 type Mutation struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Identifies the originating client, such as a device or browser tab. Use
-	// a stable identifier across requests from the same client.
+	// a stable identifier across requests from the same client. It must not
+	// hold a control character (U+0000 to U+001F): the server refuses the
+	// whole batch with invalid_argument.
 	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	// Tracks sequence order with a monotonically increasing ID for the client,
-	// starting at 1. The server tracks the last applied ID per client for
-	// idempotency and gap detection.
+	// starting at 1. The server tracks the last applied ID per client and
+	// caller for idempotency and gap detection (see WorkspaceBatch).
 	MutationId uint64 `protobuf:"varint,2,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
 	// Contains the mutation payload. Future payload variants, such as
 	// conflict-free replicated data type (CRDT) deltas, add new branches to

@@ -164,7 +164,7 @@ The [schema-revision handshake](../how-to/handle-failures.md#steps) detects vers
 
 The `workspace_id` identifier is self-asserted, and `CanAccessWorkspace` defines the authorization boundary. The engine checks this hook before executing workspace-scoped operations, but the default implementation (`AllowAll`) permits all requests. A shared deployment that does not override `CanAccessWorkspace` provides no cross-tenant isolation.
 
-The `client_id` parameter is an unauthenticated idempotency handle, not an identity. Do not base authorization decisions on `client_id`. Identity is determined by the `Principal` produced by an `Authenticator`.
+The `client_id` parameter is an unauthenticated idempotency handle, not an identity. Do not base authorization decisions on `client_id`. Identity is determined by the `Principal` produced by an `Authenticator`. The server keeps a separate mutation-ID watermark for each principal that pushes under a `client_id`, so one principal cannot use up or skip the IDs of another. Anonymous callers have no identity to keep apart, so they share one watermark per `client_id`.
 
 Active streams re-check access permissions periodically, but do not re-verify credentials:
 
@@ -336,15 +336,17 @@ Debouncing delays when peers receive updates by up to the maximum delay plus net
 
 ## Deleting idle client watermarks can apply a resend twice
 
-The server keeps one small record per `(workspace, client_id)`: the highest mutation ID it has applied or rejected for that client. This watermark is the only thing that makes a resend idempotent. A push whose response is lost stays in the client's durable pending queue, and the client resends it on its next sync cycle, which can be weeks later if the device stays offline. The server cannot tell such a resend from new work: a resend carries no marker, and the client cannot add one, because it does not know whether the original push reached the server.
+The server keeps one small record per `(workspace, caller, client_id)`: the highest mutation ID it has applied or rejected for that client. The caller is the authenticated principal, and all anonymous callers count as one. This watermark is the only thing that makes a resend idempotent. A push whose response is lost stays in the client's durable pending queue, and the client resends it on its next sync cycle, which can be weeks later if the device stays offline. The server cannot tell such a resend from new work: a resend carries no marker, and the client cannot add one, because it does not know whether the original push reached the server.
 
-Garbage collection therefore keeps watermark records by default, and the tombstone retention only clears the rejection verdicts stored next to them. The clients table then grows with the number of distinct client IDs that have ever pushed to a workspace. Each client ID is minted once per local database, so this is bounded by installs and sign-outs rather than by traffic.
+Garbage collection therefore keeps watermark records by default, and the tombstone retention only clears the rejection verdicts stored next to them. The clients table then grows with the number of distinct pairs of caller and client ID that have ever pushed to a workspace. Each client ID is minted once per local database, so this is bounded by installs and sign-outs rather than by traffic.
 
 `WithClientRetention(d)` opts into deleting the records of clients that have not pushed for `d`. A client whose record is gone is re-admitted at whatever mutation ID it pushes next. If that push is a resend, every mutation in it applies a second time:
 
 - A `PUT` or `DELETE` overwrites what other clients wrote in the meantime, because the server applies mutations in arrival order (last writer wins).
 - A batch or custom mutator runs twice.
 - Nothing reports it. The client receives `APPLIED`, and the rows look like ordinary writes.
+
+The same re-admission happens when the principal behind one client ID changes, for example when an anonymous user signs in and keeps the local database. The new principal has no record yet, so its first push is admitted at whatever mutation ID it carries, and a resend of a push that the old principal sent applies again.
 
 Set `d` well past the longest time a client can stay away and still hold unpushed work, and prefer leaving the option unset unless the clients table is a measured problem.
 

@@ -28,11 +28,12 @@ import (
 type subScope struct {
 	ws        string
 	principal Principal
-	// clientID is the stream's idempotency handle. Watermarks are keyed
-	// (workspace, client_id), so one handle serves every scope and each page
-	// still reports last_acked_mutation_id for its own workspace.
-	clientID string
-	emitter  *rowEmitter
+	// ackKey is the watermarkKey of the stream's client_id under this
+	// scope's principal. Watermarks are stored per workspace, so one client_id
+	// serves every scope and each page still reports last_acked_mutation_id
+	// for its own workspace.
+	ackKey  string
+	emitter *rowEmitter
 	// epoch is the filter epoch the emitter's read filters were resolved
 	// under.
 	epoch    uint64
@@ -233,6 +234,9 @@ func (s *Server) Subscribe(ctx context.Context, req *connect.Request[syncplanev1
 // validateSubscribe enforces the request's shape before any workspace is
 // touched. These are properties of the request, so they are RPC errors.
 func (s *Server) validateSubscribe(msg *syncplanev1.SubscribeRequest) error {
+	if err := checkClientID(msg.GetClientId()); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
 	scopes := msg.GetScopes()
 	if len(scopes) == 0 {
 		return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("subscribe needs at least one scope"))
@@ -304,7 +308,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 	return &subScope{
 		ws:           ws,
 		principal:    principal,
-		clientID:     clientID,
+		ackKey:       watermarkKey(principal, clientID),
 		emitter:      emitter,
 		epoch:        epoch,
 		wantHash:     wantHash,
@@ -435,7 +439,7 @@ func (s *Server) drainScope(ctx context.Context, stream *connect.ServerStream[sy
 		var reason resetReason
 		if err := s.readTx(ctx, sc.ws, max(sc.cur.seq, sc.minSeq), func(tx storage.ReadTx) error {
 			var e error
-			page, next, reason, e = s.servePullPage(tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.clientID, sc.rawCursor, limit)
+			page, next, reason, e = s.servePullPage(tx, route, sc.cur, sc.emitter, sc.wantHash, sc.epoch, sc.subs, sc.ackKey, sc.rawCursor, limit)
 			return e
 		}); err != nil {
 			// A read failure is this workspace's problem, not the stream's.

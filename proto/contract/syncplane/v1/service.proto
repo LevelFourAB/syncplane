@@ -63,10 +63,15 @@ service SyncService {
 }
 
 // WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
-// (workspace, client_id): the server's watermark is keyed that way, and the
-// contiguity rule (id == watermark+1) applies within a batch, never across
+// (workspace, caller, client_id): the server keeps one watermark for each, and
+// the contiguity rule (id == watermark+1) applies within a batch, never across
 // batches. A client holding several workspaces therefore keeps a separate
 // mutation-id counter and pending queue per workspace.
+//
+// The caller is the authenticated principal, by issuer and subject. Every
+// anonymous caller counts as one caller. A push from another caller under the
+// same client_id does not move this caller's watermark, and Pull, Bootstrap
+// and Subscribe report each caller its own.
 message WorkspaceBatch {
 	string workspace_id = 1;
 	repeated Mutation mutations = 2;
@@ -193,8 +198,9 @@ message PullResponse {
 	// frames since the last checkpoint are re-delivered if the stream is
 	// reopened. Empty is never a valid cursor to store.
 	bytes next_cursor = 2;
-	// Highest mutation id the server has applied for this client; the client
-	// drops pending mutations at or below it during rebase.
+	// Highest mutation id the server has applied for this client and caller
+	// (see WorkspaceBatch); the client drops pending mutations at or below it
+	// during rebase.
 	uint64 last_acked_mutation_id = 3;
 	// True when the client must discard local state and re-bootstrap: the
 	// cursor predates the tombstone horizon, or its scope changed in a way the
@@ -458,9 +464,10 @@ message WorkspaceScope {
 }
 
 message SubscribeRequest {
-	// Idempotency handle, shared by every scope: watermarks are keyed
-	// (workspace, client_id), so one handle per client is enough and lets each
-	// page report last_acked_mutation_id for its own workspace.
+	// Idempotency handle, shared by every scope: watermarks are kept per
+	// (workspace, caller, client_id) (see WorkspaceBatch), so one handle per
+	// client is enough and lets each page report last_acked_mutation_id for its
+	// own workspace.
 	string client_id = 1;
 	// The workspaces this stream carries. At least one; duplicates are
 	// rejected, and the server caps the count (see Limits).

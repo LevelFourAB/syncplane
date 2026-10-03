@@ -185,13 +185,17 @@ outcomes replay.
 ## Idempotency
 
 Syncplane achieves idempotency through per-client mutation ID watermarks,
-checked for contiguity per `(workspace, client_id)`. In-process writes that
-support retries use a separate ledger keyed by a caller-supplied idempotency key.
-Caller-supplied keys do not require contiguity and survive idle-client garbage
-collection.
+checked for contiguity per `(workspace, caller, client_id)`. The caller is the
+authenticated principal, by issuer and subject, and every anonymous caller
+counts as one caller. In-process writes that support retries use a separate
+ledger keyed by a caller-supplied idempotency key. Caller-supplied keys do not
+require contiguity and survive idle-client garbage collection.
 
 The `client_id` parameter is an unauthenticated handle asserted by the client.
-It does not represent identity; do not use it for authorization decisions.
+It does not represent identity; do not use it for authorization decisions. The
+watermark names the caller for this reason: a principal that pushes under
+another principal's `client_id` moves only its own watermark, so it cannot use
+up or skip the IDs that the other principal sends.
 
 ## Deletes and the horizon
 
@@ -236,8 +240,8 @@ When a fresh bootstrap is required, the client discards the partial snapshot.
 
 The `workspace_id` is a hard partition key everywhere, and the server sequences
 per workspace. Each workspace keeps its own cursor, pending queue, and
-mutation-id counter. The server requires per-`(workspace, client_id)` gap-free
-IDs.
+mutation-id counter. The server requires gap-free IDs per
+`(workspace, caller, client_id)`.
 
 Sharing occurs at the transport and storage layers only: a single client can
 manage multiple workspaces simultaneously, sharing a local store, change

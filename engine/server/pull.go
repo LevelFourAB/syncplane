@@ -327,6 +327,9 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	if err := checkClientID(msg.GetClientId()); err != nil {
+		return nil, connect.NewError(connect.CodeInvalidArgument, err)
+	}
 	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
 	if err != nil {
 		return nil, err
@@ -384,7 +387,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	// onto the primary — the behavior every pull had before replicas.
 	err = s.readTx(ctx, msg.GetWorkspaceId(), max(cur.seq, msg.GetMinSeq()), func(tx storage.ReadTx) error {
 		var e error
-		resp, _, resetSeen, e = s.servePullPage(tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), msg.GetClientId(), msg.GetCursor(), limit)
+		resp, _, resetSeen, e = s.servePullPage(tx, route, cur, emitter, wantHash, epoch, msg.GetSubscriptions(), watermarkKey(principal, msg.GetClientId()), msg.GetCursor(), limit)
 		return e
 	})
 	if err != nil {
@@ -476,12 +479,12 @@ func (s *Server) routePull(ctx context.Context, ws string, cur cursorState, rawC
 //
 // A resync still runs the shared reset checks first, so a cursor below the
 // horizon or from a foreign store resets rather than resyncs.
-func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, clientID string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
+func (s *Server) servePullPage(tx storage.ReadTx, route pullRoute, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, ackKey string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
 	if !route.resync {
-		return s.pullPage(tx, cur, emitter, wantHash, epoch, subs, clientID, rawCursor, limit)
+		return s.pullPage(tx, cur, emitter, wantHash, epoch, subs, ackKey, rawCursor, limit)
 	}
 	resp := &syncplanev1.PullResponse{Patch: &syncplanev1.Patch{}}
-	_, _, reset, err := s.pullPreamble(tx, cur, clientID, rawCursor, resp)
+	_, _, reset, err := s.pullPreamble(tx, cur, ackKey, rawCursor, resp)
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}
@@ -518,11 +521,12 @@ func belowHorizon(seq uint64, partialEntity string, horizon uint64) bool {
 }
 
 // pullPreamble reads the workspace position, stamps last_acked onto resp, and
-// runs the horizon + store-epoch reset checks shared by every pull path. reset
+// runs the horizon + store-epoch reset checks shared by every pull path.
+// ackKey is the caller's watermarkKey; empty stamps no last_acked. reset
 // is true when the cursor cannot be served incrementally and the caller must
 // reply reset=true. current and storeEpoch are the live workspace position
 // (meaningful only when reset is false).
-func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, clientID string, rawCursor []byte, resp *syncplanev1.PullResponse) (current, storeEpoch uint64, reset resetReason, err error) {
+func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, ackKey string, rawCursor []byte, resp *syncplanev1.PullResponse) (current, storeEpoch uint64, reset resetReason, err error) {
 	horizon, err := tx.TombstoneHorizon()
 	if err != nil {
 		return 0, 0, resetNone, err
@@ -535,8 +539,8 @@ func (s *Server) pullPreamble(tx storage.ReadTx, cur cursorState, clientID strin
 	if err != nil {
 		return 0, 0, resetNone, err
 	}
-	if clientID != "" {
-		acked, err := tx.ClientLastMutationID(clientID)
+	if ackKey != "" {
+		acked, err := tx.ClientLastMutationID(ackKey)
 		if err != nil {
 			return 0, 0, resetNone, err
 		}
@@ -694,9 +698,9 @@ func deliverPage(tx storage.ReadTx, cur cursorState, changes []storage.Row, comp
 // servePullPage routes that before invoking pullPage. The returned cursorState is the position the page
 // advanced to (meaningful only when the response is neither reset nor closes
 // the stream early); Subscribe carries it forward across notifications.
-func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, clientID string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
+func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitter, wantHash, epoch uint64, subs []*syncplanev1.Subscription, ackKey string, rawCursor []byte, limit int) (*syncplanev1.PullResponse, cursorState, resetReason, error) {
 	resp := &syncplanev1.PullResponse{Patch: &syncplanev1.Patch{}}
-	current, storeEpoch, reset, err := s.pullPreamble(tx, cur, clientID, rawCursor, resp)
+	current, storeEpoch, reset, err := s.pullPreamble(tx, cur, ackKey, rawCursor, resp)
 	if err != nil {
 		return nil, cursorState{}, resetNone, err
 	}

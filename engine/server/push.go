@@ -177,9 +177,10 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		applied = false
 		gap, badArg = "", ""
 		adopted = adopted[:0]
-		// Watermarks per client, loaded lazily and tracked as we bump them.
-		// bumped names the clients whose watermark this batch moved, which is
-		// what the single write per client after the loop is driven by.
+		// Watermarks per client, by watermarkKey, loaded lazily and tracked as
+		// we bump them. bumped names the clients whose watermark this batch
+		// moved, which is what the single write per client after the loop is
+		// driven by.
 		watermarks := map[string]uint64{}
 		bumped := map[string]bool{}
 		// Recorded verdicts per client, loaded lazily by rejectionsOf and marked
@@ -190,15 +191,15 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
-		rejectionsOf := func(clientID string) ([]storage.ClientRejection, error) {
-			if recs, ok := verdicts[clientID]; ok {
+		rejectionsOf := func(key string) ([]storage.ClientRejection, error) {
+			if recs, ok := verdicts[key]; ok {
 				return recs, nil
 			}
-			recs, err := tx.ClientRejections(clientID)
+			recs, err := tx.ClientRejections(key)
 			if err != nil {
 				return nil, err
 			}
-			verdicts[clientID] = recs
+			verdicts[key] = recs
 			return recs, nil
 		}
 		for i, m := range muts {
@@ -207,14 +208,20 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				results = nil
 				return errAbortBatch
 			}
-			last, ok := watermarks[m.GetClientId()]
+			if err := checkClientID(m.GetClientId()); err != nil {
+				badArg = err.Error()
+				results = nil
+				return errAbortBatch
+			}
+			key := watermarkKey(principal, m.GetClientId())
+			last, ok := watermarks[key]
 			if !ok {
 				var err error
-				last, err = tx.ClientLastMutationID(m.GetClientId())
+				last, err = tx.ClientLastMutationID(key)
 				if err != nil {
 					return err
 				}
-				watermarks[m.GetClientId()] = last
+				watermarks[key] = last
 			}
 
 			switch {
@@ -224,7 +231,7 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				// is resending precisely because it never learned that. Replay
 				// the verdict rather than the bare ack that would make the edit
 				// disappear unexplained.
-				recs, err := rejectionsOf(m.GetClientId())
+				recs, err := rejectionsOf(key)
 				if err != nil {
 					return err
 				}
@@ -303,16 +310,16 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 				// client does when it never sees this response — is answered
 				// with it. Outside the savepoint, like the watermark bump it
 				// accompanies.
-				recs, err := rejectionsOf(m.GetClientId())
+				recs, err := rejectionsOf(key)
 				if err != nil {
 					return err
 				}
-				verdicts[m.GetClientId()] = append(recs, storage.ClientRejection{
+				verdicts[key] = append(recs, storage.ClientRejection{
 					MutationID: m.GetMutationId(),
 					Code:       r.Code,
 					Message:    r.Message,
 				})
-				dirty[m.GetClientId()] = true
+				dirty[key] = true
 			default:
 				return applyErr
 			}
@@ -322,21 +329,21 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			// transaction, so the only value ever read back is the highest id
 			// each client reached, and a write per mutation would rewrite one
 			// row per mutation to get there.
-			watermarks[m.GetClientId()] = m.GetMutationId()
-			bumped[m.GetClientId()] = true
+			watermarks[key] = m.GetMutationId()
+			bumped[key] = true
 			results = append(results, result)
 		}
 		// One write per client, after the loop and so outside every savepoint:
 		// the bump has to survive a rejected mutation's rollback.
-		for clientID := range bumped {
-			if err := tx.SetClientLastMutationID(clientID, watermarks[clientID]); err != nil {
+		for key := range bumped {
+			if err := tx.SetClientLastMutationID(key, watermarks[key]); err != nil {
 				return err
 			}
 		}
 		// One write per client, after the loop: a batch that rejects several of
 		// one client's mutations records them together.
-		for clientID := range dirty {
-			if err := tx.SetClientRejections(clientID, trimRejections(verdicts[clientID])); err != nil {
+		for key := range dirty {
+			if err := tx.SetClientRejections(key, trimRejections(verdicts[key])); err != nil {
 				return err
 			}
 		}

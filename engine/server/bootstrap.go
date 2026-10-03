@@ -73,6 +73,9 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
+	if err := checkClientID(msg.GetClientId()); err != nil {
+		return connect.NewError(connect.CodeInvalidArgument, err)
+	}
 	principal, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
 	if err != nil {
 		return err
@@ -174,7 +177,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 			begin.Seq = current
 		}
 		if msg.GetClientId() != "" {
-			acked, err := tx.ClientLastMutationID(msg.GetClientId())
+			acked, err := tx.ClientLastMutationID(watermarkKey(principal, msg.GetClientId()))
 			if err != nil {
 				return err
 			}

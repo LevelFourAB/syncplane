@@ -20,10 +20,15 @@ export const file_syncplane_v1_service: GenFile = /*@__PURE__*/
 
 /**
  * WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
- * (workspace, client_id): the server's watermark is keyed that way, and the
- * contiguity rule (id == watermark+1) applies within a batch, never across
+ * (workspace, caller, client_id): the server keeps one watermark for each, and
+ * the contiguity rule (id == watermark+1) applies within a batch, never across
  * batches. A client holding several workspaces therefore keeps a separate
  * mutation-id counter and pending queue per workspace.
+ *
+ * The caller is the authenticated principal, by issuer and subject. Every
+ * anonymous caller counts as one caller. A push from another caller under the
+ * same client_id does not move this caller's watermark, and Pull, Bootstrap
+ * and Subscribe report each caller its own.
  *
  * @generated from message syncplane.v1.WorkspaceBatch
  */
@@ -303,8 +308,9 @@ export type PullResponse = Message<"syncplane.v1.PullResponse"> & {
   nextCursor: Uint8Array;
 
   /**
-   * Highest mutation id the server has applied for this client; the client
-   * drops pending mutations at or below it during rebase.
+   * Highest mutation id the server has applied for this client and caller
+   * (see WorkspaceBatch); the client drops pending mutations at or below it
+   * during rebase.
    *
    * @generated from field: uint64 last_acked_mutation_id = 3;
    */
@@ -923,9 +929,10 @@ export const WorkspaceScopeSchema: GenMessage<WorkspaceScope> = /*@__PURE__*/
  */
 export type SubscribeRequest = Message<"syncplane.v1.SubscribeRequest"> & {
   /**
-   * Idempotency handle, shared by every scope: watermarks are keyed
-   * (workspace, client_id), so one handle per client is enough and lets each
-   * page report last_acked_mutation_id for its own workspace.
+   * Idempotency handle, shared by every scope: watermarks are kept per
+   * (workspace, caller, client_id) (see WorkspaceBatch), so one handle per
+   * client is enough and lets each page report last_acked_mutation_id for its
+   * own workspace.
    *
    * @generated from field: string client_id = 1;
    */

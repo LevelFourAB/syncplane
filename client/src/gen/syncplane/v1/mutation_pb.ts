@@ -22,7 +22,9 @@ export const file_syncplane_v1_mutation: GenFile = /*@__PURE__*/
 export type Mutation = Message<"syncplane.v1.Mutation"> & {
   /**
    * Identifies the originating client, such as a device or browser tab. Use
-   * a stable identifier across requests from the same client.
+   * a stable identifier across requests from the same client. It must not
+   * hold a control character (U+0000 to U+001F): the server refuses the
+   * whole batch with invalid_argument.
    *
    * @generated from field: string client_id = 1;
    */
@@ -30,8 +32,8 @@ export type Mutation = Message<"syncplane.v1.Mutation"> & {
 
   /**
    * Tracks sequence order with a monotonically increasing ID for the client,
-   * starting at 1. The server tracks the last applied ID per client for
-   * idempotency and gap detection.
+   * starting at 1. The server tracks the last applied ID per client and
+   * caller for idempotency and gap detection (see WorkspaceBatch).
    *
    * @generated from field: uint64 mutation_id = 2;
    */

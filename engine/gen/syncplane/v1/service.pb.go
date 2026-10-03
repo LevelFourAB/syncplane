@@ -138,10 +138,15 @@ func (WorkspaceDropped_Reason) EnumDescriptor() ([]byte, []int) {
 }
 
 // WorkspaceBatch is one workspace's slice of a push. Mutation ids are per
-// (workspace, client_id): the server's watermark is keyed that way, and the
-// contiguity rule (id == watermark+1) applies within a batch, never across
+// (workspace, caller, client_id): the server keeps one watermark for each, and
+// the contiguity rule (id == watermark+1) applies within a batch, never across
 // batches. A client holding several workspaces therefore keeps a separate
 // mutation-id counter and pending queue per workspace.
+//
+// The caller is the authenticated principal, by issuer and subject. Every
+// anonymous caller counts as one caller. A push from another caller under the
+// same client_id does not move this caller's watermark, and Pull, Bootstrap
+// and Subscribe report each caller its own.
 type WorkspaceBatch struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	WorkspaceId   string                 `protobuf:"bytes,1,opt,name=workspace_id,json=workspaceId,proto3" json:"workspace_id,omitempty"`
@@ -603,8 +608,9 @@ type PullResponse struct {
 	// frames since the last checkpoint are re-delivered if the stream is
 	// reopened. Empty is never a valid cursor to store.
 	NextCursor []byte `protobuf:"bytes,2,opt,name=next_cursor,json=nextCursor,proto3" json:"next_cursor,omitempty"`
-	// Highest mutation id the server has applied for this client; the client
-	// drops pending mutations at or below it during rebase.
+	// Highest mutation id the server has applied for this client and caller
+	// (see WorkspaceBatch); the client drops pending mutations at or below it
+	// during rebase.
 	LastAckedMutationId uint64 `protobuf:"varint,3,opt,name=last_acked_mutation_id,json=lastAckedMutationId,proto3" json:"last_acked_mutation_id,omitempty"`
 	// True when the client must discard local state and re-bootstrap: the
 	// cursor predates the tombstone horizon, or its scope changed in a way the
@@ -1452,9 +1458,10 @@ func (x *WorkspaceScope) GetMinSeq() uint64 {
 
 type SubscribeRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// Idempotency handle, shared by every scope: watermarks are keyed
-	// (workspace, client_id), so one handle per client is enough and lets each
-	// page report last_acked_mutation_id for its own workspace.
+	// Idempotency handle, shared by every scope: watermarks are kept per
+	// (workspace, caller, client_id) (see WorkspaceBatch), so one handle per
+	// client is enough and lets each page report last_acked_mutation_id for its
+	// own workspace.
 	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	// The workspaces this stream carries. At least one; duplicates are
 	// rejected, and the server caps the count (see Limits).
