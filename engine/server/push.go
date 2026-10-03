@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"slices"
 	"time"
 
@@ -203,8 +204,12 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 			return recs, nil
 		}
 		for i, m := range muts {
-			if m.GetClientId() == "" || m.GetMutationId() == 0 {
-				badArg = "mutation needs client_id and mutation_id >= 1"
+			// The wire id is a uint64, but stores hold watermarks as signed
+			// 64-bit integers: an id above that is as malformed as 0, and
+			// reaching the store with it would fail as an internal error the
+			// client retries.
+			if m.GetClientId() == "" || m.GetMutationId() == 0 || m.GetMutationId() > math.MaxInt64 {
+				badArg = "mutation needs client_id and a mutation_id from 1 to 9223372036854775807"
 				results = nil
 				return errAbortBatch
 			}

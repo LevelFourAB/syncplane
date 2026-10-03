@@ -551,10 +551,10 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 		const results = [];
 		let applied = false;
 		for (const m of mutations) {
-			if (m.clientId === '' || m.mutationId === 0n) {
+			if (m.clientId === '' || m.mutationId === 0n || m.mutationId > 0x7fffffffffffffffn) {
 				return fail(
 					CodeInvalidArgument,
-					`workspace "${workspaceId}": mutation needs client_id and mutation_id >= 1`,
+					`workspace "${workspaceId}": mutation needs client_id and a mutation_id from 1 to 9223372036854775807`,
 				);
 			}
 			const last = state.watermarks.get(m.clientId) ?? 0n;

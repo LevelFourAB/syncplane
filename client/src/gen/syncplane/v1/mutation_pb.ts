@@ -33,7 +33,9 @@ export type Mutation = Message<"syncplane.v1.Mutation"> & {
   /**
    * Tracks sequence order with a monotonically increasing ID for the client,
    * starting at 1. The server tracks the last applied ID per client and
-   * caller for idempotency and gap detection (see WorkspaceBatch).
+   * caller for idempotency and gap detection (see WorkspaceBatch). An ID of 0
+   * or above 2^63−1 makes the server refuse the whole batch with
+   * invalid_argument.
    *
    * @generated from field: uint64 mutation_id = 2;
    */

@@ -91,7 +91,9 @@ type Mutation struct {
 	ClientId string `protobuf:"bytes,1,opt,name=client_id,json=clientId,proto3" json:"client_id,omitempty"`
 	// Tracks sequence order with a monotonically increasing ID for the client,
 	// starting at 1. The server tracks the last applied ID per client and
-	// caller for idempotency and gap detection (see WorkspaceBatch).
+	// caller for idempotency and gap detection (see WorkspaceBatch). An ID of 0
+	// or above 2^63−1 makes the server refuse the whole batch with
+	// invalid_argument.
 	MutationId uint64 `protobuf:"varint,2,opt,name=mutation_id,json=mutationId,proto3" json:"mutation_id,omitempty"`
 	// Contains the mutation payload. Future payload variants, such as
 	// conflict-free replicated data type (CRDT) deltas, add new branches to

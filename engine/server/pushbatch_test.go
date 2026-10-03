@@ -1,7 +1,10 @@
 package server_test
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -455,3 +458,46 @@ func (t *savepointCountingTx) InSavepoint(fn func() error) error {
 	t.owner.mu.Unlock()
 	return t.WriteTx.InSavepoint(fn)
 }
+
+// The wire carries a mutation id as a uint64, and stores hold it as a signed
+// 64-bit integer. An id the store cannot hold must be refused as the bad
+// argument it is: an internal error would be retried and logged at ERROR on
+// every push.
+var _ = Describe("Push mutation ids", func() {
+	var (
+		srv  *server.Server
+		logs *bytes.Buffer
+	)
+
+	BeforeEach(func() {
+		logs = &bytes.Buffer{}
+		srv = newTestServer(server.WithLogger(slog.New(slog.NewTextHandler(logs, nil))))
+	})
+
+	pushID := func(id uint64) *syncplanev1.WorkspaceResults {
+		GinkgoHelper()
+		resp, err := srv.Push(context.Background(), connect.NewRequest(pushOf(ws, []*syncplanev1.Mutation{
+			putMutation("c1", id, "todo", "t1", &todov1.Todo{Id: "t1"}),
+		})))
+		Expect(err).NotTo(HaveOccurred())
+		return resp.Msg.GetResults()[0]
+	}
+
+	DescribeTable("refuses an id outside 1 to 2^63-1 as invalid_argument",
+		func(id uint64) {
+			res := pushID(id)
+			Expect(res.GetErrorCode()).To(Equal(server.CodeInvalidArgument), "message: %s", res.GetErrorMessage())
+			Expect(res.GetErrorMessage()).To(ContainSubstring("mutation_id from 1 to 9223372036854775807"))
+			Expect(logs.String()).NotTo(ContainSubstring("batch failed"))
+		},
+		Entry("0", uint64(0)),
+		Entry("2^63", uint64(1)<<63),
+		Entry("2^64-1", uint64(math.MaxUint64)),
+	)
+
+	It("applies the largest id a store holds", func() {
+		res := pushID(math.MaxInt64)
+		Expect(res.GetErrorCode()).To(BeEmpty(), "message: %s", res.GetErrorMessage())
+		Expect(res.GetResults()[0].GetStatus()).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+	})
+})
