@@ -1012,13 +1012,50 @@ function requireMapKey(path: Path, keyType: ScalarType, seg: string): void {
 	if (keyType === ScalarType.STRING) return;
 	const ok = keyType === ScalarType.BOOL
 		? seg === 'true' || seg === 'false'
-		: /^-?\d+$/.test(seg);
+		: integralKeyFits(keyType, seg);
 	if (ok) return;
 	throw new Error(
 		`query path ${path.join('.')}: invalid ${
 			ScalarType[keyType]?.toLowerCase() ?? 'scalar'
 		} map key "${seg}"`,
 	);
+}
+
+/**
+ * Whether a segment spells a key of an integral key type. The rule is the one
+ * Go's strconv applies in base 10, which is what the Go compiler parses the
+ * same segment with: an optional sign for a signed kind and none for an
+ * unsigned one, decimal digits only, leading zeros allowed, and a value inside
+ * the kind's range.
+ */
+function integralKeyFits(keyType: ScalarType, seg: string): boolean {
+	const range = integralKeyRange(keyType);
+	if (range === undefined) return false;
+	const [ min, max ] = range;
+	if (!(min < 0n ? /^[+-]?\d+$/ : /^\d+$/).test(seg)) return false;
+	const n = BigInt(seg);
+	return n >= min && n <= max;
+}
+
+function integralKeyRange(keyType: ScalarType): readonly [bigint, bigint] | undefined {
+	switch (keyType) {
+		case ScalarType.INT32:
+		case ScalarType.SINT32:
+		case ScalarType.SFIXED32:
+			return [ -(2n ** 31n), 2n ** 31n - 1n ];
+		case ScalarType.INT64:
+		case ScalarType.SINT64:
+		case ScalarType.SFIXED64:
+			return [ -(2n ** 63n), 2n ** 63n - 1n ];
+		case ScalarType.UINT32:
+		case ScalarType.FIXED32:
+			return [ 0n, 2n ** 32n - 1n ];
+		case ScalarType.UINT64:
+		case ScalarType.FIXED64:
+			return [ 0n, 2n ** 64n - 1n ];
+		default:
+			return undefined;
+	}
 }
 
 function mapValueName(field: Extract<DescField, { fieldKind: 'map' }>): string {

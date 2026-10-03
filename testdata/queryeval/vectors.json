@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating. A path segment that follows a MAP field is the entry KEY, not a field name — the same convention an lww field-mask path uses, so there is one rule rather than two. Because a map entry has explicit presence, a query that names one variant of an app-defined oneof value simply reads as NOT FOUND for a row whose entry holds a different variant: the condition is false and the ordering ranks it last, and no cross-variant comparison ever has to be defined. That is what lets the value type be app-defined rather than an engine-canonical one. The relatedCases pin the rel condition (`matches`, the one-hop semi-join): each carries a `context` of target rows per entity, and both harnesses must produce `want` twice — once by the scan-level DEFINITION (per row, per stub, derive the target key, look it up in the context, evaluate the inner condition), and once by the TWO-PHASE REWRITE each engine actually runs (pre-pass over the context, then the membership test on the ref stubs). A target missing from the context is an orphan, which is also what a tombstoned target looks like to the evaluator.",
+	"comment": "Shared conformance vectors for the Go (engine/internal/queryeval) and TS (client/src/query/evaluate.ts) predicate evaluators. rows are protojson syncplane.testdata.v1.Widget unless type says otherwise; conds are protojson syncplane.v1.Condition; orderBy entries are protojson syncplane.v1.OrderKey. Paths use proto field names (Widget's localNames coincide). compileErrorCases must be REJECTED by both compilers rather than evaluated — each names a leaf the operator could never satisfy, which would otherwise match nothing (or tie every pair) with no explanation. A bare reference leaf is deliberately absent from compileErrorCases: the client resolves it to its target key before evaluating or sending (prepareQuery), so only the Go compiler — which receives already-resolved paths — sees it as an error. NaN is comparable to nothing, so every comparison operator on it is false; for ordering it takes a rank of its own between real values and missing ones, which is what makes the row order total and therefore encodable as index keys. The orderCases pin that rank in both directions, and the compareCases pin it pairwise — NaN after every real value, before missing, under asc and desc alike. An exists condition (`any`) is the only one whose sub-condition is scoped to something other than the row: its paths resolve against the ELEMENT. That scope is what lets two conditions describe the SAME element, and the pair \"any binds its conditions to ONE element\" / \"the same conditions as separate terms are satisfied by different elements\" is what pins the difference. Membership over a repeated single-key reference (has/hasAny/hasAll on a to-many ref) is rewritten to an exists on the target key by both compilers — Go in Compile, the client in prepareQuery, which is why the client vector harness runs prepareQuery before evaluating. A path segment that follows a MAP field is the entry KEY, not a field name — the same convention an lww field-mask path uses, so there is one rule rather than two. A key of an integral map is read the way Go's base-10 strconv reads it: a sign only on a signed key type, leading zeros allowed, and the value inside the type's range, so `+7` and `007` reach the entry keyed 7 and a key outside the range is a compile error. Because a map entry has explicit presence, a query that names one variant of an app-defined oneof value simply reads as NOT FOUND for a row whose entry holds a different variant: the condition is false and the ordering ranks it last, and no cross-variant comparison ever has to be defined. That is what lets the value type be app-defined rather than an engine-canonical one. The relatedCases pin the rel condition (`matches`, the one-hop semi-join): each carries a `context` of target rows per entity, and both harnesses must produce `want` twice — once by the scan-level DEFINITION (per row, per stub, derive the target key, look it up in the context, evaluate the inner condition), and once by the TWO-PHASE REWRITE each engine actually runs (pre-pass over the context, then the membership test on the ref stubs). A target missing from the context is an orphan, which is also what a tombstoned target looks like to the evaluator.",
 	"evalCases": [
 		{
 			"name": "eq string match",
@@ -2412,6 +2412,48 @@
 					"op": "CMP_OP_EQ",
 					"value": {
 						"stringValue": "seven"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "a leading plus sign on a signed map key reaches the same entry",
+			"row": {
+				"byId": {
+					"7": "seven"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"+7"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "seven"
+					}
+				}
+			},
+			"want": true
+		},
+		{
+			"name": "the lowest int64 is a valid map key",
+			"row": {
+				"byId": {
+					"-9223372036854775808": "min"
+				}
+			},
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"-9223372036854775808"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "min"
 					}
 				}
 			},
@@ -5120,6 +5162,51 @@
 					"path": [
 						"by_id",
 						"not-a-number"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "an int64 map key above the int64 range",
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"9223372036854775808"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "an int64 map key below the int64 range",
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"-9223372036854775809"
+					],
+					"op": "CMP_OP_EQ",
+					"value": {
+						"stringValue": "x"
+					}
+				}
+			}
+		},
+		{
+			"name": "an int64 map key that is a sign with no digits",
+			"cond": {
+				"cmp": {
+					"path": [
+						"by_id",
+						"+"
 					],
 					"op": "CMP_OP_EQ",
 					"value": {

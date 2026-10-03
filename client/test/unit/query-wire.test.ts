@@ -1,3 +1,13 @@
+import { create, createFileRegistry } from '@bufbuild/protobuf';
+import {
+	DescriptorProtoSchema,
+	FieldDescriptorProto_Label,
+	FieldDescriptorProto_Type,
+	FieldDescriptorProtoSchema,
+	FileDescriptorProtoSchema,
+	FileDescriptorSetSchema,
+	MessageOptionsSchema,
+} from '@bufbuild/protobuf/wkt';
 import { describe, expect, it } from 'vitest';
 
 import { type Todo, TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
@@ -449,5 +459,99 @@ describe('prepareQuery', () => {
 			expect(() => prepareQuery(WidgetSchema, { where: { kind: 'present', path, op: 'isSet' } }))
 				.not.toThrow();
 		}
+	});
+});
+
+// One map per integral key kind. Each kind must accept exactly the segments
+// that Go's base-10 strconv parse accepts for it (lww.DecodeMapKey), or a query
+// that compiles here fails at the server, or the other way round. The shared
+// vectors pin the int64 case on both sides; Widget has no map of the others.
+describe('prepareQuery map key segments', () => {
+	const T = FieldDescriptorProto_Type;
+	const entry = (name: string, key: FieldDescriptorProto_Type) =>
+		create(DescriptorProtoSchema, {
+			name,
+			options: create(MessageOptionsSchema, { mapEntry: true }),
+			field: [
+				create(FieldDescriptorProtoSchema, {
+					name: 'key',
+					number: 1,
+					type: key,
+					label: FieldDescriptorProto_Label.OPTIONAL,
+				}),
+				create(FieldDescriptorProtoSchema, {
+					name: 'value',
+					number: 2,
+					type: T.STRING,
+					label: FieldDescriptorProto_Label.OPTIONAL,
+				}),
+			],
+		});
+	const mapField = (name: string, number: number, entryName: string) =>
+		create(FieldDescriptorProtoSchema, {
+			name,
+			number,
+			type: T.MESSAGE,
+			typeName: `.hand.Keys.${entryName}`,
+			label: FieldDescriptorProto_Label.REPEATED,
+		});
+	const Keys = createFileRegistry(
+		create(FileDescriptorSetSchema, {
+			file: [
+				create(FileDescriptorProtoSchema, {
+					name: 'hand/keys.proto',
+					package: 'hand',
+					syntax: 'proto3',
+					messageType: [
+						create(DescriptorProtoSchema, {
+							name: 'Keys',
+							field: [
+								mapField('by_i32', 1, 'ByI32Entry'),
+								mapField('by_u32', 2, 'ByU32Entry'),
+								mapField('by_u64', 3, 'ByU64Entry'),
+							],
+							nestedType: [
+								entry('ByI32Entry', T.INT32),
+								entry('ByU32Entry', T.UINT32),
+								entry('ByU64Entry', T.UINT64),
+							],
+						}),
+					],
+				}),
+			],
+		}),
+	).getMessage('hand.Keys')!;
+	const onKey = (map: string, seg: string): CompiledQuery => ({
+		where: { kind: 'cmp', path: [ map, seg ], op: 'eq', value: 'x' },
+	});
+
+	it.each([
+		[ 'byI32', '2147483647' ],
+		[ 'byI32', '-2147483648' ],
+		[ 'byI32', '+5' ],
+		[ 'byI32', '-0' ],
+		[ 'byI32', '007' ],
+		[ 'byU32', '4294967295' ],
+		[ 'byU32', '007' ],
+		[ 'byU64', '18446744073709551615' ],
+	])('accepts %s key "%s"', (map, seg) => {
+		expect(() => prepareQuery(Keys, onKey(map, seg))).not.toThrow();
+	});
+
+	it.each([
+		[ 'byI32', '2147483648' ],
+		[ 'byI32', '-2147483649' ],
+		[ 'byI32', '-' ],
+		[ 'byI32', ' 5' ],
+		[ 'byI32', '0x5' ],
+		[ 'byI32', '1_000' ],
+		[ 'byU32', '4294967296' ],
+		[ 'byU32', '+5' ],
+		[ 'byU32', '-1' ],
+		[ 'byU32', '-0' ],
+		[ 'byU64', '18446744073709551616' ],
+		[ 'byU64', '+5' ],
+	])('rejects %s key "%s"', (map, seg) => {
+		expect(() => prepareQuery(Keys, onKey(map, seg))).toThrow(/map key/);
 	});
 });
