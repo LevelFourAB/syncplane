@@ -17,6 +17,7 @@ import (
 	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/storage"
 	"github.com/levelfourab/syncplane/engine/storage/pgstore"
+	"github.com/levelfourab/syncplane/engine/storage/prefixstore"
 	"github.com/levelfourab/syncplane/engine/storage/storagetest"
 )
 
@@ -70,6 +71,20 @@ var _ = storagetest.Leases("postgres", func() (storage.Adapter, storage.Adapter,
 	b, err := pgstore.Open(context.Background(), dsn)
 	Expect(err).NotTo(HaveOccurred())
 	return a, b, func() {
+		Expect(a.Close()).To(Succeed())
+		Expect(b.Close()).To(Succeed())
+	}
+})
+
+// The multi-app host shape: each node partitions its store per app, and every
+// app on a node shares the node's one lease session.
+var _ = storagetest.Leases("prefixstore over postgres", func() (storage.Adapter, storage.Adapter, func()) {
+	dsn := pgtest.DSN()
+	a, err := pgstore.Open(context.Background(), dsn)
+	Expect(err).NotTo(HaveOccurred())
+	b, err := pgstore.Open(context.Background(), dsn)
+	Expect(err).NotTo(HaveOccurred())
+	return prefixstore.Wrap(a, "acme/"), prefixstore.Wrap(b, "acme/"), func() {
 		Expect(a.Close()).To(Succeed())
 		Expect(b.Close()).To(Succeed())
 	}

@@ -47,6 +47,7 @@ Background work divides across nodes using per-workspace leases. `pgstore` backs
 - Garbage collection and index sweeps skip workspaces that another node is actively collecting.
 - An effects runtime leases each `(consumer, workspace)` drain in the same way.
 - A crashing node releases held advisory locks when its connection closes, which eliminates lease timeout delays.
+- Two holders on one node exclude each other in the same way. A node holds all of its leases on one connection, and an advisory lock lets the connection that holds it take it again, so the store also keeps a list of the leases it holds and refuses a second holder itself. For the same reason, a caller that gives up (its context is cancelled) never closes that connection, because closing it would release the leases of every other holder on the node.
 
 Leases are advisory and do not guarantee single delivery:
 

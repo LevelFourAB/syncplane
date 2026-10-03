@@ -49,6 +49,58 @@ func Leases(name string, newShared func() (a, b storage.Adapter, cleanup func())
 			Expect(second).To(BeNil())
 		})
 
+		// One handle is one node, and two goroutines of that node are two
+		// holders: the lease must exclude between them as it does between nodes.
+		It("excludes a second holder on the same handle", func() {
+			release, ok, err := la.TryAcquire(ctx, "gc", "ws1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+			DeferCleanup(release)
+
+			second, ok, err := la.TryAcquire(ctx, "gc", "ws1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeFalse())
+			Expect(second).To(BeNil())
+		})
+
+		It("lets the same handle take a lease again after its release", func() {
+			release, ok, err := la.TryAcquire(ctx, "gc", "ws1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+			release()
+
+			again, ok, err := la.TryAcquire(ctx, "gc", "ws1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+			again()
+		})
+
+		It("keeps the handle's other leases when a caller's context is already cancelled", func() {
+			held, ok, err := la.TryAcquire(ctx, "gc", "ws1")
+			Expect(err).NotTo(HaveOccurred())
+			Expect(ok).To(BeTrue())
+			DeferCleanup(held)
+
+			// Whether a cancelled caller gets an error or a lease is the
+			// adapter's choice; what it must not do is touch other holders.
+			cancelled, cancel := context.WithCancel(ctx)
+			cancel()
+			if release, ok, _ := la.TryAcquire(cancelled, "gc", "ws2"); ok {
+				release()
+			}
+
+			// A lease a shared backend dropped can take a moment to free on
+			// the server, so a single check right after could pass too early.
+			Consistently(func() bool {
+				again, ok, err := lb.TryAcquire(ctx, "gc", "ws1")
+				Expect(err).NotTo(HaveOccurred())
+				if ok {
+					again()
+				}
+				return ok
+			}, "300ms", "50ms").Should(BeFalse())
+		})
+
 		It("frees the lease on release", func() {
 			release, ok, err := la.TryAcquire(ctx, "gc", "ws1")
 			Expect(err).NotTo(HaveOccurred())
