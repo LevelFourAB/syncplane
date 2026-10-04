@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"connectrpc.com/connect"
@@ -20,6 +21,7 @@ import (
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
+	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 // epochPermissions hides todos whose title contains the CURRENT epoch's
@@ -84,6 +86,82 @@ func (p *epochPermissions) forget() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.forgotten = true
+}
+
+// snapshotStore marks the read snapshots open on the store it wraps, so a
+// Permissions hook can tell whether a read path called it inside one.
+type snapshotStore struct {
+	storage.Adapter
+	open *atomic.Int32
+}
+
+func (s snapshotStore) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
+	return s.Adapter.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+		s.open.Add(1)
+		defer s.open.Add(-1)
+		return fn(tx)
+	})
+}
+
+// watchedFilters admits every row and records each read filter resolved
+// while a read snapshot is open. bump moves the filter epoch; past epochs stay
+// evaluable through ReadFilterAt, except for the entity named by lost.
+type watchedFilters struct {
+	server.AllowAll
+	open   *atomic.Int32
+	lost   string
+	mu     sync.Mutex
+	epoch  uint64
+	inside []string
+}
+
+func (p *watchedFilters) note(entity string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.open.Load() > 0 {
+		p.inside = append(p.inside, entity)
+	}
+}
+
+func (p *watchedFilters) ReadFilter(_ context.Context, _ server.Principal, _ string, entity string) (server.RowFilter, error) {
+	p.note(entity)
+	return nil, nil
+}
+
+func (p *watchedFilters) FilterEpoch(context.Context, server.Principal, string) (uint64, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.epoch, nil
+}
+
+func (p *watchedFilters) ReadFilterAt(_ context.Context, _ server.Principal, _ string, entity string, epoch uint64) (server.RowFilter, error) {
+	p.note(entity)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if entity == p.lost && epoch < p.epoch {
+		return nil, server.ErrEpochUnavailable
+	}
+	return nil, nil
+}
+
+func (p *watchedFilters) bump() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.epoch++
+}
+
+// resolvedInside returns the entities whose read filter was resolved inside a
+// read snapshot.
+func (p *watchedFilters) resolvedInside() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.inside
+}
+
+func (p *watchedFilters) clearInside() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.inside = nil
 }
 
 // hiddenProjects hides every project whose name is the given one.
@@ -515,6 +593,46 @@ var _ = Describe("Delta resync", func() {
 			perms.forget()
 			resp := pull(cursor, 0)
 			Expect(resp.GetReset_()).To(BeTrue())
+		})
+	})
+
+	// A read path resolves every read filter before its read snapshot opens,
+	// so a slow hook never pins one, and a past epoch that cannot be evaluated
+	// is found before any row is classified.
+	Describe("read filter resolution", func() {
+		var perms *watchedFilters
+
+		BeforeEach(func() {
+			ctx = context.Background()
+			open := &atomic.Int32{}
+			perms = &watchedFilters{open: open, lost: "widget"}
+			store := snapshotStore{Adapter: newTestStore(), open: open}
+			start(mustNewServer(store, testEntities(), server.WithPermissions(perms)))
+			push(putWidget(1, "w1", 5), putWidget(2, "w2", 50), putTodo(3, "t1", "plain"))
+		})
+
+		todos := &syncplanev1.Subscription{Entity: "todo"}
+
+		It("resolves no read filter inside a bootstrap snapshot", func() {
+			bootstrap(windowSub(1, nil), todos)
+			Expect(perms.resolvedInside()).To(BeEmpty())
+		})
+
+		It("resolves no read filter inside a pull snapshot", func() {
+			cursor, _ := bootstrap(windowSub(1, nil), todos)
+			perms.clearInside()
+			drain(cursor, windowSub(1, nil), todos)
+			Expect(perms.resolvedInside()).To(BeEmpty())
+		})
+
+		It("leaves a windowed entity without resolving its filter at the old epoch", func() {
+			cursor, _ := bootstrap(windowSub(1, nil), todos)
+			perms.clearInside()
+
+			perms.bump()
+			_, drops, _ := drain(cursor, todos)
+			Expect(drops).To(Equal([]string{"widget"}))
+			Expect(perms.resolvedInside()).To(BeEmpty())
 		})
 	})
 

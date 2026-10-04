@@ -92,6 +92,12 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err != nil {
 		return err
 	}
+	// The windows, the closure and every snapshot page classify rows inside a
+	// read transaction, so the filters they consult resolve here, after the
+	// epoch they are stamped with, and no hook pins a snapshot.
+	if err := emitter.warmFilters(); err != nil {
+		return err
+	}
 	// A resume the scope no longer matches is dropped here rather than served:
 	// what survives is a snapshot this request could actually continue (see
 	// bootstrapresume.go). Whether the cursor is still servable needs the

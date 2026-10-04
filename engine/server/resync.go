@@ -70,10 +70,18 @@ func (s *Server) oldVisibility(ctx context.Context, ws string, cur cursorState, 
 		}
 		oldEm.filterEpochShifted = true
 	}
+	// The diff visits only the new scope's entities, and one leaving the set
+	// drops whole, so an old window on a leaving entity has no row to decide.
+	// Resolving it would call that entity's filter inside the snapshot, and the
+	// loop below does not warm it.
+	visited := newEm.entities()
+	oldEm.windows = slices.DeleteFunc(oldEm.windows, func(w *compiledWindow) bool {
+		return !slices.Contains(visited, w.info.name)
+	})
 	// Resolve every filter the scan will consult up front, so an
 	// unreconstructable epoch surfaces here as a clean reset rather than
 	// mid-scan after deltas were already emitted.
-	for _, entity := range newEm.entities() {
+	for _, entity := range visited {
 		if !oldEm.subscribed(entity) {
 			continue
 		}
