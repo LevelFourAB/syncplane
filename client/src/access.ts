@@ -266,6 +266,35 @@ export function ruleRowOf(
 }
 
 /**
+ * The inputs a prediction for a row of `def` reads from the row itself, as a
+ * string: whether the client holds the row, what its access parent names,
+ * and with `subjects`, the value of each subject field the entity's access
+ * rules name. `row` is undefined when the client does not hold the row. Two
+ * rows with equal strings give the same {@link ruleRowOf} and
+ * {@link parentRefOf}, so a change of the row that keeps the string cannot
+ * change an answer for it.
+ */
+export function accessInputsOf(
+	def: EntityDef,
+	row: Message | undefined,
+	subjects: boolean,
+): string {
+	if (row === undefined) return '';
+	const parent = parentRefOf(def, row);
+	const inputs: (string | null)[] = [ parent?.entity ?? null, parent?.key ?? null ];
+	if (subjects) {
+		const rec = row as unknown as Record<string, unknown>;
+		for (const rule of def.accessRules ?? []) {
+			if (rule.subject === undefined) continue;
+			// Read as ruleRowOf reads it.
+			const value = fieldValueOf(rec, rule.subject);
+			inputs.push(typeof value === 'string' ? value : '');
+		}
+	}
+	return JSON.stringify(inputs);
+}
+
+/**
  * The units a write changes to move a row of `def` to another access parent:
  * the marked field, or the oneof whose members are the cases. Empty for an
  * entity without an access parent.

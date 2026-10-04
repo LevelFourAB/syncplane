@@ -1849,9 +1849,11 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   once the row has synced, so a document outside the declared subscriptions
   can be edited without a scope change.
 
-- **`useCan(schema, key, permission, opts?)`** — `client.can` as a hook: re-renders
-  when the row changes and when `onAccessChange` reports the workspace. `'unknown'`
-  until the first answer resolves. See
+- **`useCan(schema, key, permission, opts?)`** — `client.can` as a hook: asks again
+  when an access input in the row changes (whether the row is held, its access
+  parent, or a subject field the access rules name) and when `onAccessChange`
+  reports the workspace. A change of any other field of the row does not ask
+  again. `'unknown'` until the first answer resolves. See
   [Predicting permissions](#predicting-permissions).
 
 - **`useSyncStatus()`** — the live account-wide status object.

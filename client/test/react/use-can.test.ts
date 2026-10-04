@@ -54,6 +54,26 @@ function countAsks(client: SyncClient): { count: number } {
 	return asks;
 }
 
+/** The hub's live watchers of both kinds: one per underlying subscription. */
+function watcherCount(client: SyncClient): number {
+	const hub = (client as unknown as {
+		hubInstance?: { watchers: Set<unknown>; keyWatchers: Set<unknown> };
+	}).hubInstance;
+	return (hub?.watchers.size ?? 0) + (hub?.keyWatchers.size ?? 0);
+}
+
+/** The keys the hub's keyed watchers read. */
+function watchedKeys(client: SyncClient): string[] {
+	const hub = (client as unknown as {
+		hubInstance?: { keyWatchers: Set<{ refs: Map<string, { key: string }> }> };
+	}).hubInstance;
+	const out: string[] = [];
+	for (const w of hub?.keyWatchers ?? []) {
+		for (const ref of w.refs.values()) out.push(ref.key);
+	}
+	return out.sort();
+}
+
 /** Lets every answer a change set off land. */
 async function settle(): Promise<void> {
 	await act(async () => {
@@ -104,6 +124,7 @@ describe('useHasPermission', () => {
 });
 
 const roomEntities = [ RoomSchema, RoomMemberSchema, PostSchema ] as const;
+const { db: roomDb } = createReactSync(roomEntities);
 const posting = (...perms: string[]) => ({
 	subjects: [ 'ann' ],
 	permissions: perms.map((permission) => ({
@@ -217,6 +238,151 @@ describe('useCan', () => {
 		await settle();
 		expect(asks.count).toBe(before);
 		expect(result.current).toBe('yes');
+		await t.client.close();
+	});
+});
+
+describe('access hooks on a row', () => {
+	// Rooms r1 and r2, and post po in r1 by ann, who may post in r1 only. The
+	// summary stops after the first sync, so only the row can set off an ask.
+	async function room(posts: readonly string[] = [ 'po' ]) {
+		const t = await createTestClient({ entities: roomEntities });
+		t.server.put(RoomSchema, { id: 'r1' });
+		t.server.put(RoomSchema, { id: 'r2' });
+		for (const id of posts) t.server.put(PostSchema, { id, room: { id: 'r1' }, authorId: 'ann' });
+		t.server.setCallerAccess(posting('view_posts', 'post'));
+		await t.sync();
+		t.server.setCallerAccess(undefined);
+		const client = t.client as unknown as SyncClient;
+		return { t, client, asks: countAsks(client) };
+	}
+
+	const canEdit = (key: string) => useCan(PostSchema, key, 'update', { fields: [ 'body' ] });
+
+	it('share one keyed watch across the rows of an entity, and ask once each at mount', async () => {
+		const ids = [ 'p0', 'p1', 'p2', 'p3', 'p4' ];
+		const { t, client, asks } = await room(ids);
+
+		const { result, unmount } = renderHook(
+			() => [ ...ids.map(canEdit), ...ids.map((id) => useHasPermission(PostSchema, id, 'post')) ],
+			{ wrapper: wrapper(client) },
+		);
+		await waitFor(() => expect(result.current).toEqual([ ...ids, ...ids ].map(() => 'yes')));
+		await settle();
+		expect(asks.count).toBe(2 * ids.length);
+		expect(watcherCount(client)).toBe(1);
+		expect(watchedKeys(client)).toEqual(ids);
+
+		unmount();
+		await settle();
+		expect(watcherCount(client)).toBe(0);
+		await t.client.close();
+	});
+
+	it('asks again for a change of the access parent or a subject field, and not for other fields', async () => {
+		const { t, client, asks } = await room();
+		const { result } = renderHook(() => canEdit('po'), { wrapper: wrapper(client) });
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		expect(asks.count).toBe(1);
+
+		await act(() => t.client.mutate.patch(PostSchema, 'po', { title: 'renamed' }));
+		await settle();
+		await act(() => t.sync());
+		await settle();
+		expect(asks.count).toBe(1);
+
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r1' }, authorId: 'bob' });
+		await act(() => t.sync());
+		await waitFor(() => expect(result.current).toBe('no'));
+		await settle();
+		expect(asks.count).toBe(2);
+
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r2' }, authorId: 'ann' });
+		await act(() => t.sync());
+		await settle();
+		expect(asks.count).toBe(3);
+		expect(result.current).toBe('no');
+
+		await act(() => t.client.mutate.patch(PostSchema, 'po', { room: { id: 'r1' } }));
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		expect(asks.count).toBe(4);
+		// The ack keeps the inputs the local write already showed.
+		await act(() => t.sync());
+		await settle();
+		expect(asks.count).toBe(4);
+		await t.client.close();
+	});
+
+	it('asks again when the row is deleted and when it is created again', async () => {
+		const { t, client, asks } = await room();
+		const { result } = renderHook(() => canEdit('po'), { wrapper: wrapper(client) });
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+
+		t.server.del(PostSchema, 'po');
+		await act(() => t.sync());
+		await waitFor(() => expect(result.current).toBe('unknown'));
+		await settle();
+		expect(asks.count).toBe(2);
+
+		await act(() => t.client.mutate.put(PostSchema, { id: 'po', room: { id: 'r1' }, body: 'again' }));
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		expect(asks.count).toBe(3);
+		await t.client.close();
+	});
+
+	it('does not ask useHasPermission again for a subject field', async () => {
+		const { t, client, asks } = await room();
+		const { result } = renderHook(() => useHasPermission(PostSchema, 'po', 'post'), {
+			wrapper: wrapper(client),
+		});
+		await waitFor(() => expect(result.current).toBe('yes'));
+		await settle();
+		expect(asks.count).toBe(1);
+
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r1' }, authorId: 'bob' });
+		await act(() => t.sync());
+		await settle();
+		expect(asks.count).toBe(1);
+
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r2' }, authorId: 'bob' });
+		await act(() => t.sync());
+		await waitFor(() => expect(result.current).toBe('no'));
+		await settle();
+		expect(asks.count).toBe(2);
+		await t.client.close();
+	});
+
+	it('shares the watch with useRow on the row, and each keeps working without the other', async () => {
+		const { t, client } = await room();
+		const can = renderHook(() => canEdit('po'), { wrapper: wrapper(client) });
+		const row = renderHook(() => roomDb.post.useRow('po'), { wrapper: wrapper(client) });
+		await waitFor(() => expect(can.result.current).toBe('yes'));
+		await waitFor(() => expect(row.result.current.row?.value.authorId).toBe('ann'));
+		expect(watcherCount(client)).toBe(1);
+
+		row.unmount();
+		await settle();
+		expect(watcherCount(client)).toBe(1);
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r2' }, authorId: 'ann' });
+		await act(() => t.sync());
+		await waitFor(() => expect(can.result.current).toBe('no'));
+
+		const again = renderHook(() => roomDb.post.useRow('po'), { wrapper: wrapper(client) });
+		await waitFor(() => expect(again.result.current.row?.value.room?.id).toBe('r2'));
+		can.unmount();
+		await settle();
+		expect(watcherCount(client)).toBe(1);
+		t.server.put(PostSchema, { id: 'po', room: { id: 'r2' }, authorId: 'ann', title: 'kept' });
+		await act(() => t.sync());
+		await waitFor(() => expect(again.result.current.row?.value.title).toBe('kept'));
+
+		again.unmount();
+		await settle();
+		expect(watcherCount(client)).toBe(0);
 		await t.client.close();
 	});
 });

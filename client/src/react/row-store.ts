@@ -1,5 +1,6 @@
 // One keyed watch per (client, workspace, entity, include) — shared by every
-// useRow and useRows on it — over the union of the rows those call sites hold,
+// useRow and useRows on it, and by the access hooks that name a row (see
+// watchRowCell) — over the union of the rows those call sites hold,
 // plus one cross-workspace watch per (client, entity, include) behind
 // useRowsAll.
 //
@@ -250,6 +251,21 @@ function scheduleSweep<T>(entry: RowEntry<T>): void {
 	}, 0);
 }
 
+/**
+ * Holds `ref` in `entry` and adds `listener` to it; returns the release. The
+ * ref leaves the watch on the sweep after its last holder releases it.
+ */
+function holdRef<T>(entry: RowEntry<T>, ref: RowRef, listener: () => void): () => void {
+	const state = keyState(entry, ref);
+	state.holders++;
+	state.listeners.add(listener);
+	return () => {
+		state.listeners.delete(listener);
+		state.holders--;
+		if (state.holders === 0) scheduleSweep(entry);
+	};
+}
+
 function notify<T>(state: KeyState<T>): void {
 	for (const listener of [ ...state.listeners ]) listener();
 }
@@ -430,17 +446,8 @@ export function useRowStore<T>(params: RowStoreParams<T>): RowCell<T> {
 	}
 
 	const subscribe = useCallback(
-		(onStoreChange: () => void) => {
-			const entry = entryFor<T>(client, identity, factoryRef.current);
-			const state = keyState(entry, refRef.current);
-			state.holders++;
-			state.listeners.add(onStoreChange);
-			return () => {
-				state.listeners.delete(onStoreChange);
-				state.holders--;
-				if (state.holders === 0) scheduleSweep(entry);
-			};
-		},
+		(onStoreChange: () => void) =>
+			holdRef(entryFor<T>(client, identity, factoryRef.current), refRef.current, onStoreChange),
 		[ client, identity, id ],
 	);
 
@@ -451,6 +458,35 @@ export function useRowStore<T>(params: RowStoreParams<T>): RowCell<T> {
 
 	const getServerSnapshot = useCallback(() => loadingCell<T>(), []);
 	return useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
+}
+
+/**
+ * Holds the row `ref` names in the shared keyed watch behind `identity`, as a
+ * useRowStore call site on it does, and calls `listener` with the row's cell.
+ * Returns the release. For code outside render that reacts to a row without a
+ * re-render on each change.
+ *
+ * `listener` runs synchronously before the return when the watch has already
+ * answered for the row, and after that each time the cell changes. It never
+ * runs with a loading cell. It can run after the release when the release is
+ * called from inside a notification.
+ */
+export function watchRowCell<T>(
+	client: SyncClient,
+	identity: string,
+	subscribe: RowWatchFactory<T>,
+	ref: RowRef,
+	listener: (cell: RowCell<T>) => void,
+): () => void {
+	const entry = entryFor<T>(client, identity, subscribe);
+	const id = refId(ref);
+	const deliver = () => {
+		const cell = cellFor(entry, id);
+		if (!cell.loading) listener(cell);
+	};
+	const release = holdRef(entry, ref, deliver);
+	deliver();
+	return release;
 }
 
 export interface RowsStoreParams<T> {
