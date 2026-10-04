@@ -37,6 +37,7 @@ import {
 	ref,
 	refList,
 	text,
+	workspaceRef,
 } from '../../src/schema/builder.js';
 
 // One definition. The inferred type, the runtime descriptor, and the
@@ -506,6 +507,43 @@ describe('schema builder — access model', () => {
 		]);
 	});
 
+	it('lowers members, and a grant whose subject is a ref() to a team', () => {
+		const team = entity('team', { id: text().key() }, {
+			members: { entity: 'team_member' },
+			access: { allow: [ { read: true, write: true, permission: 'view_teams' } ] },
+		});
+		const teamMember = entity('team_member', {
+			id: text().key(),
+			team: ref(() => team).accessParent(),
+			userId: text(),
+			role: text(),
+		}, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [ { name: 'team_member', grants: [ 'view_teams' ] } ],
+			},
+			access: { allow: [ { read: true, write: true, permission: 'view_teams' } ] },
+		});
+		const projectTeam = entity('project_team', {
+			id: text().key(),
+			project: ref(() => project).accessParent(),
+			ownerTeam: ref(() => team),
+			role: text(),
+		}, {
+			grant: {
+				subject: 'ownerTeam',
+				role: 'role',
+				roles: [ { name: 'project_team_writer', grants: [ 'view_projects' ] } ],
+			},
+			access: { allow: [ { read: true, write: true, permission: 'view_projects' } ] },
+		});
+		const teams = defineSchema(project, team, teamMember, projectTeam);
+
+		expect(getOption(teams.descMessage('team'), entityExt).members?.entity).toBe('team_member');
+		expect(getOption(teams.descMessage('project_team'), entityExt).grant?.subject).toBe('owner_team');
+	});
+
 	it('lowers .accessParent() onto the reference field', () => {
 		const field = bundle.descMessage('project_member').fields.find((f) => f.name === 'project')!;
 		expect(getOption(field, fieldBehaviorExt).accessParent).toBeDefined();
@@ -622,6 +660,28 @@ describe('schema builder — access model', () => {
 					grant: { subject: 'userId', role: 'level', roles },
 				})
 			).toThrow(/grant role field "level" must be a singular text\(\) field/);
+		});
+		it('rejects a grant subject that is neither text() nor a singular ref()', () => {
+			expect(() =>
+				entity('e', { ...fields, team: refList(() => project) }, {
+					access,
+					grant: { subject: 'team', role: 'role', roles },
+				})
+			).toThrow(/grant subject field "team" must be a singular text\(\) field or a singular ref\(\)/);
+			expect(() =>
+				entity('e', { ...fields, team: workspaceRef(() => project) }, {
+					access,
+					grant: { subject: 'team', role: 'role', roles },
+				})
+			).toThrow(/grant subject field "team" must be a singular text\(\) field or a singular ref\(\)/);
+		});
+		it('rejects members without access or without an entity', () => {
+			expect(() => entity('e', fields, { members: { entity: 'm' } })).toThrow(
+				'entity "e": an entity with members must declare access',
+			);
+			expect(() => entity('e', fields, { access, members: { entity: '' } })).toThrow(
+				'entity "e": members names no entity',
+			);
 		});
 		it('rejects a role declared twice or granting a permission twice', () => {
 			expect(() =>

@@ -81,10 +81,12 @@ type entityInfo struct {
 	// order: an enforced create stores the caller's primary subject in each.
 	creatorFields []protoreflect.FieldDescriptor
 	// access is the entity's place in the access model, nil when it declares
-	// no access option. grant is set on an entity whose rows grant roles. See
-	// access.go.
-	access *entityAccess
-	grant  *grantSpec
+	// no access option. grant is set on an entity whose rows grant roles, and
+	// members on a team entity, naming the entity whose rows make its
+	// members. See access.go.
+	access  *entityAccess
+	grant   *grantSpec
+	members string
 }
 
 // compiledIndex is one secondary index of an entity: a name scoped to the
@@ -1442,7 +1444,10 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	info.access = access
-	if info.grant, err = grantOf(desc, eo, info.access); err != nil {
+	if info.grant, err = grantOf(desc, eo, info); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if info.members, err = membersOf(eo, info.access); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Derive one index per reference field, over the target key the row

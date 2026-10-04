@@ -23,6 +23,7 @@ message Todo {
 | `history`     | Configures append-only field history tracking. See [Field history](#field-history).                                   |
 | `access`      | The rules that decide who can read, create, update and delete rows of this entity. See [Access model](#access-model). |
 | `grant`       | Declares the rows of this entity as grant rows. See [Access model](#access-model).                                    |
+| `members`     | Declares the rows of this entity as teams, and names the entity whose rows make members. See [Teams](#teams).         |
 
 The `name` field must be a valid identifier. Each entry in `key_fields` must reference a singular string, integer, boolean, or enum field. For complete syntax and constraints, see [Naming rules](naming.md).
 
@@ -300,7 +301,7 @@ Mutator operations are authorized at the invocation level. A mutator can update 
 
 ## Access model
 
-Three options declare who can read and write rows: `access` and `grant` on an entity, and `access_parent` on a reference field.
+Four options declare who can read and write rows: `access`, `grant` and `members` on an entity, and `access_parent` on a reference field.
 
 ```proto
 // A role on the whole workspace.
@@ -401,24 +402,25 @@ message Label {
 
 A caller holds a permission at an **anchor**: the workspace root, or one row that a grant row's `access_parent` field points at. A permission held at an anchor applies to the anchor row and to every row below it: the rows whose `access_parent` field points at it, the rows whose `access_parent` field points at those, and so on. A comment whose parent is a task, whose parent is a project, is below the project. An entity can be its own access parent, such as a folder inside a folder.
 
-| Option                         | Field        | Description                                                                                                                                                                                                          |
-| ------------------------------ | ------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `access`                       | `allow`      | The rules (`syncplane.v1.AccessRule`). At least one. Two rules with the same operation flags and the same source are refused.                                                                                        |
-| `access.allow[]`               | `read`       | Admits reading rows.                                                                                                                                                                                                 |
-| `access.allow[]`               | `create`     | Admits creating rows.                                                                                                                                                                                                |
-| `access.allow[]`               | `update`     | Admits changing rows that exist, which includes moving a row to another access parent.                                                                                                                               |
-| `access.allow[]`               | `delete`     | Admits deleting rows.                                                                                                                                                                                                |
-| `access.allow[]`               | `write`      | Admits `create`, `update` and `delete`, and each write operation that a later version of `options.proto` adds.                                                                                                       |
-| `access.allow[]`               | `permission` | The source: a caller that holds this permission at the workspace root, at the row, or at a row up the row's chain of access parents. Set exactly one of `permission` and `admitted`.                                 |
-| `access.allow[]`               | `admitted`   | The source: every caller admitted to the workspace. Set it as `admitted: {}`. A caller is admitted when `CanAccessWorkspace` lets it in and it holds at least one permission in the workspace.                       |
-| `grant`                        | `subject`    | The name of the field that holds the subject the row grants to: a top-level, singular `string` field outside any oneof.                                                                                              |
-| `grant`                        | `role`       | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.                              |
-| `grant`                        | `roles`      | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                                                    |
-| `field_behavior.access_parent` | (none)       | Marks the reference that places each row below another row, which can have an access parent of its own. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root. |
+| Option                         | Field        | Description                                                                                                                                                                                                                   |
+| ------------------------------ | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `access`                       | `allow`      | The rules (`syncplane.v1.AccessRule`). At least one. Two rules with the same operation flags and the same source are refused.                                                                                                 |
+| `access.allow[]`               | `read`       | Admits reading rows.                                                                                                                                                                                                          |
+| `access.allow[]`               | `create`     | Admits creating rows.                                                                                                                                                                                                         |
+| `access.allow[]`               | `update`     | Admits changing rows that exist, which includes moving a row to another access parent.                                                                                                                                        |
+| `access.allow[]`               | `delete`     | Admits deleting rows.                                                                                                                                                                                                         |
+| `access.allow[]`               | `write`      | Admits `create`, `update` and `delete`, and each write operation that a later version of `options.proto` adds.                                                                                                                |
+| `access.allow[]`               | `permission` | The source: a caller that holds this permission at the workspace root, at the row, or at a row up the row's chain of access parents. Set exactly one of `permission` and `admitted`.                                          |
+| `access.allow[]`               | `admitted`   | The source: every caller admitted to the workspace. Set it as `admitted: {}`. A caller is admitted when `CanAccessWorkspace` lets it in and it holds at least one permission in the workspace.                                |
+| `grant`                        | `subject`    | The name of the field or oneof that holds the subject the row grants to. A field is top-level and singular: a `string` field names one caller, and a reference to an entity with `members` names a team. See [Teams](#teams). |
+| `grant`                        | `role`       | The name of the field that holds the role the row grants: a top-level, singular `string` or enum field outside any oneof. An enum value names the role with the same name as the value.                                       |
+| `grant`                        | `roles`      | The roles rows can grant. Each role has a `name` and the permissions it `grants`.                                                                                                                                             |
+| `members`                      | `entity`     | The name of the grant entity whose rows make the members of each row of this entity. See [Teams](#teams).                                                                                                                     |
+| `field_behavior.access_parent` | (none)       | Marks the reference that places each row below another row, which can have an access parent of its own. A grant row anchors at the row it points at. A grant entity without the field anchors at the workspace root.          |
 
 An entity whose rules use `admitted` is in the model like every other entity: it can have an access parent, be the access parent of other entities, and be a grant entity.
 
-A grant row grants nothing when its subject is empty, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist. Every write path refuses to store a grant row with an empty subject, an undeclared role, or no `access_parent` on an entity that has one.
+A grant row grants nothing when its subject is empty or names a team that does not exist, its role is not declared in `roles`, or its `access_parent` field is unset or names a row that does not exist. Every write path refuses to store a grant row with no subject, an undeclared role, or no `access_parent` on an entity that has one.
 
 ### How rules admit an operation
 
@@ -431,7 +433,7 @@ An operation on a row is allowed when at least one rule names the operation and 
 | Delete    | The stored row.                                                                                                                       |
 | Update    | The stored row and the row as it will be stored. One rule must hold at both. Two rules that each hold at one of them do not admit it. |
 
-A write that moves a row to another access parent also needs, where the stored row sits, the right to read every entity whose rows can sit below it. A delete of a row that a live row names as its access parent is refused. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
+A write that moves a row to another access parent also needs, where the stored row sits, the right to read every entity whose rows can sit below it. A delete of a row that a live row names as its access parent, or that a live grant row names as its subject, is refused. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
 
 ### Operations no rule admits
 
@@ -500,6 +502,92 @@ message Comment {
 | Masks       | A `PATCH` reaches the access parent when its mask names the oneof group (`subject`), or the field that holds the reference message.                                                                                            |
 | Depth       | `Limits.MaxAccessDepth` applies to the deepest chain of any case.                                                                                                                                                              |
 
+### Teams
+
+A grant row can name a team as its subject. The row then grants its role to every member of the team. Declare the team entity with `members`, which names the grant entity whose rows make members:
+
+```proto
+message Team {
+	option (syncplane.v1.entity) = {
+		name: "team"
+		key_fields: [ "id" ]
+		members: { entity: "team_member" }
+		access: {
+			allow: [
+				{ read: true permission: "view_teams" },
+				{ write: true permission: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+message TeamMember {
+	option (syncplane.v1.entity) = {
+		name: "team_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "team_member" grants: [ "view_teams" ] },
+				{ name: "team_lead" grants: [ "view_teams", "manage_teams" ] }
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_teams" },
+				{ write: true permission: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A role on one project for one user, or for every member of one team.
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{ name: "project_reader" grants: [ "view_projects", "view_tasks" ] },
+				{ name: "project_writer" grants: [ "view_projects", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_projects" },
+				{ write: true permission: "edit_projects" },
+				{ delete: true permission: "view_projects" subject: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	oneof member {
+		string user_id = 3;
+		Team team = 4;
+	}
+	string role = 5;
+}
+```
+
+| Rule           | Description                                                                                                                                                                                                                 |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Membership     | A row of the member entity that grants its role at a team row also makes its subject a member of that team, whatever the role. A permission held at the workspace root, or at a row above the team, does not make a member. |
+| Subject        | `grant.subject` names a `string` field, a reference to an entity with `members`, or a oneof whose members are each one of these. A row that holds no case grants nothing.                                                   |
+| Member entity  | A grant entity whose `access_parent` points at the team entity alone, and whose subject is one `string` field. A team therefore cannot be a member of a team.                                                               |
+| Subset rule    | Unchanged. A write to a grant row that names a team needs every permission of its role at its anchor. A write to a member row needs every permission of its role at the team.                                               |
+| Delegation     | A grant to a team gives its role to every caller added to the team later. A caller who can write rows of the member entity decides who receives it.                                                                         |
+| Delete         | A write that is not trusted cannot delete a team row while a live grant row names it as its subject. A trusted write can; the grant rows then grant nothing until a team row with that key exists again.                    |
+| Subject checks | An access rule's `subject` can name a `string` member of a oneof. A row that holds another case reads as empty there, so the check does not match it.                                                                       |
+
 ### Registration rules
 
 A schema **uses the access model** when any of its entities declares `access` or `grant`. Registration refuses such a schema when:
@@ -513,11 +601,13 @@ A schema **uses the access model** when any of its entities declares `access` or
 - An entity can sit more `access_parent` hops below an entity without an access parent than `Limits.MaxAccessDepth` allows, through any case. A chain that comes back to an entity it passed, such as a folder inside a folder, has no such bound; its rows are bounded at write time instead (see [Access model](server.md#access-model)).
 - A grant entity declares no `access`.
 - A `grant` names a `subject` or `role` field that does not exist or has the wrong type, declares no roles, declares one role twice, or declares an enum role that is not a value of the enum.
+- A `grant` subject is a repeated field, a workspace-qualified reference, or a reference to an entity that declares no `members`.
+- An entity declares `members` without `access`, names no entity, or names an entity that is not registered, is not a grant entity, has an `access_parent` that does not point at the team entity alone, or has a subject that is not one `string` field.
 - A role name is declared by two entities. Role names are unique across the schema.
 - A role grants no permissions, or one permission twice.
 - A permission that a rule or a `MutatorAccess` names is granted by no role, or a role grants a permission that no rule and no `MutatorAccess` names.
 - A permission or role name breaks the [naming rules](naming.md#permission-and-role-names).
-- The `access`, rule, `admitted`, `grant`, role or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
+- The `access`, rule, `admitted`, `grant`, role, `members` or `access_parent` options carry fields the server does not know, which a newer `options.proto` can write.
 
 `RegisterDescriptorSet` and `New` refuse a schema that breaks a rule. `RegisterEntity` adds one entity at a time, so a schema it builds can break a rule until its last entity is registered. While it does, every request to the server fails with `failed_precondition`.
 
@@ -525,7 +615,7 @@ Registration logs a warning when one permission governs entities at different de
 
 ### Changing the access model
 
-A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access`, `grant` or `access_parent` options, or to the numbers of the enum values its role field matches. A change to the order of the rules is not a change. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
+A registration that changes the access model of an entity that is already registered is refused unless the caller allows it. A change is any change to the entity's `access`, `grant`, `members` or `access_parent` options, or to the numbers of the enum values its role field matches. A change to the order of the rules is not a change. Allow it with `server.AllowAccessChange()` on `RegisterDescriptorSet` and `Manager.Register`, `allow_access_change` on `AdminService.Register`, or `allowAccessChange` on the TypeScript `registerSchema`.
 
 Registration does not read stored rows. A stored grant row whose role the schema does not declare grants nothing, but keeps its value. When a registration declares that role, or adds `grant` to an entity that already holds rows, every stored row with that role value grants it. `New` has no earlier schema to compare with, so a schema compiled into the server applies such a change without `AllowAccessChange`.
 

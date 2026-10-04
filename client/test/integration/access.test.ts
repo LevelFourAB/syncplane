@@ -6,15 +6,21 @@ import type { RejectionInfo } from '../../src/client.js';
 import {
 	CommentSchema,
 	DraftSchema,
+	IssueSchema,
 	LabelSchema,
 	NoteSchema,
 	OrgMemberSchema,
 	PostSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
+	RepoMemberSchema,
+	RepoSchema,
+	RepoSquadSchema,
 	RoomMemberSchema,
 	RoomSchema,
 	SettingSchema,
+	SquadMemberSchema,
+	SquadSchema,
 	TaskSchema,
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
@@ -47,6 +53,12 @@ const entities = [
 	DraftSchema,
 	TicketSchema,
 	SettingSchema,
+	SquadSchema,
+	SquadMemberSchema,
+	RepoSchema,
+	RepoMemberSchema,
+	RepoSquadSchema,
+	IssueSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -304,5 +316,61 @@ describe('owner rules on the client', () => {
 		expect(await ann.get(DraftSchema, 'd-bob')).toBeUndefined();
 		expect(await bob.get(DraftSchema, 'd-bob')).toBeDefined();
 		expect(await bob.can(DraftSchema, 'd-bob', 'read')).toBe('yes');
+	});
+});
+
+describe('teams on the client', () => {
+	// Dave is in two squads, so leaving design keeps him in the workspace.
+	async function seedSquads(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'squad', value: { id: 'design' } },
+			{ entity: 'squad', value: { id: 'ops' } },
+			{
+				entity: 'squad_member',
+				value: { id: 'sm-dave', squad: { id: 'design' }, userId: 'dave', role: 'squad_member' },
+			},
+			{
+				entity: 'squad_member',
+				value: { id: 'sm-dave-ops', squad: { id: 'ops' }, userId: 'dave', role: 'squad_member' },
+			},
+			{ entity: 'repo', value: { id: 'r1' } },
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-design', repo: { id: 'r1' }, squad: { id: 'design' }, role: 'repo_writer' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-rita', repo: { id: 'r1' }, userId: 'rita', role: 'repo_reader' },
+			},
+			{ entity: 'issue', value: { id: 'i1', repo: { id: 'r1' }, title: 'one' } },
+		]);
+	}
+
+	it("predicts what a squad's grant lets a member do, until the member leaves", async () => {
+		const ws = freshWorkspace();
+		await seedSquads(ws);
+		const dave = await synced(clientAs('dave', ws));
+		expect(await dave.get(IssueSchema, 'i1')).toBeDefined();
+		expect(await dave.can(IssueSchema, 'i1', 'update')).toBe('yes');
+		expect(await dave.can(RepoMemberSchema, 'rm-design', 'delete')).toBe('no');
+
+		await trusted(ws, [ { entity: 'squad_member', key: 'sm-dave', delete: true } ]);
+		await dave.syncNow();
+		expect(await dave.get(IssueSchema, 'i1')).toBeUndefined();
+		expect(await dave.hasPermission(RepoSchema, 'r1', 'edit_issues')).toBe('no');
+	});
+
+	it('lets a user leave through a subject check on a member of a oneof', async () => {
+		const ws = freshWorkspace();
+		await seedSquads(ws);
+		const rita = await synced(clientAs('rita', ws));
+		expect(await rita.can(RepoMemberSchema, 'rm-rita', 'delete')).toBe('yes');
+		expect(await rita.can(RepoMemberSchema, 'rm-design', 'delete')).toBe('no');
+
+		await rita.mutate.del(RepoMemberSchema, 'rm-rita');
+		await rita.syncNow();
+		const dave = await synced(clientAs('dave', ws));
+		expect(await dave.get(RepoMemberSchema, 'rm-rita')).toBeUndefined();
+		expect(await dave.get(RepoMemberSchema, 'rm-design')).toBeDefined();
 	});
 });

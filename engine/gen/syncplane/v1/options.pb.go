@@ -144,7 +144,12 @@ type EntityOptions struct {
 	// subject one role at the row's anchor.
 	//
 	// A grant entity must also declare `access`. See `GrantOptions`.
-	Grant         *GrantOptions `protobuf:"bytes,11,opt,name=grant,proto3" json:"grant,omitempty"`
+	Grant *GrantOptions `protobuf:"bytes,11,opt,name=grant,proto3" json:"grant,omitempty"`
+	// Declares the rows of this entity as teams: a grant row can name a row of
+	// this entity as its subject, and then grants to every member of that row.
+	//
+	// See `MembersOptions`.
+	Members       *MembersOptions `protobuf:"bytes,12,opt,name=members,proto3" json:"members,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -231,6 +236,13 @@ func (x *EntityOptions) GetAccess() *AccessOptions {
 func (x *EntityOptions) GetGrant() *GrantOptions {
 	if x != nil {
 		return x.Grant
+	}
+	return nil
+}
+
+func (x *EntityOptions) GetMembers() *MembersOptions {
+	if x != nil {
+		return x.Members
 	}
 	return nil
 }
@@ -377,9 +389,10 @@ type AccessRule struct {
 	//	*AccessRule_Admitted
 	Source isAccessRule_Source `protobuf_oneof:"source"`
 	// Admits only rows whose field with this name holds one of the caller's
-	// subjects. Names a top-level, singular `string` field outside any
-	// `oneof`. An empty field value never matches, and a permission held at
-	// the workspace root does not skip the check.
+	// subjects. Names a top-level, singular `string` field. An empty field
+	// value never matches, and a permission held at the workspace root does not
+	// skip the check. A member of a `oneof` is empty on a row that holds
+	// another case, so it never matches there.
 	Subject string `protobuf:"bytes,8,opt,name=subject,proto3" json:"subject,omitempty"`
 	// Admits only updates that change no field outside this list. Valid only
 	// on a rule whose one operation is `update`. Each entry names a top-level
@@ -564,11 +577,12 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 // Declares an entity whose rows grant roles.
 //
 // Each row gives the subject in its `subject` field the role in its `role`
-// field. The role applies at the row's anchor: the row that its
-// `access_parent` field points at, or the workspace root when the entity has
-// no `access_parent` field. A row grants nothing when its subject is empty,
-// its role is not declared in `roles`, or its `access_parent` field is unset
-// or names a row that does not exist.
+// field. The subject is one caller, or every member of a team. The role
+// applies at the row's anchor: the row that its `access_parent` field points
+// at, or the workspace root when the entity has no `access_parent` field. A
+// row grants nothing when its subject is empty or names a team that does not
+// exist, its role is not declared in `roles`, or its `access_parent` field is
+// unset or names a row that does not exist.
 //
 // ```protobuf
 //
@@ -596,6 +610,19 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 //
 // ```
 //
+// To grant to users and to teams from one entity, make the subject a `oneof`:
+//
+// ```protobuf
+//
+//	oneof member {
+//	  string user_id = 3;
+//	  Team team = 4;
+//	}
+//
+// ```
+//
+// with `subject: "member"`. See `MembersOptions`.
+//
 // A write that can change what a grant row grants needs every permission of
 // the row's role where the row applies: of the stored role at the stored
 // anchor, and of the new role at the new anchor. A caller can therefore grant
@@ -606,9 +633,18 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 // Registration refuses unknown fields inside this message and inside `Role`.
 type GrantOptions struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The name of a top-level, singular `string` field outside any `oneof`
-	// that holds the subject the row grants to. The server compares it with
-	// the subjects of the caller.
+	// The name of the field or the `oneof` that holds the subject the row
+	// grants to. A field is top-level and singular, and is one of:
+	//
+	//   - a `string` field, which names one subject. The server compares it
+	//     with the subjects of the caller.
+	//   - a reference to an entity that declares `members`, which names a team.
+	//     The row grants to every member of that team. The type of the field is
+	//     the entity's message, or a reference message without a `workspace`
+	//     field.
+	//
+	// Each member of a `oneof` is one of these, so that one entity can grant
+	// to callers and to teams. A row that holds no case grants nothing.
 	Subject string `protobuf:"bytes,1,opt,name=subject,proto3" json:"subject,omitempty"`
 	// The name of a top-level, singular `string` or enum field outside any
 	// `oneof` that holds the role the row grants. An enum value names the
@@ -729,6 +765,105 @@ func (x *Role) GetGrants() []string {
 	return nil
 }
 
+// Declares the entity whose rows say who the members of each team are.
+//
+// A row of the member entity that grants its role at a team row also makes
+// its subject a member of that team, whatever the role. A grant row whose
+// subject is a reference to a team row grants its role to every member of
+// that team. A permission held at the workspace root, or at a row above the
+// team, does not make a caller a member.
+//
+// ```protobuf
+//
+//	message Team {
+//	  option (syncplane.v1.entity) = {
+//	    name: "team" key_fields: ["id"]
+//	    members: { entity: "team_member" }
+//	    access: { allow: [
+//	      { read: true permission: "view_teams" },
+//	      { write: true permission: "manage_teams" }
+//	    ] }
+//	  };
+//	  string id = 1;
+//	}
+//
+//	message TeamMember {
+//	  option (syncplane.v1.entity) = {
+//	    name: "team_member" key_fields: ["id"]
+//	    grant: {
+//	      subject: "user_id" role: "role"
+//	      roles: [
+//	        { name: "team_member" grants: ["view_teams"] },
+//	        { name: "team_lead" grants: ["view_teams", "manage_teams"] }
+//	      ]
+//	    }
+//	    access: { allow: [
+//	      { read: true permission: "view_teams" },
+//	      { write: true permission: "manage_teams" }
+//	    ] }
+//	  };
+//	  string id = 1;
+//	  Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//	  string user_id = 3;
+//	  string role = 4;
+//	}
+//
+// ```
+//
+// A grant to a team gives its role to whoever a caller adds to the team
+// later, so a caller who can write rows of the member entity decides who
+// receives it. A write that is not trusted cannot delete a team row while a
+// live grant row names it as its subject.
+//
+// Registration refuses unknown fields inside this message.
+type MembersOptions struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The name of the entity whose rows make members. It is a grant entity
+	// whose `access_parent` field is a reference to this entity and to no
+	// other, and whose subject is one `string` field, so a team cannot be a
+	// member of a team.
+	Entity        string `protobuf:"bytes,1,opt,name=entity,proto3" json:"entity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MembersOptions) Reset() {
+	*x = MembersOptions{}
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MembersOptions) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MembersOptions) ProtoMessage() {}
+
+func (x *MembersOptions) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MembersOptions.ProtoReflect.Descriptor instead.
+func (*MembersOptions) Descriptor() ([]byte, []int) {
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *MembersOptions) GetEntity() string {
+	if x != nil {
+		return x.Entity
+	}
+	return ""
+}
+
 // Marks the reference that places each row of an entity below another row in
 // the access model.
 //
@@ -755,7 +890,7 @@ type AccessParentOptions struct {
 
 func (x *AccessParentOptions) Reset() {
 	*x = AccessParentOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -767,7 +902,7 @@ func (x *AccessParentOptions) String() string {
 func (*AccessParentOptions) ProtoMessage() {}
 
 func (x *AccessParentOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[6]
+	mi := &file_syncplane_v1_options_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -780,7 +915,7 @@ func (x *AccessParentOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AccessParentOptions.ProtoReflect.Descriptor instead.
 func (*AccessParentOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{7}
 }
 
 // Marks a field that records who created the row.
@@ -804,7 +939,7 @@ type CreatorOptions struct {
 
 func (x *CreatorOptions) Reset() {
 	*x = CreatorOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[7]
+	mi := &file_syncplane_v1_options_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -816,7 +951,7 @@ func (x *CreatorOptions) String() string {
 func (*CreatorOptions) ProtoMessage() {}
 
 func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[7]
+	mi := &file_syncplane_v1_options_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -829,7 +964,7 @@ func (x *CreatorOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CreatorOptions.ProtoReflect.Descriptor instead.
 func (*CreatorOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{8}
 }
 
 // Enables server-side field history tracking for an entity.
@@ -854,7 +989,7 @@ type HistoryOptions struct {
 
 func (x *HistoryOptions) Reset() {
 	*x = HistoryOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[8]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -866,7 +1001,7 @@ func (x *HistoryOptions) String() string {
 func (*HistoryOptions) ProtoMessage() {}
 
 func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[8]
+	mi := &file_syncplane_v1_options_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -879,7 +1014,7 @@ func (x *HistoryOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use HistoryOptions.ProtoReflect.Descriptor instead.
 func (*HistoryOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
 }
 
 // Declares a message as a reference message: the stored shape of a typed
@@ -959,7 +1094,7 @@ type ReferenceOptions struct {
 
 func (x *ReferenceOptions) Reset() {
 	*x = ReferenceOptions{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -971,7 +1106,7 @@ func (x *ReferenceOptions) String() string {
 func (*ReferenceOptions) ProtoMessage() {}
 
 func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[9]
+	mi := &file_syncplane_v1_options_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -984,7 +1119,7 @@ func (x *ReferenceOptions) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ReferenceOptions.ProtoReflect.Descriptor instead.
 func (*ReferenceOptions) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
 }
 
 // Specifies a single field read during full-text search.
@@ -1001,7 +1136,7 @@ type SearchField struct {
 
 func (x *SearchField) Reset() {
 	*x = SearchField{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1013,7 +1148,7 @@ func (x *SearchField) String() string {
 func (*SearchField) ProtoMessage() {}
 
 func (x *SearchField) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[10]
+	mi := &file_syncplane_v1_options_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1026,7 +1161,7 @@ func (x *SearchField) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchField.ProtoReflect.Descriptor instead.
 func (*SearchField) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SearchField) GetPath() string {
@@ -1067,7 +1202,7 @@ type SearchSpec struct {
 
 func (x *SearchSpec) Reset() {
 	*x = SearchSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1079,7 +1214,7 @@ func (x *SearchSpec) String() string {
 func (*SearchSpec) ProtoMessage() {}
 
 func (x *SearchSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[11]
+	mi := &file_syncplane_v1_options_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1092,7 +1227,7 @@ func (x *SearchSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SearchSpec.ProtoReflect.Descriptor instead.
 func (*SearchSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SearchSpec) GetField() []*SearchField {
@@ -1129,7 +1264,7 @@ type IndexKey struct {
 
 func (x *IndexKey) Reset() {
 	*x = IndexKey{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1141,7 +1276,7 @@ func (x *IndexKey) String() string {
 func (*IndexKey) ProtoMessage() {}
 
 func (x *IndexKey) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[12]
+	mi := &file_syncplane_v1_options_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1154,7 +1289,7 @@ func (x *IndexKey) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexKey.ProtoReflect.Descriptor instead.
 func (*IndexKey) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *IndexKey) GetPath() string {
@@ -1189,7 +1324,7 @@ type IndexSpec struct {
 
 func (x *IndexSpec) Reset() {
 	*x = IndexSpec{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1201,7 +1336,7 @@ func (x *IndexSpec) String() string {
 func (*IndexSpec) ProtoMessage() {}
 
 func (x *IndexSpec) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[13]
+	mi := &file_syncplane_v1_options_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1214,7 +1349,7 @@ func (x *IndexSpec) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use IndexSpec.ProtoReflect.Descriptor instead.
 func (*IndexSpec) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *IndexSpec) GetName() string {
@@ -1338,7 +1473,7 @@ type FieldBehavior struct {
 
 func (x *FieldBehavior) Reset() {
 	*x = FieldBehavior{}
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1350,7 +1485,7 @@ func (x *FieldBehavior) String() string {
 func (*FieldBehavior) ProtoMessage() {}
 
 func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_v1_options_proto_msgTypes[14]
+	mi := &file_syncplane_v1_options_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1363,7 +1498,7 @@ func (x *FieldBehavior) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FieldBehavior.ProtoReflect.Descriptor instead.
 func (*FieldBehavior) Descriptor() ([]byte, []int) {
-	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_v1_options_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *FieldBehavior) GetOpaque() bool {
@@ -1504,7 +1639,7 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xa2\x03\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xda\x03\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
@@ -1516,7 +1651,8 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x06search\x18\t \x01(\v2\x18.syncplane.v1.SearchSpecR\x06search\x123\n" +
 	"\x06access\x18\n" +
 	" \x01(\v2\x1b.syncplane.v1.AccessOptionsR\x06access\x120\n" +
-	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grantJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
+	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
+	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
 	"\rAccessOptions\x12.\n" +
 	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\x98\x02\n" +
 	"\n" +
@@ -1540,7 +1676,9 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x05roles\x18\x03 \x03(\v2\x12.syncplane.v1.RoleR\x05roles\"2\n" +
 	"\x04Role\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
-	"\x06grants\x18\x02 \x03(\tR\x06grants\"\x15\n" +
+	"\x06grants\x18\x02 \x03(\tR\x06grants\"(\n" +
+	"\x0eMembersOptions\x12\x16\n" +
+	"\x06entity\x18\x01 \x01(\tR\x06entity\"\x15\n" +
 	"\x13AccessParentOptions\"\x10\n" +
 	"\x0eCreatorOptions\"\x10\n" +
 	"\x0eHistoryOptions\"\x12\n" +
@@ -1595,7 +1733,7 @@ func file_syncplane_v1_options_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_v1_options_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 15)
+var file_syncplane_v1_options_proto_msgTypes = make([]protoimpl.MessageInfo, 16)
 var file_syncplane_v1_options_proto_goTypes = []any{
 	(FieldWritePolicy)(0),               // 0: syncplane.v1.FieldWritePolicy
 	(*EntityOptions)(nil),               // 1: syncplane.v1.EntityOptions
@@ -1604,43 +1742,45 @@ var file_syncplane_v1_options_proto_goTypes = []any{
 	(*AdmittedCaller)(nil),              // 4: syncplane.v1.AdmittedCaller
 	(*GrantOptions)(nil),                // 5: syncplane.v1.GrantOptions
 	(*Role)(nil),                        // 6: syncplane.v1.Role
-	(*AccessParentOptions)(nil),         // 7: syncplane.v1.AccessParentOptions
-	(*CreatorOptions)(nil),              // 8: syncplane.v1.CreatorOptions
-	(*HistoryOptions)(nil),              // 9: syncplane.v1.HistoryOptions
-	(*ReferenceOptions)(nil),            // 10: syncplane.v1.ReferenceOptions
-	(*SearchField)(nil),                 // 11: syncplane.v1.SearchField
-	(*SearchSpec)(nil),                  // 12: syncplane.v1.SearchSpec
-	(*IndexKey)(nil),                    // 13: syncplane.v1.IndexKey
-	(*IndexSpec)(nil),                   // 14: syncplane.v1.IndexSpec
-	(*FieldBehavior)(nil),               // 15: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 16: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 17: google.protobuf.FieldOptions
+	(*MembersOptions)(nil),              // 7: syncplane.v1.MembersOptions
+	(*AccessParentOptions)(nil),         // 8: syncplane.v1.AccessParentOptions
+	(*CreatorOptions)(nil),              // 9: syncplane.v1.CreatorOptions
+	(*HistoryOptions)(nil),              // 10: syncplane.v1.HistoryOptions
+	(*ReferenceOptions)(nil),            // 11: syncplane.v1.ReferenceOptions
+	(*SearchField)(nil),                 // 12: syncplane.v1.SearchField
+	(*SearchSpec)(nil),                  // 13: syncplane.v1.SearchSpec
+	(*IndexKey)(nil),                    // 14: syncplane.v1.IndexKey
+	(*IndexSpec)(nil),                   // 15: syncplane.v1.IndexSpec
+	(*FieldBehavior)(nil),               // 16: syncplane.v1.FieldBehavior
+	(*descriptorpb.MessageOptions)(nil), // 17: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 18: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
-	14, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
-	9,  // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
-	12, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
+	15, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
+	10, // 1: syncplane.v1.EntityOptions.history:type_name -> syncplane.v1.HistoryOptions
+	13, // 2: syncplane.v1.EntityOptions.search:type_name -> syncplane.v1.SearchSpec
 	2,  // 3: syncplane.v1.EntityOptions.access:type_name -> syncplane.v1.AccessOptions
 	5,  // 4: syncplane.v1.EntityOptions.grant:type_name -> syncplane.v1.GrantOptions
-	3,  // 5: syncplane.v1.AccessOptions.allow:type_name -> syncplane.v1.AccessRule
-	4,  // 6: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
-	6,  // 7: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
-	11, // 8: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	13, // 9: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	0,  // 10: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
-	7,  // 11: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
-	8,  // 12: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
-	16, // 13: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	16, // 14: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
-	17, // 15: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	1,  // 16: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	10, // 17: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
-	15, // 18: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	19, // [19:19] is the sub-list for method output_type
-	19, // [19:19] is the sub-list for method input_type
-	16, // [16:19] is the sub-list for extension type_name
-	13, // [13:16] is the sub-list for extension extendee
-	0,  // [0:13] is the sub-list for field type_name
+	7,  // 5: syncplane.v1.EntityOptions.members:type_name -> syncplane.v1.MembersOptions
+	3,  // 6: syncplane.v1.AccessOptions.allow:type_name -> syncplane.v1.AccessRule
+	4,  // 7: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
+	6,  // 8: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
+	12, // 9: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	14, // 10: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	0,  // 11: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
+	8,  // 12: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
+	9,  // 13: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
+	17, // 14: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	17, // 15: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
+	18, // 16: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	1,  // 17: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	11, // 18: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
+	16, // 19: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	20, // [20:20] is the sub-list for method output_type
+	20, // [20:20] is the sub-list for method input_type
+	17, // [17:20] is the sub-list for extension type_name
+	14, // [14:17] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -1658,7 +1798,7 @@ func file_syncplane_v1_options_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_v1_options_proto_rawDesc), len(file_syncplane_v1_options_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   15,
+			NumMessages:   16,
 			NumExtensions: 3,
 			NumServices:   0,
 		},

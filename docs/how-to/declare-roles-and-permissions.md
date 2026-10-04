@@ -72,6 +72,105 @@ Role names are unique across the schema. A role granted to a caller can only be 
 
 Every write refuses a role that the schema does not declare, but registration does not check rows that are already stored. When you add `grant` to an entity that already holds rows, or add a role, each stored row whose role value matches a declared role starts to grant it. Check the stored values before you deploy such a change.
 
+### Give a role to a team
+
+First choose how your app uses teams:
+
+| Your app needs                                                     | Use                                                                                     |
+| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
+| Each project belongs to one team                                   | Make `Team` the `access_parent` of `Project`, and grant roles on the team.              |
+| Teams come from your identity provider                             | Return the caller's groups from `WithSubjects`, such as `group:eng`, and grant to them. |
+| A team gets a role on projects that other teams or users also have | Team grants, below.                                                                     |
+
+For team grants, declare who the members of a team are with `members` on the team entity. Each `team_member` row makes its user a member of its team, whatever the role:
+
+```proto
+message Team {
+	option (syncplane.v1.entity) = {
+		name: "team"
+		key_fields: [ "id" ]
+		members: { entity: "team_member" }
+		access: {
+			allow: [
+				{ read: true permission: "view_teams" },
+				{ write: true permission: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+}
+
+message TeamMember {
+	option (syncplane.v1.entity) = {
+		name: "team_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{ name: "team_member" grants: [ "view_teams" ] },
+				{ name: "team_lead" grants: [ "view_teams", "manage_teams" ] }
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_teams" },
+				{ write: true permission: "manage_teams" }
+			]
+		}
+	};
+	string id = 1;
+	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+```
+
+Then let `ProjectMember` name a user or a team. Make its subject a oneof, and keep the roles you have:
+
+```proto
+message ProjectMember {
+	option (syncplane.v1.entity) = {
+		name: "project_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{ name: "project_reader" grants: [ "view_projects", "view_roster", "view_tasks" ] },
+				{ name: "project_admin" grants: [ "view_projects", "view_roster", "manage_roster", "view_tasks", "edit_tasks" ] }
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_roster" },
+				{ write: true permission: "manage_roster" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	oneof member {
+		string user_id = 3;
+		Team team = 4;
+	}
+	string role = 5;
+}
+```
+
+A `ProjectMember` row with `team` set gives its role to every member of that team. When someone joins or leaves the team, their clients receive or lose the project's rows on the next pull. One roster holds users and teams, so the UI lists both from one entity.
+
+Before you ship, check these points:
+
+- **Who manages a team decides who gets its grants.** A grant to a team gives its role to every user added to the team later. Give `manage_teams` only to callers you trust with every grant the team holds.
+- **Every role of the member entity makes a member.** For guests who see a team but do not get its grants, use a separate grant entity anchored at the team.
+- **A team cannot be a member of a team.** Registration refuses a member entity whose subject is a team.
+- **To give teams other roles than users**, declare a separate grant entity with a plain `Team team` subject and its own roles. Role names are unique across the schema, so name them differently, such as `project_team_reader`.
+- **To let a user leave a project**, add `{ delete: true permission: "view_roster" subject: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
+- **Delete the grants before the team.** A client cannot delete a team that a live grant row names.
+- **Admins are members only with a row.** A role at the workspace root does not make a caller a member of a team. To let an admin see what a team sees, grant the admin the same permissions at the root.
+
 ## 3. Declare access on every other entity
 
 Once one entity declares `access` or `grant`, every entity must declare `access`. Mark the reference that places a row below another row with `access_parent`:

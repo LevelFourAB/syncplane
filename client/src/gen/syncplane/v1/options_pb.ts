@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIt4CCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnNKBAgEEAVKBAgHEAhKBAgIEAlSDWRlbGV0ZV9wb2xpY3lSDWNyZWF0ZV9wb2xpY3lSDXVwZGF0ZV9wb2xpY3kiOAoNQWNjZXNzT3B0aW9ucxInCgVhbGxvdxgBIAMoCzIYLnN5bmNwbGFuZS52MS5BY2Nlc3NSdWxlIswBCgpBY2Nlc3NSdWxlEgwKBHJlYWQYASABKAgSDgoGY3JlYXRlGAIgASgIEg4KBnVwZGF0ZRgDIAEoCBIOCgZkZWxldGUYBCABKAgSDQoFd3JpdGUYBSABKAgSFAoKcGVybWlzc2lvbhgGIAEoCUgAEjAKCGFkbWl0dGVkGAcgASgLMhwuc3luY3BsYW5lLnYxLkFkbWl0dGVkQ2FsbGVySAASDwoHc3ViamVjdBgIIAEoCRIOCgZmaWVsZHMYCSADKAlCCAoGc291cmNlIhAKDkFkbWl0dGVkQ2FsbGVyIlAKDEdyYW50T3B0aW9ucxIPCgdzdWJqZWN0GAEgASgJEgwKBHJvbGUYAiABKAkSIQoFcm9sZXMYAyADKAsyEi5zeW5jcGxhbmUudjEuUm9sZSIkCgRSb2xlEgwKBG5hbWUYASABKAkSDgoGZ3JhbnRzGAIgAygJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUizAEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIUCgpwZXJtaXNzaW9uGAYgASgJSAASMAoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXJIABIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCUIICgZzb3VyY2UiEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIiQKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
 
 /**
  * Declares a message as a syncable entity.
@@ -109,6 +109,16 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * @generated from field: syncplane.v1.GrantOptions grant = 11;
    */
   grant?: GrantOptions | undefined;
+
+  /**
+   * Declares the rows of this entity as teams: a grant row can name a row of
+   * this entity as its subject, and then grants to every member of that row.
+   *
+   * See `MembersOptions`.
+   *
+   * @generated from field: syncplane.v1.MembersOptions members = 12;
+   */
+  members?: MembersOptions | undefined;
 };
 
 /**
@@ -278,9 +288,10 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
 
   /**
    * Admits only rows whose field with this name holds one of the caller's
-   * subjects. Names a top-level, singular `string` field outside any
-   * `oneof`. An empty field value never matches, and a permission held at
-   * the workspace root does not skip the check.
+   * subjects. Names a top-level, singular `string` field. An empty field
+   * value never matches, and a permission held at the workspace root does not
+   * skip the check. A member of a `oneof` is empty on a row that holds
+   * another case, so it never matches there.
    *
    * @generated from field: string subject = 8;
    */
@@ -333,11 +344,12 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  * Declares an entity whose rows grant roles.
  *
  * Each row gives the subject in its `subject` field the role in its `role`
- * field. The role applies at the row's anchor: the row that its
- * `access_parent` field points at, or the workspace root when the entity has
- * no `access_parent` field. A row grants nothing when its subject is empty,
- * its role is not declared in `roles`, or its `access_parent` field is unset
- * or names a row that does not exist.
+ * field. The subject is one caller, or every member of a team. The role
+ * applies at the row's anchor: the row that its `access_parent` field points
+ * at, or the workspace root when the entity has no `access_parent` field. A
+ * row grants nothing when its subject is empty or names a team that does not
+ * exist, its role is not declared in `roles`, or its `access_parent` field is
+ * unset or names a row that does not exist.
  *
  * ```protobuf
  * message ProjectMember {
@@ -363,6 +375,17 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  * }
  * ```
  *
+ * To grant to users and to teams from one entity, make the subject a `oneof`:
+ *
+ * ```protobuf
+ *   oneof member {
+ *     string user_id = 3;
+ *     Team team = 4;
+ *   }
+ * ```
+ *
+ * with `subject: "member"`. See `MembersOptions`.
+ *
  * A write that can change what a grant row grants needs every permission of
  * the row's role where the row applies: of the stored role at the stored
  * anchor, and of the new role at the new anchor. A caller can therefore grant
@@ -376,9 +399,18 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  */
 export type GrantOptions = Message<"syncplane.v1.GrantOptions"> & {
   /**
-   * The name of a top-level, singular `string` field outside any `oneof`
-   * that holds the subject the row grants to. The server compares it with
-   * the subjects of the caller.
+   * The name of the field or the `oneof` that holds the subject the row
+   * grants to. A field is top-level and singular, and is one of:
+   *
+   * - a `string` field, which names one subject. The server compares it
+   *   with the subjects of the caller.
+   * - a reference to an entity that declares `members`, which names a team.
+   *   The row grants to every member of that team. The type of the field is
+   *   the entity's message, or a reference message without a `workspace`
+   *   field.
+   *
+   * Each member of a `oneof` is one of these, so that one entity can grant
+   * to callers and to teams. A row that holds no case grants nothing.
    *
    * @generated from field: string subject = 1;
    */
@@ -440,6 +472,78 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 5);
 
 /**
+ * Declares the entity whose rows say who the members of each team are.
+ *
+ * A row of the member entity that grants its role at a team row also makes
+ * its subject a member of that team, whatever the role. A grant row whose
+ * subject is a reference to a team row grants its role to every member of
+ * that team. A permission held at the workspace root, or at a row above the
+ * team, does not make a caller a member.
+ *
+ * ```protobuf
+ * message Team {
+ *   option (syncplane.v1.entity) = {
+ *     name: "team" key_fields: ["id"]
+ *     members: { entity: "team_member" }
+ *     access: { allow: [
+ *       { read: true permission: "view_teams" },
+ *       { write: true permission: "manage_teams" }
+ *     ] }
+ *   };
+ *   string id = 1;
+ * }
+ *
+ * message TeamMember {
+ *   option (syncplane.v1.entity) = {
+ *     name: "team_member" key_fields: ["id"]
+ *     grant: {
+ *       subject: "user_id" role: "role"
+ *       roles: [
+ *         { name: "team_member" grants: ["view_teams"] },
+ *         { name: "team_lead" grants: ["view_teams", "manage_teams"] }
+ *       ]
+ *     }
+ *     access: { allow: [
+ *       { read: true permission: "view_teams" },
+ *       { write: true permission: "manage_teams" }
+ *     ] }
+ *   };
+ *   string id = 1;
+ *   Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ *   string user_id = 3;
+ *   string role = 4;
+ * }
+ * ```
+ *
+ * A grant to a team gives its role to whoever a caller adds to the team
+ * later, so a caller who can write rows of the member entity decides who
+ * receives it. A write that is not trusted cannot delete a team row while a
+ * live grant row names it as its subject.
+ *
+ * Registration refuses unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.MembersOptions
+ */
+export type MembersOptions = Message<"syncplane.v1.MembersOptions"> & {
+  /**
+   * The name of the entity whose rows make members. It is a grant entity
+   * whose `access_parent` field is a reference to this entity and to no
+   * other, and whose subject is one `string` field, so a team cannot be a
+   * member of a team.
+   *
+   * @generated from field: string entity = 1;
+   */
+  entity: string;
+};
+
+/**
+ * Describes the message syncplane.v1.MembersOptions.
+ * Use `create(MembersOptionsSchema)` to create a new message.
+ */
+export const MembersOptionsSchema: GenMessage<MembersOptions> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 6);
+
+/**
  * Marks the reference that places each row of an entity below another row in
  * the access model.
  *
@@ -469,7 +573,7 @@ export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & 
  * Use `create(AccessParentOptionsSchema)` to create a new message.
  */
 export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * Marks a field that records who created the row.
@@ -496,7 +600,7 @@ export type CreatorOptions = Message<"syncplane.v1.CreatorOptions"> & {
  * Use `create(CreatorOptionsSchema)` to create a new message.
  */
 export const CreatorOptionsSchema: GenMessage<CreatorOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 7);
+  messageDesc(file_syncplane_v1_options, 8);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -524,7 +628,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 8);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -602,7 +706,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 9);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Specifies a single field read during full-text search.
@@ -626,7 +730,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 10);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -672,7 +776,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 11);
+  messageDesc(file_syncplane_v1_options, 12);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -707,7 +811,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 12);
+  messageDesc(file_syncplane_v1_options, 13);
 
 /**
  * Defines a secondary index for an entity.
@@ -740,7 +844,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 13);
+  messageDesc(file_syncplane_v1_options, 14);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -912,7 +1016,7 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 14);
+  messageDesc(file_syncplane_v1_options, 15);
 
 /**
  * Specifies which callers can write a specific field of an entity.

@@ -659,3 +659,163 @@ message Setting {
 	string user_id = 1;
 	string theme = 2;
 }
+
+// A squad, the team of the team schema below: Squad, SquadMember, Repo,
+// RepoMember, RepoSquad and Issue, registered apart from the schemas above.
+message Squad {
+	option (syncplane.v1.entity) = {
+		name: "squad"
+		key_fields: [ "id" ]
+		members: { entity: "squad_member" }
+		access: {
+			allow: [
+				{ read: true permission: "view_squads" },
+				{ write: true permission: "manage_squads" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// Makes its user a member of one squad, whatever the role.
+message SquadMember {
+	option (syncplane.v1.entity) = {
+		name: "squad_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "squad_member"
+					grants: [ "view_squads" ]
+				},
+				{
+					name: "squad_lead"
+					grants: [ "view_squads", "manage_squads" ]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_squads" },
+				{ write: true permission: "manage_squads" }
+			]
+		}
+	};
+	string id = 1;
+	Squad squad = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+message Repo {
+	option (syncplane.v1.entity) = {
+		name: "repo"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_repos" },
+				{ write: true permission: "edit_repos" }
+			]
+		}
+	};
+	string id = 1;
+}
+
+// A role on one repo for one user, or for every member of one squad. A user
+// can leave the repo by deleting their own row.
+message RepoMember {
+	option (syncplane.v1.entity) = {
+		name: "repo_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{
+					name: "repo_reader"
+					grants: [ "view_repos", "view_repo_members", "view_issues" ]
+				},
+				{
+					name: "repo_writer"
+					grants: [
+						"view_repos",
+						"view_repo_members",
+						"view_issues",
+						"edit_issues"
+					]
+				},
+				{
+					name: "repo_admin"
+					grants: [
+						"view_repos",
+						"edit_repos",
+						"view_repo_members",
+						"manage_repo_members",
+						"view_issues",
+						"edit_issues"
+					]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_repo_members" },
+				{ write: true permission: "manage_repo_members" },
+				{ delete: true permission: "view_repos" subject: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	oneof member {
+		string user_id = 3;
+		Squad squad = 4;
+	}
+	string role = 5;
+}
+
+// A role on one repo for every member of one squad, named by a plain
+// reference rather than a oneof.
+message RepoSquad {
+	option (syncplane.v1.entity) = {
+		name: "repo_squad"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "squad"
+			role: "role"
+			roles: [ {
+				name: "repo_squad_reader"
+				grants: [ "view_repos", "view_issues" ]
+			} ]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_repo_members" },
+				{ write: true permission: "manage_repo_members" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	Squad squad = 3;
+	string role = 4;
+}
+
+// An issue in a repo.
+message Issue {
+	option (syncplane.v1.entity) = {
+		name: "issue"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_issues" },
+				{ write: true permission: "edit_issues" }
+			]
+		}
+	};
+	string id = 1;
+	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}

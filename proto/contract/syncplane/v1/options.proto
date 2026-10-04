@@ -58,6 +58,11 @@ message EntityOptions {
 	//
 	// A grant entity must also declare `access`. See `GrantOptions`.
 	GrantOptions grant = 11;
+	// Declares the rows of this entity as teams: a grant row can name a row of
+	// this entity as its subject, and then grants to every member of that row.
+	//
+	// See `MembersOptions`.
+	MembersOptions members = 12;
 
 	reserved 4, 7, 8;
 	reserved "delete_policy", "create_policy", "update_policy";
@@ -164,9 +169,10 @@ message AccessRule {
 	}
 
 	// Admits only rows whose field with this name holds one of the caller's
-	// subjects. Names a top-level, singular `string` field outside any
-	// `oneof`. An empty field value never matches, and a permission held at
-	// the workspace root does not skip the check.
+	// subjects. Names a top-level, singular `string` field. An empty field
+	// value never matches, and a permission held at the workspace root does not
+	// skip the check. A member of a `oneof` is empty on a row that holds
+	// another case, so it never matches there.
 	string subject = 8;
 	// Admits only updates that change no field outside this list. Valid only
 	// on a rule whose one operation is `update`. Each entry names a top-level
@@ -191,11 +197,12 @@ message AdmittedCaller {}
 // Declares an entity whose rows grant roles.
 //
 // Each row gives the subject in its `subject` field the role in its `role`
-// field. The role applies at the row's anchor: the row that its
-// `access_parent` field points at, or the workspace root when the entity has
-// no `access_parent` field. A row grants nothing when its subject is empty,
-// its role is not declared in `roles`, or its `access_parent` field is unset
-// or names a row that does not exist.
+// field. The subject is one caller, or every member of a team. The role
+// applies at the row's anchor: the row that its `access_parent` field points
+// at, or the workspace root when the entity has no `access_parent` field. A
+// row grants nothing when its subject is empty or names a team that does not
+// exist, its role is not declared in `roles`, or its `access_parent` field is
+// unset or names a row that does not exist.
 //
 // ```protobuf
 // message ProjectMember {
@@ -221,6 +228,17 @@ message AdmittedCaller {}
 // }
 // ```
 //
+// To grant to users and to teams from one entity, make the subject a `oneof`:
+//
+// ```protobuf
+//   oneof member {
+//     string user_id = 3;
+//     Team team = 4;
+//   }
+// ```
+//
+// with `subject: "member"`. See `MembersOptions`.
+//
 // A write that can change what a grant row grants needs every permission of
 // the row's role where the row applies: of the stored role at the stored
 // anchor, and of the new role at the new anchor. A caller can therefore grant
@@ -230,9 +248,18 @@ message AdmittedCaller {}
 //
 // Registration refuses unknown fields inside this message and inside `Role`.
 message GrantOptions {
-	// The name of a top-level, singular `string` field outside any `oneof`
-	// that holds the subject the row grants to. The server compares it with
-	// the subjects of the caller.
+	// The name of the field or the `oneof` that holds the subject the row
+	// grants to. A field is top-level and singular, and is one of:
+	//
+	// - a `string` field, which names one subject. The server compares it
+	//   with the subjects of the caller.
+	// - a reference to an entity that declares `members`, which names a team.
+	//   The row grants to every member of that team. The type of the field is
+	//   the entity's message, or a reference message without a `workspace`
+	//   field.
+	//
+	// Each member of a `oneof` is one of these, so that one entity can grant
+	// to callers and to teams. A row that holds no case grants nothing.
 	string subject = 1;
 	// The name of a top-level, singular `string` or enum field outside any
 	// `oneof` that holds the role the row grants. An enum value names the
@@ -251,6 +278,63 @@ message Role {
 	// The permissions the role grants at its anchor. At least one, without
 	// duplicates.
 	repeated string grants = 2;
+}
+
+// Declares the entity whose rows say who the members of each team are.
+//
+// A row of the member entity that grants its role at a team row also makes
+// its subject a member of that team, whatever the role. A grant row whose
+// subject is a reference to a team row grants its role to every member of
+// that team. A permission held at the workspace root, or at a row above the
+// team, does not make a caller a member.
+//
+// ```protobuf
+// message Team {
+//   option (syncplane.v1.entity) = {
+//     name: "team" key_fields: ["id"]
+//     members: { entity: "team_member" }
+//     access: { allow: [
+//       { read: true permission: "view_teams" },
+//       { write: true permission: "manage_teams" }
+//     ] }
+//   };
+//   string id = 1;
+// }
+//
+// message TeamMember {
+//   option (syncplane.v1.entity) = {
+//     name: "team_member" key_fields: ["id"]
+//     grant: {
+//       subject: "user_id" role: "role"
+//       roles: [
+//         { name: "team_member" grants: ["view_teams"] },
+//         { name: "team_lead" grants: ["view_teams", "manage_teams"] }
+//       ]
+//     }
+//     access: { allow: [
+//       { read: true permission: "view_teams" },
+//       { write: true permission: "manage_teams" }
+//     ] }
+//   };
+//   string id = 1;
+//   Team team = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   string user_id = 3;
+//   string role = 4;
+// }
+// ```
+//
+// A grant to a team gives its role to whoever a caller adds to the team
+// later, so a caller who can write rows of the member entity decides who
+// receives it. A write that is not trusted cannot delete a team row while a
+// live grant row names it as its subject.
+//
+// Registration refuses unknown fields inside this message.
+message MembersOptions {
+	// The name of the entity whose rows make members. It is a grant entity
+	// whose `access_parent` field is a reference to this entity and to no
+	// other, and whose subject is one `string` field, so a team cannot be a
+	// member of a team.
+	string entity = 1;
 }
 
 // Marks the reference that places each row of an entity below another row in

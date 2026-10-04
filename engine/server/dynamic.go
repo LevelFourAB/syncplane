@@ -62,6 +62,11 @@ type DynamicEntity struct {
 	// its role field is a string field. The entity keeps the pointer, so do
 	// not modify it after registration.
 	Grant *syncplanev1.GrantOptions
+	// Members mirrors (syncplane.v1.entity).members and declares the entity's
+	// rows as teams, whose members are the rows of the entity it names. Nil
+	// declares none. The entity keeps the pointer, so do not modify it after
+	// registration.
+	Members *syncplanev1.MembersOptions
 }
 
 // DynamicIndex is one declared secondary index of a dynamic entity, mirroring
@@ -316,6 +321,7 @@ func dynamicEntityProto(
 		Index:     indexes,
 		Access:    spec.Access,
 		Grant:     spec.Grant,
+		Members:   spec.Members,
 	})
 	dp.Options = mopts
 

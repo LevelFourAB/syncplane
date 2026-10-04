@@ -1801,6 +1801,404 @@ func (x *Setting) GetTheme() string {
 	return ""
 }
 
+// A squad, the team of the team schema below: Squad, SquadMember, Repo,
+// RepoMember, RepoSquad and Issue, registered apart from the schemas above.
+type Squad struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Squad) Reset() {
+	*x = Squad{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Squad) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Squad) ProtoMessage() {}
+
+func (x *Squad) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Squad.ProtoReflect.Descriptor instead.
+func (*Squad) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{27}
+}
+
+func (x *Squad) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// Makes its user a member of one squad, whatever the role.
+type SquadMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Squad         *Squad                 `protobuf:"bytes,2,opt,name=squad,proto3" json:"squad,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SquadMember) Reset() {
+	*x = SquadMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SquadMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SquadMember) ProtoMessage() {}
+
+func (x *SquadMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SquadMember.ProtoReflect.Descriptor instead.
+func (*SquadMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *SquadMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *SquadMember) GetSquad() *Squad {
+	if x != nil {
+		return x.Squad
+	}
+	return nil
+}
+
+func (x *SquadMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *SquadMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type Repo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Repo) Reset() {
+	*x = Repo{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Repo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Repo) ProtoMessage() {}
+
+func (x *Repo) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Repo.ProtoReflect.Descriptor instead.
+func (*Repo) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *Repo) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A role on one repo for one user, or for every member of one squad. A user
+// can leave the repo by deleting their own row.
+type RepoMember struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Repo  *Repo                  `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
+	// Types that are valid to be assigned to Member:
+	//
+	//	*RepoMember_UserId
+	//	*RepoMember_Squad
+	Member        isRepoMember_Member `protobuf_oneof:"member"`
+	Role          string              `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RepoMember) Reset() {
+	*x = RepoMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RepoMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RepoMember) ProtoMessage() {}
+
+func (x *RepoMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RepoMember.ProtoReflect.Descriptor instead.
+func (*RepoMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{30}
+}
+
+func (x *RepoMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RepoMember) GetRepo() *Repo {
+	if x != nil {
+		return x.Repo
+	}
+	return nil
+}
+
+func (x *RepoMember) GetMember() isRepoMember_Member {
+	if x != nil {
+		return x.Member
+	}
+	return nil
+}
+
+func (x *RepoMember) GetUserId() string {
+	if x != nil {
+		if x, ok := x.Member.(*RepoMember_UserId); ok {
+			return x.UserId
+		}
+	}
+	return ""
+}
+
+func (x *RepoMember) GetSquad() *Squad {
+	if x != nil {
+		if x, ok := x.Member.(*RepoMember_Squad); ok {
+			return x.Squad
+		}
+	}
+	return nil
+}
+
+func (x *RepoMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type isRepoMember_Member interface {
+	isRepoMember_Member()
+}
+
+type RepoMember_UserId struct {
+	UserId string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3,oneof"`
+}
+
+type RepoMember_Squad struct {
+	Squad *Squad `protobuf:"bytes,4,opt,name=squad,proto3,oneof"`
+}
+
+func (*RepoMember_UserId) isRepoMember_Member() {}
+
+func (*RepoMember_Squad) isRepoMember_Member() {}
+
+// A role on one repo for every member of one squad, named by a plain
+// reference rather than a oneof.
+type RepoSquad struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Repo          *Repo                  `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
+	Squad         *Squad                 `protobuf:"bytes,3,opt,name=squad,proto3" json:"squad,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RepoSquad) Reset() {
+	*x = RepoSquad{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RepoSquad) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RepoSquad) ProtoMessage() {}
+
+func (x *RepoSquad) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RepoSquad.ProtoReflect.Descriptor instead.
+func (*RepoSquad) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{31}
+}
+
+func (x *RepoSquad) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RepoSquad) GetRepo() *Repo {
+	if x != nil {
+		return x.Repo
+	}
+	return nil
+}
+
+func (x *RepoSquad) GetSquad() *Squad {
+	if x != nil {
+		return x.Squad
+	}
+	return nil
+}
+
+func (x *RepoSquad) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// An issue in a repo.
+type Issue struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Repo          *Repo                  `protobuf:"bytes,2,opt,name=repo,proto3" json:"repo,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Issue) Reset() {
+	*x = Issue{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Issue) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Issue) ProtoMessage() {}
+
+func (x *Issue) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Issue.ProtoReflect.Descriptor instead.
+func (*Issue) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{32}
+}
+
+func (x *Issue) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Issue) GetRepo() *Repo {
+	if x != nil {
+		return x.Repo
+	}
+	return nil
+}
+
+func (x *Issue) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -2057,7 +2455,73 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05theme\x18\x02 \x01(\tR\x05theme:)\xa2\xbb\x18%\n" +
 	"\asetting\x12\auser_idR\x11\n" +
-	"\x0f\b\x01(\x01B\auser_id:\x00*Q\n" +
+	"\x0f\b\x01(\x01B\auser_id:\x00\"^\n" +
+	"\x05Squad\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:E\xa2\xbb\x18A\n" +
+	"\x05squad\x12\x02idR$\n" +
+	"\x0f\b\x012\vview_squads\n" +
+	"\x11(\x012\rmanage_squadsb\x0e\n" +
+	"\fsquad_member\"\xa5\x02\n" +
+	"\vSquadMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12A\n" +
+	"\x05squad\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.SquadB\x06\xaa\xbb\x18\x02Z\x00R\x05squad\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\x95\x01\xa2\xbb\x18\x90\x01\n" +
+	"\fsquad_member\x12\x02idR$\n" +
+	"\x0f\b\x012\vview_squads\n" +
+	"\x11(\x012\rmanage_squadsZV\n" +
+	"\auser_id\x12\x04role\x1a\x1b\n" +
+	"\fsquad_member\x12\vview_squads\x1a(\n" +
+	"\n" +
+	"squad_lead\x12\vview_squads\x12\rmanage_squads\"H\n" +
+	"\x04Repo\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:0\xa2\xbb\x18,\n" +
+	"\x04repo\x12\x02idR \n" +
+	"\x0e\b\x012\n" +
+	"view_repos\n" +
+	"\x0e(\x012\n" +
+	"edit_repos\"\xb2\x04\n" +
+	"\n" +
+	"RepoMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x12\x19\n" +
+	"\auser_id\x18\x03 \x01(\tH\x00R\x06userId\x12;\n" +
+	"\x05squad\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.SquadH\x00R\x05squad\x12\x12\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\xdd\x02\xa2\xbb\x18\xd8\x02\n" +
+	"\vrepo_member\x12\x02idRI\n" +
+	"\x15\b\x012\x11view_repo_members\n" +
+	"\x17(\x012\x13manage_repo_members\n" +
+	"\x17 \x01B\auser_id2\n" +
+	"view_reposZ\xf9\x01\n" +
+	"\x06member\x12\x04role\x1a9\n" +
+	"\vrepo_reader\x12\n" +
+	"view_repos\x12\x11view_repo_members\x12\vview_issues\x1aF\n" +
+	"\vrepo_writer\x12\n" +
+	"view_repos\x12\x11view_repo_members\x12\vview_issues\x12\vedit_issues\x1af\n" +
+	"\n" +
+	"repo_admin\x12\n" +
+	"view_repos\x12\n" +
+	"edit_repos\x12\x11view_repo_members\x12\x13manage_repo_members\x12\vview_issues\x12\vedit_issuesB\b\n" +
+	"\x06member\"\xb0\x02\n" +
+	"\tRepoSquad\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x129\n" +
+	"\x05squad\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SquadR\x05squad\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\x83\x01\xa2\xbb\x18\x7f\n" +
+	"\n" +
+	"repo_squad\x12\x02idR0\n" +
+	"\x15\b\x012\x11view_repo_members\n" +
+	"\x17(\x012\x13manage_repo_membersZ;\n" +
+	"\x05squad\x12\x04role\x1a,\n" +
+	"\x11repo_squad_reader\x12\n" +
+	"view_repos\x12\vview_issues\"\xa2\x01\n" +
+	"\x05Issue\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04repo\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RepoB\x06\xaa\xbb\x18\x02Z\x00R\x04repo\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:3\xa2\xbb\x18/\n" +
+	"\x05issue\x12\x02idR\"\n" +
+	"\x0f\b\x012\vview_issues\n" +
+	"\x0f(\x012\vedit_issues*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -2076,7 +2540,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
@@ -2106,6 +2570,12 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Draft)(nil),         // 25: syncplane.testdata.access.v1.Draft
 	(*Ticket)(nil),        // 26: syncplane.testdata.access.v1.Ticket
 	(*Setting)(nil),       // 27: syncplane.testdata.access.v1.Setting
+	(*Squad)(nil),         // 28: syncplane.testdata.access.v1.Squad
+	(*SquadMember)(nil),   // 29: syncplane.testdata.access.v1.SquadMember
+	(*Repo)(nil),          // 30: syncplane.testdata.access.v1.Repo
+	(*RepoMember)(nil),    // 31: syncplane.testdata.access.v1.RepoMember
+	(*RepoSquad)(nil),     // 32: syncplane.testdata.access.v1.RepoSquad
+	(*Issue)(nil),         // 33: syncplane.testdata.access.v1.Issue
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -2128,11 +2598,17 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	22, // 17: syncplane.testdata.access.v1.Post.room:type_name -> syncplane.testdata.access.v1.Room
 	22, // 18: syncplane.testdata.access.v1.Draft.room:type_name -> syncplane.testdata.access.v1.Room
 	22, // 19: syncplane.testdata.access.v1.Ticket.room:type_name -> syncplane.testdata.access.v1.Room
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	20, // [20:20] is the sub-list for extension type_name
-	20, // [20:20] is the sub-list for extension extendee
-	0,  // [0:20] is the sub-list for field type_name
+	28, // 20: syncplane.testdata.access.v1.SquadMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	30, // 21: syncplane.testdata.access.v1.RepoMember.repo:type_name -> syncplane.testdata.access.v1.Repo
+	28, // 22: syncplane.testdata.access.v1.RepoMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	30, // 23: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
+	28, // 24: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
+	30, // 25: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
+	26, // [26:26] is the sub-list for method output_type
+	26, // [26:26] is the sub-list for method input_type
+	26, // [26:26] is the sub-list for extension type_name
+	26, // [26:26] is the sub-list for extension extendee
+	0,  // [0:26] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -2152,13 +2628,17 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 		(*PlaceRef_Board)(nil),
 		(*PlaceRef_Space)(nil),
 	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[30].OneofWrappers = []any{
+		(*RepoMember_UserId)(nil),
+		(*RepoMember_Squad)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   27,
+			NumMessages:   33,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

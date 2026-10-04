@@ -24,6 +24,20 @@ A grant row grants nothing when its anchor row does not exist. Without this rule
 
 A grant row also grants nothing when the schema does not declare its role, and every write path refuses an undeclared role. Rows stored before the schema declared a role are the exception: when a registration adds the role, or adds `grant` to an entity that already holds rows, those rows start to grant it. Registration does not look for such rows, because that reads the grant entity in every workspace on each registration, and the rows were written under the rules the application had at that time. A runtime registration must pass `AllowAccessChange` for such a change, and that flag is where the operator accepts the stored values.
 
+## Teams
+
+A team is a row. The team entity's `members` option names a grant entity whose rows anchor at the team, and each such row makes its subject a member. A grant row whose subject field is a reference to the team gives its role to every member. The type of the subject field decides between a user and a team, so one roster entity with a oneof subject holds both, with one list of roles. Two entities would need two lists, because role names are unique across the schema.
+
+**Membership is a row, not a permission.** A permission held at the root applies at every row, so if a permission made a caller a member, an admin would be a member of every team and would hold every team's grants. The caller's access set would then grow with every team grant in the workspace. A role that does not grant the permission would also make no member, and nothing would report it. With rows, a caller is a member of exactly the teams that its own rows name, and the engine finds them in the grant rows it already reads.
+
+**A grant to a team is a delegation.** The subset rule still applies to each row: the writer of a team grant holds the role's permissions at the anchor, and the writer of a member row holds the member role's permissions at the team. But a grant to a team also gives its role to every caller who joins the team later, and a caller who can add members does not need to hold that role. This is what a team is for: the project admin decides that the team gets the role, and the team decides who is in it.
+
+**A team cannot be a member of a team.** Grant resolution has two passes. The first reads the caller's own grant rows, member rows included, which gives the caller's teams. The second reads the grant rows that name those teams. A team inside a team would need a third pass, and nested teams in general need repeated passes with a depth limit. Registration therefore refuses a member entity whose subject is a team. Lifting the refusal later breaks no schema.
+
+The caller's access set stays one list of permissions and anchors, whatever pass found them. Cursors, resyncs and the `CallerAccess` summary therefore work the same for team grants: a change of membership or of a team grant changes the anchors, and the next pull resyncs the rows below them.
+
+A team row cannot be deleted while a live grant row names it, for the same reason as an access parent: a team created later with the same key would receive the grants.
+
 ## Rules
 
 The `access` option of an entity lists rules. Each rule names operations (read, create, update, delete, or `write` for every write operation) and a source: a permission, or `admitted` for every caller that the workspace gate lets in. See [Access model](../reference/proto-options.md#access-model) for the options.
@@ -104,7 +118,7 @@ The answer is advisory. The client does not refuse a write when `can()` answers 
 
 ## Costs and limits
 
-- **Grant resolution.** Each request and each stream drain reads the caller's grant rows: one probe of the subject index for each grant entity, or a scan of the grant entity until the index is built.
+- **Grant resolution.** Each request and each stream drain reads the caller's grant rows: one probe of the subject index for each grant entity, or a scan of the grant entity until the index is built. Team grants add one probe of the team reference index for each team the caller is a member of, and a read of the grant rows found.
 - **Chain walks.** A read below the root reads each row on the chains of the rows it classifies once. A write reads the chain of the row it writes, and a move of a row in a recursive chain reads the chain of the new parent to refuse a cycle.
 - **Moves.** A move of a row that rows sit below writes one log row. Every pull and stream drain reads the moves after its cursor, which is one row read when nothing moved. A delete of such a row probes the reference index of each entity that can sit below it.
 - **Root changes.** Gaining or losing a permission at the root affects every row of the entities that use it, so the resync scans those entities.

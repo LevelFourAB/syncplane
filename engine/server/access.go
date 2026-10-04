@@ -280,7 +280,15 @@ const depthUnbounded = -1
 // resolved at registration: which fields of a grant row hold its subject and
 // its role, and what each declared role grants.
 type grantSpec struct {
-	subject protoreflect.FieldDescriptor
+	// subjects are the cases of the subject, in field order: one for a field,
+	// one per member of a oneof, and one per target of a reference message
+	// that holds a oneof of entities. A row holds at most one case. Whether
+	// each team case points at an entity with members is a catalog question,
+	// answered by compileAccessModel.
+	subjects []subjectCase
+	// subjectName names the subject in masks and errors: the field, or the
+	// oneof whose members are the cases.
+	subjectName string
 	// role is a string or enum field. An enum value names the role spelled
 	// like the value.
 	role protoreflect.FieldDescriptor
@@ -289,6 +297,89 @@ type grantSpec struct {
 	// roleNames are the declared role names in declaration order, for errors
 	// and for the evolution check, which sorts them.
 	roleNames []string
+}
+
+// subjectCase is one case of a grant entity's subject: a string field, which
+// names one subject of a caller, or a reference, which names a team.
+type subjectCase struct {
+	fd protoreflect.FieldDescriptor
+	// team is the reference of a case that names a team, nil for a string
+	// field.
+	team *refField
+}
+
+// indexName is the index that resolving a caller's grants probes for the
+// case: the index the engine derives over a string case, which has the name
+// an indexed mark on the field would give, or the reference index of a team
+// case.
+func (c subjectCase) indexName() string {
+	if c.team != nil {
+		return refIndexName(c.team.ref)
+	}
+	return fieldIndexName(c.fd)
+}
+
+// stringCases returns the cases of g that name a subject of a caller.
+func (g *grantSpec) stringCases() []protoreflect.FieldDescriptor {
+	var out []protoreflect.FieldDescriptor
+	for _, c := range g.subjects {
+		if c.team == nil {
+			out = append(out, c.fd)
+		}
+	}
+	return out
+}
+
+// namesSubject reports whether row's subject names one of subjects, which
+// are sorted: a string case holds one of them.
+func (g *grantSpec) namesSubject(subjects []string, row protoreflect.Message) bool {
+	for _, c := range g.subjects {
+		if c.team == nil && subjectMatches(subjects, row.Get(c.fd).String()) {
+			return true
+		}
+	}
+	return false
+}
+
+// subjectSet reports whether the row of entity holds a subject: a string
+// case that is not empty, or a team case whose reference names a key. model
+// is the compiled access model, which knows the target of each team case;
+// without one, a team case that is set counts.
+func (g *grantSpec) subjectSet(row protoreflect.Message, model *accessModel, entity string) bool {
+	for _, c := range g.subjects {
+		switch {
+		case c.team == nil:
+			if row.Get(c.fd).String() != "" {
+				return true
+			}
+		case model == nil:
+			if row.Has(c.fd) {
+				return true
+			}
+		}
+	}
+	if model == nil {
+		return false
+	}
+	_, ok := parentOf(row, model.teamSubjects[entity])
+	return ok
+}
+
+// subjectSpec renders the subject in a canonical form for the access spec: its
+// name, then each case as its path (see refCasePath) and, for a team case,
+// its target entity. A subject that is one string field renders as its name.
+func (g *grantSpec) subjectSpec() string {
+	if len(g.subjects) == 1 && g.subjects[0].team == nil {
+		return g.subjectName
+	}
+	cases := make([]string, len(g.subjects))
+	for i, c := range g.subjects {
+		cases[i] = string(c.fd.Name())
+		if c.team != nil {
+			cases[i] = refCasePath(c.team.ref) + ">" + protoopts.Entity(c.team.ref.Target).GetName()
+		}
+	}
+	return g.subjectName + "(" + strings.Join(cases, ",") + ")"
 }
 
 // accessOf checks an entity's access option and its access_parent field, and
@@ -397,7 +488,7 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		return accessRule{}, fmt.Errorf("%s names no source; set permission or admitted", where)
 	}
 	if name := r.GetSubject(); name != "" {
-		fd, err := singularStringField(desc, name)
+		fd, err := stringField(desc, name)
 		if err != nil {
 			return accessRule{}, fmt.Errorf("%s subject: %w", where, err)
 		}
@@ -416,17 +507,29 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 	return rule, nil
 }
 
-// singularStringField resolves a field that a check reads on every row: a
+// singularStringField resolves a field that is set on every row: a
 // top-level, singular string field outside any oneof.
 func singularStringField(desc protoreflect.MessageDescriptor, name string) (protoreflect.FieldDescriptor, error) {
+	fd, err := stringField(desc, name)
+	if err != nil {
+		return nil, err
+	}
+	if od := lww.OneofOf(fd); od != nil {
+		return nil, fmt.Errorf("field %q is a member of oneof %q; it must be set on every row", name, od.Name())
+	}
+	return fd, nil
+}
+
+// stringField resolves a field that a check reads on each row: a top-level,
+// singular string field. A member of a oneof reads as empty on a row that
+// holds another case, which no subject check matches.
+func stringField(desc protoreflect.MessageDescriptor, name string) (protoreflect.FieldDescriptor, error) {
 	fd := desc.Fields().ByName(protoreflect.Name(name))
 	switch {
 	case fd == nil:
 		return nil, fmt.Errorf("field %q not found", name)
 	case fd.IsList() || fd.IsMap():
 		return nil, fmt.Errorf("field %q is repeated; it must hold one value", name)
-	case lww.OneofOf(fd) != nil:
-		return nil, fmt.Errorf("field %q is a member of oneof %q; it must be set on every row", name, lww.OneofOf(fd).Name())
 	case fd.Kind() != protoreflect.StringKind:
 		return nil, fmt.Errorf("field %q is %s; it must be a string", name, fd.Kind())
 	}
@@ -635,8 +738,9 @@ func refuseNestedMarks(desc protoreflect.MessageDescriptor, mark string, has fun
 
 // grantOf checks an entity's grant option and resolves its subject and role
 // fields. A grant entity must itself sit in the model, so its rows are read
-// and written under permissions of their own.
-func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions, access *entityAccess) (*grantSpec, error) {
+// and written under permissions of their own. It needs info.refFields and
+// info.access.
+func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions, info *entityInfo) (*grantSpec, error) {
 	opt := eo.GetGrant()
 	if opt == nil {
 		return nil, nil
@@ -644,15 +748,12 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	if err := refuseUnknownOptionFields("grant", opt); err != nil {
 		return nil, err
 	}
-	if access == nil {
+	if info.access == nil {
 		return nil, fmt.Errorf("a grant entity must declare access")
 	}
-	subject, err := grantField(desc, "subject", opt.GetSubject())
+	subjects, err := grantSubjectOf(desc, info, opt.GetSubject())
 	if err != nil {
 		return nil, err
-	}
-	if subject.Kind() != protoreflect.StringKind {
-		return nil, fmt.Errorf("grant subject field %q is %s; it must be a string", subject.Name(), subject.Kind())
 	}
 	role, err := grantField(desc, "role", opt.GetRole())
 	if err != nil {
@@ -661,13 +762,18 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	if role.Kind() != protoreflect.StringKind && role.Kind() != protoreflect.EnumKind {
 		return nil, fmt.Errorf("grant role field %q is %s; it must be a string or an enum", role.Name(), role.Kind())
 	}
-	if role == subject {
+	if slices.ContainsFunc(subjects, func(c subjectCase) bool { return c.fd == role }) {
 		return nil, fmt.Errorf("grant names field %q as both subject and role", role.Name())
 	}
 	if len(opt.GetRoles()) == 0 {
 		return nil, fmt.Errorf("grant declares no roles")
 	}
-	g := &grantSpec{subject: subject, role: role, roles: make(map[string][]string, len(opt.GetRoles()))}
+	g := &grantSpec{
+		subjects:    subjects,
+		subjectName: opt.GetSubject(),
+		role:        role,
+		roles:       make(map[string][]string, len(opt.GetRoles())),
+	}
 	for _, r := range opt.GetRoles() {
 		if err := refuseUnknownOptionFields("grant role", r); err != nil {
 			return nil, err
@@ -701,25 +807,88 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	return g, nil
 }
 
-// grantSubjectIndexName is the index the engine derives over a grant entity's
-// subject field, so resolving a caller's grants probes its own rows instead
-// of scanning the entity. It shares the name an indexed mark on the field
-// would give, so marking the field as well adds no second index.
-func grantSubjectIndexName(g *grantSpec) string {
-	return fieldIndexName(g.subject)
+// grantSubjectOf resolves the subject a grant option names: a field, or a
+// oneof whose members are the cases. Each case is a top-level, singular
+// string field, or a reference without a workspace field. A reference message
+// that holds a oneof of entities gives one case per target.
+func grantSubjectOf(desc protoreflect.MessageDescriptor, info *entityInfo, name string) ([]subjectCase, error) {
+	if name == "" {
+		return nil, fmt.Errorf("grant names no subject field")
+	}
+	var fields []protoreflect.FieldDescriptor
+	if od := desc.Oneofs().ByName(protoreflect.Name(name)); od != nil && !od.IsSynthetic() {
+		for i := 0; i < od.Fields().Len(); i++ {
+			fields = append(fields, od.Fields().Get(i))
+		}
+	} else {
+		fd := desc.Fields().ByName(protoreflect.Name(name))
+		if fd == nil {
+			return nil, fmt.Errorf("grant subject field %q not found", name)
+		}
+		if od := lww.OneofOf(fd); od != nil {
+			return nil, fmt.Errorf("grant subject field %q is a member of oneof %q; name the oneof", name, od.Name())
+		}
+		fields = append(fields, fd)
+	}
+	var cases []subjectCase
+	for _, fd := range fields {
+		if fd.IsList() || fd.IsMap() {
+			return nil, fmt.Errorf("grant subject field %q is repeated; it must hold one value", fd.Name())
+		}
+		if fd.Kind() == protoreflect.StringKind {
+			cases = append(cases, subjectCase{fd: fd})
+			continue
+		}
+		refs := lww.RefsOf(fd)
+		if len(refs) == 0 {
+			return nil, fmt.Errorf("grant subject field %q is %s; it must be a string or a reference", fd.Name(), fd.Kind())
+		}
+		if refs[0].Workspace != nil {
+			return nil, fmt.Errorf("grant subject field %q is a reference message with a workspace field; "+
+				"a team is a row of the grant row's own workspace", fd.Name())
+		}
+		for i := range info.refFields {
+			if rf := &info.refFields[i]; rf.fd == fd {
+				cases = append(cases, subjectCase{fd: fd, team: rf})
+			}
+		}
+	}
+	return cases, nil
+}
+
+// membersOf checks an entity's members option and returns the name of the
+// entity whose rows make members, "" when the entity declares none. Whether
+// that entity is a grant entity anchored at this one is a catalog question,
+// answered by compileAccessModel.
+func membersOf(eo *syncplanev1.EntityOptions, access *entityAccess) (string, error) {
+	opt := eo.GetMembers()
+	if opt == nil {
+		return "", nil
+	}
+	if err := refuseUnknownOptionFields("members", opt); err != nil {
+		return "", err
+	}
+	if access == nil {
+		return "", fmt.Errorf("an entity with members must declare access")
+	}
+	if opt.GetEntity() == "" {
+		return "", fmt.Errorf("members names no entity")
+	}
+	return opt.GetEntity(), nil
 }
 
 // buildSubjectIndexes derives an index over each field the access model
-// looks rows up by subject in: a grant entity's subject field, so resolving a
-// caller's grants probes its own rows, and the subject field of each read
-// rule with a subject check, so a read narrows to the rows that name the
-// caller. Each index has the name an indexed mark on the field would give. It
-// runs after buildDeclaredIndexes, so a field the schema marks indexed already
-// has its index.
+// looks rows up by subject in: each string case of a grant entity's subject,
+// so resolving a caller's grants probes its own rows, and the subject field
+// of each read rule with a subject check, so a read narrows to the rows that
+// name the caller. A team case is a reference, which has its reference index
+// already. Each index has the name an indexed mark on the field would give.
+// It runs after buildDeclaredIndexes, so a field the schema marks indexed
+// already has its index.
 func buildSubjectIndexes(info *entityInfo) error {
 	var fields []protoreflect.FieldDescriptor
 	if info.grant != nil {
-		fields = append(fields, info.grant.subject)
+		fields = append(fields, info.grant.stringCases()...)
 	}
 	if info.access != nil {
 		for _, o := range info.access.read.owned {
@@ -789,6 +958,16 @@ type accessModel struct {
 	roles map[string]*modelRole
 	// grantEntities are the entities whose rows grant roles, sorted by name.
 	grantEntities []*entityInfo
+	// teamOf maps the name of each member entity to the team entity whose
+	// members its rows make.
+	teamOf map[string]string
+	// teamSubjects maps the name of each grant entity whose subject can name a
+	// team to the edges of its team cases, in field order: a row whose case
+	// names a team row grants to the members of that row. subjectsOf maps the
+	// name of each team entity to the edges that point at it, sorted by grant
+	// entity name and then in field order.
+	teamSubjects map[string][]*accessEdge
+	subjectsOf   map[string][]*accessEdge
 	// parents maps the name of each entity with an access parent to the
 	// edges of its cases, in field order. anchors holds the names of their
 	// targets: the entities whose rows can be anchors, so a write to one can
@@ -890,12 +1069,15 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	sort.Strings(names)
 
 	m := &accessModel{
-		roles:    map[string]*modelRole{},
-		entities: map[string]*entityInfo{},
-		parents:  map[string][]*accessEdge{},
-		anchors:  map[string]bool{},
-		children: map[string][]*accessEdge{},
-		depths:   map[string]int{},
+		roles:        map[string]*modelRole{},
+		teamOf:       map[string]string{},
+		teamSubjects: map[string][]*accessEdge{},
+		subjectsOf:   map[string][]*accessEdge{},
+		entities:     map[string]*entityInfo{},
+		parents:      map[string][]*accessEdge{},
+		anchors:      map[string]bool{},
+		children:     map[string][]*accessEdge{},
+		depths:       map[string]int{},
 	}
 	used := map[string][]string{} // permission → entities that name it
 	for _, name := range names {
@@ -926,8 +1108,31 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 				used[p] = append(used[p], name)
 			}
 		}
+		if info.members != "" {
+			if err := checkMembers(c, info); err != nil {
+				return nil, err
+			}
+			m.teamOf[info.members] = name
+		}
 		if info.grant == nil {
 			continue
+		}
+		for _, sc := range info.grant.subjects {
+			if sc.team == nil {
+				continue
+			}
+			target, ok := c.byType[sc.team.ref.Target.FullName()]
+			if !ok {
+				return nil, fmt.Errorf("server: entity %q grant subject field %q points at %s, which is not a registered entity",
+					name, refCasePath(sc.team.ref), sc.team.ref.Target.FullName())
+			}
+			if target.members == "" {
+				return nil, fmt.Errorf("server: entity %q grant subject field %q points at entity %q, which declares no members; "+
+					"declare members on %q to grant to its members", name, refCasePath(sc.team.ref), target.name, target.name)
+			}
+			e := &accessEdge{child: info, target: target, ref: sc.team}
+			m.teamSubjects[name] = append(m.teamSubjects[name], e)
+			m.subjectsOf[target.name] = append(m.subjectsOf[target.name], e)
 		}
 		m.grantEntities = append(m.grantEntities, info)
 		for _, role := range info.grant.roleNames {
@@ -1045,6 +1250,28 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	}
 	m.fingerprint = readPolicyOf(m.readRules)
 	return m, nil
+}
+
+// checkMembers checks the members option of the team entity info against the
+// catalog: it names a grant entity whose access parent points at info alone,
+// and whose subject is one string field. A member entity with a team case
+// would make a team a member of a team, which the model does not resolve.
+func checkMembers(c *catalog, info *entityInfo) error {
+	member, ok := c.entities[info.members]
+	switch {
+	case !ok:
+		return fmt.Errorf("server: entity %q members names entity %q, which is not registered", info.name, info.members)
+	case member.grant == nil:
+		return fmt.Errorf("server: entity %q members names entity %q, which is not a grant entity; "+
+			"its rows must grant a role at the team they make their subject a member of", info.name, member.name)
+	case member.access == nil || len(member.access.parents) != 1 || member.access.parents[0].entity != info.name:
+		return fmt.Errorf("server: entity %q members names entity %q, whose access_parent does not point at %q alone",
+			info.name, member.name, info.name)
+	case len(member.grant.subjects) != 1 || member.grant.subjects[0].team != nil:
+		return fmt.Errorf("server: entity %q members names entity %q, whose grant subject is not one string field; "+
+			"a team cannot be a member of a team", info.name, member.name)
+	}
+	return nil
 }
 
 // undecidingRules returns a warning for each rule of info that never decides
@@ -1316,8 +1543,11 @@ func accessSpecOf(info *entityInfo) string {
 			b.WriteString(" parent=" + a.parentRule())
 		}
 	}
+	if info.members != "" {
+		b.WriteString(" members=" + info.members)
+	}
 	if g := info.grant; g != nil {
-		b.WriteString(" subject=" + string(g.subject.Name()) + " role=" + string(g.role.Name()))
+		b.WriteString(" subject=" + g.subjectSpec() + " role=" + string(g.role.Name()))
 		roles := slices.Clone(g.roleNames)
 		sort.Strings(roles)
 		for _, r := range roles {

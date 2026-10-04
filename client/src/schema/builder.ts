@@ -70,6 +70,7 @@ import {
 	GrantOptionsSchema,
 	IndexKeySchema,
 	IndexSpecSchema,
+	MembersOptionsSchema,
 	reference as referenceExt,
 	ReferenceOptionsSchema,
 	RoleSchema,
@@ -692,6 +693,8 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly access?: AccessDecl;
 	/** The roles the entity's rows grant; see {@link EntityOptions.grant}. */
 	readonly grant?: GrantDecl;
+	/** Who the members of each row are; see {@link EntityOptions.members}. */
+	readonly members?: MembersDecl;
 	/** @internal synthesized proto full name, e.g. "sync.dynamic.Todo". */
 	readonly typeName: string;
 }
@@ -764,12 +767,30 @@ export type AccessRuleDecl =
  * root when the entity has no access parent.
  */
 export interface GrantDecl {
-	/** Accessor name of the `text()` field that holds the subject. */
+	/**
+	 * Accessor name of the field that holds the subject: a `text()` field,
+	 * which names one caller, or a singular `ref()` to an entity that declares
+	 * `members`, which names a team and grants to every member of it.
+	 */
 	subject: string;
 	/** Accessor name of the `text()` field that holds the role. */
 	role: string;
 	/** The roles rows can grant. At least one, with names unique across the schema. */
 	roles: RoleDecl[];
+}
+
+/**
+ * The entity whose rows say who the members of each team row are, mirroring
+ * syncplane.v1.MembersOptions.
+ *
+ * Each live row of the member entity makes its subject a member of the team
+ * row its `.accessParent()` reference points at, whatever its role. The member
+ * entity is a grant entity whose access parent is this entity alone, and whose
+ * subject is a `text()` field.
+ */
+export interface MembersDecl {
+	/** Wire name of the member entity. */
+	entity: string;
 }
 
 /** One role of a {@link GrantDecl}, mirroring syncplane.v1.Role. */
@@ -863,6 +884,7 @@ export function entity<F extends Fields>(
 		...(options?.search === undefined ? {} : { search: options.search }),
 		...(options?.access === undefined ? {} : { access: options.access }),
 		...(options?.grant === undefined ? {} : { grant: options.grant }),
+		...(options?.members === undefined ? {} : { members: options.members }),
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
 }
@@ -959,6 +981,41 @@ export interface EntityOptions {
 	 * ```
 	 */
 	grant?: GrantDecl;
+	/**
+	 * Declares the entity's rows as teams; see {@link MembersDecl}. A grant
+	 * whose subject is a `ref()` to this entity grants to every member of the
+	 * team row it names. An entity with members must also declare `access`.
+	 *
+	 * A write that is not trusted cannot delete a team row while a live grant
+	 * row names it as its subject.
+	 *
+	 * @example
+	 * ```ts
+	 * const team = schema.entity('team', { id: schema.text().key() }, {
+	 *   members: { entity: 'team_member' },
+	 *   access: { allow: [ { read: true, permission: 'view_teams' } ] },
+	 * });
+	 * const teamMember = schema.entity('team_member', {
+	 *   id: schema.text().key(),
+	 *   team: schema.ref(() => team).accessParent(),
+	 *   userId: schema.text(),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: { subject: 'userId', role: 'role', roles: [ { name: 'team_member', grants: ['view_teams'] } ] },
+	 *   access: { allow: [ { read: true, permission: 'view_teams' } ] },
+	 * });
+	 * const projectTeam = schema.entity('project_team', {
+	 *   id: schema.text().key(),
+	 *   project: schema.ref(() => project).accessParent(),
+	 *   team: schema.ref(() => team),
+	 *   role: schema.text(),
+	 * }, {
+	 *   grant: { subject: 'team', role: 'role', roles: [ { name: 'project_team_writer', grants: ['view_tasks', 'edit_tasks'] } ] },
+	 *   access: { allow: [ { read: true, permission: 'view_tasks' } ] },
+	 * });
+	 * ```
+	 */
+	members?: MembersDecl;
 }
 
 /**
@@ -986,6 +1043,11 @@ function assertAccess(
 			`${where}: field "${parents[0]}" is marked accessParent(), but the entity declares no access`,
 		);
 	}
+	const members = options?.members;
+	if (members !== undefined) {
+		if (access === undefined) throw new Error(`${where}: an entity with members must declare access`);
+		if (!members.entity) throw new Error(`${where}: members names no entity`);
+	}
 	const grant = options?.grant;
 	if (grant === undefined) return;
 	if (access === undefined) {
@@ -996,10 +1058,15 @@ function assertAccess(
 		if (spec === undefined) {
 			throw new Error(`${where}: grant ${part} field "${grant[part]}" is not declared`);
 		}
-		if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+		const text = spec.kind === 'scalar' && spec.scalar === 'string' && !spec.repeated;
+		const team = spec.kind === 'ref' && !spec.repeated && !spec.refWorkspace;
+		if (part === 'subject' && !text && !team) {
 			throw new Error(
-				`${where}: grant ${part} field "${grant[part]}" must be a singular text() field`,
+				`${where}: grant subject field "${grant.subject}" must be a singular text() field or a singular ref()`,
 			);
+		}
+		if (part === 'role' && !text) {
+			throw new Error(`${where}: grant role field "${grant.role}" must be a singular text() field`);
 		}
 	}
 	if (grant.subject === grant.role) {
@@ -1296,6 +1363,9 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 					role: snakeCase(e.grant.role),
 					roles: e.grant.roles.map((r) => create(RoleSchema, { name: r.name, grants: r.grants })),
 				}),
+			}),
+			...(e.members === undefined ? {} : {
+				members: create(MembersOptionsSchema, { entity: e.members.entity }),
 			}),
 			// Paths are written in accessor names and lowered to proto names
 			// here, which is the same translation a query path takes on the way

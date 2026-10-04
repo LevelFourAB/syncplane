@@ -92,7 +92,7 @@ Understanding-oriented. Read these when a behaviour surprises you.
 - [The convergence model](explanation/convergence-model.md) — sequences,
   per-field last-writer-wins, rebase, tombstones, compare-and-swap.
 - [The access model](explanation/access-model.md) — grants, roles and anchors,
-  how access rules combine, why access is declared in the schema, how grant changes reach clients, and
+  teams, how access rules combine, why access is declared in the schema, how grant changes reach clients, and
   what the model costs.
 - [Partial sync and coverage](explanation/partial-sync-and-coverage.md) — why
   windows exist and why every result carries a coverage report.

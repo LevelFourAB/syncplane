@@ -263,11 +263,16 @@ func (a *permAnchors) holds(entity, key string) bool {
 // resolveAccess reads what the caller holds from the grant rows in tx, and
 // adds its global roles at the root.
 //
-// A grant row counts only when its subject is one of the caller's, its role is
+// A grant row counts only when its subject names the caller, its role is
 // declared, and its anchor exists: a grant entity with an access parent
-// anchors at the parent row, which must be live in tx. The read is one subject
-// probe per grant entity and subject while the subject index is ready, and a
-// scan of the grant entity otherwise.
+// anchors at the parent row, which must be live in tx. A subject names the
+// caller when it is one of the caller's subjects, or a team row that one of
+// the caller's own grant rows makes it a member of.
+//
+// The read has two passes. The first probes the index of each string case of
+// each grant entity once per subject, and the second the index of each team
+// case once per team the first pass found. A grant entity whose indexes are
+// not ready is scanned instead.
 func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSet, error) {
 	set := &accessSet{perms: map[string]*permAnchors{}}
 	for _, role := range c.globalRoles {
@@ -276,75 +281,171 @@ func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSe
 	if len(c.subjects) == 0 {
 		return set, nil
 	}
+	subjects := make([]protoreflect.Value, len(c.subjects))
+	for i, subject := range c.subjects {
+		subjects[i] = protoreflect.ValueOfString(subject)
+	}
+	// teams are the team rows the caller is a member of, by team entity.
+	teams := map[string][]string{}
 	for _, g := range c.model.grantEntities {
-		type pending struct {
-			perms []string
-			at    anchorRow
+		var probes []caseProbe
+		for _, fd := range g.grant.stringCases() {
+			for _, v := range subjects {
+				probes = append(probes, caseProbe{index: fieldIndexName(fd), values: []protoreflect.Value{v}})
+			}
 		}
-		var parented []pending
-		err := grantRowsOf(tx, g, c.subjects, limits, func(msg protoreflect.Message) {
-			if !slices.Contains(c.subjects, msg.Get(g.grant.subject).String()) {
+		if len(probes) == 0 {
+			continue
+		}
+		var held []heldGrant
+		err := grantRowsOf(tx, g, probes, limits, func(msg protoreflect.Message) {
+			if !g.grant.namesSubject(c.subjects, msg) {
 				return
 			}
-			perms := g.grant.roles[grantRoleOf(g.grant, msg)]
-			if perms == nil {
-				return
+			if h, ok := grantFrom(c.model, g, msg); ok {
+				held = append(held, h)
 			}
-			if !g.access.hasParent() {
-				set.grantRoot(perms)
-				return
-			}
-			at, ok := parentOf(msg, c.model.parents[g.name])
-			if !ok {
-				return
-			}
-			parented = append(parented, pending{perms: perms, at: at})
 		})
 		if err != nil {
 			return nil, err
 		}
-		if len(parented) == 0 {
+		added, err := set.grantLive(tx, held)
+		if err != nil {
+			return nil, err
+		}
+		if team := c.model.teamOf[g.name]; team != "" {
+			for _, at := range added {
+				teams[team] = append(teams[team], at.key)
+			}
+		}
+	}
+	if len(teams) == 0 {
+		return set, nil
+	}
+	// Only rows of the caller's own grant entities can make a member, so the
+	// teams are complete before this pass, and nothing it adds is a team.
+	for _, g := range c.model.grantEntities {
+		edges := c.model.teamSubjects[g.name]
+		member := map[anchorRow]bool{}
+		var probes []caseProbe
+		for _, e := range edges {
+			probed := map[string]bool{}
+			for _, key := range teams[e.target.name] {
+				values, ok := keyValuesOf(e.target, key)
+				if !ok || probed[key] {
+					continue
+				}
+				// A caller can hold more than one member row in a team.
+				probed[key] = true
+				member[anchorRow{entity: e.target.name, key: key}] = true
+				probes = append(probes, caseProbe{index: refIndexName(e.ref.ref), values: values})
+			}
+		}
+		if len(probes) == 0 {
 			continue
 		}
-		// A grant anchored at a row that does not exist grants nothing, so a
-		// grant row cannot reserve access to a key before the row is created.
-		keys := map[string][]string{}
-		for _, p := range parented {
-			keys[p.at.entity] = append(keys[p.at.entity], p.at.key)
-		}
-		entities := make([]string, 0, len(keys))
-		for entity := range keys {
-			entities = append(entities, entity)
-		}
-		sort.Strings(entities)
-		live := make(map[anchorRow]bool, len(parented))
-		for _, entity := range entities {
-			ks := keys[entity]
-			for start := 0; start < len(ks); start += maxRowBatch {
-				batch := ks[start:min(start+maxRowBatch, len(ks))]
-				if err := tx.GetRows(entity, batch, func(row storage.Row) error {
-					if !row.Deleted {
-						live[anchorRow{entity: entity, key: row.Key}] = true
-					}
-					return nil
-				}); err != nil {
-					return nil, err
-				}
+		var held []heldGrant
+		err := grantRowsOf(tx, g, probes, limits, func(msg protoreflect.Message) {
+			if team, ok := parentOf(msg, edges); !ok || !member[team] {
+				return
 			}
-		}
-		for _, p := range parented {
-			if live[p.at] {
-				set.grantAt(p.perms, p.at)
+			if h, ok := grantFrom(c.model, g, msg); ok {
+				held = append(held, h)
 			}
+		})
+		if err != nil {
+			return nil, err
+		}
+		if _, err := set.grantLive(tx, held); err != nil {
+			return nil, err
 		}
 	}
 	return set, nil
 }
 
+// heldGrant is what one grant row gives: the permissions of its role, at the
+// workspace root when at is nil and at the row at names otherwise.
+type heldGrant struct {
+	perms []string
+	at    *anchorRow
+}
+
+// grantFrom returns what the grant row msg of g gives, whoever its subject
+// names. ok is false when its role is not declared, or its entity has an
+// access parent and the row names none.
+func grantFrom(model *accessModel, g *entityInfo, msg protoreflect.Message) (heldGrant, bool) {
+	perms := g.grant.roles[grantRoleOf(g.grant, msg)]
+	if perms == nil {
+		return heldGrant{}, false
+	}
+	if !g.access.hasParent() {
+		return heldGrant{perms: perms}, true
+	}
+	at, ok := parentOf(msg, model.parents[g.name])
+	if !ok {
+		return heldGrant{}, false
+	}
+	return heldGrant{perms: perms, at: &at}, true
+}
+
+// grantLive adds held to s, less the grants anchored at a row that is not
+// live in tx, and returns the anchor rows of the grants it added.
+func (s *accessSet) grantLive(tx storage.ReadTx, held []heldGrant) ([]anchorRow, error) {
+	// A grant anchored at a row that does not exist grants nothing, so a
+	// grant row cannot reserve access to a key before the row is created.
+	keys := map[string][]string{}
+	for _, h := range held {
+		if h.at == nil {
+			s.grantRoot(h.perms)
+			continue
+		}
+		keys[h.at.entity] = append(keys[h.at.entity], h.at.key)
+	}
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	entities := make([]string, 0, len(keys))
+	for entity := range keys {
+		entities = append(entities, entity)
+	}
+	sort.Strings(entities)
+	live := map[anchorRow]bool{}
+	for _, entity := range entities {
+		ks := keys[entity]
+		for start := 0; start < len(ks); start += maxRowBatch {
+			batch := ks[start:min(start+maxRowBatch, len(ks))]
+			if err := tx.GetRows(entity, batch, func(row storage.Row) error {
+				if !row.Deleted {
+					live[anchorRow{entity: entity, key: row.Key}] = true
+				}
+				return nil
+			}); err != nil {
+				return nil, err
+			}
+		}
+	}
+	var added []anchorRow
+	for _, h := range held {
+		if h.at != nil && live[*h.at] {
+			s.grantAt(h.perms, *h.at)
+			added = append(added, *h.at)
+		}
+	}
+	return added, nil
+}
+
+// caseProbe is one lookup of grant rows: the index of one subject case, and
+// the value a row's case holds to match it, one per index component.
+type caseProbe struct {
+	index  string
+	values []protoreflect.Value
+}
+
 // grantRowsOf calls fn with every live, decodable row of the grant entity g
-// whose subject may be one of subjects. fn still has to compare the subject:
-// the scan fallback yields every row.
-func grantRowsOf(tx storage.ReadTx, g *entityInfo, subjects []string, limits Limits, fn func(protoreflect.Message)) error {
+// that probes may find: the rows each probe's index holds under its values
+// while every index the probes name is ready, and every row of g otherwise.
+// fn still has to check the subject, since the scan yields every row.
+func grantRowsOf(tx storage.ReadTx, g *entityInfo, probes []caseProbe, limits Limits, fn func(protoreflect.Message)) error {
 	visit := func(row storage.Row) error {
 		if row.Deleted {
 			return nil
@@ -358,20 +459,28 @@ func grantRowsOf(tx storage.ReadTx, g *entityInfo, subjects []string, limits Lim
 		fn(msg.ProtoReflect())
 		return nil
 	}
-	ci := g.indexByName(grantSubjectIndexName(g.grant))
-	ready := false
-	if ci != nil && !limits.DisableIndexes {
-		var err error
-		if ready, err = ci.ready(tx, g.name); err != nil {
+	indexes := map[string]*compiledIndex{}
+	for _, p := range probes {
+		if _, known := indexes[p.index]; known {
+			continue
+		}
+		ci := g.indexByName(p.index)
+		if ci == nil || limits.DisableIndexes {
+			return tx.ScanEntity(g.name, visit)
+		}
+		ready, err := ci.ready(tx, g.name)
+		if err != nil {
 			return err
 		}
-	}
-	if !ready {
-		return tx.ScanEntity(g.name, visit)
+		if !ready {
+			return tx.ScanEntity(g.name, visit)
+		}
+		indexes[p.index] = ci
 	}
 	var keys []string
-	for _, subject := range subjects {
-		lo, hi, err := ci.probeRefIndex([]protoreflect.Value{protoreflect.ValueOfString(subject)})
+	for _, p := range probes {
+		ci := indexes[p.index]
+		lo, hi, err := ci.probeRefIndex(p.values)
 		if err != nil {
 			return err
 		}

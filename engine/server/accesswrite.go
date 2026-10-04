@@ -179,7 +179,7 @@ func touchesGrant(info *entityInfo, op syncplanev1.CrudOp, mask []string) bool {
 	if op != syncplanev1.CrudOp_CRUD_OP_PATCH {
 		return true
 	}
-	fields := []string{string(info.grant.subject.Name()), string(info.grant.role.Name())}
+	fields := []string{info.grant.subjectName, string(info.grant.role.Name())}
 	if info.access.hasParent() {
 		fields = append(fields, info.access.parentName)
 	}
@@ -226,7 +226,7 @@ func checkGrantSubset(tx storage.ReadTx, access *txAccess, info *entityInfo, key
 	return nil
 }
 
-// checkGrantRow refuses a grant row that could never grant anything: an empty
+// checkGrantRow refuses a grant row that could never grant anything: no
 // subject, a role the entity does not declare, or, on an entity with an access
 // parent, no parent. Every write path runs it, Trusted ones included, on a PUT
 // and on a PATCH that reaches one of those fields.
@@ -236,9 +236,9 @@ func (s *Server) checkGrantRow(info *entityInfo, key string, op syncplanev1.Crud
 	}
 	g := info.grant
 	row := msg.ProtoReflect()
-	if row.Get(g.subject).String() == "" {
+	if !g.subjectSet(row, s.catalogPtr().access, info.name) {
 		return Reject(CodeInvalidArgument, fmt.Sprintf(
-			"entity %q: row %q has an empty %q; a grant row must name its subject", info.name, key, g.subject.Name()))
+			"entity %q: row %q has an empty %q; a grant row must name its subject", info.name, key, g.subjectName))
 	}
 	if role := grantRoleOf(g, row); g.roles[role] == nil {
 		return Reject(CodeInvalidArgument, fmt.Sprintf(
@@ -340,9 +340,10 @@ type accessWrite struct {
 // stored row sits. On a grant entity, a write that can change what the row
 // grants also needs every permission of the stored role at the stored anchor,
 // so a caller cannot demote or remove a grant stronger than its own. A delete
-// of a row that other rows name as their access parent is refused while one
-// of them is live: deleting it would leave them anchored at nothing, and a row
-// created later with the same key would take them over.
+// of a row that other rows name as their access parent, or that grant rows
+// name as their subject, is refused while one of them is live: deleting it
+// would leave them pointing at nothing, and a row created later with the same
+// key would take them over.
 func (g *writeGate) beginAccessWrite(
 	tx storage.ReadTx,
 	info *entityInfo,
@@ -393,6 +394,17 @@ func (g *writeGate) beginAccessWrite(
 			return nil, Reject(CodeConflict, fmt.Sprintf(
 				"entity %q: row %q is the access parent of a live %s row; delete or move the rows below it first",
 				info.name, key, below))
+		}
+	}
+	if op == syncplanev1.CrudOp_CRUD_OP_DELETE && len(model.subjectsOf[info.name]) > 0 {
+		grant, err := liveRowNaming(tx, info, key, model.subjectsOf[info.name], model.teamSubjects, g.srv.limits)
+		if err != nil {
+			return nil, err
+		}
+		if grant != "" {
+			return nil, Reject(CodeConflict, fmt.Sprintf(
+				"entity %q: row %q is the subject of a live %s row; delete the grant rows that name it first",
+				info.name, key, grant))
 		}
 	}
 	w.live, w.stored = true, sr
@@ -505,19 +517,34 @@ func admitsUpdate(rules []accessRule, changed func() []string, final func(access
 }
 
 // liveRowBelow returns the name of an entity with a live row whose access
-// parent is the row of info with key, or "" when there is none. It probes the
-// reference index of each case that points at info, and scans the case's
-// entity, once for all of its cases, while that index is not ready.
+// parent is the row of info with key, or "" when there is none.
 func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key string, limits Limits) (string, error) {
+	return liveRowNaming(tx, info, key, model.children[info.name], model.parents, limits)
+}
+
+// liveRowNaming returns the name of an entity with a live row whose reference
+// along one of edges names the row of info with key, or "" when there is
+// none. cases maps each entity to every edge of the same kind it has, which a
+// scan compares a row with. It probes the reference index of each edge, and
+// scans the edge's entity, once for all of its edges, while that index is not
+// ready.
+func liveRowNaming(
+	tx storage.ReadTx,
+	info *entityInfo,
+	key string,
+	edges []*accessEdge,
+	cases map[string][]*accessEdge,
+	limits Limits,
+) (string, error) {
 	values, ok := keyValuesOf(info, key)
 	if !ok {
 		return "", nil
 	}
 	self := anchorRow{entity: info.name, key: key}
-	// A scan compares the parent of each row whatever case it holds, so one
-	// scan answers for every case of the child that points at info.
+	// A scan compares the reference of each row whatever case it holds, so
+	// one scan answers for every case of the entity that points at info.
 	scanned := map[string]bool{}
-	for _, e := range model.children[info.name] {
+	for _, e := range edges {
 		child := e.child
 		found := false
 		stop := func() error {
@@ -551,7 +578,7 @@ func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key s
 				if derr != nil {
 					return nil
 				}
-				if parent, ok := parentOf(msg.ProtoReflect(), model.parents[child.name]); ok && parent == self {
+				if named, ok := parentOf(msg.ProtoReflect(), cases[child.name]); ok && named == self {
 					return stop()
 				}
 				return nil

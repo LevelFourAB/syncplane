@@ -211,7 +211,7 @@ Dynamic schema construction helpers include `server.DynamicField` (`Message`, `R
 
 Schema registration validates that entity names conform to identifier rules and that `key_fields` match supported client types. See [Naming rules](naming.md).
 
-`server.DynamicEntity` carries `Access` and `Grant` (the `syncplanev1.AccessOptions` and `syncplanev1.GrantOptions` messages), and `server.DynamicField.AccessParent` marks a `Ref` field as the access parent. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
+`server.DynamicEntity` carries `Access`, `Grant` and `Members` (the `syncplanev1.AccessOptions`, `syncplanev1.GrantOptions` and `syncplanev1.MembersOptions` messages), and `server.DynamicField.AccessParent` marks a `Ref` field as the access parent. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
 
 ```go
 server.DynamicEntity{
@@ -511,6 +511,7 @@ server.WithGlobalRoles(fn GlobalRolesFunc)
 ```
 
 - A grant row applies to a caller when its subject field equals one of the caller's subjects. `WithSubjects` sets them; the default is `Principal.Subject`, and none for an anonymous caller. Empty subjects are ignored.
+- A grant row whose subject names a team applies to every member of that team: a caller whose own grant row of the team's member entity grants its role at the team row. See [Teams](proto-options.md#teams).
 - `WithGlobalRoles` adds roles the caller holds at the root of every workspace, such as staff roles from an identity-provider claim. A role that no grant entity declares fails the request with `internal`. Any other error from the hook fails the request as retryable.
 - Both hooks run once per request before any read transaction opens, and again on every `Subscribe` heartbeat.
 
@@ -529,11 +530,12 @@ Before the write transaction opens, the server refuses a write that can only be 
 | Delete                                                  | A delete rule that admits it where the stored row sits. Checked before the version check.                                                                                             |
 | Update that changes the access parent                   | One update rule that admits it both where the stored row sits and where the new row sits, and, where the stored row sits, the right to read every entity whose rows can sit below it. |
 | Delete of a row that is the access parent of a live row | Refused with `CodeConflict`. Delete or move the rows below it first; a batch can do both.                                                                                             |
+| Delete of a team row that a live grant row names        | Refused with `CodeConflict`. Delete the grant rows that name it first; a batch can do both.                                                                                           |
 | Write to a grant row that can change its role           | Every permission of the stored role at the stored anchor, and of the new role at the new anchor, each held there or up its chain.                                                     |
 
 A `PUT` without an expected version is a create when the row does not exist and an update when it exists.
 
-The grant-row rule runs on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, the role or the access parent: its field, or the oneof group of a polymorphic one. A caller can therefore grant and revoke only what it holds itself. Every write path, `Trusted` included, refuses with `CodeInvalidArgument` a grant row with an empty subject, an undeclared role, or no access parent where the entity has one, and a row that would sit below itself or more than `MaxAccessDepth` hops below a row without an access parent. A `Trusted` write may delete a row that rows sit below; those rows then anchor at nothing. All other refusals are `CodePermissionDenied`, with one message whether the parent is missing or hidden. `CanMutate`, `FieldPermissions` and `RowWritePermissions` still run and can refuse what the model allows.
+The grant-row rule runs on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, the role or the access parent: its field, or the oneof group of a polymorphic one. A caller can therefore grant and revoke only what it holds itself. Every write path, `Trusted` included, refuses with `CodeInvalidArgument` a grant row with no subject, an undeclared role, or no access parent where the entity has one, and a row that would sit below itself or more than `MaxAccessDepth` hops below a row without an access parent. A `Trusted` write may delete a row that rows sit below, or a team row that grant rows name; those rows then anchor at nothing, or grant to no one. All other refusals are `CodePermissionDenied`, with one message whether the parent is missing or hidden. `CanMutate`, `FieldPermissions` and `RowWritePermissions` still run and can refuse what the model allows.
 
 A mutator is checked by its `MutatorAccess`, inside the write transaction before its body runs:
 
@@ -544,7 +546,7 @@ server.WithMutator("rename_task", &taskv1.TaskArgs{}, renameTask,
 
 The caller must hold `Permission` at the row of `Entity` whose key the args' `KeyField` holds, or up its chain, or at the root when both are empty. A row that does not exist refuses the invocation. In a schema that uses the access model, a mutator without `MutatorAccess` is refused for every caller who is not `Trusted`. The rows the body writes are not checked; `EntityTx.Can(permission, prototype, key)` reports whether the invoking caller holds a permission at a row. Registration refuses a `MutatorAccess` whose permission no role grants, whose entity is not registered, or whose key field is not a singular string field of the args.
 
-A grant row counts only when its subject matches, its role is declared, and its anchor row exists. The engine derives an index over each grant entity's subject field, so the read costs one probe per subject once the index is built, and a scan of the grant entity before that.
+A grant row counts only when its subject matches, its role is declared, and its anchor row exists. The engine derives an index over each grant entity's subject field, so the read costs one probe per subject once the index is built, and a scan of the grant entity before that. A schema with teams adds a second pass: one probe of each team reference per team the caller is a member of.
 
 A Bootstrap for a caller whom an entity's read rules admit only below the root reads the rows below its anchors by key, walking down through the index of each access-parent reference, rather than scanning the entity.
 
