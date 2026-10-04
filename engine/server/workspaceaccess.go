@@ -27,8 +27,9 @@ import (
 // A schema that breaks a rule of the access model fails every request here
 // with failed_precondition, before the application's hook runs. In a schema
 // that uses the model, the gate then resolves the caller's subjects and global
-// roles, reads its grants from the primary, and refuses a caller that holds no
-// permission in the workspace, after the application's hook admitted it.
+// roles. When the schema declares a role, it also reads the caller's grants
+// from the primary and refuses a caller that holds no permission in the
+// workspace, after the application's hook admitted it.
 func (s *Server) enterWorkspace(ctx context.Context, workspaceID string) (admission, error) {
 	adm := admission{principal: principalOf(ctx)}
 	model, err := s.catalogPtr().accessModelOrErr()

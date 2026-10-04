@@ -92,9 +92,11 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * model.
    *
    * A schema uses the access model when any of its entities declares
-   * `access` or `grant`. In such a schema every entity must declare
-   * `access`, and registration refuses a schema where one does not. See
-   * `AccessOptions`.
+   * `access` or `grant`. An entity in such a schema that declares no
+   * `access` is outside the model: every caller admitted to the workspace
+   * reads and writes its rows, and no rule or access parent applies to
+   * them. A server built with `WithStrictAccess` refuses such an entity.
+   * See `AccessOptions`.
    *
    * @generated from field: syncplane.v1.AccessOptions access = 10;
    */
@@ -324,9 +326,9 @@ export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
  * Selects every caller admitted to the workspace as the source of an
  * `AccessRule`.
  *
- * In a schema that uses the access model, a caller is admitted when the
- * application's workspace hook lets it in and it holds at least one
- * permission in the workspace.
+ * A caller is admitted when the application's workspace hook lets it in. In a
+ * schema that declares a role, it must also hold at least one permission in
+ * the workspace.
  *
  * @generated from message syncplane.v1.AdmittedCaller
  */

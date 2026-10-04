@@ -171,9 +171,9 @@ Before you ship, check these points:
 - **Delete the grants before the team.** A client cannot delete a team that a live grant row names.
 - **Admins are members only with a row.** A role at the workspace root does not make a caller a member of a team. To let an admin see what a team sees, grant the admin the same permissions at the root.
 
-## 3. Declare access on every other entity
+## 3. Declare access on the entities the roles govern
 
-Once one entity declares `access` or `grant`, every entity must declare `access`. Mark the reference that places a row below another row with `access_parent`:
+An entity that declares no `access` stays open to every caller that enters the workspace, so declare `access` on each entity whose rows a role decides, and leave the others alone. Mark the reference that places a row below another row with `access_parent`; the entity it points at must declare `access` too:
 
 ```proto
 message Project {
@@ -345,7 +345,7 @@ message TaskNote {
 
 A client creates a note with `put`. The server refuses a `put` of a note that exists, because that write is an update. The TypeScript client rejects `patch`, `update` and `del` on a note before it sends them.
 
-To let every caller in the workspace read an entity, use `admitted: {}` as the source of the read rule. A caller is admitted when `CanAccessWorkspace` lets it in and it holds at least one permission in the workspace:
+To let every caller in the workspace read an entity, use `admitted: {}` as the source of the read rule. A caller is admitted when `CanAccessWorkspace` lets it in and, in a schema that declares a role, it holds at least one permission in the workspace:
 
 ```proto
 // Every caller in the workspace reads labels. Org admins write them.

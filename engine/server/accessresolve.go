@@ -73,6 +73,19 @@ func WithGlobalRoles(fn GlobalRolesFunc) Option {
 	}
 }
 
+// WithStrictAccess makes registration refuse an entity that declares no
+// access option in a schema that uses the access model. Without it such an
+// entity is outside the model: every caller the workspace gate admits reads
+// and writes its rows, and registration logs a warning for each such entity
+// when the schema declares a role. A schema that uses no access option at all
+// is unaffected.
+func WithStrictAccess() Option {
+	return func(s *Server) error {
+		s.strictAccess = true
+		return nil
+	}
+}
+
 // accessCaller is a caller's identity in the access model, resolved once per
 // request by the workspace gate: the subjects its grant rows may name and the
 // roles it holds at the root of every workspace.
@@ -611,13 +624,18 @@ func andFilters(a, b readFilter) readFilter {
 }
 
 // errNoAccess is the settled denial for a caller who holds no permission in a
-// workspace whose schema uses the access model.
+// workspace whose schema declares a role.
 var errNoAccess = DenyWorkspace("no access to this workspace")
 
-// admitAccess resolves what the caller holds from the primary and refuses a
-// caller that holds nothing. The primary is read so that a replica that has
-// not yet seen a new grant cannot turn into a permanent denial.
+// admitAccess resolves what the caller holds from the primary and, when the
+// schema declares a role, refuses a caller that holds nothing. The primary is
+// read so that a replica that has not yet seen a new grant cannot turn into a
+// permanent denial.
 func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessCaller) (*accessSet, error) {
+	if !c.model.requiresPermission() {
+		// No caller can hold a permission, so there are no grants to read.
+		return &accessSet{perms: map[string]*permAnchors{}}, nil
+	}
 	var set *accessSet
 	err := s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
 		var err error

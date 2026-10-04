@@ -79,6 +79,11 @@ type registerConfig struct {
 // that is already registered: its access, grant or access_parent options, or
 // the names of the enum values its grant role field matches. Every client
 // resyncs the rows the change affects.
+//
+// It also lets a registration declare the first role of a schema that uses
+// the access model without one, or remove the last. That decides whether the
+// workspace gate refuses a caller that holds no permission, so callers without
+// a grant row lose or gain access to every workspace.
 func AllowAccessChange() RegisterOption {
 	return func(c *registerConfig) { c.allowAccessChange = true }
 }
@@ -161,6 +166,7 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 				}
 			}
 		}
+		prev := c.access
 		for _, info := range infos {
 			c.entities[info.name] = info
 			c.byType[info.msgType.Descriptor().FullName()] = info
@@ -171,8 +177,11 @@ func (s *Server) registerDescriptorSet(set []byte, opts ...RegisterOption) (Regi
 		}
 		// A descriptor set is a whole schema, so unlike RegisterEntity it is
 		// judged here and refused when it breaks a rule of the access model.
-		c.recompileAccess(s.mutators, s.limits)
-		return c.accessErr
+		c.recompileAccess(s)
+		if c.accessErr != nil {
+			return c.accessErr
+		}
+		return validateGateEvolution(prev, c.access, cfg.allowAccessChange)
 	})
 	if err != nil {
 		return RegisterResult{}, err

@@ -664,10 +664,10 @@ func (c *catalog) accessModelOrErr() (*accessModel, error) {
 }
 
 // recompileAccess compiles the access model for the catalog's current
-// entities and the server's mutators. Every swap that adds or replaces an
-// entity calls it.
-func (c *catalog) recompileAccess(mutators map[string]*mutatorInfo, limits Limits) {
-	c.access, c.accessErr = compileAccessModel(c, mutators, limits.maxAccessDepth())
+// entities and the server's mutators and strictness. Every swap that adds or
+// replaces an entity calls it.
+func (c *catalog) recompileAccess(s *Server) {
+	c.access, c.accessErr = compileAccessModel(c, s.mutators, s.limits.maxAccessDepth(), s.strictAccess)
 }
 
 // indexBuildMark fingerprints every index of every registered entity, so that
@@ -831,6 +831,9 @@ type Server struct {
 	// nil when not installed. Fixed once New returns.
 	subjects    SubjectsFunc
 	globalRoles GlobalRolesFunc
+	// strictAccess is WithStrictAccess: registration refuses an entity outside
+	// the access model in a schema that uses it.
+	strictAccess bool
 }
 
 // catalogPtr returns the current immutable catalog snapshot.
@@ -1168,7 +1171,7 @@ func New(store storage.Adapter, opts ...Option) (*Server, error) {
 	// Entities register one at a time and mutators after them, so the model is
 	// judged once both are in.
 	if err := s.swapCatalog(func(c *catalog) error {
-		c.recompileAccess(s.mutators, s.limits)
+		c.recompileAccess(s)
 		return c.accessErr
 	}); err != nil {
 		return nil, err
@@ -1324,7 +1327,7 @@ func (s *Server) RegisterEntity(msg proto.Message) error {
 		if err := ensureHistoryEntity(c); err != nil {
 			return err
 		}
-		c.recompileAccess(s.mutators, s.limits)
+		c.recompileAccess(s)
 		return nil
 	}); err != nil {
 		return err

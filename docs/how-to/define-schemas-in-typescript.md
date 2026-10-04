@@ -92,7 +92,7 @@ import { schema } from 'syncplane';
    });
    ```
 
-   When one entity declares `access`, every entity must declare it, and a role of a grant entity must grant each permission that a rule names. See [Declare roles and permissions](declare-roles-and-permissions.md).
+   An entity without `access` stays open to every caller that enters the workspace, and a role of a grant entity must grant each permission that a rule names. See [Declare roles and permissions](declare-roles-and-permissions.md).
 
    At the call site, the client rejects a write that no rule can admit. For example, `comment.mutate.del(...)` rejects with an error. A `put()` creates a comment, and the server refuses a `put()` of a comment that exists. For more information, see [Access model](../reference/typescript-client.md#access-model).
 

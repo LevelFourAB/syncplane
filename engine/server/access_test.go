@@ -14,6 +14,7 @@ import (
 	"google.golang.org/protobuf/types/descriptorpb"
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
+	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/server"
 )
@@ -159,6 +160,15 @@ func unknownField() []byte {
 	return protowire.AppendVarint(protowire.AppendTag(nil, 999, protowire.VarintType), 1)
 }
 
+// plainSpec is an entity with a key and nothing else: no access, no grant,
+// no access parent.
+func plainSpec(name string) server.DynamicEntity {
+	return server.DynamicEntity{
+		Name: name, KeyFields: []string{"id"},
+		Fields: []server.DynamicField{{Name: "id", Number: 1, Kind: protoreflect.StringKind}},
+	}
+}
+
 // accessFileSet returns a descriptor set holding the compiled access test
 // schema, after change has edited its file.
 func accessFileSet(change func(*descriptorpb.FileDescriptorProto)) []byte {
@@ -217,6 +227,33 @@ var _ = Describe("Access model registration", func() {
 
 		It("registers a descriptor set that uses the model", func() {
 			Expect(register(orgSpecs())).To(Succeed())
+		})
+
+		It("registers an entity that declares no access beside entities that do", func() {
+			Expect(register(append(orgSpecs(), plainSpec("comment")))).To(Succeed())
+		})
+
+		// Every caller that enters a workspace of a schema with a role holds a
+		// permission, and an entity outside the model is open to each of them.
+		It("warns about an entity outside the model when the schema declares a role", func() {
+			logs := &recordingHandler{}
+			srv = newBareServer(server.WithLogger(slog.New(logs)))
+			Expect(register(append(orgSpecs(), plainSpec("comment"), plainSpec("audit")))).To(Succeed())
+			Expect(logs.attrs("access model warning", "finding")).To(ConsistOf(
+				ContainSubstring(`entity "audit" declares no access option`),
+				ContainSubstring(`entity "comment" declares no access option`),
+			))
+			Expect(logs.levels("access model warning")).To(HaveEach(slog.LevelWarn))
+		})
+
+		// Without a role, admitted means what the workspace hook admits, and an
+		// entity outside the model behaves as it does in a schema without one.
+		It("does not warn about an entity outside the model when the schema declares no role", func() {
+			logs := &recordingHandler{}
+			_, err := server.New(newTestStore(), server.WithLogger(slog.New(logs)),
+				server.WithEntities(&accessv1.Note{}, &accessv1.Setting{}, &testdatav1.Widget{}))
+			Expect(err).NotTo(HaveOccurred())
+			Expect(logs.count("access model warning")).To(BeZero())
 		})
 
 		// view_members governs OrgMember at the workspace root and
@@ -393,16 +430,36 @@ var _ = Describe("Access model registration", func() {
 		}, "grant role carries option fields this server does not know"),
 	)
 
+	Context("under WithStrictAccess", func() {
+		BeforeEach(func() {
+			srv = newBareServer(server.WithStrictAccess())
+		})
+
+		It("registers a schema where every entity declares access", func() {
+			Expect(register(orgSpecs())).To(Succeed())
+		})
+
+		It("refuses an entity that declares no access", func() {
+			Expect(register(append(orgSpecs(), plainSpec("comment")))).To(MatchError(ContainSubstring(
+				`entity "comment" declares no access option`)))
+		})
+
+		It("refuses an entity that declares no access in a schema without a role", func() {
+			_, err := server.New(newTestStore(), server.WithStrictAccess(),
+				server.WithEntities(&accessv1.Note{}, &accessv1.Setting{}, &testdatav1.Widget{}))
+			Expect(err).To(MatchError(ContainSubstring(`entity "widget" declares no access option`)))
+		})
+
+		It("registers a schema that does not use the model", func() {
+			_, err := server.New(newTestStore(), server.WithStrictAccess(), server.WithEntities(&testdatav1.Widget{}))
+			Expect(err).NotTo(HaveOccurred())
+		})
+	})
+
 	DescribeTable("refuses a schema that breaks a rule across entities",
 		func(change func([]server.DynamicEntity) []server.DynamicEntity, want string) {
 			Expect(register(change(orgSpecs()))).To(MatchError(ContainSubstring(want)))
 		},
-		Entry("an entity without access", func(s []server.DynamicEntity) []server.DynamicEntity {
-			return append(s, server.DynamicEntity{
-				Name: "comment", KeyFields: []string{"id"},
-				Fields: []server.DynamicField{{Name: "id", Number: 1, Kind: protoreflect.StringKind}},
-			})
-		}, `entity "comment" declares no access option`),
 		Entry("an access parent outside the model", func(s []server.DynamicEntity) []server.DynamicEntity {
 			task := specNamed(s, "task")
 			task.Access = nil
@@ -510,6 +567,23 @@ var _ = Describe("Access model registration", func() {
 			Expect(register(orgSpecs())).To(MatchError(ContainSubstring("changes its access model")))
 			Expect(register(orgSpecs(), server.AllowAccessChange())).To(Succeed())
 		})
+
+		// The first role makes the gate refuse every caller without a grant,
+		// although no entity that was registered before changes.
+		It("refuses a schema declaring its first role without the flag", func() {
+			srv = newBareServer()
+			note := server.DynamicEntity{
+				Name: "note", KeyFields: []string{"id"},
+				Fields: []server.DynamicField{{Name: "id", Number: 1, Kind: protoreflect.StringKind}},
+				Access: &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{admittedRule("read", "write")}},
+			}
+			Expect(register([]server.DynamicEntity{note})).To(Succeed())
+
+			withMembers := []server.DynamicEntity{note, orgSpecs()[0]}
+			specNamed(withMembers, "org_member").Grant.Roles[0].Grants = []string{"view_members", "manage_members"}
+			Expect(register(withMembers)).To(MatchError(ContainSubstring("the schema declares its first role")))
+			Expect(register(withMembers, server.AllowAccessChange())).To(Succeed())
+		})
 	})
 
 	Context("evolution of an enum role field", func() {
@@ -558,6 +632,19 @@ var _ = Describe("Access model registration", func() {
 })
 
 // attrs returns the value of key on every record logged with msg.
+// levels returns the level of every record with the message.
+func (h *recordingHandler) levels(msg string) []slog.Level {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []slog.Level
+	for _, r := range h.records {
+		if r.Message == msg {
+			out = append(out, r.Level)
+		}
+	}
+	return out
+}
+
 func (h *recordingHandler) attrs(msg, key string) []string {
 	h.mu.Lock()
 	defer h.mu.Unlock()

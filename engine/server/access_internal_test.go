@@ -61,7 +61,7 @@ var _ = Describe("access model fingerprint", func() {
 			c.entities[info.name] = info
 			c.byType[info.msgType.Descriptor().FullName()] = info
 		}
-		m, err := compileAccessModel(c, nil, 32)
+		m, err := compileAccessModel(c, nil, 32, false)
 		Expect(err).NotTo(HaveOccurred())
 		Expect(m).NotTo(BeNil())
 		return m

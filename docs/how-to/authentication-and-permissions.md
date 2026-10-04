@@ -144,6 +144,34 @@ Some writes must come only from your own server code. For example, only the serv
 
 In a schema that uses the access model, leave the operation out of every access rule of the entity. The server refuses the write before `CanMutate` runs, and the TypeScript client rejects it at the call site. See [Allow some operations and not others](declare-roles-and-permissions.md#allow-some-operations-and-not-others).
 
+The access model does not need roles for this. When no entity declares `grant`, the schema declares no role, and `CanAccessWorkspace` alone decides who enters a workspace. Give the entity rules with `admitted: {}` as the source. The other entities need no `access`: an entity without one is open to every caller that enters the workspace, as before.
+
+```proto
+// Clients read activity rows. Only the server records them.
+message Activity {
+	option (syncplane.v1.entity) = {
+		name: "activity"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true admitted: {} } ] }
+	};
+	string id = 1;
+	string text = 2;
+}
+
+// Clients create, read and archive projects, but never delete them.
+message Project {
+	option (syncplane.v1.entity) = {
+		name: "project"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true create: true update: true admitted: {} } ] }
+	};
+	string id = 1;
+	bool archived = 2;
+}
+```
+
+If you later add a grant entity, the schema declares its first role, and the workspace gate then refuses every caller that holds no permission. Registration refuses that change unless you allow it; see [Changing the access model](../reference/proto-options.md#changing-the-access-model).
+
 In a schema that does not use the access model, refuse the operation in `CanMutate`. The hook receives each CRUD write of a batch on its own, with its entity and its operation:
 
 ```go
@@ -159,7 +187,7 @@ func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string,
 - **A custom mutator reaches the hook as one `Write` with `Custom` set,** and the rows that its body writes do not. A mutator that deletes projects therefore needs its own check.
 - **The client cannot predict this refusal.** It queues the delete, and reverts it when the server rejects it.
 
-Neither access rules nor `CanMutate` can enforce a rule that depends on the stored row, such as "only edit your own comment". Use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
+`CanMutate` cannot enforce a rule that depends on the stored row, such as "only edit your own comment". An access rule can when a field of the row names the caller: set `subject` on the rule to that field. For other rules, use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
 
 To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
 

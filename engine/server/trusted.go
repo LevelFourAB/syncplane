@@ -63,8 +63,8 @@ func isTrusted(ctx context.Context) bool {
 // instead of having to unpick a transport status it never asked for.
 //
 // In a schema that uses the access model it also resolves the caller's access
-// and refuses a caller that holds no permission in the workspace, as
-// enterWorkspace does.
+// as enterWorkspace does, and refuses a caller that holds no permission in the
+// workspace when the schema declares a role.
 func (s *Server) gate(ctx context.Context, workspaceID string) (adm admission, enforced bool, err error) {
 	if isTrusted(ctx) {
 		return admission{}, false, nil

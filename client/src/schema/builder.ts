@@ -432,8 +432,8 @@ export class Field<T> {
 	/**
 	 * Places each row below the row this reference points at in the access
 	 * model: a permission held at the referenced row applies to this row. An
-	 * entity has at most one access parent, and must declare `access`; see
-	 * {@link EntityOptions.access}.
+	 * entity has at most one access parent, and both it and the referenced
+	 * entity must declare `access`; see {@link EntityOptions.access}.
 	 *
 	 * Throws unless the field is a singular `ref()`. The server also refuses
 	 * the mark on a protected field.
@@ -724,7 +724,9 @@ export interface AccessDecl {
  * and `delete`. The source is either `permission`, which admits a caller that
  * holds that permission at the workspace root, at the row, or at a row up the
  * row's chain of `.accessParent()` references, or `admitted: true`, which
- * admits every caller admitted to the workspace.
+ * admits every caller admitted to the workspace. The server's workspace hook
+ * admits a caller; in a schema where some entity declares `grant`, the caller
+ * must also hold at least one permission in the workspace.
  *
  * `subject` names a singular `text()` field that must hold one of the
  * caller's subjects; an empty value never matches, and a permission held at
@@ -922,10 +924,11 @@ export interface EntityOptions {
 	 * Who can read and write rows of this entity in the access model; see
 	 * {@link AccessDecl}.
 	 *
-	 * In a schema where any entity declares `access` or `grant`, every entity
-	 * must declare `access`, and the server refuses a schema where one does
-	 * not. When omitted, the entity is outside the access model and its writes
-	 * are subject only to the app's permission policy.
+	 * When omitted, the entity is outside the access model: every caller the
+	 * server admits to the workspace reads and writes its rows, subject only
+	 * to the app's permission policy, and `can()` answers `'unknown'` for them.
+	 * A server built with `WithStrictAccess` refuses such an entity in a schema
+	 * where any entity declares `access` or `grant`.
 	 *
 	 * Collaborative-text fields are edited by PATCH, so a client edits them
 	 * only where a rule admits `update`.

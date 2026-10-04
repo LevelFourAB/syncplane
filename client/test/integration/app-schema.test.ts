@@ -359,4 +359,59 @@ describe('runtime registration of an access-model schema', () => {
 		});
 		expect(res.entityNames).toContain('org_member');
 	});
+
+	// Without a grant entity the schema declares no role, so the app's
+	// workspace hook alone admits a caller, and the rules still decide what
+	// each caller can do. syncplaned admits every caller.
+	function makeNoRoleBundle(opts: { withMembers?: boolean } = {}) {
+		const entry = entity('entry', { id: text().key(), body: text() }, {
+			access: { allow: [ { read: true, create: true, admitted: true } ] },
+		});
+		if (!opts.withMembers) return defineSchema(entry);
+		const member = entity('member', { id: text().key(), userId: text(), role: text() }, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [ { name: 'admin', grants: [ 'view_members' ] } ],
+			},
+			access: { allow: [ { read: true, permission: 'view_members' } ] },
+		});
+		return defineSchema(entry, member);
+	}
+
+	it('syncs a schema that declares no role, and holds writes to its rules', async () => {
+		const noRole = makeNoRoleBundle();
+		await registerSchema(adminTransport(), 'access-norole', noRole, { token: TOKEN });
+		const Entry = noRole.descMessage('entry');
+		const ws = freshWorkspace();
+
+		const a = appClient('access-norole', ws, noRole.descMessages());
+		await a.start();
+		await a.mutate.put(Entry, { id: 'e1', body: 'posted' }, { expectedVersion: 0n });
+		await a.syncNow();
+		expect(await a.pendingCount()).toBe(0);
+
+		const b = appClient('access-norole', ws, noRole.descMessages());
+		await b.start();
+		await b.syncNow();
+		expect(((await b.get(Entry, 'e1')) as Record<string, any> | undefined)?.body).toBe('posted');
+		await expect(b.mutate.patch(Entry, 'e1', { body: 'edited' }))
+			.rejects.toThrow(/no access rule admits update/);
+		await expect(b.mutate.del(Entry, 'e1')).rejects.toThrow(/no access rule admits delete/);
+
+		await a.close();
+		await b.close();
+	});
+
+	it('declares the first role of a schema only when the registration allows it', async () => {
+		await registerSchema(adminTransport(), 'access-first-role', makeNoRoleBundle(), { token: TOKEN });
+		const withMembers = makeNoRoleBundle({ withMembers: true });
+		await expect(registerSchema(adminTransport(), 'access-first-role', withMembers, { token: TOKEN }))
+			.rejects.toThrow(/the schema declares its first role/);
+		const res = await registerSchema(adminTransport(), 'access-first-role', withMembers, {
+			token: TOKEN,
+			allowAccessChange: true,
+		});
+		expect(res.entityNames).toContain('member');
+	});
 });

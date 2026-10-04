@@ -992,16 +992,24 @@ type accessModel struct {
 	// readPerms are the permissions model entities read by, sorted. They are
 	// what a cursor records of a caller's access.
 	readPerms []string
-	// readRules are the read rules of the model entities, sorted by entity
-	// (see readRuleOf), and fingerprint is their hash (see readPolicyOf). Two
-	// models with the same fingerprint read the same rows from the same
-	// anchors. What roles grant is not part of it: a cursor records that as
-	// the anchors a caller holds.
+	// readRules are the read rules of every entity, the ones outside the
+	// model included, sorted by entity (see readRuleOf), and fingerprint is
+	// their hash (see readPolicyOf). Two models with the same fingerprint read
+	// the same rows from the same anchors. What roles grant is not part of
+	// it: a cursor records that as the anchors a caller holds.
 	readRules   []*syncplanecursorv1.EntityReadRule
 	fingerprint uint64
 	// warnings are findings that do not make the model invalid but are likely
 	// mistakes. Registration logs them.
 	warnings []string
+}
+
+// requiresPermission reports whether the workspace gate admits only a caller
+// that holds a permission: the schema declares a role. Without one no caller
+// can hold a permission, and the application's workspace hook alone admits
+// callers. A nil model requires none.
+func (m *accessModel) requiresPermission() bool {
+	return m != nil && len(m.roles) > 0
 }
 
 // accessEdge is one case of an access parent in a compiled model: a row of
@@ -1042,6 +1050,13 @@ type modelRole struct {
 // and compiles the result. It returns nil, nil for a schema that does not use
 // the model.
 //
+// An entity that declares no access is outside the model: no rule and no
+// anchor applies to its rows, so every caller the workspace gate admits reads
+// and writes them, as in a schema without the model. strict refuses such an
+// entity instead (see WithStrictAccess). In a schema that declares a role the
+// gate admits only callers that hold a permission, and each outside entity is
+// open to all of them, which the model reports as a warning.
+//
 // The catalog may be half built: RegisterEntity adds one entity at a time, so
 // a schema can fail here until its last entity arrives. The caller decides
 // whether that is an error to report or a state to hold (see
@@ -1051,14 +1066,14 @@ type modelRole struct {
 // permission, and is checked against the model here. maxDepth is
 // Limits.MaxAccessDepth: an entity whose chain of parent entities is longer
 // is refused, since none of its rows could anchor anywhere.
-func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth int) (*accessModel, error) {
-	names := make([]string, 0, len(c.entities))
+func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth int, strict bool) (*accessModel, error) {
+	all := make([]string, 0, len(c.entities))
 	inUse := false
 	for name, info := range c.entities {
 		if isEngineEntity(info) {
 			continue
 		}
-		names = append(names, name)
+		all = append(all, name)
 		if info.access != nil || info.grant != nil {
 			inUse = true
 		}
@@ -1066,7 +1081,22 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	if !inUse {
 		return nil, nil
 	}
-	sort.Strings(names)
+	sort.Strings(all)
+	// names are the entities in the model; outside the ones that declare no
+	// access. A grant entity declares access (see grantOf), so it is never
+	// outside.
+	var names, outside []string
+	for _, name := range all {
+		if c.entities[name].access == nil {
+			if strict {
+				return nil, fmt.Errorf("server: entity %q declares no access option; the server is built with WithStrictAccess, "+
+					"so in a schema that uses the access model every entity declares access: { allow: [...] }", name)
+			}
+			outside = append(outside, name)
+			continue
+		}
+		names = append(names, name)
+	}
 
 	m := &accessModel{
 		roles:        map[string]*modelRole{},
@@ -1083,10 +1113,6 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	for _, name := range names {
 		info := c.entities[name]
 		a := info.access
-		if a == nil {
-			return nil, fmt.Errorf("server: entity %q declares no access option; in a schema that uses the access model "+
-				"every entity declares access: { allow: [...] }", name)
-		}
 		m.entities[name] = info
 		for _, p := range a.parents {
 			target, ok := c.byType[p.ref.ref.Target.FullName()]
@@ -1145,9 +1171,6 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	}
 
 	for _, name := range names {
-		if c.entities[name].access == nil {
-			continue
-		}
 		d := m.depthOf(name)
 		if d > maxDepth {
 			return nil, fmt.Errorf("server: entity %q can sit %d access_parent hops below an entity without a parent, "+
@@ -1245,7 +1268,18 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		}
 	}
 
-	for _, name := range names {
+	if len(m.roles) > 0 {
+		for _, name := range outside {
+			m.warnings = append(m.warnings, fmt.Sprintf(
+				"entity %q declares no access option, so every caller that holds a permission in a workspace reads and writes its rows; "+
+					"declare access on it, or build the server with WithStrictAccess to refuse it", name))
+		}
+	}
+
+	// The record covers the entities outside the model as well, so a cursor
+	// resets when an entity it holds rows of joins or leaves the model, and
+	// not when an entity is added outside it.
+	for _, name := range all {
 		m.readRules = append(m.readRules, &syncplanecursorv1.EntityReadRule{Entity: name, Rule: readRuleOf(c.entities[name])})
 	}
 	m.fingerprint = readPolicyOf(m.readRules)
@@ -1426,11 +1460,14 @@ func (m *accessModel) readersBelow(name string) []readers {
 	return out
 }
 
-// readRuleOf renders what decides which rows of a model entity a caller
-// reads, in a canonical form: two entities with equal rules read the same
-// rows from the same anchors.
+// readRuleOf renders what decides which rows of an entity a caller reads, in
+// a canonical form: two entities with equal rules read the same rows from the
+// same anchors. An entity outside the model reads every row.
 func readRuleOf(info *entityInfo) string {
 	a := info.access
+	if a == nil {
+		return "open"
+	}
 	rule := "read=" + a.read.key()
 	if a.hasParent() {
 		rule += " parent=" + a.parentRule()
@@ -1577,6 +1614,25 @@ func validateAccessEvolution(old, next *entityInfo, allow bool) error {
 			"register with the access change allowed to apply it", next.name)
 	}
 	return nil
+}
+
+// validateGateEvolution refuses, unless allow is set, a schema that changes
+// whether the workspace gate requires a permission (see requiresPermission).
+// prev is the model of the schema registered before, nil when there was none.
+func validateGateEvolution(prev, next *accessModel, allow bool) error {
+	// A schema that adopts the model or leaves it changes the access of an
+	// entity it had, which validateAccessEvolution refuses, so only a schema
+	// that keeps the model needs this check: a new grant entity changes no
+	// entity that was registered before.
+	if allow || prev == nil || prev.requiresPermission() == next.requiresPermission() {
+		return nil
+	}
+	if next.requiresPermission() {
+		return fmt.Errorf("server: the schema declares its first role, so the workspace gate starts to refuse " +
+			"every caller that holds no permission; register with the access change allowed to apply it")
+	}
+	return fmt.Errorf("server: the schema declares no role any more, so the workspace gate admits every caller " +
+		"the application's workspace hook admits; register with the access change allowed to apply it")
 }
 
 // logAccessWarnings logs the findings of a valid access model that are likely
