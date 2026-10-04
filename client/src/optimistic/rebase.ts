@@ -8,7 +8,7 @@ import {
 } from '@bufbuild/protobuf';
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
-import { ACCESS_TOUCH_ENTITY, touchPendingAccess } from '../access.js';
+import { ACCESS_TOUCH_ENTITY, type DecodedAccess, touchPendingAccess } from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
 	type CrudMutation,
@@ -17,7 +17,6 @@ import {
 	MutationSchema,
 } from '../gen/syncplane/v1/mutation_pb.js';
 import type { RowChange } from '../gen/syncplane/v1/patch_pb.js';
-import { type CallerAccess, CallerAccessSchema } from '../gen/syncplane/v1/service_pb.js';
 import {
 	confirmedKey,
 	type ConfirmedRecord,
@@ -978,11 +977,12 @@ export interface FinalizeInput {
 	deferAcked?: boolean;
 	/**
 	 * What the caller holds in the workspace, when the server sent it with this
-	 * position. Absent leaves the stored summary alone, except on a baseline,
-	 * which removes it: a snapshot without one is of a schema without the
-	 * access model.
+	 * position, encoded by encodeAccess; the transaction stores its `raw`.
+	 * Absent leaves the stored summary alone, except on a baseline, which
+	 * removes it: a snapshot without one is of a schema without the access
+	 * model.
 	 */
-	callerAccess?: CallerAccess;
+	callerAccess?: DecodedAccess;
 }
 
 /**
@@ -1099,7 +1099,7 @@ export async function finalizeRebase(
 		await tx.put(metaServerSeq(workspaceId), input.serverSeq.toString());
 	}
 	if (input.callerAccess !== undefined) {
-		await tx.put(metaCallerAccess(workspaceId), toBinary(CallerAccessSchema, input.callerAccess));
+		await tx.put(metaCallerAccess(workspaceId), input.callerAccess.raw);
 		// Announced like a row change, so it reaches this tab's access
 		// listeners and every other tab's on the same channel (see
 		// SyncClient.onAccessChange).
@@ -1173,7 +1173,7 @@ export interface RebaseInput {
 	 */
 	serverSeq?: bigint;
 	/** The page's CallerAccess (PullResponse.caller_access); see FinalizeInput. */
-	callerAccess?: CallerAccess;
+	callerAccess?: DecodedAccess;
 }
 
 export interface RebaseResult {

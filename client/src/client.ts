@@ -1836,12 +1836,15 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
 	>();
 	/**
-	 * Per workspace, the CallerAccess that accessSummaryIn decoded last, with
-	 * its stored bytes. accessSummaryIn uses it again while the stored bytes
-	 * stay the same, so a local write, which moves the access generation
-	 * through the pending queue, does not decode the CallerAccess again.
+	 * Per workspace, the CallerAccess that accessSummaryIn decoded last, or
+	 * that this tab stored last (see accessStored), with its stored bytes.
+	 * accessSummaryIn uses it again while the stored bytes stay the same, so a
+	 * local write, which moves the access generation through the pending
+	 * queue, does not decode the CallerAccess again.
 	 */
 	private decodedAccess = new Map<string, DecodedAccess>();
+	/** The workspaces accessSummaryIn has read a summary for. */
+	private accessAsked = new Set<string>();
 	/** The access batch that still takes predictions; see askAccess. */
 	private accessBatch: AccessAsk[] | undefined;
 	private coordinator?: Coordinator;
@@ -2005,6 +2008,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.statusTracker.removeWorkspace(workspaceId);
 		this.accessSummaries.delete(workspaceId);
 		this.decodedAccess.delete(workspaceId);
+		this.accessAsked.delete(workspaceId);
 		if (this.defaultWorkspaceId === workspaceId) {
 			this.defaultWorkspaceId = undefined;
 			this.statusTracker.setDefaultWorkspace(undefined);
@@ -2710,6 +2714,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			onIndexesStale: (workspaceId) => this.startIndexBuild(workspaceId),
 			mirrors: this.mirrors,
 			notify: (touched) => this.notifyChange(touched),
+			onAccessStored: (workspaceId, access) => this.accessStored(workspaceId, access),
 			status: this.statusTracker,
 			scopes: this.ownScopes(),
 			// Resolved through the registry so an unregistered schema fails here,
@@ -3564,6 +3569,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		tx: KVRead,
 		workspaceId: string,
 	): Promise<AccessSummary | undefined> {
+		this.accessAsked.add(workspaceId);
 		const generation = await tx.get(accessGeneration(workspaceId));
 		const cached = this.accessSummaries.get(workspaceId);
 		if (generation !== undefined && cached?.generation === generation) return cached.summary;
@@ -3594,6 +3600,20 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			});
 		}
 		return summary;
+	}
+
+	/**
+	 * Keeps `access`, which a commit of this tab just stored for `workspaceId`,
+	 * for accessSummaryIn to compare the stored bytes with, so the next
+	 * prediction does not decode the bytes this tab encoded. The comparison
+	 * is what keeps it correct when a later commit, in this tab or another,
+	 * stores other bytes. Kept only for a workspace this tab asks predictions
+	 * in, because what it keeps stays in memory until the next CallerAccess
+	 * replaces it.
+	 */
+	private accessStored(workspaceId: string, access: DecodedAccess): void {
+		if (!this.accessAsked.has(workspaceId) || !this.scopes.has(workspaceId)) return;
+		this.decodedAccess.set(workspaceId, access);
 	}
 
 	/** @internal backs devtools.ts; see ClientInternals. */

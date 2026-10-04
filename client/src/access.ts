@@ -6,7 +6,13 @@
  * app shape its UI before it asks.
  */
 
-import { type DescField, type DescMessage, fromBinary, type Message } from '@bufbuild/protobuf';
+import {
+	type DescField,
+	type DescMessage,
+	fromBinary,
+	type Message,
+	toBinary,
+} from '@bufbuild/protobuf';
 
 import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
 import { type CallerAccess, CallerAccessSchema } from './gen/syncplane/v1/service_pb.js';
@@ -52,7 +58,8 @@ export const ACCESS_TOUCH_ENTITY = '#access';
 /** A CallerAccess indexed for lookups. */
 export class AccessSummary {
 	private readonly roots = new Set<string>();
-	private readonly anchors = new Map<string, Set<string>>();
+	/** The keys of the rows each permission is held at, by entity. */
+	private readonly anchors = new Map<string, Map<string, Set<string>>>();
 	/** The caller's subjects, the primary subject first. */
 	readonly subjects: readonly string[];
 
@@ -63,11 +70,16 @@ export class AccessSummary {
 				this.roots.add(p.permission);
 				continue;
 			}
-			const set = new Set<string>();
+			// Nested maps and not one set of entity and key joined: a joined
+			// string costs an allocation for each key here and for each lookup
+			// in holds, and the keys the decode made can go in as they are.
+			const byEntity = new Map<string, Set<string>>();
 			for (const a of p.anchors) {
-				for (const key of a.keys) set.add(anchorId(a.entity, key));
+				const keys = byEntity.get(a.entity);
+				if (keys === undefined) byEntity.set(a.entity, new Set(a.keys));
+				else for (const key of a.keys) keys.add(key);
 			}
-			this.anchors.set(p.permission, set);
+			this.anchors.set(p.permission, byEntity);
 		}
 	}
 
@@ -82,14 +94,43 @@ export class AccessSummary {
 	 */
 	holds(permission: string, entity: string, key: string): boolean {
 		return this.roots.has(permission)
-			|| (this.anchors.get(permission)?.has(anchorId(entity, key)) ?? false);
+			|| (this.anchors.get(permission)?.get(entity)?.has(key) ?? false);
 	}
 }
 
-/** An {@link AccessSummary} and the encoded CallerAccess it was decoded from. */
+/** An encoded CallerAccess and the {@link AccessSummary} of it. */
 export interface DecodedAccess {
 	readonly raw: Uint8Array;
 	readonly summary: AccessSummary;
+}
+
+/**
+ * Encodes `access` to store it. The result's summary is made from `access`
+ * when it is first read, with no decode of `raw`, so do not change `access`
+ * or `raw` after the call. Given to {@link decodeAccess} as `last`, the
+ * result comes back for equal bytes with no decode.
+ */
+export function encodeAccess(access: CallerAccess): DecodedAccess {
+	return new EncodedAccess(toBinary(CallerAccessSchema, access), access);
+}
+
+class EncodedAccess implements DecodedAccess {
+	private access: CallerAccess | undefined;
+	private built: AccessSummary | undefined;
+
+	constructor(readonly raw: Uint8Array, access: CallerAccess) {
+		this.access = access;
+	}
+
+	get summary(): AccessSummary {
+		if (this.built === undefined) {
+			this.built = new AccessSummary(this.access!);
+			// The summary keeps what it reads of the message, so the message
+			// need not stay in memory.
+			this.access = undefined;
+		}
+		return this.built;
+	}
 }
 
 /**
@@ -195,10 +236,6 @@ export function decideRules(
 function and(a: CanAnswer, b: CanAnswer): CanAnswer {
 	if (a === 'no' || b === 'no') return 'no';
 	return a === 'unknown' || b === 'unknown' ? 'unknown' : 'yes';
-}
-
-function anchorId(entity: string, key: string): string {
-	return `${entity}/${key}`;
 }
 
 /**

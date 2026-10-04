@@ -35,7 +35,7 @@ import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
 import { accessGeneration, metaCallerAccess, pendingPrefix } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { GenerationOf, KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
-import { createTestClient, DEFAULT_WORKSPACE } from '../../src/testing/index.js';
+import { createTestClient, DEFAULT_WORKSPACE, TestServer } from '../../src/testing/index.js';
 
 const WS = 'ws-can';
 
@@ -147,6 +147,22 @@ describe('hasPermission()', () => {
 			role: 'project_reader',
 		});
 		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await c.close();
+	});
+
+	it('finds a key in each of two anchor rows of one entity', async () => {
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, {
+			permissions: [ {
+				permission: 'edit_tasks',
+				anchors: [ { entity: 'project', keys: [ 'p1' ] }, { entity: 'project', keys: [ 'p2' ] } ],
+			} ],
+		});
+		const c = offlineClient(kv, [ ProjectSchema, ProjectMemberSchema, TaskSchema ]);
+		const answers = await Promise.all(
+			[ 'p1', 'p2', 'p3' ].map((k) => c.hasPermission(ProjectSchema, k, 'edit_tasks')),
+		);
+		expect(answers).toEqual([ 'yes', 'yes', 'no' ]);
 		await c.close();
 	});
 
@@ -816,6 +832,54 @@ describe('the stored CallerAccess', () => {
 		expect(await ask()).toBe('yes');
 		expect(decodes.callerAccess).toBe(1);
 		await t.close();
+	});
+
+	it('is not decoded by the client that stored it, until another client stores one', async () => {
+		const server = new TestServer({ entities });
+		server.put(TaskSchema, { id: 't1', project: { id: 'p1' } }, { workspace: WS });
+		server.put(TaskSchema, { id: 't2', project: { id: 'p2' } }, { workspace: WS });
+		const grant = (...projects: string[]) =>
+			server.setCallerAccess({
+				permissions: [ {
+					permission: 'edit_tasks',
+					anchors: [ { entity: 'project', keys: projects } ],
+				} ],
+			}, { workspace: WS });
+		// Two clients on one store stand in for two tabs, and only `applying`
+		// syncs.
+		const kv = new MemoryKVStore();
+		const applying = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities,
+			transport: server.transport(),
+			streamEnabled: false,
+			presenceEnabled: false,
+			pollIntervalMs: 0,
+		});
+		const other = offlineClient(kv, entities);
+		await applying.start();
+		const ask = (c: SyncClient) =>
+			Promise.all([ 't1', 't2' ].map((k) => c.can(TaskSchema, k, 'update', { fields: [ 'title' ] })));
+
+		// A client keeps what it stores only for a workspace it asks in.
+		expect(await ask(applying)).toEqual([ 'unknown', 'unknown' ]);
+		decodes.callerAccess = 0;
+		grant('p1');
+		await applying.syncNow();
+		expect(await ask(applying)).toEqual([ 'yes', 'no' ]);
+		grant('p2');
+		await applying.syncNow();
+		expect(await ask(applying)).toEqual([ 'no', 'yes' ]);
+		expect(decodes.callerAccess).toBe(0);
+		expect(await ask(other)).toEqual([ 'no', 'yes' ]);
+		expect(decodes.callerAccess).toBe(1);
+
+		await storeSummary(kv, { permissions: [ { permission: 'edit_tasks', root: true } ] });
+		expect(await ask(applying)).toEqual([ 'yes', 'yes' ]);
+		expect(decodes.callerAccess).toBe(2);
+		await applying.close();
+		await other.close();
 	});
 
 	it('answers unknown once the workspace is purged', async () => {

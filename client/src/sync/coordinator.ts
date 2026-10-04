@@ -1,7 +1,7 @@
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { type Client, Code, ConnectError, createClient, type Transport } from '@connectrpc/connect';
 
-import { touchPendingAccess } from '../access.js';
+import { type DecodedAccess, encodeAccess, touchPendingAccess } from '../access.js';
 import {
 	CodeInternal,
 	CodeMutationIdGap,
@@ -242,6 +242,12 @@ export interface CoordinatorOptions {
 	 * no cheap key list; see TouchSet.
 	 */
 	notify: (touched: TouchSet) => Promise<void>;
+	/**
+	 * Called with the workspace and what was stored after each commit that
+	 * stores a CallerAccess, before the notify of that commit. `access.raw` is
+	 * the stored value; do not change it.
+	 */
+	onAccessStored?: (workspaceId: string, access: DecodedAccess) => void;
 	status: StatusTracker;
 	onMutationRejected?: (info: RejectionInfo) => void;
 	/** Observability seam; see sync/events.ts. */
@@ -2274,8 +2280,10 @@ export class Coordinator {
 		return result;
 	}
 
-	private rebaseTx(workspaceId: string, page: PullResponse): Promise<RebaseResult> {
-		return this.opts.kvMutex.run(() =>
+	private async rebaseTx(workspaceId: string, page: PullResponse): Promise<RebaseResult> {
+		// Encoded before the lock is taken, which keeps the lock for less time.
+		const access = page.callerAccess === undefined ? undefined : encodeAccess(page.callerAccess);
+		const result = await this.opts.kvMutex.run(() =>
 			rebase(this.opts.kv, this.opts.registry, this.opts.mirrors, workspaceId, {
 				changes: page.patch?.changes ?? [],
 				dropEntities: page.patch?.dropEntities ?? [],
@@ -2297,9 +2305,11 @@ export class Coordinator {
 				// it) is dropped whole — rows AND cursor — instead of regressing
 				// the shared store.
 				serverSeq: page.seq,
-				...(page.callerAccess === undefined ? {} : { callerAccess: page.callerAccess }),
+				...(access === undefined ? {} : { callerAccess: access }),
 			}, this.opts.indexes)
 		);
+		if (access !== undefined && !result.skipped) this.opts.onAccessStored?.(workspaceId, access);
+		return result;
 	}
 
 	/**
@@ -2741,6 +2751,9 @@ export class Coordinator {
 		// tab's write is time this bootstrap spent, and hiding it would report a
 		// contended store as a fast one.
 		const swapStarted = performance.now();
+		const storedAccess = superseded || snapshotAccess === undefined
+			? undefined
+			: encodeAccess(snapshotAccess);
 		// A bootstrap the chunk loop already found superseded has nothing to
 		// install and takes no lock; the generation that displaced it owns the
 		// workspace, including the rows this one had written.
@@ -2815,7 +2828,7 @@ export class Coordinator {
 							// The snapshot's watermark covers an unanswered push as a
 							// pull's does (see rebaseTx), so the same hold applies.
 							deferAcked: this.unresolvedPush.has(workspaceId),
-							...(snapshotAccess === undefined ? {} : { callerAccess: snapshotAccess }),
+							...(storedAccess === undefined ? {} : { callerAccess: storedAccess }),
 						},
 						touched,
 					);
@@ -2852,6 +2865,7 @@ export class Coordinator {
 			if (direct) await this.notifyAfterFailure(touched);
 			return false;
 		}
+		if (storedAccess !== undefined) this.opts.onAccessStored?.(workspaceId, storedAccess);
 		// A bootstrap establishes a fresh baseline, authoritative even when it
 		// moves the in-memory seq BACKWARDS: after a store swap/recreate the new
 		// snapshot seq sits below the stale one, and clamping to the max would
