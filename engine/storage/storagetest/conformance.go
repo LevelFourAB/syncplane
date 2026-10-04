@@ -1072,6 +1072,49 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 				})
 			})
 
+			It("serves GetRow from inside a ScanIndexRanges callback, through more entries than one internal batch", func() {
+				// The engine finds the rows below a caller's anchors this way,
+				// one range per anchor, and a caller with many anchors yields
+				// more entries than any plausible page. The ranges are listed
+				// out of key order, so the yield order shows whether pages
+				// resume where the last one ended.
+				const extra = 600
+				write("ws1", func(tx storage.WriteTx) {
+					for i := 0; i < extra; i++ {
+						key := fmt.Sprintf("b%04d", i)
+						Expect(tx.PutRow("widget", key, []byte("v-"+key), uint64(i+10), storage.Actor{})).To(Succeed())
+						Expect(tx.PutIndexEntries("widget", key, []storage.IndexEntry{
+							{Index: "by_parent", Key: []byte{byte(i % 3)}},
+						})).To(Succeed())
+					}
+				})
+				var want []string
+				for _, parent := range []int{2, 0, 1} {
+					for i := parent; i < extra; i += 3 {
+						want = append(want, fmt.Sprintf("%d:b%04d", parent, i))
+					}
+				}
+				ranges := []storage.IndexRange{
+					{Lo: []byte{0x02}, Hi: []byte{0x03}},
+					{Lo: []byte{0x00}, Hi: []byte{0x01}},
+					{Lo: []byte{0x01}, Hi: []byte{0x02}},
+				}
+				eachTx(func(tx storage.ReadTx) {
+					var got []string
+					Expect(tx.ScanIndexRanges("widget", "by_parent", ranges, func(i int, _ []byte, rowKey string) error {
+						// The range's parent byte, so that got reads like want.
+						got = append(got, fmt.Sprintf("%d:%s", ranges[i].Lo[0], rowKey))
+						row, err := tx.GetRow("widget", rowKey)
+						if err != nil {
+							return err
+						}
+						Expect(row.Value).To(Equal([]byte("v-" + rowKey)))
+						return nil
+					})).To(Succeed())
+					Expect(got).To(Equal(want), "a callback that reads on every entry must not truncate or reorder the scan")
+				})
+			})
+
 			It("serves reads from inside a GetRows callback", func() {
 				// A batch read is itself a yielding read, so an adapter that
 				// holds its result set open across the callback breaks the same
@@ -3650,6 +3693,127 @@ func Conformance(name string, newAdapter func() storage.Adapter) bool {
 					})
 					Expect(err).To(MatchError(stop))
 					Expect(seen).To(Equal(1))
+				})
+			})
+
+			Describe("over several ranges", func() {
+				// What ScanIndexRanges yields, as "i:rowKey" per entry, so that a
+				// failure shows which range an entry was reported under.
+				scanRanges := func(tx storage.ReadTx, entity, idx string, ranges ...storage.IndexRange) []string {
+					GinkgoHelper()
+					var got []string
+					Expect(tx.ScanIndexRanges(entity, idx, ranges, func(i int, _ []byte, rowKey string) error {
+						got = append(got, fmt.Sprintf("%d:%s", i, rowKey))
+						return nil
+					})).To(Succeed())
+					return got
+				}
+
+				BeforeEach(func() {
+					write("ws1", func(tx storage.WriteTx) {
+						for i, k := range []string{"k1", "k2", "k3", "k4", "k5"} {
+							Expect(tx.PutIndexEntries("widget", k, []storage.IndexEntry{
+								entry("by_label", byte(i+1)),
+							})).To(Succeed())
+						}
+						// k0 shares k4's key, so the row key has to order the
+						// two. Its by_count entry and gadget's entry sit at keys
+						// the ranges below cover, and no scan of widget's
+						// by_label may yield them.
+						Expect(tx.PutIndexEntries("widget", "k0", []storage.IndexEntry{
+							entry("by_label", 0x04), entry("by_count", 0x02),
+						})).To(Succeed())
+						Expect(tx.PutIndexEntries("gadget", "g1", []storage.IndexEntry{
+							entry("by_label", 0x02),
+						})).To(Succeed())
+					})
+				})
+
+				It("yields range by range in the order given, each as ScanIndex yields it", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						ranges := []storage.IndexRange{
+							{Lo: []byte{0x04}, Hi: []byte{0x06}},
+							{Lo: []byte{0x01}, Hi: []byte{0x02}},
+							{Lo: nil, Hi: []byte{0x02}},
+							{Lo: []byte{0x05}, Hi: nil},
+							{Lo: nil, Hi: nil},
+						}
+						Expect(scanRanges(tx, "widget", "by_label", ranges...)).To(Equal([]string{
+							"0:k0", "0:k4", "0:k5",
+							"1:k1",
+							"2:k1",
+							"3:k5",
+							"4:k1", "4:k2", "4:k3", "4:k0", "4:k4", "4:k5",
+						}))
+						for i, r := range ranges {
+							// Alone, the range is at position 0.
+							var want []string
+							for _, rowKey := range scan(tx, "widget", "by_label", r.Lo, r.Hi) {
+								want = append(want, "0:"+rowKey)
+							}
+							Expect(scanRanges(tx, "widget", "by_label", r)).To(Equal(want), "range %d alone", i)
+						}
+					})
+				})
+
+				It("yields an entry once for every range that holds it", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scanRanges(tx, "widget", "by_label",
+							storage.IndexRange{Lo: []byte{0x02}, Hi: []byte{0x04}},
+							storage.IndexRange{Lo: []byte{0x03}, Hi: []byte{0x05}},
+							storage.IndexRange{Lo: []byte{0x02}, Hi: []byte{0x04}},
+						)).To(Equal([]string{
+							"0:k2", "0:k3",
+							"1:k3", "1:k0", "1:k4",
+							"2:k2", "2:k3",
+						}))
+					})
+				})
+
+				It("keeps the position of a range that holds nothing", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scanRanges(tx, "widget", "by_label",
+							storage.IndexRange{Lo: []byte{0x09}, Hi: nil},
+							storage.IndexRange{Lo: []byte{0x03}, Hi: []byte{0x03}},
+							storage.IndexRange{Lo: []byte{0x04}, Hi: []byte{0x02}},
+							storage.IndexRange{Lo: []byte{0x05}, Hi: []byte{0x06}},
+							storage.IndexRange{Lo: []byte{0x00}, Hi: []byte{0x01}},
+						)).To(Equal([]string{"3:k5"}))
+					})
+				})
+
+				It("yields nothing for no ranges", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						Expect(scanRanges(tx, "widget", "by_label")).To(BeEmpty())
+						Expect(scanRanges(tx, "widget", "by_label", []storage.IndexRange{}...)).To(BeEmpty())
+					})
+				})
+
+				It("keeps entities, indexes and workspaces apart", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						all := []storage.IndexRange{{}, {Lo: []byte{0x02}, Hi: []byte{0x03}}}
+						Expect(scanRanges(tx, "gadget", "by_label", all...)).To(Equal([]string{"0:g1", "1:g1"}))
+						Expect(scanRanges(tx, "widget", "by_count", all...)).To(Equal([]string{"0:k0", "1:k0"}))
+						Expect(scanRanges(tx, "widget", "by_other", all...)).To(BeEmpty())
+					})
+					read("ws2", func(tx storage.ReadTx) {
+						Expect(scanRanges(tx, "widget", "by_label", storage.IndexRange{}, storage.IndexRange{})).To(BeEmpty())
+					})
+				})
+
+				It("stops when fn returns an error, propagating it", func() {
+					read("ws1", func(tx storage.ReadTx) {
+						stop := errors.New("stop")
+						seen := 0
+						err := tx.ScanIndexRanges("widget", "by_label",
+							[]storage.IndexRange{{Lo: []byte{0x01}, Hi: []byte{0x02}}, {}},
+							func(int, []byte, string) error {
+								seen++
+								return stop
+							})
+						Expect(err).To(MatchError(stop))
+						Expect(seen).To(Equal(1))
+					})
 				})
 			})
 		})

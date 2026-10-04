@@ -63,11 +63,11 @@
 //     an under-covered span as COMPLETE is the one failure that corrupts
 //     documents.
 //   - Secondary index entries (PutIndexEntries, DeleteIndexEntries,
-//     ScanIndex, IndexState, SetIndexState) exist only for LIVE rows: a
-//     DeleteRow is paired with a DeleteIndexEntries by the engine, so a
-//     tombstone never has entries. CollectTombstones is a bulk delete of rows
-//     that are already gone from the index and needs no index work;
-//     PurgeEntityRows removes live rows, so it must drop their entries with
+//     ScanIndex, ScanIndexRanges, IndexState, SetIndexState) exist only for
+//     LIVE rows: a DeleteRow is paired with a DeleteIndexEntries by the
+//     engine, so a tombstone never has entries. CollectTombstones is a bulk
+//     delete of rows that are already gone from the index and needs no index
+//     work; PurgeEntityRows removes live rows, so it must drop their entries with
 //     them — it is the one bulk delete that does its own index work. The keys
 //     are opaque bytes compared BYTEWISE — the engine builds them so that byte
 //     order is the row order it wants, and an adapter that applies a collation
@@ -701,6 +701,30 @@ type ReadTx interface {
 	// but the caller re-reads it anyway to apply read filters — from INSIDE
 	// this callback, which is why a scan has to tolerate re-entrant reads.
 	ScanIndex(entity, index string, lo, hi []byte, limit int, order ScanOrder, fn func(entry []byte, rowKey string) error) error
+	// ScanIndexRanges yields the entries one entity holds in one secondary
+	// index under each of ranges, and passes fn the position in ranges of the
+	// range it yields from as i.
+	//
+	// The yield is range by range, in the order ranges lists them, and within
+	// one range it is what ScanIndex yields for that range under ScanAsc with
+	// no limit. Each range yields on its own: an entry that two ranges hold is
+	// yielded once for each of them, and a repeated range yields its entries
+	// again. An empty ranges yields nothing.
+	//
+	// When fn returns an error, the scan stops, fn is not called again, and
+	// ScanIndexRanges returns that error unchanged. fn may issue reads on this
+	// transaction, exactly as a ScanIndex callback may.
+	//
+	// It exists because a scan per range is a round trip per range on a
+	// networked adapter: the engine reads the index entries under many keys at
+	// once (the grants of a caller's teams, the rows below a caller's anchors)
+	// through this, so the read costs round trips proportional to its entries,
+	// not to its ranges. An adapter with no multi-range read may loop over
+	// ScanIndex and lose nothing. One range can hold every row below a
+	// parent, and fn often stops the scan at a bound, so an adapter that reads
+	// many ranges at once must page the read and not read a range to its end
+	// before fn sees its first entries.
+	ScanIndexRanges(entity, index string, ranges []IndexRange, fn func(i int, entry []byte, rowKey string) error) error
 	// IndexState returns the spec fingerprint one entity's stored entries in an
 	// index were built under and whether the build finished. A missing index
 	// reads as ("", false, nil) — not an error, because an index the engine has
@@ -964,6 +988,14 @@ type WriteTx interface {
 type IndexEntry struct {
 	Index string
 	Key   []byte
+}
+
+// IndexRange is one range of entry keys that ReadTx.ScanIndexRanges reads: the
+// keys in [Lo, Hi), compared bytewise. A nil Lo starts at the first entry and a
+// nil Hi runs past the last one. A range whose Lo is not below its Hi holds no
+// entry.
+type IndexRange struct {
+	Lo, Hi []byte
 }
 
 // MaxIndexEntryBytes caps IndexEntry.Key. An adapter must store and scan back

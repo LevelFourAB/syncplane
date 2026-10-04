@@ -451,6 +451,13 @@ func (t *grantProbeTx) ScanIndex(entity, index string, lo, hi []byte, limit int,
 	return t.ReadTx.ScanIndex(entity, index, lo, hi, limit, order, fn)
 }
 
+func (t *grantProbeTx) ScanIndexRanges(entity, index string, ranges []storage.IndexRange, fn func(int, []byte, string) error) error {
+	if t.store.probe(entity, index) {
+		t.probed = true
+	}
+	return t.ReadTx.ScanIndexRanges(entity, index, ranges, fn)
+}
+
 type grantProbeWriteTx struct {
 	storage.WriteTx
 	store *grantProbeStore
@@ -459,4 +466,9 @@ type grantProbeWriteTx struct {
 func (t *grantProbeWriteTx) ScanIndex(entity, index string, lo, hi []byte, limit int, order storage.ScanOrder, fn func([]byte, string) error) error {
 	t.store.probe(entity, index)
 	return t.WriteTx.ScanIndex(entity, index, lo, hi, limit, order, fn)
+}
+
+func (t *grantProbeWriteTx) ScanIndexRanges(entity, index string, ranges []storage.IndexRange, fn func(int, []byte, string) error) error {
+	t.store.probe(entity, index)
+	return t.WriteTx.ScanIndexRanges(entity, index, ranges, fn)
 }

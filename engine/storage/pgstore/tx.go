@@ -731,6 +731,172 @@ func (t *pgTx) ScanIndex(
 		func(r indexRow) error { return fn(r.entry, r.rowKey) })
 }
 
+// ScanIndexRanges reads a run of bounded ranges a page at a time, every range
+// of the run in one statement (see scanBoundedRanges), so a probe of many keys
+// costs the round trips of its entries rather than one per key. A range with
+// no upper bound reads through ScanIndex on its own, which costs a round trip
+// more and is rare: a prefix range has a Hi unless its prefix is all 0xff.
+func (t *pgTx) ScanIndexRanges(
+	entity, index string,
+	ranges []storage.IndexRange,
+	fn func(i int, entry []byte, rowKey string) error,
+) error {
+	for start := 0; start < len(ranges); {
+		if ranges[start].Hi == nil {
+			i := start
+			if err := t.ScanIndex(entity, index, ranges[i].Lo, nil, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
+				return fn(i, entry, rowKey)
+			}); err != nil {
+				return err
+			}
+			start++
+			continue
+		}
+		end := start + 1
+		for end < len(ranges) && ranges[end].Hi != nil {
+			end++
+		}
+		if err := t.scanBoundedRanges(entity, index, ranges[start:end], start, fn); err != nil {
+			return err
+		}
+		start = end
+	}
+	return nil
+}
+
+// rangeEntry is one entry a multi-range read returns: the position of its
+// range in the caller's list, the entry, and the row it points at.
+type rangeEntry struct {
+	i      int
+	entry  []byte
+	rowKey string
+}
+
+// scanBoundedRanges yields the entries of ranges, every one of which has a Hi,
+// to fn as ScanIndexRanges does. first is the position of ranges[0] in the
+// caller's list.
+//
+// It pages by key rather than through scanRows's cursor. Postgres cannot tell
+// that the join below returns its rows in the order of the outer ORDER BY, so
+// it sorts each range's entries, and an unlimited read sorts every entry of a
+// range before it returns the first: 79 ms for the first 257 entries of a
+// range of 200000, where a page of the same range takes 0.2 ms. A LIMIT inside
+// the join bounds that sort to one page, and the next page starts after the
+// last entry yielded.
+func (t *pgTx) scanBoundedRanges(
+	entity, index string,
+	ranges []storage.IndexRange,
+	first int,
+	fn func(i int, entry []byte, rowKey string) error,
+) error {
+	if len(ranges) == 1 {
+		// ScanIndex reads one range as fast, with a plan that has no join.
+		return t.ScanIndex(entity, index, ranges[0].Lo, ranges[0].Hi, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
+			return fn(first, entry, rowKey)
+		})
+	}
+	los := make([][]byte, len(ranges))
+	his := make([][]byte, len(ranges))
+	for i, r := range ranges {
+		// The empty key sorts first, so it stands in for a nil Lo as a bound
+		// the index can seek to.
+		los[i] = notNilBytes(r.Lo)
+		his[i] = r.Hi
+	}
+	// Each page reads one entry more than it yields, which tells whether the
+	// range of the last entry yielded goes on.
+	const pageRead = scanBatch + 1
+	// Each range is a primary-key probe of its own through the LATERAL join,
+	// which reads the range in index order and stops at the LIMIT. The ORDER
+	// BY inside the join makes the LIMIT take the first entries of the range,
+	// and it keeps the probe plan when the statement cache makes the statement
+	// generic, where the planner does not know how many ranges there are: a
+	// generic plan of the join without it reads every entry of the entity
+	// once and filters it against each range. (k, key) is unique within one
+	// range, as the primary key holds it, so the outer ORDER BY is a total
+	// order.
+	const across = `SELECT r.i, e.k, e.key
+		FROM unnest($4::bytea[], $5::bytea[]) WITH ORDINALITY AS r(lo, hi, i)
+		CROSS JOIN LATERAL (
+			SELECT k, key FROM index_entries
+			WHERE workspace_id = $1 AND entity = $2 AND idx = $3 AND k >= r.lo AND k < r.hi
+			ORDER BY k, key
+			LIMIT $6
+		) e
+		ORDER BY r.i, e.k, e.key
+		LIMIT $6`
+	// The rest of one range after an entry. The row comparison seeks in the
+	// primary key, where a test of k alone would read every entry before it
+	// again that shares its k, as all the rows below one parent do.
+	const rest = `SELECT k, key FROM index_entries
+		WHERE workspace_id = $1 AND entity = $2 AND idx = $3 AND (k, key) > ($4, $5) AND k < $6
+		ORDER BY k, key
+		LIMIT $7`
+
+	// from is the first range not yet read to its end, and after is the last
+	// entry yielded from it, nil when it has yielded none.
+	from := 0
+	var after *rangeEntry
+	for from < len(ranges) {
+		var (
+			page []rangeEntry
+			err  error
+		)
+		if after == nil {
+			offset := from
+			page, err = queryBatch(t, across,
+				[]any{t.ws, entity, index, los[from:], his[from:], int64(pageRead)}, pageRead,
+				func(rows pgx.Rows) (rangeEntry, error) {
+					var (
+						e   rangeEntry
+						ord int64
+					)
+					if err := rows.Scan(&ord, &e.entry, &e.rowKey); err != nil {
+						return rangeEntry{}, err
+					}
+					e.i = offset + int(ord-1) // WITH ORDINALITY counts from 1
+					return e, nil
+				})
+		} else {
+			i := from
+			page, err = queryBatch(t, rest,
+				[]any{t.ws, entity, index, after.entry, after.rowKey, his[from], int64(pageRead)}, pageRead,
+				func(rows pgx.Rows) (rangeEntry, error) {
+					e := rangeEntry{i: i}
+					if err := rows.Scan(&e.entry, &e.rowKey); err != nil {
+						return rangeEntry{}, err
+					}
+					return e, nil
+				})
+		}
+		if err != nil {
+			return err
+		}
+		more := len(page) > scanBatch
+		yielded := page[:min(len(page), scanBatch)]
+		for _, e := range yielded {
+			if err := fn(first+e.i, e.entry, e.rowKey); err != nil {
+				return err
+			}
+		}
+		switch {
+		case !more && after == nil:
+			// No range from `from` on held more than this page.
+			return nil
+		case !more:
+			from, after = from+1, nil
+		case page[scanBatch].i == yielded[scanBatch-1].i:
+			last := yielded[scanBatch-1]
+			from, after = last.i, &last
+		default:
+			// The entry read past the page opens a range of its own, so the
+			// ranges up to it are done and the next page starts at it.
+			from, after = page[scanBatch].i, nil
+		}
+	}
+	return nil
+}
+
 func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
 	var (
 		specHash string

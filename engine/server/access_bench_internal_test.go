@@ -315,6 +315,34 @@ func BenchmarkResolveAccess(b *testing.B) {
 	}
 }
 
+// BenchmarkQueryAccess measures a Query of the issues the caller can read: a
+// page of 50 from the rows below the repos the caller holds view_issues at,
+// which the read finds through the issue entity's reference index before it
+// reads a row.
+func BenchmarkQueryAccess(b *testing.B) {
+	for _, repos := range accessScales[:2] {
+		c := accessBenchCase{repos: repos}
+		b.Run(c.name(), func(b *testing.B) {
+			ab := newAccessBench(b, c)
+			query := func() *syncplanev1.QueryResponse {
+				resp, err := ab.srv.Query(ab.as, connect.NewRequest(&syncplanev1.QueryRequest{
+					WorkspaceId: "ws", Entity: "issue", Limit: 50,
+				}))
+				if err != nil {
+					b.Fatal(err)
+				}
+				return resp.Msg
+			}
+			if got, want := len(query().GetRows()), min(repos, 50); got != want {
+				b.Fatalf("the query returned %d issues, want %d", got, want)
+			}
+			for b.Loop() {
+				query()
+			}
+		})
+	}
+}
+
 // BenchmarkRenderAccess measures rendering a resolved set as a cursor records
 // it and as a client receives it, hashes included, which every pull and every
 // Subscribe drain pays. The roles grant 3, 4 and 6 permissions at each repo.

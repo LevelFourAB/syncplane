@@ -349,10 +349,10 @@ func accessIn(tx storage.ReadTx, c *accessCaller, limits Limits, prior *accessSe
 // caller when it is one of the caller's subjects, or a team row that one of
 // the caller's own grant rows makes it a member of.
 //
-// The read has two passes. The first probes the index of each string case of
-// each grant entity once per subject, and the second the index of each team
-// case once per team the first pass found. A grant entity whose indexes are
-// not ready is scanned instead.
+// The read has two passes. The first reads the index of each string case of
+// each grant entity under every subject, and the second the index of each
+// team case under every team the first pass found, in one read per index. A
+// grant entity whose indexes are not ready is scanned instead.
 func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSet, error) {
 	set := &accessSet{perms: map[string]*permAnchors{}}
 	for _, role := range c.globalRoles {
@@ -557,14 +557,24 @@ func grantRowsOf(tx storage.ReadTx, g *entityInfo, probes []caseProbe, limits Li
 		}
 		indexes[p.index] = ci
 	}
-	var keys []string
+	// One read per index rather than per probe: a caller in many teams makes
+	// a probe per team, and a networked store pays a round trip per read.
+	var order []*compiledIndex
+	ranges := map[*compiledIndex][]storage.IndexRange{}
 	for _, p := range probes {
 		ci := indexes[p.index]
 		lo, hi, err := ci.probeRefIndex(p.values)
 		if err != nil {
 			return err
 		}
-		if err := tx.ScanIndex(g.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+		if _, seen := ranges[ci]; !seen {
+			order = append(order, ci)
+		}
+		ranges[ci] = append(ranges[ci], storage.IndexRange{Lo: lo, Hi: hi})
+	}
+	var keys []string
+	for _, ci := range order {
+		if err := tx.ScanIndexRanges(g.name, ci.name, ranges[ci], func(_ int, _ []byte, rowKey string) error {
 			keys = append(keys, rowKey)
 			return nil
 		}); err != nil {
@@ -848,7 +858,8 @@ var errCandidateBound = errors.New("server: access candidate bound")
 // one of from or sit at most Limits.MaxAccessDepth hops below one of them. It
 // walks down from each row through the reference index of each case of the
 // access parents that point at its entity, entering only the entities that
-// lead to target, so it reads index entries and no rows.
+// lead to target, so it reads index entries and no rows. Each hop reads each
+// such index once, under every row the hop walks down from.
 //
 // The walk follows the parents rows hold now. It is a superset of the rows a
 // caller holding a permission at from can read, as long as the caller
@@ -885,7 +896,10 @@ func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from [
 	}
 	maxDepth := limits.maxAccessDepth()
 	for level := 0; len(frontier) > 0; level++ {
-		var next []anchorRow
+		// The frontier by entity, so that one read of a child edge's index
+		// walks down from every frontier row of the edge's parent entity.
+		var entities []string
+		byEntity := map[string][]anchorRow{}
 		for _, at := range frontier {
 			if at.entity == target.name {
 				found[at.key] = struct{}{}
@@ -893,26 +907,47 @@ func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from [
 			if level == maxDepth {
 				continue
 			}
-			for _, e := range model.children[at.entity] {
+			if _, seen := byEntity[at.entity]; !seen {
+				entities = append(entities, at.entity)
+			}
+			byEntity[at.entity] = append(byEntity[at.entity], at)
+		}
+		var next []anchorRow
+		for _, entity := range entities {
+			rows := byEntity[entity]
+			// Parsed on the first edge that leads to target: a row whose key
+			// does not parse stops the walk only when it has a hop to make.
+			var values [][]protoreflect.Value
+			for _, e := range model.children[entity] {
 				child := e.child
 				if !leads(child.name) {
 					continue
 				}
-				values, parsed := keyValuesOf(model.entities[at.entity], at.key)
-				if !parsed {
-					return nil, false, nil
+				if values == nil {
+					values = make([][]protoreflect.Value, len(rows))
+					for i, at := range rows {
+						v, parsed := keyValuesOf(model.entities[entity], at.key)
+						if !parsed {
+							return nil, false, nil
+						}
+						values[i] = v
+					}
 				}
 				ci, ready, err := indexOf(e)
 				if err != nil || !ready {
 					return nil, false, err
 				}
-				lo, hi, err := ci.probeRefIndex(values)
-				if err != nil {
-					return nil, false, err
+				ranges := make([]storage.IndexRange, len(rows))
+				for i, v := range values {
+					lo, hi, err := ci.probeRefIndex(v)
+					if err != nil {
+						return nil, false, err
+					}
+					ranges[i] = storage.IndexRange{Lo: lo, Hi: hi}
 				}
-				// Stops inside the scan, so one row with many rows below it costs
-				// the bound rather than every key it holds.
-				err = tx.ScanIndex(child.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+				// Stops inside the scan, so rows with many rows below them cost
+				// the bound rather than every key they hold.
+				err = tx.ScanIndexRanges(child.name, ci.name, ranges, func(_ int, _ []byte, rowKey string) error {
 					below := anchorRow{entity: child.name, key: rowKey}
 					if _, dup := visited[below]; dup {
 						return nil

@@ -1665,6 +1665,24 @@ func (t *sqliteTx) ScanIndex(
 		})
 }
 
+// ScanIndexRanges runs one ScanIndex per range. A statement costs no round
+// trip in process, and each one probes the primary key for its own range,
+// which a single statement over all of them would also have to do.
+func (t *sqliteTx) ScanIndexRanges(
+	entity, index string,
+	ranges []storage.IndexRange,
+	fn func(i int, entry []byte, rowKey string) error,
+) error {
+	for i, r := range ranges {
+		if err := t.ScanIndex(entity, index, r.Lo, r.Hi, 0, storage.ScanAsc, func(entry []byte, rowKey string) error {
+			return fn(i, entry, rowKey)
+		}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (t *sqliteTx) IndexState(entity, index string) (string, bool, error) {
 	var (
 		specHash string
