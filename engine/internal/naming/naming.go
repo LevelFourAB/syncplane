@@ -105,7 +105,8 @@ func ValidateRelationName(name string) error {
 }
 
 // ValidatePermissionName checks a permission name of the access model —
-// (syncplane.v1.entity).access.read and .write, and the grants of a role. It
+// the permission of a rule in (syncplane.v1.entity).access.allow, and the
+// grants of a role. It
 // follows the entity-name rule: an ASCII letter or underscore followed by
 // letters, digits or underscores, at most MaxEntityNameLength of them.
 func ValidatePermissionName(name string) error {

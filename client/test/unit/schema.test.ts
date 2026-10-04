@@ -2,12 +2,9 @@ import { create, fromBinary, getOption, hasOption, toBinary } from '@bufbuild/pr
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
 import {
-	CreatePolicy,
-	DeletePolicy,
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
 	FieldWritePolicy,
-	UpdatePolicy,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import {
 	entityDefOf,
@@ -18,6 +15,8 @@ import {
 	refKeyFields,
 } from '../../src/mutations.js';
 import {
+	type AccessDecl,
+	type AccessRuleDecl,
 	bool,
 	bytes,
 	defineSchema,
@@ -80,41 +79,41 @@ describe('schema builder', () => {
 		expect(getOption(blob, fieldBehaviorExt).opaque).toBe(true);
 	});
 
-	it('defaults every write policy to ALLOW and carries trustedOnly through to the options', () => {
-		const todo = getOption(bundle.descMessage('todo'), entityExt);
-		expect(todo.createPolicy).toBe(CreatePolicy.ALLOW);
-		expect(todo.updatePolicy).toBe(UpdatePolicy.ALLOW);
-		expect(todo.deletePolicy).toBe(DeletePolicy.ALLOW);
+	it('reads which writes the access rules admit onto the EntityDef every local write consults', () => {
+		const writeAccessOf = (e: EntitySchema) =>
+			entityDefOf(defineSchema(e).descMessage(e.name)).writeAccess;
 
-		const ledger = entity('ledger', { id: text().key() }, { deletePolicy: 'trustedOnly' });
-		expect(getOption(defineSchema(ledger).descMessage('ledger'), entityExt).deletePolicy)
-			.toBe(DeletePolicy.TRUSTED_ONLY);
-
-		// Server-owned: the server writes these rows and clients only read them.
-		const activity = entity('activity', { id: text().key() }, {
-			createPolicy: 'trustedOnly',
-			updatePolicy: 'trustedOnly',
-			deletePolicy: 'trustedOnly',
+		// Append-only: creating is admitted, changing and deleting are not.
+		const entry = entity('entry', { id: text().key() }, {
+			access: { allow: [ { read: true, create: true, permission: 'post' } ] },
 		});
-		const activityOpts = getOption(defineSchema(activity).descMessage('activity'), entityExt);
-		expect(activityOpts.createPolicy).toBe(CreatePolicy.TRUSTED_ONLY);
-		expect(activityOpts.updatePolicy).toBe(UpdatePolicy.TRUSTED_ONLY);
-		expect(activityOpts.deletePolicy).toBe(DeletePolicy.TRUSTED_ONLY);
+		expect(writeAccessOf(entry)).toEqual({ create: true, update: false, delete: false });
 
-		// Append-only: creating stays open, editing does not.
-		const comment = entity('comment', { id: text().key() }, { updatePolicy: 'trustedOnly' });
-		const commentOpts = getOption(defineSchema(comment).descMessage('comment'), entityExt);
-		expect(commentOpts.createPolicy).toBe(CreatePolicy.ALLOW);
-		expect(commentOpts.updatePolicy).toBe(UpdatePolicy.TRUSTED_ONLY);
-	});
+		// `write` admits every write operation, whatever the source.
+		const note = entity('note', { id: text().key() }, {
+			access: { allow: [ { read: true, permission: 'view' }, { write: true, admitted: true } ] },
+		});
+		expect(writeAccessOf(note)).toEqual({ create: true, update: true, delete: true });
 
-	it('reads the write policies onto the EntityDef every local write consults', () => {
-		const comment = entity('comment', { id: text().key() }, { updatePolicy: 'trustedOnly' });
-		const def = entityDefOf(defineSchema(comment).descMessage('comment'));
+		// Server-owned: no rule admits a write.
+		const label = entity('label', { id: text().key() }, {
+			access: { allow: [ { read: true, permission: 'view' } ] },
+		});
+		expect(writeAccessOf(label)).toEqual({ create: false, update: false, delete: false });
 
-		expect(def.policies).toEqual({ create: 'allow', update: 'trustedOnly', delete: 'allow' });
-		expect(entityDefOf(bundle.descMessage('todo')).policies)
-			.toEqual({ create: 'allow', update: 'allow', delete: 'allow' });
+		// Rules add up: no single rule here admits both update and delete.
+		const comment = entity('comment', { id: text().key() }, {
+			access: {
+				allow: [
+					{ read: true, create: true, permission: 'view' },
+					{ update: true, permission: 'edit' },
+					{ delete: true, permission: 'moderate' },
+				],
+			},
+		});
+		expect(writeAccessOf(comment)).toEqual({ create: true, update: true, delete: true });
+
+		expect(entityDefOf(bundle.descMessage('todo')).writeAccess).toBeUndefined();
 	});
 
 	it('lowers .protected() onto every field kind that can carry it', () => {
@@ -426,7 +425,12 @@ describe('schema builder — full parity', () => {
 
 describe('schema builder — access model', () => {
 	const project = entity('project', { id: text().key() }, {
-		access: { read: 'view_projects', write: 'edit_projects' },
+		access: {
+			allow: [
+				{ read: true, permission: 'view_projects' },
+				{ write: true, permission: 'edit_projects' },
+			],
+		},
 	});
 	const member = entity('project_member', {
 		id: text().key(),
@@ -439,16 +443,56 @@ describe('schema builder — access model', () => {
 			role: 'role',
 			roles: [ { name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] } ],
 		},
-		access: { read: 'view_projects', write: 'edit_projects' },
+		access: {
+			allow: [
+				{ read: true, permission: 'view_projects' },
+				{ write: true, permission: 'edit_projects' },
+			],
+		},
 	});
-	const note = entity('note', { id: text().key() }, { access: { unrestricted: true } });
+	const note = entity('note', { id: text().key() }, {
+		access: { allow: [ { read: true, write: true, admitted: true } ] },
+	});
 	const bundle = defineSchema(project, member, note);
 	const options = (name: string) => getOption(bundle.descMessage(name), entityExt);
 
-	it('lowers access onto the entity option', () => {
-		expect(options('project').access?.read).toBe('view_projects');
-		expect(options('project').access?.write).toBe('edit_projects');
-		expect(options('note').access?.unrestricted).toBe(true);
+	it('lowers access rules onto the entity option', () => {
+		const [ read, write, ...rest ] = options('project').access!.allow;
+		expect(rest).toEqual([]);
+		expect(read).toMatchObject({
+			read: true,
+			create: false,
+			update: false,
+			delete: false,
+			write: false,
+		});
+		expect(read!.source).toEqual({ case: 'permission', value: 'view_projects' });
+		expect(write).toMatchObject({
+			read: false,
+			create: false,
+			update: false,
+			delete: false,
+			write: true,
+		});
+		expect(write!.source).toEqual({ case: 'permission', value: 'edit_projects' });
+	});
+
+	it('lowers an admitted rule onto the source oneof', () => {
+		const [ rule, ...rest ] = options('note').access!.allow;
+		expect(rest).toEqual([]);
+		expect(rule).toMatchObject({ read: true, write: true });
+		expect(rule!.source.case).toBe('admitted');
+	});
+
+	it('keeps the rules through the serialized descriptor set', () => {
+		// AdmittedCaller is an empty message, so only its presence on the wire
+		// says the rule has a source.
+		const decoded = entitiesFromDescriptorSet(bundle.toBinary()).find((d) =>
+			getOption(d, entityExt).name === 'note'
+		)!;
+		const [ rule ] = getOption(decoded, entityExt).access!.allow;
+		expect(rule!.source.case).toBe('admitted');
+		expect(rule).toMatchObject({ read: true, write: true });
 	});
 
 	it('lowers grant with proto field names', () => {
@@ -473,17 +517,72 @@ describe('schema builder — access model', () => {
 
 	describe('validation', () => {
 		const fields = { id: text().key(), userId: text(), role: text() };
-		const access = { read: 'view', write: 'edit' };
+		const access: AccessDecl = {
+			allow: [ { read: true, permission: 'view' }, { write: true, permission: 'edit' } ],
+		};
 		const roles = [ { name: 'writer', grants: [ 'view', 'edit' ] } ];
+		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
 
 		it('rejects accessParent() on anything but a singular ref()', () => {
 			expect(() => text().accessParent()).toThrow(/only valid on a ref\(\)/);
 			expect(() => refList(() => project).accessParent()).toThrow(/only valid on a ref\(\)/);
 		});
 		it('rejects a permission name that is not an identifier', () => {
-			expect(() => entity('e', fields, { access: { read: 'view-all', write: 'edit' } })).toThrow(
-				'entity "e" access.read: permission name "view-all" is not an identifier',
+			expect(allowing({ read: true, permission: 'view-all' })).toThrow(
+				'entity "e" access.allow[0]: permission name "view-all" is not an identifier',
 			);
+			expect(allowing({ read: true, permission: '' })).toThrow(
+				'entity "e" access.allow[0]: permission name is empty',
+			);
+		});
+		it('rejects an access declaration without rules', () => {
+			expect(allowing()).toThrow('entity "e": access.allow declares no rules');
+			// A declaration without `allow` at all, as plain JS can pass.
+			const shapeless = { read: 'view', write: 'edit' } as unknown as AccessDecl;
+			expect(() => entity('e', fields, { access: shapeless })).toThrow(
+				/access.allow declares no rules/,
+			);
+		});
+		it('rejects a rule that admits no operation', () => {
+			expect(allowing({ read: true, permission: 'view' }, { permission: 'edit' })).toThrow(
+				'entity "e" access.allow[1]: the rule admits no operation; '
+					+ 'set read, create, update, delete or write',
+			);
+			expect(allowing({ read: false, write: false, admitted: true })).toThrow(
+				/access.allow\[0\]: the rule admits no operation/,
+			);
+		});
+		it('rejects a rule without exactly one source', () => {
+			// @ts-expect-error a rule needs a source
+			const sourceless: AccessRuleDecl = { read: true };
+			expect(allowing(sourceless)).toThrow(
+				'entity "e" access.allow[0]: the rule has no source; set permission or admitted: true',
+			);
+			// @ts-expect-error a rule takes one source
+			const both: AccessRuleDecl = { read: true, permission: 'view', admitted: true };
+			expect(allowing(both)).toThrow(
+				'entity "e" access.allow[0]: the rule sets both permission and admitted; set exactly one',
+			);
+			const unadmitted = { read: true, admitted: false } as unknown as AccessRuleDecl;
+			expect(allowing(unadmitted)).toThrow('entity "e" access.allow[0]: admitted must be true');
+		});
+		it('rejects a rule declared twice', () => {
+			expect(allowing(
+				{ read: true, permission: 'view' },
+				{ write: true, permission: 'edit' },
+				{ read: true, create: false, permission: 'view' },
+			)).toThrow('entity "e" access.allow[2]: the rule repeats access.allow[0]');
+			expect(allowing({ read: true, admitted: true }, { read: true, admitted: true })).toThrow(
+				/access.allow\[1\]: the rule repeats access.allow\[0\]/,
+			);
+		});
+		it('accepts rules that differ in operations or source', () => {
+			expect(allowing(
+				{ read: true, permission: 'view' },
+				{ read: true, admitted: true },
+				{ read: true, create: true, permission: 'view' },
+				{ write: true, permission: 'view' },
+			)).not.toThrow();
 		});
 		it('rejects two access parents', () => {
 			expect(() =>
@@ -494,18 +593,21 @@ describe('schema builder — access model', () => {
 				}, { access })
 			).toThrow(/fields "a" and "b" are both marked accessParent\(\)/);
 		});
-		it('rejects an access parent without read and write access', () => {
+		it('rejects an access parent without access', () => {
 			expect(() => entity('e', { id: text().key(), p: ref(() => project).accessParent() })).toThrow(
-				/is marked accessParent\(\), but the entity declares no read and write access/,
+				'entity "e": field "p" is marked accessParent(), but the entity declares no access',
 			);
-		});
-		it('rejects a grant entity outside the model', () => {
+			// Any access declaration will do, including one admitting every caller.
 			expect(() =>
-				entity('e', fields, {
-					access: { unrestricted: true },
-					grant: { subject: 'userId', role: 'role', roles },
+				entity('e', { id: text().key(), p: ref(() => project).accessParent() }, {
+					access: { allow: [ { read: true, admitted: true } ] },
 				})
-			).toThrow(/a grant entity must declare access with read and write/);
+			).not.toThrow();
+		});
+		it('rejects a grant entity without access', () => {
+			expect(() => entity('e', fields, { grant: { subject: 'userId', role: 'role', roles } })).toThrow(
+				'entity "e": a grant entity must declare access',
+			);
 		});
 		it('rejects a grant field that is not a declared text() field', () => {
 			expect(() => entity('e', fields, { access, grant: { subject: 'who', role: 'role', roles } }))

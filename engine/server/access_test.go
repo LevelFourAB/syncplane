@@ -36,13 +36,13 @@ func orgSpecs() []server.DynamicEntity {
 				Name:   "org_admin",
 				Grants: []string{"view_members", "manage_members", "view_projects", "edit_projects", "view_tasks", "edit_tasks"},
 			}}},
-			Access: &syncplanev1.AccessOptions{Read: "view_members", Write: "manage_members"},
+			Access: readWrite("view_members", "manage_members"),
 		},
 		{
 			Name:      "project",
 			KeyFields: []string{"id"},
 			Fields:    []server.DynamicField{{Name: "id", Number: 1, Kind: str}},
-			Access:    &syncplanev1.AccessOptions{Read: "view_projects", Write: "edit_projects"},
+			Access:    readWrite("view_projects", "edit_projects"),
 		},
 		{
 			Name:      "task",
@@ -51,9 +51,52 @@ func orgSpecs() []server.DynamicEntity {
 				{Name: "id", Number: 1, Kind: str},
 				{Name: "project", Number: 2, Ref: "project", AccessParent: true},
 			},
-			Access: &syncplanev1.AccessOptions{Read: "view_tasks", Write: "edit_tasks"},
+			Access: readWrite("view_tasks", "edit_tasks"),
 		},
 	}
+}
+
+// readWrite returns access options with one rule that admits reads by read
+// and one that admits every write by write.
+func readWrite(read, write string) *syncplanev1.AccessOptions {
+	return &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{permRule(read, "read"), permRule(write, "write")}}
+}
+
+// permRule returns a rule that admits ops, each one of "read", "create",
+// "update", "delete" and "write", to a caller that holds permission.
+func permRule(permission string, ops ...string) *syncplanev1.AccessRule {
+	r := opsRule(ops...)
+	r.Source = &syncplanev1.AccessRule_Permission{Permission: permission}
+	return r
+}
+
+// admittedRule returns a rule that admits ops to every admitted caller.
+func admittedRule(ops ...string) *syncplanev1.AccessRule {
+	r := opsRule(ops...)
+	r.Source = &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}
+	return r
+}
+
+func opsRule(ops ...string) *syncplanev1.AccessRule {
+	GinkgoHelper()
+	r := &syncplanev1.AccessRule{}
+	for _, op := range ops {
+		switch op {
+		case "read":
+			r.Read = true
+		case "create":
+			r.Create = true
+		case "update":
+			r.Update = true
+		case "delete":
+			r.Delete = true
+		case "write":
+			r.Write = true
+		default:
+			Fail("unknown operation " + op)
+		}
+	}
+	return r
 }
 
 // commentSpec is a comment below a task, two hops below the project, for
@@ -65,7 +108,7 @@ func commentSpec() server.DynamicEntity {
 			{Name: "id", Number: 1, Kind: protoreflect.StringKind},
 			{Name: "task", Number: 2, Ref: "task", AccessParent: true},
 		},
-		Access: &syncplanev1.AccessOptions{Read: "view_tasks", Write: "edit_tasks"},
+		Access: readWrite("view_tasks", "edit_tasks"),
 	}
 }
 
@@ -84,7 +127,7 @@ func withFolders(specs []server.DynamicEntity) []server.DynamicEntity {
 				{Name: "id", Number: 1, Kind: str},
 				{Name: "parent", Number: 2, Ref: "folder", AccessParent: true},
 			},
-			Access: &syncplanev1.AccessOptions{Read: "view_files", Write: "edit_files"},
+			Access: readWrite("view_files", "edit_files"),
 		},
 		server.DynamicEntity{
 			Name: "file", KeyFields: []string{"id"},
@@ -92,7 +135,7 @@ func withFolders(specs []server.DynamicEntity) []server.DynamicEntity {
 				{Name: "id", Number: 1, Kind: str},
 				{Name: "folder", Number: 2, Ref: "folder", AccessParent: true},
 			},
-			Access: &syncplanev1.AccessOptions{Read: "view_files", Write: "edit_files"},
+			Access: readWrite("view_files", "edit_files"),
 		},
 	)
 }
@@ -206,6 +249,29 @@ var _ = Describe("Access model registration", func() {
 			Expect(logs.count("access model warning")).To(BeZero())
 		})
 
+		It("registers rules that admit every admitted caller, on an access parent, below one and on a grant entity", func() {
+			specs := orgSpecs()
+			specNamed(specs, "project").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+				admittedRule("read"), permRule("edit_projects", "write"), permRule("view_projects", "read"),
+			}}
+			specNamed(specs, "task").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+				admittedRule("read", "write"), permRule("view_tasks", "read"), permRule("edit_tasks", "write"),
+			}}
+			specNamed(specs, "org_member").Access.Allow[0] = admittedRule("read")
+			specNamed(specs, "org_member").Access.Allow = append(specNamed(specs, "org_member").Access.Allow,
+				permRule("view_members", "read"))
+			Expect(register(specs)).To(Succeed())
+		})
+
+		It("registers rules that split the write operations across permissions", func() {
+			specs := orgSpecs()
+			specNamed(specs, "task").Access = &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+				permRule("view_tasks", "read"), permRule("view_tasks", "create"),
+				permRule("edit_tasks", "update", "delete"), permRule("edit_projects", "read"),
+			}}
+			Expect(register(specs)).To(Succeed())
+		})
+
 		It("registers an access parent with an access parent of its own", func() {
 			Expect(register(append(orgSpecs(), commentSpec()))).To(Succeed())
 		})
@@ -229,7 +295,7 @@ var _ = Describe("Access model registration", func() {
 			logs := &recordingHandler{}
 			srv = newBareServer(server.WithLogger(slog.New(logs)))
 			specs := withFolders(orgSpecs())
-			specNamed(specs, "file").Access.Read = "view_tasks"
+			specNamed(specs, "file").Access = readWrite("view_tasks", "edit_files")
 			Expect(register(specs)).To(Succeed())
 			Expect(logs.attrs("access model warning", "finding")).To(ConsistOf(
 				ContainSubstring(`permission "view_tasks"`),
@@ -243,21 +309,28 @@ var _ = Describe("Access model registration", func() {
 			change(specs)
 			Expect(register(specs)).To(MatchError(ContainSubstring(want)))
 		},
-		Entry("access without a write permission", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Access.Write = ""
-		}, "must name both a read and a write permission"),
-		Entry("unrestricted together with a permission", func(s []server.DynamicEntity) {
-			specNamed(s, "project").Access.Unrestricted = true
-		}, "sets unrestricted together with read or write"),
+		Entry("access without a rule", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access = &syncplanev1.AccessOptions{}
+		}, "access declares no rule"),
+		Entry("a rule without an operation", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Allow[1] = permRule("edit_tasks")
+		}, "access allow[1] names no operation"),
+		Entry("a rule without a source", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Allow[0].Source = nil
+		}, "access allow[0] names no source"),
+		Entry("a rule with an empty permission", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Allow[0] = permRule("", "read")
+		}, "access allow[0]: permission name"),
+		Entry("two rules that are the same", func(s []server.DynamicEntity) {
+			a := specNamed(s, "task").Access
+			a.Allow = append(a.Allow, permRule("view_tasks", "read"))
+		}, "access allow[0] and allow[2] are the same rule"),
 		Entry("a permission that is not an identifier", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Access.Read = "view-tasks"
+			specNamed(s, "task").Access = readWrite("view-tasks", "edit_tasks")
 		}, `permission name "view-tasks" is not an identifier`),
 		Entry("an access parent on an entity without access", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access = nil
 		}, `field "project" is marked access_parent, but the entity declares no access option`),
-		Entry("an access parent on an unrestricted entity", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Access = &syncplanev1.AccessOptions{Unrestricted: true}
-		}, "but access is unrestricted"),
 		Entry("two access parents", func(s []server.DynamicEntity) {
 			task := specNamed(s, "task")
 			task.Fields = append(task.Fields, server.DynamicField{Name: "other", Number: 3, Ref: "project", AccessParent: true})
@@ -271,9 +344,17 @@ var _ = Describe("Access model registration", func() {
 		Entry("unknown fields inside access", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access.ProtoReflect().SetUnknown(unknownField())
 		}, "access carries option fields this server does not know"),
-		Entry("a grant entity outside the model", func(s []server.DynamicEntity) {
-			specNamed(s, "org_member").Access = &syncplanev1.AccessOptions{Unrestricted: true}
-		}, "a grant entity must declare access with a read and a write permission"),
+		Entry("unknown fields inside a rule", func(s []server.DynamicEntity) {
+			specNamed(s, "task").Access.Allow[1].ProtoReflect().SetUnknown(unknownField())
+		}, "access allow[1] carries option fields this server does not know"),
+		Entry("unknown fields inside an admitted source", func(s []server.DynamicEntity) {
+			admitted := &syncplanev1.AdmittedCaller{}
+			admitted.ProtoReflect().SetUnknown(unknownField())
+			specNamed(s, "task").Access.Allow[0].Source = &syncplanev1.AccessRule_Admitted{Admitted: admitted}
+		}, "access allow[0] admitted carries option fields this server does not know"),
+		Entry("a grant entity without access", func(s []server.DynamicEntity) {
+			specNamed(s, "org_member").Access = nil
+		}, "a grant entity must declare access"),
 		Entry("a grant with no roles", func(s []server.DynamicEntity) {
 			specNamed(s, "org_member").Grant.Roles = nil
 		}, "grant declares no roles"),
@@ -323,9 +404,11 @@ var _ = Describe("Access model registration", func() {
 			})
 		}, `entity "comment" declares no access option`),
 		Entry("an access parent outside the model", func(s []server.DynamicEntity) []server.DynamicEntity {
-			specNamed(s, "project").Access = &syncplanev1.AccessOptions{Unrestricted: true}
-			return s
-		}, `points at entity "project", which is not in the access model`),
+			task := specNamed(s, "task")
+			task.Access = nil
+			task.Fields[1].AccessParent = false
+			return append(s, commentSpec())
+		}, `points at entity "task", which is not in the access model`),
 		Entry("a role declared by two entities", func(s []server.DynamicEntity) []server.DynamicEntity {
 			guest := specNamed(s, "org_member")
 			return append(s, server.DynamicEntity{
@@ -333,18 +416,18 @@ var _ = Describe("Access model registration", func() {
 				Grant: &syncplanev1.GrantOptions{Subject: "user_id", Role: "role", Roles: []*syncplanev1.Role{
 					{Name: "org_admin", Grants: []string{"view_tasks"}},
 				}},
-				Access: &syncplanev1.AccessOptions{Read: "view_members", Write: "manage_members"},
+				Access: readWrite("view_members", "manage_members"),
 			})
 		}, `role "org_admin" is declared by both entity "guest" and entity "org_member"`),
 		Entry("a permission that no role grants", func(s []server.DynamicEntity) []server.DynamicEntity {
-			specNamed(s, "task").Access.Write = "edit_everything"
+			specNamed(s, "task").Access = readWrite("view_tasks", "edit_everything")
 			return s
 		}, `permission "edit_everything" of entity "task" is granted by no role`),
-		Entry("a role that grants a permission no entity uses", func(s []server.DynamicEntity) []server.DynamicEntity {
+		Entry("a role that grants a permission no rule uses", func(s []server.DynamicEntity) []server.DynamicEntity {
 			g := specNamed(s, "org_member").Grant
 			g.Roles[0].Grants = append(g.Roles[0].Grants, "delete_org")
 			return s
-		}, `role "org_admin" of entity "org_member" grants permission "delete_org", which no entity or mutator uses`),
+		}, `role "org_admin" of entity "org_member" grants permission "delete_org", which no access rule or mutator uses`),
 	)
 
 	Context("compiled entities", func() {

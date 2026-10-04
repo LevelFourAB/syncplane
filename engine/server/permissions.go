@@ -195,9 +195,9 @@ type Permissions interface {
 	// authorized individually, on either path.
 	//
 	// It is not the only thing that can refuse a write. The engine enforces the
-	// schema's own rules first — the (syncplane.v1.entity) create_policy,
-	// update_policy and delete_policy — so a write this hook never sees has
-	// already been rejected. A policy therefore cannot widen what a schema
+	// schema's own rules first — in a schema that uses the access model, a
+	// write that can only be an operation no (syncplane.v1.entity).access rule
+	// admits — so a write this hook never sees has already been rejected. A policy therefore cannot widen what a schema
 	// forbids, only narrow it further. A write this hook admits must then pass
 	// the row check against the row it targets, which by default refuses a
 	// write to a row ReadFilter hides; see RowWritePermissions.
@@ -526,8 +526,8 @@ func (AllowAll) FilterEpoch(context.Context, Principal, string) (uint64, error) 
 // paths and not others.
 //
 // Trusted callers never reach it — every call site sits behind the same
-// `enforced` check that skips CanMutate — which is what lets the TRUSTED_ONLY
-// policies be defined in terms of that bypass.
+// `enforced` check that skips CanMutate — which is what leaves an operation no
+// access rule admits to trusted writes.
 //
 // g is the request's write gate, non-nil for every enforced write. Resolving it
 // here rather than at apply time is what keeps FieldPermissions, WriteFilter and
@@ -584,8 +584,9 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 	return refuseProtectedMask(info, w.Crud, protected)
 }
 
-// checkWritePolicy enforces the schema's own write rules on a CRUD write: the
-// (syncplane.v1.entity) create_policy, update_policy and delete_policy, and the
+// checkWritePolicy enforces the schema's own write rules that need no row on
+// a CRUD write: the operations that no (syncplane.v1.entity).access rule
+// admits, which only trusted writes may perform, and the
 // (syncplane.v1.field_behavior) write_policy marks that put a field out of a
 // client's reach.
 //
@@ -597,9 +598,11 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 // It runs BEFORE the app's policy so a schema-level "no" does not depend on
 // that policy having an opinion, and it refuses with a Rejection because the
 // answer is deterministic: the client should ack and drop the mutation rather
-// than back off and retry a write that can never land.
+// than back off and retry a write that can never land. Whether a rule admits
+// this caller at this row needs the row, so the write transaction decides
+// that (see beginAccessWrite).
 //
-// Which policy a write must satisfy is decided from the write alone, so this
+// Which operation a write can be is decided from the write alone, so this
 // stays a pure function that needs no storage read and can run before the write
 // transaction opens:
 //
@@ -609,19 +612,18 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 //     if the row does not exist".
 //   - PUT asserting any other version is an update — a row at that version
 //     exists.
-//   - PUT asserting nothing is create-or-update and must satisfy BOTH. Calling
-//     it one or the other would open a hole in the opposite direction: under
-//     create_policy TRUSTED_ONLY with updates allowed, treating it as an update
-//     would let any client create rows with a plain put().
+//   - PUT asserting nothing is a create or an update, depending on the stored
+//     row, and is refused here only when no rule admits either. The write
+//     transaction checks the one it turns out to be.
 //
 // Two things deliberately pass. An unknown entity does — applyCrud rejects it
 // with a message about the entity, and re-deciding that here would only give
 // the two paths a chance to disagree; an unspecified op passes for the same
 // reason. An entity registered after this check and before the write applies
 // is known by then, so applyCrud runs writePolicyOf again against the entity it
-// applies with. So does a custom mutation: a mutator body's rows are covered by the
-// Write{Custom} verdict on its invocation rather than authorized one by one,
-// which is the escape hatch the options are designed around (see DeletePolicy).
+// applies with. So does a custom mutation: a mutator body's rows are covered by
+// the Write{Custom} verdict on its invocation rather than authorized one by
+// one.
 func (s *Server) checkWritePolicy(w Write) error {
 	crud := w.Crud
 	if crud == nil {
@@ -639,53 +641,37 @@ func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 	if err := refuseProtectedMask(info, crud, info.protectedFields); err != nil {
 		return err
 	}
-	creates := info.createPolicy == syncplanev1.CreatePolicy_CREATE_POLICY_TRUSTED_ONLY
-	updates := info.updatePolicy == syncplanev1.UpdatePolicy_UPDATE_POLICY_TRUSTED_ONLY
+	a := info.access
+	if a == nil {
+		return nil
+	}
+	refuse := func(what string) error {
+		return Reject(CodePermissionDenied, fmt.Sprintf(
+			"entity %q has no access rule that admits %s, so only a trusted write may %s its rows",
+			info.name, what, what))
+	}
 	switch crud.GetOp() {
 	case syncplanev1.CrudOp_CRUD_OP_DELETE:
-		if info.deletePolicy == syncplanev1.DeletePolicy_DELETE_POLICY_TRUSTED_ONLY {
-			return Reject(CodePermissionDenied, fmt.Sprintf(
-				"entity %q declares delete_policy TRUSTED_ONLY, so only a trusted write may delete its rows",
-				info.name))
+		if !a.names(opDelete) {
+			return refuse("delete")
 		}
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
-		if updates {
-			return Reject(CodePermissionDenied, fmt.Sprintf(
-				"entity %q declares update_policy TRUSTED_ONLY, so only a trusted write may modify its rows",
-				info.name))
+		if !a.names(opUpdate) {
+			return refuse("update")
 		}
 	case syncplanev1.CrudOp_CRUD_OP_PUT:
 		switch {
 		case crud.ExpectedVersion == nil:
-			// Unguarded: could land either way, so it needs both.
-			if creates && updates {
-				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q declares create_policy and update_policy TRUSTED_ONLY, so only a trusted write may write its rows",
-					info.name))
-			}
-			if creates {
-				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q declares create_policy TRUSTED_ONLY, and a PUT without an expected_version would "+
-						"create the row if it were absent; pass the row's current version to assert an update",
-					info.name))
-			}
-			if updates {
-				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q declares update_policy TRUSTED_ONLY, and a PUT without an expected_version would "+
-						"replace the row if it were present; pass expected_version 0 to assert a create",
-					info.name))
+			if !a.names(opCreate) && !a.names(opUpdate) {
+				return refuse("create or update")
 			}
 		case crud.GetExpectedVersion() == 0:
-			if creates {
-				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q declares create_policy TRUSTED_ONLY, so only a trusted write may create its rows",
-					info.name))
+			if !a.names(opCreate) {
+				return refuse("create")
 			}
 		default:
-			if updates {
-				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q declares update_policy TRUSTED_ONLY, so only a trusted write may modify its rows",
-					info.name))
+			if !a.names(opUpdate) {
+				return refuse("update")
 			}
 		}
 	}

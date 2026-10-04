@@ -11,13 +11,13 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
-import { assertWritePolicy, type EntityDef, type WritePolicies } from '../../src/mutations.js';
+import { assertWritePolicy, type EntityDef, type WriteAccess } from '../../src/mutations.js';
 
 interface PolicyCase {
 	name: string;
 	op: 'PUT' | 'PATCH' | 'DELETE' | 'UNSPECIFIED';
 	expectedVersion: string | null;
-	policies: WritePolicies;
+	access?: WriteAccess;
 	protected?: string[];
 	mask?: string[];
 	want: 'allow' | 'refuse';
@@ -38,10 +38,10 @@ const opOf = (op: PolicyCase['op']): CrudOp =>
 		? CrudOp.DELETE
 		: CrudOp.UNSPECIFIED;
 
-/** Only `name`, `policies` and `protectedFields` are read by the classifier, so
- * the rest of the EntityDef stays unbuilt rather than stubbed. */
-const defWith = (policies: WritePolicies, protectedFields: string[]): EntityDef =>
-	({ name: 'vector', policies, protectedFields }) as unknown as EntityDef;
+/** Only `name`, `writeAccess` and `protectedFields` are read by the classifier,
+ * so the rest of the EntityDef stays unbuilt rather than stubbed. */
+const defWith = (writeAccess: WriteAccess | undefined, protectedFields: string[]): EntityDef =>
+	({ name: 'vector', writeAccess, protectedFields }) as unknown as EntityDef;
 
 describe('write policy conformance vectors', () => {
 	it('has cases', () => {
@@ -53,7 +53,7 @@ describe('write policy conformance vectors', () => {
 			const expectedVersion = tc.expectedVersion === null ? undefined : BigInt(tc.expectedVersion);
 			const call = () =>
 				assertWritePolicy(
-					defWith(tc.policies, tc.protected ?? []),
+					defWith(tc.access, tc.protected ?? []),
 					opOf(tc.op),
 					expectedVersion,
 					tc.mask,

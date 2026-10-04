@@ -285,11 +285,11 @@ func WithTextPeer(peer string) WriteOption {
 // *Rejection AsRejection recovers). An absent or deleted row reads as version
 // 0, so WithExpectedVersion(0) means "only if the row does not exist".
 //
-// Beyond conflict detection it is how a server-side write states its intent to
-// an entity that restricts updates or creates: an unguarded PUT could land
-// either way, so it is refused where either policy is TRUSTED_ONLY, while
-// version 0 is provably a create and a non-zero version provably an update (see
-// CreatePolicy and UpdatePolicy).
+// Beyond conflict detection it is how a write states its intent to an entity
+// whose access rules admit creates and updates apart: version 0 is provably a
+// create and a non-zero version provably an update, so a write the rules do
+// not admit as that operation is refused before the write transaction opens.
+// An unguarded PUT is a create or an update depending on the stored row.
 //
 // Ignored by Patch, which takes its expected version as an argument.
 func WithExpectedVersion(version uint64) WriteOption {

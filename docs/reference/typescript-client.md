@@ -1404,24 +1404,6 @@ const article = schema.entity('article', {
 `.searchable()` throws an error on non-string fields.
 See [proto options](proto-options.md#full-text-search) and [Search data](../how-to/search.md).
 
-### Write policies
-
-Configure client write permissions with `createPolicy`, `updatePolicy`, and `deletePolicy`:
-
-```ts
-const comment = schema.entity('comment', {
-	id: schema.text().key(),
-	body: schema.text(),
-}, {
-	updatePolicy: 'trustedOnly',
-	deletePolicy: 'trustedOnly',
-});
-```
-
-Setting `'trustedOnly'` restricts writes to server-side mutations.
-Client calls violating these policies throw an error locally before mutating local state.
-See [Write policies](proto-options.md#write-policies).
-
 ### Protected fields
 
 `.protected()` prevents client writes from altering specific fields:
@@ -1445,7 +1427,12 @@ The `access` and `grant` entity options and the `.accessParent()` field mark dec
 
 ```ts
 const project = schema.entity('project', { id: schema.text().key() }, {
-	access: { read: 'view_projects', write: 'edit_projects' },
+	access: {
+		allow: [
+			{ read: true, permission: 'view_projects' },
+			{ write: true, permission: 'edit_projects' },
+		],
+	},
 });
 
 const projectMember = schema.entity('project_member', {
@@ -1462,17 +1449,28 @@ const projectMember = schema.entity('project_member', {
 			{ name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] },
 		],
 	},
-	access: { read: 'view_projects', write: 'edit_projects' },
+	access: {
+		allow: [
+			{ read: true, permission: 'view_projects' },
+			{ write: true, permission: 'edit_projects' },
+		],
+	},
 });
 
+// Every caller admitted to the workspace reads labels and adds them.
+// No rule admits update or delete, so only trusted server-side writes do that.
 const label = schema.entity('label', { id: schema.text().key() }, {
-	access: { unrestricted: true },
+	access: {
+		allow: [ { read: true, create: true, admitted: true } ],
+	},
 });
 ```
 
+Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `permission: '<name>'` or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
 `grant.subject` and `grant.role` name `text()` fields by accessor name. `.accessParent()` is valid on a singular `ref()` only.
 `entity()` throws on the rules that concern one entity. The server checks the rules that span entities when the schema is registered.
-See [Access model](proto-options.md#access-model).
+
+`put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).
 
 #### Predicting permissions
 

@@ -119,6 +119,38 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 	return a.chainsOf(tx).holdsAt(anchors, *at)
 }
 
+// admits reports whether rule admits the caller at the row of info with key,
+// as of tx. A rule with a permission needs it at the workspace root, at the
+// row itself, or at a row up its parent chain. A rule that admits every
+// admitted caller holds for every caller that passed the workspace gate,
+// which is every caller with an access. row is the row's decoded value, or
+// nil for a row that does not exist.
+func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	if rule.admitted() {
+		return true, nil
+	}
+	return a.holds(tx, rule.permission, info, key, row)
+}
+
+// admitting returns the rules of info that name op and admit the caller at
+// the row of info with key, as of tx, in declaration order.
+func (a *txAccess) admitting(tx storage.ReadTx, op accessOp, info *entityInfo, key string, row protoreflect.Message) ([]accessRule, error) {
+	var out []accessRule
+	for _, rule := range info.access.rules {
+		if !rule.names(op) {
+			continue
+		}
+		ok, err := a.admits(tx, rule, info, key, row)
+		if err != nil {
+			return nil, err
+		}
+		if ok {
+			out = append(out, rule)
+		}
+	}
+	return out, nil
+}
+
 // grantAnchorOf returns the anchor a grant row applies at, nil for the
 // workspace root. ok is false when the row anchors at nothing.
 func grantAnchorOf(model *accessModel, info *entityInfo, row protoreflect.Message) (*anchorRow, bool) {
@@ -288,18 +320,22 @@ type accessWrite struct {
 	live         bool
 	stored       protoreflect.Message
 	storedParent chainEdge
+	// updating are the update rules that admit the caller at the stored row.
+	// One of them must also admit it at the row as it will be stored.
+	updating []accessRule
 }
 
 // beginAccessWrite runs the access model's check against the stored row, and
 // returns the write for finish. Callers run it before the version check, so a
 // refused caller does not learn the row's version.
 //
-// An update or a delete needs the entity's write permission where the stored
-// row sits. On a grant entity, a write that can change what the row grants
-// also needs every permission of the stored role at the stored anchor, so a
-// caller cannot demote or remove a grant stronger than its own. A delete of a
-// row that other rows name as their access parent is refused while one of
-// them is live: deleting it would leave them anchored at nothing, and a row
+// A write to a live row is an update, or a delete for a DELETE, and needs a
+// rule of the entity that names the operation and admits the caller where the
+// stored row sits. On a grant entity, a write that can change what the row
+// grants also needs every permission of the stored role at the stored anchor,
+// so a caller cannot demote or remove a grant stronger than its own. A delete
+// of a row that other rows name as their access parent is refused while one
+// of them is live: deleting it would leave them anchored at nothing, and a row
 // created later with the same key would take them over.
 func (g *writeGate) beginAccessWrite(
 	tx storage.ReadTx,
@@ -309,7 +345,7 @@ func (g *writeGate) beginAccessWrite(
 	mask []string,
 	load func() (storage.Row, bool, error),
 ) (*accessWrite, error) {
-	if g == nil || g.access == nil || info.access == nil || info.access.unrestricted {
+	if g == nil || g.access == nil || info.access == nil {
 		return nil, nil
 	}
 	w := &accessWrite{access: g.access, info: info, key: key, op: op, mask: mask}
@@ -326,11 +362,15 @@ func (g *writeGate) beginAccessWrite(
 	}
 	model := g.access.model()
 	sr := stored.ProtoReflect()
-	ok, err := g.access.holds(tx, info.access.write, info, key, sr)
+	want := opUpdate
+	if op == syncplanev1.CrudOp_CRUD_OP_DELETE {
+		want = opDelete
+	}
+	admitting, err := g.access.admitting(tx, want, info, key, sr)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	if len(admitting) == 0 {
 		return nil, refuseRow(info, key)
 	}
 	if touchesGrant(info, op, mask) {
@@ -351,6 +391,9 @@ func (g *writeGate) beginAccessWrite(
 	}
 	w.live, w.stored = true, sr
 	w.storedParent = edgeOf(model, info, sr)
+	if want == opUpdate {
+		w.updating = admitting
+	}
 	return w, nil
 }
 
@@ -358,13 +401,15 @@ func (g *writeGate) beginAccessWrite(
 // after the mask merge, the protected-field carry-over and the reference
 // projection, before the index update.
 //
-// A create needs the write permission where the new row sits, and so does an
-// update that moves the row to another access parent. A move also needs, where
-// the row sits before it, the read permission of every entity whose rows can
-// sit below it: the rows below move with it, and the caller would otherwise
-// show them to whoever reads at the new parent. On a grant entity, a write
-// that can change what the row grants also needs every permission of the new
-// role at the new anchor, so a caller cannot grant more than it holds.
+// A create needs a create rule that admits the caller where the new row sits.
+// An update that moves the row to another access parent needs one of the
+// update rules that admitted the caller at the stored row to admit it where
+// the row will sit as well. A move also needs, where the row sits before it,
+// the right to read every entity whose rows can sit below it: the rows below
+// move with it, and the caller would otherwise show them to whoever reads at
+// the new parent. On a grant entity, a write that can change what the row
+// grants also needs every permission of the new role at the new anchor, so a
+// caller cannot grant more than it holds.
 func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	if w == nil {
 		return nil
@@ -374,25 +419,46 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	// The parent's entity counts as well as its key: a polymorphic parent can
 	// move between rows of two entities that share a key.
 	moved := w.live && edgeOf(model, w.info, fr) != w.storedParent
-	if !w.live || moved {
-		ok, err := w.access.holds(tx, w.info.access.write, w.info, w.key, fr)
+	switch {
+	case !w.live:
+		admitting, err := w.access.admitting(tx, opCreate, w.info, w.key, fr)
 		if err != nil {
 			return err
 		}
-		if !ok {
+		if len(admitting) == 0 {
 			return refuseRow(w.info, w.key)
 		}
-	}
-	if moved {
-		for _, perm := range model.readPermsBelow(w.info.name) {
-			ok, err := w.access.holds(tx, perm, w.info, w.key, w.stored)
+	case moved:
+		// One rule for both sides: the stored row's parent chain differs from
+		// the new one, so a rule that admitted the caller there need not here.
+		admitted := false
+		for _, rule := range w.updating {
+			ok, err := w.access.admits(tx, rule, w.info, w.key, fr)
+			if err != nil {
+				return err
+			}
+			if ok {
+				admitted = true
+				break
+			}
+		}
+		if !admitted {
+			return refuseRow(w.info, w.key)
+		}
+		set, err := w.access.get(tx)
+		if err != nil {
+			return err
+		}
+		chains := w.access.chainsOf(tx)
+		for _, r := range model.readersBelow(w.info.name) {
+			ok, err := chains.holds(set.readAnchors(r), w.info, w.key, w.stored)
 			if err != nil {
 				return err
 			}
 			if !ok {
 				return Reject(CodePermissionDenied, fmt.Sprintf(
-					"entity %q: moving row %q needs permission %q where it is now, to carry the rows below it",
-					w.info.name, w.key, perm))
+					"entity %q: moving row %q needs one of the permissions %s where it is now, to carry the rows below it",
+					w.info.name, w.key, strings.Join(r.perms, ", ")))
 			}
 		}
 	}

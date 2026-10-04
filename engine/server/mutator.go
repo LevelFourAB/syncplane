@@ -343,9 +343,8 @@ func (e *EntityTx) GetMeta(dst proto.Message, key string) (found bool, meta RowM
 // an invented identity.
 //
 // WithExpectedVersion makes the write a compare-and-swap and is also how it
-// states create-or-update intent to an entity restricting either (see
-// CreatePolicy); without one the write is unguarded and follows arrival order
-// like any other.
+// states create-or-update intent; without one the write is unguarded and
+// follows arrival order like any other.
 func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	o, err := collectWriteOpts(opts)
 	if err != nil {

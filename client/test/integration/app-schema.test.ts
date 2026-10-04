@@ -284,7 +284,12 @@ describe('runtime app schema registration', () => {
 describe('runtime registration of an access-model schema', () => {
 	function makeAccessBundle(opts: { orgViewerRole?: boolean; unusedGrant?: boolean } = {}) {
 		const project = entity('project', { id: text().key(), name: text() }, {
-			access: { read: 'view_projects', write: 'edit_projects' },
+			access: {
+				allow: [
+					{ read: true, permission: 'view_projects' },
+					{ write: true, permission: 'edit_projects' },
+				],
+			},
 		});
 		const orgMember = entity('org_member', { id: text().key(), userId: text(), role: text() }, {
 			grant: {
@@ -306,12 +311,25 @@ describe('runtime registration of an access-model schema', () => {
 					...(opts.orgViewerRole ? [ { name: 'org_viewer', grants: [ 'view_tasks' ] } ] : []),
 				],
 			},
-			access: { read: 'view_members', write: 'manage_members' },
+			access: {
+				allow: [
+					{ read: true, permission: 'view_members' },
+					{ write: true, permission: 'manage_members' },
+				],
+			},
 		});
 		const task = entity('task', { id: text().key(), project: ref(() => project).accessParent() }, {
-			access: { read: 'view_tasks', write: 'edit_tasks' },
+			access: {
+				allow: [
+					{ read: true, permission: 'view_tasks' },
+					{ create: true, update: true, permission: 'edit_tasks' },
+					{ delete: true, permission: 'manage_members' },
+				],
+			},
 		});
-		const label = entity('label', { id: text().key() }, { access: { unrestricted: true } });
+		const label = entity('label', { id: text().key() }, {
+			access: { allow: [ { read: true, write: true, admitted: true } ] },
+		});
 		return defineSchema(project, orgMember, task, label);
 	}
 
@@ -322,12 +340,12 @@ describe('runtime registration of an access-model schema', () => {
 		expect(res.entityNames).toEqual([ 'label', 'org_member', 'project', 'task' ]);
 	});
 
-	it('refuses a role that grants a permission no entity uses', async () => {
+	it('refuses a role that grants a permission no rule uses', async () => {
 		await expect(
 			registerSchema(adminTransport(), 'access-unused', makeAccessBundle({ unusedGrant: true }), {
 				token: TOKEN,
 			}),
-		).rejects.toThrow(/grants permission "delete_org", which no entity or mutator uses/);
+		).rejects.toThrow(/grants permission "delete_org", which no access rule or mutator uses/);
 	});
 
 	it("changes an entity's access model only when the registration allows it", async () => {

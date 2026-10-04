@@ -108,7 +108,8 @@ export function invertCrud(
 			}
 			// Version 0 means "row must not exist". The restore is a create, so
 			// asserting that conflicts instead of overwriting whatever took the
-			// key since, and keeps the undo legal where updates are trustedOnly.
+			// key since, and keeps the undo legal where no access rule admits an
+			// update.
 			return create(CrudMutationSchema, {
 				entity: crud.entity,
 				key: crud.key,

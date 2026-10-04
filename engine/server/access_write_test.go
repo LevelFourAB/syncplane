@@ -290,8 +290,6 @@ var _ = Describe("Access model writes", func() {
 		},
 		Entry("a permission no role grants", server.MutatorAccess{Permission: "launch"}, nil,
 			`permission "launch" of mutator m is granted by no role`),
-		Entry("an entity outside the model", server.MutatorAccess{Permission: "edit_tasks", Entity: "note", KeyField: "task_id"},
-			&accessv1.TaskArgs{}, `names entity "note", which is not in the access model`),
 		Entry("a key field the args do not have", server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "id"},
 			&accessv1.TaskArgs{}, `key field "id" must be a singular string field`),
 		Entry("an entity without a key field", server.MutatorAccess{Permission: "edit_tasks", Entity: "task"},

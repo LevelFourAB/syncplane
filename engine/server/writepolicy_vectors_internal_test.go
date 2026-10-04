@@ -22,11 +22,12 @@ type writePolicyCase struct {
 	Name            string  `json:"name"`
 	Op              string  `json:"op"`
 	ExpectedVersion *string `json:"expectedVersion"`
-	Policies        struct {
-		Create string `json:"create"`
-		Update string `json:"update"`
-		Delete string `json:"delete"`
-	} `json:"policies"`
+	// Access is nil for an entity without access rules.
+	Access *struct {
+		Create bool `json:"create"`
+		Update bool `json:"update"`
+		Delete bool `json:"delete"`
+	} `json:"access"`
 	Protected []string `json:"protected"`
 	Mask      []string `json:"mask"`
 	Want      string   `json:"want"`
@@ -49,12 +50,17 @@ var _ = Describe("write policy conformance vectors", func() {
 	It("classifies every case the way the vectors say", func() {
 		for _, tc := range cases {
 			srv := &Server{}
-			info := &entityInfo{
-				name:            "vector",
-				createPolicy:    createPolicyFromVector(tc.Policies.Create),
-				updatePolicy:    updatePolicyFromVector(tc.Policies.Update),
-				deletePolicy:    deletePolicyFromVector(tc.Policies.Delete),
-				protectedFields: tc.Protected,
+			info := &entityInfo{name: "vector", protectedFields: tc.Protected}
+			if a := tc.Access; a != nil {
+				info.access = &entityAccess{named: opRead}
+				for _, op := range []struct {
+					set bool
+					op  accessOp
+				}{{a.Create, opCreate}, {a.Update, opUpdate}, {a.Delete, opDelete}} {
+					if op.set {
+						info.access.named |= op.op
+					}
+				}
 			}
 			srv.cat.Store(&catalog{entities: map[string]*entityInfo{info.name: info}})
 
@@ -91,25 +97,4 @@ func opFromVector(op string) syncplanev1.CrudOp {
 	default:
 		return syncplanev1.CrudOp_CRUD_OP_UNSPECIFIED
 	}
-}
-
-func createPolicyFromVector(p string) syncplanev1.CreatePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.CreatePolicy_CREATE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.CreatePolicy_CREATE_POLICY_ALLOW
-}
-
-func updatePolicyFromVector(p string) syncplanev1.UpdatePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.UpdatePolicy_UPDATE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.UpdatePolicy_UPDATE_POLICY_ALLOW
-}
-
-func deletePolicyFromVector(p string) syncplanev1.DeletePolicy {
-	if p == "trustedOnly" {
-		return syncplanev1.DeletePolicy_DELETE_POLICY_TRUSTED_ONLY
-	}
-	return syncplanev1.DeletePolicy_DELETE_POLICY_ALLOW
 }

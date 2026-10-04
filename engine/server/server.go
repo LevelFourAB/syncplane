@@ -54,14 +54,6 @@ type entityInfo struct {
 	// indexes, under the reserved searchIndexName.
 	search  *searchIndex
 	mergers lww.Mergers
-	// createPolicy, updatePolicy and deletePolicy are the entity's
-	// (syncplane.v1.entity) write policies. The engine checks them alongside
-	// CanMutate (see Server.authorizeWrite); they are held here rather than
-	// re-read from the descriptor because they are consulted once per
-	// authorized write.
-	createPolicy syncplanev1.CreatePolicy
-	updatePolicy syncplanev1.UpdatePolicy
-	deletePolicy syncplanev1.DeletePolicy
 	// serverOnly is (syncplane.v1.entity).server_only: the entity's rows never
 	// reach a client. Enforced at the row emitter, which is the chokepoint
 	// bootstrap, pull and resync share, and at the two doors a client could name
@@ -1370,13 +1362,10 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 		return nil, fmt.Errorf("server: entity %q declares no key_fields", eo.GetName())
 	}
 	info := &entityInfo{
-		name:         eo.GetName(),
-		msgType:      mt,
-		createPolicy: eo.GetCreatePolicy(),
-		updatePolicy: eo.GetUpdatePolicy(),
-		deletePolicy: eo.GetDeletePolicy(),
-		serverOnly:   eo.GetServerOnly(),
-		history:      eo.GetHistory(),
+		name:       eo.GetName(),
+		msgType:    mt,
+		serverOnly: eo.GetServerOnly(),
+		history:    eo.GetHistory(),
 	}
 	for _, kf := range eo.GetKeyFields() {
 		fd := desc.Fields().ByName(protoreflect.Name(kf))

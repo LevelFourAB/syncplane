@@ -22,14 +22,16 @@ import (
 )
 
 // entityAccess is an entity's place in the access model: its
-// (syncplane.v1.entity).access option and its access_parent field, checked
-// and resolved at registration. Nil on an entity that declares no access
-// option.
+// (syncplane.v1.entity).access rules and its access_parent field, checked and
+// resolved at registration. Nil on an entity that declares no access option.
 type entityAccess struct {
-	// unrestricted is access.unrestricted: the entity is outside the model and
-	// read and write are empty.
-	unrestricted bool
-	read, write  string
+	// rules are the entity's access rules, in declaration order.
+	rules []accessRule
+	// named holds every operation at least one rule admits, with opWrite
+	// spread over the write operations it covers.
+	named accessOp
+	// read is who the read rules admit.
+	read readers
 	// parents are the cases of the access parent, in field order, and empty
 	// when rows anchor at the workspace root: one case for a reference to one
 	// entity, one per case of a polymorphic reference. A row holds at most one
@@ -40,6 +42,87 @@ type entityAccess struct {
 	// parentName names the access parent in masks and errors: the marked
 	// field, or the holder's oneof whose members are the cases.
 	parentName string
+}
+
+// accessOp is a set of the operations an access rule admits.
+type accessOp uint8
+
+const (
+	opRead accessOp = 1 << iota
+	opCreate
+	opUpdate
+	opDelete
+	// opWrite is a rule's write flag: every write operation, including any a
+	// later version adds. It is a bit of its own rather than the three
+	// operations it covers now, so that the access spec tells a rule that names
+	// write apart from one that names create, update and delete.
+	opWrite
+)
+
+// accessOpNames names each flag of an access rule, in field order.
+var accessOpNames = []struct {
+	op   accessOp
+	name string
+}{{opRead, "read"}, {opCreate, "create"}, {opUpdate, "update"}, {opDelete, "delete"}, {opWrite, "write"}}
+
+// accessRule is one rule of an entity's access option.
+type accessRule struct {
+	ops accessOp
+	// permission is the permission the rule needs, "" for a rule that admits
+	// every admitted caller.
+	permission string
+}
+
+// admitted reports whether the rule admits every caller admitted to the
+// workspace.
+func (r accessRule) admitted() bool {
+	return r.permission == ""
+}
+
+// names reports whether the rule admits op, one of opRead, opCreate, opUpdate
+// and opDelete.
+func (r accessRule) names(op accessOp) bool {
+	return r.ops&op != 0 || (op != opRead && r.ops&opWrite != 0)
+}
+
+// spec renders the rule in a canonical form: two rules with equal specs admit
+// the same operations to the same callers.
+func (r accessRule) spec() string {
+	var ops []string
+	for _, o := range accessOpNames {
+		if r.ops&o.op != 0 {
+			ops = append(ops, o.name)
+		}
+	}
+	source := "admitted"
+	if !r.admitted() {
+		source = "permission=" + r.permission
+	}
+	return strings.Join(ops, ",") + ":" + source
+}
+
+// names reports whether at least one rule admits op, one of opRead, opCreate,
+// opUpdate and opDelete, whatever the rule's source.
+func (a *entityAccess) names(op accessOp) bool {
+	return a.named&op != 0
+}
+
+// readers is who may read the rows of an entity: a caller that holds one of
+// perms where a row sits, or every admitted caller when all is set.
+type readers struct {
+	// perms are the permissions of the entity's read rules, sorted and without
+	// repeats. Empty when all is set.
+	perms []string
+	all   bool
+}
+
+// key renders r in a canonical form: entities with equal keys are read by
+// the same callers at the same anchors. "*" cannot be a permission name.
+func (r readers) key() string {
+	if r.all {
+		return "*"
+	}
+	return strings.Join(r.perms, ",")
 }
 
 // parentCase is one case of an entity's access parent: the reference a row
@@ -126,7 +209,7 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 	if opt == nil {
 		if parents != nil {
 			return nil, fmt.Errorf("%s is marked access_parent, but the entity declares no access option; "+
-				"declare access: { read: \"...\" write: \"...\" }", parentDescription(parents, parentName))
+				"declare access: { allow: [...] }", parentDescription(parents, parentName))
 		}
 		return nil, nil
 	}
@@ -136,27 +219,79 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 	if err := refuseUnknownOptionFields("access", opt); err != nil {
 		return nil, err
 	}
-	a := &entityAccess{unrestricted: opt.GetUnrestricted(), read: opt.GetRead(), write: opt.GetWrite()}
-	if a.unrestricted {
-		if a.read != "" || a.write != "" {
-			return nil, fmt.Errorf("access sets unrestricted together with read or write; an unrestricted entity names no permissions")
-		}
-		if parents != nil {
-			return nil, fmt.Errorf("%s is marked access_parent, but access is unrestricted; "+
-				"an unrestricted entity has no place in the access model", parentDescription(parents, parentName))
-		}
-		return a, nil
+	if len(opt.GetAllow()) == 0 {
+		return nil, fmt.Errorf("access declares no rule; add at least one rule to allow")
 	}
-	if a.read == "" || a.write == "" {
-		return nil, fmt.Errorf("access must name both a read and a write permission, or set unrestricted")
-	}
-	for _, p := range []string{a.read, a.write} {
-		if err := naming.ValidatePermissionName(p); err != nil {
-			return nil, fmt.Errorf("access: %w", err)
+	a := &entityAccess{parents: parents, parentName: parentName}
+	seen := map[string]int{}
+	reads := map[string]bool{}
+	for i, r := range opt.GetAllow() {
+		rule, err := accessRuleOf(i, r)
+		if err != nil {
+			return nil, err
+		}
+		spec := rule.spec()
+		if j, dup := seen[spec]; dup {
+			return nil, fmt.Errorf("access allow[%d] and allow[%d] are the same rule", j, i)
+		}
+		seen[spec] = i
+		a.rules = append(a.rules, rule)
+		for _, op := range []accessOp{opRead, opCreate, opUpdate, opDelete} {
+			if rule.names(op) {
+				a.named |= op
+			}
+		}
+		if rule.names(opRead) {
+			if rule.admitted() {
+				a.read.all = true
+			} else {
+				reads[rule.permission] = true
+			}
 		}
 	}
-	a.parents, a.parentName = parents, parentName
+	if !a.read.all {
+		for p := range reads {
+			a.read.perms = append(a.read.perms, p)
+		}
+		sort.Strings(a.read.perms)
+	}
 	return a, nil
+}
+
+// accessRuleOf checks the rule at index i of an access option's allow list.
+func accessRuleOf(i int, r *syncplanev1.AccessRule) (accessRule, error) {
+	where := fmt.Sprintf("access allow[%d]", i)
+	if err := refuseUnknownOptionFields(where, r); err != nil {
+		return accessRule{}, err
+	}
+	var rule accessRule
+	for _, flag := range []struct {
+		set bool
+		op  accessOp
+	}{{r.GetRead(), opRead}, {r.GetCreate(), opCreate}, {r.GetUpdate(), opUpdate}, {r.GetDelete(), opDelete}, {r.GetWrite(), opWrite}} {
+		if flag.set {
+			rule.ops |= flag.op
+		}
+	}
+	if rule.ops == 0 {
+		return accessRule{}, fmt.Errorf("%s names no operation; set read, create, update, delete or write", where)
+	}
+	switch src := r.GetSource().(type) {
+	case *syncplanev1.AccessRule_Permission:
+		if err := naming.ValidatePermissionName(src.Permission); err != nil {
+			return accessRule{}, fmt.Errorf("%s: %w", where, err)
+		}
+		rule.permission = src.Permission
+	case *syncplanev1.AccessRule_Admitted:
+		if src.Admitted != nil {
+			if err := refuseUnknownOptionFields(where+" admitted", src.Admitted); err != nil {
+				return accessRule{}, err
+			}
+		}
+	default:
+		return accessRule{}, fmt.Errorf("%s names no source; set permission or admitted", where)
+	}
+	return rule, nil
 }
 
 // accessParentOf finds the access parent of an entity: the cases of the
@@ -292,8 +427,8 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 	if err := refuseUnknownOptionFields("grant", opt); err != nil {
 		return nil, err
 	}
-	if access == nil || access.unrestricted {
-		return nil, fmt.Errorf("a grant entity must declare access with a read and a write permission")
+	if access == nil {
+		return nil, fmt.Errorf("a grant entity must declare access")
 	}
 	subject, err := grantField(desc, "subject", opt.GetSubject())
 	if err != nil {
@@ -427,8 +562,7 @@ type accessModel struct {
 	// change what a caller holds.
 	parents map[string][]*accessEdge
 	anchors map[string]bool
-	// entities maps the name of each entity in the model, unrestricted ones
-	// left out, to its definition.
+	// entities maps the name of each entity in the model to its definition.
 	entities map[string]*entityInfo
 	// children maps the name of each anchor entity to the edges that point at
 	// it, sorted by child name and then in field order. below maps it to
@@ -536,10 +670,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		a := info.access
 		if a == nil {
 			return nil, fmt.Errorf("server: entity %q declares no access option; in a schema that uses the access model "+
-				"every entity declares access: { read: \"...\" write: \"...\" } or access: { unrestricted: true }", name)
-		}
-		if a.unrestricted {
-			continue
+				"every entity declares access: { allow: [...] }", name)
 		}
 		m.entities[name] = info
 		for _, p := range a.parents {
@@ -548,17 +679,17 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at %s, which is not a registered entity",
 					name, refCasePath(p.ref.ref), p.ref.ref.Target.FullName())
 			}
-			if target.access == nil || target.access.unrestricted {
+			if target.access == nil {
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which is not in the access model; "+
-					"declare access with a read and a write permission on %q", name, refCasePath(p.ref.ref), target.name, target.name)
+					"declare access on %q", name, refCasePath(p.ref.ref), target.name, target.name)
 			}
 			e := &accessEdge{child: info, target: target, ref: p.ref}
 			m.parents[name] = append(m.parents[name], e)
 			m.anchors[target.name] = true
 			m.children[target.name] = append(m.children[target.name], e)
 		}
-		for _, p := range []string{a.read, a.write} {
-			if !slices.Contains(used[p], name) {
+		for _, r := range a.rules {
+			if p := r.permission; p != "" && !slices.Contains(used[p], name) {
 				used[p] = append(used[p], name)
 			}
 		}
@@ -576,7 +707,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	}
 
 	for _, name := range names {
-		if a := c.entities[name].access; a == nil || a.unrestricted {
+		if c.entities[name].access == nil {
 			continue
 		}
 		d := m.depthOf(name)
@@ -635,14 +766,16 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	for _, name := range roleNames {
 		for _, p := range m.roles[name].perms {
 			if used[p] == nil {
-				return nil, fmt.Errorf("server: role %q of entity %q grants permission %q, which no entity or mutator uses",
+				return nil, fmt.Errorf("server: role %q of entity %q grants permission %q, which no access rule or mutator uses",
 					name, m.roles[name].entity, p)
 			}
 		}
 	}
 	for _, name := range names {
-		if a := c.entities[name].access; a != nil && !a.unrestricted && !slices.Contains(m.readPerms, a.read) {
-			m.readPerms = append(m.readPerms, a.read)
+		for _, p := range c.entities[name].access.read.perms {
+			if !slices.Contains(m.readPerms, p) {
+				m.readPerms = append(m.readPerms, p)
+			}
 		}
 	}
 	sort.Strings(m.readPerms)
@@ -727,16 +860,19 @@ func (m *accessModel) entitiesBelow(anchor string) []string {
 	return out
 }
 
-// readPermsBelow returns, sorted and without repeats, the read permissions of
-// the entities whose rows can sit below rows of the named entity.
-func (m *accessModel) readPermsBelow(name string) []string {
-	var out []string
+// readersBelow returns who may read the entities whose rows can sit below
+// rows of the named entity, sorted by key and without repeats.
+func (m *accessModel) readersBelow(name string) []readers {
+	var out []readers
+	seen := map[string]bool{}
 	for _, below := range m.below[name] {
-		if p := m.entities[below].access.read; !slices.Contains(out, p) {
-			out = append(out, p)
+		r := m.entities[below].access.read
+		if k := r.key(); !seen[k] {
+			seen[k] = true
+			out = append(out, r)
 		}
 	}
-	sort.Strings(out)
+	sort.Slice(out, func(i, j int) bool { return out[i].key() < out[j].key() })
 	return out
 }
 
@@ -745,10 +881,7 @@ func (m *accessModel) readPermsBelow(name string) []string {
 // rows from the same anchors.
 func readRuleOf(info *entityInfo) string {
 	a := info.access
-	if a.unrestricted {
-		return "unrestricted"
-	}
-	rule := "read=" + a.read
+	rule := "read=" + a.read.key()
 	if a.hasParent() {
 		rule += " parent=" + a.parentRule()
 	}
@@ -826,7 +959,7 @@ func checkMutatorAccess(c *catalog, mi *mutatorInfo, ma *MutatorAccess) error {
 	if !ok {
 		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not registered", mi.name, ma.Entity)
 	}
-	if info.access == nil || info.access.unrestricted {
+	if info.access == nil {
 		return fmt.Errorf("server: mutator %q MutatorAccess names entity %q, which is not in the access model", mi.name, ma.Entity)
 	}
 	if mi.args == nil {
@@ -849,10 +982,13 @@ func accessSpecOf(info *entityInfo) string {
 	switch a := info.access; {
 	case a == nil:
 		b.WriteString(" access=none")
-	case a.unrestricted:
-		b.WriteString(" access=unrestricted")
 	default:
-		b.WriteString(" read=" + a.read + " write=" + a.write)
+		rules := make([]string, len(a.rules))
+		for i, r := range a.rules {
+			rules[i] = r.spec()
+		}
+		sort.Strings(rules)
+		b.WriteString(" allow=" + strings.Join(rules, ";"))
 		if a.hasParent() {
 			b.WriteString(" parent=" + a.parentRule())
 		}

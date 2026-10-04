@@ -39,13 +39,13 @@ var _ = Describe("access model fingerprint", func() {
 					{Name: "reader", Grants: []string{"view"}},
 					{Name: "writer", Grants: []string{"view", "edit"}},
 				}},
-				Access: &syncplanev1.AccessOptions{Read: "view", Write: "edit"},
+				Access: rwAccess("view", "edit"),
 			},
 			{
 				Name:      "project",
 				KeyFields: []string{"id"},
 				Fields:    []DynamicField{{Name: "id", Number: 1, Kind: str}},
-				Access:    &syncplanev1.AccessOptions{Read: "view", Write: "edit"},
+				Access:    rwAccess("view", "edit"),
 			},
 		}
 	}
@@ -102,7 +102,16 @@ var _ = Describe("access model fingerprint", func() {
 			s[0].Grant.Subject = "email"
 		}),
 		Entry("an entity writes by another permission", func(s []DynamicEntity) {
-			s[1].Access.Write = "view"
+			s[1].Access = rwAccess("view", "view")
+		}),
+		Entry("an entity splits its write rule by operation", func(s []DynamicEntity) {
+			s[1].Access.Allow = append(s[1].Access.Allow[:1],
+				&syncplanev1.AccessRule{Create: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit"}},
+				&syncplanev1.AccessRule{Update: true, Delete: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view"}})
+		}),
+		Entry("an entity declares its rules in another order", func(s []DynamicEntity) {
+			allow := s[1].Access.Allow
+			allow[0], allow[1] = allow[1], allow[0]
 		}),
 	)
 
@@ -113,7 +122,14 @@ var _ = Describe("access model fingerprint", func() {
 			Expect(compile(s).fingerprint).NotTo(Equal(compile(specs()).fingerprint))
 		},
 		Entry("an entity swaps its permissions", func(s []DynamicEntity) {
-			s[1].Access = &syncplanev1.AccessOptions{Read: "edit", Write: "view"}
+			s[1].Access = rwAccess("edit", "view")
+		}),
+		Entry("an entity reads by a second permission", func(s []DynamicEntity) {
+			s[1].Access.Allow = append(s[1].Access.Allow,
+				&syncplanev1.AccessRule{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit"}})
+		}),
+		Entry("an entity is read by every admitted caller", func(s []DynamicEntity) {
+			s[1].Access.Allow[0].Source = &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}
 		}),
 		Entry("the access parent is dropped", func(s []DynamicEntity) {
 			s[0].Fields[1].AccessParent = false
@@ -124,6 +140,15 @@ var _ = Describe("access model fingerprint", func() {
 		}),
 	)
 })
+
+// rwAccess returns access options with one rule that admits reads by read and
+// one that admits every write by write.
+func rwAccess(read, write string) *syncplanev1.AccessOptions {
+	return &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+		{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: read}},
+		{Write: true, Source: &syncplanev1.AccessRule_Permission{Permission: write}},
+	}}
+}
 
 // The conformance vectors are shared with the TS client
 // (client/test/unit/access-vectors.test.ts): the engine's decision and the

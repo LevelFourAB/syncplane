@@ -266,10 +266,10 @@ func (s *Server) compareAccess(ctx context.Context, ws string, tx storage.ReadTx
 // records on cmp the rows whose moves change what the caller can read. It
 // sets e.movesThrough to the newest move it read.
 //
-// A move changes what the caller can read when, for the read permission of
-// some entity whose rows can sit below the moved row, the caller held it on
-// the moved row's chain as the client's rows reflect it and does not hold it
-// on the chain now, or the other way around. The first side reads with the
+// A move changes what the caller can read when, for some entity whose rows can
+// sit below the moved row, the caller could read it on the moved row's chain
+// as the client's rows reflect it and cannot on the chain now, or the other
+// way around. The first side reads with the
 // cursor's access and with each moved row's parent from before its first
 // move; the second with the access and parents bound now.
 func (s *Server) compareMoves(ctx context.Context, ws string, tx storage.ReadTx, cur cursorState, e *rowEmitter, cmp *accessComparison) error {
@@ -344,9 +344,9 @@ func firstMoves(moves []accessMove) (map[anchorRow]chainEdge, []anchorRow) {
 }
 
 // movedForCaller returns, in the order they first moved, the rows of moves
-// whose chains hold the read permission of some entity below them on one side
-// and not on the other: was and wasSet read the chains before the moves, is
-// and isSet now.
+// whose chains let the caller read some entity below them on one side and not
+// on the other: was and wasSet read the chains before the moves, is and isSet
+// now.
 func movedForCaller(
 	model *accessModel,
 	was *accessChains,
@@ -361,12 +361,12 @@ func movedForCaller(
 		if model.entities[row.entity] == nil {
 			continue // the entity left the model, which a change of policy resets
 		}
-		for _, perm := range model.readPermsBelow(row.entity) {
-			before, err := was.holdsAt(wasSet.perms[perm], row)
+		for _, r := range model.readersBelow(row.entity) {
+			before, err := was.holdsAt(wasSet.readAnchors(r), row)
 			if err != nil {
 				return nil, err
 			}
-			after, err := is.holdsAt(isSet.perms[perm], row)
+			after, err := is.holdsAt(isSet.readAnchors(r), row)
 			if err != nil {
 				return nil, err
 			}
@@ -417,9 +417,9 @@ func (s *Server) loadReadAccess(ctx context.Context, ws string, cur cursorState,
 	return &ra, nil
 }
 
-// sameReadAnchors reports whether two sets hold perm at the same anchors.
-func sameReadAnchors(a, b *accessSet, perm string) bool {
-	x, y := a.perms[perm], b.perms[perm]
+// sameAnchors reports whether x and y hold their permissions at the same
+// anchors. A nil value holds nothing.
+func sameAnchors(x, y *permAnchors) bool {
 	xRoot, yRoot := x != nil && x.root, y != nil && y.root
 	if xRoot || yRoot {
 		return xRoot == yRoot
@@ -449,10 +449,10 @@ func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 		return true
 	}
 	info, ok := newEm.srv.catalogPtr().entities[entity]
-	if !ok || info.access == nil || info.access.unrestricted {
+	if !ok || info.access == nil {
 		return true
 	}
-	return sameReadAnchors(oldEm.access, newEm.access, info.access.read)
+	return sameAnchors(oldEm.access.readAnchors(info.access.read), newEm.access.readAnchors(info.access.read))
 }
 
 // rootLost returns the entities the caller could read at the workspace root
@@ -463,10 +463,10 @@ func rootLost(c *catalog, entities []string, old, now *accessSet) []string {
 	var out []string
 	for _, name := range entities {
 		info := c.entities[name]
-		if info == nil || info.access == nil || info.access.unrestricted {
+		if info == nil || info.access == nil {
 			continue
 		}
-		o, n := old.perms[info.access.read], now.perms[info.access.read]
+		o, n := old.readAnchors(info.access.read), now.readAnchors(info.access.read)
 		if o != nil && o.root && (n == nil || !n.root) {
 			out = append(out, name)
 		}
@@ -490,7 +490,7 @@ func (e *rowEmitter) hideOnOldSide(entities []string) {
 // accessDeltaCandidates returns, in key order, the keys of the rows of info
 // whose visibility can differ between the two sides of a resync whose scopes
 // are the same and whose access differs: the anchors of the entity's read
-// permission that one side holds and the other does not, the rows below
+// permissions that one side holds and the other does not, the rows below
 // those anchors (see rowsBelow), and both sides' window members. ok is false
 // when the entity must be scanned instead: the root was gained, an index is
 // not ready, or the set is larger than maxCandidates.
@@ -506,7 +506,7 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 		return withWindowMembers(keys, info.name, maxCandidates, newEm.windowMembers)
 	}
 	a := info.access
-	o, n := oldEm.access.perms[a.read], newEm.access.perms[a.read]
+	o, n := oldEm.access.readAnchors(a.read), newEm.access.readAnchors(a.read)
 	oRoot, nRoot := o != nil && o.root, n != nil && n.root
 	if oRoot && nRoot {
 		// Every row is readable on both sides, wherever its parents are.
@@ -669,8 +669,8 @@ func splitRowKey(key string) []string {
 // filter epoch whose old side cannot be rebuilt stays a reset: an old side
 // built from the new scope would hide that change from the diff. Any old side
 // reads with the cursor's access when it differs, and with the current access
-// otherwise, and reads nothing of an entity whose read permission the caller
-// held at the root and no longer does.
+// otherwise, and reads nothing of an entity the caller could read at the root
+// and no longer can.
 func (s *Server) bindResyncAccess(
 	ctx context.Context,
 	ws string,

@@ -4,7 +4,7 @@ This guide sets up the access model for an app where an organization has project
 
 ## 1. Choose the permissions
 
-Give each entity one permission to read its rows and one to write them. Use separate names for entities at different levels, so a role granted on the whole workspace does not reach more than you intend:
+Start with one permission to read the rows of each entity and one to write them. A rule with `write` admits create, update and delete. To give these operations to different callers, see [Allow some operations and not others](#allow-some-operations-and-not-others). Use separate names for entities at different levels, so a role granted on the whole workspace does not reach more than you intend:
 
 | Entity           | Read            | Write            |
 | ---------------- | --------------- | ---------------- |
@@ -30,7 +30,12 @@ message OrgMember {
 				{ name: "org_admin" grants: [ "view_members", "manage_members", "view_projects", "edit_projects", "view_roster", "manage_roster", "view_tasks", "edit_tasks" ] }
 			]
 		}
-		access: { read: "view_members" write: "manage_members" }
+		access: {
+			allow: [
+				{ read: true permission: "view_members" },
+				{ write: true permission: "manage_members" }
+			]
+		}
 	};
 	string id = 1;
 	string user_id = 2;
@@ -49,7 +54,12 @@ message ProjectMember {
 				{ name: "project_admin" grants: [ "view_projects", "view_roster", "manage_roster", "view_tasks", "edit_tasks" ] }
 			]
 		}
-		access: { read: "view_roster" write: "manage_roster" }
+		access: {
+			allow: [
+				{ read: true permission: "view_roster" },
+				{ write: true permission: "manage_roster" }
+			]
+		}
 	};
 	string id = 1;
 	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -71,7 +81,12 @@ message Project {
 	option (syncplane.v1.entity) = {
 		name: "project"
 		key_fields: [ "id" ]
-		access: { read: "view_projects" write: "edit_projects" }
+		access: {
+			allow: [
+				{ read: true permission: "view_projects" },
+				{ write: true permission: "edit_projects" }
+			]
+		}
 	};
 	string id = 1;
 	string name = 2;
@@ -81,7 +96,12 @@ message Task {
 	option (syncplane.v1.entity) = {
 		name: "task"
 		key_fields: [ "id" ]
-		access: { read: "view_tasks" write: "edit_tasks" }
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ write: true permission: "edit_tasks" }
+			]
+		}
 	};
 	string id = 1;
 	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -96,7 +116,12 @@ message Comment {
 	option (syncplane.v1.entity) = {
 		name: "comment"
 		key_fields: [ "id" ]
-		access: { read: "view_tasks" write: "edit_tasks" }
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ write: true permission: "edit_tasks" }
+			]
+		}
 	};
 	string id = 1;
 	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -111,7 +136,12 @@ message Folder {
 	option (syncplane.v1.entity) = {
 		name: "folder"
 		key_fields: [ "id" ]
-		access: { read: "view_folders" write: "edit_folders" }
+		access: {
+			allow: [
+				{ read: true permission: "view_folders" },
+				{ write: true permission: "edit_folders" }
+			]
+		}
 	};
 	string id = 1;
 	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -127,7 +157,12 @@ message Comment {
 	option (syncplane.v1.entity) = {
 		name: "comment"
 		key_fields: [ "id" ]
-		access: { read: "view_comments" write: "edit_comments" }
+		access: {
+			allow: [
+				{ read: true permission: "view_comments" },
+				{ write: true permission: "edit_comments" }
+			]
+		}
 	};
 	string id = 1;
 	oneof subject {
@@ -138,15 +173,106 @@ message Comment {
 }
 ```
 
-The comment has one `read` and one `write` permission for both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: mark the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
+The comment's rules apply in both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: mark the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
 
-An entity that every member of the workspace may read and write declares `access: { unrestricted: true }`. Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
+Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
 
 The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model).
 
+### Allow some operations and not others
+
+Each rule names the operations it admits. An operation is allowed when at least one rule admits it. An operation that no rule names is open only to trusted writes: code that runs under `server.Trusted`, connectors, effects and the bodies of custom mutators. The server refuses a client write that can only be such an operation before `CanMutate` runs, and the TypeScript client rejects it at the call site.
+
+To give create, update and delete to different permissions, write one rule for each. Here a member who may comment creates comments, and a moderator changes and deletes them:
+
+```proto
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ create: true permission: "post_comments" },
+				{ update: true delete: true permission: "moderate_comments" }
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string body = 3;
+}
+```
+
+Add `post_comments` and `moderate_comments` to the roles that must hold them. A move to another task needs one update rule that admits the caller at both tasks, so here only a moderator moves a comment.
+
+To make an entity server-owned, give it a read rule and no other rule. Clients read its rows, and only trusted writes create, change or delete them:
+
+```proto
+// The server records activity. Clients read it.
+message Activity {
+	option (syncplane.v1.entity) = {
+		name: "activity"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true permission: "view_tasks" } ] }
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string what = 3;
+}
+```
+
+Write its rows from trusted code, such as an effect or `srv.Mutate(server.Trusted(ctx), ...)`. See [Write from server-side code](server-side-writes.md).
+
+To make an entity append-only, give it a read rule and a create rule. A client creates a row and cannot change or delete it after that:
+
+```proto
+message TaskNote {
+	option (syncplane.v1.entity) = {
+		name: "task_note"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ create: true permission: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string body = 3;
+}
+```
+
+A client creates a note with `put`. The server refuses a `put` of a note that exists, because that write is an update. The TypeScript client rejects `patch`, `update` and `del` on a note before it sends them.
+
+To let every caller in the workspace read an entity, use `admitted: {}` as the source of the read rule. A caller is admitted when `CanAccessWorkspace` lets it in and it holds at least one permission in the workspace:
+
+```proto
+// Every caller in the workspace reads labels. Org admins write them.
+message Label {
+	option (syncplane.v1.entity) = {
+		name: "label"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true admitted: {} },
+				{ write: true permission: "edit_projects" }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+}
+```
+
+An entity whose rules use `admitted` stays in the model. It can have an access parent, be the access parent of other entities, and be a grant entity.
+
+To keep a client from deleting rows in a schema that does not use the access model, refuse the delete in `CanMutate`. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
+
 ### Moving and deleting rows that other rows sit below
 
-Rows below a row move with it. To move a task to another project, the caller needs `edit_tasks` at both projects and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.
+Rows below a row move with it. To move a task to another project, the caller needs one update rule that admits it at both projects, here the `write` rule with `edit_tasks`, and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.
 
 A client cannot delete a row while a live row names it as its access parent. Delete or move the comments first; one batch can delete the comments and the task together. Trusted code can delete the task anyway, and its comments then sit below nothing, so only a caller who holds `view_tasks` at the workspace root reads them.
 

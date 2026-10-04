@@ -24,6 +24,18 @@ A grant row grants nothing when its anchor row does not exist. Without this rule
 
 A grant row also grants nothing when the schema does not declare its role, and every write path refuses an undeclared role. Rows stored before the schema declared a role are the exception: when a registration adds the role, or adds `grant` to an entity that already holds rows, those rows start to grant it. Registration does not look for such rows, because that reads the grant entity in every workspace on each registration, and the rows were written under the rules the application had at that time. A runtime registration must pass `AllowAccessChange` for such a change, and that flag is where the operator accepts the stored values.
 
+## Rules
+
+The `access` option of an entity lists rules. Each rule names operations (read, create, update, delete, or `write` for every write operation) and a source: a permission, or `admitted` for every caller that the workspace gate lets in. See [Access model](../reference/proto-options.md#access-model) for the options.
+
+**Rules join with OR.** An operation is allowed when any rule admits it, and the order of the rules has no effect. Rules are monotonic for the same reason as grants: a new rule can only add access. Each rule therefore means the same thing whatever other rules the entity has, and a reviewer can read one rule and know what it allows. On the read side, the rows a caller reads are the union of the rows below the anchors of each read permission, which is the set that a grant change resyncs (see below).
+
+**An update needs one rule for both sides.** An update can move a row to another access parent, and a rule admits the move only when its source holds where the row is and where it goes. If one rule could admit the old place and another rule the new place, two narrow rules together would allow moves that neither rule states. For example, a rule for triagers in an intake project and a rule for editors in their own projects would together let a caller with both roles move any intake task into a project that it edits. With one rule for both sides, each rule adds exactly the moves it states.
+
+**An operation that no rule names is left to trusted writes.** The schema states what callers may do, and what it does not state is closed. A server-owned entity is then an entity with a read rule only, and an append-only entity is one with a read rule and a create rule. Trusted writes (connectors, effects, mutator bodies) are the application's own code, and they skip the rules as they skip the permission hooks. The operation that a write can be follows from the write alone: a `PATCH` is an update, a `DELETE` is a delete, and a `PUT` with version 0 is a create. The server therefore refuses such a write before it opens the write transaction, and the client refuses it before it enters the pending queue, where it could only end as a rejection.
+
+**`admitted` is a source, not a switch.** Some entities, such as labels, are open to every member of the workspace. `admitted` states this for one rule, so one entity can let every member read and only admins write. The entity stays in the model: it can have an access parent, be the access parent of rows that need a permission, and be a grant entity. A caller is admitted when `CanAccessWorkspace` lets it in and it holds at least one permission in the workspace, so `admitted` still needs a grant row or a global role for the caller.
+
 ## Chains of parents
 
 A row's access parent can have an access parent of its own. A comment sits below a task, and the task below a project, so a permission held at the project reaches the comment. An entity can also be its own access parent, as in a folder tree. A caller holds a permission at a row when it holds it at the root, at the row, or at any row up the row's chain.
@@ -36,7 +48,7 @@ Two limits keep the walks bounded. `Limits.MaxAccessDepth` caps how many rows a 
 
 A row's access parent can also be polymorphic: a comment sits on a task or on a doc. The row still has one parent, and the case it holds decides which entity that parent is a row of, so a chain walk follows whichever case each row holds. The walk down probes the reference index of each case. Each case is its own index, so a guest in one project reaches the comments on that project's tasks without reading the comments on docs.
 
-A polymorphic entity has one `read` and one `write` permission, not one for each case. The rule that decides whether a caller reads a comment then stays one rule for the entity, whatever case the comment holds, and moving a comment from a task to a doc changes where it sits but not what it needs. The cost is that the roles of each tree must grant the comment permissions. Every member of the oneof must be marked: a row that held an unmarked case would anchor at nothing, and only a caller with the permission at the root could read it. A change of case is a move like any other, and two targets with the same key are two rows, because a row's parent is always an entity and a key together.
+A polymorphic entity has one set of rules, not one for each case. The rules that decide whether a caller reads a comment then stay the same for the entity, whatever case the comment holds, and moving a comment from a task to a doc changes where it sits but not what it needs. The cost is that the roles of each tree must grant the permissions of the comment rules. Every member of the oneof must be marked: a row that held an unmarked case would anchor at nothing, and only a caller with the permission at the root could read it. A change of case is a move like any other, and two targets with the same key are two rows, because a row's parent is always an entity and a key together.
 
 There is no stored chain. A stored chain for each row would have to be rewritten for every row below a row that moves, under the write lock, and that write would show the keys of those rows to clients that cannot read them. The engine reads the chain when it needs it instead, and records moves (see below).
 
@@ -48,11 +60,11 @@ The workspace gate reads the grants once more, from the primary, before any read
 
 ## Writes are checked inside the transaction
 
-A write needs the entity's `write` permission where the row sits. The engine checks this inside the write transaction, so a write sees the grants that earlier writes of the same batch made:
+A write needs a rule that admits its operation where the row sits. The engine checks this inside the write transaction, so a write sees the grants that earlier writes of the same batch made:
 
 - An update or delete is checked against the stored row, before the version check, so a refused caller does not learn the row's version.
 - A create is checked against the new row after merges, carried-over fields and reference projection.
-- An update that moves a row to another parent is checked at both parents. Otherwise a caller could move a task into a project it can write and out of one it cannot.
+- An update that moves a row to another parent is checked at both parents, by one rule. Otherwise a caller could move a task into a project it can write and out of one it cannot.
 
 A move carries every row below the moved row with it. A move therefore also needs, where the row is before the move, the read permission of every entity whose rows can sit below it. Without that rule, a caller who may edit tasks but not read their comments could move a task to a project where other people read comments.
 
@@ -71,7 +83,7 @@ On the next pull, the engine compares the caller's current read anchors with the
 - The same anchors: the pull continues as usual.
 - Different anchors: the pull starts a resync. It reads only the rows below the anchors that were added or removed, through the reference index, and sends rows that became visible and tombstones for rows that became hidden.
 - An entity that the caller could read at the root and now cannot: the resync drops the entity on the client and sends the rows the caller can still read. This costs what the caller keeps, not one tombstone for each row it lost.
-- A change to the access model: the record also holds the read rule of each entity, which is its read permission and its access parent. If an entity that the record and the current schema both know has a different read rule, the rows on the client were chosen by a rule that no longer applies, so the client resets and bootstraps again. Other model changes keep the cursor. A role that grants other permissions moves the anchors, which resync as above. An entity that is new to the model has no rows on the client to correct. Thus a client can move between nodes with the older and the newer schema during a rolling deploy, and it does not reset.
+- A change to the access model: the record also holds the read rule of each entity, which is who its read rules admit and its access parent. If an entity that the record and the current schema both know has a different read rule, the rows on the client were chosen by a rule that no longer applies, so the client resets and bootstraps again. Other model changes keep the cursor. A role that grants other permissions moves the anchors, which resync as above. An entity that is new to the model has no rows on the client to correct. Thus a client can move between nodes with the older and the newer schema during a rolling deploy, and it does not reset.
 - A missing record or a cursor issued to other subjects: the client resets and bootstraps again.
 
 The record lives in the store and never in the cursor itself. A resync tombstones rows by the anchors the record names, so a client that could write its own record could name anchors it never held and receive the keys of hidden rows.
@@ -80,7 +92,7 @@ The record lives in the store and never in the cursor itself. A resync tombstone
 
 A move changes visibility without a grant change. When a task moves to another project, every comment below it changes visibility, but no comment is written, and neither the grants nor the change scan show it. The engine therefore keeps a move log: every write that changes the access parent of a row that rows sit below, or creates or deletes such a row, records the row and its parent before the write, in the same transaction. A row without rows below it moves nothing but itself, and the change scan already sends it.
 
-On the next pull, the engine reads the moves after the cursor. For each moved row it compares the chain above the row as the client's rows reflect it with the chain now: if the caller holds the read permission of an entity below the row on one side and not on the other, the pull resyncs the rows below the moved row. The old side of that resync reads with the cursor's grants and with each moved row's parent from before its first move. A move that changes nothing the caller reads, such as a task moved between two projects the caller is not in, costs that caller one read of the log. After the resync the cursor records the newest move it reflects, so the next pull does not resync the same moves again.
+On the next pull, the engine reads the moves after the cursor. For each moved row it compares the chain above the row as the client's rows reflect it with the chain now: if a read rule of an entity below the row admits the caller on one side and not on the other, the pull resyncs the rows below the moved row. The old side of that resync reads with the cursor's grants and with each moved row's parent from before its first move. A move that changes nothing the caller reads, such as a task moved between two projects the caller is not in, costs that caller one read of the log. After the resync the cursor records the newest move it reflects, so the next pull does not resync the same moves again.
 
 A move during a resync resets the client when it changes what the caller reads, as a grant change during a resync does. A cursor that has more moves after it than `Limits.MaxResyncScan` also resets. Garbage collection removes moves at or below the tombstone horizon, where every cursor resets anyway.
 
@@ -88,7 +100,7 @@ A move during a resync resets the client when it changes what the caller reads, 
 
 The client receives a `CallerAccess` summary: every permission the caller holds and its anchors. To answer for a row below an anchor, the client walks the row's chain through the rows it holds locally, its own queued writes included. When a row of the chain is not held locally, for example a task the caller cannot read above a comment it can, the answer is `'unknown'`. The server sends it when it changes, and the client stores it with the cursor. `can()` and `useCan` answer `'yes'`, `'no'` or `'unknown'` from it.
 
-The answer is advisory. The client does not refuse writes locally, because the rule depends on rows and grants that the client may not hold. Every write is queued, and a refused write comes back as a rejection acknowledgement. A row the caller lost access to keeps showing a pending local write until that acknowledgement arrives.
+The answer is advisory. The client does not refuse a write when `can()` answers `'no'`, because the answer depends on rows and grants that the client may not hold. It refuses only a write that no rule admits to any caller, which it can tell from the schema alone. Every write is queued, and a refused write comes back as a rejection acknowledgement. A row the caller lost access to keeps showing a pending local write until that acknowledgement arrives.
 
 ## Costs and limits
 
@@ -98,5 +110,5 @@ The answer is advisory. The client does not refuse writes locally, because the r
 - **Root changes.** Gaining or losing a permission at the root affects every row of the entities that use it, so the resync scans those entities.
 - **Shared permission names.** A permission used at two depths that do not sit below one another, such as `view_members` for org members and for project members, lets a role that grants it at the root read the rosters of every project. Registration logs a warning for this case. A permission shared by a row and the rows below it, such as `view_tasks` for tasks and their comments, is the common case and logs nothing.
 - **Tombstones reveal keys.** A tombstone for a hidden row still shows the row's entity, key and version. Use keys that are not secret.
-- **Text deltas.** A caller who does not hold an entity's read permission at the root receives collaborative-text fields as whole documents, not as deltas.
+- **Text deltas.** A caller whom no read rule of an entity admits at the root receives collaborative-text fields as whole documents, not as deltas.
 - **Query.** For a caller below the root, the `Query` RPC reads only the rows below the caller's anchors, which it finds through the reference index, and an index walk skips the entries of other rows without reading them. When the caller has more such rows than `MaxIndexScanCandidates`, the query reads like one from a caller at the root: through an index walk or a scan of the entity, with the model as a filter.

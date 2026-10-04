@@ -26,11 +26,6 @@ message EntityOptions {
 	// Writes to this entity re-encode and update the row position in every
 	// declared index.
 	repeated IndexSpec index = 3;
-	// Specifies who can delete rows of this entity.
-	//
-	// When unset, any caller admitted by the application permission policy can
-	// delete rows.
-	DeletePolicy delete_policy = 4;
 	// Specifies whether rows of this entity stay on the server only.
 	//
 	// When `true`, rows are never bootstrapped, pulled, or streamed to
@@ -44,35 +39,13 @@ message EntityOptions {
 	//
 	// See `HistoryOptions`.
 	HistoryOptions history = 6;
-	// Specifies who can create rows of this entity.
-	//
-	// When unset, any caller admitted by the application permission policy can
-	// create rows.
-	//
-	// A write counts as a create when it provably cannot target an existing
-	// row, such as a `PUT` request asserting `expected_version = 0`. A `PUT`
-	// request that asserts no version is a create-or-update operation and must
-	// satisfy both `create_policy` and `update_policy`.
-	CreatePolicy create_policy = 7;
-	// Specifies who can update existing rows of this entity.
-	//
-	// When unset, any caller admitted by the application permission policy can
-	// update rows.
-	//
-	// This policy applies to every `PATCH` request and every `PUT` request
-	// that could overwrite an existing row. To create a row on an entity that
-	// restricts updates, set `expected_version = 0`.
-	//
-	// Collaborative text fields are edited using `PATCH`, so client editing
-	// requires permission under this policy.
-	UpdatePolicy update_policy = 8;
 	// Configures full-text search over the fields of this entity.
 	//
 	// Fields marked with `(syncplane.v1.field_behavior).searchable` are
 	// indexed first in field order, followed by the fields declared in this
 	// search specification. See `SearchSpec`.
 	SearchSpec search = 9;
-	// Names the permissions that govern rows of this entity in the access
+	// Declares who can read and write the rows of this entity in the access
 	// model.
 	//
 	// A schema uses the access model when any of its entities declares
@@ -83,47 +56,100 @@ message EntityOptions {
 	// Declares the rows of this entity as grant rows: each row gives one
 	// subject one role at the row's anchor.
 	//
-	// A grant entity must also declare `access` with `read` and `write`. See
-	// `GrantOptions`.
+	// A grant entity must also declare `access`. See `GrantOptions`.
 	GrantOptions grant = 11;
+
+	reserved 4, 7, 8;
+	reserved "delete_policy", "create_policy", "update_policy";
 }
 
-// Names the permissions a caller must hold to read and to write the rows of
-// an entity.
+// Declares who can read and write the rows of an entity in the access model.
 //
 // A caller holds a permission at an anchor: the workspace root, or one row
 // that a grant row's `access_parent` field points at. A permission held at
 // an anchor applies to the anchor row and to every row below it: the rows
 // whose `access_parent` field points at it, the rows whose `access_parent`
-// field points at those, and so on. See `GrantOptions` and
-// `AccessParentOptions`.
+// field points at those, and so on. A row whose `access_parent` field is
+// unset, or names a row that does not exist, has no parent and never falls
+// back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
 //
-// A caller can read a row when it holds `read` at the workspace root, at
-// the row itself, or at a row up the row's chain of access parents. A row
-// whose `access_parent` field is unset, or names a row that does not exist,
-// has no parent and never falls back to the workspace root.
+// An operation on a row is allowed when at least one rule in `allow` admits
+// it. A rule only adds access: no rule takes away what another rule allows,
+// and the order of the rules has no effect. An operation that no rule names
+// is open only to trusted writes, such as connectors, effects and mutator
+// bodies.
 //
-// A permission name starts with a letter or an underscore, followed by
-// letters, digits and underscores. Registration refuses a permission that
-// no declared role grants, and a role that grants a permission no entity
-// uses, so a misspelled name fails on either side.
+// ```protobuf
+// message Comment {
+//   option (syncplane.v1.entity) = {
+//     name: "comment" key_fields: ["id"]
+//     access: { allow: [
+//       { read: true permission: "view_tasks" },
+//       { create: true permission: "comment" },
+//       { update: true delete: true permission: "moderate_comments" }
+//     ] }
+//   };
+//   string id = 1;
+//   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+// }
+// ```
+//
+// Registration refuses a permission that no declared role grants, and a role
+// that grants a permission no rule uses, so a misspelled name fails on either
+// side.
 //
 // The application permission hooks still run, and can refuse what the
 // model allows. They cannot allow what the model refuses.
 //
 // Registration refuses unknown fields inside this message.
 message AccessOptions {
-	// The permission that lets a caller read rows. Required unless
-	// `unrestricted` is set.
-	string read = 1;
-	// The permission that lets a caller create, update and delete rows.
-	// Required unless `unrestricted` is set.
-	string write = 2;
-	// Puts the entity outside the access model: every caller admitted to the
-	// workspace can read and write its rows, subject to the application
-	// permission hooks. Cannot be combined with `read` or `write`.
-	bool unrestricted = 3;
+	// The rules. At least one, and no two the same.
+	repeated AccessRule allow = 1;
 }
+
+// One way to read or write the rows of an entity.
+//
+// A rule admits each operation it names when its source holds for the caller
+// and the row: for a read, the row; for a create, the row as it will be
+// stored; for a delete, the stored row. An update must be admitted by one rule
+// for both the stored row and the row as it will be stored, so a rule admits
+// a write that moves a row to another access parent only when its source
+// holds at the old place and at the new one.
+//
+// Registration refuses a rule without an operation or without a source, and
+// unknown fields inside this message.
+message AccessRule {
+	// Admits reading rows.
+	bool read = 1;
+	// Admits creating rows.
+	bool create = 2;
+	// Admits changing rows that exist, including moving them to another access
+	// parent.
+	bool update = 3;
+	// Admits deleting rows.
+	bool delete = 4;
+	// Admits every write operation: `create`, `update` and `delete`, and each
+	// write operation a later version adds.
+	bool write = 5;
+
+	// Who the rule admits.
+	oneof source {
+		// A caller that holds this permission at the workspace root, at the
+		// row, or at a row up the row's chain of access parents. Starts with a
+		// letter or an underscore, followed by letters, digits and underscores.
+		string permission = 6;
+		// Every caller admitted to the workspace. See `AdmittedCaller`.
+		AdmittedCaller admitted = 7;
+	}
+}
+
+// Selects every caller admitted to the workspace as the source of an
+// `AccessRule`.
+//
+// In a schema that uses the access model, a caller is admitted when the
+// application's workspace hook lets it in and it holds at least one
+// permission in the workspace.
+message AdmittedCaller {}
 
 // Declares an entity whose rows grant roles.
 //
@@ -146,7 +172,10 @@ message AccessOptions {
 //         "edit_tasks"] }
 //       ]
 //     }
-//     access: { read: "view_members" write: "manage_members" }
+//     access: { allow: [
+//       { read: true permission: "view_members" },
+//       { write: true permission: "manage_members" }
+//     ] }
 //   };
 //   string id = 1;
 //   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
@@ -197,9 +226,7 @@ message Role {
 // An entity has at most one access parent: one top-level, singular field, or
 // every member of one `oneof` on the entity. Each marked field is a
 // reference: its type is an entity message, or a reference message without a
-// `workspace` field. A marked field cannot carry a `write_policy`. Every
-// entity the access parent can point at must declare `access` with `read` and
-// `write`.
+// `workspace` field. A marked field cannot carry a `write_policy`.
 //
 // A polymorphic parent points at one of several entities: a marked `oneof`,
 // or a marked field whose reference message holds a `oneof` of entities. The
@@ -225,73 +252,10 @@ message AccessParentOptions {}
 // records.
 message HistoryOptions {}
 
-// Specifies which callers can delete rows of an entity.
-//
-// The engine enforces this policy before applying the application permission
-// policy.
-//
-// This policy applies directly to `DELETE` primitives. To allow
-// client-initiated deletions of protected entities, implement a custom mutator
-// with the required checks and authorize the mutator invocation by name.
-enum DeletePolicy {
-	// Allows any caller admitted by the permission policy to delete rows.
-	DELETE_POLICY_UNSPECIFIED = 0;
-	// Explicitly allows any caller admitted by the permission policy to delete
-	// rows.
-	DELETE_POLICY_ALLOW = 1;
-	// Restricts deletion to writes made under the trusted bypass, such as
-	// connectors, migrations, or scheduled background jobs. Standard callers
-	// and in-process APIs are denied.
-	DELETE_POLICY_TRUSTED_ONLY = 2;
-}
-
-// Specifies which callers can create rows of an entity.
-//
-// The engine enforces this policy before applying the application permission
-// policy.
-//
-// A `PUT` request asserting `expected_version = 0` is treated as a create
-// operation. A `PUT` request asserting no version is a create-or-update
-// operation and must satisfy both `CreatePolicy` and `UpdatePolicy`.
-enum CreatePolicy {
-	// Allows any caller admitted by the permission policy to create rows.
-	CREATE_POLICY_UNSPECIFIED = 0;
-	// Explicitly allows any caller admitted by the permission policy to create
-	// rows.
-	CREATE_POLICY_ALLOW = 1;
-	// Restricts creation to writes made under the trusted bypass, such as
-	// connectors, migrations, or scheduled background jobs. Standard callers
-	// and in-process APIs are denied.
-	CREATE_POLICY_TRUSTED_ONLY = 2;
-}
-
-// Specifies which callers can modify existing rows of an entity.
-//
-// The engine enforces this policy before applying the application permission
-// policy.
-//
-// This policy applies directly to `PATCH` and `PUT` primitives. To allow
-// client-initiated updates of protected entities based on row-level rules such
-// as ownership, implement a custom mutator with the required checks and
-// authorize the mutator invocation by name.
-enum UpdatePolicy {
-	// Allows any caller admitted by the permission policy to update rows.
-	UPDATE_POLICY_UNSPECIFIED = 0;
-	// Explicitly allows any caller admitted by the permission policy to update
-	// rows.
-	UPDATE_POLICY_ALLOW = 1;
-	// Restricts updates to writes made under the trusted bypass, such as
-	// connectors, migrations, or scheduled background jobs. Standard callers
-	// and in-process APIs are denied.
-	UPDATE_POLICY_TRUSTED_ONLY = 2;
-}
-
 // Specifies which callers can write a specific field of an entity.
 //
-// This policy applies at the field level, while `CreatePolicy`,
-// `UpdatePolicy`, and `DeletePolicy` apply to whole rows. Use it when specific
-// fields must be modified only by the server while the rest of the row remains
-// client-writable.
+// Use it when specific fields must be modified only by the server while the
+// rest of the row remains client-writable.
 //
 // The engine handles write operations as follows:
 // - A `PATCH` request whose field mask includes a protected field fails.

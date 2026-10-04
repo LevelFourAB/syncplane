@@ -213,6 +213,20 @@ Schema registration validates that entity names conform to identifier rules and 
 
 `server.DynamicEntity` carries `Access` and `Grant` (the `syncplanev1.AccessOptions` and `syncplanev1.GrantOptions` messages), and `server.DynamicField.AccessParent` marks a `Ref` field as the access parent. See [Access model](proto-options.md#access-model) for the rules registration enforces on them.
 
+```go
+server.DynamicEntity{
+	Name:      "task",
+	KeyFields: []string{"id"},
+	Fields:    fields,
+	Access: &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
+		{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_tasks"}},
+		{Write: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit_tasks"}},
+		// Every caller admitted to the workspace may create tasks.
+		{Create: true, Source: &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}},
+	}},
+}
+```
+
 ### Registration guarantees
 
 - **Trust**: `RegisterAuthorizer` defaults to deny (`DenyAll`). The built-in `TokenAuthorizer` checks an `Authorization: Bearer <token>` header in constant time. A denied call never touches state.
@@ -245,7 +259,7 @@ Write options for `ApplyTx` and `EntityTx`:
 
 - `WithTextString(field, value)`
 - `WithTextPeer(peer)`
-- `WithExpectedVersion(v)`: Enforces a compare-and-swap check on `Put`. The row must match the expected version, where version 0 represents an absent or deleted row. See [write policies](proto-options.md#write-policies). `Patch` accepts expected version as an explicit parameter.
+- `WithExpectedVersion(v)`: Enforces a compare-and-swap check on `Put`. The row must match the expected version, where version 0 represents an absent or deleted row. A `Put` with version 0 is a create for the access rules; see [Operations no rule admits](proto-options.md#operations-no-rule-admits). `Patch` accepts expected version as an explicit parameter.
 
 In-process writes do not update or consult client watermarks. See [Write from server-side code](../how-to/server-side-writes.md).
 
@@ -500,21 +514,24 @@ server.WithGlobalRoles(fn GlobalRolesFunc)
 - `WithGlobalRoles` adds roles the caller holds at the root of every workspace, such as staff roles from an identity-provider claim. A role that no grant entity declares fails the request with `internal`. Any other error from the hook fails the request as retryable.
 - Both hooks run once per request before any read transaction opens, and again on every `Subscribe` heartbeat.
 
-| Step                                           | Rule                                                                                                                                                                                                                                                          |
-| ---------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Workspace gate (every RPC and in-process call) | `CanAccessWorkspace` runs first. The engine then reads the caller's grants from the primary and refuses a caller that holds no permission with `DenyWorkspace` (`CodeWorkspaceAccessRevoked`).                                                                |
-| Reads                                          | Pull, Bootstrap, Subscribe, Query, `View` and `Apply` read the grants again inside their read snapshot, and read the rows up each row's chain of access parents from the same snapshot. A row is visible when the model admits it and `ReadFilter` admits it. |
-| Anchored rooms                                 | The anchor row must be readable under the grants the workspace gate read. The rows up its chain are read through the same cache as the anchor row.                                                                                                            |
+| Step                                           | Rule                                                                                                                                                                                                                                                                               |
+| ---------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Workspace gate (every RPC and in-process call) | `CanAccessWorkspace` runs first. The engine then reads the caller's grants from the primary and refuses a caller that holds no permission with `DenyWorkspace` (`CodeWorkspaceAccessRevoked`).                                                                                     |
+| Reads                                          | Pull, Bootstrap, Subscribe, Query, `View` and `Apply` read the grants again inside their read snapshot, and read the rows up each row's chain of access parents from the same snapshot. A row is visible when a read rule admits the caller at the row and `ReadFilter` admits it. |
+| Anchored rooms                                 | The anchor row must be readable under the grants the workspace gate read. The rows up its chain are read through the same cache as the anchor row.                                                                                                                                 |
 
-Writes are decided inside the write transaction, so a write sees the grant rows that earlier writes of the same batch, `Mutate` closure or `Apply` wrote:
+Before the write transaction opens, the server refuses a write that can only be an operation no access rule names; see [Operations no rule admits](proto-options.md#operations-no-rule-admits). The rest is decided inside the write transaction, so a write sees the grant rows that earlier writes of the same batch, `Mutate` closure or `Apply` wrote. A rule with a permission admits the caller where a row sits when the caller holds the permission at the root, at the row itself, or at a row up its chain of access parents. A rule with `admitted` admits every caller that passed the workspace gate, at every row.
 
-| Write                                                   | The caller needs                                                                                                                                                 |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Create                                                  | The entity's `write` permission where the new row sits: the root, the row itself, or a row up its chain of access parents.                                       |
-| Update, delete                                          | The `write` permission where the stored row sits. Checked before the version check, so a refusal hides the version.                                              |
-| Update that changes the access parent                   | The `write` permission at both the stored and the new parent, and, where the stored row sits, the `read` permission of every entity whose rows can sit below it. |
-| Delete of a row that is the access parent of a live row | Refused with `CodeConflict`. Delete or move the rows below it first; a batch can do both.                                                                        |
-| Write to a grant row that can change its role           | Every permission of the stored role at the stored anchor, and of the new role at the new anchor, each held there or up its chain.                                |
+| Write                                                   | The caller needs                                                                                                                                                                      |
+| ------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Create                                                  | A create rule that admits it where the new row sits.                                                                                                                                  |
+| Update                                                  | An update rule that admits it where the stored row sits. Checked before the version check, so a refusal hides the version.                                                            |
+| Delete                                                  | A delete rule that admits it where the stored row sits. Checked before the version check.                                                                                             |
+| Update that changes the access parent                   | One update rule that admits it both where the stored row sits and where the new row sits, and, where the stored row sits, the right to read every entity whose rows can sit below it. |
+| Delete of a row that is the access parent of a live row | Refused with `CodeConflict`. Delete or move the rows below it first; a batch can do both.                                                                                             |
+| Write to a grant row that can change its role           | Every permission of the stored role at the stored anchor, and of the new role at the new anchor, each held there or up its chain.                                                     |
+
+A `PUT` without an expected version is a create when the row does not exist and an update when it exists.
 
 The grant-row rule runs on every `PUT` and `DELETE` of a grant row, and on a `PATCH` whose mask reaches the subject, the role or the access parent: its field, or the oneof group of a polymorphic one. A caller can therefore grant and revoke only what it holds itself. Every write path, `Trusted` included, refuses with `CodeInvalidArgument` a grant row with an empty subject, an undeclared role, or no access parent where the entity has one, and a row that would sit below itself or more than `MaxAccessDepth` hops below a row without an access parent. A `Trusted` write may delete a row that rows sit below; those rows then anchor at nothing. All other refusals are `CodePermissionDenied`, with one message whether the parent is missing or hidden. `CanMutate`, `FieldPermissions` and `RowWritePermissions` still run and can refuse what the model allows.
 
@@ -525,24 +542,24 @@ server.WithMutator("rename_task", &taskv1.TaskArgs{}, renameTask,
 	server.MutatorAccess{Permission: "edit_tasks", Entity: "task", KeyField: "task_id"})
 ```
 
-The caller must hold `Permission` at the row of `Entity` whose key the args' `KeyField` holds, or up its chain, or at the root when both are empty. A row that does not exist refuses the invocation. In a schema that uses the access model, a mutator without `MutatorAccess` is refused for every caller who is not `Trusted`. The rows the body writes are not checked; `EntityTx.Can(permission, prototype, key)` reports whether the invoking caller holds a permission at a row. Registration refuses a `MutatorAccess` whose permission no role grants, whose entity is outside the model, or whose key field is not a singular string field of the args.
+The caller must hold `Permission` at the row of `Entity` whose key the args' `KeyField` holds, or up its chain, or at the root when both are empty. A row that does not exist refuses the invocation. In a schema that uses the access model, a mutator without `MutatorAccess` is refused for every caller who is not `Trusted`. The rows the body writes are not checked; `EntityTx.Can(permission, prototype, key)` reports whether the invoking caller holds a permission at a row. Registration refuses a `MutatorAccess` whose permission no role grants, whose entity is not registered, or whose key field is not a singular string field of the args.
 
 A grant row counts only when its subject matches, its role is declared, and its anchor row exists. The engine derives an index over each grant entity's subject field, so the read costs one probe per subject once the index is built, and a scan of the grant entity before that.
 
-A Bootstrap for a caller who holds an entity's read permission below the root reads the rows below its anchors by key, walking down through the index of each access-parent reference, rather than scanning the entity.
+A Bootstrap for a caller whom an entity's read rules admit only below the root reads the rows below its anchors by key, walking down through the index of each access-parent reference, rather than scanning the entity.
 
 A cursor records what its caller could read: a hash in the cursor, and the full record in the cursor-state store, never inline. A pull or a `Subscribe` drain compares the caller's current grants with the record:
 
-| Finding                                                                                                                                                                                                                                                                                                          | Result                                                                                                            |
-| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
-| Same grants                                                                                                                                                                                                                                                                                                      | An ordinary page.                                                                                                 |
-| Grants added or removed                                                                                                                                                                                                                                                                                          | A resync of the rows below the anchors that changed: values for rows now visible, tombstones for rows now hidden. |
-| A permission held at the root is lost                                                                                                                                                                                                                                                                            | The entity is in `drop_entities`, and the rows still visible are sent again.                                      |
-| A row that rows sit below moved to another access parent, was deleted by a `Trusted` write, or was created with a key rows below name, and the move changes what the caller can read                                                                                                                             | A resync of the rows below the moved row.                                                                         |
-| A role grants other permissions, or an entity joins the access model                                                                                                                                                                                                                                             | As for grants added or removed.                                                                                   |
-| An entity the cursor knows has another read permission, access parent or `unrestricted` setting; a record the store no longer holds; other subjects; grants that change again during a resync; a move during a resync that changes what the caller can read; or more moves since the cursor than `MaxResyncScan` | `reset`; the client bootstraps again.                                                                             |
+| Finding                                                                                                                                                                                                                                                                                                       | Result                                                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| Same grants                                                                                                                                                                                                                                                                                                   | An ordinary page.                                                                                                 |
+| Grants added or removed                                                                                                                                                                                                                                                                                       | A resync of the rows below the anchors that changed: values for rows now visible, tombstones for rows now hidden. |
+| A permission held at the root is lost                                                                                                                                                                                                                                                                         | The entity is in `drop_entities`, and the rows still visible are sent again.                                      |
+| A row that rows sit below moved to another access parent, was deleted by a `Trusted` write, or was created with a key rows below name, and the move changes what the caller can read                                                                                                                          | A resync of the rows below the moved row.                                                                         |
+| A role grants other permissions, or an entity joins the access model                                                                                                                                                                                                                                          | As for grants added or removed.                                                                                   |
+| An entity the cursor knows has read rules that admit other callers, or another access parent; a record the store no longer holds; other subjects; grants that change again during a resync; a move during a resync that changes what the caller can read; or more moves since the cursor than `MaxResyncScan` | `reset`; the client bootstraps again.                                                                             |
 
-Without a cursor-state store, every change of a caller's grants resets that caller's clients. So does an entity that joins the access model or changes its read permission, access parent or `unrestricted` setting.
+Without a cursor-state store, every change of a caller's grants resets that caller's clients. So does an entity that joins the access model or changes who its read rules admit or its access parent.
 
 Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from.
 

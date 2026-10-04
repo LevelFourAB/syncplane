@@ -1,212 +1,300 @@
 {
-	"comment": "Shared conformance vectors for entity write-policy classification: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts (assertWritePolicy) must reach the same verdict on every case. The decision is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none; null is what makes the unguarded-PUT rule observable, and it is the case the two implementations are most likely to disagree on. `policies` gives the entity's create/update/delete policies; each is \"allow\" or \"trustedOnly\". `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely, which is what \"trustedOnly\" is defined against. `protected` gives the entity's protected fields — the ones marked (syncplane.v1.field_behavior).write_policy TRUSTED_ONLY, a oneof named by its group — and `mask` the paths a PATCH names; both default to empty. Only PATCH is refused over them: a PUT names no field, so the write path substitutes the stored value instead, which needs the row and so is not classified here. Fields the server's FieldPermissions hook adds per caller are outside these vectors: the client cannot know them, and the two sides are not meant to agree on them.",
+	"comment": "Shared conformance vectors for the schema-level write check: engine/server/permissions.go (Server.checkWritePolicy) and client/src/mutations.ts must reach the same verdict on every case. The check is a pure function of the write — op, and whether it asserts an expected_version — because it runs before the write transaction opens and never reads the row. `expectedVersion` is a decimal string (uint64 in Go, bigint in TS) or null for a write that asserts none. `access` says, for an entity whose schema uses the access model, whether at least one rule of the entity's (syncplane.v1.entity).access admits each write operation, whatever the rule's source; it is omitted for an entity without access rules, whose writes this check never refuses for their op. An operation no rule admits is open only to trusted writes, so the check refuses a write that can only be that operation: PATCH is an update, DELETE a delete, PUT asserting version 0 a create, PUT asserting any other version an update. A PUT that asserts no version is a create when the row is absent and an update when it is present; the check refuses it only where no rule admits either, and the write path decides on the stored row. Whether the caller holds a rule's permission is also decided on the stored row, inside the write transaction, and is outside these vectors. `want` is \"allow\" when the write passes the schema-level check on to the app's permission policy, and \"refuse\" when it is rejected before that policy is consulted. Every case here is an UNTRUSTED write: a trusted one skips the check entirely. `protected` gives the entity's protected fields — the ones marked (syncplane.v1.field_behavior).write_policy TRUSTED_ONLY, a oneof named by its group — and `mask` the paths a PATCH names; both default to empty. Only PATCH is refused over them: a PUT names no field, so the write path substitutes the stored value instead, which needs the row and so is not classified here. Fields the server's FieldPermissions hook adds per caller are outside these vectors: the client cannot know them, and the two sides are not meant to agree on them.",
 	"cases": [
 		{
-			"name": "unrestricted entity allows every op",
+			"name": "an entity without access rules allows PUT",
 			"op": "PUT",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
 			"want": "allow"
 		},
 		{
-			"name": "unrestricted entity allows PATCH",
+			"name": "an entity without access rules allows PATCH",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
 			"want": "allow"
 		},
 		{
-			"name": "unrestricted entity allows DELETE",
+			"name": "an entity without access rules allows DELETE",
 			"op": "DELETE",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
 			"want": "allow"
 		},
 		{
-			"name": "PATCH is an update and is refused where updates are trustedOnly",
+			"name": "PATCH is an update and is refused where no rule admits updates",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "allow" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": true
+			},
 			"want": "refuse"
 		},
 		{
 			"name": "a guarded PATCH is still an update",
 			"op": "PATCH",
 			"expectedVersion": "7",
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "allow" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": true
+			},
 			"want": "refuse"
 		},
 		{
-			"name": "PATCH never upserts, so create policy does not reach it",
+			"name": "PATCH never upserts, so a missing create rule does not reach it",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "trustedOnly", "update": "allow", "delete": "allow" },
+			"access": {
+				"create": false,
+				"update": true,
+				"delete": true
+			},
 			"want": "allow"
 		},
 		{
 			"name": "PATCH asserting version 0 is still an update, not a create",
 			"op": "PATCH",
 			"expectedVersion": "0",
-			"policies": { "create": "trustedOnly", "update": "allow", "delete": "allow" },
+			"access": {
+				"create": false,
+				"update": true,
+				"delete": true
+			},
 			"want": "allow"
 		},
 		{
-			"name": "DELETE is refused where deletes are trustedOnly",
+			"name": "DELETE is refused where no rule admits deletes",
 			"op": "DELETE",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "trustedOnly" },
+			"access": {
+				"create": true,
+				"update": true,
+				"delete": false
+			},
 			"want": "refuse"
 		},
 		{
-			"name": "DELETE is unaffected by create and update policies",
+			"name": "DELETE is unaffected by the create and update rules",
 			"op": "DELETE",
 			"expectedVersion": null,
-			"policies": { "create": "trustedOnly", "update": "trustedOnly", "delete": "allow" },
+			"access": {
+				"create": false,
+				"update": false,
+				"delete": true
+			},
 			"want": "allow"
 		},
 		{
-			"name": "PUT asserting version 0 is provably a create and is refused where creates are trustedOnly",
+			"name": "PUT asserting version 0 is provably a create and is refused where no rule admits creates",
 			"op": "PUT",
 			"expectedVersion": "0",
-			"policies": { "create": "trustedOnly", "update": "allow", "delete": "allow" },
+			"access": {
+				"create": false,
+				"update": true,
+				"delete": true
+			},
 			"want": "refuse"
 		},
 		{
-			"name": "PUT asserting version 0 is a create, so update policy does not reach it",
+			"name": "PUT asserting version 0 is a create, so a missing update rule does not reach it",
 			"op": "PUT",
 			"expectedVersion": "0",
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "allow" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": false
+			},
 			"want": "allow"
 		},
 		{
-			"name": "PUT asserting a non-zero version is provably an update and is refused where updates are trustedOnly",
+			"name": "PUT asserting a non-zero version is provably an update and is refused where no rule admits updates",
 			"op": "PUT",
 			"expectedVersion": "3",
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "allow" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": true
+			},
 			"want": "refuse"
 		},
 		{
-			"name": "PUT asserting a non-zero version is an update, so create policy does not reach it",
+			"name": "PUT asserting a non-zero version is an update, so a missing create rule does not reach it",
 			"op": "PUT",
 			"expectedVersion": "3",
-			"policies": { "create": "trustedOnly", "update": "allow", "delete": "allow" },
+			"access": {
+				"create": false,
+				"update": true,
+				"delete": false
+			},
 			"want": "allow"
 		},
 		{
-			"name": "unguarded PUT is refused where creates are trustedOnly, since it would create an absent row",
+			"name": "unguarded PUT passes where only creates are admitted: the write path decides on the stored row",
 			"op": "PUT",
 			"expectedVersion": null,
-			"policies": { "create": "trustedOnly", "update": "allow", "delete": "allow" },
-			"want": "refuse"
-		},
-		{
-			"name": "unguarded PUT is refused where updates are trustedOnly, since it would replace a present row",
-			"op": "PUT",
-			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "allow" },
-			"want": "refuse"
-		},
-		{
-			"name": "unguarded PUT is refused where both are trustedOnly",
-			"op": "PUT",
-			"expectedVersion": null,
-			"policies": { "create": "trustedOnly", "update": "trustedOnly", "delete": "allow" },
-			"want": "refuse"
-		},
-		{
-			"name": "unguarded PUT passes where neither create nor update is restricted, whatever delete says",
-			"op": "PUT",
-			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "trustedOnly" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": false
+			},
 			"want": "allow"
+		},
+		{
+			"name": "unguarded PUT passes where only updates are admitted: the write path decides on the stored row",
+			"op": "PUT",
+			"expectedVersion": null,
+			"access": {
+				"create": false,
+				"update": true,
+				"delete": false
+			},
+			"want": "allow"
+		},
+		{
+			"name": "unguarded PUT is refused where no rule admits a create or an update",
+			"op": "PUT",
+			"expectedVersion": null,
+			"access": {
+				"create": false,
+				"update": false,
+				"delete": true
+			},
+			"want": "refuse"
 		},
 		{
 			"name": "server-owned entity refuses a guarded create",
 			"op": "PUT",
 			"expectedVersion": "0",
-			"policies": { "create": "trustedOnly", "update": "trustedOnly", "delete": "trustedOnly" },
+			"access": {
+				"create": false,
+				"update": false,
+				"delete": false
+			},
+			"want": "refuse"
+		},
+		{
+			"name": "server-owned entity refuses a DELETE",
+			"op": "DELETE",
+			"expectedVersion": null,
+			"access": {
+				"create": false,
+				"update": false,
+				"delete": false
+			},
 			"want": "refuse"
 		},
 		{
 			"name": "append-only entity admits a guarded create",
 			"op": "PUT",
 			"expectedVersion": "0",
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "trustedOnly" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": false
+			},
 			"want": "allow"
 		},
 		{
 			"name": "append-only entity refuses an edit",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "trustedOnly", "delete": "trustedOnly" },
+			"access": {
+				"create": true,
+				"update": false,
+				"delete": false
+			},
 			"want": "refuse"
 		},
 		{
 			"name": "an unspecified op is left to the write path to reject",
 			"op": "UNSPECIFIED",
 			"expectedVersion": null,
-			"policies": { "create": "trustedOnly", "update": "trustedOnly", "delete": "trustedOnly" },
+			"access": {
+				"create": false,
+				"update": false,
+				"delete": false
+			},
 			"want": "allow"
 		},
 		{
 			"name": "a mask naming a protected field is refused",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
-			"mask": ["owner"],
+			"protected": [
+				"owner"
+			],
+			"mask": [
+				"owner"
+			],
 			"want": "refuse"
 		},
 		{
 			"name": "a mask reaching into a protected field is refused",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["audit"],
-			"mask": ["audit.size"],
+			"protected": [
+				"audit"
+			],
+			"mask": [
+				"audit.size"
+			],
 			"want": "refuse"
 		},
 		{
 			"name": "one protected path refuses the whole mask",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
-			"mask": ["label", "owner"],
+			"protected": [
+				"owner"
+			],
+			"mask": [
+				"label",
+				"owner"
+			],
 			"want": "refuse"
 		},
 		{
 			"name": "a mask naming only writable fields passes",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
-			"mask": ["label", "settings.color"],
+			"protected": [
+				"owner"
+			],
+			"mask": [
+				"label",
+				"settings.color"
+			],
 			"want": "allow"
 		},
 		{
 			"name": "a protected field is matched whole, not by prefix",
 			"op": "PATCH",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
-			"mask": ["owner_label"],
+			"protected": [
+				"owner"
+			],
+			"mask": [
+				"owner_label"
+			],
 			"want": "allow"
 		},
 		{
 			"name": "a PUT is not refused by a protected field: the write path carries the stored value over",
 			"op": "PUT",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
+			"protected": [
+				"owner"
+			],
 			"want": "allow"
 		},
 		{
 			"name": "a DELETE is not refused by a protected field, which guards a value and not the row",
 			"op": "DELETE",
 			"expectedVersion": null,
-			"policies": { "create": "allow", "update": "allow", "delete": "allow" },
-			"protected": ["owner"],
+			"protected": [
+				"owner"
+			],
 			"want": "allow"
 		}
 	]

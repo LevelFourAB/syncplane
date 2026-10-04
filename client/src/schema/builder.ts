@@ -57,8 +57,9 @@ import {
 import {
 	AccessOptionsSchema,
 	AccessParentOptionsSchema,
-	CreatePolicy,
-	DeletePolicy,
+	type AccessRule,
+	AccessRuleSchema,
+	AdmittedCallerSchema,
 	entity as entityExt,
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
@@ -73,7 +74,6 @@ import {
 	RoleSchema,
 	SearchFieldSchema,
 	SearchSpecSchema,
-	UpdatePolicy,
 } from '../gen/syncplane/v1/options_pb.js';
 import {
 	validateEntityName,
@@ -373,19 +373,25 @@ export class Field<T> {
 	/**
 	 * Places each row below the row this reference points at in the access
 	 * model: a permission held at the referenced row applies to this row. An
-	 * entity has at most one access parent, and must declare `access` with
-	 * `read` and `write`; see {@link EntityOptions.access}.
+	 * entity has at most one access parent, and must declare `access`; see
+	 * {@link EntityOptions.access}.
 	 *
 	 * Throws unless the field is a singular `ref()`. The server also refuses
-	 * the mark on a protected field, and when the referenced entity has an
-	 * access parent of its own.
+	 * the mark on a protected field.
 	 *
 	 * @example
 	 * ```ts
 	 * const task = schema.entity('task', {
 	 *   id: schema.text().key(),
 	 *   project: schema.ref(() => project).accessParent(),
-	 * }, { access: { read: 'view_tasks', write: 'edit_tasks' } });
+	 * }, {
+	 *   access: {
+	 *     allow: [
+	 *       { read: true, permission: 'view_tasks' },
+	 *       { write: true, permission: 'edit_tasks' },
+	 *     ],
+	 *   },
+	 * });
 	 * ```
 	 */
 	accessParent(): Field<T> {
@@ -624,13 +630,7 @@ export interface EntitySchema<F extends Fields = Fields> {
 	readonly indexes: readonly IndexDecl[];
 	/** Full-text search declaration, when the entity has one. */
 	readonly search?: SearchOpts;
-	/** Who may create rows of this entity; see {@link EntityOptions.createPolicy}. */
-	readonly createPolicy: PolicyDecl;
-	/** Who may update rows of this entity; see {@link EntityOptions.updatePolicy}. */
-	readonly updatePolicy: PolicyDecl;
-	/** Who may delete rows of this entity; see {@link EntityOptions.deletePolicy}. */
-	readonly deletePolicy: PolicyDecl;
-	/** The entity's place in the access model; see {@link EntityOptions.access}. */
+	/** Who can read and write the entity's rows; see {@link EntityOptions.access}. */
 	readonly access?: AccessDecl;
 	/** The roles the entity's rows grant; see {@link EntityOptions.grant}. */
 	readonly grant?: GrantDecl;
@@ -639,28 +639,53 @@ export interface EntitySchema<F extends Fields = Fields> {
 }
 
 /**
- * Who may perform one class of write on an entity, mirroring
- * syncplane.v1.CreatePolicy, UpdatePolicy and DeletePolicy.
+ * Who can read and write an entity's rows in the access model, mirroring
+ * syncplane.v1.AccessOptions.
  *
- * `'allow'` is the default and the behaviour of every other entity: anyone the
- * app's permission policy admits may write. `'trustedOnly'` refuses that write
- * to every caller the server authorizes — sync clients and the in-process API
- * alike, and the client refuses it locally rather than applying it optimistically
- * — leaving the write to trusted server-side code and to custom mutators, whose
- * rows are covered by the verdict on the invocation.
+ * An operation is allowed when at least one rule admits it, and the order of
+ * the rules has no effect. An operation no rule admits is open only to
+ * trusted server-side writes, such as connectors, effects and custom mutator
+ * bodies, and the client refuses a write that can only be such an operation
+ * at the call site.
+ *
+ * `allow` holds at least one rule, and no two rules the same.
  */
-export type PolicyDecl = 'allow' | 'trustedOnly';
+export interface AccessDecl {
+	allow: AccessRuleDecl[];
+}
 
 /**
- * An entity's place in the access model, mirroring syncplane.v1.AccessOptions:
- * the permission a caller must hold to read rows, and the one to create,
- * update and delete them, or `unrestricted` for an entity outside the model.
+ * One rule of an {@link AccessDecl}, mirroring syncplane.v1.AccessRule: the
+ * operations it admits, and who it admits them to.
  *
- * A caller holds a permission at an anchor — the workspace root, or the row a
- * grant row's access parent points at — and it applies to the anchor row and
- * to the rows whose `.accessParent()` reference points at it.
+ * At least one operation must be `true`. `write` admits `create`, `update`
+ * and `delete`. The source is either `permission`, which admits a caller that
+ * holds that permission at the workspace root, at the row, or at a row up the
+ * row's chain of `.accessParent()` references, or `admitted: true`, which
+ * admits every caller admitted to the workspace.
+ *
+ * An update must be admitted for both the stored row and the row as it will
+ * be stored, so a rule admits moving a row to another access parent only when
+ * its source holds at both places.
+ *
+ * @example
+ * ```ts
+ * const allow: schema.AccessRuleDecl[] = [
+ *   { read: true, permission: 'view_tasks' },
+ *   { create: true, permission: 'comment' },
+ *   { update: true, delete: true, permission: 'moderate_comments' },
+ * ];
+ * ```
  */
-export type AccessDecl = { read: string; write: string } | { unrestricted: true };
+export type AccessRuleDecl =
+	& {
+		read?: boolean;
+		create?: boolean;
+		update?: boolean;
+		delete?: boolean;
+		write?: boolean;
+	}
+	& ({ permission: string; admitted?: never } | { admitted: true; permission?: never });
 
 /**
  * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
@@ -683,9 +708,6 @@ export interface RoleDecl {
 	/** The permissions the role grants at its anchor. At least one. */
 	grants: string[];
 }
-
-/** Alias of {@link PolicyDecl}, kept for the `deletePolicy` option it was named for. */
-export type DeletePolicyDecl = PolicyDecl;
 
 /**
  * One composite secondary index, mirroring syncplane.v1.IndexSpec. Declare one
@@ -771,9 +793,6 @@ export function entity<F extends Fields>(
 		...(options?.search === undefined ? {} : { search: options.search }),
 		...(options?.access === undefined ? {} : { access: options.access }),
 		...(options?.grant === undefined ? {} : { grant: options.grant }),
-		createPolicy: options?.createPolicy ?? 'allow',
-		updatePolicy: options?.updatePolicy ?? 'allow',
-		deletePolicy: options?.deletePolicy ?? 'allow',
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
 	};
 }
@@ -808,55 +827,41 @@ export interface EntityOptions {
 	 */
 	search?: SearchOpts;
 	/**
-	 * Who may delete rows of this entity. Defaults to `'allow'`.
+	 * Who can read and write rows of this entity in the access model; see
+	 * {@link AccessDecl}.
 	 *
-	 * `'trustedOnly'` takes DELETE away from clients entirely, which is worth
-	 * doing for the rows a cascade hangs off: it removes the only irreversible
-	 * verb the wire has, rather than making its damage recoverable after the
-	 * fact. Deletion stays reachable through a custom mutator, where the app
-	 * can put the cascade handling and checks it wants.
-	 */
-	deletePolicy?: PolicyDecl;
-	/**
-	 * Who may create rows of this entity. Defaults to `'allow'`.
+	 * In a schema where any entity declares `access` or `grant`, every entity
+	 * must declare `access`, and the server refuses a schema where one does
+	 * not. When omitted, the entity is outside the access model and its writes
+	 * are subject only to the app's permission policy.
 	 *
-	 * `'trustedOnly'` marks the entity server-owned: clients read its rows and
-	 * the server writes them, without every deployment's permission policy
-	 * having to remember to say so. A client that tries is refused at the call
-	 * site.
-	 */
-	createPolicy?: PolicyDecl;
-	/**
-	 * Who may modify existing rows of this entity in place. Defaults to
-	 * `'allow'`.
-	 *
-	 * `'trustedOnly'` alongside a permissive `createPolicy` makes an entity
-	 * append-only: a client may post a row but not silently edit one afterwards,
-	 * leaving edits to a custom mutator that can check who is asking. Such a
-	 * client must assert `expectedVersion: 0n` on its `put()` to say it means to
-	 * create — an unguarded put could replace a row, so it is refused.
-	 *
-	 * Collaborative-text fields are edited by PATCH, so an entity carrying one
-	 * cannot have its text edited by clients while this is `'trustedOnly'`.
-	 */
-	updatePolicy?: PolicyDecl;
-	/**
-	 * The permissions that govern rows of this entity in the access model.
-	 *
-	 * A caller can read a row when it holds `read` at the workspace root, at
-	 * the row itself, or at the row the row's `.accessParent()` reference
-	 * points at, and the same holds for `write`. In a schema where any entity
-	 * declares `access` or `grant`, every entity must declare `access`, and the
-	 * server refuses a schema where one does not.
+	 * Collaborative-text fields are edited by PATCH, so a client edits them
+	 * only where a rule admits `update`.
 	 *
 	 * Permission names follow the identifier rule in docs/reference/naming.md.
 	 * The server refuses a permission no role grants, and a role that grants a
-	 * permission no entity uses.
+	 * permission no rule uses.
+	 *
+	 * @example
+	 * Rows a client can post but not change or delete afterwards. A `put()`
+	 * that passes `expectedVersion: 0n` is a create; one that passes no
+	 * version could replace a stored row, and the server refuses it when the
+	 * row exists.
+	 * ```ts
+	 * const entry = schema.entity('entry', {
+	 *   id: schema.text().key(),
+	 *   body: schema.text(),
+	 * }, {
+	 *   access: {
+	 *     allow: [ { read: true, create: true, permission: 'post_entries' } ],
+	 *   },
+	 * });
+	 * ```
 	 */
 	access?: AccessDecl;
 	/**
 	 * Declares the entity's rows as grant rows; see {@link GrantDecl}. A grant
-	 * entity must also declare `access` with `read` and `write`.
+	 * entity must also declare `access`.
 	 *
 	 * @example
 	 * ```ts
@@ -874,7 +879,12 @@ export interface EntityOptions {
 	 *       { name: 'project_writer', grants: ['view_projects', 'view_tasks', 'edit_tasks'] },
 	 *     ],
 	 *   },
-	 *   access: { read: 'view_members', write: 'manage_members' },
+	 *   access: {
+	 *     allow: [
+	 *       { read: true, permission: 'view_members' },
+	 *       { write: true, permission: 'manage_members' },
+	 *     ],
+	 *   },
 	 * });
 	 * ```
 	 */
@@ -894,27 +904,22 @@ function assertAccess(
 ): void {
 	const where = `entity "${entityName}"`;
 	const access = options?.access;
-	if (access !== undefined && !('unrestricted' in access)) {
-		validatePermissionName(access.read, `${where} access.read`);
-		validatePermissionName(access.write, `${where} access.write`);
-	}
+	if (access !== undefined) assertAccessRules(where, access);
 	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
 	if (parents.length > 1) {
 		throw new Error(
 			`${where}: fields "${parents[0]}" and "${parents[1]}" are both marked accessParent()`,
 		);
 	}
-	if (parents.length > 0 && (access === undefined || 'unrestricted' in access)) {
+	if (parents.length > 0 && access === undefined) {
 		throw new Error(
-			`${where}: field "${
-				parents[0]
-			}" is marked accessParent(), but the entity declares no read and write access`,
+			`${where}: field "${parents[0]}" is marked accessParent(), but the entity declares no access`,
 		);
 	}
 	const grant = options?.grant;
 	if (grant === undefined) return;
-	if (access === undefined || 'unrestricted' in access) {
-		throw new Error(`${where}: a grant entity must declare access with read and write`);
+	if (access === undefined) {
+		throw new Error(`${where}: a grant entity must declare access`);
 	}
 	for (const part of [ 'subject', 'role' ] as const) {
 		const spec = fields[grant[part]]?.spec;
@@ -948,6 +953,54 @@ function assertAccess(
 			perms.add(perm);
 		}
 	}
+}
+
+/** The operations of an {@link AccessRuleDecl}, in syncplane.v1.AccessRule field order. */
+const ACCESS_OPERATIONS = [ 'read', 'create', 'update', 'delete', 'write' ] as const;
+
+/**
+ * Validates the rules of one entity's access declaration against the rules
+ * the engine enforces on syncplane.v1.AccessOptions at registration.
+ */
+function assertAccessRules(where: string, access: AccessDecl): void {
+	// A plain-JS caller can pass a shape the types refuse, such as one with no
+	// `allow` array.
+	if (!Array.isArray(access.allow) || access.allow.length === 0) {
+		throw new Error(`${where}: access.allow declares no rules`);
+	}
+	const seen = new Map<string, number>();
+	access.allow.forEach((rule, i) => {
+		const at = `${where} access.allow[${i}]`;
+		if (!ACCESS_OPERATIONS.some((op) => rule[op] === true)) {
+			throw new Error(
+				`${at}: the rule admits no operation; set read, create, update, delete or write`,
+			);
+		}
+		const hasPermission = rule.permission !== undefined;
+		const hasAdmitted = rule.admitted !== undefined;
+		if (hasPermission && hasAdmitted) {
+			throw new Error(`${at}: the rule sets both permission and admitted; set exactly one`);
+		}
+		if (!hasPermission && !hasAdmitted) {
+			throw new Error(`${at}: the rule has no source; set permission or admitted: true`);
+		}
+		if (hasPermission) {
+			validatePermissionName(rule.permission!, at);
+		} else if (rule.admitted !== true) {
+			throw new Error(`${at}: admitted must be true`);
+		}
+		// The key is the rule as the proto message holds it: an operation left
+		// unset and one set to false encode the same, so they must collide.
+		const key = JSON.stringify([
+			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
+			rule.permission ?? null,
+		]);
+		const first = seen.get(key);
+		if (first !== undefined) {
+			throw new Error(`${at}: the rule repeats access.allow[${first}]`);
+		}
+		seen.set(key, i);
+	});
 }
 
 /**
@@ -1100,6 +1153,20 @@ function oneSchemaFile(entities: readonly EntitySchema[]): FileDescriptorProto {
 	});
 }
 
+/** Lowers one access rule to its syncplane.v1.AccessRule. */
+function accessRuleOf(rule: AccessRuleDecl): AccessRule {
+	return create(AccessRuleSchema, {
+		read: rule.read === true,
+		create: rule.create === true,
+		update: rule.update === true,
+		delete: rule.delete === true,
+		write: rule.write === true,
+		source: rule.permission === undefined
+			? { case: 'admitted', value: create(AdmittedCallerSchema) }
+			: { case: 'permission', value: rule.permission },
+	});
+}
+
 /** Lowers one entity to a top-level DescriptorProto with (syncplane.v1.entity). */
 function entityMessageOf(e: EntitySchema): DescriptorProto {
 	const fullName = `${DYNAMIC_PACKAGE}.${pascalCase(e.name)}`;
@@ -1116,19 +1183,8 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 		create(EntityOptionsSchema, {
 			name: e.name,
 			keyFields: keyFieldNames,
-			createPolicy: e.createPolicy === 'trustedOnly'
-				? CreatePolicy.TRUSTED_ONLY
-				: CreatePolicy.ALLOW,
-			updatePolicy: e.updatePolicy === 'trustedOnly'
-				? UpdatePolicy.TRUSTED_ONLY
-				: UpdatePolicy.ALLOW,
-			deletePolicy: e.deletePolicy === 'trustedOnly'
-				? DeletePolicy.TRUSTED_ONLY
-				: DeletePolicy.ALLOW,
 			...(e.access === undefined ? {} : {
-				access: 'unrestricted' in e.access
-					? create(AccessOptionsSchema, { unrestricted: true })
-					: create(AccessOptionsSchema, { read: e.access.read, write: e.access.write }),
+				access: create(AccessOptionsSchema, { allow: e.access.allow.map(accessRuleOf) }),
 			}),
 			...(e.grant === undefined ? {} : {
 				grant: create(GrantOptionsSchema, {

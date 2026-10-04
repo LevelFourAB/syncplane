@@ -12,7 +12,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIrgDCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSMQoNZGVsZXRlX3BvbGljeRgEIAEoDjIaLnN5bmNwbGFuZS52MS5EZWxldGVQb2xpY3kSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIxCg1jcmVhdGVfcG9saWN5GAcgASgOMhouc3luY3BsYW5lLnYxLkNyZWF0ZVBvbGljeRIxCg11cGRhdGVfcG9saWN5GAggASgOMhouc3luY3BsYW5lLnYxLlVwZGF0ZVBvbGljeRIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMiQgoNQWNjZXNzT3B0aW9ucxIMCgRyZWFkGAEgASgJEg0KBXdyaXRlGAIgASgJEhQKDHVucmVzdHJpY3RlZBgDIAEoCCJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiJAoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCSIVChNBY2Nlc3NQYXJlbnRPcHRpb25zIhAKDkhpc3RvcnlPcHRpb25zIhIKEFJlZmVyZW5jZU9wdGlvbnMiGwoLU2VhcmNoRmllbGQSDAoEcGF0aBgBIAEoCSJPCgpTZWFyY2hTcGVjEigKBWZpZWxkGAEgAygLMhkuc3luY3BsYW5lLnYxLlNlYXJjaEZpZWxkEhcKD2tlZXBfZGlhY3JpdGljcxgCIAEoCCImCghJbmRleEtleRIMCgRwYXRoGAEgASgJEgwKBGRlc2MYAiABKAgiPgoJSW5kZXhTcGVjEgwKBG5hbWUYASABKAkSIwoDa2V5GAIgAygLMhYuc3luY3BsYW5lLnYxLkluZGV4S2V5IqgCCg1GaWVsZEJlaGF2aW9yEg4KBm9wYXF1ZRgBIAEoCBIRCglrZXlfZmllbGQYAiADKAkSEwoLb3JkZXJfZmllbGQYAyABKAkSDAoEdGV4dBgEIAEoCBIPCgdpbmRleGVkGAUgASgIEg8KB2hpc3RvcnkYBiABKAgSEgoKc2VhcmNoYWJsZRgHIAEoCBI0Cgx3cml0ZV9wb2xpY3kYCCABKA4yHi5zeW5jcGxhbmUudjEuRmllbGRXcml0ZVBvbGljeRIRCgl3b3Jrc3BhY2UYCSABKAgSGAoQcmV2ZXJzZV9yZWxhdGlvbhgKIAEoCRI4Cg1hY2Nlc3NfcGFyZW50GAsgASgLMiEuc3luY3BsYW5lLnYxLkFjY2Vzc1BhcmVudE9wdGlvbnMqZgoMRGVsZXRlUG9saWN5Eh0KGURFTEVURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIXChNERUxFVEVfUE9MSUNZX0FMTE9XEAESHgoaREVMRVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAipmCgxDcmVhdGVQb2xpY3kSHQoZQ1JFQVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhcKE0NSRUFURV9QT0xJQ1lfQUxMT1cQARIeChpDUkVBVEVfUE9MSUNZX1RSVVNURURfT05MWRACKmYKDFVwZGF0ZVBvbGljeRIdChlVUERBVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASFwoTVVBEQVRFX1BPTElDWV9BTExPVxABEh4KGlVQREFURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAIqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIt4CCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnNKBAgEEAVKBAgHEAhKBAgIEAlSDWRlbGV0ZV9wb2xpY3lSDWNyZWF0ZV9wb2xpY3lSDXVwZGF0ZV9wb2xpY3kiOAoNQWNjZXNzT3B0aW9ucxInCgVhbGxvdxgBIAMoCzIYLnN5bmNwbGFuZS52MS5BY2Nlc3NSdWxlIqsBCgpBY2Nlc3NSdWxlEgwKBHJlYWQYASABKAgSDgoGY3JlYXRlGAIgASgIEg4KBnVwZGF0ZRgDIAEoCBIOCgZkZWxldGUYBCABKAgSDQoFd3JpdGUYBSABKAgSFAoKcGVybWlzc2lvbhgGIAEoCUgAEjAKCGFkbWl0dGVkGAcgASgLMhwuc3luY3BsYW5lLnYxLkFkbWl0dGVkQ2FsbGVySABCCAoGc291cmNlIhAKDkFkbWl0dGVkQ2FsbGVyIlAKDEdyYW50T3B0aW9ucxIPCgdzdWJqZWN0GAEgASgJEgwKBHJvbGUYAiABKAkSIQoFcm9sZXMYAyADKAsyEi5zeW5jcGxhbmUudjEuUm9sZSIkCgRSb2xlEgwKBG5hbWUYASABKAkSDgoGZ3JhbnRzGAIgAygJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXkiqAIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucyp5ChBGaWVsZFdyaXRlUG9saWN5EiIKHkZJRUxEX1dSSVRFX1BPTElDWV9VTlNQRUNJRklFRBAAEhwKGEZJRUxEX1dSSVRFX1BPTElDWV9BTExPVxABEiMKH0ZJRUxEX1dSSVRFX1BPTElDWV9UUlVTVEVEX09OTFkQAjpWCgZlbnRpdHkSHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtIcDIAEoCzIbLnN5bmNwbGFuZS52MS5FbnRpdHlPcHRpb25zUgZlbnRpdHk6XwoJcmVmZXJlbmNlEh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLaHAyABKAsyHi5zeW5jcGxhbmUudjEuUmVmZXJlbmNlT3B0aW9uc1IJcmVmZXJlbmNlOmMKDmZpZWxkX2JlaGF2aW9yEh0uZ29vZ2xlLnByb3RvYnVmLkZpZWxkT3B0aW9ucxi1hwMgASgLMhsuc3luY3BsYW5lLnYxLkZpZWxkQmVoYXZpb3JSDWZpZWxkQmVoYXZpb3JCRlpEZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdjE7c3luY3BsYW5ldjFiBnByb3RvMw", [file_google_protobuf_descriptor]);
 
 /**
  * Declares a message as a syncable entity.
@@ -54,16 +54,6 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
   index: IndexSpec[];
 
   /**
-   * Specifies who can delete rows of this entity.
-   *
-   * When unset, any caller admitted by the application permission policy can
-   * delete rows.
-   *
-   * @generated from field: syncplane.v1.DeletePolicy delete_policy = 4;
-   */
-  deletePolicy: DeletePolicy;
-
-  /**
    * Specifies whether rows of this entity stay on the server only.
    *
    * When `true`, rows are never bootstrapped, pulled, or streamed to
@@ -87,38 +77,6 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
   history?: HistoryOptions | undefined;
 
   /**
-   * Specifies who can create rows of this entity.
-   *
-   * When unset, any caller admitted by the application permission policy can
-   * create rows.
-   *
-   * A write counts as a create when it provably cannot target an existing
-   * row, such as a `PUT` request asserting `expected_version = 0`. A `PUT`
-   * request that asserts no version is a create-or-update operation and must
-   * satisfy both `create_policy` and `update_policy`.
-   *
-   * @generated from field: syncplane.v1.CreatePolicy create_policy = 7;
-   */
-  createPolicy: CreatePolicy;
-
-  /**
-   * Specifies who can update existing rows of this entity.
-   *
-   * When unset, any caller admitted by the application permission policy can
-   * update rows.
-   *
-   * This policy applies to every `PATCH` request and every `PUT` request
-   * that could overwrite an existing row. To create a row on an entity that
-   * restricts updates, set `expected_version = 0`.
-   *
-   * Collaborative text fields are edited using `PATCH`, so client editing
-   * requires permission under this policy.
-   *
-   * @generated from field: syncplane.v1.UpdatePolicy update_policy = 8;
-   */
-  updatePolicy: UpdatePolicy;
-
-  /**
    * Configures full-text search over the fields of this entity.
    *
    * Fields marked with `(syncplane.v1.field_behavior).searchable` are
@@ -130,7 +88,7 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
   search?: SearchSpec | undefined;
 
   /**
-   * Names the permissions that govern rows of this entity in the access
+   * Declares who can read and write the rows of this entity in the access
    * model.
    *
    * A schema uses the access model when any of its entities declares
@@ -146,8 +104,7 @@ export type EntityOptions = Message<"syncplane.v1.EntityOptions"> & {
    * Declares the rows of this entity as grant rows: each row gives one
    * subject one role at the row's anchor.
    *
-   * A grant entity must also declare `access` with `read` and `write`. See
-   * `GrantOptions`.
+   * A grant entity must also declare `access`. See `GrantOptions`.
    *
    * @generated from field: syncplane.v1.GrantOptions grant = 11;
    */
@@ -162,25 +119,40 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 0);
 
 /**
- * Names the permissions a caller must hold to read and to write the rows of
- * an entity.
+ * Declares who can read and write the rows of an entity in the access model.
  *
  * A caller holds a permission at an anchor: the workspace root, or one row
  * that a grant row's `access_parent` field points at. A permission held at
  * an anchor applies to the anchor row and to every row below it: the rows
  * whose `access_parent` field points at it, the rows whose `access_parent`
- * field points at those, and so on. See `GrantOptions` and
- * `AccessParentOptions`.
+ * field points at those, and so on. A row whose `access_parent` field is
+ * unset, or names a row that does not exist, has no parent and never falls
+ * back to the workspace root. See `GrantOptions` and `AccessParentOptions`.
  *
- * A caller can read a row when it holds `read` at the workspace root, at
- * the row itself, or at a row up the row's chain of access parents. A row
- * whose `access_parent` field is unset, or names a row that does not exist,
- * has no parent and never falls back to the workspace root.
+ * An operation on a row is allowed when at least one rule in `allow` admits
+ * it. A rule only adds access: no rule takes away what another rule allows,
+ * and the order of the rules has no effect. An operation that no rule names
+ * is open only to trusted writes, such as connectors, effects and mutator
+ * bodies.
  *
- * A permission name starts with a letter or an underscore, followed by
- * letters, digits and underscores. Registration refuses a permission that
- * no declared role grants, and a role that grants a permission no entity
- * uses, so a misspelled name fails on either side.
+ * ```protobuf
+ * message Comment {
+ *   option (syncplane.v1.entity) = {
+ *     name: "comment" key_fields: ["id"]
+ *     access: { allow: [
+ *       { read: true permission: "view_tasks" },
+ *       { create: true permission: "comment" },
+ *       { update: true delete: true permission: "moderate_comments" }
+ *     ] }
+ *   };
+ *   string id = 1;
+ *   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+ * }
+ * ```
+ *
+ * Registration refuses a permission that no declared role grants, and a role
+ * that grants a permission no rule uses, so a misspelled name fails on either
+ * side.
  *
  * The application permission hooks still run, and can refuse what the
  * model allows. They cannot allow what the model refuses.
@@ -191,29 +163,11 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  */
 export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
   /**
-   * The permission that lets a caller read rows. Required unless
-   * `unrestricted` is set.
+   * The rules. At least one, and no two the same.
    *
-   * @generated from field: string read = 1;
+   * @generated from field: repeated syncplane.v1.AccessRule allow = 1;
    */
-  read: string;
-
-  /**
-   * The permission that lets a caller create, update and delete rows.
-   * Required unless `unrestricted` is set.
-   *
-   * @generated from field: string write = 2;
-   */
-  write: string;
-
-  /**
-   * Puts the entity outside the access model: every caller admitted to the
-   * workspace can read and write its rows, subject to the application
-   * permission hooks. Cannot be combined with `read` or `write`.
-   *
-   * @generated from field: bool unrestricted = 3;
-   */
-  unrestricted: boolean;
+  allow: AccessRule[];
 };
 
 /**
@@ -222,6 +176,112 @@ export type AccessOptions = Message<"syncplane.v1.AccessOptions"> & {
  */
 export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
   messageDesc(file_syncplane_v1_options, 1);
+
+/**
+ * One way to read or write the rows of an entity.
+ *
+ * A rule admits each operation it names when its source holds for the caller
+ * and the row: for a read, the row; for a create, the row as it will be
+ * stored; for a delete, the stored row. An update must be admitted by one rule
+ * for both the stored row and the row as it will be stored, so a rule admits
+ * a write that moves a row to another access parent only when its source
+ * holds at the old place and at the new one.
+ *
+ * Registration refuses a rule without an operation or without a source, and
+ * unknown fields inside this message.
+ *
+ * @generated from message syncplane.v1.AccessRule
+ */
+export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
+  /**
+   * Admits reading rows.
+   *
+   * @generated from field: bool read = 1;
+   */
+  read: boolean;
+
+  /**
+   * Admits creating rows.
+   *
+   * @generated from field: bool create = 2;
+   */
+  create: boolean;
+
+  /**
+   * Admits changing rows that exist, including moving them to another access
+   * parent.
+   *
+   * @generated from field: bool update = 3;
+   */
+  update: boolean;
+
+  /**
+   * Admits deleting rows.
+   *
+   * @generated from field: bool delete = 4;
+   */
+  delete: boolean;
+
+  /**
+   * Admits every write operation: `create`, `update` and `delete`, and each
+   * write operation a later version adds.
+   *
+   * @generated from field: bool write = 5;
+   */
+  write: boolean;
+
+  /**
+   * Who the rule admits.
+   *
+   * @generated from oneof syncplane.v1.AccessRule.source
+   */
+  source: {
+    /**
+     * A caller that holds this permission at the workspace root, at the
+     * row, or at a row up the row's chain of access parents. Starts with a
+     * letter or an underscore, followed by letters, digits and underscores.
+     *
+     * @generated from field: string permission = 6;
+     */
+    value: string;
+    case: "permission";
+  } | {
+    /**
+     * Every caller admitted to the workspace. See `AdmittedCaller`.
+     *
+     * @generated from field: syncplane.v1.AdmittedCaller admitted = 7;
+     */
+    value: AdmittedCaller;
+    case: "admitted";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message syncplane.v1.AccessRule.
+ * Use `create(AccessRuleSchema)` to create a new message.
+ */
+export const AccessRuleSchema: GenMessage<AccessRule> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 2);
+
+/**
+ * Selects every caller admitted to the workspace as the source of an
+ * `AccessRule`.
+ *
+ * In a schema that uses the access model, a caller is admitted when the
+ * application's workspace hook lets it in and it holds at least one
+ * permission in the workspace.
+ *
+ * @generated from message syncplane.v1.AdmittedCaller
+ */
+export type AdmittedCaller = Message<"syncplane.v1.AdmittedCaller"> & {
+};
+
+/**
+ * Describes the message syncplane.v1.AdmittedCaller.
+ * Use `create(AdmittedCallerSchema)` to create a new message.
+ */
+export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
+  messageDesc(file_syncplane_v1_options, 3);
 
 /**
  * Declares an entity whose rows grant roles.
@@ -245,7 +305,10 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  *         "edit_tasks"] }
  *       ]
  *     }
- *     access: { read: "view_members" write: "manage_members" }
+ *     access: { allow: [
+ *       { read: true permission: "view_members" },
+ *       { write: true permission: "manage_members" }
+ *     ] }
  *   };
  *   string id = 1;
  *   Project project = 2 [(syncplane.v1.field_behavior).access_parent = {}];
@@ -298,7 +361,7 @@ export type GrantOptions = Message<"syncplane.v1.GrantOptions"> & {
  * Use `create(GrantOptionsSchema)` to create a new message.
  */
 export const GrantOptionsSchema: GenMessage<GrantOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 4);
 
 /**
  * Declares one role and the permissions it grants.
@@ -328,7 +391,7 @@ export type Role = Message<"syncplane.v1.Role"> & {
  * Use `create(RoleSchema)` to create a new message.
  */
 export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 3);
+  messageDesc(file_syncplane_v1_options, 5);
 
 /**
  * Marks the reference that places each row of an entity below another row in
@@ -341,9 +404,7 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
  * An entity has at most one access parent: one top-level, singular field, or
  * every member of one `oneof` on the entity. Each marked field is a
  * reference: its type is an entity message, or a reference message without a
- * `workspace` field. A marked field cannot carry a `write_policy`. Every
- * entity the access parent can point at must declare `access` with `read` and
- * `write`.
+ * `workspace` field. A marked field cannot carry a `write_policy`.
  *
  * A polymorphic parent points at one of several entities: a marked `oneof`,
  * or a marked field whose reference message holds a `oneof` of entities. The
@@ -362,7 +423,7 @@ export type AccessParentOptions = Message<"syncplane.v1.AccessParentOptions"> & 
  * Use `create(AccessParentOptionsSchema)` to create a new message.
  */
 export const AccessParentOptionsSchema: GenMessage<AccessParentOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 4);
+  messageDesc(file_syncplane_v1_options, 6);
 
 /**
  * Enables server-side field history tracking for an entity.
@@ -390,7 +451,7 @@ export type HistoryOptions = Message<"syncplane.v1.HistoryOptions"> & {
  * Use `create(HistoryOptionsSchema)` to create a new message.
  */
 export const HistoryOptionsSchema: GenMessage<HistoryOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 5);
+  messageDesc(file_syncplane_v1_options, 7);
 
 /**
  * Declares a message as a reference message: the stored shape of a typed
@@ -468,7 +529,7 @@ export type ReferenceOptions = Message<"syncplane.v1.ReferenceOptions"> & {
  * Use `create(ReferenceOptionsSchema)` to create a new message.
  */
 export const ReferenceOptionsSchema: GenMessage<ReferenceOptions> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 6);
+  messageDesc(file_syncplane_v1_options, 8);
 
 /**
  * Specifies a single field read during full-text search.
@@ -492,7 +553,7 @@ export type SearchField = Message<"syncplane.v1.SearchField"> & {
  * Use `create(SearchFieldSchema)` to create a new message.
  */
 export const SearchFieldSchema: GenMessage<SearchField> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 7);
+  messageDesc(file_syncplane_v1_options, 9);
 
 /**
  * Configures full-text search over an entity, specifying searchable fields in
@@ -538,7 +599,7 @@ export type SearchSpec = Message<"syncplane.v1.SearchSpec"> & {
  * Use `create(SearchSpecSchema)` to create a new message.
  */
 export const SearchSpecSchema: GenMessage<SearchSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 8);
+  messageDesc(file_syncplane_v1_options, 10);
 
 /**
  * Specifies one field component of an index and its sort order.
@@ -573,7 +634,7 @@ export type IndexKey = Message<"syncplane.v1.IndexKey"> & {
  * Use `create(IndexKeySchema)` to create a new message.
  */
 export const IndexKeySchema: GenMessage<IndexKey> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 9);
+  messageDesc(file_syncplane_v1_options, 11);
 
 /**
  * Defines a secondary index for an entity.
@@ -606,7 +667,7 @@ export type IndexSpec = Message<"syncplane.v1.IndexSpec"> & {
  * Use `create(IndexSpecSchema)` to create a new message.
  */
 export const IndexSpecSchema: GenMessage<IndexSpec> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 10);
+  messageDesc(file_syncplane_v1_options, 12);
 
 /**
  * Configures merge, indexing, and authorization behavior for a field.
@@ -770,148 +831,13 @@ export type FieldBehavior = Message<"syncplane.v1.FieldBehavior"> & {
  * Use `create(FieldBehaviorSchema)` to create a new message.
  */
 export const FieldBehaviorSchema: GenMessage<FieldBehavior> = /*@__PURE__*/
-  messageDesc(file_syncplane_v1_options, 11);
-
-/**
- * Specifies which callers can delete rows of an entity.
- *
- * The engine enforces this policy before applying the application permission
- * policy.
- *
- * This policy applies directly to `DELETE` primitives. To allow
- * client-initiated deletions of protected entities, implement a custom mutator
- * with the required checks and authorize the mutator invocation by name.
- *
- * @generated from enum syncplane.v1.DeletePolicy
- */
-export enum DeletePolicy {
-  /**
-   * Allows any caller admitted by the permission policy to delete rows.
-   *
-   * @generated from enum value: DELETE_POLICY_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * Explicitly allows any caller admitted by the permission policy to delete
-   * rows.
-   *
-   * @generated from enum value: DELETE_POLICY_ALLOW = 1;
-   */
-  ALLOW = 1,
-
-  /**
-   * Restricts deletion to writes made under the trusted bypass, such as
-   * connectors, migrations, or scheduled background jobs. Standard callers
-   * and in-process APIs are denied.
-   *
-   * @generated from enum value: DELETE_POLICY_TRUSTED_ONLY = 2;
-   */
-  TRUSTED_ONLY = 2,
-}
-
-/**
- * Describes the enum syncplane.v1.DeletePolicy.
- */
-export const DeletePolicySchema: GenEnum<DeletePolicy> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_options, 0);
-
-/**
- * Specifies which callers can create rows of an entity.
- *
- * The engine enforces this policy before applying the application permission
- * policy.
- *
- * A `PUT` request asserting `expected_version = 0` is treated as a create
- * operation. A `PUT` request asserting no version is a create-or-update
- * operation and must satisfy both `CreatePolicy` and `UpdatePolicy`.
- *
- * @generated from enum syncplane.v1.CreatePolicy
- */
-export enum CreatePolicy {
-  /**
-   * Allows any caller admitted by the permission policy to create rows.
-   *
-   * @generated from enum value: CREATE_POLICY_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * Explicitly allows any caller admitted by the permission policy to create
-   * rows.
-   *
-   * @generated from enum value: CREATE_POLICY_ALLOW = 1;
-   */
-  ALLOW = 1,
-
-  /**
-   * Restricts creation to writes made under the trusted bypass, such as
-   * connectors, migrations, or scheduled background jobs. Standard callers
-   * and in-process APIs are denied.
-   *
-   * @generated from enum value: CREATE_POLICY_TRUSTED_ONLY = 2;
-   */
-  TRUSTED_ONLY = 2,
-}
-
-/**
- * Describes the enum syncplane.v1.CreatePolicy.
- */
-export const CreatePolicySchema: GenEnum<CreatePolicy> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_options, 1);
-
-/**
- * Specifies which callers can modify existing rows of an entity.
- *
- * The engine enforces this policy before applying the application permission
- * policy.
- *
- * This policy applies directly to `PATCH` and `PUT` primitives. To allow
- * client-initiated updates of protected entities based on row-level rules such
- * as ownership, implement a custom mutator with the required checks and
- * authorize the mutator invocation by name.
- *
- * @generated from enum syncplane.v1.UpdatePolicy
- */
-export enum UpdatePolicy {
-  /**
-   * Allows any caller admitted by the permission policy to update rows.
-   *
-   * @generated from enum value: UPDATE_POLICY_UNSPECIFIED = 0;
-   */
-  UNSPECIFIED = 0,
-
-  /**
-   * Explicitly allows any caller admitted by the permission policy to update
-   * rows.
-   *
-   * @generated from enum value: UPDATE_POLICY_ALLOW = 1;
-   */
-  ALLOW = 1,
-
-  /**
-   * Restricts updates to writes made under the trusted bypass, such as
-   * connectors, migrations, or scheduled background jobs. Standard callers
-   * and in-process APIs are denied.
-   *
-   * @generated from enum value: UPDATE_POLICY_TRUSTED_ONLY = 2;
-   */
-  TRUSTED_ONLY = 2,
-}
-
-/**
- * Describes the enum syncplane.v1.UpdatePolicy.
- */
-export const UpdatePolicySchema: GenEnum<UpdatePolicy> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_options, 2);
+  messageDesc(file_syncplane_v1_options, 13);
 
 /**
  * Specifies which callers can write a specific field of an entity.
  *
- * This policy applies at the field level, while `CreatePolicy`,
- * `UpdatePolicy`, and `DeletePolicy` apply to whole rows. Use it when specific
- * fields must be modified only by the server while the rest of the row remains
- * client-writable.
+ * Use it when specific fields must be modified only by the server while the
+ * rest of the row remains client-writable.
  *
  * The engine handles write operations as follows:
  * - A `PATCH` request whose field mask includes a protected field fails.
@@ -956,7 +882,7 @@ export enum FieldWritePolicy {
  * Describes the enum syncplane.v1.FieldWritePolicy.
  */
 export const FieldWritePolicySchema: GenEnum<FieldWritePolicy> = /*@__PURE__*/
-  enumDesc(file_syncplane_v1_options, 3);
+  enumDesc(file_syncplane_v1_options, 0);
 
 /**
  * Field numbers 50100, 50101 and 50102 are unregistered; fine for

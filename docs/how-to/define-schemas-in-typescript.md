@@ -65,9 +65,9 @@ import { schema } from 'syncplane';
 
    **Note:** If you encounter a TypeScript inference cycle with self-referencing entities, name the recursive field map and annotate the entity type using `type X = Infer<typeof x>`.
 
-2. Configure entity write policies and protected fields.
+2. Configure access rules and protected fields.
 
-   To restrict entity-level write permissions, pass an options object as the third argument to `schema.entity()`:
+   To decide who reads and writes the rows of an entity, pass `access` in the options object, the third argument to `schema.entity()`. Each rule admits operations to the callers that hold a permission, or to every admitted caller with `admitted: true`. An operation that no rule admits is open only to trusted server-side writes:
 
    ```ts
    // Server-owned: the server records these rows, clients only read them.
@@ -75,19 +75,28 @@ import { schema } from 'syncplane';
    	id: schema.text().key(),
    	what: schema.text(),
    }, {
-   	createPolicy: 'trustedOnly',
-   	updatePolicy: 'trustedOnly',
-   	deletePolicy: 'trustedOnly',
+   	access: { allow: [ { read: true, permission: 'view_activity' } ] },
    });
 
-   // Append-only: a client may post a comment but not silently edit or remove one.
+   // Append-only: a client may post a comment but not edit or remove one.
    const comment = schema.entity('comment', {
    	id: schema.text().key(),
    	body: schema.text(),
-   }, { updatePolicy: 'trustedOnly', deletePolicy: 'trustedOnly' });
+   }, {
+   	access: {
+   		allow: [
+   			{ read: true, permission: 'view_comments' },
+   			{ create: true, permission: 'post_comments' },
+   		],
+   	},
+   });
    ```
 
-   The `'trustedOnly'` setting lowers to the matching `*_TRUSTED_ONLY` proto option. Clients reject restricted operations at the call site; for example, calling `comment.mutate.del(...)` throws an error. Creating an append-only row requires `{ expectedVersion: 0n }` on `put()`. For more information, see [Write policies](../reference/proto-options.md#write-policies).
+   When one entity declares `access`, every entity must declare it, and a role of a grant entity must grant each permission that a rule names. See [Declare roles and permissions](declare-roles-and-permissions.md).
+
+   At the call site, the client rejects a write that no rule can admit. For example, `comment.mutate.del(...)` rejects with an error. A `put()` creates a comment, and the server refuses a `put()` of a comment that exists. For more information, see [Access model](../reference/typescript-client.md#access-model).
+
+   In a schema without `access`, refuse such writes in the server's `CanMutate` hook. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
 
    To restrict specific fields while keeping the entity writable, add `.protected()` to the field definition:
 

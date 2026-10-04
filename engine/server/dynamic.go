@@ -52,16 +52,10 @@ type DynamicEntity struct {
 	// Names must be unique within the entity and must not start with "__",
 	// which is reserved for indexes the engine derives for itself.
 	Indexes []DynamicIndex
-	// CreatePolicy, UpdatePolicy and DeletePolicy mirror the same-named
-	// (syncplane.v1.entity) options, enforced identically for a dynamic entity
-	// and a compiled one. The zero value of each admits any caller the app's
-	// permission policy admits.
-	CreatePolicy syncplanev1.CreatePolicy
-	UpdatePolicy syncplanev1.UpdatePolicy
-	DeletePolicy syncplanev1.DeletePolicy
-	// Access mirrors (syncplane.v1.entity).access: the permissions that govern
-	// the entity's rows in the access model. Nil declares none. The entity
-	// keeps the pointer, so do not modify it after registration.
+	// Access mirrors (syncplane.v1.entity).access: the rules that decide who
+	// reads and writes the entity's rows in the access model. Nil declares
+	// none. The entity keeps the pointer, so do not modify it after
+	// registration.
 	Access *syncplanev1.AccessOptions
 	// Grant mirrors (syncplane.v1.entity).grant and declares the entity's rows
 	// as grant rows. Nil declares none. A dynamic entity has no enum fields, so
@@ -312,14 +306,11 @@ func dynamicEntityProto(
 		return nil, err
 	}
 	proto.SetExtension(mopts, syncplanev1.E_Entity, &syncplanev1.EntityOptions{
-		Name:         spec.Name,
-		KeyFields:    spec.KeyFields,
-		Index:        indexes,
-		CreatePolicy: spec.CreatePolicy,
-		UpdatePolicy: spec.UpdatePolicy,
-		DeletePolicy: spec.DeletePolicy,
-		Access:       spec.Access,
-		Grant:        spec.Grant,
+		Name:      spec.Name,
+		KeyFields: spec.KeyFields,
+		Index:     indexes,
+		Access:    spec.Access,
+		Grant:     spec.Grant,
 	})
 	dp.Options = mopts
 

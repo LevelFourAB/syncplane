@@ -138,18 +138,28 @@ Note the following behavior regarding stored write attribution:
 
 `Invoke` authorizes once on the verb (`Write{Custom}`). The mutator body's individual row writes are not authorized separately.
 
-## Enforcing write policies in the schema
+## Reserve an operation for trusted writes
 
-`(syncplane.v1.entity)` defines three write policies: `create_policy`, `update_policy`, and `delete_policy`. The engine enforces these policies before `CanMutate` runs on every write path.
+Some writes must come only from your own server code. For example, only the server records activity rows, or clients archive projects but never delete them. Trusted writes skip the access rules and the permission hooks, so a rule that refuses the operation to every other caller reserves it for trusted writes.
 
-Setting a policy to `*_TRUSTED_ONLY` restricts that write operation to trusted server writes and custom mutators, blocking sync clients and direct in-process calls. Common use cases include:
+In a schema that uses the access model, leave the operation out of every access rule of the entity. The server refuses the write before `CanMutate` runs, and the TypeScript client rejects it at the call site. See [Allow some operations and not others](declare-roles-and-permissions.md#allow-some-operations-and-not-others).
 
-- Server-owned entities: restrict all three operations to `*_TRUSTED_ONLY`.
-- Append-only entities: restrict update and delete operations while permitting creation.
+In a schema that does not use the access model, refuse the operation in `CanMutate`. The hook receives each CRUD write of a batch on its own, with its entity and its operation:
 
-Use schema write policies for rules that apply to all deployments. Defining the rule in the schema ensures it is enforced consistently, rather than relying on policy code in each deployment where a missing check fails open.
+```go
+func (myPermissions) CanMutate(_ context.Context, p server.Principal, ws string, w server.Write) error {
+	if c := w.Crud; c != nil && c.GetEntity() == "project" && c.GetOp() == syncplanev1.CrudOp_CRUD_OP_DELETE {
+		return server.Reject(server.CodePermissionDenied, "projects are archived, not deleted")
+	}
+	return nil
+}
+```
 
-Schema write policies apply to caller classes rather than specific rows. To enforce row-level rules such as "only edit your own comment", use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row), [Check ownership in a mutator](#check-ownership-in-a-mutator), and [Write policies](../reference/proto-options.md#write-policies).
+- **Writes under `server.Trusted` skip the hook,** so a connector, an effect or a retention job can still delete projects.
+- **A custom mutator reaches the hook as one `Write` with `Custom` set,** and the rows that its body writes do not. A mutator that deletes projects therefore needs its own check.
+- **The client cannot predict this refusal.** It queues the delete, and reverts it when the server rejects it.
+
+Neither access rules nor `CanMutate` can enforce a rule that depends on the stored row, such as "only edit your own comment". Use a write filter if the rule depends on the stored row's fields, or a custom mutator if it depends on who last wrote the row. For more information, see [Check writes against the stored row](#check-writes-against-the-stored-row) and [Check ownership in a mutator](#check-ownership-in-a-mutator).
 
 To protect individual fields on a writable row, use `(syncplane.v1.field_behavior).write_policy`. A `PATCH` request that includes a protected field in its field mask is rejected. A `PUT` request preserves the existing stored value of the protected field and applies the remaining updates. For more information, see [Protected fields](../reference/proto-options.md#protected-fields).
 

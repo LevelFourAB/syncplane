@@ -36,7 +36,12 @@ message OrgMember {
 				}
 			]
 		}
-		access: { read: "view_members" write: "manage_members" }
+		access: {
+			allow: [
+				{ read: true permission: "view_members" },
+				{ write: true permission: "manage_members" }
+			]
+		}
 	};
 	string id = 1;
 	string user_id = 2;
@@ -47,7 +52,12 @@ message Project {
 	option (syncplane.v1.entity) = {
 		name: "project"
 		key_fields: [ "id" ]
-		access: { read: "view_projects" write: "edit_projects" }
+		access: {
+			allow: [
+				{ read: true permission: "view_projects" },
+				{ write: true permission: "edit_projects" }
+			]
+		}
 	};
 	string id = 1;
 	string name = 2;
@@ -102,7 +112,12 @@ message ProjectMember {
 				}
 			]
 		}
-		access: { read: "view_members" write: "manage_members" }
+		access: {
+			allow: [
+				{ read: true permission: "view_members" },
+				{ write: true permission: "manage_members" }
+			]
+		}
 	};
 	string id = 1;
 	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -114,7 +129,12 @@ message Task {
 	option (syncplane.v1.entity) = {
 		name: "task"
 		key_fields: [ "id" ]
-		access: { read: "view_tasks" write: "edit_tasks" }
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ write: true permission: "edit_tasks" }
+			]
+		}
 	};
 	string id = 1;
 	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -127,33 +147,60 @@ message Comment {
 	option (syncplane.v1.entity) = {
 		name: "comment"
 		key_fields: [ "id" ]
-		access: { read: "view_tasks" write: "edit_tasks" }
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ write: true permission: "edit_tasks" }
+			]
+		}
 	};
 	string id = 1;
 	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string body = 3;
 }
 
-// Readable by every org member, writable only through trusted writes.
+// Readable by every org member. No rule admits a write, so only trusted
+// writes create, change and delete labels.
 message Label {
 	option (syncplane.v1.entity) = {
 		name: "label"
 		key_fields: [ "id" ]
-		access: { read: "view_labels" write: "view_labels" }
-		create_policy: CREATE_POLICY_TRUSTED_ONLY
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
+		access: { allow: [ { read: true permission: "view_labels" } ] }
 	};
 	string id = 1;
 	string name = 2;
 }
 
-// Outside the access model: every admitted caller reads and writes it.
+// Every admitted caller reads and writes it.
 message Note {
 	option (syncplane.v1.entity) = {
 		name: "note"
 		key_fields: [ "id" ]
-		access: { unrestricted: true }
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+			} ]
+		}
+	};
+	string id = 1;
+	string body = 2;
+}
+
+// An entry in an append-only log: a caller who can read tasks posts one, and
+// no rule admits an update or a delete. Registered with the org schema by the
+// specs that check which write operations a rule set leaves to trusted writes.
+message Entry {
+	option (syncplane.v1.entity) = {
+		name: "entry"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ create: true permission: "view_tasks" }
+			]
+		}
 	};
 	string id = 1;
 	string body = 2;
@@ -191,7 +238,12 @@ message TeamMember {
 				}
 			]
 		}
-		access: { read: "view_team" write: "edit_team" }
+		access: {
+			allow: [
+				{ read: true permission: "view_team" },
+				{ write: true permission: "edit_team" }
+			]
+		}
 	};
 	string id = 1;
 	Team team = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -203,7 +255,12 @@ message Team {
 	option (syncplane.v1.entity) = {
 		name: "team"
 		key_fields: [ "id" ]
-		access: { read: "view_team" write: "edit_team" }
+		access: {
+			allow: [
+				{ read: true permission: "view_team" },
+				{ write: true permission: "edit_team" }
+			]
+		}
 	};
 	string id = 1;
 }
@@ -214,7 +271,12 @@ message Folder {
 	option (syncplane.v1.entity) = {
 		name: "folder"
 		key_fields: [ "id" ]
-		access: { read: "view_folders" write: "edit_folders" }
+		access: {
+			allow: [
+				{ read: true permission: "view_folders" },
+				{ write: true permission: "edit_folders" }
+			]
+		}
 	};
 	string id = 1;
 	Folder parent = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -244,7 +306,12 @@ message FolderMember {
 				}
 			]
 		}
-		access: { read: "view_folders" write: "manage_folders" }
+		access: {
+			allow: [
+				{ read: true permission: "view_folders" },
+				{ write: true permission: "manage_folders" }
+			]
+		}
 	};
 	string id = 1;
 	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -257,7 +324,12 @@ message Doc {
 	option (syncplane.v1.entity) = {
 		name: "doc"
 		key_fields: [ "id" ]
-		access: { read: "view_folders" write: "edit_folders" }
+		access: {
+			allow: [
+				{ read: true permission: "view_folders" },
+				{ write: true permission: "edit_folders" }
+			]
+		}
 	};
 	string id = 1;
 	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -271,7 +343,12 @@ message Board {
 	option (syncplane.v1.entity) = {
 		name: "board"
 		key_fields: [ "id" ]
-		access: { read: "view_places" write: "edit_places" }
+		access: {
+			allow: [
+				{ read: true permission: "view_places" },
+				{ write: true permission: "edit_places" }
+			]
+		}
 	};
 	string id = 1;
 }
@@ -281,7 +358,12 @@ message Space {
 	option (syncplane.v1.entity) = {
 		name: "space"
 		key_fields: [ "id" ]
-		access: { read: "view_places" write: "edit_places" }
+		access: {
+			allow: [
+				{ read: true permission: "view_places" },
+				{ write: true permission: "edit_places" }
+			]
+		}
 	};
 	string id = 1;
 }
@@ -330,7 +412,12 @@ message PlaceMember {
 				}
 			]
 		}
-		access: { read: "view_place_members" write: "manage_place_members" }
+		access: {
+			allow: [
+				{ read: true permission: "view_place_members" },
+				{ write: true permission: "manage_place_members" }
+			]
+		}
 	};
 	string id = 1;
 	oneof place {
@@ -346,7 +433,12 @@ message Card {
 	option (syncplane.v1.entity) = {
 		name: "card"
 		key_fields: [ "id" ]
-		access: { read: "view_cards" write: "edit_cards" }
+		access: {
+			allow: [
+				{ read: true permission: "view_cards" },
+				{ write: true permission: "edit_cards" }
+			]
+		}
 	};
 	string id = 1;
 	oneof place {
@@ -361,7 +453,12 @@ message CardItem {
 	option (syncplane.v1.entity) = {
 		name: "card_item"
 		key_fields: [ "id" ]
-		access: { read: "view_cards" write: "edit_cards" }
+		access: {
+			allow: [
+				{ read: true permission: "view_cards" },
+				{ write: true permission: "edit_cards" }
+			]
+		}
 	};
 	string id = 1;
 	Card card = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -385,7 +482,12 @@ message Pin {
 	option (syncplane.v1.entity) = {
 		name: "pin"
 		key_fields: [ "id" ]
-		access: { read: "view_pins" write: "edit_pins" }
+		access: {
+			allow: [
+				{ read: true permission: "view_pins" },
+				{ write: true permission: "edit_pins" }
+			]
+		}
 	};
 	string id = 1;
 	PlaceRef place = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];

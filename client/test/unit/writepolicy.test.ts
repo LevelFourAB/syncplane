@@ -1,127 +1,223 @@
 // The client refuses a write its schema says can never land, at the call site,
 // instead of applying it to the overlay and rolling it back when the rejection
-// ack arrives. The fixtures mirror the engine's: "activity" is server-owned
-// (all three policies trustedOnly), "comment" is append-only (creates allowed,
-// edits and deletes not) and "ledger" restricts deletes only.
+// ack arrives. An entity's access rules decide which writes those are: an
+// operation no rule admits is open only to trusted server-side writes.
 
+import type { DescMessage } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
-import { TodoSchema } from '../../src/gen/example/todo/v1/todo_pb.js';
 import {
-	ActivitySchema,
-	CommentSchema,
-	LedgerSchema,
-} from '../../src/gen/syncplane/testdata/v1/testdata_pb.js';
+	EntrySchema,
+	LabelSchema,
+	NoteSchema,
+} from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
+import { type AccessRuleDecl, defineSchema, entity, text } from '../../src/schema/builder.js';
 
-function newClient() {
+const ruled = (name: string, ...allow: AccessRuleDecl[]) =>
+	entity(name, { id: text().key(), body: text() }, { access: { allow } });
+
+const bundle = defineSchema(
+	// Server-owned: clients read its rows, and no rule admits a write.
+	ruled('activity', { read: true, permission: 'view' }),
+	// Append-only: a client posts a row, but cannot change or remove it.
+	ruled('comment', { read: true, create: true, permission: 'view' }),
+	// Everything but a delete.
+	ruled('ledger', { read: true, permission: 'view' }, {
+		create: true,
+		update: true,
+		permission: 'edit',
+	}),
+	// Rows a client changes but never creates.
+	ruled('setting', { read: true, update: true, permission: 'view' }),
+	// Every admitted caller writes.
+	ruled('memo', { read: true, write: true, admitted: true }),
+);
+const Activity = bundle.descMessage('activity');
+const Comment = bundle.descMessage('comment');
+const Ledger = bundle.descMessage('ledger');
+const Setting = bundle.descMessage('setting');
+const Memo = bundle.descMessage('memo');
+
+// Outside the access model, so in a schema of its own.
+const Plain = defineSchema(entity('plain', { id: text().key(), body: text() })).descMessage(
+	'plain',
+);
+
+function newClient(entities: DescMessage[] = [ ...bundle.descMessages() ]) {
 	return new SyncClient({
 		workspaceId: 'ws1',
 		kvStore: new MemoryKVStore(),
-		entities: [ TodoSchema, ActivitySchema, CommentSchema, LedgerSchema ],
+		entities,
 		streamEnabled: false,
 		pollIntervalMs: 0,
 	});
 }
 
-/** Nothing reached the local store, so no rollback was needed. */
-async function isEmpty(client: SyncClient, schema: Parameters<SyncClient['get']>[0], key: string) {
-	return (await client.get(schema, key)) === undefined;
-}
+// The write API is typed for generated schemas; a builder schema's rows pass
+// through it untyped.
+const put = (
+	client: SyncClient,
+	schema: DescMessage,
+	id: string,
+	body: string,
+	expectedVersion?: bigint,
+) =>
+	client.mutate.put(
+		schema,
+		{ id, body } as never,
+		expectedVersion === undefined ? undefined : { expectedVersion },
+	);
+const patch = (client: SyncClient, schema: DescMessage, id: string, body: string) =>
+	client.mutate.patch(schema, id, { body } as never);
+const bodyOf = async (client: SyncClient, schema: DescMessage, id: string) =>
+	((await client.get(schema, id)) as { body?: string } | undefined)?.body;
 
-describe('entity write policies', () => {
-	it('leaves an unrestricted entity alone', async () => {
+describe('entity access rules on local writes', () => {
+	it('leaves an entity without access rules alone', async () => {
+		const client = newClient([ Plain ]);
+		await put(client, Plain, 'p1', 'first');
+		await patch(client, Plain, 'p1', 'edited');
+		await client.mutate.del(Plain, 'p1');
+		await client.close();
+	});
+
+	it('leaves an entity whose rules admit every write alone', async () => {
 		const client = newClient();
-		await client.mutate.put(TodoSchema, { id: 't1', title: 'first' });
-		await client.mutate.patch(TodoSchema, 't1', { title: 'edited' });
-		await client.mutate.del(TodoSchema, 't1');
+		await put(client, Memo, 'm1', 'first');
+		await put(client, Memo, 'm2', 'second', 0n);
+		await patch(client, Memo, 'm1', 'edited');
+		await client.mutate.del(Memo, 'm2');
+		expect(await bodyOf(client, Memo, 'm1')).toBe('edited');
 		await client.close();
 	});
 
 	it('refuses every write to a server-owned entity', async () => {
 		const client = newClient();
 
-		await expect(client.mutate.put(ActivitySchema, { id: 'a1', what: 'made' }))
-			.rejects.toThrow(/createPolicy and updatePolicy are trustedOnly/);
-		await expect(
-			client.mutate.put(ActivitySchema, { id: 'a1', what: 'made' }, { expectedVersion: 0n }),
-		).rejects.toThrow(/createPolicy is trustedOnly/);
-		await expect(client.mutate.patch(ActivitySchema, 'a1', { what: 'edited' }))
-			.rejects.toThrow(/updatePolicy is trustedOnly/);
-		await expect(client.mutate.del(ActivitySchema, 'a1'))
-			.rejects.toThrow(/deletePolicy is trustedOnly/);
+		await expect(put(client, Activity, 'a1', 'made')).rejects.toThrow(
+			'entity "activity": no access rule admits create or update, so only a trusted server-side '
+				+ 'write may write its rows',
+		);
+		await expect(put(client, Activity, 'a1', 'made', 0n)).rejects.toThrow(
+			'entity "activity": no access rule admits create, so only a trusted server-side write may '
+				+ 'create its rows',
+		);
+		await expect(put(client, Activity, 'a1', 'made', 3n)).rejects.toThrow(
+			/no access rule admits update, so only a trusted server-side write may change its rows/,
+		);
+		await expect(patch(client, Activity, 'a1', 'edited')).rejects.toThrow(
+			'entity "activity": no access rule admits update, so only a trusted server-side write may '
+				+ 'change its rows',
+		);
+		await expect(client.mutate.del(Activity, 'a1')).rejects.toThrow(
+			'entity "activity": no access rule admits delete, so only a trusted server-side write may '
+				+ 'delete its rows',
+		);
 
-		expect(await isEmpty(client, ActivitySchema, 'a1')).toBe(true);
+		expect(await client.get(Activity, 'a1')).toBeUndefined();
 		await client.close();
 	});
 
-	it('lets an append-only entity be created, but only when the write says so', async () => {
+	it('lets an append-only entity be created, guarded or not', async () => {
 		const client = newClient();
 
-		// An unguarded put could replace a row, so it is refused — and the
-		// message has to teach the fix, since this is the case an app hits first.
-		await expect(client.mutate.put(CommentSchema, { id: 'c1', body: 'posted' }))
-			.rejects.toThrow(/pass expectedVersion 0n to assert a create/);
-		expect(await isEmpty(client, CommentSchema, 'c1')).toBe(true);
+		await put(client, Comment, 'c1', 'posted', 0n);
+		// An unguarded put is a create when the row is absent, which only the
+		// server can tell, so it passes here and the server decides.
+		await put(client, Comment, 'c2', 'posted');
 
-		await client.mutate.put(CommentSchema, { id: 'c1', body: 'posted' }, { expectedVersion: 0n });
-		expect((await client.get(CommentSchema, 'c1'))?.body).toBe('posted');
-
+		expect(await bodyOf(client, Comment, 'c1')).toBe('posted');
+		expect(await bodyOf(client, Comment, 'c2')).toBe('posted');
 		await client.close();
 	});
 
-	it('refuses to edit or remove an append-only row', async () => {
+	it('refuses to change or remove an append-only row', async () => {
 		const client = newClient();
-		await client.mutate.put(CommentSchema, { id: 'c1', body: 'posted' }, { expectedVersion: 0n });
+		await put(client, Comment, 'c1', 'posted', 0n);
 
-		await expect(client.mutate.patch(CommentSchema, 'c1', { body: 'edited' }))
-			.rejects.toThrow(/updatePolicy is trustedOnly/);
-		await expect(
-			client.mutate.put(CommentSchema, { id: 'c1', body: 'edited' }, { expectedVersion: 1n }),
-		).rejects.toThrow(/updatePolicy is trustedOnly/);
-		await expect(client.mutate.del(CommentSchema, 'c1'))
-			.rejects.toThrow(/deletePolicy is trustedOnly/);
+		await expect(patch(client, Comment, 'c1', 'edited')).rejects.toThrow(
+			/no access rule admits update/,
+		);
+		await expect(put(client, Comment, 'c1', 'edited', 1n)).rejects.toThrow(
+			/no access rule admits update/,
+		);
+		await expect(client.mutate.del(Comment, 'c1')).rejects.toThrow(/no access rule admits delete/);
 
 		// The refusals left the row exactly as it was posted.
-		expect((await client.get(CommentSchema, 'c1'))?.body).toBe('posted');
+		expect(await bodyOf(client, Comment, 'c1')).toBe('posted');
 		await client.close();
 	});
 
 	it('refuses through update(), which is a patch underneath', async () => {
 		const client = newClient();
-		await client.mutate.put(CommentSchema, { id: 'c1', body: 'posted' }, { expectedVersion: 0n });
+		await put(client, Comment, 'c1', 'posted', 0n);
 
-		await expect(client.mutate.update(CommentSchema, 'c1', (draft) => {
-			draft.body = 'edited';
-		})).rejects.toThrow(/updatePolicy is trustedOnly/);
+		await expect(client.mutate.update(Comment, 'c1', (draft) => {
+			(draft as { body?: string }).body = 'edited';
+		})).rejects.toThrow(/no access rule admits update/);
 
-		expect((await client.get(CommentSchema, 'c1'))?.body).toBe('posted');
+		expect(await bodyOf(client, Comment, 'c1')).toBe('posted');
 		await client.close();
 	});
 
-	it('refuses through the typed db facade', async () => {
+	it('restricts only what the rules leave out', async () => {
 		const client = newClient();
 
-		await expect(client.db.comment.mutate.put({ id: 'c1', body: 'posted' }))
-			.rejects.toThrow(/updatePolicy is trustedOnly/);
-		await expect(client.db.activity.mutate.del('a1'))
-			.rejects.toThrow(/deletePolicy is trustedOnly/);
+		// "ledger" admits creates and updates but not deletes, so writes that
+		// are not a delete pass.
+		await put(client, Ledger, 'l1', 'made');
+		await put(client, Ledger, 'l2', 'made', 0n);
+		await patch(client, Ledger, 'l1', 'edited');
+		await expect(client.mutate.del(Ledger, 'l1')).rejects.toThrow(/no access rule admits delete/);
 
+		expect(await bodyOf(client, Ledger, 'l1')).toBe('edited');
 		await client.close();
 	});
 
-	it('restricts only what the schema restricts', async () => {
+	it('refuses only a guarded create where rules admit updates alone', async () => {
 		const client = newClient();
 
-		// "ledger" restricts deletes and nothing else, so an unguarded put still
-		// passes: the check never asks about a policy the entity did not set.
-		await client.mutate.put(LedgerSchema, { id: 'l1', label: 'made' });
-		await client.mutate.patch(LedgerSchema, 'l1', { label: 'edited' });
-		await expect(client.mutate.del(LedgerSchema, 'l1'))
-			.rejects.toThrow(/deletePolicy is trustedOnly/);
+		await expect(put(client, Setting, 's1', 'made', 0n)).rejects.toThrow(
+			/no access rule admits create, so only a trusted server-side write may create its rows/,
+		);
+		expect(await client.get(Setting, 's1')).toBeUndefined();
 
-		expect((await client.get(LedgerSchema, 'l1'))?.label).toBe('edited');
+		// An unguarded put is an update when the row is present; the server
+		// decides on the stored row.
+		await put(client, Setting, 's1', 'made');
+		await put(client, Setting, 's1', 'changed', 1n);
+		await patch(client, Setting, 's1', 'edited');
+		await expect(client.mutate.del(Setting, 's1')).rejects.toThrow(/no access rule admits delete/);
+
+		expect(await bodyOf(client, Setting, 's1')).toBe('edited');
+		await client.close();
+	});
+
+	it('reads the rules from a compiled schema and refuses through the typed db facade', async () => {
+		// Built here rather than by newClient, so the entities keep the types
+		// client.db derives its keys from.
+		const client = new SyncClient({
+			workspaceId: 'ws1',
+			kvStore: new MemoryKVStore(),
+			entities: [ EntrySchema, LabelSchema, NoteSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+
+		await client.db.entry.mutate.put({ id: 'e1', body: 'posted' }, { expectedVersion: 0n });
+		await expect(client.db.entry.mutate.patch('e1', { body: 'edited' }))
+			.rejects.toThrow('entity "entry": no access rule admits update');
+		await expect(client.db.label.mutate.put({ id: 'l1', name: 'red' }))
+			.rejects.toThrow('entity "label": no access rule admits create or update');
+		await expect(client.db.label.mutate.del('l1'))
+			.rejects.toThrow('entity "label": no access rule admits delete');
+		// The admitted source counts like any other.
+		await client.db.note.mutate.put({ id: 'n1', body: 'anyone' });
+		await client.db.note.mutate.del('n1');
+
+		expect((await client.db.entry.get('e1'))?.body).toBe('posted');
 		await client.close();
 	});
 });

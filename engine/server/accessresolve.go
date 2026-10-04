@@ -171,6 +171,41 @@ func (s *accessSet) any() bool {
 	return false
 }
 
+// rootAnchors holds a permission at the workspace root. It is shared, so
+// nothing may change it.
+var rootAnchors = &permAnchors{root: true}
+
+// readAnchors returns where the set lets the caller read the rows that r
+// governs: the union of the anchors of r's permissions, or the workspace root
+// when r admits every admitted caller. It returns nil when the caller holds
+// none of r's permissions. The result can be shared with the set, so nothing
+// may change it.
+func (s *accessSet) readAnchors(r readers) *permAnchors {
+	if r.all {
+		return rootAnchors
+	}
+	if len(r.perms) == 1 {
+		return s.perms[r.perms[0]]
+	}
+	var union *permAnchors
+	for _, p := range r.perms {
+		a := s.perms[p]
+		switch {
+		case a == nil:
+		case a.root:
+			return rootAnchors
+		case len(a.rows) > 0:
+			if union == nil {
+				union = &permAnchors{rows: make(map[anchorRow]struct{}, len(a.rows))}
+			}
+			for at := range a.rows {
+				union.rows[at] = struct{}{}
+			}
+		}
+	}
+	return union
+}
+
 func (a *permAnchors) holds(entity, key string) bool {
 	if a == nil {
 		return false
@@ -327,15 +362,15 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 
 // modelReadFilter returns the filter the access model puts on reads of info
 // for the bound caller, or nil when the model hides no row of it: the entity
-// is outside the model, or the caller holds its read permission at the root.
-// A row is readable when the caller holds the permission at the row or at a
-// row up its parent chain.
+// is outside the model, or a read rule admits the caller at the root. A row
+// is readable when the caller holds one of the read rules' permissions at the
+// row or at a row up its parent chain.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
-	if a == nil || a.unrestricted {
+	if a == nil {
 		return nil
 	}
-	anchors := e.access.perms[a.read]
+	anchors := e.access.readAnchors(a.read)
 	if anchors != nil && anchors.root {
 		return nil
 	}
@@ -405,21 +440,21 @@ func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessC
 var errAccessUnbound = errors.New("server: access model read before the caller's access was resolved")
 
 // accessNarrows reports whether the bound access set can narrow the rows of
-// info: the entity is in the model and the caller does not hold its read
-// permission at the root. It reads nothing.
+// info: the entity is in the model and no read rule admits the caller at the
+// root. It reads nothing.
 func (e *rowEmitter) accessNarrows(info *entityInfo) bool {
 	a := info.access
-	if e.caller == nil || e.access == nil || a == nil || a.unrestricted {
+	if e.caller == nil || e.access == nil || a == nil {
 		return false
 	}
-	anchors := e.access.perms[a.read]
+	anchors := e.access.readAnchors(a.read)
 	return anchors == nil || !anchors.root
 }
 
 // accessCandidates returns, in key order, the keys of the rows of info that the
-// bound access set can let the caller read: the anchors of its read permission
-// that are rows of info, and the rows of info below such an anchor (see
-// rowsBelow). It is a superset of the rows the model's filter admits, so
+// bound access set can let the caller read: the anchors of its read
+// permissions that are rows of info, and the rows of info below such an
+// anchor (see rowsBelow). It is a superset of the rows the model's filter admits, so
 // reading these keys and classifying each row gives what a scan would. ok is
 // false when the set does not narrow the entity, or when narrowing would cost
 // more than maxCandidates keys or needs an index that is not ready; the caller
@@ -429,7 +464,7 @@ func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCa
 		return nil, false, nil
 	}
 	var from []anchorRow
-	if anchors := e.access.perms[info.access.read]; anchors != nil {
+	if anchors := e.access.readAnchors(info.access.read); anchors != nil {
 		for at := range anchors.rows {
 			from = append(from, at)
 		}

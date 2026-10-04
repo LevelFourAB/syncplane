@@ -28,15 +28,13 @@ import {
 	CustomMutationSchema,
 } from './gen/syncplane/v1/mutation_pb.js';
 import {
-	CreatePolicy,
-	DeletePolicy,
+	type AccessOptions,
 	entity as entityExt,
 	type EntityOptions,
 	field_behavior as fieldBehaviorExt,
 	type FieldBehavior,
 	FieldWritePolicy,
 	reference as referenceExt,
-	UpdatePolicy,
 } from './gen/syncplane/v1/options_pb.js';
 import {
 	rowKey,
@@ -129,12 +127,14 @@ export interface EntityDef {
 	 */
 	serverOnly: boolean;
 	/**
-	 * The entity's (syncplane.v1.entity) write policies. `'trustedOnly'` means
-	 * the server refuses that class of write to every caller it authorizes, so
-	 * the client refuses it at the call site rather than applying it to the
-	 * overlay and rolling it back on the rejection ack (see assertWritePolicy).
+	 * Which write operations at least one rule of the entity's
+	 * `(syncplane.v1.entity).access` admits, or `undefined` when the entity
+	 * declares no access. The server refuses an operation no rule admits to
+	 * every caller it authorizes, so the client refuses it at the call site
+	 * rather than applying it to the overlay and rolling it back on the
+	 * rejection ack (see assertWritePolicy).
 	 */
-	policies: WritePolicies;
+	writeAccess: WriteAccess | undefined;
 	/**
 	 * Top-level field names no client write may change, from
 	 * `(syncplane.v1.field_behavior).write_policy` — a oneof named by its group.
@@ -154,12 +154,14 @@ export interface EntityDef {
 	grant: boolean;
 }
 
-/** Who may perform each class of write on an entity, mirroring the
- * syncplane.v1 CreatePolicy/UpdatePolicy/DeletePolicy enums. */
-export interface WritePolicies {
-	create: 'allow' | 'trustedOnly';
-	update: 'allow' | 'trustedOnly';
-	delete: 'allow' | 'trustedOnly';
+/** Whether at least one of an entity's access rules admits each write
+ * operation, whatever the rule's source. A rule with `write` admits all
+ * three. An operation no rule admits is open only to trusted server-side
+ * writes. */
+export interface WriteAccess {
+	create: boolean;
+	update: boolean;
+	delete: boolean;
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -205,12 +207,24 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		serverOnly: opts.serverOnly,
 		protectedFields: protectedFieldsOf(schema, keyFields),
 		grant: opts.grant !== undefined,
-		policies: {
-			create: opts.createPolicy === CreatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
-			update: opts.updatePolicy === UpdatePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
-			delete: opts.deletePolicy === DeletePolicy.TRUSTED_ONLY ? 'trustedOnly' : 'allow',
-		},
+		writeAccess: writeAccessOf(opts.access),
 	};
+}
+
+/**
+ * Folds an entity's access rules into the write operations they admit. The
+ * source of a rule is left out: whether the caller holds a permission is
+ * decided on the stored row, which only the server has.
+ */
+function writeAccessOf(access: AccessOptions | undefined): WriteAccess | undefined {
+	if (access === undefined) return undefined;
+	const out: WriteAccess = { create: false, update: false, delete: false };
+	for (const rule of access.allow) {
+		out.create ||= rule.write || rule.create;
+		out.update ||= rule.write || rule.update;
+		out.delete ||= rule.write || rule.delete;
+	}
+	return out;
 }
 
 /**
@@ -252,18 +266,20 @@ export function protectedFieldOf(def: EntityDef, path: string): string | undefin
 }
 
 /**
- * Throws if the entity's write policies forbid this write, which is the same
- * decision the server makes in Server.checkWritePolicy — a client that
- * classified differently would either block a legal write or enqueue one only
- * to have it rejected. The shared vectors in testdata/writepolicy pin the two
- * against each other.
+ * Throws if the entity's schema forbids this write to every untrusted caller,
+ * which is the same decision the server makes in Server.checkWritePolicy — a
+ * client that classified differently would either block a legal write or
+ * enqueue one only to have it rejected. The shared vectors in
+ * testdata/writepolicy pin the two against each other.
  *
- * Classification is a pure function of the write, so it needs no row read:
- * PATCH never upserts and is an update; a PUT asserting version 0 is provably a
- * create and one asserting any other version provably an update; a PUT
- * asserting nothing could land either way and so needs both policies to admit
- * it. Calling an unguarded PUT a create or an update instead would let it
- * through where the opposite policy forbids it.
+ * An entity with access rules refuses a write that can only be an operation
+ * no rule admits. Classification is a pure function of the write, so it needs
+ * no row read: PATCH never upserts and is an update; DELETE is a delete; a
+ * PUT asserting version 0 is provably a create and one asserting any other
+ * version provably an update. A PUT asserting nothing is a create when the
+ * row is absent and an update when it is present, so it is refused only where
+ * no rule admits either, and the server decides on the stored row. An entity
+ * without access rules is never refused for its op.
  *
  * `paths` is the effective mask of a patch, including any path a text-string
  * value contributed — the same mask the server authorizes. A path reaching a
@@ -290,45 +306,24 @@ export function assertWritePolicy(
 			}
 		}
 	}
-	const creates = def.policies.create === 'trustedOnly';
-	const updates = def.policies.update === 'trustedOnly';
+	const access = def.writeAccess;
+	if (access === undefined) return;
+	const onlyTrusted = (what: string, verb: string): never =>
+		refuse(`no access rule admits ${what}, so only a trusted server-side write may ${verb} its rows`);
 	switch (op) {
 		case CrudOp.DELETE:
-			if (def.policies.delete === 'trustedOnly') {
-				refuse('deletePolicy is trustedOnly, so only a trusted server-side write may delete its rows');
-			}
+			if (!access.delete) onlyTrusted('delete', 'delete');
 			return;
 		case CrudOp.PATCH:
-			if (updates) {
-				refuse('updatePolicy is trustedOnly, so only a trusted server-side write may modify its rows');
-			}
+			if (!access.update) onlyTrusted('update', 'change');
 			return;
 		case CrudOp.PUT:
 			if (expectedVersion === undefined) {
-				if (creates && updates) {
-					refuse(
-						'createPolicy and updatePolicy are trustedOnly, so only a trusted server-side write may '
-							+ 'write its rows',
-					);
-				}
-				if (creates) {
-					refuse(
-						'createPolicy is trustedOnly, and a put() without an expectedVersion would create the row '
-							+ "if it were absent; pass the row's current version to assert an update",
-					);
-				}
-				if (updates) {
-					refuse(
-						'updatePolicy is trustedOnly, and a put() without an expectedVersion would replace the row '
-							+ 'if it were present; pass expectedVersion 0n to assert a create',
-					);
-				}
+				if (!access.create && !access.update) onlyTrusted('create or update', 'write');
 			} else if (expectedVersion === 0n) {
-				if (creates) {
-					refuse('createPolicy is trustedOnly, so only a trusted server-side write may create its rows');
-				}
-			} else if (updates) {
-				refuse('updatePolicy is trustedOnly, so only a trusted server-side write may modify its rows');
+				if (!access.create) onlyTrusted('create', 'create');
+			} else if (!access.update) {
+				onlyTrusted('update', 'change');
 			}
 			return;
 		default:

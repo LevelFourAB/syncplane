@@ -624,51 +624,6 @@ message SearchEmptyEntity {
 	string title = 2;
 }
 
-// Delete-policy fixture: an entity whose rows only a trusted write may delete.
-// Stands in for the root objects a cascade hangs off, where deletion is meant
-// to be a considered server-side act rather than a verb clients hold.
-message Ledger {
-	option (syncplane.v1.entity) = {
-		name: "ledger"
-		key_fields: [ "id" ]
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string label = 2;
-}
-
-// Write-policy fixture for a server-owned entity: the server records these
-// rows and clients only read them. Stands in for an activity feed written by
-// effects and connectors.
-message Activity {
-	option (syncplane.v1.entity) = {
-		name: "activity"
-		key_fields: [ "id" ]
-		create_policy: CREATE_POLICY_TRUSTED_ONLY
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string what = 2;
-}
-
-// Write-policy fixture for an append-only entity: a client may post a row but
-// not edit or remove it afterwards. Stands in for comments, where edits go
-// through a mutator that checks authorship.
-message Comment {
-	option (syncplane.v1.entity) = {
-		name: "comment"
-		key_fields: [ "id" ]
-		update_policy: UPDATE_POLICY_TRUSTED_ONLY
-		delete_policy: DELETE_POLICY_TRUSTED_ONLY
-	};
-
-	string id = 1;
-	string body = 2;
-}
-
 // History fixture with a NARROWED capture set: `title` and `body` are marked,
 // `note` is not, so a write that touches only `note` records nothing. `body` is
 // collaborative text, which is what makes the restore-is-a-PATCH trap
