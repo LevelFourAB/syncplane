@@ -1446,7 +1446,11 @@ const projectMember = schema.entity('project_member', {
 		role: 'role',
 		roles: [
 			{ name: 'project_reader', grants: [ 'view_projects' ] },
-			{ name: 'project_writer', grants: [ 'view_projects', 'edit_projects' ] },
+			{
+				name: 'project_writer',
+				includes: [ 'project_reader' ],
+				grants: [ 'edit_projects' ],
+			},
 		],
 	},
 	access: {
@@ -1468,6 +1472,7 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 
 Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `permission: '<name>'` or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
 `grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `.accessParent()` is valid on a singular `ref()` only.
+Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.
 `entity()` throws on the rules that concern one entity. The server checks the rules that span entities when the schema is registered.
 
 `put`, `patch`, `update` and `del` reject with an `Error` before they change local state when the write can only be an operation that no rule of the entity names: `del` without a delete rule, `patch` and `update` without an update rule, `put` with `expectedVersion: 0n` without a create rule, `put` with another `expectedVersion` without an update rule, and `put` with no `expectedVersion` when no rule names create or update. See [Operations no rule admits](proto-options.md#operations-no-rule-admits).

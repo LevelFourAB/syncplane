@@ -36,6 +36,7 @@ import {
 	message,
 	ref,
 	refList,
+	type RoleDecl,
 	text,
 	workspaceRef,
 } from '../../src/schema/builder.js';
@@ -507,6 +508,33 @@ describe('schema builder — access model', () => {
 		]);
 	});
 
+	it('lowers role includes', () => {
+		const viewer = entity('viewer', {
+			id: text().key(),
+			project: ref(() => project).accessParent(),
+			userId: text(),
+			role: text(),
+		}, {
+			grant: {
+				subject: 'userId',
+				role: 'role',
+				roles: [
+					{ name: 'project_viewer', grants: [ 'view_projects' ] },
+					{ name: 'project_editor', includes: [ 'project_viewer' ], grants: [ 'edit_projects' ] },
+					{ name: 'project_lead', includes: [ 'project_editor' ] },
+				],
+			},
+			access: { allow: [ { read: true, permission: 'view_projects' } ] },
+		});
+		const roles =
+			getOption(defineSchema(project, viewer).descMessage('viewer'), entityExt).grant!.roles;
+		expect(roles.map((r) => [ r.name, r.grants, r.includes ])).toEqual([
+			[ 'project_viewer', [ 'view_projects' ], [] ],
+			[ 'project_editor', [ 'edit_projects' ], [ 'project_viewer' ] ],
+			[ 'project_lead', [], [ 'project_editor' ] ],
+		]);
+	});
+
 	it('lowers members, and a grant whose subject is a ref() to a team', () => {
 		const team = entity('team', { id: text().key() }, {
 			members: { entity: 'team_member' },
@@ -700,6 +728,45 @@ describe('schema builder — access model', () => {
 					},
 				})
 			).toThrow(/grant role "w" grants "edit" twice/);
+		});
+		it('accepts a role that includes another role, with or without grants of its own', () => {
+			const ladder: RoleDecl[] = [
+				{ name: 'reader', grants: [ 'view' ] },
+				{ name: 'writer', includes: [ 'reader' ], grants: [ 'view', 'edit' ] },
+				{ name: 'member', includes: [ 'writer' ] },
+			];
+			expect(() =>
+				entity('e', fields, { access, grant: { subject: 'userId', role: 'role', roles: ladder } })
+			)
+				.not.toThrow();
+		});
+		it('rejects an include of an undeclared role, a repeated include and an include cycle', () => {
+			const granting = (...roles: RoleDecl[]) => () =>
+				entity('e', fields, { access, grant: { subject: 'userId', role: 'role', roles } });
+			expect(granting({ name: 'w', includes: [ 'r' ] })).toThrow(
+				'entity "e": grant role "w" includes "r", which is not a role of this grant',
+			);
+			expect(granting({ name: 'r', grants: [ 'view' ] }, { name: 'w', includes: [ 'r', 'r' ] }))
+				.toThrow(
+					'entity "e": grant role "w" includes "r" twice',
+				);
+			expect(granting({ name: 'w', includes: [ 'w' ] })).toThrow(
+				'entity "e": grant role "w" includes itself through w → w',
+			);
+			expect(granting(
+				{ name: 'a', grants: [ 'view' ], includes: [ 'b' ] },
+				{ name: 'b', includes: [ 'c' ] },
+				{ name: 'c', includes: [ 'b' ] },
+			)).toThrow('entity "e": grant role "b" includes itself through b → c → b');
+		});
+		it('rejects a role that neither grants nor includes', () => {
+			// @ts-expect-error a role declares grants or includes
+			const bare: RoleDecl = { name: 'w' };
+			expect(bare.name).toBe('w');
+			const empty = { name: 'w', grants: [] };
+			expect(() =>
+				entity('e', fields, { access, grant: { subject: 'userId', role: 'role', roles: [ empty ] } })
+			).toThrow('entity "e": grant role "w" grants no permissions');
 		});
 	});
 });

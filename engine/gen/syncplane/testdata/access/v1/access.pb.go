@@ -2296,29 +2296,24 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04name\x18\x02 \x01(\tR\x04name:9\xa2\xbb\x185\n" +
 	"\aproject\x12\x02idR&\n" +
 	"\x11\b\x012\rview_projects\n" +
-	"\x11(\x012\redit_projects\"\xd5\x04\n" +
+	"\x11(\x012\redit_projects\"\xe1\x03\n" +
 	"\rProjectMember\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
 	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x17\n" +
 	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
-	"\x04role\x18\x04 \x01(\tR\x04role:\xbd\x03\xa2\xbb\x18\xb8\x03\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xc9\x02\xa2\xbb\x18\xc4\x02\n" +
 	"\x0eproject_member\x12\x02idR&\n" +
 	"\x10\b\x012\fview_members\n" +
-	"\x12(\x012\x0emanage_membersZ\xf9\x02\n" +
+	"\x12(\x012\x0emanage_membersZ\x85\x02\n" +
 	"\auser_id\x12\x04role\x1a9\n" +
 	"\x0eproject_reader\x12\rview_projects\x12\fview_members\x12\n" +
-	"view_tasks\x1aE\n" +
-	"\x0eproject_writer\x12\rview_projects\x12\fview_members\x12\n" +
-	"view_tasks\x12\n" +
-	"edit_tasks\x1aT\n" +
-	"\rproject_admin\x12\rview_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
-	"view_tasks\x12\n" +
-	"edit_tasks\x1a+\n" +
+	"view_tasks\x1a,\n" +
+	"\x0eproject_writer\x12\n" +
+	"edit_tasks\x1a\x0eproject_reader\x1a/\n" +
+	"\rproject_admin\x12\x0emanage_members\x1a\x0eproject_writer\x1a+\n" +
 	"\x0eproject_editor\x12\rview_projects\x12\n" +
-	"edit_tasks\x1ac\n" +
-	"\rproject_owner\x12\rview_projects\x12\redit_projects\x12\fview_members\x12\x0emanage_members\x12\n" +
-	"view_tasks\x12\n" +
-	"edit_tasks\"\xa7\x01\n" +
+	"edit_tasks\x1a-\n" +
+	"\rproject_owner\x12\redit_projects\x1a\rproject_admin\"\xa7\x01\n" +
 	"\x04Task\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
 	"\aproject\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.ProjectB\x06\xaa\xbb\x18\x02Z\x00R\aproject\x12\x14\n" +

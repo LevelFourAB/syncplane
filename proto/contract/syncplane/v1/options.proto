@@ -273,13 +273,29 @@ message GrantOptions {
 }
 
 // Declares one role and the permissions it grants.
+//
+// A role grants the permissions in `grants` and every permission of each role
+// in `includes`, through any number of steps:
+//
+// ```protobuf
+// roles: [
+//   { name: "task_reader" grants: ["view_projects", "view_tasks"] },
+//   { name: "task_writer" includes: ["task_reader"] grants: ["edit_tasks"] }
+// ]
+// ```
+//
+// A role grants at least one permission, directly or through `includes`.
 message Role {
 	// The role name. Unique across the schema, with the same character rules
 	// as a permission name.
 	string name = 1;
-	// The permissions the role grants at its anchor. At least one, without
-	// duplicates.
+	// The permissions the role grants at its anchor, without duplicates. A
+	// permission that an included role also grants is accepted.
 	repeated string grants = 2;
+	// The names of the roles whose permissions this role also grants, without
+	// duplicates. Each one is a role of the same `GrantOptions`. A role that
+	// includes itself, directly or through other roles, is refused.
+	repeated string includes = 3;
 }
 
 // Declares the entity whose rows say who the members of each team are.

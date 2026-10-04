@@ -795,11 +795,35 @@ export interface MembersDecl {
 	entity: string;
 }
 
-/** One role of a {@link GrantDecl}, mirroring syncplane.v1.Role. */
-export interface RoleDecl {
+/**
+ * One role of a {@link GrantDecl}, mirroring syncplane.v1.Role. A role grants
+ * the permissions in `grants` and every permission of each role in
+ * `includes`.
+ *
+ * @example
+ * ```ts
+ * roles: [
+ *   { name: 'project_reader', grants: ['view_projects', 'view_tasks'] },
+ *   { name: 'project_writer', includes: ['project_reader'], grants: ['edit_tasks'] },
+ * ]
+ * ```
+ */
+export type RoleDecl = RoleFields & ({ grants: string[] } | { includes: string[] });
+
+/** The fields of a {@link RoleDecl}. */
+interface RoleFields {
 	name: string;
-	/** The permissions the role grants at its anchor. At least one. */
-	grants: string[];
+	/**
+	 * The permissions the role grants at its anchor, without duplicates. A
+	 * permission that an included role also grants is accepted.
+	 */
+	grants?: string[];
+	/**
+	 * The names of roles of the same grant whose permissions this role also
+	 * grants, without duplicates. A role that includes itself, directly or
+	 * through other roles, is refused.
+	 */
+	includes?: string[];
 }
 
 /**
@@ -971,7 +995,7 @@ export interface EntityOptions {
 	 *     role: 'role',
 	 *     roles: [
 	 *       { name: 'project_reader', grants: ['view_projects', 'view_tasks'] },
-	 *       { name: 'project_writer', grants: ['view_projects', 'view_tasks', 'edit_tasks'] },
+	 *       { name: 'project_writer', includes: ['project_reader'], grants: ['edit_tasks'] },
 	 *     ],
 	 *   },
 	 *   access: {
@@ -1081,11 +1105,12 @@ function assertAccess(
 		validateRoleName(role.name, `${where} grant`);
 		if (names.has(role.name)) throw new Error(`${where}: grant declares role "${role.name}" twice`);
 		names.add(role.name);
-		if (role.grants.length === 0) {
+		const grants = role.grants ?? [];
+		if (grants.length === 0 && (role.includes ?? []).length === 0) {
 			throw new Error(`${where}: grant role "${role.name}" grants no permissions`);
 		}
 		const perms = new Set<string>();
-		for (const perm of role.grants) {
+		for (const perm of grants) {
 			validatePermissionName(perm, `${where} grant role "${role.name}"`);
 			if (perms.has(perm)) {
 				throw new Error(`${where}: grant role "${role.name}" grants "${perm}" twice`);
@@ -1093,6 +1118,47 @@ function assertAccess(
 			perms.add(perm);
 		}
 	}
+	assertRoleIncludes(where, grant.roles, names);
+}
+
+/**
+ * Validates the `includes` of every role of one grant against the rules the
+ * engine enforces at registration: each names a role of the same grant, once,
+ * and no role includes itself through any chain.
+ */
+function assertRoleIncludes(where: string, roles: RoleDecl[], names: Set<string>): void {
+	const includes = new Map<string, string[]>();
+	for (const role of roles) {
+		const seen = new Set<string>();
+		for (const inc of role.includes ?? []) {
+			if (!names.has(inc)) {
+				throw new Error(
+					`${where}: grant role "${role.name}" includes "${inc}", which is not a role of this grant; `
+						+ 'a role includes only roles declared beside it',
+				);
+			}
+			if (seen.has(inc)) {
+				throw new Error(`${where}: grant role "${role.name}" includes "${inc}" twice`);
+			}
+			seen.add(inc);
+		}
+		includes.set(role.name, role.includes ?? []);
+	}
+	const done = new Set<string>();
+	const visit = (name: string, path: string[]): void => {
+		if (done.has(name)) return;
+		const at = path.indexOf(name);
+		if (at >= 0) {
+			throw new Error(
+				`${where}: grant role "${name}" includes itself through ${
+					[ ...path.slice(at), name ].join(' → ')
+				}`,
+			);
+		}
+		for (const inc of includes.get(name)!) visit(inc, [ ...path, name ]);
+		done.add(name);
+	};
+	for (const role of roles) visit(role.name, []);
 }
 
 /** The operations of an {@link AccessRuleDecl}, in syncplane.v1.AccessRule field order. */
@@ -1364,7 +1430,9 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 					// Accessor names lower to proto names, as a key field's does.
 					subject: snakeCase(e.grant.subject),
 					role: snakeCase(e.grant.role),
-					roles: e.grant.roles.map((r) => create(RoleSchema, { name: r.name, grants: r.grants })),
+					roles: e.grant.roles.map((r) =>
+						create(RoleSchema, { name: r.name, grants: r.grants ?? [], includes: r.includes ?? [] })
+					),
 				}),
 			}),
 			...(e.members === undefined ? {} : {

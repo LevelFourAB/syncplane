@@ -711,14 +711,32 @@ func (x *GrantOptions) GetRoles() []*Role {
 }
 
 // Declares one role and the permissions it grants.
+//
+// A role grants the permissions in `grants` and every permission of each role
+// in `includes`, through any number of steps:
+//
+// ```protobuf
+// roles: [
+//
+//	{ name: "task_reader" grants: ["view_projects", "view_tasks"] },
+//	{ name: "task_writer" includes: ["task_reader"] grants: ["edit_tasks"] }
+//
+// ]
+// ```
+//
+// A role grants at least one permission, directly or through `includes`.
 type Role struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// The role name. Unique across the schema, with the same character rules
 	// as a permission name.
 	Name string `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
-	// The permissions the role grants at its anchor. At least one, without
-	// duplicates.
-	Grants        []string `protobuf:"bytes,2,rep,name=grants,proto3" json:"grants,omitempty"`
+	// The permissions the role grants at its anchor, without duplicates. A
+	// permission that an included role also grants is accepted.
+	Grants []string `protobuf:"bytes,2,rep,name=grants,proto3" json:"grants,omitempty"`
+	// The names of the roles whose permissions this role also grants, without
+	// duplicates. Each one is a role of the same `GrantOptions`. A role that
+	// includes itself, directly or through other roles, is refused.
+	Includes      []string `protobuf:"bytes,3,rep,name=includes,proto3" json:"includes,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -763,6 +781,13 @@ func (x *Role) GetName() string {
 func (x *Role) GetGrants() []string {
 	if x != nil {
 		return x.Grants
+	}
+	return nil
+}
+
+func (x *Role) GetIncludes() []string {
+	if x != nil {
+		return x.Includes
 	}
 	return nil
 }
@@ -1675,10 +1700,11 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\fGrantOptions\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x12\n" +
 	"\x04role\x18\x02 \x01(\tR\x04role\x12(\n" +
-	"\x05roles\x18\x03 \x03(\v2\x12.syncplane.v1.RoleR\x05roles\"2\n" +
+	"\x05roles\x18\x03 \x03(\v2\x12.syncplane.v1.RoleR\x05roles\"N\n" +
 	"\x04Role\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x16\n" +
-	"\x06grants\x18\x02 \x03(\tR\x06grants\"(\n" +
+	"\x06grants\x18\x02 \x03(\tR\x06grants\x12\x1a\n" +
+	"\bincludes\x18\x03 \x03(\tR\bincludes\"(\n" +
 	"\x0eMembersOptions\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\"\x15\n" +
 	"\x13AccessParentOptions\"\x10\n" +

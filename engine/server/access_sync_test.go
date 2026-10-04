@@ -490,6 +490,28 @@ var _ = Describe("Access model sync across a policy change", func() {
 		Expect(moved.view()).To(Equal(after.pull("guest")))
 	})
 
+	// A role holds the permissions of the roles it includes, so a change to an
+	// included role reaches every caller that holds the including role.
+	It("resyncs a cursor across a change to a role that the caller's role includes", func() {
+		writer := newAccessReplica(before, "writer")
+		writer.sync()
+		Expect(writer.view()).To(ContainElement("task/t2"))
+		after := reregistered(func(file *descriptorpb.FileDescriptorProto) {
+			member := messageNamed(file, "ProjectMember")
+			eo := proto.GetExtension(member.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
+			for _, role := range eo.GetGrant().GetRoles() {
+				if role.GetName() == "project_reader" {
+					role.Grants = []string{"view_projects", "view_members"}
+				}
+			}
+		})
+		moved := newAccessReplica(after, "writer")
+		moved.cursor, moved.rows = writer.cursor, maps.Clone(writer.rows)
+		moved.sync()
+		Expect(moved.view()).NotTo(ContainElement("task/t2"))
+		Expect(moved.view()).To(Equal(after.pull("writer")))
+	})
+
 	It("resets a cursor across a change to the read rule of an entity it knows", func() {
 		after := reregistered(func(file *descriptorpb.FileDescriptorProto) {
 			label := messageNamed(file, "Label")

@@ -78,22 +78,13 @@ message ProjectMember {
 				},
 				{
 					name: "project_writer"
-					grants: [
-						"view_projects",
-						"view_members",
-						"view_tasks",
-						"edit_tasks"
-					]
+					includes: [ "project_reader" ]
+					grants: [ "edit_tasks" ]
 				},
 				{
 					name: "project_admin"
-					grants: [
-						"view_projects",
-						"view_members",
-						"manage_members",
-						"view_tasks",
-						"edit_tasks"
-					]
+					includes: [ "project_writer" ]
+					grants: [ "manage_members" ]
 				},
 				{
 					name: "project_editor"
@@ -101,14 +92,8 @@ message ProjectMember {
 				},
 				{
 					name: "project_owner"
-					grants: [
-						"view_projects",
-						"edit_projects",
-						"view_members",
-						"manage_members",
-						"view_tasks",
-						"edit_tasks"
-					]
+					includes: [ "project_admin" ]
+					grants: [ "edit_projects" ]
 				}
 			]
 		}

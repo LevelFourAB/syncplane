@@ -229,6 +229,20 @@ var _ = Describe("Access model registration", func() {
 			Expect(register(orgSpecs())).To(Succeed())
 		})
 
+		It("registers a role that includes another role and grants nothing of its own", func() {
+			specs := orgSpecs()
+			g := specNamed(specs, "org_member").Grant
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_owner", Includes: []string{"org_admin"}})
+			Expect(register(specs)).To(Succeed())
+		})
+
+		It("registers a role that also grants a permission of a role it includes", func() {
+			specs := orgSpecs()
+			g := specNamed(specs, "org_member").Grant
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_owner", Includes: []string{"org_admin"}, Grants: []string{"view_tasks"}})
+			Expect(register(specs)).To(Succeed())
+		})
+
 		It("registers an entity that declares no access beside entities that do", func() {
 			Expect(register(append(orgSpecs(), plainSpec("comment")))).To(Succeed())
 		})
@@ -419,6 +433,21 @@ var _ = Describe("Access model registration", func() {
 			g := specNamed(s, "org_member").Grant
 			g.Roles[0].Grants = append(g.Roles[0].Grants, "view_tasks")
 		}, `grant role "org_admin" grants "view_tasks" twice`),
+		Entry("a role that includes a role the grant does not declare", func(s []server.DynamicEntity) {
+			specNamed(s, "org_member").Grant.Roles[0].Includes = []string{"org_viewer"}
+		}, `grant role "org_admin" includes "org_viewer", which is not a role of this grant`),
+		Entry("a role that includes a role twice", func(s []server.DynamicEntity) {
+			g := specNamed(s, "org_member").Grant
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_owner", Includes: []string{"org_admin", "org_admin"}})
+		}, `grant role "org_owner" includes "org_admin" twice`),
+		Entry("a role that includes itself", func(s []server.DynamicEntity) {
+			specNamed(s, "org_member").Grant.Roles[0].Includes = []string{"org_admin"}
+		}, `grant role "org_admin" includes itself through org_admin → org_admin`),
+		Entry("roles that include each other", func(s []server.DynamicEntity) {
+			g := specNamed(s, "org_member").Grant
+			g.Roles[0].Includes = []string{"org_owner"}
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_owner", Includes: []string{"org_admin"}})
+		}, `grant role "org_admin" includes itself through org_admin → org_owner → org_admin`),
 		Entry("a role name that is not an identifier", func(s []server.DynamicEntity) {
 			specNamed(s, "org_member").Grant.Roles[0].Name = "org admin"
 		}, `role name "org admin" is not an identifier`),
@@ -476,6 +505,16 @@ var _ = Describe("Access model registration", func() {
 				Access: readWrite("view_members", "manage_members"),
 			})
 		}, `role "org_admin" is declared by both entity "guest" and entity "org_member"`),
+		Entry("a role that includes a role of another entity", func(s []server.DynamicEntity) []server.DynamicEntity {
+			guest := specNamed(s, "org_member")
+			return append(s, server.DynamicEntity{
+				Name: "guest", KeyFields: []string{"id"}, Fields: guest.Fields,
+				Grant: &syncplanev1.GrantOptions{Subject: "user_id", Role: "role", Roles: []*syncplanev1.Role{
+					{Name: "org_guest", Includes: []string{"org_admin"}},
+				}},
+				Access: readWrite("view_members", "manage_members"),
+			})
+		}, `grant role "org_guest" includes "org_admin", which is not a role of this grant`),
 		Entry("a permission that no role grants", func(s []server.DynamicEntity) []server.DynamicEntity {
 			specNamed(s, "task").Access = readWrite("view_tasks", "edit_everything")
 			return s
@@ -545,6 +584,23 @@ var _ = Describe("Access model registration", func() {
 
 		It("applies the change when the registration allows it", func() {
 			Expect(register(addRole(), server.AllowAccessChange())).To(Succeed())
+		})
+
+		// Includes are expanded at registration, so what each role grants is
+		// all the evolution check compares.
+		It("accepts roles rewritten with includes to the same permissions without the flag", func() {
+			srv = newBareServer()
+			flat := orgSpecs()
+			g := specNamed(flat, "org_member").Grant
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_viewer", Grants: []string{"view_members", "view_projects", "view_tasks"}})
+			Expect(register(flat)).To(Succeed())
+
+			nested := orgSpecs()
+			g = specNamed(nested, "org_member").Grant
+			g.Roles[0].Includes = []string{"org_viewer"}
+			g.Roles[0].Grants = []string{"manage_members", "edit_projects", "edit_tasks"}
+			g.Roles = append(g.Roles, &syncplanev1.Role{Name: "org_viewer", Grants: []string{"view_members", "view_projects", "view_tasks"}})
+			Expect(register(nested)).To(Succeed())
 		})
 
 		It("accepts an additive field without the flag", func() {

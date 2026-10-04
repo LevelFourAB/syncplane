@@ -51,7 +51,7 @@ message ProjectMember {
 			role: "role"
 			roles: [
 				{ name: "project_reader" grants: [ "view_projects", "view_roster", "view_tasks" ] },
-				{ name: "project_admin" grants: [ "view_projects", "view_roster", "manage_roster", "view_tasks", "edit_tasks" ] }
+				{ name: "project_admin" includes: [ "project_reader" ] grants: [ "manage_roster", "edit_tasks" ] }
 			]
 		}
 		access: {
@@ -67,6 +67,8 @@ message ProjectMember {
 	string role = 4;
 }
 ```
+
+`project_admin` includes `project_reader`, so it grants every permission of `project_reader` and the two it lists. When you add a permission to `project_reader`, `project_admin` grants it too. A role can include only roles of its own `grant`, and a role can include a role that includes other roles. Registration refuses a role that includes itself through any chain.
 
 Role names are unique across the schema. A role granted to a caller can only be given or taken away by a caller who holds all of its permissions at the same row.
 

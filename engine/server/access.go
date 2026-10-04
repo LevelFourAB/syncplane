@@ -292,7 +292,8 @@ type grantSpec struct {
 	// role is a string or enum field. An enum value names the role spelled
 	// like the value.
 	role protoreflect.FieldDescriptor
-	// roles maps a declared role name to the permissions it grants, sorted.
+	// roles maps a declared role name to the permissions it grants, sorted,
+	// with the permissions of the roles it includes added.
 	roles map[string][]string
 	// roleNames are the declared role names in declaration order, for errors
 	// and for the evolution check, which sorts them.
@@ -788,7 +789,7 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 			return nil, fmt.Errorf("grant role %q is not a value of enum %s, which role field %q holds",
 				r.GetName(), role.Enum().FullName(), role.Name())
 		}
-		if len(r.GetGrants()) == 0 {
+		if len(r.GetGrants()) == 0 && len(r.GetIncludes()) == 0 {
 			return nil, fmt.Errorf("grant role %q grants no permissions", r.GetName())
 		}
 		perms := slices.Clone(r.GetGrants())
@@ -804,7 +805,66 @@ func grantOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions,
 		g.roles[r.GetName()] = perms
 		g.roleNames = append(g.roleNames, r.GetName())
 	}
+	if err := expandRoleIncludes(opt.GetRoles(), g.roles); err != nil {
+		return nil, err
+	}
 	return g, nil
+}
+
+// expandRoleIncludes adds to each role in perms the permissions of every role
+// it includes, directly or through other roles, and keeps each list sorted
+// and without duplicates. perms holds the permissions each role of roles
+// grants directly. An include names a role of the same grant option, so that
+// accessSpecOf of one entity covers everything its roles grant.
+func expandRoleIncludes(roles []*syncplanev1.Role, perms map[string][]string) error {
+	includes := make(map[string][]string, len(roles))
+	for _, r := range roles {
+		seen := map[string]bool{}
+		for _, inc := range r.GetIncludes() {
+			if _, ok := perms[inc]; !ok {
+				return fmt.Errorf("grant role %q includes %q, which is not a role of this grant; "+
+					"a role includes only roles declared beside it", r.GetName(), inc)
+			}
+			if seen[inc] {
+				return fmt.Errorf("grant role %q includes %q twice", r.GetName(), inc)
+			}
+			seen[inc] = true
+		}
+		includes[r.GetName()] = r.GetIncludes()
+	}
+	expanded := make(map[string][]string, len(roles))
+	var expand func(name string, path []string) ([]string, error)
+	expand = func(name string, path []string) ([]string, error) {
+		if done, ok := expanded[name]; ok {
+			return done, nil
+		}
+		if i := slices.Index(path, name); i >= 0 {
+			return nil, fmt.Errorf("grant role %q includes itself through %s",
+				name, strings.Join(append(slices.Clone(path[i:]), name), " → "))
+		}
+		path = append(path, name)
+		out := slices.Clone(perms[name])
+		for _, inc := range includes[name] {
+			more, err := expand(inc, path)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, more...)
+		}
+		sort.Strings(out)
+		out = slices.Compact(out)
+		expanded[name] = out
+		return out, nil
+	}
+	for _, r := range roles {
+		if _, err := expand(r.GetName(), nil); err != nil {
+			return err
+		}
+	}
+	for name, p := range expanded {
+		perms[name] = p
+	}
+	return nil
 }
 
 // grantSubjectOf resolves the subject a grant option names: a field, or a
