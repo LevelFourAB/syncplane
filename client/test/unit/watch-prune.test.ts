@@ -20,7 +20,7 @@ import { EntityRegistry } from '../../src/mutations.js';
 import { ChainMutex } from '../../src/mutex.js';
 import { applyServerChanges } from '../../src/optimistic/rebase.js';
 import { compileQuery, type Query } from '../../src/query/index.js';
-import type { Row } from '../../src/read.js';
+import { readMergedRowsWithVersion, type Row } from '../../src/read.js';
 import { TouchSet } from '../../src/touch.js';
 import { WatcherHub, type WatchHandle } from '../../src/watch.js';
 
@@ -159,6 +159,66 @@ describe('shared row pruning', () => {
 		expect(scope(hub).rows).toBe(1);
 
 		handle.close();
+		expect(hub.scopeStats().size).toBe(0);
+	});
+
+	it('keeps the shared rows to the union of many keyed watchers on every commit path', async () => {
+		const kv = await seeded();
+		const hub = hubOf(kv);
+		// One watcher per row, as a list of row views mounts them, plus a second
+		// watcher on w0 and a query sharing the scope.
+		const counts = new Map<string, number | undefined>();
+		const handles = Array.from(
+			{ length: 20 },
+			(_, i) =>
+				hub.watchRefs(WidgetSchema, WS, [ { workspaceId: WS, key: `w${i}` } ], (rows) => {
+					for (const r of rows) counts.set(r.key, (r.row?.value as Widget | undefined)?.count);
+				}),
+		);
+		const twin = hub.watchRefs(WidgetSchema, WS, [ { workspaceId: WS, key: 'w0' } ], () => {});
+		const high = await watchQuery(hub, { where: (w) => w.count.gte(ROWS - 5) });
+		expect(scope(hub).rows).toBe(25);
+
+		// Read back: a watched row and a row no watcher holds.
+		await hub.notify(
+			await applyServer(kv, [
+				serverRow('w5', 2n, { id: 'w5', count: 50 }),
+				serverRow('w150', 2n, { id: 'w150', count: 150 }),
+			]),
+		);
+		expect(counts.get('w5')).toBe(50);
+		expect(scope(hub).rows).toBe(25);
+
+		// Handed over by the writer: the same commit shape, without the read.
+		await applyServer(kv, [
+			serverRow('w6', 3n, { id: 'w6', count: 60 }),
+			serverRow('w151', 3n, { id: 'w151', count: 151 }),
+		]);
+		const handed = new TouchSet();
+		const tx = await kv.read();
+		const keys = [ 'w6', 'w151' ];
+		const views = await readMergedRowsWithVersion(
+			tx,
+			registry,
+			'widget',
+			keys.map((key) => ({ workspaceId: WS, key })),
+		);
+		tx.release();
+		keys.forEach((key, i) => handed.rowWithView(WS, 'widget', key, views[i]));
+		const deliver = await hub.notifyWithRows(handed);
+		expect(deliver).toBeDefined();
+		await deliver!();
+		expect(counts.get('w6')).toBe(60);
+		expect(scope(hub).rows).toBe(25);
+
+		// A row two watchers hold stays until the second one closes.
+		twin.close();
+		expect(scope(hub).rows).toBe(25);
+		handles[0]!.close();
+		expect(scope(hub).rows).toBe(24);
+
+		for (const h of handles) h.close();
+		high.unsub.close();
 		expect(hub.scopeStats().size).toBe(0);
 	});
 });
