@@ -3,11 +3,12 @@
 // them again on every status change. These specs pin what the answers cost,
 // that a remembered answer follows every write that changes it, that an access
 // parent this client does not register still decides, how can() fills in
-// the inputs of the access rules from local rows, and that predictions asked
-// together share one read of the store and answer as they do one at a time.
+// the inputs of the access rules from local rows, that predictions asked
+// together share one read of the store and answer as they do one at a time,
+// and that the stored CallerAccess is decoded again only when it changes.
 
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { CanAnswer } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
@@ -31,12 +32,25 @@ import {
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCallerAccess, pendingPrefix } from '../../src/keys.js';
+import { accessGeneration, metaCallerAccess, pendingPrefix } from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { GenerationOf, KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
-import { createTestClient } from '../../src/testing/index.js';
+import { createTestClient, DEFAULT_WORKSPACE } from '../../src/testing/index.js';
 
 const WS = 'ws-can';
+
+/** How many times the client decoded a CallerAccess. */
+const decodes = vi.hoisted(() => ({ callerAccess: 0 }));
+
+// The real module, with each decode of a CallerAccess counted in `decodes`.
+vi.mock('@bufbuild/protobuf', async (importOriginal) => {
+	const mod = await importOriginal<typeof import('@bufbuild/protobuf')>();
+	const fromBinary: typeof mod.fromBinary = (schema, bytes, options) => {
+		if (schema.typeName === 'syncplane.v1.CallerAccess') decodes.callerAccess++;
+		return mod.fromBinary(schema, bytes, options);
+	};
+	return { ...mod, fromBinary };
+});
 
 /** A store whose transactions count the scans of WS's pending queue. */
 class QueueScanCountingStore implements KVStore {
@@ -699,3 +713,136 @@ describe('predictions asked together', () => {
 		await c.close();
 	});
 });
+
+describe('the stored CallerAccess', () => {
+	const entities = [ ProjectSchema, ProjectMemberSchema, TaskSchema ];
+
+	it('is not decoded again for a local write that cannot change the grants', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, entities);
+		// The first answer opens the store, so the summary written next is
+		// stamped like one a pull writes.
+		expect(await c.can(TaskSchema, 't1', 'read')).toBe('unknown');
+		await storeSummary(kv, {
+			permissions: [ {
+				permission: 'edit_tasks',
+				anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+			} ],
+		});
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		await c.mutate.put(TaskSchema, { id: 't2', project: { id: 'p2' } });
+		const ask = () =>
+			Promise.all([ 't1', 't2' ].map((k) => c.can(TaskSchema, k, 'update', { fields: [ 'title' ] })));
+
+		decodes.callerAccess = 0;
+		expect(await ask()).toEqual([ 'yes', 'no' ]);
+		expect(decodes.callerAccess).toBe(1);
+		for (let i = 0; i < 3; i++) {
+			const before = await generationIn(kv, WS);
+			await c.mutate.patch(TaskSchema, 't1', { title: `edit ${i}` });
+			// The write moved the generation, so the answers are decided again.
+			expect(await generationIn(kv, WS)).not.toBe(before);
+			expect(await ask()).toEqual([ 'yes', 'no' ]);
+		}
+		expect(decodes.callerAccess).toBe(1);
+		await c.close();
+	});
+
+	it('changes the answers as soon as the server sends a new one, of the same length too', async () => {
+		const t = await createTestClient({ entities });
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.put(TaskSchema, { id: 't2', project: { id: 'p2' } });
+		const ask = () =>
+			Promise.all(
+				[ 't1', 't2' ].map((k) => t.client.can(TaskSchema, k, 'update', { fields: [ 'title' ] })),
+			);
+		const stored = () =>
+			t.client.inspect().read(async (tx) =>
+				(await tx.get(metaCallerAccess(DEFAULT_WORKSPACE))) as Uint8Array
+			);
+		const grant = (...projects: string[]) =>
+			t.server.setCallerAccess({
+				permissions: [ {
+					permission: 'edit_tasks',
+					anchors: [ { entity: 'project', keys: projects } ],
+				} ],
+			});
+
+		grant('p1');
+		await t.sync();
+		expect(await ask()).toEqual([ 'yes', 'no' ]);
+		const first = await stored();
+
+		grant('p2');
+		await t.sync();
+		const second = await stored();
+		expect(second.length).toBe(first.length);
+		expect(second).not.toEqual(first);
+		expect(await ask()).toEqual([ 'no', 'yes' ]);
+
+		grant('p1', 'p2');
+		await t.sync();
+		expect(await ask()).toEqual([ 'yes', 'yes' ]);
+
+		grant();
+		await t.sync();
+		expect(await ask()).toEqual([ 'no', 'no' ]);
+		await t.close();
+	});
+
+	it('answers unknown while a write to a grant row is queued, and is not decoded again over it', async () => {
+		const t = await createTestClient({ entities });
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.setCallerAccess({ permissions: [ { permission: 'edit_tasks', root: true } ] });
+		await t.sync();
+		const ask = () => t.client.can(TaskSchema, 't1', 'update', { fields: [ 'title' ] });
+
+		decodes.callerAccess = 0;
+		expect(await ask()).toBe('yes');
+		await t.client.mutate.put(ProjectMemberSchema, {
+			id: 'pm-new',
+			project: { id: 'p1' },
+			userId: 'someone',
+			role: 'project_reader',
+		});
+		expect(await ask()).toBe('unknown');
+		await t.client.mutate.patch(TaskSchema, 't1', { title: 'queued too' });
+		expect(await ask()).toBe('unknown');
+
+		// The server sends a CallerAccess only when it changes, so the pull that
+		// acks the writes carries none and the client keeps the one it holds.
+		t.server.setCallerAccess(undefined);
+		await t.sync();
+		expect(await ask()).toBe('yes');
+		expect(decodes.callerAccess).toBe(1);
+		await t.close();
+	});
+
+	it('answers unknown once the workspace is purged', async () => {
+		const kv = new MemoryKVStore();
+		// Two clients on one store stand in for two tabs.
+		const tab = offlineClient(kv, entities);
+		const purging = offlineClient(kv, entities);
+		expect(await tab.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(kv, { permissions: [ { permission: 'edit_tasks', root: true } ] });
+		expect(await tab.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		expect(await purging.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		await purging.removeWorkspace(WS, { purge: true });
+		expect(await tab.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		expect(await purging.addWorkspace(WS).hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe(
+			'unknown',
+		);
+		await tab.close();
+		await purging.close();
+	});
+});
+
+async function generationIn(kv: KVStore, workspaceId: string): Promise<unknown> {
+	const tx = await kv.read();
+	try {
+		return await tx.get(accessGeneration(workspaceId));
+	} finally {
+		tx.release();
+	}
+}

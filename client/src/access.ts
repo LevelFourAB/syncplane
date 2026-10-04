@@ -6,10 +6,10 @@
  * app shape its UI before it asks.
  */
 
-import type { DescField, DescMessage, Message } from '@bufbuild/protobuf';
+import { type DescField, type DescMessage, fromBinary, type Message } from '@bufbuild/protobuf';
 
 import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
-import type { CallerAccess } from './gen/syncplane/v1/service_pb.js';
+import { type CallerAccess, CallerAccessSchema } from './gen/syncplane/v1/service_pb.js';
 import {
 	type AccessRuleDef,
 	type EntityDef,
@@ -84,6 +84,49 @@ export class AccessSummary {
 		return this.roots.has(permission)
 			|| (this.anchors.get(permission)?.has(anchorId(entity, key)) ?? false);
 	}
+}
+
+/** An {@link AccessSummary} and the encoded CallerAccess it was decoded from. */
+export interface DecodedAccess {
+	readonly raw: Uint8Array;
+	readonly summary: AccessSummary;
+}
+
+/**
+ * Decodes the CallerAccess encoded as `raw`, or returns `last` when
+ * `last.raw` holds the same bytes as `raw`. The result keeps `raw`, so do not
+ * change `raw` after the call. Throws what `fromBinary` throws for bytes that
+ * are not a CallerAccess.
+ *
+ * Cost when it returns `last`: one pass over the bytes and no decode.
+ */
+export function decodeAccess(raw: Uint8Array, last: DecodedAccess | undefined): DecodedAccess {
+	if (last !== undefined && sameBytes(last.raw, raw)) return last;
+	return { raw, summary: new AccessSummary(fromBinary(CallerAccessSchema, raw)) };
+}
+
+function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
+	if (a === b) return true;
+	const n = a.byteLength;
+	if (n !== b.byteLength) return false;
+	let i = 0;
+	// Four bytes at a time when the two views start on a word boundary. This
+	// is approximately five times faster than a byte loop, and the cost is
+	// important: a CallerAccess with thousands of anchors is more than 100 KB,
+	// and the prediction after each local write compares it again.
+	if (a.byteOffset % 4 === 0 && b.byteOffset % 4 === 0) {
+		const words = n >>> 2;
+		const wa = new Uint32Array(a.buffer, a.byteOffset, words);
+		const wb = new Uint32Array(b.buffer, b.byteOffset, words);
+		for (; i < words; i++) {
+			if (wa[i] !== wb[i]) return false;
+		}
+		i = words << 2;
+	}
+	for (; i < n; i++) {
+		if (a[i] !== b[i]) return false;
+	}
+	return true;
 }
 
 /**

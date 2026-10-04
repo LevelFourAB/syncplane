@@ -14,11 +14,13 @@ import {
 	type AccessChain,
 	type AccessOperation,
 	accessParentUnits,
-	AccessSummary,
+	type AccessSummary,
 	anchorEntities,
 	type CanAnswer,
 	canAt,
 	decideRules,
+	decodeAccess,
+	type DecodedAccess,
 	MAX_ACCESS_CHAIN,
 	type ParentRef,
 	parentRefOf,
@@ -1833,6 +1835,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		string,
 		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
 	>();
+	/**
+	 * Per workspace, the CallerAccess that accessSummaryIn decoded last, with
+	 * its stored bytes. accessSummaryIn uses it again while the stored bytes
+	 * stay the same, so a local write, which moves the access generation
+	 * through the pending queue, does not decode the CallerAccess again.
+	 */
+	private decodedAccess = new Map<string, DecodedAccess>();
 	/** The access batch that still takes predictions; see askAccess. */
 	private accessBatch: AccessAsk[] | undefined;
 	private coordinator?: Coordinator;
@@ -1994,6 +2003,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		this.dropHolds(workspaceId);
 		this.coordinator?.removeWorkspace(workspaceId);
 		this.statusTracker.removeWorkspace(workspaceId);
+		this.accessSummaries.delete(workspaceId);
+		this.decodedAccess.delete(workspaceId);
 		if (this.defaultWorkspaceId === workspaceId) {
 			this.defaultWorkspaceId = undefined;
 			this.statusTracker.setDefaultWorkspace(undefined);
@@ -3545,7 +3556,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * The summary canIn decides from in `workspaceId`, or undefined when it
 	 * cannot decide: none is stored, or a queued write can change the caller's
 	 * grants. Reuses the one decided under the same access generation, which
-	 * spares every answer after the first a walk of the pending queue.
+	 * spares every answer after the first a walk of the pending queue. Under a
+	 * new generation it walks the queue again, and decodes the stored
+	 * CallerAccess only when its bytes changed.
 	 */
 	private async accessSummaryIn(
 		tx: KVRead,
@@ -3556,11 +3569,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		if (generation !== undefined && cached?.generation === generation) return cached.summary;
 		const summary = (async () => {
 			const raw = await tx.get(metaCallerAccess(workspaceId));
-			if (raw === undefined) return undefined;
+			if (raw === undefined) {
+				this.decodedAccess.delete(workspaceId);
+				return undefined;
+			}
 			if (pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))) {
 				return undefined;
 			}
-			return new AccessSummary(fromBinary(CallerAccessSchema, raw as Uint8Array));
+			// Compare the bytes, not a generation: one generation covers the
+			// pending queue and the CallerAccess together, and tabs of older
+			// builds that share the store would not stamp a second one.
+			const decoded = decodeAccess(raw as Uint8Array, this.decodedAccess.get(workspaceId));
+			this.decodedAccess.set(workspaceId, decoded);
+			return decoded.summary;
 		})();
 		if (generation !== undefined) {
 			// Entered before the first await, so a caller that reads the same
