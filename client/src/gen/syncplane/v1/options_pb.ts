@@ -167,14 +167,15 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  *
  * A caller holds a permission at an anchor: the workspace root, or one row
  * that a grant row's `access_parent` field points at. A permission held at
- * an anchor applies to the anchor row and to every row whose
- * `access_parent` field points at it. See `GrantOptions` and
+ * an anchor applies to the anchor row and to every row below it: the rows
+ * whose `access_parent` field points at it, the rows whose `access_parent`
+ * field points at those, and so on. See `GrantOptions` and
  * `AccessParentOptions`.
  *
  * A caller can read a row when it holds `read` at the workspace root, at
- * the row itself, or at the row that the row's `access_parent` field points
- * at. A row whose `access_parent` field is unset, or names a row that does
- * not exist, has no parent and never falls back to the workspace root.
+ * the row itself, or at a row up the row's chain of access parents. A row
+ * whose `access_parent` field is unset, or names a row that does not exist,
+ * has no parent and never falls back to the workspace root.
  *
  * A permission name starts with a letter or an underscore, followed by
  * letters, digits and underscores. Registration refuses a permission that
@@ -333,11 +334,21 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
  * Marks the reference that places each row of an entity below another row in
  * the access model.
  *
- * A permission held at the referenced row applies to the referencing row.
- * Valid on one field per entity: a top-level, singular field outside any
- * `oneof`, whose type is an entity message. The referenced entity must
- * declare `access` with `read` and `write`, and must not have an
- * `access_parent` field itself. The field cannot carry a `write_policy`.
+ * A permission held at the referenced row applies to the referencing row and
+ * to every row below it. The referenced row can have an access parent of its
+ * own, and an entity can be its own access parent.
+ *
+ * An entity has at most one access parent: one top-level, singular field, or
+ * every member of one `oneof` on the entity. Each marked field is a
+ * reference: its type is an entity message, or a reference message without a
+ * `workspace` field. A marked field cannot carry a `write_policy`. Every
+ * entity the access parent can point at must declare `access` with `read` and
+ * `write`.
+ *
+ * A polymorphic parent points at one of several entities: a marked `oneof`,
+ * or a marked field whose reference message holds a `oneof` of entities. The
+ * case a row holds names the row it sits below, and a row that holds no case
+ * has no parent.
  *
  * Registration refuses unknown fields inside this message.
  *

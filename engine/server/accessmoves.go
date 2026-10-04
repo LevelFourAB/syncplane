@@ -92,7 +92,7 @@ func (s *Server) recordAccessMove(
 	actor storage.Actor,
 ) error {
 	model := s.catalogPtr().access
-	if model == nil || info.access == nil || info.access.parent == nil || !model.anchors[info.name] {
+	if model == nil || info.access == nil || !info.access.hasParent() || !model.anchors[info.name] {
 		return nil
 	}
 	var from, to chainEdge

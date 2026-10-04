@@ -34,6 +34,10 @@ To find the rows a caller can read without scanning an entity, the engine walks 
 
 Two limits keep the walks bounded. `Limits.MaxAccessDepth` caps how many rows a chain has: registration refuses a schema whose entities chain deeper, a write refuses a row that would sit deeper in a recursive chain, and a read stops walking at that depth. A write that would place a row below itself is refused on every write path, so the data never holds a cycle.
 
+A row's access parent can also be polymorphic: a comment sits on a task or on a doc. The row still has one parent, and the case it holds decides which entity that parent is a row of, so a chain walk follows whichever case each row holds. The walk down probes the reference index of each case. Each case is its own index, so a guest in one project reaches the comments on that project's tasks without reading the comments on docs.
+
+A polymorphic entity has one `read` and one `write` permission, not one for each case. The rule that decides whether a caller reads a comment then stays one rule for the entity, whatever case the comment holds, and moving a comment from a task to a doc changes where it sits but not what it needs. The cost is that the roles of each tree must grant the comment permissions. Every member of the oneof must be marked: a row that held an unmarked case would anchor at nothing, and only a caller with the permission at the root could read it. A change of case is a move like any other, and two targets with the same key are two rows, because a row's parent is always an entity and a key together.
+
 There is no stored chain. A stored chain for each row would have to be rewritten for every row below a row that moves, under the write lock, and that write would show the keys of those rows to clients that cannot read them. The engine reads the chain when it needs it instead, and records moves (see below).
 
 ## Reads use one snapshot

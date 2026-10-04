@@ -120,6 +120,26 @@ message Folder {
 
 A chain is at most `Limits.MaxAccessDepth` rows long (32 by default). The server refuses a folder moved below itself or below a chain that is already that long.
 
+A row can sit below one of several entities, such as a comment on a task or on a doc. Mark every member of a oneof with `access_parent`. The case a row holds decides where it sits:
+
+```proto
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: { read: "view_comments" write: "edit_comments" }
+	};
+	string id = 1;
+	oneof subject {
+		Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Doc doc = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	}
+	string body = 4;
+}
+```
+
+The comment has one `read` and one `write` permission for both cases. Add `view_comments` and `edit_comments` to the project roles and to the folder roles, so that a role in either tree reaches the comments below it. A reference message whose target is a oneof of entities works the same way: mark the field that holds it. See [Polymorphic access parents](../reference/proto-options.md#polymorphic-access-parents).
+
 An entity that every member of the workspace may read and write declares `access: { unrestricted: true }`. Registration refuses a schema with a permission no role grants, or a role that grants a permission nothing uses. Read the error: it names the permission and the entity.
 
 The TypeScript schema builder declares the same options with `access`, `grant` and `.accessParent()`; see the [TypeScript client reference](../reference/typescript-client.md#access-model).

@@ -30,13 +30,63 @@ type entityAccess struct {
 	// read and write are empty.
 	unrestricted bool
 	read, write  string
-	// parent is the reference marked access_parent, nil when rows anchor at the
-	// workspace root. parentEntity is the wire name of the entity it points
-	// at, read off the target type's own option so registration order does not
-	// matter; whether that entity is registered and in the model is a catalog
-	// question, answered by compileAccessModel.
-	parent       *refField
-	parentEntity string
+	// parents are the cases of the access parent, in field order, and empty
+	// when rows anchor at the workspace root: one case for a reference to one
+	// entity, one per case of a polymorphic reference. A row holds at most one
+	// case, and the case it holds names the row it sits below. Whether each
+	// target is registered and in the model is a catalog question, answered by
+	// compileAccessModel.
+	parents []parentCase
+	// parentName names the access parent in masks and errors: the marked
+	// field, or the holder's oneof whose members are the cases.
+	parentName string
+}
+
+// parentCase is one case of an entity's access parent: the reference a row
+// holds when it sits below a row of entity, the wire name read off the target
+// type's own option so registration order does not matter.
+type parentCase struct {
+	ref    *refField
+	entity string
+}
+
+// hasParent reports whether rows of the entity sit below other rows rather
+// than at the workspace root.
+func (a *entityAccess) hasParent() bool {
+	return len(a.parents) > 0
+}
+
+// parentFieldSet reports whether row sets a field of the access parent,
+// whether or not the value names a key.
+func (a *entityAccess) parentFieldSet(row protoreflect.Message) bool {
+	for _, p := range a.parents {
+		if row.Has(p.ref.fd) {
+			return true
+		}
+	}
+	return false
+}
+
+// parentRule renders the access parent's cases in a canonical form, for the
+// read rule and the access spec: each case as its path (see refCasePath) and
+// target entity, sorted. A reference to one entity renders as
+// "field>entity".
+func (a *entityAccess) parentRule() string {
+	cases := make([]string, len(a.parents))
+	for i, p := range a.parents {
+		cases[i] = refCasePath(p.ref.ref) + ">" + p.entity
+	}
+	sort.Strings(cases)
+	return strings.Join(cases, ",")
+}
+
+// parentDescription names an access parent in an error: the marked field, or
+// the oneof whose members are the cases.
+func parentDescription(parents []parentCase, name string) string {
+	if len(parents) > 0 && lww.OneofOf(parents[0].ref.fd) != nil {
+		return fmt.Sprintf("oneof %q", name)
+	}
+	return fmt.Sprintf("field %q", name)
 }
 
 // depthUnbounded is the access depth of an entity whose chain of parent
@@ -68,15 +118,15 @@ type grantSpec struct {
 // schema — the parent entity is registered and in the model, depth, role
 // names and permission coverage — are compileAccessModel's.
 func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions, info *entityInfo) (*entityAccess, error) {
-	parent, err := accessParentOf(desc, info)
+	parents, parentName, err := accessParentOf(desc, info)
 	if err != nil {
 		return nil, err
 	}
 	opt := eo.GetAccess()
 	if opt == nil {
-		if parent != nil {
-			return nil, fmt.Errorf("field %q is marked access_parent, but the entity declares no access option; "+
-				"declare access: { read: \"...\" write: \"...\" }", parent.fd.Name())
+		if parents != nil {
+			return nil, fmt.Errorf("%s is marked access_parent, but the entity declares no access option; "+
+				"declare access: { read: \"...\" write: \"...\" }", parentDescription(parents, parentName))
 		}
 		return nil, nil
 	}
@@ -91,9 +141,9 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		if a.read != "" || a.write != "" {
 			return nil, fmt.Errorf("access sets unrestricted together with read or write; an unrestricted entity names no permissions")
 		}
-		if parent != nil {
-			return nil, fmt.Errorf("field %q is marked access_parent, but access is unrestricted; "+
-				"an unrestricted entity has no place in the access model", parent.fd.Name())
+		if parents != nil {
+			return nil, fmt.Errorf("%s is marked access_parent, but access is unrestricted; "+
+				"an unrestricted entity has no place in the access model", parentDescription(parents, parentName))
 		}
 		return a, nil
 	}
@@ -105,23 +155,28 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 			return nil, fmt.Errorf("access: %w", err)
 		}
 	}
-	if parent != nil {
-		a.parent = parent
-		a.parentEntity = protoopts.Entity(parent.ref.Target).GetName()
-	}
+	a.parents, a.parentName = parents, parentName
 	return a, nil
 }
 
-// accessParentOf finds the top-level field marked access_parent and returns
-// its reference, or nil when no field carries the mark. It also refuses the
-// mark on a field nested inside a message field, where it cannot take effect.
+// accessParentOf finds the access parent of an entity: the cases of the
+// reference marked access_parent, and the name of the parent (see
+// entityAccess.parentName). It returns nil when no field carries the mark.
 //
-// The shapes refused here are ones the model does not resolve: a to-many or
-// polymorphic parent has several candidate anchors, and a workspace-qualified
-// one can name a row outside the workspace. Each is a validation rule rather
-// than a structural limit, so accepting one later is additive.
-func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) (*refField, error) {
-	var found *refField
+// The parent is one top-level field, or every member of one oneof on the
+// entity. Either way it is polymorphic when it can hold more than one case: a
+// marked field whose type is a reference message with a oneof of entities, or
+// a oneof whose members are each a reference. A oneof with an unmarked member
+// is refused, so that every case a row can hold names the row it sits below.
+// accessParentOf also refuses the mark on a field nested inside a message
+// field, where it cannot take effect.
+//
+// The shapes refused here are ones the model does not resolve: a to-many
+// parent has several anchors at once, and a workspace-qualified one can name
+// a row outside the workspace. Each is a validation rule rather than a
+// structural limit, so accepting one later is additive.
+func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) ([]parentCase, string, error) {
+	var marked []protoreflect.FieldDescriptor
 	fields := desc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
@@ -130,40 +185,61 @@ func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) (*ref
 			continue
 		}
 		if err := refuseUnknownOptionFields(fmt.Sprintf("field %q access_parent", fd.Name()), b.GetAccessParent()); err != nil {
-			return nil, err
+			return nil, "", err
 		}
-		if found != nil {
-			return nil, fmt.Errorf("fields %q and %q are both marked access_parent; an entity has at most one",
-				found.fd.Name(), fd.Name())
+		// A oneof's members share one parent; anything else marked twice is
+		// a second parent.
+		if len(marked) > 0 {
+			if od := lww.OneofOf(fd); od == nil || lww.OneofOf(marked[0]) != od {
+				return nil, "", fmt.Errorf("fields %q and %q are both marked access_parent; an entity has at most one, "+
+					"which is one field or the members of one oneof", marked[0].Name(), fd.Name())
+			}
 		}
 		if fd.IsList() || fd.IsMap() {
-			return nil, fmt.Errorf("access_parent field %q is repeated; an access parent is one row", fd.Name())
-		}
-		if od := lww.OneofOf(fd); od != nil {
-			return nil, fmt.Errorf("access_parent field %q is a member of oneof %q; an access parent cannot be inside a oneof",
-				fd.Name(), od.Name())
+			return nil, "", fmt.Errorf("access_parent field %q is repeated; an access parent is one row", fd.Name())
 		}
 		refs := lww.RefsOf(fd)
-		if len(refs) != 1 || refs[0].Value != nil {
-			return nil, fmt.Errorf("access_parent field %q must be a field whose type is an entity message", fd.Name())
+		if len(refs) == 0 {
+			return nil, "", fmt.Errorf("access_parent field %q must be a reference: a field whose type is an entity message "+
+				"or a reference message", fd.Name())
+		}
+		if refs[0].Workspace != nil {
+			return nil, "", fmt.Errorf("access_parent field %q is a reference message with a workspace field; "+
+				"an access parent is a row of the holder's own workspace", fd.Name())
 		}
 		// A protected field keeps its stored value on a PUT and the zero value on
 		// a create, so every row a client created would anchor at nothing.
 		if b.GetWritePolicy() == syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_TRUSTED_ONLY {
-			return nil, fmt.Errorf("access_parent field %q is marked write_policy TRUSTED_ONLY; "+
+			return nil, "", fmt.Errorf("access_parent field %q is marked write_policy TRUSTED_ONLY; "+
 				"a client could then create rows only without a parent", fd.Name())
 		}
-		for j := range info.refFields {
-			if info.refFields[j].fd == fd {
-				found = &info.refFields[j]
-				break
+		marked = append(marked, fd)
+	}
+	if err := refuseNestedAccessParents(desc); err != nil {
+		return nil, "", err
+	}
+	if len(marked) == 0 {
+		return nil, "", nil
+	}
+	name := string(marked[0].Name())
+	if od := lww.OneofOf(marked[0]); od != nil {
+		name = string(od.Name())
+		members := od.Fields()
+		for i := 0; i < members.Len(); i++ {
+			if m := members.Get(i); fieldBehaviorOf(m).GetAccessParent() == nil {
+				return nil, "", fmt.Errorf("access_parent field %q is a member of oneof %q, whose member %q is not marked; "+
+					"mark every member, so that each case names the row it sits below",
+					marked[0].Name(), od.Name(), m.Name())
 			}
 		}
 	}
-	if err := refuseNestedAccessParents(desc); err != nil {
-		return nil, err
+	var cases []parentCase
+	for i := range info.refFields {
+		if rf := &info.refFields[i]; slices.Contains(marked, rf.fd) {
+			cases = append(cases, parentCase{ref: rf, entity: protoopts.Entity(rf.ref.Target).GetName()})
+		}
 	}
-	return found, nil
+	return cases, name, nil
 }
 
 // refuseNestedAccessParents refuses access_parent on a field of a message
@@ -346,22 +422,22 @@ type accessModel struct {
 	// grantEntities are the entities whose rows grant roles, sorted by name.
 	grantEntities []*entityInfo
 	// parents maps the name of each entity with an access parent to the
-	// entity the parent reference points at. anchors holds the names of those
+	// edges of its cases, in field order. anchors holds the names of their
 	// targets: the entities whose rows can be anchors, so a write to one can
 	// change what a caller holds.
-	parents map[string]*entityInfo
+	parents map[string][]*accessEdge
 	anchors map[string]bool
 	// entities maps the name of each entity in the model, unrestricted ones
 	// left out, to its definition.
 	entities map[string]*entityInfo
-	// children maps the name of each anchor entity to the entities whose
-	// access parent points at it, sorted by name. below maps it to every
-	// entity whose rows can sit any number of hops below its rows, sorted by
-	// name, itself included when the chain is recursive.
-	children map[string][]*entityInfo
+	// children maps the name of each anchor entity to the edges that point at
+	// it, sorted by child name and then in field order. below maps it to
+	// every entity whose rows can sit any number of hops below its rows,
+	// sorted by name, itself included when the chain is recursive.
+	children map[string][]*accessEdge
 	below    map[string][]string
-	// depths maps each model entity to the number of access_parent hops from
-	// its rows to an entity without a parent, or depthUnbounded.
+	// depths maps each model entity to the largest number of access_parent
+	// hops from its rows to an entity without a parent, or depthUnbounded.
 	depths map[string]int
 	// moving is set when some entity has an access parent and rows that can
 	// sit below its rows, so moving one of its rows moves rows below it (see
@@ -380,6 +456,33 @@ type accessModel struct {
 	// warnings are findings that do not make the model invalid but are likely
 	// mistakes. Registration logs them.
 	warnings []string
+}
+
+// accessEdge is one case of an access parent in a compiled model: a row of
+// child whose ref holds a value sits below the row of target it names.
+type accessEdge struct {
+	child, target *entityInfo
+	ref           *refField
+}
+
+// parentOf returns the row that msg's access parent names, given the edges
+// of its entity's cases. ok is false when no case is set or the set case
+// names no key.
+func parentOf(msg protoreflect.Message, edges []*accessEdge) (anchorRow, bool) {
+	for _, e := range edges {
+		if !msg.Has(e.ref.fd) {
+			continue
+		}
+		// The cases inside one reference message share the field, and only the
+		// active one yields a stub.
+		stub, ok := e.ref.ref.Stub(msg.Get(e.ref.fd).Message())
+		if !ok {
+			continue
+		}
+		key := e.target.keyOf(stub)
+		return anchorRow{entity: e.target.name, key: key}, key != ""
+	}
+	return anchorRow{}, false
 }
 
 // modelRole is one declared role and the grant entity that declares it.
@@ -422,9 +525,9 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	m := &accessModel{
 		roles:    map[string]*modelRole{},
 		entities: map[string]*entityInfo{},
-		parents:  map[string]*entityInfo{},
+		parents:  map[string][]*accessEdge{},
 		anchors:  map[string]bool{},
-		children: map[string][]*entityInfo{},
+		children: map[string][]*accessEdge{},
 		depths:   map[string]int{},
 	}
 	used := map[string][]string{} // permission → entities that name it
@@ -439,19 +542,20 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			continue
 		}
 		m.entities[name] = info
-		if a.parent != nil {
-			target, ok := c.byType[a.parent.ref.Target.FullName()]
+		for _, p := range a.parents {
+			target, ok := c.byType[p.ref.ref.Target.FullName()]
 			if !ok {
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at %s, which is not a registered entity",
-					name, a.parent.fd.Name(), a.parent.ref.Target.FullName())
+					name, refCasePath(p.ref.ref), p.ref.ref.Target.FullName())
 			}
 			if target.access == nil || target.access.unrestricted {
 				return nil, fmt.Errorf("server: entity %q access_parent field %q points at entity %q, which is not in the access model; "+
-					"declare access with a read and a write permission on %q", name, a.parent.fd.Name(), target.name, target.name)
+					"declare access with a read and a write permission on %q", name, refCasePath(p.ref.ref), target.name, target.name)
 			}
-			m.parents[name] = target
+			e := &accessEdge{child: info, target: target, ref: p.ref}
+			m.parents[name] = append(m.parents[name], e)
 			m.anchors[target.name] = true
-			m.children[target.name] = append(m.children[target.name], info)
+			m.children[target.name] = append(m.children[target.name], e)
 		}
 		for _, p := range []string{a.read, a.write} {
 			if !slices.Contains(used[p], name) {
@@ -477,14 +581,14 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		}
 		d := m.depthOf(name)
 		if d > maxDepth {
-			return nil, fmt.Errorf("server: entity %q sits %d access_parent hops below an entity without a parent, "+
+			return nil, fmt.Errorf("server: entity %q can sit %d access_parent hops below an entity without a parent, "+
 				"more than MaxAccessDepth (%d) allows", name, d, maxDepth)
 		}
 	}
 	m.below = map[string][]string{}
 	for anchor := range m.anchors {
 		m.below[anchor] = m.entitiesBelow(anchor)
-		if m.parents[anchor] != nil {
+		if len(m.parents[anchor]) > 0 {
 			m.moving = true
 		}
 	}
@@ -574,50 +678,30 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	return m, nil
 }
 
-// depthOf returns the number of access_parent hops from rows of the named
-// entity to an entity without a parent, or depthUnbounded when the chain of
-// parent entities runs into a cycle. It memoizes into m.depths, so it runs
-// once m.parents is complete.
+// depthOf returns the largest number of access_parent hops from rows of the
+// named entity to an entity without a parent, over every case of every
+// parent on the way, or depthUnbounded when some chain of parent entities
+// runs into a cycle. It memoizes into m.depths, so it runs once m.parents is
+// complete.
 func (m *accessModel) depthOf(name string) int {
 	if d, ok := m.depths[name]; ok {
 		return d
 	}
-	seen := map[string]bool{}
-	var chain []string
+	// Marked before the walk, so a chain that leads back here reads as one
+	// that never ends. An entity the walk reaches this mark from has a chain
+	// that runs into a cycle through name, so none is marked wrongly.
+	m.depths[name] = depthUnbounded
 	d := 0
-	for at := name; ; {
-		if known, ok := m.depths[at]; ok {
-			if known != depthUnbounded {
-				d += known
-			} else {
-				d = depthUnbounded
-			}
-			break
-		}
-		if seen[at] {
+	for _, e := range m.parents[name] {
+		up := m.depthOf(e.target.name)
+		if up == depthUnbounded {
 			d = depthUnbounded
 			break
 		}
-		seen[at] = true
-		chain = append(chain, at)
-		parent := m.parents[at]
-		if parent == nil {
-			break
-		}
-		d++
-		at = parent.name
+		d = max(d, up+1)
 	}
-	// Every entity on the walk sits a known number of hops above the end of
-	// it, or on a chain that never ends.
-	for i, at := range chain {
-		switch {
-		case d == depthUnbounded:
-			m.depths[at] = depthUnbounded
-		default:
-			m.depths[at] = d - i
-		}
-	}
-	return m.depths[name]
+	m.depths[name] = d
+	return d
 }
 
 // entitiesBelow returns, sorted, every entity whose rows can sit below rows
@@ -628,10 +712,10 @@ func (m *accessModel) entitiesBelow(anchor string) []string {
 	for len(queue) > 0 {
 		at := queue[0]
 		queue = queue[1:]
-		for _, child := range m.children[at] {
-			if !seen[child.name] {
-				seen[child.name] = true
-				queue = append(queue, child.name)
+		for _, e := range m.children[at] {
+			if !seen[e.child.name] {
+				seen[e.child.name] = true
+				queue = append(queue, e.child.name)
 			}
 		}
 	}
@@ -665,8 +749,8 @@ func readRuleOf(info *entityInfo) string {
 		return "unrestricted"
 	}
 	rule := "read=" + a.read
-	if a.parent != nil {
-		rule += " parent=" + string(a.parent.fd.Name()) + ">" + a.parentEntity
+	if a.hasParent() {
+		rule += " parent=" + a.parentRule()
 	}
 	return rule
 }
@@ -769,8 +853,8 @@ func accessSpecOf(info *entityInfo) string {
 		b.WriteString(" access=unrestricted")
 	default:
 		b.WriteString(" read=" + a.read + " write=" + a.write)
-		if a.parent != nil {
-			b.WriteString(" parent=" + string(a.parent.fd.Name()) + ">" + a.parentEntity)
+		if a.hasParent() {
+			b.WriteString(" parent=" + a.parentRule())
 		}
 	}
 	if g := info.grant; g != nil {

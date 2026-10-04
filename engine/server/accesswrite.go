@@ -122,14 +122,14 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 // grantAnchorOf returns the anchor a grant row applies at, nil for the
 // workspace root. ok is false when the row anchors at nothing.
 func grantAnchorOf(model *accessModel, info *entityInfo, row protoreflect.Message) (*anchorRow, bool) {
-	if info.access.parent == nil {
+	if !info.access.hasParent() {
 		return nil, true
 	}
-	parentKey, ok := parentKeyOf(row, info.access, model.parents[info.name])
+	parent, ok := parentOf(row, model.parents[info.name])
 	if !ok {
 		return nil, false
 	}
-	return &anchorRow{entity: info.access.parentEntity, key: parentKey}, true
+	return &parent, true
 }
 
 // touchesGrant reports whether a write to a grant entity can change what one
@@ -143,8 +143,8 @@ func touchesGrant(info *entityInfo, op syncplanev1.CrudOp, mask []string) bool {
 		return true
 	}
 	fields := []string{string(info.grant.subject.Name()), string(info.grant.role.Name())}
-	if info.access.parent != nil {
-		fields = append(fields, string(info.access.parent.fd.Name()))
+	if info.access.hasParent() {
+		fields = append(fields, info.access.parentName)
 	}
 	for _, path := range mask {
 		head, _, _ := strings.Cut(path, ".")
@@ -207,14 +207,14 @@ func (s *Server) checkGrantRow(info *entityInfo, key string, op syncplanev1.Crud
 		return Reject(CodeInvalidArgument, fmt.Sprintf(
 			"entity %q: row %q holds role %q, which the entity does not declare", info.name, key, role))
 	}
-	if a := info.access; a.parent != nil {
-		named := row.Has(a.parent.fd)
+	if a := info.access; a.hasParent() {
+		named := a.parentFieldSet(row)
 		if model := s.catalogPtr().access; named && model != nil {
-			_, named = parentKeyOf(row, a, model.parents[info.name])
+			_, named = parentOf(row, model.parents[info.name])
 		}
 		if !named {
 			return Reject(CodeInvalidArgument, fmt.Sprintf(
-				"entity %q: row %q names no %q; a grant row must name the row it applies at", info.name, key, a.parent.fd.Name()))
+				"entity %q: row %q names no %q; a grant row must name the row it applies at", info.name, key, a.parentName))
 		}
 	}
 	return nil
@@ -237,7 +237,7 @@ func (s *Server) checkAccessChain(
 	final proto.Message,
 ) error {
 	model := s.catalogPtr().access
-	if model == nil || info.access == nil || info.access.parent == nil || model.depths[info.name] != depthUnbounded {
+	if model == nil || info.access == nil || !info.access.hasParent() || model.depths[info.name] != depthUnbounded {
 		return nil
 	}
 	report := func(row storage.Row, err error) { s.reportPoison(ctx, ws, row, err) }
@@ -284,10 +284,10 @@ type accessWrite struct {
 	op     syncplanev1.CrudOp
 	mask   []string
 	// live, stored and storedParent describe the row before the write:
-	// whether one existed, its value, and the key its access parent named.
+	// whether one existed, its value, and the row its access parent named.
 	live         bool
 	stored       protoreflect.Message
-	storedParent string
+	storedParent chainEdge
 }
 
 // beginAccessWrite runs the access model's check against the stored row, and
@@ -350,7 +350,7 @@ func (g *writeGate) beginAccessWrite(
 		}
 	}
 	w.live, w.stored = true, sr
-	w.storedParent, _ = parentKeyOf(sr, info.access, model.parents[info.name])
+	w.storedParent = edgeOf(model, info, sr)
 	return w, nil
 }
 
@@ -371,8 +371,9 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	}
 	model := w.access.model()
 	fr := final.ProtoReflect()
-	parent, _ := parentKeyOf(fr, w.info.access, model.parents[w.info.name])
-	moved := w.live && parent != w.storedParent
+	// The parent's entity counts as well as its key: a polymorphic parent can
+	// move between rows of two entities that share a key.
+	moved := w.live && edgeOf(model, w.info, fr) != w.storedParent
 	if !w.live || moved {
 		ok, err := w.access.holds(tx, w.info.access.write, w.info, w.key, fr)
 		if err != nil {
@@ -403,20 +404,25 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 
 // liveRowBelow returns the name of an entity with a live row whose access
 // parent is the row of info with key, or "" when there is none. It probes the
-// reference index of each child entity, and scans the entity while that index
-// is not ready.
+// reference index of each case that points at info, and scans the case's
+// entity, once for all of its cases, while that index is not ready.
 func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key string, limits Limits) (string, error) {
 	values, ok := keyValuesOf(info, key)
 	if !ok {
 		return "", nil
 	}
-	for _, child := range model.children[info.name] {
+	self := anchorRow{entity: info.name, key: key}
+	// A scan compares the parent of each row whatever case it holds, so one
+	// scan answers for every case of the child that points at info.
+	scanned := map[string]bool{}
+	for _, e := range model.children[info.name] {
+		child := e.child
 		found := false
 		stop := func() error {
 			found = true
 			return errCandidateBound
 		}
-		ci := child.indexByName(refIndexName(child.access.parent.ref))
+		ci := child.indexByName(refIndexName(e.ref.ref))
 		ready := false
 		if ci != nil && !limits.DisableIndexes {
 			var err error
@@ -434,12 +440,16 @@ func liveRowBelow(tx storage.ReadTx, model *accessModel, info *entityInfo, key s
 				return stop()
 			})
 		} else {
+			if scanned[child.name] {
+				continue
+			}
+			scanned[child.name] = true
 			err = tx.ScanEntity(child.name, func(row storage.Row) error {
 				msg, derr := child.decode(row.Value)
 				if derr != nil {
 					return nil
 				}
-				if parentKey, ok := parentKeyOf(msg.ProtoReflect(), child.access, info); ok && parentKey == key {
+				if parent, ok := parentOf(msg.ProtoReflect(), model.parents[child.name]); ok && parent == self {
 					return stop()
 				}
 				return nil

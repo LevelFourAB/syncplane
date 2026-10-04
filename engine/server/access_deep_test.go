@@ -3,7 +3,6 @@ package server_test
 import (
 	"context"
 	"fmt"
-	"net/http/httptest"
 	"sort"
 	"time"
 
@@ -14,7 +13,6 @@ import (
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
-	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
 	"github.com/levelfourab/syncplane/engine/server"
 	"github.com/levelfourab/syncplane/engine/storage"
 )
@@ -31,16 +29,7 @@ func newDeepFixtureOn(store storage.Adapter, opts ...server.Option) *accessFixtu
 // members who hold roles on one folder and everything below it.
 func newFolderFixtureOn(store storage.Adapter, opts ...server.Option) *accessFixture {
 	GinkgoHelper()
-	f := &accessFixture{ctx: GinkgoT().Context(), store: store}
-	f.srv = mustNewServer(store, append([]server.Option{
-		server.WithEntities(&accessv1.Folder{}, &accessv1.FolderMember{}, &accessv1.Doc{}),
-		headerAuthenticator(),
-	}, opts...)...)
-	ts := httptest.NewServer(f.srv.HTTPHandler())
-	DeferCleanup(ts.Close)
-	f.sync = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
-	f.presence = syncplanev1connect.NewPresenceServiceClient(ts.Client(), ts.URL)
-	return f
+	return newSchemaFixtureOn(store, server.WithEntities(&accessv1.Folder{}, &accessv1.FolderMember{}, &accessv1.Doc{}), opts...)
 }
 
 func task(id string) *accessv1.Task     { return &accessv1.Task{Id: id} }

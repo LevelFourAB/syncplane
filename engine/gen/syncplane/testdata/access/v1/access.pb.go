@@ -837,6 +837,510 @@ func (x *Doc) GetTitle() string {
 	return ""
 }
 
+// A board, the top of one of two trees in the polymorphic schema below:
+// Board, Space, PlaceMember, Card, CardItem and Pin, registered apart from
+// the schemas above.
+type Board struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Board) Reset() {
+	*x = Board{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Board) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Board) ProtoMessage() {}
+
+func (x *Board) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Board.ProtoReflect.Descriptor instead.
+func (*Board) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{13}
+}
+
+func (x *Board) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A space, the top of the other tree.
+type Space struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Space) Reset() {
+	*x = Space{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Space) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Space) ProtoMessage() {}
+
+func (x *Space) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Space.ProtoReflect.Descriptor instead.
+func (*Space) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{14}
+}
+
+func (x *Space) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A role on one board or one space and the rows below it.
+type PlaceMember struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Types that are valid to be assigned to Place:
+	//
+	//	*PlaceMember_Board
+	//	*PlaceMember_Space
+	Place         isPlaceMember_Place `protobuf_oneof:"place"`
+	UserId        string              `protobuf:"bytes,4,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string              `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaceMember) Reset() {
+	*x = PlaceMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaceMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaceMember) ProtoMessage() {}
+
+func (x *PlaceMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaceMember.ProtoReflect.Descriptor instead.
+func (*PlaceMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *PlaceMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *PlaceMember) GetPlace() isPlaceMember_Place {
+	if x != nil {
+		return x.Place
+	}
+	return nil
+}
+
+func (x *PlaceMember) GetBoard() *Board {
+	if x != nil {
+		if x, ok := x.Place.(*PlaceMember_Board); ok {
+			return x.Board
+		}
+	}
+	return nil
+}
+
+func (x *PlaceMember) GetSpace() *Space {
+	if x != nil {
+		if x, ok := x.Place.(*PlaceMember_Space); ok {
+			return x.Space
+		}
+	}
+	return nil
+}
+
+func (x *PlaceMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *PlaceMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type isPlaceMember_Place interface {
+	isPlaceMember_Place()
+}
+
+type PlaceMember_Board struct {
+	Board *Board `protobuf:"bytes,2,opt,name=board,proto3,oneof"`
+}
+
+type PlaceMember_Space struct {
+	Space *Space `protobuf:"bytes,3,opt,name=space,proto3,oneof"`
+}
+
+func (*PlaceMember_Board) isPlaceMember_Place() {}
+
+func (*PlaceMember_Space) isPlaceMember_Place() {}
+
+// A card on a board or in a space: below whichever of the two it names.
+type Card struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Id    string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	// Types that are valid to be assigned to Place:
+	//
+	//	*Card_Board
+	//	*Card_Space
+	Place         isCard_Place `protobuf_oneof:"place"`
+	Title         string       `protobuf:"bytes,4,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Card) Reset() {
+	*x = Card{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Card) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Card) ProtoMessage() {}
+
+func (x *Card) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Card.ProtoReflect.Descriptor instead.
+func (*Card) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{16}
+}
+
+func (x *Card) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Card) GetPlace() isCard_Place {
+	if x != nil {
+		return x.Place
+	}
+	return nil
+}
+
+func (x *Card) GetBoard() *Board {
+	if x != nil {
+		if x, ok := x.Place.(*Card_Board); ok {
+			return x.Board
+		}
+	}
+	return nil
+}
+
+func (x *Card) GetSpace() *Space {
+	if x != nil {
+		if x, ok := x.Place.(*Card_Space); ok {
+			return x.Space
+		}
+	}
+	return nil
+}
+
+func (x *Card) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+type isCard_Place interface {
+	isCard_Place()
+}
+
+type Card_Board struct {
+	Board *Board `protobuf:"bytes,2,opt,name=board,proto3,oneof"`
+}
+
+type Card_Space struct {
+	Space *Space `protobuf:"bytes,3,opt,name=space,proto3,oneof"`
+}
+
+func (*Card_Board) isCard_Place() {}
+
+func (*Card_Space) isCard_Place() {}
+
+// An item on a card, two access_parent hops below the card's board or space.
+type CardItem struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Card          *Card                  `protobuf:"bytes,2,opt,name=card,proto3" json:"card,omitempty"`
+	Text          string                 `protobuf:"bytes,3,opt,name=text,proto3" json:"text,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CardItem) Reset() {
+	*x = CardItem{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CardItem) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CardItem) ProtoMessage() {}
+
+func (x *CardItem) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CardItem.ProtoReflect.Descriptor instead.
+func (*CardItem) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *CardItem) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *CardItem) GetCard() *Card {
+	if x != nil {
+		return x.Card
+	}
+	return nil
+}
+
+func (x *CardItem) GetText() string {
+	if x != nil {
+		return x.Text
+	}
+	return ""
+}
+
+// A reference to a board or a space.
+type PlaceRef struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Target:
+	//
+	//	*PlaceRef_Board
+	//	*PlaceRef_Space
+	Target        isPlaceRef_Target `protobuf_oneof:"target"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PlaceRef) Reset() {
+	*x = PlaceRef{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PlaceRef) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PlaceRef) ProtoMessage() {}
+
+func (x *PlaceRef) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PlaceRef.ProtoReflect.Descriptor instead.
+func (*PlaceRef) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *PlaceRef) GetTarget() isPlaceRef_Target {
+	if x != nil {
+		return x.Target
+	}
+	return nil
+}
+
+func (x *PlaceRef) GetBoard() *Board {
+	if x != nil {
+		if x, ok := x.Target.(*PlaceRef_Board); ok {
+			return x.Board
+		}
+	}
+	return nil
+}
+
+func (x *PlaceRef) GetSpace() *Space {
+	if x != nil {
+		if x, ok := x.Target.(*PlaceRef_Space); ok {
+			return x.Space
+		}
+	}
+	return nil
+}
+
+type isPlaceRef_Target interface {
+	isPlaceRef_Target()
+}
+
+type PlaceRef_Board struct {
+	Board *Board `protobuf:"bytes,1,opt,name=board,proto3,oneof"`
+}
+
+type PlaceRef_Space struct {
+	Space *Space `protobuf:"bytes,2,opt,name=space,proto3,oneof"`
+}
+
+func (*PlaceRef_Board) isPlaceRef_Target() {}
+
+func (*PlaceRef_Space) isPlaceRef_Target() {}
+
+// A pin on a board or in a space, placed through a reference message rather
+// than a oneof of its own.
+type Pin struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Place         *PlaceRef              `protobuf:"bytes,2,opt,name=place,proto3" json:"place,omitempty"`
+	Label         string                 `protobuf:"bytes,3,opt,name=label,proto3" json:"label,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Pin) Reset() {
+	*x = Pin{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Pin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Pin) ProtoMessage() {}
+
+func (x *Pin) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Pin.ProtoReflect.Descriptor instead.
+func (*Pin) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *Pin) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Pin) GetPlace() *PlaceRef {
+	if x != nil {
+		return x.Place
+	}
+	return nil
+}
+
+func (x *Pin) GetLabel() string {
+	if x != nil {
+		return x.Label
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -946,7 +1450,61 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x06folder\x18\x02 \x01(\v2$.syncplane.testdata.access.v1.FolderB\x06\xaa\xbb\x18\x02Z\x00R\x06folder\x12\x14\n" +
 	"\x05title\x18\x03 \x01(\tR\x05title:+\xa2\xbb\x18'\n" +
 	"\x03doc\x12\x02idR\x1c\n" +
-	"\fview_folders\x12\fedit_folders*Q\n" +
+	"\fview_folders\x12\fedit_folders\"D\n" +
+	"\x05Board\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:+\xa2\xbb\x18'\n" +
+	"\x05board\x12\x02idR\x1a\n" +
+	"\vview_places\x12\vedit_places\"D\n" +
+	"\x05Space\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:+\xa2\xbb\x18'\n" +
+	"\x05space\x12\x02idR\x1a\n" +
+	"\vview_places\x12\vedit_places\"\xdd\x04\n" +
+	"\vPlaceMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12C\n" +
+	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05board\x12C\n" +
+	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05space\x12\x17\n" +
+	"\auser_id\x18\x04 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\xfd\x02\xa2\xbb\x18\xf8\x02\n" +
+	"\fplace_member\x12\x02idR*\n" +
+	"\x12view_place_members\x12\x14manage_place_membersZ\xb7\x02\n" +
+	"\auser_id\x12\x04role\x1aF\n" +
+	"\fplace_viewer\x12\vview_places\x12\x12view_place_members\x12\n" +
+	"view_cards\x12\tview_pins\x1a]\n" +
+	"\fplace_editor\x12\vview_places\x12\x12view_place_members\x12\n" +
+	"view_cards\x12\n" +
+	"edit_cards\x12\tview_pins\x12\tedit_pins\x1a\x7f\n" +
+	"\vplace_admin\x12\vview_places\x12\vedit_places\x12\x12view_place_members\x12\x14manage_place_members\x12\n" +
+	"view_cards\x12\n" +
+	"edit_cards\x12\tview_pins\x12\tedit_pinsB\a\n" +
+	"\x05place\"\xe9\x01\n" +
+	"\x04Card\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12C\n" +
+	"\x05board\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.BoardB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05board\x12C\n" +
+	"\x05space\x18\x03 \x01(\v2#.syncplane.testdata.access.v1.SpaceB\x06\xaa\xbb\x18\x02Z\x00H\x00R\x05space\x12\x14\n" +
+	"\x05title\x18\x04 \x01(\tR\x05title:(\xa2\xbb\x18$\n" +
+	"\x04card\x12\x02idR\x18\n" +
+	"\n" +
+	"view_cards\x12\n" +
+	"edit_cardsB\a\n" +
+	"\x05place\"\x9d\x01\n" +
+	"\bCardItem\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04card\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.CardB\x06\xaa\xbb\x18\x02Z\x00R\x04card\x12\x12\n" +
+	"\x04text\x18\x03 \x01(\tR\x04text:-\xa2\xbb\x18)\n" +
+	"\tcard_item\x12\x02idR\x18\n" +
+	"\n" +
+	"view_cards\x12\n" +
+	"edit_cards\"\x94\x01\n" +
+	"\bPlaceRef\x12;\n" +
+	"\x05board\x18\x01 \x01(\v2#.syncplane.testdata.access.v1.BoardH\x00R\x05board\x12;\n" +
+	"\x05space\x18\x02 \x01(\v2#.syncplane.testdata.access.v1.SpaceH\x00R\x05space:\x04\xb2\xbb\x18\x00B\b\n" +
+	"\x06target\"\x98\x01\n" +
+	"\x03Pin\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12D\n" +
+	"\x05place\x18\x02 \x01(\v2&.syncplane.testdata.access.v1.PlaceRefB\x06\xaa\xbb\x18\x02Z\x00R\x05place\x12\x14\n" +
+	"\x05label\x18\x03 \x01(\tR\x05label:%\xa2\xbb\x18!\n" +
+	"\x03pin\x12\x02idR\x16\n" +
+	"\tview_pins\x12\tedit_pins*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -965,7 +1523,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 20)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
@@ -981,6 +1539,13 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Folder)(nil),        // 11: syncplane.testdata.access.v1.Folder
 	(*FolderMember)(nil),  // 12: syncplane.testdata.access.v1.FolderMember
 	(*Doc)(nil),           // 13: syncplane.testdata.access.v1.Doc
+	(*Board)(nil),         // 14: syncplane.testdata.access.v1.Board
+	(*Space)(nil),         // 15: syncplane.testdata.access.v1.Space
+	(*PlaceMember)(nil),   // 16: syncplane.testdata.access.v1.PlaceMember
+	(*Card)(nil),          // 17: syncplane.testdata.access.v1.Card
+	(*CardItem)(nil),      // 18: syncplane.testdata.access.v1.CardItem
+	(*PlaceRef)(nil),      // 19: syncplane.testdata.access.v1.PlaceRef
+	(*Pin)(nil),           // 20: syncplane.testdata.access.v1.Pin
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -991,11 +1556,19 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	11, // 5: syncplane.testdata.access.v1.Folder.parent:type_name -> syncplane.testdata.access.v1.Folder
 	11, // 6: syncplane.testdata.access.v1.FolderMember.folder:type_name -> syncplane.testdata.access.v1.Folder
 	11, // 7: syncplane.testdata.access.v1.Doc.folder:type_name -> syncplane.testdata.access.v1.Folder
-	8,  // [8:8] is the sub-list for method output_type
-	8,  // [8:8] is the sub-list for method input_type
-	8,  // [8:8] is the sub-list for extension type_name
-	8,  // [8:8] is the sub-list for extension extendee
-	0,  // [0:8] is the sub-list for field type_name
+	14, // 8: syncplane.testdata.access.v1.PlaceMember.board:type_name -> syncplane.testdata.access.v1.Board
+	15, // 9: syncplane.testdata.access.v1.PlaceMember.space:type_name -> syncplane.testdata.access.v1.Space
+	14, // 10: syncplane.testdata.access.v1.Card.board:type_name -> syncplane.testdata.access.v1.Board
+	15, // 11: syncplane.testdata.access.v1.Card.space:type_name -> syncplane.testdata.access.v1.Space
+	17, // 12: syncplane.testdata.access.v1.CardItem.card:type_name -> syncplane.testdata.access.v1.Card
+	14, // 13: syncplane.testdata.access.v1.PlaceRef.board:type_name -> syncplane.testdata.access.v1.Board
+	15, // 14: syncplane.testdata.access.v1.PlaceRef.space:type_name -> syncplane.testdata.access.v1.Space
+	19, // 15: syncplane.testdata.access.v1.Pin.place:type_name -> syncplane.testdata.access.v1.PlaceRef
+	16, // [16:16] is the sub-list for method output_type
+	16, // [16:16] is the sub-list for method input_type
+	16, // [16:16] is the sub-list for extension type_name
+	16, // [16:16] is the sub-list for extension extendee
+	0,  // [0:16] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -1003,13 +1576,25 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 	if File_syncplane_testdata_access_v1_access_proto != nil {
 		return
 	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[15].OneofWrappers = []any{
+		(*PlaceMember_Board)(nil),
+		(*PlaceMember_Space)(nil),
+	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[16].OneofWrappers = []any{
+		(*Card_Board)(nil),
+		(*Card_Space)(nil),
+	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[18].OneofWrappers = []any{
+		(*PlaceRef_Board)(nil),
+		(*PlaceRef_Space)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   13,
+			NumMessages:   20,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

@@ -61,14 +61,14 @@ func newAccessChainsFrom(
 // edgeOf returns the parent edge of a row of info whose value is row, nil for
 // a row that does not exist.
 func edgeOf(model *accessModel, info *entityInfo, row protoreflect.Message) chainEdge {
-	if row == nil || info.access == nil || info.access.parent == nil {
+	if row == nil {
 		return chainEdge{}
 	}
-	key, ok := parentKeyOf(row, info.access, model.parents[info.name])
+	parent, ok := parentOf(row, model.parents[info.name])
 	if !ok {
 		return chainEdge{}
 	}
-	return chainEdge{parent: anchorRow{entity: info.access.parentEntity, key: key}, ok: true}
+	return chainEdge{parent: parent, ok: true}
 }
 
 // firstEdge returns the parent edge of a row whose value the caller holds.
@@ -90,7 +90,7 @@ func (c *accessChains) edge(at anchorRow) (chainEdge, error) {
 	var e chainEdge
 	// A row of an entity without an access parent ends every chain, so the
 	// common one-level case reads nothing.
-	if info := c.model.entities[at.entity]; info != nil && c.model.parents[at.entity] != nil {
+	if info := c.model.entities[at.entity]; info != nil && len(c.model.parents[at.entity]) > 0 {
 		row, err := c.get(at.entity, at.key)
 		switch {
 		case errors.Is(err, storage.ErrNotFound):

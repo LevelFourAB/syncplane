@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/testdata/access/v1/access.proto.
  */
 export const file_syncplane_testdata_access_v1_access: GenFile = /*@__PURE__*/
-  fileDesc("CilzeW5jcGxhbmUvdGVzdGRhdGEvYWNjZXNzL3YxL2FjY2Vzcy5wcm90bxIcc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MSKkAgoJT3JnTWVtYmVyEgoKAmlkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDAoEcm9sZRgDIAEoCTrrAaK7GOYBCgpvcmdfbWVtYmVyEgJpZFIeCgx2aWV3X21lbWJlcnMSDm1hbmFnZV9tZW1iZXJzWrMBCgd1c2VyX2lkEgRyb2xlGjQKCm9yZ19tZW1iZXISDXZpZXdfcHJvamVjdHMSCnZpZXdfdGFza3MSC3ZpZXdfbGFiZWxzGmwKCW9yZ19hZG1pbhIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIKdmlld190YXNrcxIKZWRpdF90YXNrcxILdmlld19sYWJlbHMiVgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOjGiuxgtCgdwcm9qZWN0EgJpZFIeCg12aWV3X3Byb2plY3RzEg1lZGl0X3Byb2plY3RzIrIECg1Qcm9qZWN0TWVtYmVyEgoKAmlkGAEgASgJEj4KB3Byb2plY3QYAiABKAsyJS5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlByb2plY3RCBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEgwKBHJvbGUYBCABKAk6tQOiuxiwAwoOcHJvamVjdF9tZW1iZXISAmlkUh4KDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnNa+QIKB3VzZXJfaWQSBHJvbGUaOQoOcHJvamVjdF9yZWFkZXISDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIKdmlld190YXNrcxpFCg5wcm9qZWN0X3dyaXRlchINdmlld19wcm9qZWN0cxIMdmlld19tZW1iZXJzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzGlQKDXByb2plY3RfYWRtaW4SDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnMSCnZpZXdfdGFza3MSCmVkaXRfdGFza3MaKwoOcHJvamVjdF9lZGl0b3ISDXZpZXdfcHJvamVjdHMSCmVkaXRfdGFza3MaYwoNcHJvamVjdF9vd25lchINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxIKdmlld190YXNrcxIKZWRpdF90YXNrcyKLAQoEVGFzaxIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDQoFdGl0bGUYAyABKAk6KKK7GCQKBHRhc2sSAmlkUhgKCnZpZXdfdGFza3MSCmVkaXRfdGFza3MiigEKB0NvbW1lbnQSCgoCaWQYASABKAkSOAoEdGFzaxgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuVGFza0IGqrsYAloAEgwKBGJvZHkYAyABKAk6K6K7GCcKB2NvbW1lbnQSAmlkUhgKCnZpZXdfdGFza3MSCmVkaXRfdGFza3MiVAoFTGFiZWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCToxorsYLQoFbGFiZWwSAmlkIAI4AkACUhoKC3ZpZXdfbGFiZWxzEgt2aWV3X2xhYmVscyI0CgROb3RlEgoKAmlkGAEgASgJEgwKBGJvZHkYAiABKAk6EqK7GA4KBG5vdGUSAmlkUgIYASIbCghUYXNrQXJncxIPCgd0YXNrX2lkGAEgASgJIqQCCgpUZWFtTWVtYmVyEgoKAmlkGAEgASgJEjgKBHRlYW0YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEjQKBHJvbGUYBCABKA4yJi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1Sb2xlOogBorsYgwEKC3RlYW1fbWVtYmVyEgJpZFIWCgl2aWV3X3RlYW0SCWVkaXRfdGVhbVpYCgd1c2VyX2lkEgRyb2xlGh0KEFRFQU1fUk9MRV9WSUVXRVISCXZpZXdfdGVhbRooChBURUFNX1JPTEVfRURJVE9SEgl2aWV3X3RlYW0SCWVkaXRfdGVhbSI6CgRUZWFtEgoKAmlkGAEgASgJOiaiuxgiCgR0ZWFtEgJpZFIWCgl2aWV3X3RlYW0SCWVkaXRfdGVhbSKQAQoGRm9sZGVyEgoKAmlkGAEgASgJEjwKBnBhcmVudBgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDAoEbmFtZRgDIAEoCTouorsYKgoGZm9sZGVyEgJpZFIcCgx2aWV3X2ZvbGRlcnMSDGVkaXRfZm9sZGVycyLOAgoMRm9sZGVyTWVtYmVyEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOtQBorsYzwEKDWZvbGRlcl9tZW1iZXISAmlkUh4KDHZpZXdfZm9sZGVycxIObWFuYWdlX2ZvbGRlcnNamQEKB3VzZXJfaWQSBHJvbGUaHQoNZm9sZGVyX3ZpZXdlchIMdmlld19mb2xkZXJzGisKDWZvbGRlcl9lZGl0b3ISDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzGjwKDmZvbGRlcl9tYW5hZ2VyEgx2aWV3X2ZvbGRlcnMSDGVkaXRfZm9sZGVycxIObWFuYWdlX2ZvbGRlcnMiiwEKA0RvYxIKCgJpZBgBIAEoCRI8CgZmb2xkZXIYAiABKAsyJC5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLkZvbGRlckIGqrsYAloAEg0KBXRpdGxlGAMgASgJOiuiuxgnCgNkb2MSAmlkUhwKDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzKlEKCFRlYW1Sb2xlEhkKFVRFQU1fUk9MRV9VTlNQRUNJRklFRBAAEhQKEFRFQU1fUk9MRV9WSUVXRVIQARIUChBURUFNX1JPTEVfRURJVE9SEAJCU1pRZ2l0aHViLmNvbS9sZXZlbGZvdXJhYi9zeW5jcGxhbmUvZW5naW5lL2dlbi9zeW5jcGxhbmUvdGVzdGRhdGEvYWNjZXNzL3YxO2FjY2Vzc3YxYgZwcm90bzM", [file_syncplane_v1_options]);
+  fileDesc("CilzeW5jcGxhbmUvdGVzdGRhdGEvYWNjZXNzL3YxL2FjY2Vzcy5wcm90bxIcc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MSKkAgoJT3JnTWVtYmVyEgoKAmlkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDAoEcm9sZRgDIAEoCTrrAaK7GOYBCgpvcmdfbWVtYmVyEgJpZFIeCgx2aWV3X21lbWJlcnMSDm1hbmFnZV9tZW1iZXJzWrMBCgd1c2VyX2lkEgRyb2xlGjQKCm9yZ19tZW1iZXISDXZpZXdfcHJvamVjdHMSCnZpZXdfdGFza3MSC3ZpZXdfbGFiZWxzGmwKCW9yZ19hZG1pbhIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIKdmlld190YXNrcxIKZWRpdF90YXNrcxILdmlld19sYWJlbHMiVgoHUHJvamVjdBIKCgJpZBgBIAEoCRIMCgRuYW1lGAIgASgJOjGiuxgtCgdwcm9qZWN0EgJpZFIeCg12aWV3X3Byb2plY3RzEg1lZGl0X3Byb2plY3RzIrIECg1Qcm9qZWN0TWVtYmVyEgoKAmlkGAEgASgJEj4KB3Byb2plY3QYAiABKAsyJS5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlByb2plY3RCBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEgwKBHJvbGUYBCABKAk6tQOiuxiwAwoOcHJvamVjdF9tZW1iZXISAmlkUh4KDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnNa+QIKB3VzZXJfaWQSBHJvbGUaOQoOcHJvamVjdF9yZWFkZXISDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIKdmlld190YXNrcxpFCg5wcm9qZWN0X3dyaXRlchINdmlld19wcm9qZWN0cxIMdmlld19tZW1iZXJzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzGlQKDXByb2plY3RfYWRtaW4SDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnMSCnZpZXdfdGFza3MSCmVkaXRfdGFza3MaKwoOcHJvamVjdF9lZGl0b3ISDXZpZXdfcHJvamVjdHMSCmVkaXRfdGFza3MaYwoNcHJvamVjdF9vd25lchINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxIKdmlld190YXNrcxIKZWRpdF90YXNrcyKLAQoEVGFzaxIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDQoFdGl0bGUYAyABKAk6KKK7GCQKBHRhc2sSAmlkUhgKCnZpZXdfdGFza3MSCmVkaXRfdGFza3MiigEKB0NvbW1lbnQSCgoCaWQYASABKAkSOAoEdGFzaxgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuVGFza0IGqrsYAloAEgwKBGJvZHkYAyABKAk6K6K7GCcKB2NvbW1lbnQSAmlkUhgKCnZpZXdfdGFza3MSCmVkaXRfdGFza3MiVAoFTGFiZWwSCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCToxorsYLQoFbGFiZWwSAmlkIAI4AkACUhoKC3ZpZXdfbGFiZWxzEgt2aWV3X2xhYmVscyI0CgROb3RlEgoKAmlkGAEgASgJEgwKBGJvZHkYAiABKAk6EqK7GA4KBG5vdGUSAmlkUgIYASIbCghUYXNrQXJncxIPCgd0YXNrX2lkGAEgASgJIqQCCgpUZWFtTWVtYmVyEgoKAmlkGAEgASgJEjgKBHRlYW0YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEjQKBHJvbGUYBCABKA4yJi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1Sb2xlOogBorsYgwEKC3RlYW1fbWVtYmVyEgJpZFIWCgl2aWV3X3RlYW0SCWVkaXRfdGVhbVpYCgd1c2VyX2lkEgRyb2xlGh0KEFRFQU1fUk9MRV9WSUVXRVISCXZpZXdfdGVhbRooChBURUFNX1JPTEVfRURJVE9SEgl2aWV3X3RlYW0SCWVkaXRfdGVhbSI6CgRUZWFtEgoKAmlkGAEgASgJOiaiuxgiCgR0ZWFtEgJpZFIWCgl2aWV3X3RlYW0SCWVkaXRfdGVhbSKQAQoGRm9sZGVyEgoKAmlkGAEgASgJEjwKBnBhcmVudBgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDAoEbmFtZRgDIAEoCTouorsYKgoGZm9sZGVyEgJpZFIcCgx2aWV3X2ZvbGRlcnMSDGVkaXRfZm9sZGVycyLOAgoMRm9sZGVyTWVtYmVyEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOtQBorsYzwEKDWZvbGRlcl9tZW1iZXISAmlkUh4KDHZpZXdfZm9sZGVycxIObWFuYWdlX2ZvbGRlcnNamQEKB3VzZXJfaWQSBHJvbGUaHQoNZm9sZGVyX3ZpZXdlchIMdmlld19mb2xkZXJzGisKDWZvbGRlcl9lZGl0b3ISDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzGjwKDmZvbGRlcl9tYW5hZ2VyEgx2aWV3X2ZvbGRlcnMSDGVkaXRfZm9sZGVycxIObWFuYWdlX2ZvbGRlcnMiiwEKA0RvYxIKCgJpZBgBIAEoCRI8CgZmb2xkZXIYAiABKAsyJC5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLkZvbGRlckIGqrsYAloAEg0KBXRpdGxlGAMgASgJOiuiuxgnCgNkb2MSAmlkUhwKDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzIkAKBUJvYXJkEgoKAmlkGAEgASgJOiuiuxgnCgVib2FyZBICaWRSGgoLdmlld19wbGFjZXMSC2VkaXRfcGxhY2VzIkAKBVNwYWNlEgoKAmlkGAEgASgJOiuiuxgnCgVzcGFjZRICaWRSGgoLdmlld19wbGFjZXMSC2VkaXRfcGxhY2VzIr0ECgtQbGFjZU1lbWJlchIKCgJpZBgBIAEoCRI8CgVib2FyZBgCIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQm9hcmRCBqq7GAJaAEgAEjwKBXNwYWNlGAMgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcGFjZUIGqrsYAloASAASDwoHdXNlcl9pZBgEIAEoCRIMCgRyb2xlGAUgASgJOv0CorsY+AIKDHBsYWNlX21lbWJlchICaWRSKgoSdmlld19wbGFjZV9tZW1iZXJzEhRtYW5hZ2VfcGxhY2VfbWVtYmVyc1q3AgoHdXNlcl9pZBIEcm9sZRpGCgxwbGFjZV92aWV3ZXISC3ZpZXdfcGxhY2VzEhJ2aWV3X3BsYWNlX21lbWJlcnMSCnZpZXdfY2FyZHMSCXZpZXdfcGlucxpdCgxwbGFjZV9lZGl0b3ISC3ZpZXdfcGxhY2VzEhJ2aWV3X3BsYWNlX21lbWJlcnMSCnZpZXdfY2FyZHMSCmVkaXRfY2FyZHMSCXZpZXdfcGlucxIJZWRpdF9waW5zGn8KC3BsYWNlX2FkbWluEgt2aWV3X3BsYWNlcxILZWRpdF9wbGFjZXMSEnZpZXdfcGxhY2VfbWVtYmVycxIUbWFuYWdlX3BsYWNlX21lbWJlcnMSCnZpZXdfY2FyZHMSCmVkaXRfY2FyZHMSCXZpZXdfcGlucxIJZWRpdF9waW5zQgcKBXBsYWNlItABCgRDYXJkEgoKAmlkGAEgASgJEjwKBWJvYXJkGAIgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Cb2FyZEIGqrsYAloASAASPAoFc3BhY2UYAyABKAsyIy5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlNwYWNlQgaquxgCWgBIABINCgV0aXRsZRgEIAEoCTooorsYJAoEY2FyZBICaWRSGAoKdmlld19jYXJkcxIKZWRpdF9jYXJkc0IHCgVwbGFjZSKNAQoIQ2FyZEl0ZW0SCgoCaWQYASABKAkSOAoEY2FyZBgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQ2FyZEIGqrsYAloAEgwKBHRleHQYAyABKAk6LaK7GCkKCWNhcmRfaXRlbRICaWRSGAoKdmlld19jYXJkcxIKZWRpdF9jYXJkcyKGAQoIUGxhY2VSZWYSNAoFYm9hcmQYASABKAsyIy5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLkJvYXJkSAASNAoFc3BhY2UYAiABKAsyIy5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlNwYWNlSAA6BLK7GABCCAoGdGFyZ2V0IoYBCgNQaW4SCgoCaWQYASABKAkSPQoFcGxhY2UYAiABKAsyJi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlBsYWNlUmVmQgaquxgCWgASDQoFbGFiZWwYAyABKAk6JaK7GCEKA3BpbhICaWRSFgoJdmlld19waW5zEgllZGl0X3BpbnMqUQoIVGVhbVJvbGUSGQoVVEVBTV9ST0xFX1VOU1BFQ0lGSUVEEAASFAoQVEVBTV9ST0xFX1ZJRVdFUhABEhQKEFRFQU1fUk9MRV9FRElUT1IQAkJTWlFnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS90ZXN0ZGF0YS9hY2Nlc3MvdjE7YWNjZXNzdjFiBnByb3RvMw", [file_syncplane_v1_options]);
 
 /**
  * A role on the whole workspace.
@@ -370,6 +370,223 @@ export type Doc = Message<"syncplane.testdata.access.v1.Doc"> & {
  */
 export const DocSchema: GenMessage<Doc> = /*@__PURE__*/
   messageDesc(file_syncplane_testdata_access_v1_access, 12);
+
+/**
+ * A board, the top of one of two trees in the polymorphic schema below:
+ * Board, Space, PlaceMember, Card, CardItem and Pin, registered apart from
+ * the schemas above.
+ *
+ * @generated from message syncplane.testdata.access.v1.Board
+ */
+export type Board = Message<"syncplane.testdata.access.v1.Board"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.Board.
+ * Use `create(BoardSchema)` to create a new message.
+ */
+export const BoardSchema: GenMessage<Board> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 13);
+
+/**
+ * A space, the top of the other tree.
+ *
+ * @generated from message syncplane.testdata.access.v1.Space
+ */
+export type Space = Message<"syncplane.testdata.access.v1.Space"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.Space.
+ * Use `create(SpaceSchema)` to create a new message.
+ */
+export const SpaceSchema: GenMessage<Space> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 14);
+
+/**
+ * A role on one board or one space and the rows below it.
+ *
+ * @generated from message syncplane.testdata.access.v1.PlaceMember
+ */
+export type PlaceMember = Message<"syncplane.testdata.access.v1.PlaceMember"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from oneof syncplane.testdata.access.v1.PlaceMember.place
+   */
+  place: {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Board board = 2;
+     */
+    value: Board;
+    case: "board";
+  } | {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Space space = 3;
+     */
+    value: Space;
+    case: "space";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * @generated from field: string user_id = 4;
+   */
+  userId: string;
+
+  /**
+   * @generated from field: string role = 5;
+   */
+  role: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.PlaceMember.
+ * Use `create(PlaceMemberSchema)` to create a new message.
+ */
+export const PlaceMemberSchema: GenMessage<PlaceMember> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 15);
+
+/**
+ * A card on a board or in a space: below whichever of the two it names.
+ *
+ * @generated from message syncplane.testdata.access.v1.Card
+ */
+export type Card = Message<"syncplane.testdata.access.v1.Card"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from oneof syncplane.testdata.access.v1.Card.place
+   */
+  place: {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Board board = 2;
+     */
+    value: Board;
+    case: "board";
+  } | {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Space space = 3;
+     */
+    value: Space;
+    case: "space";
+  } | { case: undefined; value?: undefined };
+
+  /**
+   * @generated from field: string title = 4;
+   */
+  title: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.Card.
+ * Use `create(CardSchema)` to create a new message.
+ */
+export const CardSchema: GenMessage<Card> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 16);
+
+/**
+ * An item on a card, two access_parent hops below the card's board or space.
+ *
+ * @generated from message syncplane.testdata.access.v1.CardItem
+ */
+export type CardItem = Message<"syncplane.testdata.access.v1.CardItem"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: syncplane.testdata.access.v1.Card card = 2;
+   */
+  card?: Card | undefined;
+
+  /**
+   * @generated from field: string text = 3;
+   */
+  text: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.CardItem.
+ * Use `create(CardItemSchema)` to create a new message.
+ */
+export const CardItemSchema: GenMessage<CardItem> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 17);
+
+/**
+ * A reference to a board or a space.
+ *
+ * @generated from message syncplane.testdata.access.v1.PlaceRef
+ */
+export type PlaceRef = Message<"syncplane.testdata.access.v1.PlaceRef"> & {
+  /**
+   * @generated from oneof syncplane.testdata.access.v1.PlaceRef.target
+   */
+  target: {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Board board = 1;
+     */
+    value: Board;
+    case: "board";
+  } | {
+    /**
+     * @generated from field: syncplane.testdata.access.v1.Space space = 2;
+     */
+    value: Space;
+    case: "space";
+  } | { case: undefined; value?: undefined };
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.PlaceRef.
+ * Use `create(PlaceRefSchema)` to create a new message.
+ */
+export const PlaceRefSchema: GenMessage<PlaceRef> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 18);
+
+/**
+ * A pin on a board or in a space, placed through a reference message rather
+ * than a oneof of its own.
+ *
+ * @generated from message syncplane.testdata.access.v1.Pin
+ */
+export type Pin = Message<"syncplane.testdata.access.v1.Pin"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: syncplane.testdata.access.v1.PlaceRef place = 2;
+   */
+  place?: PlaceRef | undefined;
+
+  /**
+   * @generated from field: string label = 3;
+   */
+  label: string;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.Pin.
+ * Use `create(PinSchema)` to create a new message.
+ */
+export const PinSchema: GenMessage<Pin> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 19);
 
 /**
  * Roles a TeamMember row can hold, matched by value name.

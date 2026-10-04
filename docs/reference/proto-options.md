@@ -196,7 +196,7 @@ repeated Item items = 5 [(syncplane.v1.field_behavior) = { key_field: [ "id" ] o
 | `write_policy`     | `enum`     | Set to `FIELD_WRITE_POLICY_TRUSTED_ONLY` to restrict field modification to trusted callers while leaving the rest of the row writable. Allowed on top-level fields only. Protects a oneof as a group. Cannot be applied to key fields. See [Protected fields](#protected-fields).                                                                                                                                                                                                                                                                                                   |
 | `workspace`        | `bool`     | Inside a reference message, marks the string field that names the workspace the referenced row lives in. Empty means the holder's own workspace. Valid on one singular `string` field of a message carrying `(syncplane.v1.reference)`. See [References](#references).                                                                                                                                                                                                                                                                                                              |
 | `reverse_relation` | `string`   | Names the reverse relation this reference adds to its target entity. Empty means `<plural(holder entity)>By<Field>`, such as `issuesByAssignee`. Valid on a reference field declared on an entity, including a member of a oneof. See [Reverse relations](#reverse-relations).                                                                                                                                                                                                                                                                                                      |
-| `access_parent`    | `message`  | Places each row below the row this reference points at in the access model. Set it as `access_parent: {}`. See [Access model](#access-model).                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| `access_parent`    | `message`  | Places each row below the row this reference points at in the access model. Set it as `access_parent: {}`. On a oneof, mark every member. See [Access model](#access-model).                                                                                                                                                                                                                                                                                                                                                                                                        |
 
 ## References
 
@@ -466,15 +466,45 @@ A grant row grants nothing when its subject is empty, its role is not declared i
 
 A caller can create a row where it holds the entity's `write` permission, and update or delete a row where the stored row sits. A write that moves a row to another access parent needs `write` at both, and the `read` permission of every entity whose rows can sit below it where the row is before the move. A delete of a row that a live row names as its access parent is refused. A write that can change what a grant row grants needs every permission of the role at the row's anchor, before and after the write, so a caller grants and revokes only what it holds itself. See [Access model](server.md#access-model) for the full write rules and for mutators.
 
+### Polymorphic access parents
+
+An access parent can point at one of several entities. Declare it in either shape of a [polymorphic reference](#polymorphic-references): mark every member of a oneof on the entity, or mark a field whose reference message holds a oneof of entities.
+
+```proto
+// A comment on a task, or on a doc.
+message Comment {
+	option (syncplane.v1.entity) = {
+		name: "comment"
+		key_fields: [ "id" ]
+		access: { read: "view_comments" write: "edit_comments" }
+	};
+	string id = 1;
+	oneof subject {
+		Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Doc doc = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	}
+}
+```
+
+| Rule        | Description                                                                                                                                                                                                                     |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Parent row  | The case a row holds names the row it sits below. A row that holds no case, or holds a case that names no key, has no parent.                                                                                                   |
+| Permissions | The entity's `read` and `write` permissions apply in every case. A role reaches the rows below a target only when it grants them, so grant `view_comments` both in the roles that reach tasks and in the roles that reach docs. |
+| Cases       | Every member of the oneof is marked, and every member is a reference. A reference message with a `workspace` field is refused.                                                                                                  |
+| Moves       | A write that changes the case or the key is a move, with the write rules above. A task and a doc with the same key are two rows.                                                                                                |
+| Masks       | A `PATCH` reaches the access parent when its mask names the oneof group (`subject`), or the field that holds the reference message.                                                                                             |
+| Depth       | `Limits.MaxAccessDepth` applies to the deepest chain of any case.                                                                                                                                                               |
+
 ### Registration rules
 
 A schema **uses the access model** when any of its entities declares `access` or `grant`. Registration refuses such a schema when:
 
 - An entity declares no `access`. Declare `access: { unrestricted: true }` for an entity outside the model.
 - An `access` sets `unrestricted` together with a permission, or names only one of `read` and `write`.
-- An entity marks more than one `access_parent` field, or marks one that is repeated, a member of a oneof, nested inside a message field, a workspace-qualified or polymorphic reference, or protected by `write_policy`.
-- An `access_parent` points at an entity that is not registered or is outside the model.
-- An entity sits more `access_parent` hops below an entity without an access parent than `Limits.MaxAccessDepth` allows. A chain that comes back to an entity it passed, such as a folder inside a folder, has no such bound; its rows are bounded at write time instead (see [Access model](server.md#access-model)).
+- An entity marks more than one `access_parent` field, other than the members of one oneof, or marks one that is repeated, not a reference, nested inside a message field, a workspace-qualified reference, or protected by `write_policy`.
+- An entity marks some members of a oneof `access_parent` but not all of them.
+- A case of an `access_parent` points at an entity that is not registered or is outside the model.
+- An entity can sit more `access_parent` hops below an entity without an access parent than `Limits.MaxAccessDepth` allows, through any case. A chain that comes back to an entity it passed, such as a folder inside a folder, has no such bound; its rows are bounded at write time instead (see [Access model](server.md#access-model)).
 - A grant entity does not declare `access` with `read` and `write`.
 - A `grant` names a `subject` or `role` field that does not exist or has the wrong type, declares no roles, declares one role twice, or declares an enum role that is not a value of the enum.
 - A role name is declared by two entities. Role names are unique across the schema.
@@ -493,7 +523,7 @@ A registration that changes the access model of an entity that is already regist
 
 Registration does not read stored rows. A stored grant row whose role the schema does not declare grants nothing, but keeps its value. When a registration declares that role, or adds `grant` to an entity that already holds rows, every stored row with that role value grants it. `New` has no earlier schema to compare with, so a schema compiled into the server applies such a change without `AllowAccessChange`.
 
-Clients follow a change on their next pull. A change to an entity's `read` permission, `unrestricted` setting or `access_parent` field resets every client that holds a cursor. Every other change, such as a role that grants other permissions, sends only the rows whose visibility changed. See [Access model](server.md#access-model) for every case.
+Clients follow a change on their next pull. A change to an entity's `read` permission, `unrestricted` setting, `access_parent` field or its cases resets every client that holds a cursor. Every other change, such as a role that grants other permissions, sends only the rows whose visibility changed. See [Access model](server.md#access-model) for every case.
 
 ## Secondary indexes
 

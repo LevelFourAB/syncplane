@@ -141,16 +141,21 @@ const (
 	fieldIndexPrefix = reservedIndexPrefix + "field_"
 )
 
-// refIndexName is the index over one reference's stored target key. A case
-// of a polymorphic reference message shares its field with its sibling cases
-// and is told apart by the case's own name — joined with a dot, which no
-// field name contains, so it cannot spell another field's index.
+// refIndexName is the index over one reference's stored target key, named
+// by refCasePath.
 func refIndexName(ref *lww.Ref) string {
-	name := refIndexPrefix + string(ref.Field.Name())
+	return refIndexPrefix + refCasePath(ref)
+}
+
+// refCasePath names one case of a reference: its field, and for a case of a
+// polymorphic reference message, which shares its field with its sibling
+// cases, the case's own name after a dot. No field name contains a dot, so
+// the path of a case cannot spell the path of another field.
+func refCasePath(ref *lww.Ref) string {
 	if ref.InnerCase() {
-		name += "." + string(ref.Value.Name())
+		return string(ref.Field.Name()) + "." + string(ref.Value.Name())
 	}
-	return name
+	return string(ref.Field.Name())
 }
 
 // textField is one collaborative-text field: its dotted proto path and the
@@ -479,7 +484,8 @@ type Limits struct {
 	MaxRelConditions int
 	// Maximum access_parent hops from a row up to a row without an access
 	// parent, in a schema that uses the access model. Registration refuses an
-	// entity whose chain of parent entities is longer. In a recursive chain,
+	// entity with a longer chain of parent entities, through any case of a
+	// polymorphic access parent. In a recursive chain,
 	// such as a folder inside a folder, a write that would put a row deeper is
 	// refused, and a read stops walking at this depth: a row deeper than it
 	// is read as anchored at nothing above that point. Default 32.

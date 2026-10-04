@@ -9,10 +9,14 @@ import { describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
 import {
+	CardItemSchema,
+	CardSchema,
 	CommentSchema,
 	FolderSchema,
+	PinSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
+	SpaceSchema,
 	TaskSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
@@ -199,6 +203,52 @@ describe('can()', () => {
 		await t.client.mutate.patch(TaskSchema, 't2', { project: { id: 'p1' } });
 		expect(await t.client.can(CommentSchema, 'c2', 'view_tasks')).toBe('yes');
 		await t.client.close();
+	});
+
+	// The board x and the space x share a key, so only the case tells the two
+	// parents apart.
+	it('follows the case of a polymorphic access parent that a row holds', async () => {
+		const t = await createTestClient({ entities: [ CardSchema, CardItemSchema, PinSchema ] });
+		t.server.put(CardSchema, { id: 'c-b', place: { case: 'board', value: { id: 'x' } } });
+		t.server.put(CardSchema, { id: 'c-s', place: { case: 'space', value: { id: 'x' } } });
+		t.server.put(CardItemSchema, { id: 'i-b', card: { id: 'c-b' } });
+		t.server.put(CardItemSchema, { id: 'i-s', card: { id: 'c-s' } });
+		t.server.put(PinSchema, { id: 'p-b', place: { target: { case: 'board', value: { id: 'x' } } } });
+		t.server.put(PinSchema, { id: 'p-s', place: { target: { case: 'space', value: { id: 'x' } } } });
+		t.server.setCallerAccess({
+			permissions: [
+				{ permission: 'view_cards', anchors: [ { entity: 'board', keys: [ 'x' ] } ] },
+				{ permission: 'view_pins', anchors: [ { entity: 'board', keys: [ 'x' ] } ] },
+			],
+		});
+		await t.sync();
+		expect(await t.client.can(CardSchema, 'c-b', 'view_cards')).toBe('yes');
+		expect(await t.client.can(CardSchema, 'c-s', 'view_cards')).toBe('no');
+		expect(await t.client.can(CardItemSchema, 'i-b', 'view_cards')).toBe('yes');
+		expect(await t.client.can(CardItemSchema, 'i-s', 'view_cards')).toBe('no');
+		expect(await t.client.can(PinSchema, 'p-b', 'view_pins')).toBe('yes');
+		expect(await t.client.can(PinSchema, 'p-s', 'view_pins')).toBe('no');
+
+		// A queued move to the other case counts where the row will be.
+		await t.client.mutate.patch(CardSchema, 'c-s', { place: { case: 'board', value: { id: 'x' } } });
+		expect(await t.client.can(CardItemSchema, 'i-s', 'view_cards')).toBe('yes');
+		await t.client.close();
+	});
+
+	it('follows a queued delete of a row that a case of a polymorphic access parent names', async () => {
+		const kv = new MemoryKVStore();
+		await storeSummary(kv, { permissions: [ { permission: 'view_cards', root: true } ] });
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: kv,
+			entities: [ SpaceSchema, CardSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		expect(await c.can(CardSchema, 'c1', 'view_cards')).toBe('yes');
+		await c.mutate.del(SpaceSchema, 's1');
+		expect(await c.can(CardSchema, 'c1', 'view_cards')).toBe('unknown');
+		await c.close();
 	});
 
 	it('walks a recursive chain', async () => {

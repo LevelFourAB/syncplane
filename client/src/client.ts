@@ -15,7 +15,6 @@ import {
 	type CanAnswer,
 	canAt,
 	MAX_ACCESS_CHAIN,
-	parentDefOf,
 	parentRefOf,
 	pendingChangesAccess,
 } from './access.js';
@@ -3122,15 +3121,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						? undefined
 						: await readMergedRow(tx, this.entityRegistry, at.name, workspaceId, atKey);
 					const parent = parentRefOf(at, bytes === undefined ? undefined : fromBinary(at.schema, bytes));
-					const parentDef = parentDefOf(at);
-					if (parent === null || parentDef === undefined) break;
+					if (parent === null) break;
 					if (parent === undefined || rows.length === MAX_ACCESS_CHAIN) {
 						complete = false;
 						break;
 					}
-					rows.push(parent);
+					rows.push({ entity: parent.entity, key: parent.key });
 					if (summary.holds(permission, parent.entity, parent.key)) return 'yes';
-					at = parentDef;
+					at = parent.def;
 					atKey = parent.key;
 				}
 				return canAt(summary, permission, def.name, key, { rows, complete });

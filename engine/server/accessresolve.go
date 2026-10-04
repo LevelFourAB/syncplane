@@ -201,7 +201,7 @@ func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSe
 	for _, g := range c.model.grantEntities {
 		type pending struct {
 			perms []string
-			key   string
+			at    anchorRow
 		}
 		var parented []pending
 		err := grantRowsOf(tx, g, c.subjects, limits, func(msg protoreflect.Message) {
@@ -212,15 +212,15 @@ func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSe
 			if perms == nil {
 				return
 			}
-			if g.access.parent == nil {
+			if !g.access.hasParent() {
 				set.grantRoot(perms)
 				return
 			}
-			key, ok := parentKeyOf(msg, g.access, c.model.parents[g.name])
+			at, ok := parentOf(msg, c.model.parents[g.name])
 			if !ok {
 				return
 			}
-			parented = append(parented, pending{perms: perms, key: key})
+			parented = append(parented, pending{perms: perms, at: at})
 		})
 		if err != nil {
 			return nil, err
@@ -230,26 +230,33 @@ func resolveAccess(tx storage.ReadTx, c *accessCaller, limits Limits) (*accessSe
 		}
 		// A grant anchored at a row that does not exist grants nothing, so a
 		// grant row cannot reserve access to a key before the row is created.
-		parent := g.access.parentEntity
-		keys := make([]string, 0, len(parented))
+		keys := map[string][]string{}
 		for _, p := range parented {
-			keys = append(keys, p.key)
+			keys[p.at.entity] = append(keys[p.at.entity], p.at.key)
 		}
-		live := make(map[string]bool, len(keys))
-		for start := 0; start < len(keys); start += maxRowBatch {
-			batch := keys[start:min(start+maxRowBatch, len(keys))]
-			if err := tx.GetRows(parent, batch, func(row storage.Row) error {
-				if !row.Deleted {
-					live[row.Key] = true
+		entities := make([]string, 0, len(keys))
+		for entity := range keys {
+			entities = append(entities, entity)
+		}
+		sort.Strings(entities)
+		live := make(map[anchorRow]bool, len(parented))
+		for _, entity := range entities {
+			ks := keys[entity]
+			for start := 0; start < len(ks); start += maxRowBatch {
+				batch := ks[start:min(start+maxRowBatch, len(ks))]
+				if err := tx.GetRows(entity, batch, func(row storage.Row) error {
+					if !row.Deleted {
+						live[anchorRow{entity: entity, key: row.Key}] = true
+					}
+					return nil
+				}); err != nil {
+					return nil, err
 				}
-				return nil
-			}); err != nil {
-				return nil, err
 			}
 		}
 		for _, p := range parented {
-			if live[p.key] {
-				set.grantAt(p.perms, anchorRow{entity: parent, key: p.key})
+			if live[p.at] {
+				set.grantAt(p.perms, p.at)
 			}
 		}
 	}
@@ -316,20 +323,6 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 		return string(ev.Name())
 	}
 	return ""
-}
-
-// parentKeyOf returns the key of the row that msg's access parent points at.
-// ok is false when the reference is unset or names no key.
-func parentKeyOf(msg protoreflect.Message, a *entityAccess, parentInfo *entityInfo) (string, bool) {
-	if a.parent == nil || parentInfo == nil || !msg.Has(a.parent.fd) {
-		return "", false
-	}
-	stub, ok := a.parent.ref.Stub(msg.Get(a.parent.fd).Message())
-	if !ok {
-		return "", false
-	}
-	key := parentInfo.keyOf(stub)
-	return key, key != ""
 }
 
 // modelReadFilter returns the filter the access model puts on reads of info
@@ -450,9 +443,9 @@ var errCandidateBound = errors.New("server: access candidate bound")
 
 // rowsBelow returns, in key order, the keys of the rows of target that are
 // one of from or sit at most Limits.MaxAccessDepth hops below one of them. It
-// walks down from each row through the reference indexes of the access
-// parents, entering only the entities that lead to target, so it reads index
-// entries and no rows.
+// walks down from each row through the reference index of each case of the
+// access parents that point at its entity, entering only the entities that
+// lead to target, so it reads index entries and no rows.
 //
 // The walk follows the parents rows hold now. It is a superset of the rows a
 // caller holding a permission at from can read, as long as the caller
@@ -471,20 +464,20 @@ func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from [
 			frontier = append(frontier, at)
 		}
 	}
-	readyIndex := map[string]*compiledIndex{}
-	indexOf := func(child *entityInfo) (*compiledIndex, bool, error) {
-		if ci, known := readyIndex[child.name]; known {
+	readyIndex := map[*accessEdge]*compiledIndex{}
+	indexOf := func(e *accessEdge) (*compiledIndex, bool, error) {
+		if ci, known := readyIndex[e]; known {
 			return ci, ci != nil, nil
 		}
-		ci := child.indexByName(refIndexName(child.access.parent.ref))
+		ci := e.child.indexByName(refIndexName(e.ref.ref))
 		if ci == nil || limits.DisableIndexes {
 			ci = nil
-		} else if ready, err := ci.ready(tx, child.name); err != nil {
+		} else if ready, err := ci.ready(tx, e.child.name); err != nil {
 			return nil, false, err
 		} else if !ready {
 			ci = nil
 		}
-		readyIndex[child.name] = ci
+		readyIndex[e] = ci
 		return ci, ci != nil, nil
 	}
 	maxDepth := limits.maxAccessDepth()
@@ -497,7 +490,8 @@ func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from [
 			if level == maxDepth {
 				continue
 			}
-			for _, child := range model.children[at.entity] {
+			for _, e := range model.children[at.entity] {
+				child := e.child
 				if !leads(child.name) {
 					continue
 				}
@@ -505,7 +499,7 @@ func rowsBelow(tx storage.ReadTx, model *accessModel, target *entityInfo, from [
 				if !parsed {
 					return nil, false, nil
 				}
-				ci, ready, err := indexOf(child)
+				ci, ready, err := indexOf(e)
 				if err != nil || !ready {
 					return nil, false, err
 				}

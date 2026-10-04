@@ -78,6 +78,20 @@ func newAccessFixtureOn(store storage.Adapter, opts ...server.Option) *accessFix
 	return f
 }
 
+// newSchemaFixtureOn is a fixture over store running the schema that entities
+// registers, behind the header authenticator, for a spec whose rows are not
+// rows of the org schema.
+func newSchemaFixtureOn(store storage.Adapter, entities server.Option, opts ...server.Option) *accessFixture {
+	GinkgoHelper()
+	f := &accessFixture{ctx: GinkgoT().Context(), store: store}
+	f.srv = mustNewServer(store, append([]server.Option{entities, headerAuthenticator()}, opts...)...)
+	ts := httptest.NewServer(f.srv.HTTPHandler())
+	DeferCleanup(ts.Close)
+	f.sync = syncplanev1connect.NewSyncServiceClient(ts.Client(), ts.URL)
+	f.presence = syncplanev1connect.NewPresenceServiceClient(ts.Client(), ts.URL)
+	return f
+}
+
 // seed writes rows as a trusted caller.
 func (f *accessFixture) seed(msgs ...proto.Message) {
 	GinkgoHelper()

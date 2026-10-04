@@ -263,3 +263,131 @@ message Doc {
 	Folder folder = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
 }
+
+// A board, the top of one of two trees in the polymorphic schema below:
+// Board, Space, PlaceMember, Card, CardItem and Pin, registered apart from
+// the schemas above.
+message Board {
+	option (syncplane.v1.entity) = {
+		name: "board"
+		key_fields: [ "id" ]
+		access: { read: "view_places" write: "edit_places" }
+	};
+	string id = 1;
+}
+
+// A space, the top of the other tree.
+message Space {
+	option (syncplane.v1.entity) = {
+		name: "space"
+		key_fields: [ "id" ]
+		access: { read: "view_places" write: "edit_places" }
+	};
+	string id = 1;
+}
+
+// A role on one board or one space and the rows below it.
+message PlaceMember {
+	option (syncplane.v1.entity) = {
+		name: "place_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "place_viewer"
+					grants: [
+						"view_places",
+						"view_place_members",
+						"view_cards",
+						"view_pins"
+					]
+				},
+				{
+					name: "place_editor"
+					grants: [
+						"view_places",
+						"view_place_members",
+						"view_cards",
+						"edit_cards",
+						"view_pins",
+						"edit_pins"
+					]
+				},
+				{
+					name: "place_admin"
+					grants: [
+						"view_places",
+						"edit_places",
+						"view_place_members",
+						"manage_place_members",
+						"view_cards",
+						"edit_cards",
+						"view_pins",
+						"edit_pins"
+					]
+				}
+			]
+		}
+		access: { read: "view_place_members" write: "manage_place_members" }
+	};
+	string id = 1;
+	oneof place {
+		Board board = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Space space = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	}
+	string user_id = 4;
+	string role = 5;
+}
+
+// A card on a board or in a space: below whichever of the two it names.
+message Card {
+	option (syncplane.v1.entity) = {
+		name: "card"
+		key_fields: [ "id" ]
+		access: { read: "view_cards" write: "edit_cards" }
+	};
+	string id = 1;
+	oneof place {
+		Board board = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+		Space space = 3 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	}
+	string title = 4;
+}
+
+// An item on a card, two access_parent hops below the card's board or space.
+message CardItem {
+	option (syncplane.v1.entity) = {
+		name: "card_item"
+		key_fields: [ "id" ]
+		access: { read: "view_cards" write: "edit_cards" }
+	};
+	string id = 1;
+	Card card = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string text = 3;
+}
+
+// A reference to a board or a space.
+message PlaceRef {
+	option (syncplane.v1.reference) = {
+	};
+
+	oneof target {
+		Board board = 1;
+		Space space = 2;
+	}
+}
+
+// A pin on a board or in a space, placed through a reference message rather
+// than a oneof of its own.
+message Pin {
+	option (syncplane.v1.entity) = {
+		name: "pin"
+		key_fields: [ "id" ]
+		access: { read: "view_pins" write: "edit_pins" }
+	};
+	string id = 1;
+	PlaceRef place = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string label = 3;
+}

@@ -14,8 +14,9 @@ import {
 	entityDefOf,
 	type EntityRegistry,
 	fieldBehaviorOf,
+	fieldValueOf,
 	keyOf,
-	refShape,
+	refShapes,
 	refStub,
 } from './mutations.js';
 
@@ -81,10 +82,11 @@ function anchorId(entity: string, key: string): string {
 
 /**
  * What a row's access parent names: the entity and key of the row it sits
- * below, `null` for a row whose entity has no access parent or whose
- * reference is unset, and `undefined` when the row is not known.
+ * below, with the entity's definition, `null` for a row whose entity has no
+ * access parent or whose reference is unset, and `undefined` when the row is
+ * not known.
  */
-export type ParentRef = { entity: string; key: string } | null | undefined;
+export type ParentRef = { entity: string; key: string; def: EntityDef } | null | undefined;
 
 /**
  * The rows above a row for `canAt`, nearest first: the row its access parent
@@ -117,44 +119,43 @@ export function canAt(
 	return chain.complete ? 'no' : 'unknown';
 }
 
-const parentFields = new WeakMap<DescMessage, DescField | null>();
+const parentFields = new WeakMap<DescMessage, readonly DescField[]>();
 
-/** The field of an entity marked `access_parent`, or undefined when it has none. */
-export function accessParentField(schema: DescMessage): DescField | undefined {
-	let field = parentFields.get(schema);
-	if (field === undefined) {
-		field = schema.fields.find((f) => fieldBehaviorOf(f)?.accessParent !== undefined) ?? null;
-		parentFields.set(schema, field);
+/**
+ * The fields of an entity marked `access_parent`: one field, the members of
+ * one oneof, or none.
+ */
+export function accessParentFields(schema: DescMessage): readonly DescField[] {
+	let fields = parentFields.get(schema);
+	if (fields === undefined) {
+		fields = schema.fields.filter((f) => fieldBehaviorOf(f)?.accessParent !== undefined);
+		parentFields.set(schema, fields);
 	}
-	return field ?? undefined;
+	return fields;
 }
 
 /**
- * What a row's access parent names. `row` is the row's value, or undefined
- * when the row is not held locally.
+ * What a row's access parent names, from the case the row holds. `row` is
+ * the row's value, or undefined when the row is not held locally.
  */
 export function parentRefOf(def: EntityDef, row: Message | undefined): ParentRef {
-	const field = accessParentField(def.schema);
-	if (field === undefined) return null;
+	const fields = accessParentFields(def.schema);
+	if (fields.length === 0) return null;
 	if (row === undefined) return undefined;
-	const value = (row as unknown as Record<string, unknown>)[field.localName];
-	const shape = refShape(field);
-	if (value === undefined || value === null || shape === undefined) return null;
-	const stub = refStub(shape, value as Message);
-	if (stub === undefined) return null;
-	const target = targetDefOf(shape.targetSchema);
-	const key = keyOf(target, stub);
-	return key === '' ? null : { entity: target.name, key };
-}
-
-/**
- * The entity the access parent of `def` points at, or undefined when it has
- * no access parent.
- */
-export function parentDefOf(def: EntityDef): EntityDef | undefined {
-	const field = accessParentField(def.schema);
-	const shape = field === undefined ? undefined : refShape(field);
-	return shape === undefined ? undefined : targetDefOf(shape.targetSchema);
+	for (const field of fields) {
+		const value = fieldValueOf(row as unknown as Record<string, unknown>, field);
+		if (value === undefined || value === null) continue;
+		// The cases inside one reference message share the field, and only the
+		// active one yields a stub.
+		for (const shape of refShapes(field)) {
+			const stub = refStub(shape, value as Message);
+			if (stub === undefined) continue;
+			const target = targetDefOf(shape.targetSchema);
+			const key = keyOf(target, stub);
+			return key === '' ? null : { entity: target.name, key, def: target };
+		}
+	}
+	return null;
 }
 
 const targetDefs = new WeakMap<DescMessage, EntityDef>();
@@ -203,16 +204,15 @@ export function pendingChangesAccess(
 
 const anchorSets = new WeakMap<EntityRegistry, Set<string>>();
 
-/** The entities some entity's access parent points at. */
+/** The entities some case of some entity's access parent points at. */
 function anchorEntities(registry: EntityRegistry): Set<string> {
 	let set = anchorSets.get(registry);
 	if (set === undefined) {
 		set = new Set();
 		for (const name of registry.names()) {
-			const def = registry.get(name)!;
-			const field = accessParentField(def.schema);
-			const target = field === undefined ? undefined : refShape(field)?.targetSchema;
-			if (target !== undefined) set.add(targetDefOf(target).name);
+			for (const field of accessParentFields(registry.get(name)!.schema)) {
+				for (const shape of refShapes(field)) set.add(targetDefOf(shape.targetSchema).name);
+			}
 		}
 		anchorSets.set(registry, set);
 	}

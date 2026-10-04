@@ -217,7 +217,7 @@ var _ = Describe("Access model registration", func() {
 		It("refuses a chain of parent entities longer than MaxAccessDepth", func() {
 			srv = newBareServer(server.WithLimits(server.Limits{MaxAccessDepth: 1}))
 			Expect(register(append(orgSpecs(), commentSpec()))).To(MatchError(ContainSubstring(
-				`entity "comment" sits 2 access_parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
+				`entity "comment" can sit 2 access_parent hops below an entity without a parent, more than MaxAccessDepth (1) allows`)))
 		})
 
 		It("accepts a recursive chain whatever MaxAccessDepth is", func() {
@@ -267,7 +267,7 @@ var _ = Describe("Access model registration", func() {
 		}, `access_parent field "project" is repeated`),
 		Entry("a workspace-qualified access parent", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Fields[1].RefWorkspace = true
-		}, `access_parent field "project" must be a field whose type is an entity message`),
+		}, `access_parent field "project" is a reference message with a workspace field`),
 		Entry("unknown fields inside access", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access.ProtoReflect().SetUnknown(unknownField())
 		}, "access carries option fields this server does not know"),
