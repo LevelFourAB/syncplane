@@ -71,6 +71,13 @@ type accessRule struct {
 	// permission is the permission the rule needs, "" for a rule that admits
 	// every admitted caller.
 	permission string
+	// subject is the field that must hold one of the caller's subjects, nil
+	// when the rule sets no subject check.
+	subject protoreflect.FieldDescriptor
+	// fields are the units an update the rule admits may change, sorted: the
+	// names of top-level fields outside a oneof, and of oneofs. Nil when the
+	// rule sets no fields check.
+	fields []string
 }
 
 // admitted reports whether the rule admits every caller admitted to the
@@ -83,6 +90,37 @@ func (r accessRule) admitted() bool {
 // and opDelete.
 func (r accessRule) names(op accessOp) bool {
 	return r.ops&op != 0 || (op != opRead && r.ops&opWrite != 0)
+}
+
+// subjectHolds reports whether row passes the rule's subject check: the rule
+// sets none, or the field holds one of subjects. subjects are sorted, and an
+// empty value never matches.
+func (r accessRule) subjectHolds(subjects []string, row protoreflect.Message) bool {
+	return r.subject == nil || subjectMatches(subjects, row.Get(r.subject).String())
+}
+
+// subjectMatches reports whether a subject field holding value names one of
+// subjects, which are sorted. An empty value never matches.
+func subjectMatches(subjects []string, value string) bool {
+	if value == "" {
+		return false
+	}
+	_, found := slices.BinarySearch(subjects, value)
+	return found
+}
+
+// fieldsAllow reports whether an update that changes the units in changed
+// passes the rule's fields check.
+func (r accessRule) fieldsAllow(changed []string) bool {
+	if r.fields == nil {
+		return true
+	}
+	for _, u := range changed {
+		if _, found := slices.BinarySearch(r.fields, u); !found {
+			return false
+		}
+	}
+	return true
 }
 
 // spec renders the rule in a canonical form: two rules with equal specs admit
@@ -98,7 +136,14 @@ func (r accessRule) spec() string {
 	if !r.admitted() {
 		source = "permission=" + r.permission
 	}
-	return strings.Join(ops, ",") + ":" + source
+	spec := strings.Join(ops, ",") + ":" + source
+	if r.subject != nil {
+		spec += ":subject=" + string(r.subject.Name())
+	}
+	if r.fields != nil {
+		spec += ":fields=" + strings.Join(r.fields, ",")
+	}
+	return spec
 }
 
 // names reports whether at least one rule admits op, one of opRead, opCreate,
@@ -107,22 +152,75 @@ func (a *entityAccess) names(op accessOp) bool {
 	return a.named&op != 0
 }
 
+// maskCovered reports whether some update rule's fields check allows a PATCH
+// with the mask paths, whatever the rule's source and subject check: the rule
+// has no fields list, or its list names the unit each path writes into. A key
+// field is left out, since a PATCH that changes one is refused anyway. When
+// no rule allows the mask, heads are its units, sorted.
+func (a *entityAccess) maskCovered(info *entityInfo, paths []string) (heads []string, ok bool) {
+	for _, path := range paths {
+		head := protectedHead(path)
+		if slices.Contains(heads, head) || slices.ContainsFunc(info.keyFields, func(fd protoreflect.FieldDescriptor) bool {
+			return string(fd.Name()) == head
+		}) {
+			continue
+		}
+		heads = append(heads, head)
+	}
+	sort.Strings(heads)
+	for _, r := range a.rules {
+		if r.names(opUpdate) && r.fieldsAllow(heads) {
+			return nil, true
+		}
+	}
+	return heads, false
+}
+
 // readers is who may read the rows of an entity: a caller that holds one of
-// perms where a row sits, or every admitted caller when all is set.
+// perms where a row sits, every admitted caller when all is set, and the
+// callers that one of owned admits.
 type readers struct {
-	// perms are the permissions of the entity's read rules, sorted and without
-	// repeats. Empty when all is set.
+	// perms are the permissions of the entity's read rules without a subject
+	// check, sorted and without repeats. Empty when all is set.
 	perms []string
 	all   bool
+	// owned are the entity's read rules with a subject check, sorted by spec.
+	// Empty when all is set, since all admits every row they could.
+	owned []accessRule
 }
 
 // key renders r in a canonical form: entities with equal keys are read by
-// the same callers at the same anchors. "*" cannot be a permission name.
+// the same callers at the same anchors. "*" cannot be a permission name, and
+// "|" cannot be part of a rule spec's names.
 func (r readers) key() string {
 	if r.all {
 		return "*"
 	}
-	return strings.Join(r.perms, ",")
+	key := strings.Join(r.perms, ",")
+	for _, o := range r.owned {
+		key += "|" + o.spec()
+	}
+	return key
+}
+
+// loose returns r with every subject check dropped: who may read some row of
+// the entity where a row sits. It is a superset of r, for the checks that
+// cannot read the subject of each row.
+func (r readers) loose() readers {
+	if r.all || len(r.owned) == 0 {
+		return readers{perms: r.perms, all: r.all}
+	}
+	out := readers{perms: slices.Clone(r.perms)}
+	for _, o := range r.owned {
+		if o.admitted() {
+			return readers{all: true}
+		}
+		if !slices.Contains(out.perms, o.permission) {
+			out.perms = append(out.perms, o.permission)
+		}
+	}
+	sort.Strings(out.perms)
+	return out
 }
 
 // parentCase is one case of an entity's access parent: the reference a row
@@ -226,7 +324,7 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 	seen := map[string]int{}
 	reads := map[string]bool{}
 	for i, r := range opt.GetAllow() {
-		rule, err := accessRuleOf(i, r)
+		rule, err := accessRuleOf(i, r, desc, info.keyFields)
 		if err != nil {
 			return nil, err
 		}
@@ -241,25 +339,32 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 				a.named |= op
 			}
 		}
-		if rule.names(opRead) {
-			if rule.admitted() {
-				a.read.all = true
-			} else {
-				reads[rule.permission] = true
-			}
+		switch {
+		case !rule.names(opRead):
+		case rule.subject != nil:
+			a.read.owned = append(a.read.owned, rule)
+		case rule.admitted():
+			a.read.all = true
+		default:
+			reads[rule.permission] = true
 		}
 	}
-	if !a.read.all {
+	if a.read.all {
+		a.read.owned = nil
+	} else {
 		for p := range reads {
 			a.read.perms = append(a.read.perms, p)
 		}
 		sort.Strings(a.read.perms)
+		sort.Slice(a.read.owned, func(i, j int) bool { return a.read.owned[i].spec() < a.read.owned[j].spec() })
 	}
 	return a, nil
 }
 
 // accessRuleOf checks the rule at index i of an access option's allow list.
-func accessRuleOf(i int, r *syncplanev1.AccessRule) (accessRule, error) {
+// desc is the entity's message and keyFields its key fields, which a rule's
+// checks may not name.
+func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) (accessRule, error) {
 	where := fmt.Sprintf("access allow[%d]", i)
 	if err := refuseUnknownOptionFields(where, r); err != nil {
 		return accessRule{}, err
@@ -291,7 +396,117 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule) (accessRule, error) {
 	default:
 		return accessRule{}, fmt.Errorf("%s names no source; set permission or admitted", where)
 	}
+	if name := r.GetSubject(); name != "" {
+		fd, err := singularStringField(desc, name)
+		if err != nil {
+			return accessRule{}, fmt.Errorf("%s subject: %w", where, err)
+		}
+		rule.subject = fd
+	}
+	if r.GetFields() != nil {
+		if rule.ops != opUpdate {
+			return accessRule{}, fmt.Errorf("%s names fields, which only a rule whose one operation is update can name", where)
+		}
+		fields, err := ruleFieldsOf(desc, keyFields, r.GetFields())
+		if err != nil {
+			return accessRule{}, fmt.Errorf("%s fields: %w", where, err)
+		}
+		rule.fields = fields
+	}
 	return rule, nil
+}
+
+// singularStringField resolves a field that a check reads on every row: a
+// top-level, singular string field outside any oneof.
+func singularStringField(desc protoreflect.MessageDescriptor, name string) (protoreflect.FieldDescriptor, error) {
+	fd := desc.Fields().ByName(protoreflect.Name(name))
+	switch {
+	case fd == nil:
+		return nil, fmt.Errorf("field %q not found", name)
+	case fd.IsList() || fd.IsMap():
+		return nil, fmt.Errorf("field %q is repeated; it must hold one value", name)
+	case lww.OneofOf(fd) != nil:
+		return nil, fmt.Errorf("field %q is a member of oneof %q; it must be set on every row", name, lww.OneofOf(fd).Name())
+	case fd.Kind() != protoreflect.StringKind:
+		return nil, fmt.Errorf("field %q is %s; it must be a string", name, fd.Kind())
+	}
+	return fd, nil
+}
+
+// ruleFieldsOf checks the fields list of an access rule and returns it
+// sorted: each entry names a top-level field outside a oneof, or a oneof,
+// which are the units a mask names. A key field cannot be listed, since no
+// update changes one.
+func ruleFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor, names []string) ([]string, error) {
+	if len(names) == 0 {
+		return nil, fmt.Errorf("the list is empty")
+	}
+	out := make([]string, 0, len(names))
+	for _, name := range names {
+		if desc.Oneofs().ByName(protoreflect.Name(name)) != nil {
+			out = append(out, name)
+			continue
+		}
+		fd := desc.Fields().ByName(protoreflect.Name(name))
+		switch {
+		case fd == nil:
+			return nil, fmt.Errorf("%q is not a field or a oneof of %s", name, desc.FullName())
+		case lww.OneofOf(fd) != nil:
+			return nil, fmt.Errorf("field %q is a member of oneof %q; name the oneof", name, lww.OneofOf(fd).Name())
+		case slices.Contains(keyFields, fd):
+			return nil, fmt.Errorf("%q is a key field, which no update changes", name)
+		}
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	for i := 1; i < len(out); i++ {
+		if out[i] == out[i-1] {
+			return nil, fmt.Errorf("%q is listed twice", out[i])
+		}
+	}
+	return out, nil
+}
+
+// changedUnits returns, sorted, the units of an entity's rows that differ
+// between stored and final: the top-level fields outside a oneof, and the
+// oneofs, by name. A oneof differs when the rows hold different cases or
+// different values in the same case.
+func changedUnits(desc protoreflect.MessageDescriptor, stored, final protoreflect.Message) []string {
+	var out []string
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if lww.OneofOf(fd) != nil {
+			continue
+		}
+		if !fieldEqual(fd, stored, final) {
+			out = append(out, string(fd.Name()))
+		}
+	}
+	oneofs := desc.Oneofs()
+	for i := 0; i < oneofs.Len(); i++ {
+		od := oneofs.Get(i)
+		if od.IsSynthetic() {
+			// A proto3 optional field is its own unit, compared above.
+			continue
+		}
+		a, b := stored.WhichOneof(od), final.WhichOneof(od)
+		if a != b || (a != nil && !fieldEqual(a, stored, final)) {
+			out = append(out, string(od.Name()))
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// fieldEqual reports whether field fd holds the same value in a and b. A
+// field with explicit presence that one row sets and the other does not
+// differs, even when the set value is the default.
+func fieldEqual(fd protoreflect.FieldDescriptor, a, b protoreflect.Message) bool {
+	if a.Has(fd) != b.Has(fd) {
+		return false
+	}
+	return a.Get(fd).Equal(b.Get(fd))
 }
 
 // accessParentOf finds the access parent of an entity: the cases of the
@@ -350,7 +565,7 @@ func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) ([]pa
 		}
 		marked = append(marked, fd)
 	}
-	if err := refuseNestedAccessParents(desc); err != nil {
+	if err := refuseNestedMarks(desc, "access_parent", func(b *syncplanev1.FieldBehavior) bool { return b.GetAccessParent() != nil }); err != nil {
 		return nil, "", err
 	}
 	if len(marked) == 0 {
@@ -377,10 +592,12 @@ func accessParentOf(desc protoreflect.MessageDescriptor, info *entityInfo) ([]pa
 	return cases, name, nil
 }
 
-// refuseNestedAccessParents refuses access_parent on a field of a message
-// nested in the entity. The walk does not enter entity-typed fields: those
-// are other entities, checked when they register.
-func refuseNestedAccessParents(desc protoreflect.MessageDescriptor) error {
+// refuseNestedMarks refuses a field behavior that only a field of the entity
+// itself can carry, on a field of a message nested in the entity. mark names
+// the behavior in the error, and has reports whether a field carries it. The
+// walk does not enter entity-typed fields: those are other entities, checked
+// when they register.
+func refuseNestedMarks(desc protoreflect.MessageDescriptor, mark string, has func(*syncplanev1.FieldBehavior) bool) error {
 	seen := map[protoreflect.FullName]bool{desc.FullName(): true}
 	var walk func(md protoreflect.MessageDescriptor) error
 	walk = func(md protoreflect.MessageDescriptor) error {
@@ -402,9 +619,9 @@ func refuseNestedAccessParents(desc protoreflect.MessageDescriptor) error {
 			seen[sub.FullName()] = true
 			subFields := sub.Fields()
 			for j := 0; j < subFields.Len(); j++ {
-				if f := subFields.Get(j); fieldBehaviorOf(f).GetAccessParent() != nil {
-					return fmt.Errorf("field %q of %s is marked access_parent, but only a field declared on the entity itself can be an access parent",
-						f.Name(), sub.FullName())
+				if f := subFields.Get(j); has(fieldBehaviorOf(f)) {
+					return fmt.Errorf("field %q of %s is marked %s, but only a field declared on the entity itself can carry it",
+						f.Name(), sub.FullName(), mark)
 				}
 			}
 			if err := walk(sub); err != nil {
@@ -492,27 +709,43 @@ func grantSubjectIndexName(g *grantSpec) string {
 	return fieldIndexName(g.subject)
 }
 
-// buildGrantIndex derives the subject index of a grant entity. It runs after
-// buildDeclaredIndexes, so a field the schema marks indexed already has it.
-func buildGrantIndex(info *entityInfo) error {
-	if info.grant == nil || info.indexByName(grantSubjectIndexName(info.grant)) != nil {
-		return nil
+// buildSubjectIndexes derives an index over each field the access model
+// looks rows up by subject in: a grant entity's subject field, so resolving a
+// caller's grants probes its own rows, and the subject field of each read
+// rule with a subject check, so a read narrows to the rows that name the
+// caller. Each index has the name an indexed mark on the field would give. It
+// runs after buildDeclaredIndexes, so a field the schema marks indexed already
+// has its index.
+func buildSubjectIndexes(info *entityInfo) error {
+	var fields []protoreflect.FieldDescriptor
+	if info.grant != nil {
+		fields = append(fields, info.grant.subject)
+	}
+	if info.access != nil {
+		for _, o := range info.access.read.owned {
+			fields = append(fields, o.subject)
+		}
 	}
 	desc := info.msgType.Descriptor()
-	c, err := query.CompileIndexComponent(desc, []string{string(info.grant.subject.Name())}, false)
-	if err != nil {
-		return fmt.Errorf("grant subject field %q: %w", info.grant.subject.Name(), err)
+	for _, fd := range fields {
+		if info.indexByName(fieldIndexName(fd)) != nil {
+			continue
+		}
+		c, err := query.CompileIndexComponent(desc, []string{string(fd.Name())}, false)
+		if err != nil {
+			return fmt.Errorf("subject field %q: %w", fd.Name(), err)
+		}
+		comps := []query.IndexComponent{c}
+		enc, err := query.NewIndexEncoder(comps)
+		if err != nil {
+			return fmt.Errorf("subject field %q: %w", fd.Name(), err)
+		}
+		info.indexes = append(info.indexes, compiledIndex{
+			name:     fieldIndexName(fd),
+			specHash: query.SpecHash(comps),
+			encoder:  enc,
+		})
 	}
-	comps := []query.IndexComponent{c}
-	enc, err := query.NewIndexEncoder(comps)
-	if err != nil {
-		return fmt.Errorf("grant subject field %q: %w", info.grant.subject.Name(), err)
-	}
-	info.indexes = append(info.indexes, compiledIndex{
-		name:     grantSubjectIndexName(info.grant),
-		specHash: query.SpecHash(comps),
-		encoder:  enc,
-	})
 	return nil
 }
 
@@ -772,13 +1005,16 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		}
 	}
 	for _, name := range names {
-		for _, p := range c.entities[name].access.read.perms {
+		for _, p := range c.entities[name].access.read.loose().perms {
 			if !slices.Contains(m.readPerms, p) {
 				m.readPerms = append(m.readPerms, p)
 			}
 		}
 	}
 	sort.Strings(m.readPerms)
+	for _, name := range names {
+		m.warnings = append(m.warnings, m.undecidingRules(c.entities[name])...)
+	}
 	// One permission on a row and on the rows below it is the common case: a
 	// comment is read with its task. Two entities that are not on one chain
 	// and sit at different depths are the likely mistake, such as one
@@ -809,6 +1045,92 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	}
 	m.fingerprint = readPolicyOf(m.readRules)
 	return m, nil
+}
+
+// undecidingRules returns a warning for each rule of info that never decides
+// an operation it names, because another rule of info names the operation and
+// admits every caller and row it admits. Such a rule is likely a mistake: a
+// narrower rule written beside a wider one reads as if it narrows the wider
+// one, and it does not. m.roles must be complete.
+func (m *accessModel) undecidingRules(info *entityInfo) []string {
+	rules := info.access.rules
+	var out []string
+	for i, r := range rules {
+		byRule := map[int][]string{}
+		var deciders []int
+		for _, o := range accessOpNames[:4] {
+			if !r.names(o.op) {
+				continue
+			}
+			for j, other := range rules {
+				if j != i && other.names(o.op) && m.covers(other, r) {
+					if byRule[j] == nil {
+						deciders = append(deciders, j)
+					}
+					byRule[j] = append(byRule[j], o.name)
+					break
+				}
+			}
+		}
+		for _, j := range deciders {
+			out = append(out, fmt.Sprintf(
+				"entity %q: access allow[%d] never decides %s: allow[%d] admits every caller and row it admits there",
+				info.name, i, strings.Join(byRule[j], ", "), j))
+		}
+	}
+	return out
+}
+
+// covers reports whether rule a admits every caller and row that rule b
+// admits, for an operation both name: a's source holds wherever b's does, and
+// each check a sets is one b sets as well, or a looser one.
+func (m *accessModel) covers(a, b accessRule) bool {
+	switch {
+	case a.admitted():
+	case b.admitted() || !m.implies(b.permission, a.permission):
+		return false
+	}
+	if a.subject != nil && a.subject != b.subject {
+		return false
+	}
+	if a.fields != nil && (b.fields == nil || !b.fieldsWithin(a.fields)) {
+		return false
+	}
+	return true
+}
+
+// fieldsWithin reports whether every unit r's fields check allows is in
+// fields, which is sorted. A rule without the check allows every unit.
+func (r accessRule) fieldsWithin(fields []string) bool {
+	if r.fields == nil {
+		return false
+	}
+	for _, f := range r.fields {
+		if _, found := slices.BinarySearch(fields, f); !found {
+			return false
+		}
+	}
+	return true
+}
+
+// implies reports whether a caller that holds permission p at a row holds q
+// there as well: p is q, or every role that grants p also grants q. Global
+// roles are declared roles too, so the answer covers them.
+func (m *accessModel) implies(p, q string) bool {
+	if p == q {
+		return true
+	}
+	granted := false
+	for _, r := range m.roles {
+		if _, ok := slices.BinarySearch(r.perms, p); !ok {
+			continue
+		}
+		granted = true
+		if _, ok := slices.BinarySearch(r.perms, q); !ok {
+			return false
+		}
+	}
+	return granted
 }
 
 // depthOf returns the largest number of access_parent hops from rows of the
@@ -860,13 +1182,14 @@ func (m *accessModel) entitiesBelow(anchor string) []string {
 	return out
 }
 
-// readersBelow returns who may read the entities whose rows can sit below
-// rows of the named entity, sorted by key and without repeats.
+// readersBelow returns who may read some row of each entity whose rows can
+// sit below rows of the named entity, with subject checks dropped (see
+// readers.loose), sorted by key and without repeats.
 func (m *accessModel) readersBelow(name string) []readers {
 	var out []readers
 	seen := map[string]bool{}
 	for _, below := range m.below[name] {
-		r := m.entities[below].access.read
+		r := m.entities[below].access.read.loose()
 		if k := r.key(); !seen[k] {
 			seen[k] = true
 			out = append(out, r)

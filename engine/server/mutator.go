@@ -447,6 +447,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		if err := carryProtectedFields(info, protected, base, msg); err != nil {
 			return err
 		}
+		if base == nil && e.gate != nil && len(info.creatorFields) > 0 {
+			stampCreatorFields(info, msg, e.gate.creatorSubject())
+		}
 		texts, err := takePlainStrings(info, msg, nil, o)
 		if err != nil {
 			return err

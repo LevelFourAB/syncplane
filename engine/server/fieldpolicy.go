@@ -212,3 +212,17 @@ func carryProtectedFields(info *entityInfo, protected []string, base, msg proto.
 	}
 	return nil
 }
+
+// stampCreatorFields stores subject in every creator field of msg, or clears
+// each when subject is empty. An enforced create runs it after the
+// protected-field carry-over, which cleared them.
+func stampCreatorFields(info *entityInfo, msg proto.Message, subject string) {
+	row := msg.ProtoReflect()
+	for _, fd := range info.creatorFields {
+		if subject == "" {
+			row.Clear(fd)
+			continue
+		}
+		row.Set(fd, protoreflect.ValueOfString(subject))
+	}
+}

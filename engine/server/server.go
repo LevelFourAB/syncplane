@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -72,9 +73,13 @@ type entityInfo struct {
 	historyFields []string
 	// protectedFields are the top-level units no authorized caller may write:
 	// the fields marked (field_behavior).write_policy TRUSTED_ONLY, with a
-	// oneof contributing its group name. Empty for almost every entity, which
-	// is what keeps the check off the hot path — see writeGate.
+	// oneof contributing its group name, and the creator fields. Empty for
+	// almost every entity, which is what keeps the check off the hot path —
+	// see writeGate.
 	protectedFields []string
+	// creatorFields are the fields marked (field_behavior).creator, in field
+	// order: an enforced create stores the caller's primary subject in each.
+	creatorFields []protoreflect.FieldDescriptor
 	// access is the entity's place in the access model, nil when it declares
 	// no access option. grant is set on an entity whose rows grant roles. See
 	// access.go.
@@ -1453,7 +1458,7 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	if err := buildDeclaredIndexes(info, eo); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
-	if err := buildGrantIndex(info); err != nil {
+	if err := buildSubjectIndexes(info); err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
 	}
 	// Search: a field-level `searchable` mark and an entity-level `search`
@@ -1486,6 +1491,15 @@ func buildEntityInfo(mt protoreflect.MessageType) (*entityInfo, error) {
 	protected, err := protectedFieldsOf(desc, info.keyFields)
 	if err != nil {
 		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	if info.creatorFields, err = creatorFieldsOf(desc, info.keyFields); err != nil {
+		return nil, fmt.Errorf("server: entity %q: %w", info.name, err)
+	}
+	// After the create, a creator field changes like a TRUSTED_ONLY one: a
+	// PATCH naming it is refused and a PUT keeps the stored value. Only the
+	// create differs, where the gate stamps it instead of clearing it.
+	for _, fd := range info.creatorFields {
+		protected = append(protected, string(fd.Name()))
 	}
 	info.protectedFields = protected
 	if info.history != nil {
@@ -1634,6 +1648,39 @@ func protectedFieldsOf(
 		marked = append(marked, name)
 	}
 	return marked, nil
+}
+
+// creatorFieldsOf returns the fields marked (field_behavior).creator, in field
+// order. A marked field must be a top-level, singular string field outside any
+// oneof, and cannot be a key field or carry a write_policy: a key field never
+// changes, and a write_policy would contradict the stamp.
+func creatorFieldsOf(desc protoreflect.MessageDescriptor, keyFields []protoreflect.FieldDescriptor) ([]protoreflect.FieldDescriptor, error) {
+	var out []protoreflect.FieldDescriptor
+	fields := desc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		b := fieldBehaviorOf(fd)
+		if b.GetCreator() == nil {
+			continue
+		}
+		if err := refuseUnknownOptionFields(fmt.Sprintf("field %q creator", fd.Name()), b.GetCreator()); err != nil {
+			return nil, err
+		}
+		if _, err := singularStringField(desc, string(fd.Name())); err != nil {
+			return nil, fmt.Errorf("creator: %w", err)
+		}
+		if slices.Contains(keyFields, fd) {
+			return nil, fmt.Errorf("key field %q is marked creator; a key field never changes after the create", fd.Name())
+		}
+		if b.GetWritePolicy() != syncplanev1.FieldWritePolicy_FIELD_WRITE_POLICY_UNSPECIFIED {
+			return nil, fmt.Errorf("field %q is marked creator and write_policy; a creator field already keeps its value after the create", fd.Name())
+		}
+		out = append(out, fd)
+	}
+	if err := refuseNestedMarks(desc, "creator", func(b *syncplanev1.FieldBehavior) bool { return b.GetCreator() != nil }); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // collectTextFields walks a message's fields (descending through singular,

@@ -1,0 +1,1154 @@
+{
+	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`permission`, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, and `fields`, the units an update may change). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, and `fields` gives the value of each subject field. A permission missing from `held` is held nowhere. A null in `held` or in `fields` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when its source holds and its subject check holds on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
+	"cases": [
+		{
+			"name": "a read rule admits a caller who holds its permission",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a read rule refuses a caller who does not hold its permission",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": false
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a permission the client cannot place answers unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": null
+				},
+				"fields": {}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "a permission missing from held is not held",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a subject check admits a row that names the caller",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a subject check admits a row that names any subject of the caller",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann",
+				"team:a"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": "team:a"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a subject check refuses a row that names someone else, wherever the permission is held",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "an empty subject field never matches",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": ""
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "an empty subject never matches, even for a caller without subjects",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": ""
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a subject check refuses a row whose subject differs before the permission is known",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": null
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a matching subject with a permission the client cannot place answers unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": null
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "a subject value the client cannot read answers unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"author_id": null
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "an admitted rule with a subject check admits the caller's own row",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"write": true,
+					"admitted": true,
+					"subject": "user_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {
+					"user_id": "ann"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "an admitted rule with a subject check refuses another caller's row",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"write": true,
+					"admitted": true,
+					"subject": "user_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {
+					"user_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "one rule that answers yes decides, whatever the others answer",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				},
+				{
+					"read": true,
+					"permission": "view_all"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true,
+					"view_all": null
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "no rule says yes and one is unknown: unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				},
+				{
+					"read": true,
+					"permission": "view_all"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true,
+					"view_all": null
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "every rule says no: no",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts",
+					"subject": "author_id"
+				},
+				{
+					"read": true,
+					"permission": "view_all"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true,
+					"view_all": false
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "an operation no rule names is refused",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {}
+			},
+			"changed": [],
+			"want": "no"
+		},
+		{
+			"name": "a create rule checks the row as it will be stored",
+			"op": "create",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a create rule refuses a row that names someone else",
+			"op": "create",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": true
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a write rule admits a create",
+			"op": "create",
+			"rules": [
+				{
+					"write": true,
+					"permission": "edit"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit": true
+				},
+				"fields": {}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a delete rule with a subject check refuses another author's row",
+			"op": "delete",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "another delete rule without the check admits it",
+			"op": "delete",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": true
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a delete the client cannot place on one rule and refuses on the other answers unknown",
+			"op": "delete",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": null
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "an update rule admits a change to the fields it lists",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"changed": [
+				"body"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "an update rule refuses a change to a field it does not list",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"changed": [
+				"body",
+				"title"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update that changes no field passes every fields list",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"changed": [],
+			"want": "yes"
+		},
+		{
+			"name": "an update of fields no list covers needs a rule without a list",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": false
+				},
+				"fields": {
+					"author_id": "ann"
+				}
+			},
+			"changed": null,
+			"want": "no"
+		},
+		{
+			"name": "a rule without a fields list admits an update of any field",
+			"op": "update",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_posts"
+				},
+				{
+					"create": true,
+					"delete": true,
+					"permission": "post",
+					"subject": "author_id"
+				},
+				{
+					"update": true,
+					"permission": "post",
+					"subject": "author_id",
+					"fields": [
+						"body"
+					]
+				},
+				{
+					"update": true,
+					"delete": true,
+					"permission": "moderate_posts"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": true
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"view_posts": true,
+					"moderate_posts": true
+				},
+				"fields": {
+					"author_id": "bob"
+				}
+			},
+			"changed": null,
+			"want": "yes"
+		},
+		{
+			"name": "an update needs the subject check to hold on the row as it will be stored",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "view_posts",
+					"subject": "assignee_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"assignee_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"assignee_id": "bob"
+				}
+			},
+			"changed": [
+				"assignee_id"
+			],
+			"want": "no"
+		},
+		{
+			"name": "a new subject value the client cannot read answers unknown",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "view_posts",
+					"subject": "assignee_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"assignee_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"view_posts": true
+				},
+				"fields": {
+					"assignee_id": null
+				}
+			},
+			"changed": [
+				"assignee_id"
+			],
+			"want": "unknown"
+		},
+		{
+			"name": "a move needs the permission at the new place too",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "edit"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit": false
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "no"
+		},
+		{
+			"name": "a move to a place the client cannot see answers unknown",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "edit"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit": null
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "unknown"
+		},
+		{
+			"name": "two rules that each admit one side of an update do not add up",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "edit_here"
+				},
+				{
+					"update": true,
+					"permission": "edit_there"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_here": true,
+					"edit_there": false
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_here": false,
+					"edit_there": true
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "no"
+		},
+		{
+			"name": "one of two rules that admits both sides decides",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "edit_here"
+				},
+				{
+					"update": true,
+					"permission": "edit_there"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_here": true,
+					"edit_there": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_here": false,
+					"edit_there": true
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "a write rule admits an update",
+			"op": "update",
+			"rules": [
+				{
+					"write": true,
+					"permission": "edit"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit": true
+				},
+				"fields": {}
+			},
+			"changed": null,
+			"want": "yes"
+		}
+	]
+}

@@ -23,6 +23,12 @@ var accessPrototypes = map[string]proto.Message{
 	"label":          &accessv1.Label{},
 	"note":           &accessv1.Note{},
 	"entry":          &accessv1.Entry{},
+	"room":           &accessv1.Room{},
+	"room_member":    &accessv1.RoomMember{},
+	"post":           &accessv1.Post{},
+	"draft":          &accessv1.Draft{},
+	"ticket":         &accessv1.Ticket{},
+	"setting":        &accessv1.Setting{},
 }
 
 // accessOptions is the access-model test schema, which the -access flag

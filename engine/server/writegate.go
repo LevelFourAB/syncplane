@@ -39,6 +39,10 @@ type writeGate struct {
 	// access is what the caller holds in the access model, resolved inside
 	// each write transaction; nil for a schema without the model.
 	access *txAccess
+	// creator is what an enforced create stores in each creator field, set
+	// once creatorKnown is.
+	creator      string
+	creatorKnown bool
 }
 
 // newWriteGate builds the gate an enforced request carries into its writes, or
@@ -54,6 +58,21 @@ func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID st
 			s.reportPoison(ctx, workspaceID, row, err)
 		}),
 	}
+}
+
+// creatorSubject returns the caller's primary subject, which a create stores
+// in each creator field. In a schema with the access model it is the one the
+// workspace gate resolved, so the hook runs once per request.
+func (g *writeGate) creatorSubject() string {
+	if !g.creatorKnown {
+		if g.access != nil {
+			g.creator = g.access.caller.primary
+		} else {
+			g.creator = g.srv.primarySubjectOf(g.p)
+		}
+		g.creatorKnown = true
+	}
+	return g.creator
 }
 
 // accessOf returns the gate's access, nil for a nil gate.

@@ -2,14 +2,21 @@ import { createConnectTransport } from '@connectrpc/connect-node';
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
+import type { RejectionInfo } from '../../src/client.js';
 import {
 	CommentSchema,
+	DraftSchema,
 	LabelSchema,
 	NoteSchema,
 	OrgMemberSchema,
+	PostSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
+	RoomMemberSchema,
+	RoomSchema,
+	SettingSchema,
 	TaskSchema,
+	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVStore } from '../../src/kv/store.js';
@@ -34,6 +41,12 @@ const entities = [
 	CommentSchema,
 	LabelSchema,
 	NoteSchema,
+	RoomSchema,
+	RoomMemberSchema,
+	PostSchema,
+	DraftSchema,
+	TicketSchema,
+	SettingSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -45,8 +58,10 @@ function clientAs(
 	user: string,
 	workspaceId: string,
 	kvStore: KVStore = new MemoryKVStore(),
+	onMutationRejected?: (info: RejectionInfo) => void,
 ): SyncClient {
 	const client = new SyncClient({
+		onMutationRejected,
 		transport: createConnectTransport({
 			baseUrl: server.url,
 			httpVersion: '1.1',
@@ -103,20 +118,20 @@ describe('access model on the client', () => {
 		const ws = freshWorkspace();
 		await seed(ws);
 		const guest = clientAs('guest', ws);
-		expect(await guest.can(TaskSchema, 't1', 'view_tasks')).toBe('unknown');
+		expect(await guest.hasPermission(TaskSchema, 't1', 'view_tasks')).toBe('unknown');
 		await synced(guest);
 
-		expect(await guest.can(TaskSchema, 't1', 'view_tasks')).toBe('yes');
-		expect(await guest.can(TaskSchema, 't1', 'edit_tasks')).toBe('no');
-		expect(await guest.can(ProjectSchema, 'p1', 'view_projects')).toBe('yes');
-		expect(await guest.can(ProjectSchema, 'p2', 'view_projects')).toBe('no');
+		expect(await guest.hasPermission(TaskSchema, 't1', 'view_tasks')).toBe('yes');
+		expect(await guest.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('no');
+		expect(await guest.hasPermission(ProjectSchema, 'p1', 'view_projects')).toBe('yes');
+		expect(await guest.hasPermission(ProjectSchema, 'p2', 'view_projects')).toBe('no');
 		// The guest does not hold t2, so its access parent is unknown here.
-		expect(await guest.can(TaskSchema, 't2', 'view_tasks')).toBe('unknown');
+		expect(await guest.hasPermission(TaskSchema, 't2', 'view_tasks')).toBe('unknown');
 
 		const writer = await synced(clientAs('writer', ws));
-		expect(await writer.can(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
+		expect(await writer.hasPermission(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
 		const admin = await synced(clientAs('admin', ws));
-		expect(await admin.can(TaskSchema, 'not-here', 'edit_tasks')).toBe('yes');
+		expect(await admin.hasPermission(TaskSchema, 'not-here', 'edit_tasks')).toBe('yes');
 	});
 
 	it("follows a change of the caller's grants", async () => {
@@ -125,7 +140,7 @@ describe('access model on the client', () => {
 		const guest = await synced(clientAs('guest', ws));
 		const changed: string[] = [];
 		guest.onAccessChange((w) => changed.push(w));
-		expect(await guest.can(TaskSchema, 't1', 'edit_tasks')).toBe('no');
+		expect(await guest.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('no');
 
 		await trusted(ws, [
 			{
@@ -134,7 +149,7 @@ describe('access model on the client', () => {
 			},
 		]);
 		await guest.syncNow();
-		expect(await guest.can(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		expect(await guest.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
 		expect(changed).toContain(ws);
 	});
 
@@ -164,27 +179,27 @@ describe('access model on the client', () => {
 		await seed(ws);
 		const kv = new MemoryKVStore();
 		const first = await synced(clientAs('writer', ws, kv));
-		expect(await first.can(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
+		expect(await first.hasPermission(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
 		await first.close();
 
 		const second = clientAs('writer', ws, kv);
-		expect(await second.can(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
+		expect(await second.hasPermission(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
 	});
 
 	it('answers unknown while a local grant write waits for its ack', async () => {
 		const ws = freshWorkspace();
 		await seed(ws);
 		const admin = await synced(clientAs('admin', ws));
-		expect(await admin.can(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		expect(await admin.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
 		await admin.mutate.put(ProjectMemberSchema, {
 			id: 'pm-new',
 			project: { id: 'p1' },
 			userId: 'someone',
 			role: 'project_reader',
 		});
-		expect(await admin.can(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		expect(await admin.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
 		await admin.syncNow();
-		expect(await admin.can(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		expect(await admin.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
 	});
 
 	it('moves the comments of a task that moves to another project', async () => {
@@ -197,7 +212,7 @@ describe('access model on the client', () => {
 		const guest = await synced(clientAs('guest', ws));
 		const writer = await synced(clientAs('writer', ws));
 		expect((await guest.get(CommentSchema, 'c1'))?.body).toBe('on one');
-		expect(await guest.can(CommentSchema, 'c1', 'view_tasks')).toBe('yes');
+		expect(await guest.hasPermission(CommentSchema, 'c1', 'view_tasks')).toBe('yes');
 		expect(await writer.get(CommentSchema, 'c1')).toBeUndefined();
 
 		await trusted(ws, [ {
@@ -208,6 +223,86 @@ describe('access model on the client', () => {
 		await writer.syncNow();
 		expect(await guest.get(CommentSchema, 'c1')).toBeUndefined();
 		expect((await writer.get(CommentSchema, 'c1'))?.body).toBe('on one');
-		expect(await writer.can(CommentSchema, 'c1', 'edit_tasks')).toBe('yes');
+		expect(await writer.hasPermission(CommentSchema, 'c1', 'edit_tasks')).toBe('yes');
+	});
+});
+
+describe('owner rules on the client', () => {
+	async function seedRoom(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'room', value: { id: 'r1' } },
+			{
+				entity: 'room_member',
+				value: { id: 'rm-ann', room: { id: 'r1' }, userId: 'ann', role: 'room_poster' },
+			},
+			{
+				entity: 'room_member',
+				value: { id: 'rm-bob', room: { id: 'r1' }, userId: 'bob', role: 'room_poster' },
+			},
+			{ entity: 'post', value: { id: 'po-bob', room: { id: 'r1' }, authorId: 'bob', body: 'yo' } },
+			{ entity: 'draft', value: { id: 'd-bob', room: { id: 'r1' }, authorId: 'bob' } },
+		]);
+	}
+
+	it('stores the caller as the creator of a row it creates', async () => {
+		const ws = freshWorkspace();
+		await seedRoom(ws);
+		const ann = await synced(clientAs('ann', ws));
+		await ann.mutate.put(PostSchema, {
+			id: 'po-ann',
+			room: { id: 'r1' },
+			authorId: 'bob',
+			body: 'hi',
+		});
+		expect((await ann.get(PostSchema, 'po-ann'))?.authorId).toBe('ann');
+		await ann.syncNow();
+
+		const bob = await synced(clientAs('bob', ws));
+		expect((await bob.get(PostSchema, 'po-ann'))?.authorId).toBe('ann');
+	});
+
+	it('predicts what the server admits and refuses', async () => {
+		const ws = freshWorkspace();
+		await seedRoom(ws);
+		const rejections: RejectionInfo[] = [];
+		const ann = await synced(
+			clientAs('ann', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+		await ann.mutate.put(PostSchema, { id: 'po-ann', room: { id: 'r1' }, body: 'hi' });
+		await ann.syncNow();
+
+		expect(await ann.can(PostSchema, 'po-ann', 'update', { fields: [ 'body' ] })).toBe('yes');
+		await ann.mutate.patch(PostSchema, 'po-ann', { body: 'edited' });
+		expect(await ann.can(PostSchema, 'po-ann', 'update', { fields: [ 'title' ] })).toBe('no');
+		await ann.mutate.patch(PostSchema, 'po-ann', { title: 'renamed' });
+		expect(await ann.can(PostSchema, 'po-bob', 'delete')).toBe('no');
+		await ann.mutate.del(PostSchema, 'po-bob');
+		expect(await ann.canCreate(SettingSchema, { userId: 'bob' })).toBe('no');
+		await ann.mutate.put(SettingSchema, { userId: 'bob', theme: 'pink' });
+		expect(await ann.canCreate(SettingSchema, { userId: 'ann' })).toBe('yes');
+		await ann.mutate.put(SettingSchema, { userId: 'ann', theme: 'pink' });
+		await ann.syncNow();
+
+		expect(rejections.map((r) => r.errorCode)).toEqual([
+			'permission_denied',
+			'permission_denied',
+			'permission_denied',
+		]);
+		const post = await ann.get(PostSchema, 'po-ann');
+		expect(post?.body).toBe('edited');
+		expect(post?.title).toBe('');
+		expect((await ann.get(PostSchema, 'po-bob'))?.body).toBe('yo');
+		expect((await ann.get(SettingSchema, 'ann'))?.theme).toBe('pink');
+		expect(await ann.get(SettingSchema, 'bob')).toBeUndefined();
+	});
+
+	it('syncs only the rows a subject check lets the caller read', async () => {
+		const ws = freshWorkspace();
+		await seedRoom(ws);
+		const ann = await synced(clientAs('ann', ws));
+		const bob = await synced(clientAs('bob', ws));
+		expect(await ann.get(DraftSchema, 'd-bob')).toBeUndefined();
+		expect(await bob.get(DraftSchema, 'd-bob')).toBeDefined();
+		expect(await bob.can(DraftSchema, 'd-bob', 'read')).toBe('yes');
 	});
 });

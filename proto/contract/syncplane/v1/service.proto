@@ -240,6 +240,10 @@ message CallerAccess {
 	repeated PermissionAccess permissions = 1;
 	// The workspace sequence this summary is current through.
 	uint64 seq = 2;
+	// The caller's subjects: the values grant rows and `subject` checks
+	// compare with. The first is the primary subject, which a create stores
+	// in each `creator` field. Empty for an anonymous caller.
+	repeated string subjects = 3;
 }
 
 // Where a caller holds one permission.

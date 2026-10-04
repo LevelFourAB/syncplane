@@ -136,8 +136,14 @@ export interface EntityDef {
 	 */
 	writeAccess: WriteAccess | undefined;
 	/**
+	 * The entity's `(syncplane.v1.entity).access` rules, in declaration order,
+	 * or `undefined` when the entity declares no access.
+	 */
+	accessRules: readonly AccessRuleDef[] | undefined;
+	/**
 	 * Top-level field names no client write may change, from
-	 * `(syncplane.v1.field_behavior).write_policy` — a oneof named by its group.
+	 * `(syncplane.v1.field_behavior).write_policy` — a oneof named by its group —
+	 * and from `creator`.
 	 *
 	 * A `patch()` masking one is refused at the call site; a `put()` carries the
 	 * stored value over instead, which is what the server does with the row it
@@ -146,6 +152,12 @@ export interface EntityDef {
 	 * enqueues and comes back as a rejection ack.
 	 */
 	protectedFields: string[];
+	/**
+	 * The fields marked `(syncplane.v1.field_behavior).creator`: a create
+	 * stores the caller's primary subject in each, so a local put of a row
+	 * this client does not hold does the same to the overlay.
+	 */
+	creatorFields: DescField[];
 	/**
 	 * Whether the entity's rows grant roles in the access model
 	 * (`(syncplane.v1.entity).grant`), so a local write to one can change what
@@ -162,6 +174,30 @@ export interface WriteAccess {
 	create: boolean;
 	update: boolean;
 	delete: boolean;
+	/**
+	 * The `fields` lists of the update rules, by proto name, when every update
+	 * rule has one; `undefined` when some update rule has none, which admits
+	 * an update of any field.
+	 */
+	updateFields?: readonly (readonly string[])[];
+}
+
+/**
+ * One rule of an entity's `(syncplane.v1.entity).access`, resolved against
+ * the entity's schema. `write` is spread over `create`, `update` and
+ * `delete`.
+ */
+export interface AccessRuleDef {
+	read: boolean;
+	create: boolean;
+	update: boolean;
+	delete: boolean;
+	/** The permission the rule needs; `undefined` admits every admitted caller. */
+	permission: string | undefined;
+	/** The field that must hold one of the caller's subjects. */
+	subject: DescField | undefined;
+	/** The units an update may change, by proto name, sorted. */
+	fields: readonly string[] | undefined;
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -199,6 +235,7 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		}
 		return field;
 	});
+	const accessRules = accessRulesOf(schema, opts.access);
 	return {
 		schema,
 		name: opts.name,
@@ -206,24 +243,53 @@ export function entityDefOf(schema: DescMessage): EntityDef {
 		indexes: indexesOf(schema, opts),
 		serverOnly: opts.serverOnly,
 		protectedFields: protectedFieldsOf(schema, keyFields),
+		creatorFields: schema.fields.filter((f) => fieldBehaviorOf(f)?.creator !== undefined),
 		grant: opts.grant !== undefined,
-		writeAccess: writeAccessOf(opts.access),
+		writeAccess: writeAccessOf(accessRules),
+		accessRules,
 	};
 }
 
 /**
+ * Resolves an entity's access rules against its schema. The server refuses a
+ * rule whose subject names no field at registration, so such a check never
+ * matches here.
+ */
+function accessRulesOf(
+	schema: DescMessage,
+	access: AccessOptions | undefined,
+): AccessRuleDef[] | undefined {
+	if (access === undefined) return undefined;
+	return access.allow.map((rule) => ({
+		read: rule.read,
+		create: rule.write || rule.create,
+		update: rule.write || rule.update,
+		delete: rule.write || rule.delete,
+		permission: rule.source.case === 'permission' ? rule.source.value : undefined,
+		subject: rule.subject === '' ? undefined : schema.fields.find((f) => f.name === rule.subject),
+		fields: rule.fields.length === 0 ? undefined : [ ...rule.fields ].sort(),
+	}));
+}
+
+/**
  * Folds an entity's access rules into the write operations they admit. The
- * source of a rule is left out: whether the caller holds a permission is
+ * source of a rule and its subject check are left out: whether they hold is
  * decided on the stored row, which only the server has.
  */
-function writeAccessOf(access: AccessOptions | undefined): WriteAccess | undefined {
-	if (access === undefined) return undefined;
+function writeAccessOf(rules: readonly AccessRuleDef[] | undefined): WriteAccess | undefined {
+	if (rules === undefined) return undefined;
 	const out: WriteAccess = { create: false, update: false, delete: false };
-	for (const rule of access.allow) {
-		out.create ||= rule.write || rule.create;
-		out.update ||= rule.write || rule.update;
-		out.delete ||= rule.write || rule.delete;
+	const lists: (readonly string[])[] = [];
+	let unlisted = false;
+	for (const rule of rules) {
+		out.create ||= rule.create;
+		out.delete ||= rule.delete;
+		if (!rule.update) continue;
+		out.update = true;
+		if (rule.fields === undefined) unlisted = true;
+		else lists.push(rule.fields);
 	}
+	if (out.update && !unlisted) out.updateFields = lists;
 	return out;
 }
 
@@ -239,7 +305,12 @@ function protectedFieldsOf(schema: DescMessage, keyFields: DescField[]): string[
 	const out: string[] = [];
 	const seen = new Set<string>();
 	for (const field of schema.fields) {
-		if (fieldBehaviorOf(field)?.writePolicy !== FieldWritePolicy.TRUSTED_ONLY) continue;
+		const behavior = fieldBehaviorOf(field);
+		// A creator field keeps its value after the create the way a
+		// TRUSTED_ONLY one does; only the create itself differs.
+		if (behavior?.writePolicy !== FieldWritePolicy.TRUSTED_ONLY && behavior?.creator === undefined) {
+			continue;
+		}
 		if (keys.has(field.name)) {
 			throw new Error(
 				`${schema.typeName}: key field "${field.name}" is marked write_policy TRUSTED_ONLY; `
@@ -284,7 +355,9 @@ export function protectedFieldOf(def: EntityDef, path: string): string | undefin
  * `paths` is the effective mask of a patch, including any path a text-string
  * value contributed — the same mask the server authorizes. A path reaching a
  * protected field is refused; the field it reaches is its first segment, so
- * masking `audit.size` is refused wherever masking `audit` is.
+ * masking `audit.size` is refused wherever masking `audit` is. When every
+ * update rule has a `fields` list, a patch is also refused unless one list
+ * names every field the mask reaches, key fields left out.
  */
 export function assertWritePolicy(
 	def: EntityDef,
@@ -314,9 +387,20 @@ export function assertWritePolicy(
 		case CrudOp.DELETE:
 			if (!access.delete) onlyTrusted('delete', 'delete');
 			return;
-		case CrudOp.PATCH:
+		case CrudOp.PATCH: {
 			if (!access.update) onlyTrusted('update', 'change');
-			return;
+			if (access.updateFields === undefined || paths === undefined) return;
+			// A key field is left out: a patch that changes one is refused anyway.
+			const keys = new Set(def.keyFields.map((f) => f.name));
+			const heads = [ ...new Set(paths.map((p) => p.split('.', 1)[0]!)) ]
+				.filter((h) => !keys.has(h))
+				.sort();
+			if (access.updateFields.some((list) => heads.every((h) => list.includes(h)))) return;
+			refuse(
+				`no access rule admits an update of ${heads.map((h) => `"${h}"`).join(', ')} together, `
+					+ `so a patch masking them is refused`,
+			);
+		}
 		case CrudOp.PUT:
 			if (expectedVersion === undefined) {
 				if (!access.create && !access.update) onlyTrusted('create or update', 'write');
@@ -3140,6 +3224,22 @@ export function carryProtectedFields<D extends DescMessage>(
 		if (localName === undefined) continue;
 		out[localName] = src[localName];
 	}
+	return value;
+}
+
+/**
+ * Stores `subject` in every creator field of `value`, which is what the server
+ * does on a create it authorizes. A put of a row this client does not hold is
+ * the client's best guess at a create; a stale guess is corrected by the next
+ * rebase. Mutates and returns `value`.
+ */
+export function stampCreatorFields<D extends DescMessage>(
+	def: EntityDef,
+	value: MessageShape<D>,
+	subject: string,
+): MessageShape<D> {
+	const out = value as unknown as Rec;
+	for (const field of def.creatorFields) out[field.localName] = subject;
 	return value;
 }
 

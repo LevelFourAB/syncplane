@@ -1,12 +1,14 @@
 import { create, fromBinary, getOption, hasOption, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, expectTypeOf, it } from 'vitest';
 
+import { CrudOp } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import {
 	entity as entityExt,
 	field_behavior as fieldBehaviorExt,
 	FieldWritePolicy,
 } from '../../src/gen/syncplane/v1/options_pb.js';
 import {
+	assertWritePolicy,
 	entityDefOf,
 	EntityRegistry,
 	isRef,
@@ -638,6 +640,117 @@ describe('schema builder — access model', () => {
 					},
 				})
 			).toThrow(/grant role "w" grants "edit" twice/);
+		});
+	});
+});
+
+describe('schema builder — owner rules', () => {
+	const room = entity('room', { id: text().key() }, {
+		access: { allow: [ { read: true, write: true, permission: 'view' } ] },
+	});
+	const post = entity('post', {
+		id: text().key(),
+		room: ref(() => room).accessParent(),
+		authorId: text().creator(),
+		body: text(),
+		title: text(),
+	}, {
+		access: {
+			allow: [
+				{ read: true, permission: 'view' },
+				{ create: true, delete: true, permission: 'post', subject: 'authorId' },
+				{ update: true, permission: 'post', subject: 'authorId', fields: [ 'title', 'body' ] },
+			],
+		},
+	});
+	const bundle = defineSchema(room, post);
+
+	it('lowers subject and fields with proto field names, the fields sorted on the server', () => {
+		const [ , create, update ] = getOption(bundle.descMessage('post'), entityExt).access!.allow;
+		expect(create).toMatchObject({ create: true, delete: true, subject: 'author_id', fields: [] });
+		expect(update).toMatchObject({ update: true, subject: 'author_id', fields: [ 'title', 'body' ] });
+	});
+
+	it('lowers .creator() onto the field', () => {
+		const field = bundle.descMessage('post').fields.find((f) => f.name === 'author_id')!;
+		expect(getOption(field, fieldBehaviorExt).creator).toBeDefined();
+	});
+
+	it('reads the rules and the creator field onto the EntityDef', () => {
+		const def = entityDefOf(bundle.descMessage('post'));
+		expect(def.creatorFields.map((f) => f.name)).toEqual([ 'author_id' ]);
+		expect(def.protectedFields).toEqual([ 'author_id' ]);
+		expect(def.accessRules![2]).toMatchObject({
+			update: true,
+			permission: 'post',
+			fields: [ 'body', 'title' ],
+		});
+		expect(def.accessRules![2]!.subject?.name).toBe('author_id');
+		expect(def.writeAccess).toEqual({
+			create: true,
+			update: true,
+			delete: true,
+			updateFields: [ [ 'body', 'title' ] ],
+		});
+	});
+
+	it('refuses locally a patch whose mask no fields list covers', () => {
+		const def = entityDefOf(bundle.descMessage('post'));
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'body' ])).not.toThrow();
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'id', 'title' ])).not.toThrow();
+		expect(() => assertWritePolicy(def, CrudOp.PATCH, undefined, [ 'room' ])).toThrow(
+			'entity "post": no access rule admits an update of "room" together, so a patch masking them is refused',
+		);
+	});
+
+	describe('validation', () => {
+		const fields = { id: text().key(), ownerId: text(), count: int32(), note: text() };
+		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
+
+		it('rejects creator() on anything but a singular text() that is not a key or protected', () => {
+			expect(() => int32().creator()).toThrow(/only valid on a singular text\(\) field/);
+			expect(() => text().key().creator()).toThrow(/not valid on a key field/);
+			expect(() => text().creator().key()).toThrow(/cannot be creator\(\)/);
+			expect(() => text().protected().creator()).toThrow(/not valid on a protected\(\) field/);
+			expect(() => text().creator().protected()).toThrow(/not valid on a creator\(\) field/);
+		});
+		it('rejects a subject that is not a declared text() field', () => {
+			expect(allowing({ read: true, permission: 'p', subject: 'who' })).toThrow(
+				'entity "e" access.allow[0]: subject field "who" is not declared',
+			);
+			expect(allowing({ read: true, permission: 'p', subject: 'count' })).toThrow(
+				'entity "e" access.allow[0]: subject field "count" must be a singular text() field',
+			);
+		});
+		it('rejects fields on a rule that names another operation than update', () => {
+			expect(allowing({ update: true, delete: true, permission: 'p', fields: [ 'note' ] })).toThrow(
+				'entity "e" access.allow[0]: fields is valid only on a rule whose one operation is update',
+			);
+			expect(allowing({ write: true, permission: 'p', fields: [ 'note' ] })).toThrow(
+				/fields is valid only/,
+			);
+		});
+		it('rejects a fields list that is empty, names an unknown or key field, or repeats one', () => {
+			expect(allowing({ update: true, permission: 'p', fields: [] })).toThrow(/fields lists no field/);
+			expect(allowing({ update: true, permission: 'p', fields: [ 'text' ] })).toThrow(
+				/fields names "text", which is not declared/,
+			);
+			expect(allowing({ update: true, permission: 'p', fields: [ 'id' ] })).toThrow(
+				/fields names key field "id"/,
+			);
+			expect(allowing({ update: true, permission: 'p', fields: [ 'note', 'note' ] })).toThrow(
+				/fields names "note" twice/,
+			);
+		});
+		it('treats rules that differ only in the order of their fields as the same rule', () => {
+			expect(allowing(
+				{ update: true, permission: 'p', fields: [ 'note', 'count' ] },
+				{ update: true, permission: 'p', fields: [ 'count', 'note' ] },
+			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+			expect(allowing(
+				{ read: true, permission: 'p', subject: 'ownerId' },
+				{ read: true, permission: 'p' },
+			)).not.toThrow();
 		});
 	});
 });

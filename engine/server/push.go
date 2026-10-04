@@ -1015,6 +1015,9 @@ func (s *Server) applyCrud(
 			if err := carryProtectedFields(info, protected, base, msg); err != nil {
 				return err
 			}
+			if base == nil {
+				stampCreatorFields(info, msg, g.creatorSubject())
+			}
 		}
 		var prevText map[string][]byte
 		if len(info.textFields) > 0 {

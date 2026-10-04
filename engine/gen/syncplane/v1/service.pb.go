@@ -738,7 +738,11 @@ type CallerAccess struct {
 	// not listed is held nowhere.
 	Permissions []*PermissionAccess `protobuf:"bytes,1,rep,name=permissions,proto3" json:"permissions,omitempty"`
 	// The workspace sequence this summary is current through.
-	Seq           uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
+	// The caller's subjects: the values grant rows and `subject` checks
+	// compare with. The first is the primary subject, which a create stores
+	// in each `creator` field. Empty for an anonymous caller.
+	Subjects      []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -785,6 +789,13 @@ func (x *CallerAccess) GetSeq() uint64 {
 		return x.Seq
 	}
 	return 0
+}
+
+func (x *CallerAccess) GetSubjects() []string {
+	if x != nil {
+		return x.Subjects
+	}
+	return nil
 }
 
 // Where a caller holds one permission.
@@ -2194,10 +2205,11 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x12\x10\n" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
-	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"b\n" +
+	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"~\n" +
 	"\fCallerAccess\x12@\n" +
 	"\vpermissions\x18\x01 \x03(\v2\x1e.syncplane.v1.PermissionAccessR\vpermissions\x12\x10\n" +
-	"\x03seq\x18\x02 \x01(\x04R\x03seq\"z\n" +
+	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
+	"\bsubjects\x18\x03 \x03(\tR\bsubjects\"z\n" +
 	"\x10PermissionAccess\x12\x1e\n" +
 	"\n" +
 	"permission\x18\x01 \x01(\tR\n" +

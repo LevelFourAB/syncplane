@@ -434,15 +434,19 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 
 	/**
 	 * Sets what clients are told the caller holds in a workspace under the
-	 * access model, which `SyncClient.can` and `useCan` answer from. Every
-	 * bootstrap, pull and stream page after this call carries it, and
-	 * `undefined` stops sending one; a client keeps the last one it received.
-	 * Nothing here is enforced: the server still applies every write and
-	 * serves every row.
+	 * access model, which `SyncClient.can`, `SyncClient.hasPermission` and the
+	 * React access hooks answer from. `subjects` are what the rules' subject
+	 * checks compare with, and the first is what a client stores in a creator
+	 * field of a row it creates. Every bootstrap, pull and stream page after
+	 * this call carries it, and `undefined` stops sending one; a client keeps
+	 * the last one it received. Nothing here is enforced: the server still
+	 * applies every write, serves every row, and stores a creator field as the
+	 * client wrote it.
 	 *
 	 * @example
 	 * ```ts
 	 * server.setCallerAccess({
+	 *   subjects: [ 'ann' ],
 	 *   permissions: [
 	 *     { permission: 'view_tasks', root: true },
 	 *     { permission: 'edit_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] },

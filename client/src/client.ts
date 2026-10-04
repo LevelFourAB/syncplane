@@ -11,12 +11,18 @@ import { createClient, type Transport } from '@connectrpc/connect';
 
 import {
 	ACCESS_TOUCH_ENTITY,
+	type AccessChain,
+	type AccessOperation,
+	accessParentUnits,
 	AccessSummary,
 	type CanAnswer,
 	canAt,
+	decideRules,
 	MAX_ACCESS_CHAIN,
 	parentRefOf,
 	pendingChangesAccess,
+	type RuleRow,
+	ruleRowOf,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
@@ -114,6 +120,7 @@ import {
 	protectedFieldOf,
 	refQualified,
 	refSegmentOf,
+	stampCreatorFields,
 	takeTextStrings,
 	textFieldBytes,
 	textFieldInit,
@@ -793,6 +800,17 @@ export interface PatchOptions extends CasOptions {
 	paths?: string[];
 }
 
+/** Options for {@link SyncClient.can}. */
+export interface CanOptions {
+	/**
+	 * For an update, the fields it changes, named as a patch mask names them.
+	 * When omitted, the update changes fields that no rule's `fields` list
+	 * covers and keeps the access parent and every subject field, so only a
+	 * rule without a `fields` list can admit it.
+	 */
+	fields?: string[];
+}
+
 /** A PATCH whose mask is given rather than derived — see PatchInit. */
 export interface MaskedPatchOptions extends PatchOptions {
 	paths: string[];
@@ -1068,8 +1086,21 @@ export interface WorkspaceClient<E extends readonly DescMessage[] = readonly Des
 	): Room<S, M>;
 	get<D extends DescMessage>(schema: D, key: string): Promise<MessageShape<D> | undefined>;
 	getRow<D extends DescMessage>(schema: D, key: string): Promise<Row<MessageShape<D>> | undefined>;
-	/** Predicts a permission at a row in this workspace; see SyncClient.can. */
-	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer>;
+	/** Predicts an operation on a row in this workspace; see SyncClient.can. */
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions,
+	): Promise<CanAnswer>;
+	/** Predicts a create in this workspace; see SyncClient.canCreate. */
+	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer>;
+	/** Predicts a permission at a row in this workspace; see SyncClient.hasPermission. */
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<CanAnswer>;
 	scan<D extends DescMessage>(schema: D): Promise<RowSet<MessageShape<D>>>;
 	query<D extends DescMessage, const Q extends Query<MessageShape<D>>>(
 		schema: D,
@@ -1251,6 +1282,7 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 			...this.client.crudMutateApi(
 				(crud) => this.client.enqueue(this, { case: 'crud', value: crud }),
 				(schema, key) => this.get(schema, key),
+				() => this.client.primarySubjectIn(this.workspaceId),
 			),
 			custom: async (name, argsSchema, args) => {
 				await this.client.enqueue(this, {
@@ -1345,8 +1377,25 @@ class WorkspaceScope<E extends readonly DescMessage[]> implements WorkspaceClien
 		return this.client.getIn(this.workspaceId, schema, key);
 	}
 
-	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer> {
-		return this.client.canIn(this.workspaceId, schema, key, permission);
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions,
+	): Promise<CanAnswer> {
+		return this.client.canIn(this.workspaceId, schema, key, operation, opts);
+	}
+
+	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer> {
+		return this.client.canCreateIn(this.workspaceId, schema, row);
+	}
+
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<CanAnswer> {
+		return this.client.hasPermissionIn(this.workspaceId, schema, key, permission);
 	}
 
 	getRow<D extends DescMessage>(
@@ -2149,12 +2198,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * own mutation, a transact() handle's facade pushes it into the batch buffer.
 	 * `read` supplies the base row `update` diffs against, from the same place
 	 * that facade's reads come from — inside a transaction that is the pre-batch
-	 * state, matching every other read on the handle.
+	 * state, matching every other read on the handle. `primarySubject` supplies
+	 * what a put of a row the facade does not hold stores in creator fields.
 	 * @internal
 	 */
 	crudMutateApi(
 		sink: (crud: CrudMutation) => Promise<void> | void,
 		read: <D extends DescMessage>(schema: D, key: string) => Promise<MessageShape<D> | undefined>,
+		primarySubject: () => Promise<string>,
 	): CrudMutateApi {
 		// Written as one wide signature rather than inline in the object literal:
 		// `patch` is overloaded on the interface, and a single implementation
@@ -2203,7 +2254,11 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				}
 				let msg = create(schema, init as MessageInitShape<typeof schema>);
 				if (def.protectedFields.length > 0) {
-					msg = carryProtectedFields(def, schema, msg, await read(schema, keyOf(def, msg)));
+					const base = await read(schema, keyOf(def, msg));
+					msg = carryProtectedFields(def, schema, msg, base);
+					if (base === undefined && def.creatorFields.length > 0) {
+						msg = stampCreatorFields(def, msg, await primarySubject());
+					}
 				}
 				const crud = buildPut(def, schema, msg, opts?.expectedVersion);
 				attachTextStrings(crud, texts);
@@ -3074,24 +3129,75 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Predicts whether the caller holds `permission` at the row of `schema`
-	 * with `key` in the default workspace, from the CallerAccess the server
-	 * last sent: held at the workspace root, at the row itself, or at a row up
-	 * its chain of access parents, as the rows held locally name it.
+	 * Predicts whether the entity's access rules admit `operation` on the row
+	 * of `schema` with `key` in the default workspace, from the CallerAccess
+	 * the server last sent and the rows held locally: where the caller holds
+	 * each rule's permission up the row's chain of access parents, and the
+	 * value of each subject field.
+	 *
+	 * For `'update'`, `opts.fields` names the fields the update changes. A
+	 * rule with a `fields` list counts only when the list names each of them,
+	 * and a rule whose subject field or the access parent is among them
+	 * answers `'unknown'` at best, since the new value decides.
 	 *
 	 * The answer is advisory. The server decides every read and write itself,
 	 * and a write this predicts as allowed can still come back as a rejection
 	 * ack. A row the caller has lost access to keeps showing an optimistic
 	 * write queued against it until that ack arrives.
 	 *
-	 * Resolves to `'unknown'` before the first summary arrives, in a schema
-	 * without the access model, when the answer depends on a row up the chain
-	 * that is not held locally (the row itself included), and while a local
-	 * write to a grant row, or a delete of a row other rows sit below, waits
-	 * for its ack.
+	 * Resolves to `'unknown'` before the first summary arrives, for an entity
+	 * outside the access model, when the row is not held locally, when the
+	 * answer depends on a row up the chain that is not held locally, and while
+	 * a local write to a grant row, or a delete of a row other rows sit below,
+	 * waits for its ack.
+	 *
+	 * @example
+	 * ```ts
+	 * const canEdit = await client.can(CommentSchema, id, 'update', { fields: ['body'] });
+	 * const canDelete = await client.can(CommentSchema, id, 'delete');
+	 * ```
 	 */
-	can<D extends DescMessage>(schema: D, key: string, permission: string): Promise<CanAnswer> {
-		return this.canIn(this.defaultScope().workspaceId, schema, key, permission);
+	can<D extends DescMessage>(
+		schema: D,
+		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions,
+	): Promise<CanAnswer> {
+		return this.canIn(this.defaultScope().workspaceId, schema, key, operation, opts);
+	}
+
+	/**
+	 * Predicts whether the entity's access rules admit creating `row` in the
+	 * default workspace: the row as the server would store it, with each
+	 * creator field holding the caller's primary subject. See {@link can} for
+	 * what the answer means and when it is `'unknown'`; the row's access
+	 * parent takes the place of the row itself.
+	 *
+	 * @example
+	 * ```ts
+	 * const canComment = await client.canCreate(CommentSchema, { id: 'c1', task: { id: taskId } });
+	 * ```
+	 */
+	canCreate<D extends DescMessage>(schema: D, row: MessageInitShape<D>): Promise<CanAnswer> {
+		return this.canCreateIn(this.defaultScope().workspaceId, schema, row);
+	}
+
+	/**
+	 * Predicts whether the caller holds `permission` at the row of `schema`
+	 * with `key` in the default workspace: at the workspace root, at the row
+	 * itself, or at a row up its chain of access parents, as the rows held
+	 * locally name it. Use it for a permission no access rule checks, such as
+	 * the one a custom mutator needs; {@link can} answers for an operation.
+	 *
+	 * Resolves to `'unknown'` in the cases {@link can} lists, where the row
+	 * itself counts as a row up the chain.
+	 */
+	hasPermission<D extends DescMessage>(
+		schema: D,
+		key: string,
+		permission: string,
+	): Promise<CanAnswer> {
+		return this.hasPermissionIn(this.defaultScope().workspaceId, schema, key, permission);
 	}
 
 	/** @internal backs WorkspaceClient.can. */
@@ -3099,43 +3205,135 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		workspaceId: string,
 		schema: D,
 		key: string,
+		operation: Exclude<AccessOperation, 'create'>,
+		opts?: CanOptions,
+	): Promise<CanAnswer> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const rules = def.accessRules;
+		if (rules === undefined) return 'unknown';
+		return this.withAccessRead(async (tx) => {
+			const summary = await this.accessSummaryIn(tx, workspaceId);
+			if (summary === undefined) return 'unknown';
+			const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
+			const row = bytes === undefined ? undefined : fromBinary(def.schema, bytes);
+			const chain = await this.accessChainIn(tx, workspaceId, def, row);
+			const stored = ruleRowOf(summary, def, key, row, chain);
+			if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
+			const changed = opts?.fields ?? null;
+			// The new value of a changed subject field or access parent decides
+			// the final side, and neither is known here.
+			const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
+			const final: RuleRow = {
+				held: moves
+					? (p) => canAt(summary, p, def.name, key, { rows: [], complete: false })
+					: stored.held,
+				subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
+			};
+			return decideRules(rules, 'update', summary.subjects, stored, final, changed);
+		});
+	}
+
+	/** @internal backs WorkspaceClient.canCreate. */
+	async canCreateIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		init: MessageInitShape<D>,
+	): Promise<CanAnswer> {
+		this.assertOpen();
+		const def = this.entityRegistry.bySchema(schema);
+		const rules = def.accessRules;
+		if (rules === undefined) return 'unknown';
+		return this.withAccessRead(async (tx) => {
+			const summary = await this.accessSummaryIn(tx, workspaceId);
+			if (summary === undefined) return 'unknown';
+			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
+			const chain = await this.accessChainIn(tx, workspaceId, def, row);
+			return decideRules(
+				rules,
+				'create',
+				summary.subjects,
+				ruleRowOf(summary, def, keyOf(def, row), row, chain),
+			);
+		});
+	}
+
+	/** @internal backs WorkspaceClient.hasPermission. */
+	async hasPermissionIn<D extends DescMessage>(
+		workspaceId: string,
+		schema: D,
+		key: string,
 		permission: string,
 	): Promise<CanAnswer> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
+		return this.withAccessRead(async (tx) => {
+			const summary = await this.accessSummaryIn(tx, workspaceId);
+			if (summary === undefined) return 'unknown';
+			if (summary.holds(permission, def.name, key)) return 'yes';
+			const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
+			const row = bytes === undefined ? undefined : fromBinary(def.schema, bytes);
+			return canAt(
+				summary,
+				permission,
+				def.name,
+				key,
+				await this.accessChainIn(tx, workspaceId, def, row),
+			);
+		});
+	}
+
+	/**
+	 * The primary subject in the last CallerAccess stored for `workspaceId`, or
+	 * an empty string before the first one arrives.
+	 * @internal
+	 */
+	async primarySubjectIn(workspaceId: string): Promise<string> {
+		return this.withAccessRead(async (tx) => {
+			const raw = await tx.get(metaCallerAccess(workspaceId));
+			if (raw === undefined) return '';
+			return fromBinary(CallerAccessSchema, raw as Uint8Array).subjects[0] ?? '';
+		});
+	}
+
+	/** Runs `fn` over a shared read of the local store. */
+	private async withAccessRead<T>(fn: (tx: KVRead) => Promise<T>): Promise<T> {
 		const kv = await this.kv();
 		return this.kvMutex.runShared(async () => {
 			const tx = await kv.read();
 			try {
-				const summary = await this.accessSummaryIn(tx, workspaceId);
-				if (summary === undefined) return 'unknown';
-				if (summary.holds(permission, def.name, key)) return 'yes';
-				const rows: { entity: string; key: string }[] = [];
-				let complete = true;
-				let at: EntityDef = def;
-				let atKey = key;
-				for (;;) {
-					// Read through the merged view, so a queued move counts
-					// where the row will be once the server accepts it.
-					const bytes = this.entityRegistry.get(at.name) === undefined
-						? undefined
-						: await readMergedRow(tx, this.entityRegistry, at.name, workspaceId, atKey);
-					const parent = parentRefOf(at, bytes === undefined ? undefined : fromBinary(at.schema, bytes));
-					if (parent === null) break;
-					if (parent === undefined || rows.length === MAX_ACCESS_CHAIN) {
-						complete = false;
-						break;
-					}
-					rows.push({ entity: parent.entity, key: parent.key });
-					if (summary.holds(permission, parent.entity, parent.key)) return 'yes';
-					at = parent.def;
-					atKey = parent.key;
-				}
-				return canAt(summary, permission, def.name, key, { rows, complete });
+				return await fn(tx);
 			} finally {
 				tx.release();
 			}
 		});
+	}
+
+	/**
+	 * The rows above `row` of `def`, read through the merged view so a queued
+	 * move counts where the row will be once the server accepts it. `row` is
+	 * undefined for a row the client does not hold, which still decides for an
+	 * entity without an access parent. Stops at a row the client does not
+	 * hold, and after MAX_ACCESS_CHAIN rows.
+	 */
+	private async accessChainIn(
+		tx: KVRead,
+		workspaceId: string,
+		def: EntityDef,
+		row: Message | undefined,
+	): Promise<AccessChain> {
+		const rows: { entity: string; key: string }[] = [];
+		let parent = parentRefOf(def, row);
+		while (parent !== null) {
+			if (parent === undefined || rows.length === MAX_ACCESS_CHAIN) return { rows, complete: false };
+			rows.push({ entity: parent.entity, key: parent.key });
+			const at = parent;
+			const bytes = this.entityRegistry.get(at.def.name) === undefined
+				? undefined
+				: await readMergedRow(tx, this.entityRegistry, at.def.name, workspaceId, at.key);
+			parent = parentRefOf(at.def, bytes === undefined ? undefined : fromBinary(at.def.schema, bytes));
+		}
+		return { rows, complete: true };
 	}
 
 	/**
@@ -5261,9 +5459,13 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			resolveReverseRef: (schema, rel, target, q) => scope.resolveReverseRef(schema, rel, target, q),
 			// Reads go to the scope, so `update` diffs against the pre-batch row —
 			// the same state every other read on the handle sees.
-			mutate: this.crudMutateApi((crud) => {
-				buffer.push(crud);
-			}, (schema, key) => scope.get(schema, key)),
+			mutate: this.crudMutateApi(
+				(crud) => {
+					buffer.push(crud);
+				},
+				(schema, key) => scope.get(schema, key),
+				() => this.primarySubjectIn(scope.workspaceId),
+			),
 			db: undefined as unknown as EntityApis<E>,
 		};
 		tx.db = buildEntityApis(this.opts.entities, tx, this.entityRegistry);

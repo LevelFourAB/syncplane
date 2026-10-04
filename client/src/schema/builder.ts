@@ -60,6 +60,7 @@ import {
 	type AccessRule,
 	AccessRuleSchema,
 	AdmittedCallerSchema,
+	CreatorOptionsSchema,
 	entity as entityExt,
 	EntityOptionsSchema,
 	field_behavior as fieldBehaviorExt,
@@ -175,6 +176,8 @@ interface FieldSpec {
 	searchable?: boolean;
 	/** Put this field out of a client's reach; see Field.protected. */
 	protectedField?: boolean;
+	/** Record who created the row in this field; see Field.creator. */
+	creator?: boolean;
 	/** kind 'ref' — the name of the reverse relation on the target; see Field.reverseRelation. */
 	reverseRelation?: string;
 	/** kind 'ref' — place each row below the referenced row; see Field.accessParent. */
@@ -208,6 +211,9 @@ export class Field<T> {
 			throw new Error('key() is only valid on a singular scalar field');
 		}
 		if (this.spec.repeated) throw new Error('a key field cannot be repeated');
+		if (this.spec.creator) {
+			throw new Error('a key field cannot be creator(): a key field never changes after the create');
+		}
 		if (this.spec.protectedField) {
 			throw new Error(
 				'a key field cannot be protected(): a patch can never move a key field, and a put that '
@@ -318,7 +324,7 @@ export class Field<T> {
 	/**
 	 * Puts this field out of a client's reach while the rest of the row stays
 	 * writable — a status a server-side workflow advances, a counter an effect
-	 * maintains, an owner stamped at creation.
+	 * maintains. To record who created the row, use {@link Field.creator}.
 	 *
 	 * A `patch()` whose mask reaches the field throws at the call site and is
 	 * rejected by the server; a `put()` is not refused, and the field keeps the
@@ -336,7 +342,59 @@ export class Field<T> {
 					+ 'that changed one would address a different row',
 			);
 		}
+		if (this.spec.creator) {
+			throw new Error('protected() is not valid on a creator() field, which already keeps its value');
+		}
 		return new Field<T>({ ...this.spec, protectedField: true });
+	}
+
+	/**
+	 * Records who created the row in this field: on a create that is not
+	 * trusted, the server stores the caller's primary subject in it, whatever
+	 * value the write carries. Afterwards the field behaves as a
+	 * {@link Field.protected} one: a `patch()` whose mask reaches it throws at
+	 * the call site, and a `put()` keeps the stored value. A trusted
+	 * server-side write stores the value it carries.
+	 *
+	 * The local view shows the primary subject from the last access summary
+	 * on a row this client creates, and an empty value before the first
+	 * summary arrives. An access rule's `subject` check can name the field to
+	 * admit only the author.
+	 *
+	 * Throws unless the field is a singular `text()` that is not a key and not
+	 * protected.
+	 *
+	 * @example
+	 * ```ts
+	 * const comment = schema.entity('comment', {
+	 *   id: schema.text().key(),
+	 *   task: schema.ref(() => task).accessParent(),
+	 *   authorId: schema.text().creator(),
+	 *   body: schema.text(),
+	 * }, {
+	 *   access: {
+	 *     allow: [
+	 *       { read: true, permission: 'view_tasks' },
+	 *       { create: true, delete: true, permission: 'comment', subject: 'authorId' },
+	 *       { update: true, permission: 'comment', subject: 'authorId', fields: ['body'] },
+	 *     ],
+	 *   },
+	 * });
+	 * ```
+	 */
+	creator(): Field<T> {
+		if (this.spec.kind !== 'scalar' || this.spec.scalar !== 'string' || this.spec.repeated) {
+			throw new Error('creator() is only valid on a singular text() field');
+		}
+		if (this.spec.key) {
+			throw new Error('creator() is not valid on a key field, which never changes after the create');
+		}
+		if (this.spec.protectedField) {
+			throw new Error(
+				'creator() is not valid on a protected() field; a creator field already keeps its value',
+			);
+		}
+		return new Field<T>({ ...this.spec, creator: true });
 	}
 
 	/**
@@ -656,7 +714,8 @@ export interface AccessDecl {
 
 /**
  * One rule of an {@link AccessDecl}, mirroring syncplane.v1.AccessRule: the
- * operations it admits, and who it admits them to.
+ * operations it admits, who it admits them to, and the checks the row must
+ * pass.
  *
  * At least one operation must be `true`. `write` admits `create`, `update`
  * and `delete`. The source is either `permission`, which admits a caller that
@@ -664,15 +723,24 @@ export interface AccessDecl {
  * row's chain of `.accessParent()` references, or `admitted: true`, which
  * admits every caller admitted to the workspace.
  *
- * An update must be admitted for both the stored row and the row as it will
- * be stored, so a rule admits moving a row to another access parent only when
- * its source holds at both places.
+ * `subject` names a singular `text()` field that must hold one of the
+ * caller's subjects; an empty value never matches, and a permission held at
+ * the root does not skip the check. `fields` names the fields an update may
+ * change, by accessor name; it is valid only on a rule whose one operation is
+ * `update`, and cannot name a key field. A move changes the access parent
+ * field, so a rule with `fields` admits a move only when it lists that field.
+ *
+ * An update must be admitted by one rule for both the stored row and the row
+ * as it will be stored, so a rule admits moving a row to another access parent
+ * only when its source holds at both places, and a rule with `subject` admits
+ * no update that writes someone else into the subject field.
  *
  * @example
  * ```ts
  * const allow: schema.AccessRuleDecl[] = [
  *   { read: true, permission: 'view_tasks' },
- *   { create: true, permission: 'comment' },
+ *   { create: true, delete: true, permission: 'comment', subject: 'authorId' },
+ *   { update: true, permission: 'comment', subject: 'authorId', fields: ['body'] },
  *   { update: true, delete: true, permission: 'moderate_comments' },
  * ];
  * ```
@@ -684,6 +752,8 @@ export type AccessRuleDecl =
 		update?: boolean;
 		delete?: boolean;
 		write?: boolean;
+		subject?: string;
+		fields?: string[];
 	}
 	& ({ permission: string; admitted?: never } | { admitted: true; permission?: never });
 
@@ -904,7 +974,7 @@ function assertAccess(
 ): void {
 	const where = `entity "${entityName}"`;
 	const access = options?.access;
-	if (access !== undefined) assertAccessRules(where, access);
+	if (access !== undefined) assertAccessRules(where, access, fields);
 	const parents = Object.keys(fields).filter((key) => fields[key]!.spec.accessParent === true);
 	if (parents.length > 1) {
 		throw new Error(
@@ -962,7 +1032,7 @@ const ACCESS_OPERATIONS = [ 'read', 'create', 'update', 'delete', 'write' ] as c
  * Validates the rules of one entity's access declaration against the rules
  * the engine enforces on syncplane.v1.AccessOptions at registration.
  */
-function assertAccessRules(where: string, access: AccessDecl): void {
+function assertAccessRules(where: string, access: AccessDecl, fields: Fields): void {
 	// A plain-JS caller can pass a shape the types refuse, such as one with no
 	// `allow` array.
 	if (!Array.isArray(access.allow) || access.allow.length === 0) {
@@ -989,11 +1059,41 @@ function assertAccessRules(where: string, access: AccessDecl): void {
 		} else if (rule.admitted !== true) {
 			throw new Error(`${at}: admitted must be true`);
 		}
+		if (rule.subject !== undefined) {
+			const spec = fields[rule.subject]?.spec;
+			if (spec === undefined) {
+				throw new Error(`${at}: subject field "${rule.subject}" is not declared`);
+			}
+			if (spec.kind !== 'scalar' || spec.scalar !== 'string' || spec.repeated) {
+				throw new Error(`${at}: subject field "${rule.subject}" must be a singular text() field`);
+			}
+		}
+		if (rule.fields !== undefined) {
+			if (
+				ACCESS_OPERATIONS.some((op) => op !== 'update' && rule[op] === true) || rule.update !== true
+			) {
+				throw new Error(`${at}: fields is valid only on a rule whose one operation is update`);
+			}
+			if (rule.fields.length === 0) throw new Error(`${at}: fields lists no field`);
+			const listed = new Set<string>();
+			for (const name of rule.fields) {
+				const spec = fields[name]?.spec;
+				if (spec === undefined) throw new Error(`${at}: fields names "${name}", which is not declared`);
+				if (spec.key) {
+					throw new Error(`${at}: fields names key field "${name}", which no update changes`);
+				}
+				if (listed.has(name)) throw new Error(`${at}: fields names "${name}" twice`);
+				listed.add(name);
+			}
+		}
 		// The key is the rule as the proto message holds it: an operation left
-		// unset and one set to false encode the same, so they must collide.
+		// unset and one set to false encode the same, so they must collide, and
+		// the order of a fields list does not count.
 		const key = JSON.stringify([
 			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
 			rule.permission ?? null,
+			rule.subject ?? null,
+			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
 		]);
 		const first = seen.get(key);
 		if (first !== undefined) {
@@ -1164,6 +1264,9 @@ function accessRuleOf(rule: AccessRuleDecl): AccessRule {
 		source: rule.permission === undefined
 			? { case: 'admitted', value: create(AdmittedCallerSchema) }
 			: { case: 'permission', value: rule.permission },
+		// Accessor names lower to proto names, as a grant's fields do.
+		subject: rule.subject === undefined ? '' : snakeCase(rule.subject),
+		fields: (rule.fields ?? []).map(snakeCase),
 	});
 }
 
@@ -1282,7 +1385,9 @@ function fieldProtoOf(
 		case 'scalar': {
 			field.type = SCALAR_TO_TYPE[spec.scalar!];
 			if (spec.opaque) setOpaque(field, spec.indexed ?? false, spec.protectedField);
-			else if (spec.indexed || spec.searchable || spec.protectedField) setScalarMarks(field, spec);
+			else if (spec.indexed || spec.searchable || spec.protectedField || spec.creator) {
+				setScalarMarks(field, spec);
+			}
 			break;
 		}
 		case 'message': {
@@ -1428,6 +1533,7 @@ function setScalarMarks(field: FieldDescriptorProto, spec: FieldSpec): void {
 			indexed: spec.indexed ?? false,
 			searchable: spec.searchable ?? false,
 			writePolicy: writePolicyOf(spec.protectedField),
+			...(spec.creator ? { creator: create(CreatorOptionsSchema) } : {}),
 		}),
 	);
 	field.options = fieldOptions;

@@ -146,6 +146,11 @@ type DynamicField struct {
 	// the compiled path honours). Valid only with a singular Ref without
 	// RefWorkspace, on a field of the entity itself.
 	AccessParent bool
+	// Creator makes the field record who created the row: an enforced create
+	// stores the caller's primary subject in it, and only a trusted write
+	// changes it afterwards (the same (syncplane.v1.field_behavior).creator
+	// the compiled path honours). Valid only on a singular string field.
+	Creator bool
 	// KeyField names the identity field(s) of a keyed message list (composite
 	// allowed). OrderField names the element's fractional position field,
 	// promoting it to a movable list. Both lower to (syncplane.v1.field_behavior).
@@ -398,6 +403,9 @@ func dynamicFieldProto(
 	if f.AccessParent && !f.isRef() {
 		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: access_parent is only valid on a Ref field", ctx, f.Name)
 	}
+	if f.Creator && (f.Kind != protoreflect.StringKind || f.Repeated || f.isMap() || f.isRef() || f.isMessage()) {
+		return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: creator is only valid on a singular string field", ctx, f.Name)
+	}
 
 	switch {
 	case f.isMap():
@@ -468,10 +476,13 @@ func dynamicFieldProto(
 				return nil, nil, fmt.Errorf("server: dynamic entity %q field %q: opaque is only valid on a singular bytes field", ctx, f.Name)
 			}
 		}
-		if f.Opaque || f.Text || f.Indexed {
+		if f.Opaque || f.Text || f.Indexed || f.Creator {
+			b := &syncplanev1.FieldBehavior{Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed}
+			if f.Creator {
+				b.Creator = &syncplanev1.CreatorOptions{}
+			}
 			fopts := &descriptorpb.FieldOptions{}
-			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior,
-				&syncplanev1.FieldBehavior{Opaque: f.Opaque, Text: f.Text, Indexed: f.Indexed})
+			proto.SetExtension(fopts, syncplanev1.E_FieldBehavior, b)
 			fdp.Options = fopts
 		}
 		return fdp, nil, nil

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 
@@ -606,7 +607,9 @@ func (s *Server) checkFieldPolicy(g *writeGate, w Write) error {
 // stays a pure function that needs no storage read and can run before the write
 // transaction opens:
 //
-//   - PATCH is an update, always: it never upserts.
+//   - PATCH is an update, always: it never upserts. Its mask names what it
+//     changes, so it is refused when every update rule has a fields list
+//     and no list names every field of the mask.
 //   - DELETE is a delete.
 //   - PUT asserting expected_version 0 is a create — that version means "only
 //     if the row does not exist".
@@ -658,6 +661,15 @@ func writePolicyOf(info *entityInfo, crud *syncplanev1.CrudMutation) error {
 	case syncplanev1.CrudOp_CRUD_OP_PATCH:
 		if !a.names(opUpdate) {
 			return refuse("update")
+		}
+		if heads, ok := a.maskCovered(info, crud.GetFieldMask().GetPaths()); !ok {
+			quoted := make([]string, len(heads))
+			for i, h := range heads {
+				quoted[i] = fmt.Sprintf("%q", h)
+			}
+			return Reject(CodePermissionDenied, fmt.Sprintf(
+				"entity %q has no access rule that admits an update of %s together, so a PATCH masking them is refused",
+				info.name, strings.Join(quoted, ", ")))
 		}
 	case syncplanev1.CrudOp_CRUD_OP_PUT:
 		switch {

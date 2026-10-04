@@ -123,9 +123,14 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 // as of tx. A rule with a permission needs it at the workspace root, at the
 // row itself, or at a row up its parent chain. A rule that admits every
 // admitted caller holds for every caller that passed the workspace gate,
-// which is every caller with an access. row is the row's decoded value, or
-// nil for a row that does not exist.
+// which is every caller with an access. A rule with a subject check also
+// needs the row's subject field to hold one of the caller's subjects. row is
+// the row's decoded value, or nil for a row that does not exist, which no
+// subject check admits.
 func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	if rule.subject != nil && (row == nil || !rule.subjectHolds(a.caller.subjects, row)) {
+		return false, nil
+	}
 	if rule.admitted() {
 		return true, nil
 	}
@@ -321,7 +326,8 @@ type accessWrite struct {
 	stored       protoreflect.Message
 	storedParent chainEdge
 	// updating are the update rules that admit the caller at the stored row.
-	// One of them must also admit it at the row as it will be stored.
+	// One of them must also admit the row as it will be stored, and the
+	// fields the write changes.
 	updating []accessRule
 }
 
@@ -398,18 +404,18 @@ func (g *writeGate) beginAccessWrite(
 }
 
 // finish runs the access model's check against the row as it will be stored:
-// after the mask merge, the protected-field carry-over and the reference
-// projection, before the index update.
+// after the mask merge, the protected-field carry-over, the creator stamp and
+// the reference projection, before the index update.
 //
-// A create needs a create rule that admits the caller where the new row sits.
-// An update that moves the row to another access parent needs one of the
-// update rules that admitted the caller at the stored row to admit it where
-// the row will sit as well. A move also needs, where the row sits before it,
-// the right to read every entity whose rows can sit below it: the rows below
-// move with it, and the caller would otherwise show them to whoever reads at
-// the new parent. On a grant entity, a write that can change what the row
-// grants also needs every permission of the new role at the new anchor, so a
-// caller cannot grant more than it holds.
+// A create needs a create rule that admits the caller and the new row. An
+// update needs one of the update rules that admitted the caller at the stored
+// row to admit the row as it will be stored as well, and the fields the write
+// changes. A move also needs, where the row sits before it, the right to read
+// every entity whose rows can sit below it: the rows below move with it, and
+// the caller would otherwise show them to whoever reads at the new parent. On
+// a grant entity, a write that can change what the row grants also needs
+// every permission of the new role at the new anchor, so a caller cannot
+// grant more than it holds.
 func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 	if w == nil {
 		return nil
@@ -428,22 +434,26 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		if len(admitting) == 0 {
 			return refuseRow(w.info, w.key)
 		}
-	case moved:
-		// One rule for both sides: the stored row's parent chain differs from
-		// the new one, so a rule that admitted the caller there need not here.
-		admitted := false
-		for _, rule := range w.updating {
-			ok, err := w.access.admits(tx, rule, w.info, w.key, fr)
-			if err != nil {
-				return err
-			}
-			if ok {
-				admitted = true
-				break
-			}
+	default:
+		admitted, err := admitsUpdate(w.updating,
+			func() []string { return changedUnits(w.info.msgType.Descriptor(), w.stored, fr) },
+			func(rule accessRule) (bool, error) {
+				// Unmoved, the row sits on the chain the rule's source was
+				// checked against, so only a subject check can answer
+				// differently.
+				if !moved && rule.subject == nil {
+					return true, nil
+				}
+				return w.access.admits(tx, rule, w.info, w.key, fr)
+			})
+		if err != nil {
+			return err
 		}
 		if !admitted {
 			return refuseRow(w.info, w.key)
+		}
+		if !moved {
+			break
 		}
 		set, err := w.access.get(tx)
 		if err != nil {
@@ -466,6 +476,32 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		return checkGrantSubset(tx, w.access, w.info, w.key, fr)
 	}
 	return nil
+}
+
+// admitsUpdate reports whether one of rules admits an update, given that each
+// admitted the stored row: its fields check allows the units changed returns,
+// and final reports that it admits the row as it will be stored. One rule
+// must admit both sides, so two rules that each admit one side do not add up
+// to a write neither admits. changed runs at most once, and only for a rule
+// with a fields check. testdata/access/rules.json pins the decision.
+func admitsUpdate(rules []accessRule, changed func() []string, final func(accessRule) (bool, error)) (bool, error) {
+	var units []string
+	read := false
+	for _, rule := range rules {
+		if rule.fields != nil {
+			if !read {
+				units, read = changed(), true
+			}
+			if !rule.fieldsAllow(units) {
+				continue
+			}
+		}
+		ok, err := final(rule)
+		if err != nil || ok {
+			return ok, err
+		}
+	}
+	return false, nil
 }
 
 // liveRowBelow returns the name of an entity with a live row whose access

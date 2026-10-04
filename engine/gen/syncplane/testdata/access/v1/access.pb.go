@@ -1397,6 +1397,410 @@ func (x *Pin) GetLabel() string {
 	return ""
 }
 
+// A room, the top of the owner-rule schema below: Room, RoomMember, Post,
+// Draft, Ticket and Setting, registered apart from the schemas above.
+type Room struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Name          string                 `protobuf:"bytes,2,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Room) Reset() {
+	*x = Room{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Room) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Room) ProtoMessage() {}
+
+func (x *Room) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Room.ProtoReflect.Descriptor instead.
+func (*Room) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *Room) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Room) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// A role on one room and the rows below it. A member can leave the room by
+// deleting their own row.
+type RoomMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Room          *Room                  `protobuf:"bytes,2,opt,name=room,proto3" json:"room,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RoomMember) Reset() {
+	*x = RoomMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RoomMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RoomMember) ProtoMessage() {}
+
+func (x *RoomMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RoomMember.ProtoReflect.Descriptor instead.
+func (*RoomMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *RoomMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *RoomMember) GetRoom() *Room {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *RoomMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *RoomMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A post in a room: its author edits the body and deletes it, and a
+// moderator edits or deletes any post.
+type Post struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Room          *Room                  `protobuf:"bytes,2,opt,name=room,proto3" json:"room,omitempty"`
+	AuthorId      string                 `protobuf:"bytes,3,opt,name=author_id,json=authorId,proto3" json:"author_id,omitempty"`
+	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Post) Reset() {
+	*x = Post{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Post) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Post) ProtoMessage() {}
+
+func (x *Post) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Post.ProtoReflect.Descriptor instead.
+func (*Post) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *Post) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Post) GetRoom() *Room {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *Post) GetAuthorId() string {
+	if x != nil {
+		return x.AuthorId
+	}
+	return ""
+}
+
+func (x *Post) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+func (x *Post) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A draft in a room, which only its author reads and writes while they can
+// read the room's posts.
+type Draft struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Room          *Room                  `protobuf:"bytes,2,opt,name=room,proto3" json:"room,omitempty"`
+	AuthorId      string                 `protobuf:"bytes,3,opt,name=author_id,json=authorId,proto3" json:"author_id,omitempty"`
+	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Draft) Reset() {
+	*x = Draft{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Draft) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Draft) ProtoMessage() {}
+
+func (x *Draft) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Draft.ProtoReflect.Descriptor instead.
+func (*Draft) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *Draft) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Draft) GetRoom() *Room {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *Draft) GetAuthorId() string {
+	if x != nil {
+		return x.AuthorId
+	}
+	return ""
+}
+
+func (x *Draft) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
+// A ticket in a room: a moderator writes it, and its assignee changes its
+// status.
+type Ticket struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Room          *Room                  `protobuf:"bytes,2,opt,name=room,proto3" json:"room,omitempty"`
+	AssigneeId    string                 `protobuf:"bytes,3,opt,name=assignee_id,json=assigneeId,proto3" json:"assignee_id,omitempty"`
+	Status        string                 `protobuf:"bytes,4,opt,name=status,proto3" json:"status,omitempty"`
+	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Ticket) Reset() {
+	*x = Ticket{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Ticket) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Ticket) ProtoMessage() {}
+
+func (x *Ticket) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Ticket.ProtoReflect.Descriptor instead.
+func (*Ticket) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *Ticket) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Ticket) GetRoom() *Room {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *Ticket) GetAssigneeId() string {
+	if x != nil {
+		return x.AssigneeId
+	}
+	return ""
+}
+
+func (x *Ticket) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Ticket) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// The settings of one user, which every admitted caller reads and writes for
+// themselves only.
+type Setting struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	UserId        string                 `protobuf:"bytes,1,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Theme         string                 `protobuf:"bytes,2,opt,name=theme,proto3" json:"theme,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Setting) Reset() {
+	*x = Setting{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Setting) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Setting) ProtoMessage() {}
+
+func (x *Setting) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Setting.ProtoReflect.Descriptor instead.
+func (*Setting) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{26}
+}
+
+func (x *Setting) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *Setting) GetTheme() string {
+	if x != nil {
+		return x.Theme
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -1585,7 +1989,75 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05label\x18\x03 \x01(\tR\x05label:-\xa2\xbb\x18)\n" +
 	"\x03pin\x12\x02idR\x1e\n" +
 	"\r\b\x012\tview_pins\n" +
-	"\r(\x012\tedit_pins*Q\n" +
+	"\r(\x012\tedit_pins\"\\\n" +
+	"\x04Room\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x12\n" +
+	"\x04name\x18\x02 \x01(\tR\x04name:0\xa2\xbb\x18,\n" +
+	"\x04room\x12\x02idR \n" +
+	"\x0e\b\x012\n" +
+	"view_rooms\n" +
+	"\x0e(\x012\n" +
+	"edit_rooms\"\xed\x03\n" +
+	"\n" +
+	"RoomMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xe1\x02\xa2\xbb\x18\xdc\x02\n" +
+	"\vroom_member\x12\x02idRI\n" +
+	"\x15\b\x012\x11view_room_members\n" +
+	"\x17(\x012\x13manage_room_members\n" +
+	"\x17 \x01B\auser_id2\n" +
+	"view_roomsZ\xfd\x01\n" +
+	"\auser_id\x12\x04role\x1a8\n" +
+	"\vroom_viewer\x12\n" +
+	"view_rooms\x12\x11view_room_members\x12\n" +
+	"view_posts\x1a>\n" +
+	"\vroom_poster\x12\n" +
+	"view_rooms\x12\x11view_room_members\x12\n" +
+	"view_posts\x12\x04post\x1ar\n" +
+	"\x0eroom_moderator\x12\n" +
+	"view_rooms\x12\n" +
+	"edit_rooms\x12\x11view_room_members\x12\x13manage_room_members\x12\n" +
+	"view_posts\x12\x04post\x12\x0emoderate_posts\"\x8f\x02\n" +
+	"\x04Post\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12#\n" +
+	"\tauthor_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body\x12\x14\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title:h\xa2\xbb\x18d\n" +
+	"\x04post\x12\x02idRX\n" +
+	"\x0e\b\x012\n" +
+	"view_posts\n" +
+	"\x15\x10\x01 \x01B\tauthor_id2\x04post\n" +
+	"\x19\x18\x01B\tauthor_idJ\x04body2\x04post\n" +
+	"\x14\x18\x01 \x012\x0emoderate_posts\"\xc0\x01\n" +
+	"\x05Draft\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12#\n" +
+	"\tauthor_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body:.\xa2\xbb\x18*\n" +
+	"\x05draft\x12\x02idR\x1d\n" +
+	"\x1b\b\x01(\x01B\tauthor_id2\n" +
+	"view_posts\"\x84\x02\n" +
+	"\x06Ticket\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1f\n" +
+	"\vassignee_id\x18\x03 \x01(\tR\n" +
+	"assigneeId\x12\x16\n" +
+	"\x06status\x18\x04 \x01(\tR\x06status\x12\x14\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title:[\xa2\xbb\x18W\n" +
+	"\x06ticket\x12\x02idRI\n" +
+	"\x0e\b\x012\n" +
+	"view_posts\n" +
+	"\x12(\x012\x0emoderate_posts\n" +
+	"#\x18\x01B\vassignee_idJ\x06status2\n" +
+	"view_posts\"c\n" +
+	"\aSetting\x12\x17\n" +
+	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
+	"\x05theme\x18\x02 \x01(\tR\x05theme:)\xa2\xbb\x18%\n" +
+	"\asetting\x12\auser_idR\x11\n" +
+	"\x0f\b\x01(\x01B\auser_id:\x00*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -1604,7 +2076,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 21)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
@@ -1628,6 +2100,12 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*CardItem)(nil),      // 19: syncplane.testdata.access.v1.CardItem
 	(*PlaceRef)(nil),      // 20: syncplane.testdata.access.v1.PlaceRef
 	(*Pin)(nil),           // 21: syncplane.testdata.access.v1.Pin
+	(*Room)(nil),          // 22: syncplane.testdata.access.v1.Room
+	(*RoomMember)(nil),    // 23: syncplane.testdata.access.v1.RoomMember
+	(*Post)(nil),          // 24: syncplane.testdata.access.v1.Post
+	(*Draft)(nil),         // 25: syncplane.testdata.access.v1.Draft
+	(*Ticket)(nil),        // 26: syncplane.testdata.access.v1.Ticket
+	(*Setting)(nil),       // 27: syncplane.testdata.access.v1.Setting
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -1646,11 +2124,15 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	15, // 13: syncplane.testdata.access.v1.PlaceRef.board:type_name -> syncplane.testdata.access.v1.Board
 	16, // 14: syncplane.testdata.access.v1.PlaceRef.space:type_name -> syncplane.testdata.access.v1.Space
 	20, // 15: syncplane.testdata.access.v1.Pin.place:type_name -> syncplane.testdata.access.v1.PlaceRef
-	16, // [16:16] is the sub-list for method output_type
-	16, // [16:16] is the sub-list for method input_type
-	16, // [16:16] is the sub-list for extension type_name
-	16, // [16:16] is the sub-list for extension extendee
-	0,  // [0:16] is the sub-list for field type_name
+	22, // 16: syncplane.testdata.access.v1.RoomMember.room:type_name -> syncplane.testdata.access.v1.Room
+	22, // 17: syncplane.testdata.access.v1.Post.room:type_name -> syncplane.testdata.access.v1.Room
+	22, // 18: syncplane.testdata.access.v1.Draft.room:type_name -> syncplane.testdata.access.v1.Room
+	22, // 19: syncplane.testdata.access.v1.Ticket.room:type_name -> syncplane.testdata.access.v1.Room
+	20, // [20:20] is the sub-list for method output_type
+	20, // [20:20] is the sub-list for method input_type
+	20, // [20:20] is the sub-list for extension type_name
+	20, // [20:20] is the sub-list for extension extendee
+	0,  // [0:20] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -1676,7 +2158,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   21,
+			NumMessages:   27,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

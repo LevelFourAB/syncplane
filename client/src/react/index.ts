@@ -15,7 +15,7 @@
 import type { DescMessage } from '@bufbuild/protobuf';
 
 import { buildReactDb } from './build-db.js';
-import { useCan } from './hooks/use-can.js';
+import { useCan, useCanCreate, useHasPermission } from './hooks/use-can.js';
 import { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
 import { usePresenceHook, useRoomHook } from './hooks/use-room.js';
 import { useSyncStatus } from './hooks/use-sync-status.js';
@@ -32,7 +32,8 @@ export {
 	useWorkspaceId,
 	useWorkspaceScope,
 } from './context.js';
-export { useCan } from './hooks/use-can.js';
+export { useCan, useCanCreate, useHasPermission } from './hooks/use-can.js';
+export type { UseCanOptions } from './hooks/use-can.js';
 export { useDistinctHook, useGroupCountHook, useGroupRowsHook } from './hooks/use-groups.js';
 export type { DistinctResult, GroupResult, RowGroupResult } from './hooks/use-groups.js';
 export { useOnMutationRejected } from './hooks/use-on-mutation-rejected.js';
@@ -87,8 +88,12 @@ export interface ReactSync<E extends readonly DescMessage[]> {
 	db: ReactEntityApis<E>;
 	useSyncStatus: typeof useSyncStatus;
 	useWorkspaceStatus: typeof useWorkspaceStatus;
-	/** Predicts a permission at a row under the access model. */
+	/** Predicts an operation on a row under the access model. */
 	useCan: typeof useCan;
+	/** Predicts a create under the access model. */
+	useCanCreate: typeof useCanCreate;
+	/** Predicts a permission at a row under the access model. */
+	useHasPermission: typeof useHasPermission;
 	useUndo: typeof useUndo;
 	useUndoScope: typeof useUndoScope;
 	useOnMutationRejected: typeof useOnMutationRejected;
@@ -118,6 +123,8 @@ export function createReactSync<const E extends readonly DescMessage[]>(
 		useSyncStatus,
 		useWorkspaceStatus,
 		useCan,
+		useCanCreate,
+		useHasPermission,
 		useUndo,
 		useUndoScope,
 		useOnMutationRejected,

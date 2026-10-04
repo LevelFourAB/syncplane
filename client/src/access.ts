@@ -1,8 +1,9 @@
 /**
  * Client-side predictions of the access model: whether the caller holds a
- * permission at a row, from the CallerAccess the server last sent for the
- * workspace. The server decides every read and write itself; these answers
- * only let an app shape its UI before it asks.
+ * permission at a row, and whether an entity's access rules admit an
+ * operation, from the CallerAccess the server last sent for the workspace.
+ * The server decides every read and write itself; these answers only let an
+ * app shape its UI before it asks.
  */
 
 import type { DescField, DescMessage, Message } from '@bufbuild/protobuf';
@@ -10,6 +11,7 @@ import type { DescField, DescMessage, Message } from '@bufbuild/protobuf';
 import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
 import type { CallerAccess } from './gen/syncplane/v1/service_pb.js';
 import {
+	type AccessRuleDef,
 	type EntityDef,
 	entityDefOf,
 	type EntityRegistry,
@@ -21,13 +23,15 @@ import {
 } from './mutations.js';
 
 /**
- * A prediction of whether the caller holds a permission at a row: `'yes'`,
- * `'no'`, or `'unknown'` when the client cannot tell — no summary has
- * arrived for the workspace, the row whose access parent decides it is not
- * held locally, or local writes the server has not acked yet can change the
- * caller's grants.
+ * A prediction about the caller's access: `'yes'`, `'no'`, or `'unknown'`
+ * when the client cannot tell — no summary has arrived for the workspace, a
+ * row the answer depends on is not held locally, or local writes the server
+ * has not acked yet can change the caller's grants.
  */
 export type CanAnswer = 'yes' | 'no' | 'unknown';
+
+/** An operation on a row that an entity's access rules decide. */
+export type AccessOperation = 'read' | 'create' | 'update' | 'delete';
 
 /**
  * How many rows up a row's chain of access parents `can` walks before it
@@ -46,8 +50,11 @@ export const ACCESS_TOUCH_ENTITY = '#access';
 export class AccessSummary {
 	private readonly roots = new Set<string>();
 	private readonly anchors = new Map<string, Set<string>>();
+	/** The caller's subjects, the primary subject first. */
+	readonly subjects: readonly string[];
 
 	constructor(access: CallerAccess) {
+		this.subjects = access.subjects;
 		for (const p of access.permissions) {
 			if (p.root) {
 				this.roots.add(p.permission);
@@ -74,6 +81,74 @@ export class AccessSummary {
 		return this.roots.has(permission)
 			|| (this.anchors.get(permission)?.has(anchorId(entity, key)) ?? false);
 	}
+}
+
+/**
+ * One row of an operation, as {@link decideRules} reads it: whether the
+ * caller holds each permission at the row or up its chain, and the value of
+ * each subject field, `undefined` where the client cannot know it.
+ */
+export interface RuleRow {
+	held(permission: string): CanAnswer;
+	subject(field: string): string | undefined;
+}
+
+/**
+ * Decides whether one of an entity's access rules admits `op`. The rule the
+ * server applies, with `'unknown'` where the client lacks an input;
+ * testdata/access/rules.json pins the two against each other.
+ *
+ * A rule admits an operation it names when its source holds on the row and
+ * its subject check passes: `subjects` holds the subject field's value, which
+ * must not be empty. `row` is the row read or deleted, the row a create will
+ * store, or the stored row of an update. An update also needs the same rule
+ * to admit `final`, the row it will store, and its fields check to allow
+ * `changed`, the units the update changes; `null` stands for fields that no
+ * list covers.
+ */
+export function decideRules(
+	rules: readonly AccessRuleDef[],
+	op: AccessOperation,
+	subjects: readonly string[],
+	row: RuleRow,
+	final?: RuleRow,
+	changed?: readonly string[] | null,
+): CanAnswer {
+	const admits = (rule: AccessRuleDef, side: RuleRow): CanAnswer => {
+		let subject: CanAnswer = 'yes';
+		if (rule.subject !== undefined) {
+			const value = side.subject(rule.subject.name);
+			subject = value === undefined
+				? 'unknown'
+				: value !== '' && subjects.includes(value)
+				? 'yes'
+				: 'no';
+		}
+		const source: CanAnswer = rule.permission === undefined ? 'yes' : side.held(rule.permission);
+		return and(subject, source);
+	};
+	let answer: CanAnswer = 'no';
+	for (const rule of rules) {
+		if (!rule[op]) continue;
+		let ruleAnswer = admits(rule, row);
+		if (op === 'update') {
+			if (rule.fields !== undefined) {
+				const listed = rule.fields;
+				const allowed = changed !== null && changed !== undefined
+					&& changed.every((u) => listed.includes(u));
+				ruleAnswer = and(ruleAnswer, allowed ? 'yes' : 'no');
+			}
+			ruleAnswer = and(ruleAnswer, final === undefined ? 'unknown' : admits(rule, final));
+		}
+		if (ruleAnswer === 'yes') return 'yes';
+		if (ruleAnswer === 'unknown') answer = 'unknown';
+	}
+	return answer;
+}
+
+function and(a: CanAnswer, b: CanAnswer): CanAnswer {
+	if (a === 'no' || b === 'no') return 'no';
+	return a === 'unknown' || b === 'unknown' ? 'unknown' : 'yes';
 }
 
 function anchorId(entity: string, key: string): string {
@@ -117,6 +192,40 @@ export function canAt(
 		if (summary.holds(permission, row.entity, row.key)) return 'yes';
 	}
 	return chain.complete ? 'no' : 'unknown';
+}
+
+/**
+ * The row of `def` with `key` as {@link decideRules} reads it from local
+ * data: a permission is decided by {@link canAt} over `chain`, and a subject
+ * field reads `row`, which is unknown when the client does not hold the row.
+ */
+export function ruleRowOf(
+	summary: AccessSummary,
+	def: EntityDef,
+	key: string,
+	row: Message | undefined,
+	chain: AccessChain,
+): RuleRow {
+	return {
+		held: (permission) => canAt(summary, permission, def.name, key, chain),
+		subject: (name) => {
+			if (row === undefined) return undefined;
+			const field = def.schema.fields.find((f) => f.name === name);
+			const value = field === undefined
+				? undefined
+				: fieldValueOf(row as unknown as Record<string, unknown>, field);
+			return typeof value === 'string' ? value : '';
+		},
+	};
+}
+
+/**
+ * The units a write changes to move a row of `def` to another access parent:
+ * the marked field, or the oneof whose members are the cases. Empty for an
+ * entity without an access parent.
+ */
+export function accessParentUnits(def: EntityDef): string[] {
+	return [ ...new Set(accessParentFields(def.schema).map((f) => f.oneof?.name ?? f.name)) ];
 }
 
 const parentFields = new WeakMap<DescMessage, readonly DescField[]>();

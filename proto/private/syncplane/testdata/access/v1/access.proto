@@ -493,3 +493,169 @@ message Pin {
 	PlaceRef place = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string label = 3;
 }
+
+// A room, the top of the owner-rule schema below: Room, RoomMember, Post,
+// Draft, Ticket and Setting, registered apart from the schemas above.
+message Room {
+	option (syncplane.v1.entity) = {
+		name: "room"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_rooms" },
+				{ write: true permission: "edit_rooms" }
+			]
+		}
+	};
+	string id = 1;
+	string name = 2;
+}
+
+// A role on one room and the rows below it. A member can leave the room by
+// deleting their own row.
+message RoomMember {
+	option (syncplane.v1.entity) = {
+		name: "room_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "room_viewer"
+					grants: [ "view_rooms", "view_room_members", "view_posts" ]
+				},
+				{
+					name: "room_poster"
+					grants: [
+						"view_rooms",
+						"view_room_members",
+						"view_posts",
+						"post"
+					]
+				},
+				{
+					name: "room_moderator"
+					grants: [
+						"view_rooms",
+						"edit_rooms",
+						"view_room_members",
+						"manage_room_members",
+						"view_posts",
+						"post",
+						"moderate_posts"
+					]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_room_members" },
+				{ write: true permission: "manage_room_members" },
+				{ delete: true permission: "view_rooms" subject: "user_id" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A post in a room: its author edits the body and deletes it, and a
+// moderator edits or deletes any post.
+message Post {
+	option (syncplane.v1.entity) = {
+		name: "post"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_posts" },
+				{
+					create: true
+					delete: true
+					permission: "post"
+					subject: "author_id"
+				},
+				{
+					update: true
+					permission: "post"
+					subject: "author_id"
+					fields: [ "body" ]
+				},
+				{ update: true delete: true permission: "moderate_posts" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string body = 4;
+	string title = 5;
+}
+
+// A draft in a room, which only its author reads and writes while they can
+// read the room's posts.
+message Draft {
+	option (syncplane.v1.entity) = {
+		name: "draft"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				permission: "view_posts"
+				subject: "author_id"
+			} ]
+		}
+	};
+	string id = 1;
+	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string author_id = 3 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string body = 4;
+}
+
+// A ticket in a room: a moderator writes it, and its assignee changes its
+// status.
+message Ticket {
+	option (syncplane.v1.entity) = {
+		name: "ticket"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_posts" },
+				{ write: true permission: "moderate_posts" },
+				{
+					update: true
+					permission: "view_posts"
+					subject: "assignee_id"
+					fields: [ "status" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string assignee_id = 3;
+	string status = 4;
+	string title = 5;
+}
+
+// The settings of one user, which every admitted caller reads and writes for
+// themselves only.
+message Setting {
+	option (syncplane.v1.entity) = {
+		name: "setting"
+		key_fields: [ "user_id" ]
+		access: {
+			allow: [ {
+				read: true
+				write: true
+				admitted: {}
+				subject: "user_id"
+			} ]
+		}
+	};
+	string user_id = 1;
+	string theme = 2;
+}

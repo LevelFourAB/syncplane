@@ -3,10 +3,15 @@ package server
 import (
 	"encoding/json"
 	"os"
+	"slices"
 	"strconv"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protodesc"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/descriptorpb"
 	"google.golang.org/protobuf/types/known/fieldmaskpb"
 
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
@@ -27,7 +32,11 @@ type writePolicyCase struct {
 		Create bool `json:"create"`
 		Update bool `json:"update"`
 		Delete bool `json:"delete"`
+		// UpdateFields are the fields lists of the update rules when every
+		// update rule has one, and nil when some update rule has none.
+		UpdateFields [][]string `json:"updateFields"`
 	} `json:"access"`
+	KeyFields []string `json:"keyFields"`
 	Protected []string `json:"protected"`
 	Mask      []string `json:"mask"`
 	Want      string   `json:"want"`
@@ -51,14 +60,25 @@ var _ = Describe("write policy conformance vectors", func() {
 		for _, tc := range cases {
 			srv := &Server{}
 			info := &entityInfo{name: "vector", protectedFields: tc.Protected}
+			for _, name := range tc.KeyFields {
+				info.keyFields = append(info.keyFields, vectorKeyField(name))
+			}
 			if a := tc.Access; a != nil {
-				info.access = &entityAccess{named: opRead}
+				info.access = &entityAccess{named: opRead, rules: []accessRule{{ops: opRead}}}
 				for _, op := range []struct {
 					set bool
 					op  accessOp
 				}{{a.Create, opCreate}, {a.Update, opUpdate}, {a.Delete, opDelete}} {
-					if op.set {
-						info.access.named |= op.op
+					if !op.set {
+						continue
+					}
+					info.access.named |= op.op
+					if op.op != opUpdate || a.UpdateFields == nil {
+						info.access.rules = append(info.access.rules, accessRule{ops: op.op})
+						continue
+					}
+					for _, fields := range a.UpdateFields {
+						info.access.rules = append(info.access.rules, accessRule{ops: opUpdate, fields: slices.Sorted(slices.Values(fields))})
 					}
 				}
 			}
@@ -85,6 +105,29 @@ var _ = Describe("write policy conformance vectors", func() {
 		}
 	})
 })
+
+// vectorKeyField returns a string field descriptor named name, standing in for
+// a key field of the vector entity: the check reads only its name.
+func vectorKeyField(name string) protoreflect.FieldDescriptor {
+	fd, err := protodesc.NewFile(&descriptorpb.FileDescriptorProto{
+		Name:    proto.String("vector_" + name + ".proto"),
+		Package: proto.String("vector"),
+		Syntax:  proto.String("proto3"),
+		MessageType: []*descriptorpb.DescriptorProto{{
+			Name: proto.String("Vector"),
+			Field: []*descriptorpb.FieldDescriptorProto{{
+				Name:   proto.String(name),
+				Number: proto.Int32(1),
+				Label:  descriptorpb.FieldDescriptorProto_LABEL_OPTIONAL.Enum(),
+				Type:   descriptorpb.FieldDescriptorProto_TYPE_STRING.Enum(),
+			}},
+		}},
+	}, nil)
+	if err != nil {
+		panic(err)
+	}
+	return fd.Messages().Get(0).Fields().Get(0)
+}
 
 func opFromVector(op string) syncplanev1.CrudOp {
 	switch op {

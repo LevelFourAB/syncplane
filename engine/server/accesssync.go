@@ -443,7 +443,9 @@ func sameAnchors(x, y *permAnchors) bool {
 }
 
 // readAccessUnchanged reports whether the two sides of a resync read entity
-// under the same anchors.
+// under the same anchors, for every permission its read rules name. The
+// subjects a subject check compares with are the same on both sides: a
+// cursor recorded for other subjects cannot resync.
 func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if newEm.caller == nil {
 		return true
@@ -452,7 +454,16 @@ func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if !ok || info.access == nil {
 		return true
 	}
-	return sameAnchors(oldEm.access.readAnchors(info.access.read), newEm.access.readAnchors(info.access.read))
+	r := info.access.read
+	if !sameAnchors(oldEm.access.readAnchors(r), newEm.access.readAnchors(r)) {
+		return false
+	}
+	for _, o := range r.owned {
+		if !o.admitted() && !sameAnchors(oldEm.access.perms[o.permission], newEm.access.perms[o.permission]) {
+			return false
+		}
+	}
+	return true
 }
 
 // rootLost returns the entities the caller could read at the workspace root
@@ -516,18 +527,26 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 		return nil, false, nil
 	}
 	changed := map[anchorRow]struct{}{}
-	for _, side := range [][2]*permAnchors{{o, n}, {n, o}} {
-		if side[0] == nil {
+	addChanged(changed, o, n)
+	// A read rule with a subject check reads the rows below its own
+	// permission's anchors that name the caller. One whose permission moved
+	// to or from the root can show or hide every such row, wherever it sits.
+	var owned []string
+	for _, rule := range a.read.owned {
+		if rule.admitted() {
+			continue // held at the root on both sides
+		}
+		ro, rn := oldEm.access.perms[rule.permission], newEm.access.perms[rule.permission]
+		if (ro != nil && ro.root) == (rn != nil && rn.root) {
+			addChanged(changed, ro, rn)
 			continue
 		}
-		for at := range side[0].rows {
-			if side[1] == nil {
-				changed[at] = struct{}{}
-				continue
-			}
-			if _, held := side[1].rows[at]; !held {
-				changed[at] = struct{}{}
-			}
+		rows, ok, err := subjectRows(tx, info, rule.subject, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		if owned, ok = mergeKeys(owned, rows, maxCandidates); !ok {
+			return nil, false, nil
 		}
 	}
 	from := make([]anchorRow, 0, len(changed)+len(oldEm.movedRows))
@@ -541,7 +560,29 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	if err != nil || !ok {
 		return nil, false, err
 	}
+	if keys, ok = mergeKeys(keys, owned, maxCandidates); !ok {
+		return nil, false, nil
+	}
 	return withWindowMembers(keys, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)
+}
+
+// addChanged adds to changed the rows that one of x and y holds its
+// permission at and the other does not. Neither may be held at the root.
+func addChanged(changed map[anchorRow]struct{}, x, y *permAnchors) {
+	for _, side := range [][2]*permAnchors{{x, y}, {y, x}} {
+		if side[0] == nil {
+			continue
+		}
+		for at := range side[0].rows {
+			if side[1] == nil {
+				changed[at] = struct{}{}
+				continue
+			}
+			if _, held := side[1].rows[at]; !held {
+				changed[at] = struct{}{}
+			}
+		}
+	}
 }
 
 // withWindowMembers adds the members of entity in the given window
@@ -728,8 +769,9 @@ func appendMissing(list, names []string) []string {
 	return list
 }
 
-// callerAccessOf renders everything set holds, for the client.
-func callerAccessOf(set *accessSet) *syncplanev1.CallerAccess {
+// callerAccessOf renders everything set holds, and the subjects of caller,
+// for the client.
+func callerAccessOf(caller *accessCaller, set *accessSet) *syncplanev1.CallerAccess {
 	perms := make([]string, 0, len(set.perms))
 	for perm, a := range set.perms {
 		if a.root || len(a.rows) > 0 {
@@ -737,7 +779,7 @@ func callerAccessOf(set *accessSet) *syncplanev1.CallerAccess {
 		}
 	}
 	sort.Strings(perms)
-	ca := &syncplanev1.CallerAccess{}
+	ca := &syncplanev1.CallerAccess{Subjects: callerSubjects(caller)}
 	for _, perm := range perms {
 		a := set.perms[perm]
 		pa := &syncplanev1.PermissionAccess{Permission: perm, Root: a.root}
@@ -757,7 +799,7 @@ func callerAccessOf(set *accessSet) *syncplanev1.CallerAccess {
 // so it changes only when what the caller holds does.
 func (e *rowEmitter) boundCallerAccess() (*syncplanev1.CallerAccess, uint64) {
 	if e.callerAccess == nil {
-		e.callerAccess = callerAccessOf(e.access)
+		e.callerAccess = callerAccessOf(e.caller, e.access)
 		raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(e.callerAccess)
 		if err != nil {
 			panic(err) // cannot fail for a message of valid in-memory protos

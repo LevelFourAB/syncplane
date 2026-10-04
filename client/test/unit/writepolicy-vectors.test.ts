@@ -18,6 +18,7 @@ interface PolicyCase {
 	op: 'PUT' | 'PATCH' | 'DELETE' | 'UNSPECIFIED';
 	expectedVersion: string | null;
 	access?: WriteAccess;
+	keyFields?: string[];
 	protected?: string[];
 	mask?: string[];
 	want: 'allow' | 'refuse';
@@ -38,10 +39,20 @@ const opOf = (op: PolicyCase['op']): CrudOp =>
 		? CrudOp.DELETE
 		: CrudOp.UNSPECIFIED;
 
-/** Only `name`, `writeAccess` and `protectedFields` are read by the classifier,
- * so the rest of the EntityDef stays unbuilt rather than stubbed. */
-const defWith = (writeAccess: WriteAccess | undefined, protectedFields: string[]): EntityDef =>
-	({ name: 'vector', writeAccess, protectedFields }) as unknown as EntityDef;
+/** Only `name`, `keyFields` (by name), `writeAccess` and `protectedFields` are
+ * read by the classifier, so the rest of the EntityDef stays unbuilt rather
+ * than stubbed. */
+const defWith = (
+	writeAccess: WriteAccess | undefined,
+	protectedFields: string[],
+	keyFields: string[],
+): EntityDef =>
+	({
+		name: 'vector',
+		writeAccess,
+		protectedFields,
+		keyFields: keyFields.map((name) => ({ name })),
+	}) as unknown as EntityDef;
 
 describe('write policy conformance vectors', () => {
 	it('has cases', () => {
@@ -53,7 +64,7 @@ describe('write policy conformance vectors', () => {
 			const expectedVersion = tc.expectedVersion === null ? undefined : BigInt(tc.expectedVersion);
 			const call = () =>
 				assertWritePolicy(
-					defWith(tc.access, tc.protected ?? []),
+					defWith(tc.access, tc.protected ?? [], tc.keyFields ?? []),
 					opOf(tc.op),
 					expectedVersion,
 					tc.mask,

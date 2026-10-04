@@ -110,11 +110,32 @@ message AccessOptions {
 // One way to read or write the rows of an entity.
 //
 // A rule admits each operation it names when its source holds for the caller
-// and the row: for a read, the row; for a create, the row as it will be
-// stored; for a delete, the stored row. An update must be admitted by one rule
-// for both the stored row and the row as it will be stored, so a rule admits
-// a write that moves a row to another access parent only when its source
-// holds at the old place and at the new one.
+// and every check it sets holds, on the row: for a read, the row; for a
+// create, the row as it will be stored; for a delete, the stored row. An
+// update must be admitted by one rule for both the stored row and the row as
+// it will be stored, so a rule admits a write that moves a row to another
+// access parent only when its source holds at the old place and at the new
+// one, and a rule with `subject` admits no write that changes the subject
+// field to a value outside the caller's subjects.
+//
+// ```protobuf
+// message Comment {
+//   option (syncplane.v1.entity) = {
+//     name: "comment" key_fields: ["id"]
+//     access: { allow: [
+//       { read: true permission: "view_tasks" },
+//       { create: true delete: true
+//         permission: "comment" subject: "author_id" },
+//       { update: true permission: "comment"
+//         subject: "author_id" fields: ["body"] }
+//     ] }
+//   };
+//   string id = 1;
+//   Task task = 2 [(syncplane.v1.field_behavior).access_parent = {}];
+//   string author_id = 3 [(syncplane.v1.field_behavior).creator = {}];
+//   string body = 4;
+// }
+// ```
 //
 // Registration refuses a rule without an operation or without a source, and
 // unknown fields inside this message.
@@ -141,6 +162,22 @@ message AccessRule {
 		// Every caller admitted to the workspace. See `AdmittedCaller`.
 		AdmittedCaller admitted = 7;
 	}
+
+	// Admits only rows whose field with this name holds one of the caller's
+	// subjects. Names a top-level, singular `string` field outside any
+	// `oneof`. An empty field value never matches, and a permission held at
+	// the workspace root does not skip the check.
+	string subject = 8;
+	// Admits only updates that change no field outside this list. Valid only
+	// on a rule whose one operation is `update`. Each entry names a top-level
+	// field outside any `oneof`, or a `oneof`, and no key field. A move
+	// changes the access parent field, so the rule admits a move only when the
+	// list names that field or its `oneof`.
+	//
+	// A `PATCH` fails before the row is read when every `update` rule of the
+	// entity has a `fields` list and no list names every field the mask
+	// names.
+	repeated string fields = 9;
 }
 
 // Selects every caller admitted to the workspace as the source of an
@@ -235,6 +272,21 @@ message Role {
 //
 // Registration refuses unknown fields inside this message.
 message AccessParentOptions {}
+
+// Marks a field that records who created the row.
+//
+// On a create that is not trusted, the server stores the caller's primary
+// subject in the field, whatever value the write carries: the first subject
+// the server maps the caller to, or an empty value for an anonymous caller.
+// After the create, a write that is not trusted cannot change the field: a
+// `PATCH` whose mask names it fails, and a `PUT` keeps the stored value. A
+// trusted write stores the value it carries.
+//
+// The field is a top-level, singular `string` field outside any `oneof`. It
+// cannot be a key field or carry a `write_policy`.
+//
+// Registration refuses unknown fields inside this message.
+message CreatorOptions {}
 
 // Enables server-side field history tracking for an entity.
 //
@@ -505,6 +557,9 @@ message FieldBehavior {
 	// Places each row below the row that this reference points at in the
 	// access model. See `AccessParentOptions`.
 	AccessParentOptions access_parent = 11;
+	// Stores the subject of the caller who creates the row. See
+	// `CreatorOptions`.
+	CreatorOptions creator = 12;
 }
 
 extend google.protobuf.MessageOptions {

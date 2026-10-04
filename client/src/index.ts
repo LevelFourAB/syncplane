@@ -1,6 +1,7 @@
-export type { CanAnswer } from './access.js';
+export type { AccessOperation, CanAnswer } from './access.js';
 export { subscription, SyncClient } from './client.js';
 export type {
+	CanOptions,
 	DiscardedMutation,
 	HoldHandle,
 	HydrationInfo,

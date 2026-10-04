@@ -32,9 +32,13 @@ type GlobalRolesFunc func(ctx context.Context, p Principal) ([]string, error)
 // subjects that name the issuer, so that two issuers' callers with the same
 // Subject do not share grants.
 //
+// The first non-empty subject is the caller's primary subject: an enforced
+// create stores it in each field marked (syncplane.v1.field_behavior).creator.
+//
 // fn runs once per request, before any read transaction opens, and must be
 // safe for concurrent use. A long-lived stream calls it again on every
-// heartbeat. It has no effect on a schema that does not use the access model.
+// heartbeat. In a schema that does not use the access model, only the primary
+// subject has an effect.
 func WithSubjects(fn SubjectsFunc) Option {
 	return func(s *Server) error {
 		s.subjects = fn
@@ -73,8 +77,11 @@ func WithGlobalRoles(fn GlobalRolesFunc) Option {
 // request by the workspace gate: the subjects its grant rows may name and the
 // roles it holds at the root of every workspace.
 type accessCaller struct {
-	model       *accessModel
+	model *accessModel
+	// subjects are sorted and without repeats; primary is the first one the
+	// hook returned, "" when there is none.
 	subjects    []string
+	primary     string
 	globalRoles []string
 }
 
@@ -85,16 +92,13 @@ func (s *Server) resolveCaller(ctx context.Context, p Principal, model *accessMo
 		return nil, nil
 	}
 	c := &accessCaller{model: model}
-	var subjects []string
-	if s.subjects != nil {
-		subjects = s.subjects(p)
-	} else if p.Subject != "" {
-		subjects = []string{p.Subject}
-	}
-	for _, subject := range subjects {
+	for _, subject := range s.subjectsOf(p) {
 		if subject != "" && !slices.Contains(c.subjects, subject) {
 			c.subjects = append(c.subjects, subject)
 		}
+	}
+	if len(c.subjects) > 0 {
+		c.primary = c.subjects[0]
 	}
 	sort.Strings(c.subjects)
 	if s.globalRoles != nil {
@@ -114,6 +118,45 @@ func (s *Server) resolveCaller(ctx context.Context, p Principal, model *accessMo
 		sort.Strings(c.globalRoles)
 	}
 	return c, nil
+}
+
+// subjectsOf returns the subjects of p as WithSubjects maps them, in the
+// order the hook returns them: Principal.Subject without the hook.
+func (s *Server) subjectsOf(p Principal) []string {
+	if s.subjects != nil {
+		return s.subjects(p)
+	}
+	if p.Subject != "" {
+		return []string{p.Subject}
+	}
+	return nil
+}
+
+// primarySubjectOf returns the primary subject of p: the first non-empty
+// subject WithSubjects returns, "" for an anonymous caller.
+func (s *Server) primarySubjectOf(p Principal) string {
+	for _, subject := range s.subjectsOf(p) {
+		if subject != "" {
+			return subject
+		}
+	}
+	return ""
+}
+
+// callerSubjects returns the subjects of c with the primary subject first,
+// the rest sorted, as a client receives them.
+func callerSubjects(c *accessCaller) []string {
+	if c.primary == "" {
+		return nil
+	}
+	out := make([]string, 0, len(c.subjects))
+	out = append(out, c.primary)
+	for _, subject := range c.subjects {
+		if subject != c.primary {
+			out = append(out, subject)
+		}
+	}
+	return out
 }
 
 // accessSet is what one caller holds in one workspace, as of one snapshot:
@@ -362,9 +405,10 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 
 // modelReadFilter returns the filter the access model puts on reads of info
 // for the bound caller, or nil when the model hides no row of it: the entity
-// is outside the model, or a read rule admits the caller at the root. A row
-// is readable when the caller holds one of the read rules' permissions at the
-// row or at a row up its parent chain.
+// is outside the model, or a read rule without a subject check admits the
+// caller at the root. A row is readable when the caller holds the permission
+// of one of the read rules at the row or at a row up its parent chain, and
+// the row passes that rule's subject check.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
 	if a == nil {
@@ -374,13 +418,59 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	if anchors != nil && anchors.root {
 		return nil
 	}
-	if anchors == nil || len(anchors.rows) == 0 {
+	if anchors != nil && len(anchors.rows) == 0 {
+		anchors = nil
+	}
+	owned := ownedReadsOf(a.read, e.caller, e.access)
+	if anchors == nil && len(owned) == 0 {
 		return denyAll
 	}
 	chains := e.chains
+	subjects := e.caller.subjects
 	return func(key string, row proto.Message) (bool, error) {
-		return chains.holds(anchors, info, key, row.ProtoReflect())
+		r := row.ProtoReflect()
+		if anchors != nil {
+			if ok, err := chains.holds(anchors, info, key, r); err != nil || ok {
+				return ok, err
+			}
+		}
+		for _, o := range owned {
+			if !o.rule.subjectHolds(subjects, r) {
+				continue
+			}
+			if ok, err := chains.holds(o.anchors, info, key, r); err != nil || ok {
+				return ok, err
+			}
+		}
+		return false, nil
 	}
+}
+
+// ownedRead is a read rule with a subject check, and where the caller holds
+// its source: the workspace root for an admitted rule.
+type ownedRead struct {
+	rule    accessRule
+	anchors *permAnchors
+}
+
+// ownedReadsOf returns the read rules of r with a subject check that can
+// admit caller under set: the caller has a subject, and holds the rule's
+// source somewhere.
+func ownedReadsOf(r readers, caller *accessCaller, set *accessSet) []ownedRead {
+	if len(r.owned) == 0 || len(caller.subjects) == 0 {
+		return nil
+	}
+	var out []ownedRead
+	for _, rule := range r.owned {
+		anchors := rootAnchors
+		if !rule.admitted() {
+			anchors = set.perms[rule.permission]
+		}
+		if anchors != nil && (anchors.root || len(anchors.rows) > 0) {
+			out = append(out, ownedRead{rule: rule, anchors: anchors})
+		}
+	}
+	return out
 }
 
 // appReadFilter adapts an application's RowFilter to a readFilter.
@@ -454,22 +544,104 @@ func (e *rowEmitter) accessNarrows(info *entityInfo) bool {
 // accessCandidates returns, in key order, the keys of the rows of info that the
 // bound access set can let the caller read: the anchors of its read
 // permissions that are rows of info, and the rows of info below such an
-// anchor (see rowsBelow). It is a superset of the rows the model's filter admits, so
-// reading these keys and classifying each row gives what a scan would. ok is
-// false when the set does not narrow the entity, or when narrowing would cost
-// more than maxCandidates keys or needs an index that is not ready; the caller
-// scans.
+// anchor (see rowsBelow). For a read rule with a subject check, the rows whose
+// subject field names the caller stand in when its subject index is ready. It
+// is a superset of the rows the model's filter admits, so reading these keys
+// and classifying each row gives what a scan would. ok is false when the set
+// does not narrow the entity, or when narrowing would cost more than
+// maxCandidates keys or needs an index that is not ready; the caller scans.
 func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCandidates int) (keys []string, ok bool, err error) {
 	if !e.accessNarrows(info) {
 		return nil, false, nil
 	}
-	var from []anchorRow
-	if anchors := e.access.readAnchors(info.access.read); anchors != nil {
-		for at := range anchors.rows {
-			from = append(from, at)
+	keys, ok, err = rowsBelow(tx, e.caller.model, info, anchorRowsOf(e.access.readAnchors(info.access.read)), maxCandidates, e.srv.limits)
+	if err != nil || !ok {
+		return nil, false, err
+	}
+	for _, o := range ownedReadsOf(info.access.read, e.caller, e.access) {
+		owned, ok, err := e.ownedCandidates(tx, info, o, maxCandidates)
+		if err != nil || !ok {
+			return nil, false, err
+		}
+		if keys, ok = mergeKeys(keys, owned, maxCandidates); !ok {
+			return nil, false, nil
 		}
 	}
-	return rowsBelow(tx, e.caller.model, info, from, maxCandidates, e.srv.limits)
+	return keys, true, nil
+}
+
+// ownedCandidates returns, in key order, a superset of the keys of the rows of
+// info that the read rule o admits the bound caller to: the rows whose
+// subject field names one of the caller's subjects when the field's index is
+// ready, and the rows below the rule's anchors otherwise. ok is false when
+// neither can be read within maxCandidates keys.
+func (e *rowEmitter) ownedCandidates(tx storage.ReadTx, info *entityInfo, o ownedRead, maxCandidates int) ([]string, bool, error) {
+	keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
+	if err != nil || ok {
+		return keys, ok, err
+	}
+	if o.anchors.root {
+		return nil, false, nil
+	}
+	return rowsBelow(tx, e.caller.model, info, anchorRowsOf(o.anchors), maxCandidates, e.srv.limits)
+}
+
+// subjectRows returns, in key order, the keys of the rows of info whose field
+// fd holds one of subjects, read from the field's index. ok is false when the
+// index is not ready or holds more than maxCandidates such rows.
+func subjectRows(tx storage.ReadTx, info *entityInfo, fd protoreflect.FieldDescriptor, subjects []string, maxCandidates int, limits Limits) ([]string, bool, error) {
+	ci := info.indexByName(fieldIndexName(fd))
+	if ci == nil || limits.DisableIndexes {
+		return nil, false, nil
+	}
+	if ready, err := ci.ready(tx, info.name); err != nil || !ready {
+		return nil, false, err
+	}
+	var keys []string
+	for _, subject := range subjects {
+		lo, hi, err := ci.probeRefIndex([]protoreflect.Value{protoreflect.ValueOfString(subject)})
+		if err != nil {
+			return nil, false, err
+		}
+		err = tx.ScanIndex(info.name, ci.name, lo, hi, 0, storage.ScanAsc, func(_ []byte, rowKey string) error {
+			keys = append(keys, rowKey)
+			if len(keys) > maxCandidates {
+				return errCandidateBound
+			}
+			return nil
+		})
+		if errors.Is(err, errCandidateBound) {
+			return nil, false, nil
+		}
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	sort.Strings(keys)
+	return slices.Compact(keys), true, nil
+}
+
+// anchorRowsOf returns the rows a is held at, in no order; none for nil.
+func anchorRowsOf(a *permAnchors) []anchorRow {
+	if a == nil {
+		return nil
+	}
+	out := make([]anchorRow, 0, len(a.rows))
+	for at := range a.rows {
+		out = append(out, at)
+	}
+	return out
+}
+
+// mergeKeys returns the union of two key lists in key order. ok is false when
+// it holds more than maxCandidates keys.
+func mergeKeys(a, b []string, maxCandidates int) ([]string, bool) {
+	out := make([]string, 0, len(a)+len(b))
+	out = append(out, a...)
+	out = append(out, b...)
+	sort.Strings(out)
+	out = slices.Compact(out)
+	return out, len(out) <= maxCandidates
 }
 
 // errCandidateBound stops an index walk that has found more rows than its
