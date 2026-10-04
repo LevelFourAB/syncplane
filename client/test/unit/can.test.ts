@@ -5,7 +5,8 @@
 // parent this client does not register still decides, how can() fills in
 // the inputs of the access rules from local rows, that predictions asked
 // together share one read of the store and answer as they do one at a time,
-// and that the stored CallerAccess is decoded again only when it changes.
+// and that the stored CallerAccess is read and decoded again only when it
+// changes.
 
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
@@ -92,6 +93,48 @@ class QueueScanCountingStore implements KVStore {
 	}
 }
 
+/** A store whose transactions count the reads of one key. */
+class KeyReadCountingStore implements KVStore {
+	keyReads = 0;
+
+	constructor(private inner: KVStore, private key: string) {}
+
+	async read(): Promise<KVRead> {
+		return this.counting(await this.inner.read());
+	}
+
+	async write(): Promise<KVWrite> {
+		return this.counting(await this.inner.write());
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+
+	trackGenerations(generationOf: GenerationOf): void {
+		(this.inner as MemoryKVStore).trackGenerations(generationOf);
+	}
+
+	private counting<T extends KVRead>(tx: T): T {
+		const store = this;
+		return new Proxy(tx, {
+			get(target, prop) {
+				const value = Reflect.get(target, prop) as unknown;
+				if (typeof value !== 'function') return value;
+				if (prop === 'get' || prop === 'getMany') {
+					return (keys: string | readonly string[]) => {
+						for (const key of typeof keys === 'string' ? [ keys ] : keys) {
+							if (key === store.key) store.keyReads++;
+						}
+						return (value as (k: unknown) => unknown).call(target, keys);
+					};
+				}
+				return value.bind(target);
+			},
+		});
+	}
+}
+
 async function storeSummary(
 	kv: KVStore,
 	access: MessageInitShape<typeof CallerAccessSchema>,
@@ -102,6 +145,12 @@ async function storeSummary(
 		metaCallerAccess(ws),
 		toBinary(CallerAccessSchema, create(CallerAccessSchema, access)),
 	);
+	await tx.commit();
+}
+
+async function deleteSummary(kv: KVStore, ws = WS): Promise<void> {
+	const tx = await kv.write();
+	await tx.del(metaCallerAccess(ws));
 	await tx.commit();
 }
 
@@ -480,6 +529,36 @@ describe('a creator field', () => {
 			.rejects.toThrow(/field "author_id" may not be written by a client/);
 		await t.client.close();
 	});
+
+	it('does not decode the CallerAccess again for each row created', async () => {
+		const t = await roomClient(inR1('view_posts', 'post'));
+		decodes.callerAccess = 0;
+		for (let i = 0; i < 3; i++) {
+			await t.client.mutate.put(PostSchema, { id: `po-new${i}`, room: { id: 'r1' } });
+			expect((await t.client.get(PostSchema, `po-new${i}`))?.authorId).toBe('ann');
+		}
+		expect(decodes.callerAccess).toBe(1);
+		await t.client.close();
+	});
+
+	it('follows a CallerAccess that another client stores or deletes', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, roomEntities);
+		const createPost = async (id: string) => {
+			await c.mutate.put(PostSchema, { id, room: { id: 'r1' } });
+			return (await c.get(PostSchema, id))?.authorId;
+		};
+		// The first create opens the store, so the summaries written next are
+		// stamped like ones a pull writes.
+		expect(await createPost('po-0')).toBe('');
+		await storeSummary(kv, { subjects: [ 'ann' ] });
+		expect(await createPost('po-1')).toBe('ann');
+		await storeSummary(kv, { subjects: [ 'bob' ] });
+		expect(await createPost('po-2')).toBe('bob');
+		await deleteSummary(kv);
+		expect(await createPost('po-3')).toBe('');
+		await c.close();
+	});
 });
 
 /**
@@ -761,6 +840,139 @@ describe('the stored CallerAccess', () => {
 			expect(await ask()).toEqual([ 'yes', 'no' ]);
 		}
 		expect(decodes.callerAccess).toBe(1);
+		await c.close();
+	});
+
+	it('is not read again for a local write that cannot change the grants', async () => {
+		const store = new KeyReadCountingStore(new MemoryKVStore(), metaCallerAccess(WS));
+		const c = offlineClient(store, entities);
+		// The first answer opens the store, so the summary written next is
+		// stamped like one a pull writes.
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(store, {
+			permissions: [ {
+				permission: 'edit_tasks',
+				anchors: [ { entity: 'project', keys: [ 'p1' ] } ],
+			} ],
+		});
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		store.keyReads = 0;
+		for (let i = 0; i < 3; i++) {
+			await c.mutate.patch(TaskSchema, 't1', { title: `edit ${i}` });
+			expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		}
+		expect(store.keyReads).toBe(0);
+		await c.close();
+	});
+
+	it('is read again once another client stores one, and not before', async () => {
+		const server = new TestServer({ entities });
+		server.put(TaskSchema, { id: 't1', project: { id: 'p1' } }, { workspace: WS });
+		const grant = (...projects: string[]) =>
+			server.setCallerAccess({
+				permissions: [ {
+					permission: 'edit_tasks',
+					anchors: [ { entity: 'project', keys: projects } ],
+				} ],
+			}, { workspace: WS });
+		// Two clients on one store stand in for two tabs, and only `applying`
+		// syncs.
+		const store = new KeyReadCountingStore(new MemoryKVStore(), metaCallerAccess(WS));
+		const applying = new SyncClient({
+			workspaceId: WS,
+			kvStore: store,
+			entities,
+			transport: server.transport(),
+			streamEnabled: false,
+			presenceEnabled: false,
+			pollIntervalMs: 0,
+		});
+		const tab = offlineClient(store, entities);
+		await applying.start();
+		const ask = () => tab.hasPermission(TaskSchema, 't1', 'edit_tasks');
+
+		grant('p1');
+		await applying.syncNow();
+		expect(await ask()).toBe('yes');
+		store.keyReads = 0;
+		await tab.mutate.patch(TaskSchema, 't1', { title: 'local' });
+		expect(await ask()).toBe('yes');
+		expect(store.keyReads).toBe(0);
+
+		grant('p2');
+		await applying.syncNow();
+		expect(await ask()).toBe('no');
+		expect(await ask()).toBe('no');
+		expect(store.keyReads).toBe(1);
+		await applying.close();
+		await tab.close();
+	});
+
+	it('answers unknown once another client deletes it', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, entities);
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(kv, { permissions: [ { permission: 'edit_tasks', root: true } ] });
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		await deleteSummary(kv);
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await c.mutate.patch(TaskSchema, 't1', { title: 'local' });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(kv, { permissions: [ { permission: 'edit_tasks', root: true } ] });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		await c.close();
+	});
+
+	it('answers unknown once a bootstrap brings none', async () => {
+		const t = await createTestClient({ entities });
+		t.server.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		t.server.setCallerAccess({ permissions: [ { permission: 'edit_tasks', root: true } ] });
+		await t.sync();
+		const ask = () => t.client.hasPermission(TaskSchema, 't1', 'edit_tasks');
+		expect(await ask()).toBe('yes');
+		await t.client.mutate.patch(TaskSchema, 't1', { title: 'local' });
+		expect(await ask()).toBe('yes');
+
+		// A horizon past the client's cursor makes the next pull bootstrap
+		// again, and the snapshot carries no CallerAccess.
+		t.server.setCallerAccess(undefined);
+		t.server.put(TaskSchema, { id: 't2', project: { id: 'p1' } });
+		t.server.gc();
+		await t.sync();
+		expect(await t.client.get(TaskSchema, 't2')).toBeDefined();
+		expect(await ask()).toBe('unknown');
+		await t.close();
+	});
+
+	it('follows each change on a store that keeps no generations', async () => {
+		const kv = new MemoryKVStore();
+		// A store of the app's own need not keep generations.
+		const untracked: KVStore = {
+			read: () => kv.read(),
+			write: () => kv.write(),
+			close: () => kv.close(),
+		};
+		const c = offlineClient(untracked, roomEntities);
+		const createPost = async (id: string) => {
+			await c.mutate.put(PostSchema, { id, room: { id: 'r1' } });
+			return (await c.get(PostSchema, id))?.authorId;
+		};
+		await storeSummary(kv, { subjects: [ 'ann' ], permissions: inR1('post') });
+		expect(await c.hasPermission(RoomSchema, 'r1', 'post')).toBe('yes');
+		expect(await createPost('po-1')).toBe('ann');
+		expect(await c.hasPermission(RoomSchema, 'r1', 'post')).toBe('yes');
+
+		await storeSummary(kv, { subjects: [ 'bob' ], permissions: inR1('view_posts') });
+		expect(await c.hasPermission(RoomSchema, 'r1', 'post')).toBe('no');
+		expect(await createPost('po-2')).toBe('bob');
+
+		await deleteSummary(kv);
+		expect(await c.hasPermission(RoomSchema, 'r1', 'post')).toBe('unknown');
+		expect(await createPost('po-3')).toBe('');
 		await c.close();
 	});
 

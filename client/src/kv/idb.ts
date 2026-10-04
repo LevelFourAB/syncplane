@@ -777,13 +777,15 @@ class IDBWrite extends IDBRead implements KVWrite {
 		this.note(key);
 	}
 
-	/** Records the generation `key` belongs to, if any. Noted as the write is
+	/** Records the generations `key` belongs to, if any. Noted as the write is
 	 * buffered rather than gathered at commit, so a commit walks the keys it is
 	 * about to write and nothing else. */
 	private note(key: string): void {
 		const at = this.generationOf?.(key);
 		if (at === undefined) return;
-		(this.stampAt ??= new Set()).add(at);
+		const stampAt = (this.stampAt ??= new Set());
+		if (typeof at === 'string') stampAt.add(at);
+		else for (const k of at) stampAt.add(k);
 	}
 
 	async commit(): Promise<void> {

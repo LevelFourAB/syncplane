@@ -589,6 +589,30 @@ describe.each(implementations)('KVStore: %s', (_name, open) => {
 			expect(await generation('gen/b')).not.toBe(b);
 		});
 
+		it('stamps each generation that the mapping names for one key', async () => {
+			store = await open();
+			(store as KVStore & GenerationTracking).trackGenerations((key) =>
+				key.startsWith('o/a/')
+					? [ 'gen/a', 'gen/all' ]
+					: key.startsWith('o/b/')
+					? 'gen/all'
+					: undefined
+			);
+			const w = await store.write();
+			await w.put('o/a/row', 1);
+			await w.commit();
+			const a = await generation('gen/a');
+			const all = await generation('gen/all');
+			expect(a).toBeTypeOf('string');
+			expect(all).toBeTypeOf('string');
+
+			const w2 = await store.write();
+			await w2.put('o/b/row', 1);
+			await w2.commit();
+			expect(await generation('gen/a')).toBe(a);
+			expect(await generation('gen/all')).not.toBe(all);
+		});
+
 		it('stamps nothing for a transaction that was released', async () => {
 			store = await tracked();
 			const w = await store.write();

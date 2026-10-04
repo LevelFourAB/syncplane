@@ -195,10 +195,22 @@ export const metaCallerAccess = (workspaceId: string): string =>
 export const accessGeneration = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}agen`;
 
 /**
- * The generation {@link accessGeneration} names for a pending-queue entry or
- * a stored CallerAccess at `key`, or undefined for every other key.
+ * The CallerAccess generation of one workspace: a token restamped by every
+ * committed transaction that writes or deletes its {@link metaCallerAccess},
+ * and by no other. A reader that finds the token it read before knows that
+ * the stored CallerAccess holds the bytes it read then, with no read of the
+ * bytes. Like {@link overlayGeneration}, the stamp rides in the writer's own
+ * transaction, and an ABSENT token means unknown.
  */
-export const accessGenerationFor = (key: string): string | undefined => {
+export const callerAccessGeneration = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}cagen`;
+
+/**
+ * The generations a write at `key` restamps: {@link accessGeneration} for a
+ * pending-queue entry, that and {@link callerAccessGeneration} for a stored
+ * CallerAccess, and none for every other key.
+ */
+export const accessGenerationFor = (key: string): string | string[] | undefined => {
 	const root = key.startsWith(PENDING_ROOT)
 		? PENDING_ROOT
 		: key.startsWith(META_WS_PREFIX)
@@ -208,7 +220,8 @@ export const accessGenerationFor = (key: string): string | undefined => {
 	const segmentEnd = key.indexOf('/', root.length);
 	if (segmentEnd === -1) return undefined;
 	if (root === META_WS_PREFIX && key.slice(segmentEnd + 1) !== 'callerAccess') return undefined;
-	return `${META_WS_PREFIX}${key.slice(root.length, segmentEnd)}/agen`;
+	const prefix = `${META_WS_PREFIX}${key.slice(root.length, segmentEnd)}/`;
+	return root === PENDING_ROOT ? `${prefix}agen` : [ `${prefix}agen`, `${prefix}cagen` ];
 };
 
 /**

@@ -62,14 +62,15 @@ export function positionsOf(value: unknown): readonly string[] {
 }
 
 /**
- * Maps a written key to the key holding the generation it belongs to, or
- * undefined when writing it changes no generation.
+ * Maps a written key to the key holding the generation it belongs to, or to
+ * the keys of several generations, or undefined when writing it changes no
+ * generation.
  */
-export type GenerationOf = (key: string) => string | undefined;
+export type GenerationOf = (key: string) => string | readonly string[] | undefined;
 
 /**
  * A store that stamps GENERATION tokens: every committed transaction that put
- * or deleted a key the mapping names writes a fresh token at the key it
+ * or deleted a key the mapping names writes a fresh token at each key it
  * returned, inside the same transaction as the writes themselves.
  *
  * A reader that finds the token it read before therefore knows nothing under

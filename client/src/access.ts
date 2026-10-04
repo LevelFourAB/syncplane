@@ -154,7 +154,8 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 	// Four bytes at a time when the two views start on a word boundary. This
 	// is approximately five times faster than a byte loop, and the cost is
 	// important: a CallerAccess with thousands of anchors is more than 100 KB,
-	// and the prediction after each local write compares it again.
+	// and over a store that keeps no generations, the prediction after each
+	// local write compares it again.
 	if (a.byteOffset % 4 === 0 && b.byteOffset % 4 === 0) {
 		const words = n >>> 2;
 		const wa = new Uint32Array(a.buffer, a.byteOffset, words);

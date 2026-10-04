@@ -61,10 +61,11 @@ import {
 	WindowSchema,
 } from './gen/syncplane/v1/patch_pb.js';
 import { AggregateOp, type QueryFacet } from './gen/syncplane/v1/query_pb.js';
-import { CallerAccessSchema, SyncService } from './gen/syncplane/v1/service_pb.js';
+import { SyncService } from './gen/syncplane/v1/service_pb.js';
 import {
 	accessGeneration,
 	accessGenerationFor,
+	callerAccessGeneration,
 	compareWorkspaces,
 	confirmedKey,
 	type ConfirmedRecord,
@@ -1836,14 +1837,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
 	>();
 	/**
-	 * Per workspace, the CallerAccess that accessSummaryIn decoded last, or
-	 * that this tab stored last (see accessStored), with its stored bytes.
-	 * accessSummaryIn uses it again while the stored bytes stay the same, so a
-	 * local write, which moves the access generation through the pending
-	 * queue, does not decode the CallerAccess again.
+	 * Per workspace, the CallerAccess that storedAccessIn read last, or that
+	 * this tab stored last (see accessStored), with its stored bytes and the
+	 * CallerAccess generation it was read under (see
+	 * keys.callerAccessGeneration), undefined where that is not known.
+	 * storedAccessIn uses it again with no read of the stored bytes while the
+	 * generation stays the same, so a local write, which moves the access
+	 * generation through the pending queue, does not read the CallerAccess
+	 * again.
 	 */
-	private decodedAccess = new Map<string, DecodedAccess>();
-	/** The workspaces accessSummaryIn has read a summary for. */
+	private decodedAccess = new Map<string, { generation: unknown; access: DecodedAccess }>();
+	/** The workspaces storedAccessIn has read the stored CallerAccess for. */
 	private accessAsked = new Set<string>();
 	/** The access batch that still takes predictions; see askAccess. */
 	private accessBatch: AccessAsk[] | undefined;
@@ -2546,8 +2550,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 			: Promise.resolve(new MemoryKVStore())).then((store) => {
 				// What lets a local read reuse the overlay it read last time
 				// instead of walking the pending queue again (see readOverlay),
-				// and can() the summary it decided (see accessSummaryIn). A
-				// caller's own store need not keep generations; its readers scan.
+				// and can() the summary it decided (see accessSummaryIn) and the
+				// CallerAccess it read (see storedAccessIn). A caller's own store
+				// need not keep generations; its readers scan.
 				if (tracksGenerations(store)) {
 					store.trackGenerations((key) => overlayGenerationFor(key) ?? accessGenerationFor(key));
 				}
@@ -3355,11 +3360,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * @internal
 	 */
 	async primarySubjectIn(workspaceId: string): Promise<string> {
-		return this.withAccessRead(async (tx) => {
-			const raw = await tx.get(metaCallerAccess(workspaceId));
-			if (raw === undefined) return '';
-			return fromBinary(CallerAccessSchema, raw as Uint8Array).subjects[0] ?? '';
-		});
+		return this.withAccessRead(async (tx) =>
+			(await this.storedAccessIn(tx, workspaceId))?.summary.subjects[0] ?? ''
+		);
 	}
 
 	/** Runs `fn` over a shared read of the local store. */
@@ -3562,31 +3565,22 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	 * cannot decide: none is stored, or a queued write can change the caller's
 	 * grants. Reuses the one decided under the same access generation, which
 	 * spares every answer after the first a walk of the pending queue. Under a
-	 * new generation it walks the queue again, and decodes the stored
-	 * CallerAccess only when its bytes changed.
+	 * new generation it walks the queue again, and reads the stored
+	 * CallerAccess only when it changed (see storedAccessIn).
 	 */
 	private async accessSummaryIn(
 		tx: KVRead,
 		workspaceId: string,
 	): Promise<AccessSummary | undefined> {
-		this.accessAsked.add(workspaceId);
 		const generation = await tx.get(accessGeneration(workspaceId));
 		const cached = this.accessSummaries.get(workspaceId);
 		if (generation !== undefined && cached?.generation === generation) return cached.summary;
 		const summary = (async () => {
-			const raw = await tx.get(metaCallerAccess(workspaceId));
-			if (raw === undefined) {
-				this.decodedAccess.delete(workspaceId);
-				return undefined;
-			}
+			const decoded = await this.storedAccessIn(tx, workspaceId);
+			if (decoded === undefined) return undefined;
 			if (pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))) {
 				return undefined;
 			}
-			// Compare the bytes, not a generation: one generation covers the
-			// pending queue and the CallerAccess together, and tabs of older
-			// builds that share the store would not stamp a second one.
-			const decoded = decodeAccess(raw as Uint8Array, this.decodedAccess.get(workspaceId));
-			this.decodedAccess.set(workspaceId, decoded);
 			return decoded.summary;
 		})();
 		if (generation !== undefined) {
@@ -3603,17 +3597,47 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
+	 * The CallerAccess stored for `workspaceId`, or undefined when none is.
+	 * Returns the one read last with no read of the stored bytes while the
+	 * CallerAccess generation is the one it was read under. Otherwise it reads
+	 * the bytes, and decodes them only when they differ from the ones read or
+	 * stored last.
+	 */
+	private async storedAccessIn(
+		tx: KVRead,
+		workspaceId: string,
+	): Promise<DecodedAccess | undefined> {
+		this.accessAsked.add(workspaceId);
+		const generation = await tx.get(callerAccessGeneration(workspaceId));
+		const last = this.decodedAccess.get(workspaceId);
+		// Every commit that writes or deletes the stored bytes restamps the
+		// generation in the same transaction, so an equal token means equal
+		// bytes. An absent token proves nothing: the store can keep no
+		// generations, or a transaction deleted the token with the bytes.
+		if (generation !== undefined && last?.generation === generation) return last.access;
+		const raw = await tx.get(metaCallerAccess(workspaceId));
+		if (raw === undefined) {
+			this.decodedAccess.delete(workspaceId);
+			return undefined;
+		}
+		const access = decodeAccess(raw as Uint8Array, last?.access);
+		this.decodedAccess.set(workspaceId, { generation, access });
+		return access;
+	}
+
+	/**
 	 * Keeps `access`, which a commit of this tab just stored for `workspaceId`,
-	 * for accessSummaryIn to compare the stored bytes with, so the next
-	 * prediction does not decode the bytes this tab encoded. The comparison
-	 * is what keeps it correct when a later commit, in this tab or another,
-	 * stores other bytes. Kept only for a workspace this tab asks predictions
-	 * in, because what it keeps stays in memory until the next CallerAccess
-	 * replaces it.
+	 * for storedAccessIn to compare the stored bytes with, so the next read
+	 * does not decode the bytes this tab encoded. The comparison is what keeps
+	 * it correct when a later commit, in this tab or another, stores other
+	 * bytes. The generation the commit stamped is not known here, so the next
+	 * read reads the bytes once. Kept only for a workspace this tab reads the
+	 * CallerAccess in, because what it keeps stays in memory until the next
+	 * CallerAccess replaces it.
 	 */
 	private accessStored(workspaceId: string, access: DecodedAccess): void {
 		if (!this.accessAsked.has(workspaceId) || !this.scopes.has(workspaceId)) return;
-		this.decodedAccess.set(workspaceId, access);
+		this.decodedAccess.set(workspaceId, { generation: undefined, access });
 	}
 
 	/** @internal backs devtools.ts; see ClientInternals. */
