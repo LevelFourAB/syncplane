@@ -66,6 +66,20 @@ func isTrusted(ctx context.Context) bool {
 // as enterWorkspace does, and refuses a caller that holds no permission in the
 // workspace when the schema declares a role.
 func (s *Server) gate(ctx context.Context, workspaceID string) (adm admission, enforced bool, err error) {
+	return s.gateTo(ctx, workspaceID, false)
+}
+
+// gateServed is gate for a call that one transaction of s.store serves. As
+// enterWorkspaceServed does, it can leave the grant check to that transaction
+// and set admission.verdict, and the call then keeps to the same rules. The
+// gate's error that verdict.settle returns is the one gate returns.
+func (s *Server) gateServed(ctx context.Context, workspaceID string) (adm admission, enforced bool, err error) {
+	return s.gateTo(ctx, workspaceID, s.grantsInServingTx(true))
+}
+
+// gateTo runs gate. leaveGrants leaves the grant check to the transaction that
+// serves the call.
+func (s *Server) gateTo(ctx context.Context, workspaceID string, leaveGrants bool) (adm admission, enforced bool, err error) {
 	if isTrusted(ctx) {
 		return admission{}, false, nil
 	}
@@ -83,8 +97,13 @@ func (s *Server) gate(ctx context.Context, workspaceID string) (adm admission, e
 	if adm.caller, err = s.resolveCaller(ctx, adm.principal, model); err != nil {
 		return adm, true, err
 	}
+	wrap := func(err error) error { return fmt.Errorf("server: workspace %q: %w", workspaceID, err) }
+	if leaveGrants && model.requiresPermission() {
+		adm.verdict = &pendingVerdict{srv: s, ws: workspaceID, caller: adm.caller, wrap: wrap}
+		return adm, true, nil
+	}
 	if adm.access, err = s.admitAccess(ctx, workspaceID, adm.caller); err != nil {
-		return adm, true, fmt.Errorf("server: workspace %q: %w", workspaceID, err)
+		return adm, true, wrap(err)
 	}
 	return adm, true, nil
 }

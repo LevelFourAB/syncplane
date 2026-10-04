@@ -282,7 +282,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		}
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
-	cur, err := s.decodeCursor(ctx, ws, want.GetCursor())
+	cur, err := s.decodeCursor(ctx, ws, want.GetCursor(), adm.verdict)
 	if err != nil {
 		// An undecodable cursor cannot be advanced from; a clean snapshot can.
 		return nil, syncplanev1.WorkspaceDropped_REASON_RESET, err

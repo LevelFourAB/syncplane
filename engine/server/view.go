@@ -40,20 +40,21 @@ func (s *Server) View(ctx context.Context, workspaceID string, fn func(tx *ViewT
 	if workspaceID == "" {
 		return fmt.Errorf("server: workspace id is required")
 	}
-	adm, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gateServed(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
 	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
-		return err
+		return adm.verdict.settle(ctx, err)
 	}
-	return s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
+	err = s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
 		if err := bind(tx); err != nil {
 			return err
 		}
 		return fn(&ViewTx{srv: s, tx: tx, ws: workspaceID, visible: visible})
 	})
+	return adm.verdict.settle(ctx, err)
 }
 
 // ViewTx is the read-only entity facade View runs against. Entity identity

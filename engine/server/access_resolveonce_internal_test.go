@@ -21,156 +21,177 @@ import (
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
 
-// The workspace gate reads the caller's grants before the transaction that
-// serves the request opens. That transaction uses the gate's grants only when
-// it reads the workspace at the same position, so a request reads the grants
-// once, and a write that lands between the two is never served under the
-// grants from before it.
+// A request reads the caller's grants once. With the default policy the
+// workspace gate leaves the read to the transaction that serves the request.
+// With a policy of the application the gate reads them in a transaction of its
+// own, before the serving transaction opens. That transaction then uses the
+// gate's grants only when it reads the workspace at the same position, so a
+// write that lands between the two is never served under the grants from
+// before it.
 var _ = Describe("Access resolution per request", func() {
 	var f *resolveOnceFixture
 
-	BeforeEach(func() {
-		f = newResolveOnceFixture()
-	})
-
-	Describe("reads the caller's grants once", func() {
-		It("for a pull", func() {
-			rows := f.pull(nil)
-			Expect(f.resolutions()).To(Equal(1))
-			Expect(rows).To(ContainElements("issue/i-0", "issue/i-1"))
-			Expect(rows).NotTo(ContainElement("issue/i-2"))
-		})
-
-		It("for a pull from a current cursor", func() {
-			cursor := f.cursor()
-			f.pull(cursor)
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for a bootstrap", func() {
-			Expect(f.bootstrap()).To(ContainElements("issue/i-0", "issue/i-1"))
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for a query", func() {
-			Expect(f.query()).To(ConsistOf("issue/i-0", "issue/i-1"))
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for a push", func() {
-			Expect(f.pushIssue("i-1")).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for a Subscribe stream up to its catch-up", func() {
-			cursor := f.cursor()
-			req := connect.NewRequest(&syncplanev1.SubscribeRequest{
-				ClientId: "c-me",
-				Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: "ws", Cursor: cursor}},
+	for _, policy := range []struct {
+		name string
+		opts []Option
+	}{
+		{"with the default policy", nil},
+		{"with a policy of the application", []Option{WithPermissions(openPolicy{})}},
+	} {
+		Describe("reads the caller's grants once "+policy.name, func() {
+			BeforeEach(func() {
+				f = newResolveOnceFixture(policy.opts...)
 			})
-			req.Header().Set(resolveOnceUser, "me")
-			ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
-			defer cancel()
-			stream, err := f.sync.Subscribe(ctx, req)
-			Expect(err).NotTo(HaveOccurred())
-			caughtUp := false
-			for !caughtUp && stream.Receive() {
-				Expect(stream.Msg().GetDropped()).To(BeNil(), "the stream dropped the scope")
-				caughtUp = stream.Msg().GetCaughtUp()
-			}
-			Expect(caughtUp).To(BeTrue(), "the stream ended before it caught up: %v", stream.Err())
-			Expect(f.resolutions()).To(Equal(1))
+
+			It("for a pull", func() {
+				rows := f.pull(nil)
+				Expect(f.resolutions()).To(Equal(1))
+				Expect(rows).To(ContainElements("issue/i-0", "issue/i-1"))
+				Expect(rows).NotTo(ContainElement("issue/i-2"))
+			})
+
+			It("for a pull from a current cursor", func() {
+				cursor := f.cursor()
+				f.pull(cursor)
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for a bootstrap", func() {
+				Expect(f.bootstrap()).To(ContainElements("issue/i-0", "issue/i-1"))
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for a query", func() {
+				Expect(f.query()).To(ConsistOf("issue/i-0", "issue/i-1"))
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for a push", func() {
+				Expect(f.pushIssue("i-1")).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED))
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for a Subscribe stream up to its catch-up", func() {
+				cursor := f.cursor()
+				req := connect.NewRequest(&syncplanev1.SubscribeRequest{
+					ClientId: "c-me",
+					Scopes:   []*syncplanev1.WorkspaceScope{{WorkspaceId: "ws", Cursor: cursor}},
+				})
+				req.Header().Set(resolveOnceUser, "me")
+				ctx, cancel := context.WithTimeout(f.ctx, 10*time.Second)
+				defer cancel()
+				stream, err := f.sync.Subscribe(ctx, req)
+				Expect(err).NotTo(HaveOccurred())
+				caughtUp := false
+				for !caughtUp && stream.Receive() {
+					Expect(stream.Msg().GetDropped()).To(BeNil(), "the stream dropped the scope")
+					caughtUp = stream.Msg().GetCaughtUp()
+				}
+				Expect(caughtUp).To(BeTrue(), "the stream ended before it caught up: %v", stream.Err())
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for View", func() {
+				Expect(f.srv.View(f.me, "ws", func(tx *ViewTx) error {
+					found, _, err := tx.Get(&accessv1.Issue{}, "i-1")
+					Expect(found).To(BeTrue())
+					return err
+				})).To(Succeed())
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for Mutate", func() {
+				Expect(f.srv.Mutate(f.me, "ws", func(tx *EntityTx) error {
+					return tx.Put(&accessv1.Issue{Id: "i-1", Repo: &accessv1.Repo{Id: "r1"}, Title: "changed"})
+				})).To(Succeed())
+				Expect(f.resolutions()).To(Equal(1))
+			})
+
+			It("for Apply", func() {
+				Expect(f.srv.Apply(f.me, "ws", func(tx *ApplyTx) error {
+					return tx.Put(&accessv1.Issue{Id: "i-1", Repo: &accessv1.Repo{Id: "r1"}, Title: "changed"})
+				})).To(Succeed())
+				Expect(f.resolutions()).To(Equal(1))
+			})
+		})
+	}
+
+	Describe("when the gate reads the grants in a transaction of its own", func() {
+		BeforeEach(func() {
+			f = newResolveOnceFixture(WithPermissions(openPolicy{}))
 		})
 
-		It("for View", func() {
-			Expect(f.srv.View(f.me, "ws", func(tx *ViewTx) error {
-				found, _, err := tx.Get(&accessv1.Issue{}, "i-1")
-				Expect(found).To(BeTrue())
-				return err
-			})).To(Succeed())
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for Mutate", func() {
-			Expect(f.srv.Mutate(f.me, "ws", func(tx *EntityTx) error {
-				return tx.Put(&accessv1.Issue{Id: "i-1", Repo: &accessv1.Repo{Id: "r1"}, Title: "changed"})
-			})).To(Succeed())
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("for Apply", func() {
-			Expect(f.srv.Apply(f.me, "ws", func(tx *ApplyTx) error {
-				return tx.Put(&accessv1.Issue{Id: "i-1", Repo: &accessv1.Repo{Id: "r1"}, Title: "changed"})
-			})).To(Succeed())
-			Expect(f.resolutions()).To(Equal(1))
-		})
-
-		It("again when a write lands between the gate and the serving transaction", func() {
+		It("reads them again when a write lands between the gate and the serving transaction", func() {
 			f.afterGate(func() { f.seed(&accessv1.Issue{Id: "i-9", Repo: &accessv1.Repo{Id: "r0"}, Title: "new"}) })
 			Expect(f.pull(nil)).To(ContainElement("issue/i-9"))
 			Expect(f.resolutions()).To(Equal(2))
 		})
-	})
 
-	// Each change runs after the gate has read the grants and before the
-	// transaction that serves the request opens.
-	revokeGrant := func(f *resolveOnceFixture) {
-		f.trusted(func(tx *EntityTx) error { return tx.Delete(&accessv1.RepoMember{}, "rm-me-1") })
-	}
-	deleteAnchor := func(f *resolveOnceFixture) {
-		f.trusted(func(tx *EntityTx) error { return tx.Delete(&accessv1.Repo{}, "r1") })
-	}
-
-	DescribeTable("serves no row below an anchor the caller lost after the gate",
-		func(change func(*resolveOnceFixture), read func(*resolveOnceFixture) []string) {
-			f.afterGate(func() { change(f) })
-			rows := read(f)
-			Expect(rows).To(ContainElement("issue/i-0"))
-			Expect(rows).NotTo(ContainElement("issue/i-1"))
-			Expect(rows).NotTo(ContainElement("repo/r1"))
-		},
-		Entry("a pull after a revoked grant", revokeGrant, func(f *resolveOnceFixture) []string { return f.pull(nil) }),
-		Entry("a pull after a deleted anchor", deleteAnchor, func(f *resolveOnceFixture) []string { return f.pull(nil) }),
-		Entry("a bootstrap after a revoked grant", revokeGrant, (*resolveOnceFixture).bootstrap),
-		Entry("a bootstrap after a deleted anchor", deleteAnchor, (*resolveOnceFixture).bootstrap),
-		Entry("a query after a revoked grant", revokeGrant, (*resolveOnceFixture).query),
-		Entry("a query after a deleted anchor", deleteAnchor, (*resolveOnceFixture).query),
-	)
-
-	It("tombstones the rows below a grant revoked after the gate on a pull from a cursor", func() {
-		cursor := f.cursor()
-		f.afterGate(func() { revokeGrant(f) })
-		var changes []*syncplanev1.RowChange
-		for more := true; more; {
-			resp := f.pullResp(cursor)
-			changes = append(changes, resp.GetPatch().GetChanges()...)
-			cursor, more = resp.GetNextCursor(), resp.GetHasMore()
+		// Each change runs after the gate has read the grants and before the
+		// transaction that serves the request opens.
+		revokeGrant := func(f *resolveOnceFixture) {
+			f.trusted(func(tx *EntityTx) error { return tx.Delete(&accessv1.RepoMember{}, "rm-me-1") })
 		}
-		var tombstoned []string
-		for _, rc := range changes {
-			Expect(rc.GetTombstone()).To(BeTrue(), "%s/%s came back live", rc.GetEntity(), rc.GetKey())
-			tombstoned = append(tombstoned, rc.GetEntity()+"/"+rc.GetKey())
+		deleteAnchor := func(f *resolveOnceFixture) {
+			f.trusted(func(tx *EntityTx) error { return tx.Delete(&accessv1.Repo{}, "r1") })
 		}
-		Expect(tombstoned).To(ContainElement("issue/i-1"))
-	})
 
-	DescribeTable("refuses a write below an anchor the caller lost after the gate",
-		func(change func(*resolveOnceFixture)) {
-			f.afterGate(func() { change(f) })
-			Expect(f.pushIssue("i-1")).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
-		},
-		Entry("after a revoked grant", revokeGrant),
-		Entry("after a deleted anchor", deleteAnchor),
-	)
+		DescribeTable("serves no row below an anchor the caller lost after the gate",
+			func(change func(*resolveOnceFixture), read func(*resolveOnceFixture) []string) {
+				f.afterGate(func() { change(f) })
+				rows := read(f)
+				Expect(rows).To(ContainElement("issue/i-0"))
+				Expect(rows).NotTo(ContainElement("issue/i-1"))
+				Expect(rows).NotTo(ContainElement("repo/r1"))
+			},
+			Entry("a pull after a revoked grant", revokeGrant, func(f *resolveOnceFixture) []string { return f.pull(nil) }),
+			Entry("a pull after a deleted anchor", deleteAnchor, func(f *resolveOnceFixture) []string { return f.pull(nil) }),
+			Entry("a bootstrap after a revoked grant", revokeGrant, (*resolveOnceFixture).bootstrap),
+			Entry("a bootstrap after a deleted anchor", deleteAnchor, (*resolveOnceFixture).bootstrap),
+			Entry("a query after a revoked grant", revokeGrant, (*resolveOnceFixture).query),
+			Entry("a query after a deleted anchor", deleteAnchor, (*resolveOnceFixture).query),
+		)
+
+		It("tombstones the rows below a grant revoked after the gate on a pull from a cursor", func() {
+			cursor := f.cursor()
+			f.afterGate(func() { revokeGrant(f) })
+			var changes []*syncplanev1.RowChange
+			for more := true; more; {
+				resp := f.pullResp(cursor)
+				changes = append(changes, resp.GetPatch().GetChanges()...)
+				cursor, more = resp.GetNextCursor(), resp.GetHasMore()
+			}
+			var tombstoned []string
+			for _, rc := range changes {
+				Expect(rc.GetTombstone()).To(BeTrue(), "%s/%s came back live", rc.GetEntity(), rc.GetKey())
+				tombstoned = append(tombstoned, rc.GetEntity()+"/"+rc.GetKey())
+			}
+			Expect(tombstoned).To(ContainElement("issue/i-1"))
+		})
+
+		DescribeTable("refuses a write below an anchor the caller lost after the gate",
+			func(change func(*resolveOnceFixture)) {
+				f.afterGate(func() { change(f) })
+				Expect(f.pushIssue("i-1")).To(Equal(syncplanev1.MutationStatus_MUTATION_STATUS_REJECTED))
+			},
+			Entry("after a revoked grant", revokeGrant),
+			Entry("after a deleted anchor", deleteAnchor),
+		)
+	})
 })
+
+// openPolicy is a policy of the application that admits every caller and
+// filters nothing.
+type openPolicy struct{ AllowAll }
 
 // resolveOnceUser names the caller of a request to the fixture's
 // authenticator.
 const resolveOnceUser = "X-Test-User"
 
 // resolveOnceFixture is a server over the team schema of the access test
-// proto. The caller "me" writes in repos r0 and r1, and "other" reads r2.
-// Each repo holds one issue.
+// proto, configured by the options newResolveOnceFixture is given. The caller
+// "me" writes in repos r0 and r1, and "other" reads r2. Each repo holds one
+// issue.
 type resolveOnceFixture struct {
 	ctx   context.Context
 	store *grantProbeStore
@@ -184,14 +205,14 @@ type resolveOnceFixture struct {
 	perResolution int
 }
 
-func newResolveOnceFixture() *resolveOnceFixture {
+func newResolveOnceFixture(opts ...Option) *resolveOnceFixture {
 	GinkgoHelper()
 	ctx := context.Background()
 	inner, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "access.db"))
 	Expect(err).NotTo(HaveOccurred())
 	DeferCleanup(func() { Expect(inner.Close()).To(Succeed()) })
 	store := &grantProbeStore{Adapter: inner, indexes: map[[2]string]bool{}}
-	srv, err := New(store,
+	srv, err := New(store, append([]Option{
 		WithEntities(
 			&accessv1.Squad{}, &accessv1.SquadMember{}, &accessv1.Repo{},
 			&accessv1.RepoMember{}, &accessv1.RepoSquad{}, &accessv1.Issue{},
@@ -199,7 +220,7 @@ func newResolveOnceFixture() *resolveOnceFixture {
 		WithAuthenticator(AuthenticatorFunc(func(_ context.Context, h http.Header) (Principal, error) {
 			return Principal{Subject: h.Get(resolveOnceUser)}, nil
 		})),
-	)
+	}, opts...)...)
 	Expect(err).NotTo(HaveOccurred())
 	f := &resolveOnceFixture{ctx: ctx, store: store, srv: srv, me: WithPrincipal(ctx, Principal{Subject: "me"})}
 	f.trusted(func(tx *EntityTx) error {

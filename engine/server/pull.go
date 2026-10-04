@@ -155,8 +155,9 @@ func windowSeedsMoved(old map[closureKey]bool, now closureRows) []closureKey {
 // longer answers is not an error: the scalars still decode, stateEvicted is
 // set, and pullPreamble converts it into a reset. Only a transient store
 // failure surfaces as an error, so the client retries instead of re-downloading
-// a workspace it could have kept.
-func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (cursorState, error) {
+// a workspace it could have kept. A verdict the workspace gate left pending is
+// reached before the store is read, and its error is a gateError.
+func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte, verdict *pendingVerdict) (cursorState, error) {
 	if len(raw) == 0 {
 		return cursorState{}, nil
 	}
@@ -196,6 +197,11 @@ func (s *Server) decodeCursor(ctx context.Context, ws string, raw []byte) (curso
 		// eviction.
 		st.stateEvicted = true
 		return st, nil
+	}
+	// The read is storage work in the workspace, which a caller the gate
+	// refuses must not cause.
+	if err := verdict.reachApart(ctx); err != nil {
+		return cursorState{}, err
 	}
 	blob, err := s.cursorState.Get(ctx, ws, cursorstate.Ref{ID: st.stateID, Gen: st.stateGen})
 	if errors.Is(err, cursorstate.ErrNotFound) {
@@ -345,7 +351,7 @@ func logReset(ctx context.Context, logger *slog.Logger, reason resetReason) {
 	logger.LogAttrs(ctx, level, "client reset; re-bootstrap required", slog.String("reason", string(reason)))
 }
 
-func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.PullRequest]) (*connect.Response[syncplanev1.PullResponse], error) {
+func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.PullRequest]) (res *connect.Response[syncplanev1.PullResponse], err error) {
 	msg := req.Msg
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
@@ -353,12 +359,17 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 	if err := checkClientID(msg.GetClientId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+			res, err = nil, gerr
+		}
+	}()
 	principal := adm.principal
-	cur, err := s.decodeCursor(ctx, msg.GetWorkspaceId(), msg.GetCursor())
+	cur, err := s.decodeCursor(ctx, msg.GetWorkspaceId(), msg.GetCursor(), adm.verdict)
 	if err != nil {
 		return nil, err
 	}

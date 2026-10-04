@@ -115,11 +115,13 @@ type rowEmitter struct {
 	// filter joined with the application's, and is cleared whenever access is
 	// bound again. prior is the set the next bindAccess binds when it is held
 	// at the position that snapshot reads (see accessIn): the workspace gate's
-	// set, then the set bound last.
+	// set, then the set bound last. verdict is the grant check the gate left
+	// to the first read transaction that binds, nil once that one reached it.
 	caller     *accessCaller
 	modelInUse bool
 	access     *accessSet
 	prior      *accessSet
+	verdict    *pendingVerdict
 	chains     *accessChains
 	combined   map[string]readFilter
 	// readAccess and readAccessHash render access as a cursor records it,
@@ -450,9 +452,20 @@ func (e *rowEmitter) filterOf(entity string) (readFilter, error) {
 // transaction of the request when it read the workspace at the position tx
 // reads, which holds the same rows, and are read from tx otherwise (see
 // accessIn). It is a no-op for a schema that does not use the access model.
+//
+// When the workspace gate left its grant check to this transaction, bindAccess
+// reaches that verdict first and returns the gate's error, a gateError, for a
+// refused caller. A read path calls it before it reads anything else of tx.
 func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	if e.caller == nil {
 		return nil
+	}
+	if e.verdict != nil {
+		set, err := e.verdict.reach(tx)
+		if err != nil {
+			return err
+		}
+		e.prior, e.verdict = set, nil
 	}
 	set, err := accessIn(tx, e.caller, e.srv.limits, e.prior)
 	if err != nil {
@@ -464,9 +477,10 @@ func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 }
 
 // admit gives the emitter the caller the workspace gate resolved, and the set
-// the gate read for bindAccess to use where it holds.
+// the gate read for bindAccess to use where it holds, or the grant check the
+// gate left to bindAccess.
 func (e *rowEmitter) admit(adm admission) {
-	e.caller, e.prior = adm.caller, adm.access
+	e.caller, e.prior, e.verdict = adm.caller, adm.access, adm.verdict
 }
 
 // chainsOver returns a parent-chain walker over the rows get reads, for the

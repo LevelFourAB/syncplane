@@ -109,14 +109,19 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		return fail(CodeInternal, "workspace %q: %s failed", ws, phase)
 	}
 
-	adm, err := s.enterWorkspace(ctx, ws)
-	principal := adm.principal
-	if err != nil {
+	// refused reports the workspace gate's error.
+	refused := func(err error) *syncplanev1.WorkspaceResults {
 		if _, denied := AsWorkspaceDenial(err); denied {
 			return fail(CodeWorkspaceAccessRevoked, "workspace %q: access denied", ws)
 		}
 		// Could not decide (a hook outage). Transient: the client retries.
 		return failInternal("resolving access", err)
+	}
+
+	adm, err := s.enterWorkspaceServed(ctx, ws, true)
+	principal := adm.principal
+	if err != nil {
+		return refused(err)
 	}
 
 	// Authorize every mutation BEFORE opening the write transaction. CanMutate
@@ -138,6 +143,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 	for i, m := range muts {
 		if err := s.authorize(ctx, principal, ws, gate, m); err != nil {
 			if _, isRejection := AsRejection(err); !isRejection {
+				if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+					return refused(gerr)
+				}
 				return failInternal(fmt.Sprintf("authorizing mutation %d", m.GetMutationId()), err)
 			}
 			authz[i] = err
@@ -374,6 +382,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		guarded = true
 		s.tel().pushSavepointReruns.Add(ctx, 1)
 		err = s.store.WithWriteTx(ctx, ws, apply)
+	}
+	if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+		return refused(gerr)
 	}
 	switch {
 	case gap != "":

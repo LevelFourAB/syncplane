@@ -69,7 +69,7 @@ import (
 // difference (or resets when it cannot); it also records the window and
 // closure key-sets, so the first pull can diff against what the snapshot
 // actually shipped.
-func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1.BootstrapRequest], stream *connect.ServerStream[syncplanev1.BootstrapResponse]) error {
+func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1.BootstrapRequest], stream *connect.ServerStream[syncplanev1.BootstrapResponse]) (err error) {
 	msg := req.Msg
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
@@ -77,10 +77,11 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err := checkClientID(msg.GetClientId()); err != nil {
 		return connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
 	if err != nil {
 		return err
 	}
+	defer func() { err = adm.verdict.settle(ctx, err) }()
 	principal := adm.principal
 	wantHash, err := subscriptionHash(msg.GetSubscriptions())
 	if err != nil {
@@ -105,7 +106,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// what survives is a snapshot this request could actually continue (see
 	// bootstrapresume.go). Whether the cursor is still servable needs the
 	// workspace position, so that half waits for the tx below.
-	resume, err := s.decodeBootstrapResume(ctx, msg.GetWorkspaceId(), msg.GetResume())
+	resume, err := s.decodeBootstrapResume(ctx, msg.GetWorkspaceId(), msg.GetResume(), adm.verdict)
 	if err != nil {
 		return err
 	}
@@ -130,6 +131,13 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	// must not sit behind writes the client has already been acked — and the
 	// anchor is at least any resume's own floor.
 	if err := s.readTxAnchored(ctx, msg.GetWorkspaceId(), func(tx storage.ReadTx) error {
+		// The whole snapshot is filtered under the access read here, with the
+		// Begin position: every later page reads at or above it. First, so a
+		// grant check the gate left to this transaction comes before any
+		// other read.
+		if err := emitter.bindAccess(tx); err != nil {
+			return err
+		}
 		current, err := tx.CurrentSeq()
 		if err != nil {
 			return err
@@ -139,11 +147,6 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 		// reset-loop.
 		storeEpoch, err := tx.StoreEpoch()
 		if err != nil {
-			return err
-		}
-		// The whole snapshot is filtered under the access read here, with the
-		// Begin position: every later page reads at or above it.
-		if err := emitter.bindAccess(tx); err != nil {
 			return err
 		}
 		if emitter.caller != nil && emitter.caller.model.moving {

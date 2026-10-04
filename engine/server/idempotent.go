@@ -108,6 +108,8 @@ func (s *Server) MutateIdempotent(
 	if inWriteTx(ctx) {
 		return WriteOutcome{}, fmt.Errorf("server: MutateIdempotent called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
+	// The ledger is read before txAccess.begin, so the gate keeps its own read:
+	// a refused caller must not be answered from a record.
 	adm, enforced, err := s.gate(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
@@ -201,7 +203,9 @@ func (s *Server) InvokeIdempotent(
 	if err != nil {
 		return WriteOutcome{}, err
 	}
-	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args)
+	// The ledger is read before the body checks the invocation, so the gate
+	// keeps its own read: a refused caller must not be answered from a record.
+	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, false)
 	if err != nil {
 		return WriteOutcome{}, err
 	}

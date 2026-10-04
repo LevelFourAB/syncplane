@@ -24,15 +24,20 @@ import (
 // apply. Results are value snapshots ordered by order_by (missing values
 // last, ties broken by the next key and finally the row key ascending, in
 // UTF-16 code-unit order — exactly the client evaluator's compareRows).
-func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.QueryRequest]) (*connect.Response[syncplanev1.QueryResponse], error) {
+func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.QueryRequest]) (res *connect.Response[syncplanev1.QueryResponse], err error) {
 	msg := req.Msg
 	if err := naming.ValidateWorkspaceID(msg.GetWorkspaceId()); err != nil {
 		return nil, connect.NewError(connect.CodeInvalidArgument, err)
 	}
-	adm, err := s.enterWorkspace(ctx, msg.GetWorkspaceId())
+	adm, err := s.enterWorkspaceServed(ctx, msg.GetWorkspaceId(), false)
 	if err != nil {
 		return nil, err
 	}
+	defer func() {
+		if gerr := adm.verdict.refusal(ctx, err); gerr != nil {
+			res, err = nil, gerr
+		}
+	}()
 	info, ok := s.catalogPtr().entities[msg.GetEntity()]
 	if !ok {
 		return nil, connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("unknown entity %q", msg.GetEntity()))

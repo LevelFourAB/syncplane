@@ -75,7 +75,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 	if inWriteTx(ctx) {
 		return fmt.Errorf("server: Mutate called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
-	adm, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gateServed(ctx, workspaceID)
 	if err != nil {
 		return err
 	}
@@ -100,7 +100,7 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		wrote = etx.wrote
 		return nil
 	})
-	if err != nil {
+	if err = adm.verdict.settle(ctx, err); err != nil {
 		return err
 	}
 	if wrote {
@@ -141,18 +141,19 @@ func (s *Server) Invoke(ctx context.Context, workspaceID, mutatorName string, ar
 	if err != nil {
 		return err
 	}
-	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args)
+	access, err := s.authorizeInvoke(ctx, workspaceID, mutatorName, args, true)
 	if err != nil {
 		return err
 	}
 	// The invocation is authorized; the body writes as server-authoritative
 	// logic, so the inner Mutate must not re-gate or authorize per row.
-	return s.Mutate(Trusted(ctx), workspaceID, func(tx *EntityTx) error {
+	err = s.Mutate(Trusted(ctx), workspaceID, func(tx *EntityTx) error {
 		if err := s.beginInvocation(ctx, workspaceID, tx, access, mi, bodyArgs); err != nil {
 			return err
 		}
 		return mi.fn(markWriteTx(ctx), tx, bodyArgs)
 	})
+	return access.settle(ctx, err)
 }
 
 // beginInvocation checks an authorized invocation against the access model
@@ -182,8 +183,16 @@ func (s *Server) beginInvocation(
 // InvokeIdempotent. It returns the caller's access in the access model, which
 // the invocation is checked against inside the transaction; nil for a Trusted
 // call and in a schema without the model.
-func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName string, args proto.Message) (*txAccess, error) {
-	adm, enforced, err := s.gate(ctx, workspaceID)
+//
+// served runs gateServed in place of gate, for a call whose write transaction
+// reaches the access before it reads anything else (see beginInvocation). The
+// caller then passes its outcome through txAccess.settle.
+func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName string, args proto.Message, served bool) (*txAccess, error) {
+	gate := s.gate
+	if served {
+		gate = s.gateServed
+	}
+	adm, enforced, err := gate(ctx, workspaceID)
 	p := adm.principal
 	if err != nil {
 		return nil, err
@@ -195,16 +204,16 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 	if args != nil {
 		packed, err := anypb.New(args)
 		if err != nil {
-			return nil, fmt.Errorf("server: mutator %q: packing args for authorization: %w", mutatorName, err)
+			return nil, adm.verdict.settle(ctx, fmt.Errorf("server: mutator %q: packing args for authorization: %w", mutatorName, err))
 		}
 		custom.Args = packed
 	}
 	// No field gate: a custom mutation has no fields of its own to protect, and
 	// the rows its body writes are covered by this one verdict.
 	if err := s.authorizeWrite(ctx, p, workspaceID, nil, Write{Custom: custom}); err != nil {
-		return nil, err
+		return nil, adm.verdict.settle(ctx, err)
 	}
-	return newTxAccess(adm.caller, adm.access, s.limits, func(row storage.Row, err error) {
+	return newTxAccess(adm, s.limits, func(row storage.Row, err error) {
 		s.reportPoison(ctx, workspaceID, row, err)
 	}), nil
 }

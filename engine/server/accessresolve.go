@@ -721,6 +721,13 @@ func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessC
 		set, err = accessIn(tx, c, s.limits, nil)
 		return err
 	})
+	return admitted(set, err)
+}
+
+// admitted is the workspace gate's verdict on set, what reading a caller's
+// grants returned with err: errNoAccess for a set that holds no permission,
+// and err wrapped as a failure to decide.
+func admitted(set *accessSet, err error) (*accessSet, error) {
 	if err != nil {
 		return nil, fmt.Errorf("server: resolving access: %w", err)
 	}

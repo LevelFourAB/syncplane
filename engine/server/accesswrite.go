@@ -23,8 +23,10 @@ type txAccess struct {
 	limits Limits
 	report func(storage.Row, error)
 	// admitted is the set the workspace gate read, which begin takes as the
-	// transaction's own where it is held (see heldAt).
+	// transaction's own where it is held (see heldAt). verdict is the grant
+	// check the gate left to the write transaction, which begin reaches.
 	admitted *accessSet
+	verdict  *pendingVerdict
 	tx       storage.ReadTx
 	set      *accessSet
 	// chains walks parent chains over chainsTx, and is dropped after a write
@@ -33,15 +35,14 @@ type txAccess struct {
 	chains   *accessChains
 }
 
-// newTxAccess returns the access of caller for its write transactions, or nil
-// for a caller outside the access model. admitted is the set the workspace
-// gate read for caller, or nil. report is told about a row on a parent chain
-// that does not decode.
-func newTxAccess(caller *accessCaller, admitted *accessSet, limits Limits, report func(storage.Row, error)) *txAccess {
-	if caller == nil {
+// newTxAccess returns the access of the caller adm admitted for its write
+// transactions, or nil for a caller outside the access model. report is told
+// about a row on a parent chain that does not decode.
+func newTxAccess(adm admission, limits Limits, report func(storage.Row, error)) *txAccess {
+	if adm.caller == nil {
 		return nil
 	}
-	return &txAccess{caller: caller, admitted: admitted, limits: limits, report: report}
+	return &txAccess{caller: adm.caller, admitted: adm.access, verdict: adm.verdict, limits: limits, report: report}
 }
 
 // begin starts one attempt of a write transaction. It drops what an earlier
@@ -50,11 +51,23 @@ func newTxAccess(caller *accessCaller, admitted *accessSet, limits Limits, repor
 // caller holds as of tx. A transaction that has taken a sequence is past that
 // position (see workspacePos), so a write path calls it before its first
 // write; after one it only costs the read of the position.
+//
+// When the workspace gate left its grant check to the write transaction, begin
+// reaches that verdict in tx and returns the gate's error, a gateError, for a
+// refused caller. A write path then calls it before it reads anything else of
+// tx, and the refused transaction writes nothing.
 func (a *txAccess) begin(tx storage.ReadTx) error {
 	if a == nil {
 		return nil
 	}
 	a.invalidate()
+	if a.verdict != nil {
+		set, err := a.verdict.reach(tx)
+		if err != nil {
+			return err
+		}
+		a.admitted = set
+	}
 	if a.admitted == nil || a.admitted.caller != a.caller {
 		return nil
 	}
@@ -69,6 +82,15 @@ func (a *txAccess) begin(tx storage.ReadTx) error {
 		a.tx, a.set = tx, a.admitted
 	}
 	return nil
+}
+
+// settle is pendingVerdict.settle for the grant check a carries. A nil a, or
+// one the workspace gate decided, returns err.
+func (a *txAccess) settle(ctx context.Context, err error) error {
+	if a == nil {
+		return err
+	}
+	return a.verdict.settle(ctx, err)
 }
 
 // get returns what the caller holds as of tx.

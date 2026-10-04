@@ -137,7 +137,7 @@ func (s *Server) apply(
 	if inWriteTx(ctx) {
 		return WriteOutcome{}, fmt.Errorf("server: Apply called re-entrantly inside a write transaction (workspace %q): a nested write transaction waits for the write lock the enclosing one holds and would deadlock; perform writes through the enclosing EntityTx instead", workspaceID)
 	}
-	adm, enforced, err := s.gate(ctx, workspaceID)
+	adm, enforced, err := s.gateServed(ctx, workspaceID)
 	if err != nil {
 		return WriteOutcome{}, err
 	}
@@ -147,7 +147,7 @@ func (s *Server) apply(
 	}
 	visible, bind, err := s.readGate(ctx, workspaceID, adm, enforced)
 	if err != nil {
-		return WriteOutcome{}, err
+		return WriteOutcome{}, adm.verdict.settle(ctx, err)
 	}
 
 	// Phase 1: run fn over a read snapshot, recording its writes. No write lock
@@ -179,7 +179,9 @@ func (s *Server) apply(
 		result, fnErr = fn(atx)
 		return fnErr
 	})
-	if err != nil {
+	// The snapshot reached the grant check first, so whatever follows runs for
+	// an admitted caller.
+	if err = adm.verdict.settle(ctx, err); err != nil {
 		return WriteOutcome{}, err
 	}
 	if replay != nil {
