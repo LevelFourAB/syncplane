@@ -193,7 +193,9 @@ func (s *Server) pushWorkspace(ctx context.Context, batch *syncplanev1.Workspace
 		// Fresh per attempt: a retried closure must re-read rather than serve
 		// what an abandoned one fetched.
 		rows := &batchRows{tx: tx, owners: owners, fetched: map[string]map[string]storage.Row{}}
-		gate.accessOf().invalidate()
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
 		rejectionsOf := func(key string) ([]storage.ClientRejection, error) {
 			if recs, ok := verdicts[key]; ok {
 				return recs, nil

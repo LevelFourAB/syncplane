@@ -371,7 +371,7 @@ func (s *Server) Pull(ctx context.Context, req *connect.Request[syncplanev1.Pull
 		return nil, err
 	}
 	emitter.noDeltaEntities = noDeltaEntitySet(msg.GetNoDeltaEntities())
-	emitter.caller = adm.caller
+	emitter.admit(adm)
 
 	// Resolve every Permissions hook OUTSIDE the read snapshot, mirroring
 	// bootstrap.go: FilterEpoch up front, then warm the emitter's per-entity

@@ -113,10 +113,13 @@ type rowEmitter struct {
 	// bound inside the read snapshot by bindAccess, and chains walks parent
 	// chains over the same rows. combined memoizes, per entity, the model's
 	// filter joined with the application's, and is cleared whenever access is
-	// bound again.
+	// bound again. prior is the set the next bindAccess binds when it is held
+	// at the position that snapshot reads (see accessIn): the workspace gate's
+	// set, then the set bound last.
 	caller     *accessCaller
 	modelInUse bool
 	access     *accessSet
+	prior      *accessSet
 	chains     *accessChains
 	combined   map[string]readFilter
 	// readAccess and readAccessHash render access as a cursor records it,
@@ -440,21 +443,30 @@ func (e *rowEmitter) filterOf(entity string) (readFilter, error) {
 	return f, nil
 }
 
-// bindAccess resolves what the caller holds from the grant rows in tx. A read
+// bindAccess binds what the caller holds as of the read transaction tx. A read
 // path calls it at the start of every read transaction whose rows it
-// classifies, so the grants it reads, the parent chains it walks and the rows
-// it filters come from one snapshot. It is a no-op for a schema that does not
-// use the access model.
+// classifies, so the grants, the parent chains it walks and the rows it
+// filters come from one snapshot. The grants are those of an earlier
+// transaction of the request when it read the workspace at the position tx
+// reads, which holds the same rows, and are read from tx otherwise (see
+// accessIn). It is a no-op for a schema that does not use the access model.
 func (e *rowEmitter) bindAccess(tx storage.ReadTx) error {
 	if e.caller == nil {
 		return nil
 	}
-	set, err := resolveAccess(tx, e.caller, e.srv.limits)
+	set, err := accessIn(tx, e.caller, e.srv.limits, e.prior)
 	if err != nil {
 		return err
 	}
+	e.prior = set
 	e.useAccess(set, e.chainsOver(tx.GetRow))
 	return nil
+}
+
+// admit gives the emitter the caller the workspace gate resolved, and the set
+// the gate read for bindAccess to use where it holds.
+func (e *rowEmitter) admit(adm admission) {
+	e.caller, e.prior = adm.caller, adm.access
 }
 
 // chainsOver returns a parent-chain walker over the rows get reads, for the

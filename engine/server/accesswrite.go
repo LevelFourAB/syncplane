@@ -22,8 +22,11 @@ type txAccess struct {
 	caller *accessCaller
 	limits Limits
 	report func(storage.Row, error)
-	tx     storage.ReadTx
-	set    *accessSet
+	// admitted is the set the workspace gate read, which begin takes as the
+	// transaction's own where it is held (see heldAt).
+	admitted *accessSet
+	tx       storage.ReadTx
+	set      *accessSet
 	// chains walks parent chains over chainsTx, and is dropped after a write
 	// to a row that can sit on a chain.
 	chainsTx storage.ReadTx
@@ -31,13 +34,41 @@ type txAccess struct {
 }
 
 // newTxAccess returns the access of caller for its write transactions, or nil
-// for a caller outside the access model. report is told about a row on a
-// parent chain that does not decode.
-func newTxAccess(caller *accessCaller, limits Limits, report func(storage.Row, error)) *txAccess {
+// for a caller outside the access model. admitted is the set the workspace
+// gate read for caller, or nil. report is told about a row on a parent chain
+// that does not decode.
+func newTxAccess(caller *accessCaller, admitted *accessSet, limits Limits, report func(storage.Row, error)) *txAccess {
 	if caller == nil {
 		return nil
 	}
-	return &txAccess{caller: caller, limits: limits, report: report}
+	return &txAccess{caller: caller, admitted: admitted, limits: limits, report: report}
+}
+
+// begin starts one attempt of a write transaction. It drops what an earlier
+// attempt resolved and, when tx reads the workspace at the position the
+// workspace gate read the caller's grants at, takes the gate's set as what the
+// caller holds as of tx. A transaction that has taken a sequence is past that
+// position (see workspacePos), so a write path calls it before its first
+// write; after one it only costs the read of the position.
+func (a *txAccess) begin(tx storage.ReadTx) error {
+	if a == nil {
+		return nil
+	}
+	a.invalidate()
+	if a.admitted == nil || a.admitted.caller != a.caller {
+		return nil
+	}
+	pos, err := workspacePosOf(tx)
+	if err != nil {
+		return err
+	}
+	if a.admitted.heldAt(a.caller, pos) {
+		// The workspace lock keeps every other write out until the
+		// transaction ends, so the set stays what tx holds until a write of
+		// the transaction's own drops it (see noteWrite).
+		a.tx, a.set = tx, a.admitted
+	}
+	return nil
 }
 
 // get returns what the caller holds as of tx.

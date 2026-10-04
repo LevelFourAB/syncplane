@@ -174,9 +174,56 @@ func callerSubjects(c *accessCaller) []string {
 
 // accessSet is what one caller holds in one workspace, as of one snapshot:
 // for each permission, the anchors the caller holds it at. A permission
-// absent from perms is held nowhere.
+// absent from perms is held nowhere. Nothing changes a set after it is
+// resolved, so transactions and emitters share it.
 type accessSet struct {
 	perms map[string]*permAnchors
+	// caller and at record, for a set resolved in a read transaction, the
+	// caller it was resolved for and the position that transaction read the
+	// workspace at, so that a later transaction at the same position can use
+	// the set (see heldAt). caller is nil for a set no other transaction may
+	// use.
+	caller *accessCaller
+	at     workspacePos
+}
+
+// workspacePos is where a transaction reads one workspace: the sequence and
+// the store epoch it sees.
+//
+// Two transactions at one position read the same rows, on the primary and on
+// a replica alike. A row write takes its version from NextSeq in the
+// transaction that commits it, and the commit makes the row and the sequence
+// visible together, so a commit that changes a row also moves the sequence.
+// The store epoch tells apart two lineages of the workspace that reach one
+// sequence. Inside a write transaction the sequence counts what the
+// transaction has taken (see storage.ReadTx.CurrentSeq), so a transaction
+// that has written a row is past every committed position. The writes that
+// take no sequence change nothing resolveAccess can tell apart: collected
+// tombstones read as rows that do not exist, an index build adds the entries
+// of rows that exist already, and the purges of the engine's own logs remove
+// no grant or anchor row.
+type workspacePos struct {
+	seq, storeEpoch uint64
+}
+
+// workspacePosOf returns the position tx reads its workspace at.
+func workspacePosOf(tx storage.ReadTx) (workspacePos, error) {
+	seq, err := tx.CurrentSeq()
+	if err != nil {
+		return workspacePos{}, err
+	}
+	epoch, err := tx.StoreEpoch()
+	if err != nil {
+		return workspacePos{}, err
+	}
+	return workspacePos{seq: seq, storeEpoch: epoch}, nil
+}
+
+// heldAt reports whether s is what c holds as of a transaction at pos: s was
+// resolved for c in a read transaction at pos (see workspacePos). A nil s is
+// held nowhere.
+func (s *accessSet) heldAt(c *accessCaller, pos workspacePos) bool {
+	return s != nil && s.caller != nil && s.caller == c && s.at == pos
 }
 
 // permAnchors are the anchors one permission is held at: the workspace root,
@@ -271,6 +318,26 @@ func (a *permAnchors) holds(entity, key string) bool {
 	}
 	_, ok := a.rows[anchorRow{entity: entity, key: key}]
 	return ok
+}
+
+// accessIn returns what c holds as of the read transaction tx: prior when it
+// is held at the position tx reads (see heldAt), and the grants tx holds
+// otherwise, recorded with that position so that a later transaction can use
+// them in turn. A nil prior always resolves.
+func accessIn(tx storage.ReadTx, c *accessCaller, limits Limits, prior *accessSet) (*accessSet, error) {
+	pos, err := workspacePosOf(tx)
+	if err != nil {
+		return nil, err
+	}
+	if prior.heldAt(c, pos) {
+		return prior, nil
+	}
+	set, err := resolveAccess(tx, c, limits)
+	if err != nil {
+		return nil, err
+	}
+	set.caller, set.at = c, pos
+	return set, nil
 }
 
 // resolveAccess reads what the caller holds from the grant rows in tx, and
@@ -630,7 +697,9 @@ var errNoAccess = DenyWorkspace("no access to this workspace")
 // admitAccess resolves what the caller holds from the primary and, when the
 // schema declares a role, refuses a caller that holds nothing. The primary is
 // read so that a replica that has not yet seen a new grant cannot turn into a
-// permanent denial.
+// permanent denial. The set records the position it was read at, so that the
+// transaction that serves the request uses it when it reads the workspace at
+// that position too (see accessIn).
 func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessCaller) (*accessSet, error) {
 	if !c.model.requiresPermission() {
 		// No caller can hold a permission, so there are no grants to read.
@@ -639,7 +708,7 @@ func (s *Server) admitAccess(ctx context.Context, workspaceID string, c *accessC
 	var set *accessSet
 	err := s.store.WithReadTx(ctx, workspaceID, func(tx storage.ReadTx) error {
 		var err error
-		set, err = resolveAccess(tx, c, s.limits)
+		set, err = accessIn(tx, c, s.limits, nil)
 		return err
 	})
 	if err != nil {

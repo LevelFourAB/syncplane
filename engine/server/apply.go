@@ -234,7 +234,9 @@ func (s *Server) apply(
 		// re-running the hook here would put it back under the write lock. The
 		// write gate does travel, warm: the PUT carry-over and the row check
 		// need the stored row, which only this transaction reads.
-		gate.accessOf().invalidate()
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, gate: gate, actor: actor, access: gate.accessOf()}
 		for _, in := range atx.intents {
 			if err := in.apply(etx); err != nil {

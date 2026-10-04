@@ -74,13 +74,15 @@ There is no stored chain. A stored chain for each row would have to be rewritten
 
 ## Reads use one snapshot
 
-Every read path reads the caller's grants inside the same read snapshot as the rows it returns: Pull, Bootstrap, Subscribe, Query, `View` and `Apply`. A grant written in the same transaction as a task therefore never reaches the client before or after the task.
+Every read path filters the rows it returns with the caller's grants as of the same read snapshot: Pull, Bootstrap, Subscribe, Query, `View` and `Apply`. A grant written in the same transaction as a task therefore never reaches the client before or after the task.
 
-In a schema that declares a role, the workspace gate reads the grants once more, from the primary, before any read snapshot opens. It refuses a caller that holds no permission in the workspace. Because it reads from the primary, a replica that has not yet seen a new grant does not cause a permanent denial.
+In a schema that declares a role, the workspace gate reads the grants first, from the primary, before any read snapshot opens. It refuses a caller that holds no permission in the workspace. Because it reads from the primary, a replica that has not yet seen a new grant does not cause a permanent denial.
+
+A read path uses the grants the gate read when its snapshot sees the workspace at the same sequence and store epoch as the gate did, and reads the grants again otherwise. Each row write takes a new sequence in the transaction that commits the row, so two snapshots at one sequence hold the same rows and give the same grants. A grant revoked between the gate and the snapshot moves the sequence, so the snapshot reads the grants again and never serves rows under grants older than itself.
 
 ## Writes are checked inside the transaction
 
-A write needs a rule that admits its operation where the row sits. The engine checks this inside the write transaction, so a write sees the grants that earlier writes of the same batch made:
+A write needs a rule that admits its operation where the row sits. The engine checks this inside the write transaction, so a write sees the grants that earlier writes of the same batch made. The transaction uses the grants the workspace gate read when it starts at the position the gate read, as a read snapshot does, and reads them again after a write to a grant row or to a row that can be an anchor:
 
 - An update or delete is checked against the stored row, before the version check, so a refused caller does not learn the row's version.
 - A create is checked against the new row after merges, carried-over fields and reference projection.

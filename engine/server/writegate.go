@@ -54,7 +54,7 @@ func (s *Server) newWriteGate(ctx context.Context, adm admission, workspaceID st
 	hook, _ := s.perms.(FieldPermissions)
 	return &writeGate{
 		srv: s, ctx: ctx, p: adm.principal, ws: workspaceID, fieldHook: hook,
-		access: newTxAccess(adm.caller, s.limits, func(row storage.Row, err error) {
+		access: newTxAccess(adm.caller, adm.access, s.limits, func(row storage.Row, err error) {
 			s.reportPoison(ctx, workspaceID, row, err)
 		}),
 	}

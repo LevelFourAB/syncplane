@@ -143,7 +143,7 @@ func (s *Server) readGate(
 	if err != nil {
 		return nil, nil, err
 	}
-	emitter.caller = adm.caller
+	emitter.admit(adm)
 	// In-process reads are a READ path: an app handler that scans a server-only
 	// entity asked for it by name, and withholding it here would only make the
 	// entity unreadable from the process that owns it. The read filter it

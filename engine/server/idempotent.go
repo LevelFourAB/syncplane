@@ -149,7 +149,9 @@ func (s *Server) mutateIdempotent(
 		if err != nil {
 			return err
 		}
-		gate.accessOf().invalidate()
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
 			access: gate.accessOf()}
 		result, err := fn(etx)

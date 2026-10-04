@@ -118,7 +118,7 @@ func (s *Server) Query(ctx context.Context, req *connect.Request[syncplanev1.Que
 	// entity is reachable here even though nothing ever syncs it. Read filters
 	// still apply — this is not a permission bypass, only a sync one.
 	emitter.includeServerOnly = true
-	emitter.caller = adm.caller
+	emitter.admit(adm)
 	// Resolve the entity's read filter BEFORE opening the snapshot (the hook
 	// must not run while the read tx is pinned); classify() inside the scan
 	// then hits the memoized filter. Query scans a single entity, so this is

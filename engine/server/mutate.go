@@ -89,7 +89,9 @@ func (s *Server) Mutate(ctx context.Context, workspaceID string, fn func(tx *Ent
 		// A fresh EntityTx per attempt keeps the closure re-runnable: a
 		// retried attempt re-allocates its sequence instead of stamping rows
 		// with one a rolled-back attempt consumed.
-		gate.accessOf().invalidate()
+		if err := gate.accessOf().begin(tx); err != nil {
+			return err
+		}
 		etx := &EntityTx{srv: s, ctx: ctx, ws: workspaceID, tx: tx, authz: authz, gate: gate, actor: actor,
 			access: gate.accessOf()}
 		if err := fn(etx); err != nil {
@@ -165,7 +167,9 @@ func (s *Server) beginInvocation(
 	args proto.Message,
 ) error {
 	// Per attempt: the adapter may run the closure again on a new transaction.
-	access.invalidate()
+	if err := access.begin(tx.tx); err != nil {
+		return err
+	}
 	if err := s.checkInvocation(ctx, workspaceID, tx.tx, access, mi, args); err != nil {
 		return err
 	}
@@ -200,7 +204,7 @@ func (s *Server) authorizeInvoke(ctx context.Context, workspaceID, mutatorName s
 	if err := s.authorizeWrite(ctx, p, workspaceID, nil, Write{Custom: custom}); err != nil {
 		return nil, err
 	}
-	return newTxAccess(adm.caller, s.limits, func(row storage.Row, err error) {
+	return newTxAccess(adm.caller, adm.access, s.limits, func(row storage.Row, err error) {
 		s.reportPoison(ctx, workspaceID, row, err)
 	}), nil
 }

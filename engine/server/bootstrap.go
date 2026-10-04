@@ -90,7 +90,7 @@ func (s *Server) Bootstrap(ctx context.Context, req *connect.Request[syncplanev1
 	if err != nil {
 		return err
 	}
-	emitter.caller = adm.caller
+	emitter.admit(adm)
 	epoch, err := s.perms.FilterEpoch(ctx, principal, msg.GetWorkspaceId())
 	if err != nil {
 		return err

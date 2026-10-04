@@ -298,7 +298,7 @@ func (s *Server) openScope(ctx context.Context, want *syncplanev1.WorkspaceScope
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
 	}
 	emitter.noDeltaEntities = noDeltas
-	emitter.caller = adm.caller
+	emitter.admit(adm)
 	epoch, err := s.perms.FilterEpoch(ctx, principal, ws)
 	if err != nil {
 		return nil, syncplanev1.WorkspaceDropped_REASON_ERROR, err
@@ -343,7 +343,7 @@ func (s *Server) refreshEpoch(ctx context.Context, sc *subScope) error {
 		return err
 	}
 	emitter.noDeltaEntities = sc.emitter.noDeltaEntities
-	emitter.caller = sc.emitter.caller
+	emitter.caller, emitter.prior = sc.emitter.caller, sc.emitter.prior
 	if err := emitter.warmFilters(); err != nil {
 		return err
 	}
@@ -379,7 +379,7 @@ func (s *Server) regateScopes(ctx context.Context, stream *connect.ServerStream[
 		if err == nil {
 			// The hooks may answer differently now, and the next drain binds
 			// the caller's access from what they say.
-			sc.emitter.caller = adm.caller
+			sc.emitter.admit(adm)
 			continue
 		}
 		reason := syncplanev1.WorkspaceDropped_REASON_ERROR

@@ -57,8 +57,11 @@ type admission struct {
 	// caller is the caller's identity in the access model, and access what
 	// it held when the gate read its grants from the primary. Both are nil
 	// for a schema that does not use the model. A read path binds the
-	// caller's access again inside its own snapshot (rowEmitter.bindAccess);
-	// access serves the checks that read no rows, such as a room's anchor.
+	// caller's access again inside its own snapshot (rowEmitter.bindAccess),
+	// and a write path inside its write transaction (txAccess.begin); both
+	// use access when their transaction reads the workspace at the position
+	// the gate read it at. access also serves the checks that read no rows,
+	// such as a room's anchor.
 	caller *accessCaller
 	access *accessSet
 }
