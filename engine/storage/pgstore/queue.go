@@ -33,8 +33,9 @@ import (
 //     because the batch may have carried statements from savepoints that have
 //     since been released.
 //
-// A read transaction never queues anything: the read surface has no method
-// that would, so its queue stays empty and every send is a no-op.
+// A read transaction queues only the two statements that open a scan cursor
+// (see scanCursor), and sends them at once. Its queue is empty between
+// operations, so every other send is a no-op.
 
 // maxQueuedStatements caps how many statements one transaction holds unsent.
 //

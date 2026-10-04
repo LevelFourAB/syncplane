@@ -53,7 +53,7 @@ type pgTx struct {
 	// queued holds the write-only statements this transaction has not sent yet,
 	// in the order they were written; sends counts the batches that have gone
 	// out, and failed holds the first error one of them returned. See queue.go.
-	// A read transaction never fills any of them.
+	// A read transaction uses them only to open a scan cursor.
 	queued []queuedStmt
 	sends  int
 	failed error

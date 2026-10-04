@@ -77,9 +77,10 @@
 //
 // A scan whose limit already bounds the result reads it in a single statement.
 // An unlimited one — ScanEntity takes no limit, and bootstrap walks whole
-// entities through it — pages through a server-side cursor instead, so its
-// memory stays off the size of the entity at the cost of a round trip per
-// batch.
+// entities through it — reads its first batch in a single statement too, and
+// pages through a server-side cursor only when the result is larger than that,
+// so its memory stays off the size of the entity at the cost of a round trip
+// per batch.
 //
 // # Schema and physical layout
 //
