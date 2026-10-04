@@ -15,11 +15,11 @@ export interface UseCanOptions extends UseWorkspaceOptions, CanOptions {}
  * what the answer means; it is advisory, so use it to shape the UI, not to
  * authorize.
  *
- * Re-evaluates when the row changes, when the server sends a new summary of
- * the caller's access (in this tab or another sharing the store), and when
- * the sync status changes, which covers a queued write that could change the
- * caller's grants being acked. Returns `'unknown'` until the first answer
- * resolves.
+ * Re-evaluates when the row changes, and when `SyncClient.onAccessChange`
+ * reports the workspace: a new summary of the caller's access arrives, a
+ * local write that can change the caller's grants is queued, acked or rolled
+ * back, or a row that other rows sit below changes, in this tab or another
+ * sharing the store. Returns `'unknown'` until the first answer resolves.
  *
  * @example
  * ```tsx
@@ -51,9 +51,9 @@ export function useCan<D extends DescMessage>(
  * Predicts whether the entity's access rules admit creating `row`, for the
  * resolved workspace. See `SyncClient.canCreate` for what the answer means.
  *
- * Re-evaluates when `row` changes by value, when the server sends a new
- * summary of the caller's access, and when the sync status changes. Returns
- * `'unknown'` until the first answer resolves.
+ * Re-evaluates when `row` changes by value, and when
+ * `SyncClient.onAccessChange` reports the workspace. Returns `'unknown'`
+ * until the first answer resolves.
  *
  * @example
  * ```tsx
@@ -105,8 +105,8 @@ export function useHasPermission<D extends DescMessage>(
 }
 
 /**
- * Holds the newest answer `ask` gives, asked again on every change of access
- * summary or sync status, and of the row with `key` when there is one.
+ * Holds the newest answer `ask` gives, asked again on every access change in
+ * the workspace and on every change of the row with `key` when there is one.
  * `deps` decide when `ask` itself changes.
  */
 function useAnswer<D extends DescMessage>(
@@ -135,15 +135,17 @@ function useAnswer<D extends DescMessage>(
 			);
 		};
 		evaluate();
+		// The access change and the row's own change cover every input of the
+		// answer. The sync status is not an input, and it changes on every local
+		// write: asking again on it makes each write cost one prediction per
+		// mounted hook.
 		const offAccess = client.onAccessChange((ws) => {
 			if (ws === scope.workspaceId) evaluate();
 		});
-		const offStatus = client.onStatusChange(evaluate);
 		const rows = key === undefined ? undefined : scope.watchRows(schema, [ key ], evaluate);
 		return () => {
 			live = false;
 			offAccess();
-			offStatus();
 			rows?.close();
 		};
 		// `ask` is a new closure on every render; deps lists what it reads.

@@ -21,6 +21,7 @@ import {
 	refShapes,
 	refStub,
 } from './mutations.js';
+import type { TouchSet } from './touch.js';
 
 /**
  * A prediction about the caller's access: `'yes'`, `'no'`, or `'unknown'`
@@ -40,9 +41,11 @@ export type AccessOperation = 'read' | 'create' | 'update' | 'delete';
 export const MAX_ACCESS_CHAIN = 32;
 
 /**
- * The entity name a summary write is announced under, in the touch tokens
- * that reach watchers and other tabs. Not an identifier, so it never names a
- * real entity.
+ * The entity name under which a commit announces, in the touch tokens that
+ * reach watchers and other tabs, a change of what the client can tell about
+ * the caller's grants: a write of the stored summary, or a write that
+ * {@link pendingChangesAccess} counts entering or leaving the pending queue.
+ * Not an identifier, so it never names a real entity.
  */
 export const ACCESS_TOUCH_ENTITY = '#access';
 
@@ -311,10 +314,27 @@ export function pendingChangesAccess(
 	return false;
 }
 
+/**
+ * Records in `touched` that a commit adds `mutations` to the pending queue of
+ * `workspaceId`, or removes them from it, when one of them can change what
+ * the caller holds (see {@link pendingChangesAccess}).
+ */
+export function touchPendingAccess(
+	touched: TouchSet,
+	registry: EntityRegistry,
+	workspaceId: string,
+	mutations: readonly Mutation[],
+): void {
+	if (pendingChangesAccess(registry, mutations)) touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
+}
+
 const anchorSets = new WeakMap<EntityRegistry, Set<string>>();
 
-/** The entities some case of some entity's access parent points at. */
-function anchorEntities(registry: EntityRegistry): Set<string> {
+/**
+ * The entities some case of some entity's access parent points at: the
+ * entities whose rows form the chains a prediction walks.
+ */
+export function anchorEntities(registry: EntityRegistry): ReadonlySet<string> {
 	let set = anchorSets.get(registry);
 	if (set === undefined) {
 		set = new Set();

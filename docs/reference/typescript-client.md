@@ -1497,7 +1497,7 @@ client.onAccessChange((workspaceId) => { ... }): () => void;
 
 The answer is advisory. The client does not refuse writes from it: every write is queued, and a write the server refuses comes back as a rejection ack. A row the caller lost access to keeps showing a pending local write until that ack arrives.
 
-`onAccessChange` calls back with the workspace id when a new summary is stored, by this tab or another tab sharing the store. The React hook `useCan(schema, key, permission, opts?)` follows the answer.
+`onAccessChange` calls back with the workspace id once for each commit that stores or removes the summary, queues, acks or rolls back a local write to a grant row (or a delete of an anchor row), or writes a row of an entity that other rows sit below, locally or from the server. It runs for commits by this tab and by other tabs sharing the store, and can run when no answer changed. It does not report a change of the row an answer is for unless that row is of such an entity, so to follow the answer for one row, watch that row too. The React hook `useCan(schema, key, permission, opts?)` does both.
 
 ### Schema compilation: defineSchema
 
@@ -1850,8 +1850,8 @@ type RowGroupResult<T> = readonly RowGroup<T>[] & Omit<WatchState, 'hydrating'>;
   can be edited without a scope change.
 
 - **`useCan(schema, key, permission, opts?)`** — `client.can` as a hook: re-renders
-  when the row changes, when a new access summary arrives, and when the sync status
-  changes. `'unknown'` until the first answer resolves. See
+  when the row changes and when `onAccessChange` reports the workspace. `'unknown'`
+  until the first answer resolves. See
   [Predicting permissions](#predicting-permissions).
 
 - **`useSyncStatus()`** — the live account-wide status object.

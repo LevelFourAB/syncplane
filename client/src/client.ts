@@ -15,6 +15,7 @@ import {
 	type AccessOperation,
 	accessParentUnits,
 	AccessSummary,
+	anchorEntities,
 	type CanAnswer,
 	canAt,
 	decideRules,
@@ -23,6 +24,7 @@ import {
 	pendingChangesAccess,
 	type RuleRow,
 	ruleRowOf,
+	touchPendingAccess,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
@@ -77,7 +79,6 @@ import {
 	type OverlayRecord,
 	overlayTextWsPrefix,
 	overlayWsPrefix,
-	parseTouchKey,
 	PENDING_ROOT,
 	pendingPrefix,
 	searchIndexWsPrefix,
@@ -2012,6 +2013,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 					}
 					touched.entity(workspaceId, entity);
 				}
+				// The sweep of the meta prefix below takes the stored CallerAccess
+				// with it, so the access listeners hear of it as they do of a wipe.
+				touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 				const kept = new Set([
 					metaLastMutationId(workspaceId),
 					metaPushedThrough(workspaceId),
@@ -2579,15 +2583,23 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Calls the onAccessChange listeners once per workspace whose stored
-	 * CallerAccess the touched set reports written.
+	 * Calls the onAccessChange listeners once per workspace in which the
+	 * touched set reports ACCESS_TOUCH_ENTITY, or a row of an entity that rows
+	 * sit below.
 	 */
 	private fireAccessChange(touched: TouchSet): void {
 		if (this.accessListeners.size === 0) return;
+		// A prediction reads the summary, whether the pending queue holds a
+		// write that can change grants, the row asked about and the rows up its
+		// chain. The first two announce themselves as ACCESS_TOUCH_ENTITY, the
+		// chain rows are anchor rows, and the row's own asker watches it. A
+		// grant row is not an input once confirmed: the server folds it into the
+		// summary, so a pull of one reports nothing here unless the summary
+		// changes too.
+		const anchors = anchorEntities(this.entityRegistry);
 		const workspaces = new Set<string>();
-		for (const token of touched.tokens()) {
-			const t = parseTouchKey(token);
-			if (t.entity === ACCESS_TOUCH_ENTITY) workspaces.add(t.workspaceId);
+		for (const { workspaceId, entity } of touched.pairs()) {
+			if (entity === ACCESS_TOUCH_ENTITY || anchors.has(entity)) workspaces.add(workspaceId);
 		}
 		for (const ws of workspaces) {
 			for (const cb of [ ...this.accessListeners ]) safeInvoke(cb, ws, 'onAccessChange');
@@ -3116,10 +3128,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * Subscribes to changes of what the caller holds under the access model:
-	 * `cb` runs with the workspace id whenever a new CallerAccess from the
-	 * server is stored for it, by this tab or another tab sharing the store.
+	 * Subscribes to changes that can change what {@link can},
+	 * {@link canCreate} and {@link hasPermission} predict in a workspace.
 	 * Returns an unsubscribe function.
+	 *
+	 * `cb` runs with the workspace id once for each commit, by this tab or
+	 * another tab sharing the store, that stores or removes the workspace's
+	 * CallerAccess; queues, acks or rolls back a local write to a grant row or
+	 * a delete of a row that other rows sit below; or writes a row of an
+	 * entity that other rows sit below, locally or from the server. It can run
+	 * when no prediction changed.
+	 *
+	 * A change of the row a prediction is for is not reported unless the row
+	 * is of such an entity. Watch that row as well to follow the prediction.
 	 */
 	onAccessChange(cb: (workspaceId: string) => void): () => void {
 		this.accessListeners.add(cb);
@@ -3759,6 +3780,9 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				// itself a record this wipe removes.
 				for (const entity of await syncableEntities(tx, this.entityRegistry)) {
 					for (const workspaceId of this.scopes.keys()) touched.entity(workspaceId, entity);
+				}
+				for (const workspaceId of this.scopes.keys()) {
+					touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 				}
 				const doomed: string[] = [];
 				for await (const [ k ] of tx.scan('')) doomed.push(k);
@@ -5307,6 +5331,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						}
 						// Persist AFTER the loop so the queued+pushed mask is the expanded one.
 						await enqueuePending(tx, workspaceId, mutation);
+						touchPendingAccess(touched, this.entityRegistry, workspaceId, [ mutation ]);
 					} else {
 						// Custom mutation: an undo barrier, applied in one shot.
 						undoBarrier = true;

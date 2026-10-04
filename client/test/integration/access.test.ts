@@ -242,6 +242,80 @@ describe('access model on the client', () => {
 	});
 });
 
+describe('onAccessChange', () => {
+	it('calls back for a queued grant write and again for its ack', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws));
+		const changed: string[] = [];
+		admin.onAccessChange((w) => changed.push(w));
+
+		await admin.mutate.put(ProjectMemberSchema, {
+			id: 'pm-new',
+			project: { id: 'p1' },
+			userId: 'someone',
+			role: 'project_reader',
+		});
+		expect(changed).toEqual([ ws ]);
+
+		await admin.syncNow();
+		expect(changed.length).toBeGreaterThan(1);
+		expect(new Set(changed)).toEqual(new Set([ ws ]));
+	});
+
+	it('calls back when a row that other rows sit below changes, by pull and by a local write', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws));
+		const changed: string[] = [];
+		admin.onAccessChange((w) => changed.push(w));
+
+		await trusted(ws, [ {
+			entity: 'task',
+			value: { id: 't1', project: { id: 'p2' }, title: 'one' },
+		} ]);
+		await admin.syncNow();
+		expect(changed).toEqual([ ws ]);
+
+		await admin.mutate.patch(TaskSchema, 't1', { project: { id: 'p1' } });
+		expect(changed).toEqual([ ws, ws ]);
+	});
+
+	it('does not call back for a write to a row that no other row sits below', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		await trusted(ws, [ {
+			entity: 'comment',
+			value: { id: 'c1', task: { id: 't1' }, body: 'one' },
+		} ]);
+		const admin = await synced(clientAs('admin', ws));
+		const changed: string[] = [];
+		admin.onAccessChange((w) => changed.push(w));
+
+		await admin.mutate.patch(CommentSchema, 'c1', { body: 'edited' });
+		await admin.syncNow();
+		expect((await admin.get(CommentSchema, 'c1'))?.body).toBe('edited');
+		expect(admin.status().pendingMutations).toBe(0);
+		expect(changed).toEqual([]);
+	});
+
+	it("does not call back for another caller's grant row that a pull brings", async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws));
+		const changed: string[] = [];
+		admin.onAccessChange((w) => changed.push(w));
+
+		await trusted(ws, [ {
+			entity: 'project_member',
+			value: { id: 'pm-other', project: { id: 'p1' }, userId: 'someone', role: 'project_reader' },
+		} ]);
+		await admin.syncNow();
+		expect((await admin.get(ProjectMemberSchema, 'pm-other'))?.userId).toBe('someone');
+		expect(changed).toEqual([]);
+	});
+});
+
 // A project member reads pages through the access model's filter, and still
 // catches up on text edits as fragments. The byte claim is asserted against
 // the testserver's counters, as in text-delta-down.test.ts.

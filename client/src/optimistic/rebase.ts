@@ -8,7 +8,7 @@ import {
 } from '@bufbuild/protobuf';
 import { anyUnpack } from '@bufbuild/protobuf/wkt';
 
-import { ACCESS_TOUCH_ENTITY } from '../access.js';
+import { ACCESS_TOUCH_ENTITY, touchPendingAccess } from '../access.js';
 import { syncableEntities } from '../entities.js';
 import {
 	type CrudMutation,
@@ -1109,9 +1109,14 @@ export async function finalizeRebase(
 		touched.entity(workspaceId, ACCESS_TOUCH_ENTITY);
 	}
 
-	const remaining = input.deferAcked
-		? await readPending(tx, workspaceId)
-		: await dropAcked(tx, workspaceId, input.lastAckedMutationId);
+	let remaining: Mutation[];
+	if (input.deferAcked) {
+		remaining = await readPending(tx, workspaceId);
+	} else {
+		const acked = await dropAcked(tx, workspaceId, input.lastAckedMutationId);
+		touchPendingAccess(touched, registry, workspaceId, acked.dropped);
+		remaining = acked.remaining;
+	}
 	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 	return remaining.length;
 }
@@ -1133,13 +1138,16 @@ export async function rollbackRejected(
 	const tx = await kv.write();
 	try {
 		const remaining: Mutation[] = [];
+		const dropped: Mutation[] = [];
 		for (const m of await readPending(tx, workspaceId)) {
 			if (rejected.has(m.mutationId)) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				dropped.push(m);
 			} else {
 				remaining.push(m);
 			}
 		}
+		touchPendingAccess(touched, registry, workspaceId, dropped);
 		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 		await tx.commit();
 		return { touched, pendingCount: remaining.length };
@@ -1314,6 +1322,7 @@ async function runResequence(
 		for (const m of pending) {
 			if (m.mutationId === dropId) {
 				await tx.del(pendingKey(workspaceId, m.mutationId));
+				touchPendingAccess(touched, registry, workspaceId, [ m ]);
 				dropped = true;
 			} else {
 				survivors.push(m);

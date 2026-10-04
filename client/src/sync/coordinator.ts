@@ -1,6 +1,7 @@
 import { create, fromBinary, toBinary } from '@bufbuild/protobuf';
 import { type Client, Code, ConnectError, createClient, type Transport } from '@connectrpc/connect';
 
+import { touchPendingAccess } from '../access.js';
 import {
 	CodeInternal,
 	CodeMutationIdGap,
@@ -1961,15 +1962,13 @@ export class Coordinator {
 							fieldMask: { paths },
 						});
 						mutationId += 1n;
-						await enqueuePending(
-							tx,
-							workspaceId,
-							create(MutationSchema, {
-								clientId: this.opts.clientId,
-								mutationId,
-								payload: { case: 'crud', value: crud },
-							}),
-						);
+						const mutation = create(MutationSchema, {
+							clientId: this.opts.clientId,
+							mutationId,
+							payload: { case: 'crud', value: crud },
+						});
+						await enqueuePending(tx, workspaceId, mutation);
+						touchPendingAccess(touched, this.opts.registry, workspaceId, [ mutation ]);
 						await applyCrudLocally(tx, this.opts.registry, workspaceId, crud, touched);
 					}
 					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
@@ -2050,6 +2049,7 @@ export class Coordinator {
 						payload: { case: 'crud', value: crud },
 					});
 					await enqueuePending(tx, workspaceId, mutation);
+					touchPendingAccess(touched, this.opts.registry, workspaceId, [ mutation ]);
 					await applyCrudLocally(tx, this.opts.registry, workspaceId, crud, touched);
 				}
 				await tx.put(metaLastMutationId(workspaceId), mutationId.toString());

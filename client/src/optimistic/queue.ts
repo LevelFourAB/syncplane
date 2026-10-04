@@ -49,19 +49,24 @@ export async function writePushedThrough(
 	await tx.put(metaPushedThrough(workspaceId), id.toString());
 }
 
-/** Drops pending mutations of one workspace with id <= acked; returns the survivors. */
+/**
+ * Drops pending mutations of one workspace with id <= acked; returns the
+ * survivors and the dropped, each in mutation-id order.
+ */
 export async function dropAcked(
 	tx: KVWrite,
 	workspaceId: string,
 	acked: bigint,
-): Promise<Mutation[]> {
+): Promise<{ remaining: Mutation[]; dropped: Mutation[] }> {
 	const remaining: Mutation[] = [];
+	const dropped: Mutation[] = [];
 	for (const m of await readPending(tx, workspaceId)) {
 		if (m.mutationId <= acked) {
 			await tx.del(pendingKey(workspaceId, m.mutationId));
+			dropped.push(m);
 		} else {
 			remaining.push(m);
 		}
 	}
-	return remaining;
+	return { remaining, dropped };
 }
