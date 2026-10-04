@@ -20,6 +20,7 @@ import {
 	canAt,
 	decideRules,
 	MAX_ACCESS_CHAIN,
+	type ParentRef,
 	parentRefOf,
 	pendingChangesAccess,
 	type RuleRow,
@@ -194,9 +195,11 @@ import {
 } from './query/wire.js';
 import {
 	decodeWholeRow,
+	type EntityRowRef,
 	mergedRowFrom,
 	type NamedWorkspaces,
 	readMergedRow,
+	readMergedRows,
 	readMergedRowsWithVersion,
 	type ReadScope,
 	type Row,
@@ -1707,6 +1710,39 @@ interface QueryPage<T> {
 }
 
 /**
+ * The row a prediction starts from: the row of `def` stored under `key`, or a
+ * `row` the caller supplies. `decide` answers from that row, undefined when the
+ * client does not hold it, and the chain of rows above it.
+ */
+type AccessPlan =
+	& { def: EntityDef; decide(row: Message | undefined, chain: AccessChain): CanAnswer }
+	& ({ key: string } | { row: Message });
+
+/** One prediction waiting in an access batch; see SyncClient.askAccess. */
+interface AccessAsk {
+	workspaceId: string;
+	/** The answer outright, or the row it starts from. */
+	plan(summary: AccessSummary): CanAnswer | AccessPlan;
+	resolve(answer: CanAnswer): void;
+	reject(err: unknown): void;
+}
+
+/** How one prediction of a batch came out. */
+type AccessOutcome = { answer: CanAnswer } | { error: unknown };
+
+/** One prediction of a batch, part way up its chain of access parents. */
+interface AccessWalk {
+	/** Its index in the batch. */
+	at: number;
+	workspaceId: string;
+	plan: AccessPlan;
+	row: Message | undefined;
+	/** The access parent of the row last reached. */
+	parent: ParentRef;
+	rows: { entity: string; key: string }[];
+}
+
+/**
  * State the devtools helper reads that the public surface has no reason to
  * carry; see SyncClient.inspect(). Every method answers for the moment it is
  * called — nothing here is a live view.
@@ -1797,6 +1833,8 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		string,
 		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
 	>();
+	/** The access batch that still takes predictions; see askAccess. */
+	private accessBatch: AccessAsk[] | undefined;
 	private coordinator?: Coordinator;
 	/**
 	 * Cross-tab intent record for this instance (sync/intent.ts): created in
@@ -3233,26 +3271,25 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
 		if (rules === undefined) return 'unknown';
-		return this.withAccessRead(async (tx) => {
-			const summary = await this.accessSummaryIn(tx, workspaceId);
-			if (summary === undefined) return 'unknown';
-			const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
-			const row = bytes === undefined ? undefined : fromBinary(def.schema, bytes);
-			const chain = await this.accessChainIn(tx, workspaceId, def, row);
-			const stored = ruleRowOf(summary, def, key, row, chain);
-			if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
-			const changed = opts?.fields ?? null;
-			// The new value of a changed subject field or access parent decides
-			// the final side, and neither is known here.
-			const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
-			const final: RuleRow = {
-				held: moves
-					? (p) => canAt(summary, p, def.name, key, { rows: [], complete: false })
-					: stored.held,
-				subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
-			};
-			return decideRules(rules, 'update', summary.subjects, stored, final, changed);
-		});
+		return this.askAccess(workspaceId, (summary) => ({
+			def,
+			key,
+			decide: (row, chain) => {
+				const stored = ruleRowOf(summary, def, key, row, chain);
+				if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
+				const changed = opts?.fields ?? null;
+				// The new value of a changed subject field or access parent decides
+				// the final side, and neither is known here.
+				const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
+				const final: RuleRow = {
+					held: moves
+						? (p) => canAt(summary, p, def.name, key, { rows: [], complete: false })
+						: stored.held,
+					subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
+				};
+				return decideRules(rules, 'update', summary.subjects, stored, final, changed);
+			},
+		}));
 	}
 
 	/** @internal backs WorkspaceClient.canCreate. */
@@ -3265,17 +3302,19 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		const def = this.entityRegistry.bySchema(schema);
 		const rules = def.accessRules;
 		if (rules === undefined) return 'unknown';
-		return this.withAccessRead(async (tx) => {
-			const summary = await this.accessSummaryIn(tx, workspaceId);
-			if (summary === undefined) return 'unknown';
+		return this.askAccess(workspaceId, (summary) => {
 			const row = stampCreatorFields(def, create(schema, init), summary.subjects[0] ?? '');
-			const chain = await this.accessChainIn(tx, workspaceId, def, row);
-			return decideRules(
-				rules,
-				'create',
-				summary.subjects,
-				ruleRowOf(summary, def, keyOf(def, row), row, chain),
-			);
+			return {
+				def,
+				row,
+				decide: (_, chain) =>
+					decideRules(
+						rules,
+						'create',
+						summary.subjects,
+						ruleRowOf(summary, def, keyOf(def, row), row, chain),
+					),
+			};
 		});
 	}
 
@@ -3288,20 +3327,10 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	): Promise<CanAnswer> {
 		this.assertOpen();
 		const def = this.entityRegistry.bySchema(schema);
-		return this.withAccessRead(async (tx) => {
-			const summary = await this.accessSummaryIn(tx, workspaceId);
-			if (summary === undefined) return 'unknown';
-			if (summary.holds(permission, def.name, key)) return 'yes';
-			const bytes = await readMergedRow(tx, this.entityRegistry, def.name, workspaceId, key);
-			const row = bytes === undefined ? undefined : fromBinary(def.schema, bytes);
-			return canAt(
-				summary,
-				permission,
-				def.name,
-				key,
-				await this.accessChainIn(tx, workspaceId, def, row),
-			);
-		});
+		return this.askAccess(workspaceId, (summary) =>
+			summary.holds(permission, def.name, key)
+				? 'yes'
+				: { def, key, decide: (_, chain) => canAt(summary, permission, def.name, key, chain) });
 	}
 
 	/**
@@ -3331,30 +3360,185 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	}
 
 	/**
-	 * The rows above `row` of `def`, read through the merged view so a queued
-	 * move counts where the row will be once the server accepts it. `row` is
-	 * undefined for a row the client does not hold, which still decides for an
-	 * entity without an access parent. Stops at a row the client does not
-	 * hold, and after MAX_ACCESS_CHAIN rows.
+	 * Adds a prediction in `workspaceId` to the open access batch, or opens a
+	 * batch when none is open, and resolves with its answer. A batch takes
+	 * predictions until its read of the store starts, so the predictions asked
+	 * in one synchronous run (a Promise.all over many keys, the effects of one
+	 * React commit) share one read. Rejects when that read fails.
 	 */
-	private async accessChainIn(
-		tx: KVRead,
-		workspaceId: string,
-		def: EntityDef,
-		row: Message | undefined,
-	): Promise<AccessChain> {
-		const rows: { entity: string; key: string }[] = [];
-		let parent = parentRefOf(def, row);
-		while (parent !== null) {
-			if (parent === undefined || rows.length === MAX_ACCESS_CHAIN) return { rows, complete: false };
-			rows.push({ entity: parent.entity, key: parent.key });
-			const at = parent;
-			const bytes = this.entityRegistry.get(at.def.name) === undefined
-				? undefined
-				: await readMergedRow(tx, this.entityRegistry, at.def.name, workspaceId, at.key);
-			parent = parentRefOf(at.def, bytes === undefined ? undefined : fromBinary(at.def.schema, bytes));
+	private askAccess(workspaceId: string, plan: AccessAsk['plan']): Promise<CanAnswer> {
+		return new Promise((resolve, reject) => {
+			const ask: AccessAsk = { workspaceId, plan, resolve, reject };
+			if (this.accessBatch !== undefined) {
+				this.accessBatch.push(ask);
+				return;
+			}
+			const batch = [ ask ];
+			this.accessBatch = batch;
+			void this.answerAccessBatch(batch);
+		});
+	}
+
+	/**
+	 * Settles every prediction in `batch` from one shared read of the store.
+	 * Never rejects: a failed read rejects each prediction instead.
+	 */
+	private async answerAccessBatch(batch: AccessAsk[]): Promise<void> {
+		const close = () => {
+			if (this.accessBatch === batch) this.accessBatch = undefined;
+		};
+		let outcomes: AccessOutcome[];
+		try {
+			const kv = await this.kv();
+			outcomes = await this.kvMutex.runShared(async () => {
+				// Closed when the read starts and not when the batch opens: a
+				// prediction asked while the batch waits for the store, or for
+				// the lock behind a writer, still shares this read.
+				close();
+				const tx = await kv.read();
+				try {
+					return await this.decideAccessBatch(tx, batch);
+				} finally {
+					tx.release();
+				}
+			});
+		} catch (err) {
+			close();
+			for (const ask of batch) ask.reject(err);
+			return;
 		}
-		return { rows, complete: true };
+		batch.forEach((ask, i) => {
+			const outcome = outcomes[i]!;
+			if ('answer' in outcome) ask.resolve(outcome.answer);
+			else ask.reject(outcome.error);
+		});
+	}
+
+	/**
+	 * Decides every prediction in `batch` from `tx`: the summary once per
+	 * workspace, then the chains of access parents level by level, with one
+	 * getMany per level for every distinct row the level reaches. The rows are
+	 * read through the merged view, so a queued move counts where the row will
+	 * be once the server accepts it. A chain stops at a row the client does not
+	 * hold, and after MAX_ACCESS_CHAIN rows.
+	 *
+	 * An error deciding one prediction is the outcome of that prediction alone.
+	 * An error reading the store rejects.
+	 */
+	private async decideAccessBatch(
+		tx: KVRead,
+		batch: readonly AccessAsk[],
+	): Promise<AccessOutcome[]> {
+		const summaries = new Map(
+			await Promise.all(
+				[ ...new Set(batch.map((ask) => ask.workspaceId)) ].map(async (ws) =>
+					[ ws, await this.accessSummaryIn(tx, ws) ] as const
+				),
+			),
+		);
+		const out: AccessOutcome[] = new Array(batch.length);
+		const walks: AccessWalk[] = [];
+		batch.forEach((ask, at) => {
+			const summary = summaries.get(ask.workspaceId);
+			if (summary === undefined) {
+				out[at] = { answer: 'unknown' };
+				return;
+			}
+			try {
+				const plan = ask.plan(summary);
+				if (typeof plan === 'string') out[at] = { answer: plan };
+				else {
+					walks.push({
+						at,
+						workspaceId: ask.workspaceId,
+						plan,
+						row: undefined,
+						parent: undefined,
+						rows: [],
+					});
+				}
+			} catch (error) {
+				out[at] = { error };
+			}
+		});
+		// Merged bytes by confirmed key, which is unique to the entity, workspace
+		// and key. Many rows share a parent, so each row is read and decoded once.
+		const held = new Map<string, Uint8Array | undefined>();
+		const decoded = new Map<string, { schema: DescMessage; row: Message }>();
+		const read = async (refs: readonly EntityRowRef[]) => {
+			const missing = new Map<string, EntityRowRef>();
+			for (const ref of refs) {
+				const id = confirmedKey(ref.entity, ref.workspaceId, ref.key);
+				if (!held.has(id)) missing.set(id, ref);
+			}
+			if (missing.size === 0) return;
+			const rows = await readMergedRows(tx, this.entityRegistry, [ ...missing.values() ]);
+			let i = 0;
+			for (const id of missing.keys()) held.set(id, rows[i++]);
+		};
+		const rowOf = (def: EntityDef, workspaceId: string, key: string): Message | undefined => {
+			const id = confirmedKey(def.name, workspaceId, key);
+			const bytes = held.get(id);
+			if (bytes === undefined) return undefined;
+			const hit = decoded.get(id);
+			if (hit?.schema === def.schema) return hit.row;
+			const row = fromBinary(def.schema, bytes);
+			decoded.set(id, { schema: def.schema, row });
+			return row;
+		};
+		const step = (walk: AccessWalk, fn: () => void): boolean => {
+			try {
+				fn();
+				return true;
+			} catch (error) {
+				out[walk.at] = { error };
+				return false;
+			}
+		};
+		const finish = (walk: AccessWalk, complete: boolean) => {
+			step(walk, () => {
+				out[walk.at] = { answer: walk.plan.decide(walk.row, { rows: walk.rows, complete }) };
+			});
+		};
+
+		await read(
+			walks.flatMap(({ plan, workspaceId }) =>
+				'key' in plan ? [ { entity: plan.def.name, workspaceId, key: plan.key } ] : []
+			),
+		);
+		let climbing = walks.filter((walk) =>
+			step(walk, () => {
+				const { plan } = walk;
+				walk.row = 'key' in plan ? rowOf(plan.def, walk.workspaceId, plan.key) : plan.row;
+				walk.parent = parentRefOf(plan.def, walk.row);
+			})
+		);
+		while (climbing.length > 0) {
+			const next: AccessWalk[] = [];
+			const refs: EntityRowRef[] = [];
+			for (const walk of climbing) {
+				const parent = walk.parent;
+				if (parent === null) finish(walk, true);
+				else if (parent === undefined || walk.rows.length === MAX_ACCESS_CHAIN) finish(walk, false);
+				else {
+					walk.rows.push({ entity: parent.entity, key: parent.key });
+					next.push(walk);
+					// A parent of an entity this client does not register counts as
+					// a row it does not hold: none of its rows reach the store.
+					if (this.entityRegistry.get(parent.def.name) !== undefined) {
+						refs.push({ entity: parent.def.name, workspaceId: walk.workspaceId, key: parent.key });
+					}
+				}
+			}
+			await read(refs);
+			climbing = next.filter((walk) =>
+				step(walk, () => {
+					const at = walk.parent!;
+					walk.parent = parentRefOf(at.def, rowOf(at.def, walk.workspaceId, at.key));
+				})
+			);
+		}
+		return out;
 	}
 
 	/**

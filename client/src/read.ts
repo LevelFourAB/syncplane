@@ -323,6 +323,44 @@ export async function readMergedRow(
 	return await mergedRowFrom(tx, registry, entity, workspaceId, key, overlay, confirmed);
 }
 
+/** A row named by its entity, workspace and key. */
+export interface EntityRowRef {
+	entity: string;
+	workspaceId: string;
+	key: string;
+}
+
+/**
+ * Resolves rows of any entities and workspaces overlay-first, as readMergedRow
+ * does, in one getMany for all their overlay and confirmed records. The result
+ * is parallel to `rows`; a row that is absent or locally deleted is undefined in
+ * its slot.
+ */
+export async function readMergedRows(
+	tx: KVRead,
+	registry: EntityRegistry,
+	rows: readonly EntityRowRef[],
+): Promise<(Uint8Array | undefined)[]> {
+	const records = await tx.getMany([
+		...rows.map(({ entity, workspaceId, key }) => overlayKey(entity, workspaceId, key)),
+		...rows.map(({ entity, workspaceId, key }) => confirmedKey(entity, workspaceId, key)),
+	]);
+	const out: (Uint8Array | undefined)[] = new Array(rows.length);
+	for (let i = 0; i < rows.length; i++) {
+		const { entity, workspaceId, key } = rows[i]!;
+		out[i] = await mergedRowFrom(
+			tx,
+			registry,
+			entity,
+			workspaceId,
+			key,
+			records[i] as OverlayRecord | undefined,
+			records[rows.length + i] as ConfirmedRecord | undefined,
+		);
+	}
+	return out;
+}
+
 /**
  * Resolves a row overlay-first from records the caller already holds, folding
  * the row's optimistic text log in as readMergedRow does. Returns the row bytes,

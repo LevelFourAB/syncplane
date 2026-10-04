@@ -2,19 +2,23 @@
 // for a workspace and from the pending queue, and a screen of buttons asks
 // them again on every status change. These specs pin what the answers cost,
 // that a remembered answer follows every write that changes it, that an access
-// parent this client does not register still decides, and how can() fills in
-// the inputs of the access rules from local rows.
+// parent this client does not register still decides, how can() fills in
+// the inputs of the access rules from local rows, and that predictions asked
+// together share one read of the store and answer as they do one at a time.
 
-import { create, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
+import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
+import type { CanAnswer } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
 	CardItemSchema,
 	CardSchema,
 	CommentSchema,
+	DocSchema,
 	DraftSchema,
 	FolderSchema,
+	PageSchema,
 	PinSchema,
 	PostSchema,
 	ProjectMemberSchema,
@@ -77,19 +81,17 @@ class QueueScanCountingStore implements KVStore {
 async function storeSummary(
 	kv: KVStore,
 	access: MessageInitShape<typeof CallerAccessSchema>,
+	ws = WS,
 ): Promise<void> {
 	const tx = await kv.write();
 	await tx.put(
-		metaCallerAccess(WS),
+		metaCallerAccess(ws),
 		toBinary(CallerAccessSchema, create(CallerAccessSchema, access)),
 	);
 	await tx.commit();
 }
 
-function offlineClient(
-	kvStore: KVStore,
-	entities: readonly (typeof TaskSchema | typeof ProjectSchema | typeof ProjectMemberSchema)[],
-): SyncClient {
+function offlineClient(kvStore: KVStore, entities: readonly DescMessage[]): SyncClient {
 	return new SyncClient({
 		workspaceId: WS,
 		kvStore,
@@ -447,5 +449,253 @@ describe('a creator field', () => {
 		await expect(t.client.mutate.patch(PostSchema, 'po-ann', { authorId: 'bob' }))
 			.rejects.toThrow(/field "author_id" may not be written by a client/);
 		await t.client.close();
+	});
+});
+
+/**
+ * A store that counts the reads it opens and the getMany calls made on them,
+ * and fails every `get` or every `getMany` while `failing` names it.
+ */
+class ReadCountingStore implements KVStore {
+	reads = 0;
+	getManys = 0;
+	failing: 'get' | 'getMany' | undefined;
+
+	constructor(private inner: KVStore) {}
+
+	async read(): Promise<KVRead> {
+		this.reads++;
+		const tx = await this.inner.read();
+		const store = this;
+		return new Proxy(tx, {
+			get(target, prop) {
+				const value = Reflect.get(target, prop) as unknown;
+				if (typeof value !== 'function') return value;
+				if (prop === 'get' || prop === 'getMany') {
+					return (...args: unknown[]) => {
+						if (prop === 'getMany') store.getManys++;
+						if (store.failing === prop) return Promise.reject(new Error(`${prop} failed`));
+						return (value as (...a: unknown[]) => unknown).apply(target, args);
+					};
+				}
+				return value.bind(target);
+			},
+		});
+	}
+
+	write(): Promise<KVWrite> {
+		return this.inner.write();
+	}
+
+	close(): Promise<void> {
+		return this.inner.close();
+	}
+}
+
+/** Asks each prediction after the one before it has answered. */
+async function oneByOne(asks: readonly (() => Promise<CanAnswer>)[]): Promise<CanAnswer[]> {
+	const out: CanAnswer[] = [];
+	for (const ask of asks) out.push(await ask());
+	return out;
+}
+
+describe('predictions asked together', () => {
+	it('answer as the same predictions asked one at a time', async () => {
+		// Projects are not registered, so a project counts as a row not held.
+		// A project has no access parent, so the chain still ends there.
+		const t = await createTestClient({
+			entities: [ TaskSchema, CommentSchema, PageSchema, FolderSchema, DocSchema ],
+		});
+		for (
+			const [ id, project ] of [ [ 't1', 'p1' ], [ 't2', 'p2' ], [ 't3', 'p1' ], [ 't4', 'p2' ] ]
+		) {
+			t.server.put(TaskSchema, { id, project: { id: project } });
+		}
+		for (
+			const [ id, task ] of [ [ 'c1a', 't1' ], [ 'c1b', 't1' ], [ 'c1c', 't1' ], [ 'c2', 't2' ], [
+				'c3',
+				't3',
+			], [ 'c9', 't9' ] ]
+		) {
+			t.server.put(CommentSchema, { id, task: { id: task } });
+		}
+		t.server.put(PageSchema, { id: 'pg1', task: { id: 't1' }, ownerId: 'bob' });
+		t.server.put(PageSchema, { id: 'pg4', task: { id: 't4' }, ownerId: 'ann' });
+		t.server.put(PageSchema, { id: 'pg5', task: { id: 't4' }, ownerId: 'bob' });
+		t.server.put(FolderSchema, { id: 'top' });
+		t.server.put(FolderSchema, { id: 'mid', parent: { id: 'top' } });
+		t.server.put(FolderSchema, { id: 'low', parent: { id: 'mid' } });
+		t.server.put(FolderSchema, { id: 'deep', parent: { id: 'low' } });
+		t.server.put(FolderSchema, { id: 'side' });
+		t.server.put(DocSchema, { id: 'd-deep', folder: { id: 'deep' } });
+		t.server.put(DocSchema, { id: 'd-top', folder: { id: 'top' } });
+		t.server.put(DocSchema, { id: 'd-side', folder: { id: 'side' } });
+		t.server.put(DocSchema, { id: 'd-lost', folder: { id: 'nowhere' } });
+		t.server.setCallerAccess({
+			subjects: [ 'ann' ],
+			permissions: [
+				{ permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] },
+				{ permission: 'view_projects', anchors: [ { entity: 'project', keys: [ 'p2' ] } ] },
+				{ permission: 'edit_tasks', anchors: [ { entity: 'task', keys: [ 't3' ] } ] },
+				{ permission: 'view_folders', anchors: [ { entity: 'folder', keys: [ 'mid' ] } ] },
+				{ permission: 'edit_folders', anchors: [ { entity: 'folder', keys: [ 'side' ] } ] },
+			],
+		});
+		await t.sync();
+		// Queued and not acked: two moves to another parent, a delete, and a
+		// row that exists only locally.
+		await t.client.mutate.patch(TaskSchema, 't2', { project: { id: 'p1' } });
+		await t.client.mutate.patch(FolderSchema, 'side', { parent: { id: 'mid' } });
+		await t.client.mutate.del(CommentSchema, 'c1c');
+		await t.client.mutate.put(CommentSchema, { id: 'c-new', task: { id: 't3' } });
+
+		const c = t.client;
+		const cases: [() => Promise<CanAnswer>, CanAnswer][] = [
+			[ () => c.can(CommentSchema, 'c1a', 'read'), 'yes' ],
+			[ () => c.can(CommentSchema, 'c1b', 'update', { fields: [ 'body' ] }), 'no' ],
+			[ () => c.can(CommentSchema, 'c1c', 'read'), 'unknown' ],
+			[ () => c.can(CommentSchema, 'c2', 'read'), 'yes' ],
+			[ () => c.can(CommentSchema, 'c3', 'update', { fields: [ 'body' ] }), 'yes' ],
+			[ () => c.can(CommentSchema, 'c9', 'read'), 'unknown' ],
+			[ () => c.can(CommentSchema, 'c-gone', 'read'), 'unknown' ],
+			[ () => c.can(CommentSchema, 'c-new', 'delete'), 'yes' ],
+			[ () => c.can(TaskSchema, 't2', 'read'), 'yes' ],
+			[ () => c.can(TaskSchema, 't3', 'update', { fields: [ 'project' ] }), 'yes' ],
+			[ () => c.can(CommentSchema, 'c3', 'update', { fields: [ 'task' ] }), 'unknown' ],
+			[ () => c.can(PageSchema, 'pg1', 'read'), 'yes' ],
+			[ () => c.can(PageSchema, 'pg4', 'read'), 'yes' ],
+			[ () => c.can(PageSchema, 'pg5', 'read'), 'no' ],
+			[ () => c.can(DocSchema, 'd-deep', 'read'), 'yes' ],
+			[ () => c.can(DocSchema, 'd-top', 'read'), 'no' ],
+			[ () => c.can(DocSchema, 'd-side', 'read'), 'yes' ],
+			[ () => c.can(DocSchema, 'd-side', 'update', { fields: [ 'title' ] }), 'yes' ],
+			[ () => c.can(DocSchema, 'd-lost', 'read'), 'unknown' ],
+			[ () => c.hasPermission(FolderSchema, 'low', 'view_folders'), 'yes' ],
+			[ () => c.hasPermission(FolderSchema, 'mid', 'view_folders'), 'yes' ],
+			[ () => c.hasPermission(FolderSchema, 'top', 'view_folders'), 'no' ],
+			[ () => c.hasPermission(CommentSchema, 'c9', 'view_tasks'), 'unknown' ],
+			[ () => c.hasPermission(TaskSchema, 't4', 'view_tasks'), 'no' ],
+			[ () => c.canCreate(CommentSchema, { id: 'n1', task: { id: 't1' } }), 'no' ],
+			[ () => c.canCreate(CommentSchema, { id: 'n3', task: { id: 't3' } }), 'yes' ],
+			[ () => c.canCreate(CommentSchema, { id: 'n9', task: { id: 't9' } }), 'unknown' ],
+			[ () => c.canCreate(DocSchema, { id: 'nd', folder: { id: 'side' } }), 'yes' ],
+		];
+		const expected = cases.map(([ , answer ]) => answer);
+		expect(await oneByOne(cases.map(([ ask ]) => ask))).toEqual(expected);
+		expect(await Promise.all(cases.map(([ ask ]) => ask()))).toEqual(expected);
+		await t.client.close();
+	});
+
+	it('answer in each workspace from its own summary and rows', async () => {
+		const [ A, B, C ] = [ 'ws-a', 'ws-b', 'ws-c' ];
+		const kv = new MemoryKVStore();
+		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
+		await storeSummary(kv, { permissions: p1 }, A);
+		await storeSummary(kv, { permissions: [ { permission: 'view_tasks', root: true } ] }, B);
+		const c = new SyncClient({
+			accountId: 'acct',
+			workspaces: [ A, B, C ],
+			defaultWorkspace: A,
+			kvStore: kv,
+			entities: [ TaskSchema, CommentSchema ],
+			streamEnabled: false,
+			pollIntervalMs: 0,
+		});
+		for (const ws of [ A, B, C ]) {
+			await c.ws(ws).mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+			await c.ws(ws).mutate.put(TaskSchema, { id: 't2', project: { id: 'p2' } });
+			await c.ws(ws).mutate.put(CommentSchema, { id: 'c1', task: { id: 't1' } });
+			await c.ws(ws).mutate.put(CommentSchema, { id: 'c2', task: { id: 't2' } });
+		}
+		// The same key under another parent in B alone.
+		await c.ws(B).mutate.patch(CommentSchema, 'c1', { task: { id: 't9' } });
+
+		const cases: [() => Promise<CanAnswer>, CanAnswer][] = [
+			[ () => c.ws(A).can(CommentSchema, 'c1', 'read'), 'yes' ],
+			[ () => c.ws(B).can(CommentSchema, 'c1', 'read'), 'yes' ],
+			[ () => c.ws(C).can(CommentSchema, 'c1', 'read'), 'unknown' ],
+			[ () => c.ws(A).can(CommentSchema, 'c2', 'read'), 'no' ],
+			[ () => c.ws(B).can(CommentSchema, 'c2', 'read'), 'yes' ],
+			[ () => c.ws(A).hasPermission(CommentSchema, 'c2', 'view_tasks'), 'no' ],
+			[ () => c.ws(B).hasPermission(CommentSchema, 'c1', 'edit_tasks'), 'unknown' ],
+			[ () => c.ws(C).hasPermission(CommentSchema, 'c2', 'view_tasks'), 'unknown' ],
+			[ () => c.ws(A).canCreate(CommentSchema, { id: 'n', task: { id: 't1' } }), 'no' ],
+		];
+		const expected = cases.map(([ , answer ]) => answer);
+		expect(await oneByOne(cases.map(([ ask ]) => ask))).toEqual(expected);
+		expect(await Promise.all(cases.map(([ ask ]) => ask()))).toEqual(expected);
+		await c.close();
+	});
+
+	it('share one read of the store, and one getMany per level of their chains', async () => {
+		const store = new ReadCountingStore(new MemoryKVStore());
+		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
+		await storeSummary(store, { permissions: p1 });
+		const c = offlineClient(store, [ TaskSchema, CommentSchema ]);
+		for (let i = 0; i < 5; i++) {
+			await c.mutate.put(TaskSchema, { id: `t${i}`, project: { id: i < 3 ? 'p1' : 'p2' } });
+		}
+		for (let i = 0; i < 50; i++) {
+			await c.mutate.put(CommentSchema, { id: `c${i}`, task: { id: `t${i % 5}` } });
+		}
+
+		store.reads = 0;
+		store.getManys = 0;
+		const answers = await Promise.all(
+			Array.from({ length: 50 }, (_, i) => c.can(CommentSchema, `c${i}`, 'read')),
+		);
+		expect(answers).toEqual(Array.from({ length: 50 }, (_, i) => i % 5 < 3 ? 'yes' : 'no'));
+		expect(store.reads).toBe(1);
+		expect(store.getManys).toBe(2);
+
+		store.reads = 0;
+		expect(await c.can(CommentSchema, 'c3', 'read')).toBe('no');
+		expect(store.reads).toBe(1);
+		await c.close();
+	});
+
+	it('all reject when the read fails, and the next ones answer', async () => {
+		const store = new ReadCountingStore(new MemoryKVStore());
+		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
+		await storeSummary(store, { permissions: p1 });
+		const c = offlineClient(store, [ TaskSchema, CommentSchema ]);
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		await c.mutate.put(CommentSchema, { id: 'c1', task: { id: 't1' } });
+		const asks = () => [
+			c.can(CommentSchema, 'c1', 'read'),
+			c.can(TaskSchema, 't1', 'update', { fields: [ 'title' ] }),
+			c.hasPermission(CommentSchema, 'c1', 'view_tasks'),
+			c.canCreate(CommentSchema, { id: 'n', task: { id: 't1' } }),
+		];
+
+		for (const failing of [ 'get', 'getMany' ] as const) {
+			store.failing = failing;
+			const settled = await Promise.allSettled(asks());
+			expect(settled.map((s) => s.status === 'rejected' && (s.reason as Error).message))
+				.toEqual(Array(4).fill(`${failing} failed`));
+		}
+		store.failing = undefined;
+		expect(await Promise.all(asks())).toEqual([ 'yes', 'no', 'yes', 'no' ]);
+		await c.close();
+	});
+
+	it('answer around one that fails to decide', async () => {
+		const kv = new MemoryKVStore();
+		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
+		await storeSummary(kv, { permissions: p1 });
+		const c = offlineClient(kv, [ TaskSchema, CommentSchema ]);
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		await c.mutate.put(CommentSchema, { id: 'c1', task: { id: 't1' } });
+
+		const settled = await Promise.allSettled([
+			c.can(CommentSchema, 'c1', 'read'),
+			// Not a list, so deciding the update throws.
+			c.can(CommentSchema, 'c1', 'update', { fields: 42 as unknown as string[] }),
+			c.hasPermission(CommentSchema, 'c1', 'view_tasks'),
+		]);
+		expect(settled.map((s) => s.status)).toEqual([ 'fulfilled', 'rejected', 'fulfilled' ]);
+		expect(settled[0]).toEqual({ status: 'fulfilled', value: 'yes' });
+		expect(settled[2]).toEqual({ status: 'fulfilled', value: 'yes' });
+		await c.close();
 	});
 });
