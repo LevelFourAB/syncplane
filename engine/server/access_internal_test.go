@@ -9,6 +9,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/dynamicpb"
 
@@ -223,35 +224,57 @@ var _ = Describe("access conformance vectors", func() {
 })
 
 // A Subscribe stream keeps one emitter and binds the caller's access again on
-// every drain, so no verdict the emitter memoizes from the access it held may
-// outlive a new binding.
-var _ = Describe("rowEmitter access binding", func() {
-	It("judges text delta safety under the access bound now", func() {
-		ctx := context.Background()
+// every drain. A text delta verdict reads nothing of that access, so it stays
+// true across bindings: what keeps delta state safe for a caller below the
+// root lives on the write paths and in the resync (see recordReadGaps).
+var _ = Describe("rowEmitter text delta verdict", func() {
+	var srv *Server
+
+	BeforeEach(func() {
 		store, err := sqlitestore.Open(filepath.Join(GinkgoT().TempDir(), "test.db"))
 		Expect(err).NotTo(HaveOccurred())
 		DeferCleanup(func() { Expect(store.Close()).To(Succeed()) })
-		srv, err := New(store, WithEntities(
+		srv, err = New(store, WithEntities(
 			&accessv1.OrgMember{}, &accessv1.Project{}, &accessv1.ProjectMember{},
 			&accessv1.Task{}, &accessv1.Label{}, &accessv1.Note{},
 		))
 		Expect(err).NotTo(HaveOccurred())
-		e, err := newRowEmitter(ctx, srv, "ws1", nil)
+	})
+
+	newEmitter := func() *rowEmitter {
+		GinkgoHelper()
+		e, err := newRowEmitter(context.Background(), srv, "ws1", nil)
 		Expect(err).NotTo(HaveOccurred())
 		e.caller = &accessCaller{model: srv.catalogPtr().access}
+		return e
+	}
 
+	belowRoot := &accessSet{perms: map[string]*permAnchors{"view_tasks": {
+		rows: map[anchorRow]struct{}{{entity: "project", key: "p1"}: {}},
+	}}}
+
+	It("fails until the access is bound", func() {
+		_, err := newEmitter().deltaSafe("task")
+		Expect(err).To(MatchError(errAccessUnbound))
+	})
+
+	It("admits a caller who reads at the root and one who reads below it", func() {
+		e := newEmitter()
 		e.useAccess(&accessSet{perms: map[string]*permAnchors{"view_tasks": {root: true}}}, nil)
-		safe, err := e.deltaSafe("task")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(safe).To(BeTrue(), "every task is visible to a caller who reads tasks at the root")
+		Expect(e.deltaSafe("task")).To(BeTrue())
 
-		// Below the root the model filters tasks, so a task the caller sees for
-		// the first time can arrive in a forward page and must ship whole.
-		e.useAccess(&accessSet{perms: map[string]*permAnchors{"view_tasks": {
-			rows: map[anchorRow]struct{}{{entity: "project", key: "p1"}: {}},
-		}}}, nil)
-		safe, err = e.deltaSafe("task")
-		Expect(err).NotTo(HaveOccurred())
-		Expect(safe).To(BeFalse())
+		e = newEmitter()
+		e.useAccess(belowRoot, nil)
+		Expect(e.deltaSafe("task")).To(BeTrue())
+	})
+
+	It("declines an entity the application's ReadFilter filters", func() {
+		e := newEmitter()
+		e.filterSource = func(string) (RowFilter, error) {
+			return func(string, proto.Message) bool { return true }, nil
+		}
+		e.useAccess(belowRoot, nil)
+		Expect(e.deltaSafe("task")).To(BeFalse(),
+			"the filter reads the row, and nothing records what it read at the cursor")
 	})
 })

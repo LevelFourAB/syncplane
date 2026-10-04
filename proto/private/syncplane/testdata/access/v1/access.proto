@@ -159,6 +159,28 @@ message Comment {
 	string body = 3;
 }
 
+// A page on a task, two access_parent hops below its project, whose body is
+// collaborative text. A caller who can read the task's tasks reads it, and so
+// does its owner where they can read the project. Registered with the org
+// schema by the specs that ship text to readers below the workspace root.
+message Page {
+	option (syncplane.v1.entity) = {
+		name: "page"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_tasks" },
+				{ read: true permission: "view_projects" subject: "owner_id" },
+				{ write: true permission: "edit_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string owner_id = 3;
+	bytes body = 4 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
 // Readable by every org member. No rule admits a write, so only trusted
 // writes create, change and delete labels.
 message Label {

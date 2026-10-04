@@ -381,6 +381,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 	}
 	var (
 		prevText map[string][]byte
+		prevRead readInputs
 		// The stored row before this write, read at most once: the row check,
 		// the merges and history capture all want the same one — and, like the
 		// wire path's memo, must treat an absent row and a tombstone alike.
@@ -437,6 +438,7 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 			} else {
 				base = decoded
 				prevText = info.textSnapshot(base)
+				prevRead = readInputsOf(e.srv.catalogPtr().access, info, base)
 			}
 		}
 		// Clone so the caller's message is not mutated by the merges.
@@ -499,6 +501,9 @@ func (e *EntityTx) Put(msg proto.Message, opts ...WriteOption) error {
 		return err
 	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, msg.ProtoReflect(), seq); err != nil {
+		return err
+	}
+	if err := info.recordReadGaps(e.tx, e.srv.catalogPtr().access, key, prevRead, msg, seq); err != nil {
 		return err
 	}
 	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,
@@ -628,6 +633,8 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 	}
 	// Snapshot before the merge: the delta log records the move it makes.
 	prevText := info.textSnapshot(base)
+	model := e.srv.catalogPtr().access
+	prevRead := readInputsOf(model, info, base)
 	if len(o.texts) > 0 || hasPlainString(info, msg) {
 		// Clone before either rewrite so the caller's message is not mutated.
 		msg = proto.Clone(msg)
@@ -700,6 +707,9 @@ func (e *EntityTx) Patch(msg proto.Message, mask []string, expected *uint64, opt
 		return err
 	}
 	if err := info.recordTextDeltas(e.tx, key, prevText, base.ProtoReflect(), seq); err != nil {
+		return err
+	}
+	if err := info.recordReadGaps(e.tx, model, key, prevRead, base, seq); err != nil {
 		return err
 	}
 	if err := info.dropRemovedTextInstances(e.tx, e.srv.textCache, e.ws, key,

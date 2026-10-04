@@ -483,9 +483,6 @@ func (e *rowEmitter) useAccess(set *accessSet, chains *accessChains) {
 	e.readAccess, e.readAccessHash = nil, 0
 	e.callerAccess, e.callerAccessHash = nil, 0
 	clear(e.combined)
-	// A delta verdict reads the combined filter, so it is only as current as
-	// the binding it was made under.
-	clear(e.deltaSafeBy)
 }
 
 // appFilterOf resolves and memoizes the application's ReadFilter for entity.
@@ -738,10 +735,16 @@ func noDeltaEntitySet(names []string) map[string]bool {
 // this entity's rows as of that sequence — the premise delta state depends on,
 // since a fragment is meaningless against state the recipient never had.
 //
-// Only an unconditionally visible entity qualifies. A read filter, a predicate,
-// a window or a follow closure can each have hidden a row at the cursor that is
-// visible now, and the forward scan emits such a row as an ordinary change
-// without knowing it is the recipient's first sight of it.
+// A predicate, a window, a follow closure or the application's ReadFilter can
+// each have hidden a row at the cursor that is visible now, and the forward
+// scan emits such a row as an ordinary change without knowing it is the
+// recipient's first sight of it, so an entity under any of them does not
+// qualify. The access model's filter does not disqualify one. A change of the
+// caller's grants since the cursor, or a move above a row that changes what the
+// caller reads, turns the pull into a resync, whose catch-up ships whole rows
+// (see compareAccess). A write that changes what the row's own fields decide
+// leaves a gap in the text delta log, so a span that covers it ships the
+// documents whole (see recordReadGaps).
 //
 // Holding the row is necessary and not sufficient: the recipient must also be
 // able to decode it, which only the recipient knows. That half arrives as
@@ -768,11 +771,14 @@ func (e *rowEmitter) computeDeltaSafe(entity string) (bool, error) {
 	if len(e.windows) > 0 || e.followEntities != nil {
 		return false, nil
 	}
-	filter, err := e.filterOf(entity)
+	if e.modelInUse && e.access == nil {
+		return false, errAccessUnbound
+	}
+	app, err := e.appFilterOf(entity)
 	if err != nil {
 		return false, err
 	}
-	if filter != nil {
+	if app != nil {
 		return false, nil
 	}
 	if e.scopes == nil {

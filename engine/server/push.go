@@ -1075,6 +1075,16 @@ func (s *Server) applyCrud(
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, msg.ProtoReflect(), seq); err != nil {
 			return err
 		}
+		if len(info.textFields) > 0 {
+			base, baseErr := currentBase()
+			if baseErr != nil {
+				return baseErr
+			}
+			model := s.catalogPtr().access
+			if err := info.recordReadGaps(tx, model, crud.GetKey(), readInputsOf(model, info, base), msg, seq); err != nil {
+				return err
+			}
+		}
 		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),
 			prevText, msg.ProtoReflect()); err != nil {
 			return err
@@ -1158,6 +1168,8 @@ func (s *Server) applyCrud(
 		// Snapshot the stored documents before the merge folds the patch into
 		// them; the delta log below describes the move from one to the other.
 		prevText := info.textSnapshot(base)
+		model := s.catalogPtr().access
+		prevRead := readInputsOf(model, info, base)
 		mergers := info.mergers
 		if live && len(info.textFields) > 0 {
 			tw, err := info.textWriteFor(s, ws, tx, crud.GetKey())
@@ -1205,6 +1217,9 @@ func (s *Server) applyCrud(
 			return err
 		}
 		if err := info.recordTextDeltas(tx, crud.GetKey(), prevText, base.ProtoReflect(), seq); err != nil {
+			return err
+		}
+		if err := info.recordReadGaps(tx, model, crud.GetKey(), prevRead, base, seq); err != nil {
 			return err
 		}
 		if err := info.dropRemovedTextInstances(tx, s.textCache, ws, crud.GetKey(),

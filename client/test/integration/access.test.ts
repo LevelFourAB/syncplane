@@ -10,6 +10,7 @@ import {
 	LabelSchema,
 	NoteSchema,
 	OrgMemberSchema,
+	PageSchema,
 	PostSchema,
 	ProjectMemberSchema,
 	ProjectSchema,
@@ -26,6 +27,7 @@ import {
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { KVStore } from '../../src/kv/store.js';
+import { decodeTextDoc, encodeTextDoc, plainTextOf, TextDoc } from '../../src/text/index.js';
 import { startTestServer, type TestServer } from '../support/testserver.js';
 import { freshWorkspace } from './helpers.js';
 
@@ -45,6 +47,7 @@ const entities = [
 	ProjectMemberSchema,
 	TaskSchema,
 	CommentSchema,
+	PageSchema,
 	LabelSchema,
 	NoteSchema,
 	RoomSchema,
@@ -236,6 +239,82 @@ describe('access model on the client', () => {
 		expect(await guest.get(CommentSchema, 'c1')).toBeUndefined();
 		expect((await writer.get(CommentSchema, 'c1'))?.body).toBe('on one');
 		expect(await writer.hasPermission(CommentSchema, 'c1', 'edit_tasks')).toBe('yes');
+	});
+});
+
+// A project member reads pages through the access model's filter, and still
+// catches up on text edits as fragments. The byte claim is asserted against
+// the testserver's counters, as in text-delta-down.test.ts.
+describe('text delta state below the workspace root', () => {
+	interface RPCStats {
+		total: Record<string, number>;
+		pullBytesOut: Record<string, number>;
+	}
+
+	async function rpcStats(): Promise<RPCStats> {
+		const res = await fetch(`${server.url}/debug/rpc`);
+		if (!res.ok) throw new Error(`rpc stats failed: ${res.status}`);
+		return (await res.json()) as RPCStats;
+	}
+
+	/** A large document of pseudo-random letters, which response compression
+	 * cannot shrink to nothing the way it shrinks repeated text. */
+	function bigDoc(peer: string): Uint8Array {
+		let seed = 1;
+		let s = '';
+		for (let i = 0; i < 8000; i++) {
+			seed = (seed * 1103515245 + 12345) % 2147483648;
+			s += String.fromCharCode(97 + ((seed >>> 16) % 26));
+		}
+		const d = new TextDoc(peer);
+		d.insert(0, s);
+		return encodeTextDoc(d);
+	}
+
+	it('catches a project member up on a fraction of the page', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws));
+		const base = bigDoc('seed');
+		await admin.mutate.put(PageSchema, { id: 'pg1', task: { id: 't1' }, body: base });
+		await admin.syncNow();
+		const guest = await synced(clientAs('guest', ws));
+		expect((await guest.get(PageSchema, 'pg1'))?.body?.length).toBeGreaterThan(base.length / 2);
+
+		const before = (await rpcStats()).pullBytesOut[ws] ?? 0;
+		const d = decodeTextDoc((await admin.get(PageSchema, 'pg1'))?.body, 'alice');
+		d.insert(0, 'HELLO ');
+		await admin.mutate.patch(PageSchema, 'pg1', { body: encodeTextDoc(d) });
+		await admin.syncNow();
+		await guest.syncNow();
+		const caughtUp = ((await rpcStats()).pullBytesOut[ws] ?? 0) - before;
+
+		expect(caughtUp).toBeGreaterThan(0);
+		expect(caughtUp).toBeLessThan(base.length * 0.2);
+		expect(plainTextOf((await guest.get(PageSchema, 'pg1'))?.body)).toBe(
+			plainTextOf((await admin.get(PageSchema, 'pg1'))?.body),
+		);
+		expect(plainTextOf((await guest.get(PageSchema, 'pg1'))?.body)).toMatch(/^HELLO /);
+	});
+
+	it('hands a project member a page that moves into its project without a bootstrap', async () => {
+		const ws = freshWorkspace();
+		await seed(ws);
+		const admin = await synced(clientAs('admin', ws));
+		await admin.mutate.put(PageSchema, { id: 'pg2', task: { id: 't2' }, body: bigDoc('seed') });
+		await admin.syncNow();
+		const guest = await synced(clientAs('guest', ws));
+		expect(await guest.get(PageSchema, 'pg2')).toBeUndefined();
+
+		await admin.mutate.patch(PageSchema, 'pg2', { task: { id: 't1' } });
+		await admin.syncNow();
+		const bootstraps = (await rpcStats()).total['Bootstrap'] ?? 0;
+		await guest.syncNow();
+
+		expect(plainTextOf((await guest.get(PageSchema, 'pg2'))?.body)).toBe(
+			plainTextOf((await admin.get(PageSchema, 'pg2'))?.body),
+		);
+		expect((await rpcStats()).total['Bootstrap'] ?? 0).toBe(bootstraps);
 	});
 });
 

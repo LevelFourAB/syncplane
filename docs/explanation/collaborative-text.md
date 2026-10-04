@@ -37,9 +37,13 @@ The server sends full state instead whenever a fold cannot be trusted:
 - The log no longer covers the span because garbage collection (GC) pruned it (see `WithTextDeltaRetention`).
 - A write in the log cannot be expressed as a delta, such as a cleared or deleted document.
 - The fragment saves too little data.
-- The client visibility of the entity might have changed since its cursor due to a read filter, a predicate, a window, or a follow closure.
+- The client visibility of the entity might have changed since its cursor due to an application `ReadFilter`, a predicate, a window, or a follow closure.
+- A write in the span changed the row's access parent, or a field that a read rule compares with the caller's subjects. Such a write can show the row to a caller for the first time, and the log cannot tell that caller apart from a caller that held the row. So every reader whose span covers the write receives the documents whole once.
+- The pull is the catch-up after a delta resync. The resync sends the rows that the new scope or access shows as of the cursor only, so every page of the catch-up sends full state until the client is current.
 
 Bootstrap chunks, delta resyncs, membership diffs, query results, and the `Changes` feed always send full state.
+
+The access model does not stop deltas. A caller below the workspace root receives fragments, as a caller at the root does. A change of the caller's grants, or a move above a row that changes what the caller reads, turns the pull into a delta resync. A change of the row's own access parent or subject field records a gap in the log. Each case sends full state to a reader that did not hold the row (see [Access model](access-model.md)).
 
 The server can make each of these decisions independently. Holding the row is necessary but not sufficient: folding a fragment also requires a schema, and a build routinely stores rows for an entity that only a neighbouring tab declares (see [A client holds only the entities it declares](convergence-model.md#a-client-holds-only-the-entities-it-declares)). Only the client knows this information, so it names those entities in `PullRequest.no_delta_entities` and their rows arrive as full state.
 

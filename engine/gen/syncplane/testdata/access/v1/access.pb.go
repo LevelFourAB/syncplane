@@ -380,6 +380,78 @@ func (x *Comment) GetBody() string {
 	return ""
 }
 
+// A page on a task, two access_parent hops below its project, whose body is
+// collaborative text. A caller who can read the task's tasks reads it, and so
+// does its owner where they can read the project. Registered with the org
+// schema by the specs that ship text to readers below the workspace root.
+type Page struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Task          *Task                  `protobuf:"bytes,2,opt,name=task,proto3" json:"task,omitempty"`
+	OwnerId       string                 `protobuf:"bytes,3,opt,name=owner_id,json=ownerId,proto3" json:"owner_id,omitempty"`
+	Body          []byte                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Page) Reset() {
+	*x = Page{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Page) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Page) ProtoMessage() {}
+
+func (x *Page) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Page.ProtoReflect.Descriptor instead.
+func (*Page) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *Page) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Page) GetTask() *Task {
+	if x != nil {
+		return x.Task
+	}
+	return nil
+}
+
+func (x *Page) GetOwnerId() string {
+	if x != nil {
+		return x.OwnerId
+	}
+	return ""
+}
+
+func (x *Page) GetBody() []byte {
+	if x != nil {
+		return x.Body
+	}
+	return nil
+}
+
 // Readable by every org member. No rule admits a write, so only trusted
 // writes create, change and delete labels.
 type Label struct {
@@ -392,7 +464,7 @@ type Label struct {
 
 func (x *Label) Reset() {
 	*x = Label{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -404,7 +476,7 @@ func (x *Label) String() string {
 func (*Label) ProtoMessage() {}
 
 func (x *Label) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[5]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -417,7 +489,7 @@ func (x *Label) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Label.ProtoReflect.Descriptor instead.
 func (*Label) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{5}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Label) GetId() string {
@@ -445,7 +517,7 @@ type Note struct {
 
 func (x *Note) Reset() {
 	*x = Note{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -457,7 +529,7 @@ func (x *Note) String() string {
 func (*Note) ProtoMessage() {}
 
 func (x *Note) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[6]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -470,7 +542,7 @@ func (x *Note) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Note.ProtoReflect.Descriptor instead.
 func (*Note) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{6}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Note) GetId() string {
@@ -500,7 +572,7 @@ type Entry struct {
 
 func (x *Entry) Reset() {
 	*x = Entry{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -512,7 +584,7 @@ func (x *Entry) String() string {
 func (*Entry) ProtoMessage() {}
 
 func (x *Entry) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[7]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -525,7 +597,7 @@ func (x *Entry) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Entry.ProtoReflect.Descriptor instead.
 func (*Entry) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{7}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *Entry) GetId() string {
@@ -552,7 +624,7 @@ type TaskArgs struct {
 
 func (x *TaskArgs) Reset() {
 	*x = TaskArgs{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -564,7 +636,7 @@ func (x *TaskArgs) String() string {
 func (*TaskArgs) ProtoMessage() {}
 
 func (x *TaskArgs) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[8]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -577,7 +649,7 @@ func (x *TaskArgs) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TaskArgs.ProtoReflect.Descriptor instead.
 func (*TaskArgs) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{8}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *TaskArgs) GetTaskId() string {
@@ -601,7 +673,7 @@ type TeamMember struct {
 
 func (x *TeamMember) Reset() {
 	*x = TeamMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +685,7 @@ func (x *TeamMember) String() string {
 func (*TeamMember) ProtoMessage() {}
 
 func (x *TeamMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[9]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +698,7 @@ func (x *TeamMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TeamMember.ProtoReflect.Descriptor instead.
 func (*TeamMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{9}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *TeamMember) GetId() string {
@@ -666,7 +738,7 @@ type Team struct {
 
 func (x *Team) Reset() {
 	*x = Team{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -678,7 +750,7 @@ func (x *Team) String() string {
 func (*Team) ProtoMessage() {}
 
 func (x *Team) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[10]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -691,7 +763,7 @@ func (x *Team) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Team.ProtoReflect.Descriptor instead.
 func (*Team) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{10}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Team) GetId() string {
@@ -714,7 +786,7 @@ type Folder struct {
 
 func (x *Folder) Reset() {
 	*x = Folder{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -726,7 +798,7 @@ func (x *Folder) String() string {
 func (*Folder) ProtoMessage() {}
 
 func (x *Folder) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[11]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -739,7 +811,7 @@ func (x *Folder) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Folder.ProtoReflect.Descriptor instead.
 func (*Folder) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{11}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *Folder) GetId() string {
@@ -776,7 +848,7 @@ type FolderMember struct {
 
 func (x *FolderMember) Reset() {
 	*x = FolderMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -788,7 +860,7 @@ func (x *FolderMember) String() string {
 func (*FolderMember) ProtoMessage() {}
 
 func (x *FolderMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[12]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -801,7 +873,7 @@ func (x *FolderMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use FolderMember.ProtoReflect.Descriptor instead.
 func (*FolderMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{12}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *FolderMember) GetId() string {
@@ -844,7 +916,7 @@ type Doc struct {
 
 func (x *Doc) Reset() {
 	*x = Doc{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -856,7 +928,7 @@ func (x *Doc) String() string {
 func (*Doc) ProtoMessage() {}
 
 func (x *Doc) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[13]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -869,7 +941,7 @@ func (x *Doc) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Doc.ProtoReflect.Descriptor instead.
 func (*Doc) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{13}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Doc) GetId() string {
@@ -905,7 +977,7 @@ type Board struct {
 
 func (x *Board) Reset() {
 	*x = Board{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -917,7 +989,7 @@ func (x *Board) String() string {
 func (*Board) ProtoMessage() {}
 
 func (x *Board) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[14]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -930,7 +1002,7 @@ func (x *Board) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Board.ProtoReflect.Descriptor instead.
 func (*Board) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{14}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *Board) GetId() string {
@@ -950,7 +1022,7 @@ type Space struct {
 
 func (x *Space) Reset() {
 	*x = Space{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -962,7 +1034,7 @@ func (x *Space) String() string {
 func (*Space) ProtoMessage() {}
 
 func (x *Space) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[15]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -975,7 +1047,7 @@ func (x *Space) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Space.ProtoReflect.Descriptor instead.
 func (*Space) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{15}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *Space) GetId() string {
@@ -1002,7 +1074,7 @@ type PlaceMember struct {
 
 func (x *PlaceMember) Reset() {
 	*x = PlaceMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1014,7 +1086,7 @@ func (x *PlaceMember) String() string {
 func (*PlaceMember) ProtoMessage() {}
 
 func (x *PlaceMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[16]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1027,7 +1099,7 @@ func (x *PlaceMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceMember.ProtoReflect.Descriptor instead.
 func (*PlaceMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{16}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *PlaceMember) GetId() string {
@@ -1108,7 +1180,7 @@ type Card struct {
 
 func (x *Card) Reset() {
 	*x = Card{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1120,7 +1192,7 @@ func (x *Card) String() string {
 func (*Card) ProtoMessage() {}
 
 func (x *Card) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[17]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1133,7 +1205,7 @@ func (x *Card) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Card.ProtoReflect.Descriptor instead.
 func (*Card) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{17}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *Card) GetId() string {
@@ -1203,7 +1275,7 @@ type CardItem struct {
 
 func (x *CardItem) Reset() {
 	*x = CardItem{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1215,7 +1287,7 @@ func (x *CardItem) String() string {
 func (*CardItem) ProtoMessage() {}
 
 func (x *CardItem) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[18]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1228,7 +1300,7 @@ func (x *CardItem) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CardItem.ProtoReflect.Descriptor instead.
 func (*CardItem) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{18}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *CardItem) GetId() string {
@@ -1266,7 +1338,7 @@ type PlaceRef struct {
 
 func (x *PlaceRef) Reset() {
 	*x = PlaceRef{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1278,7 +1350,7 @@ func (x *PlaceRef) String() string {
 func (*PlaceRef) ProtoMessage() {}
 
 func (x *PlaceRef) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[19]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1291,7 +1363,7 @@ func (x *PlaceRef) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PlaceRef.ProtoReflect.Descriptor instead.
 func (*PlaceRef) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{19}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *PlaceRef) GetTarget() isPlaceRef_Target {
@@ -1348,7 +1420,7 @@ type Pin struct {
 
 func (x *Pin) Reset() {
 	*x = Pin{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[20]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1360,7 +1432,7 @@ func (x *Pin) String() string {
 func (*Pin) ProtoMessage() {}
 
 func (x *Pin) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[20]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1373,7 +1445,7 @@ func (x *Pin) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Pin.ProtoReflect.Descriptor instead.
 func (*Pin) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{20}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *Pin) GetId() string {
@@ -1409,7 +1481,7 @@ type Room struct {
 
 func (x *Room) Reset() {
 	*x = Room{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1421,7 +1493,7 @@ func (x *Room) String() string {
 func (*Room) ProtoMessage() {}
 
 func (x *Room) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[21]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1434,7 +1506,7 @@ func (x *Room) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Room.ProtoReflect.Descriptor instead.
 func (*Room) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{21}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *Room) GetId() string {
@@ -1465,7 +1537,7 @@ type RoomMember struct {
 
 func (x *RoomMember) Reset() {
 	*x = RoomMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1477,7 +1549,7 @@ func (x *RoomMember) String() string {
 func (*RoomMember) ProtoMessage() {}
 
 func (x *RoomMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[22]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1490,7 +1562,7 @@ func (x *RoomMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RoomMember.ProtoReflect.Descriptor instead.
 func (*RoomMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{22}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *RoomMember) GetId() string {
@@ -1536,7 +1608,7 @@ type Post struct {
 
 func (x *Post) Reset() {
 	*x = Post{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1548,7 +1620,7 @@ func (x *Post) String() string {
 func (*Post) ProtoMessage() {}
 
 func (x *Post) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[23]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1561,7 +1633,7 @@ func (x *Post) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Post.ProtoReflect.Descriptor instead.
 func (*Post) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{23}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *Post) GetId() string {
@@ -1613,7 +1685,7 @@ type Draft struct {
 
 func (x *Draft) Reset() {
 	*x = Draft{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1625,7 +1697,7 @@ func (x *Draft) String() string {
 func (*Draft) ProtoMessage() {}
 
 func (x *Draft) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[24]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1638,7 +1710,7 @@ func (x *Draft) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Draft.ProtoReflect.Descriptor instead.
 func (*Draft) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{24}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{25}
 }
 
 func (x *Draft) GetId() string {
@@ -1684,7 +1756,7 @@ type Ticket struct {
 
 func (x *Ticket) Reset() {
 	*x = Ticket{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1696,7 +1768,7 @@ func (x *Ticket) String() string {
 func (*Ticket) ProtoMessage() {}
 
 func (x *Ticket) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[25]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1709,7 +1781,7 @@ func (x *Ticket) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ticket.ProtoReflect.Descriptor instead.
 func (*Ticket) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{25}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *Ticket) GetId() string {
@@ -1759,7 +1831,7 @@ type Setting struct {
 
 func (x *Setting) Reset() {
 	*x = Setting{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1771,7 +1843,7 @@ func (x *Setting) String() string {
 func (*Setting) ProtoMessage() {}
 
 func (x *Setting) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[26]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1784,7 +1856,7 @@ func (x *Setting) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Setting.ProtoReflect.Descriptor instead.
 func (*Setting) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{26}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *Setting) GetUserId() string {
@@ -1812,7 +1884,7 @@ type Squad struct {
 
 func (x *Squad) Reset() {
 	*x = Squad{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1824,7 +1896,7 @@ func (x *Squad) String() string {
 func (*Squad) ProtoMessage() {}
 
 func (x *Squad) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[27]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1837,7 +1909,7 @@ func (x *Squad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Squad.ProtoReflect.Descriptor instead.
 func (*Squad) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{27}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{28}
 }
 
 func (x *Squad) GetId() string {
@@ -1860,7 +1932,7 @@ type SquadMember struct {
 
 func (x *SquadMember) Reset() {
 	*x = SquadMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1872,7 +1944,7 @@ func (x *SquadMember) String() string {
 func (*SquadMember) ProtoMessage() {}
 
 func (x *SquadMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1885,7 +1957,7 @@ func (x *SquadMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SquadMember.ProtoReflect.Descriptor instead.
 func (*SquadMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{28}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{29}
 }
 
 func (x *SquadMember) GetId() string {
@@ -1925,7 +1997,7 @@ type Repo struct {
 
 func (x *Repo) Reset() {
 	*x = Repo{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1937,7 +2009,7 @@ func (x *Repo) String() string {
 func (*Repo) ProtoMessage() {}
 
 func (x *Repo) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1950,7 +2022,7 @@ func (x *Repo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Repo.ProtoReflect.Descriptor instead.
 func (*Repo) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{29}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Repo) GetId() string {
@@ -1978,7 +2050,7 @@ type RepoMember struct {
 
 func (x *RepoMember) Reset() {
 	*x = RepoMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1990,7 +2062,7 @@ func (x *RepoMember) String() string {
 func (*RepoMember) ProtoMessage() {}
 
 func (x *RepoMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2003,7 +2075,7 @@ func (x *RepoMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoMember.ProtoReflect.Descriptor instead.
 func (*RepoMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{30}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *RepoMember) GetId() string {
@@ -2082,7 +2154,7 @@ type RepoSquad struct {
 
 func (x *RepoSquad) Reset() {
 	*x = RepoSquad{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2094,7 +2166,7 @@ func (x *RepoSquad) String() string {
 func (*RepoSquad) ProtoMessage() {}
 
 func (x *RepoSquad) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2107,7 +2179,7 @@ func (x *RepoSquad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoSquad.ProtoReflect.Descriptor instead.
 func (*RepoSquad) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{31}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *RepoSquad) GetId() string {
@@ -2150,7 +2222,7 @@ type Issue struct {
 
 func (x *Issue) Reset() {
 	*x = Issue{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2162,7 +2234,7 @@ func (x *Issue) String() string {
 func (*Issue) ProtoMessage() {}
 
 func (x *Issue) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2175,7 +2247,7 @@ func (x *Issue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Issue.ProtoReflect.Descriptor instead.
 func (*Issue) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{32}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *Issue) GetId() string {
@@ -2263,6 +2335,17 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\acomment\x12\x02idR \n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
+	"\x0e(\x012\n" +
+	"edit_tasks\"\xdc\x01\n" +
+	"\x04Page\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04task\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.TaskB\x06\xaa\xbb\x18\x02Z\x00R\x04task\x12\x19\n" +
+	"\bowner_id\x18\x03 \x01(\tR\aownerId\x12\x1a\n" +
+	"\x04body\x18\x04 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x04body:M\xa2\xbb\x18I\n" +
+	"\x04page\x12\x02idR=\n" +
+	"\x0e\b\x012\n" +
+	"view_tasks\n" +
+	"\x1b\b\x01B\bowner_id2\rview_projects\n" +
 	"\x0e(\x012\n" +
 	"edit_tasks\"O\n" +
 	"\x05Label\x12\x0e\n" +
@@ -2540,7 +2623,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 33)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
@@ -2548,67 +2631,69 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*ProjectMember)(nil), // 3: syncplane.testdata.access.v1.ProjectMember
 	(*Task)(nil),          // 4: syncplane.testdata.access.v1.Task
 	(*Comment)(nil),       // 5: syncplane.testdata.access.v1.Comment
-	(*Label)(nil),         // 6: syncplane.testdata.access.v1.Label
-	(*Note)(nil),          // 7: syncplane.testdata.access.v1.Note
-	(*Entry)(nil),         // 8: syncplane.testdata.access.v1.Entry
-	(*TaskArgs)(nil),      // 9: syncplane.testdata.access.v1.TaskArgs
-	(*TeamMember)(nil),    // 10: syncplane.testdata.access.v1.TeamMember
-	(*Team)(nil),          // 11: syncplane.testdata.access.v1.Team
-	(*Folder)(nil),        // 12: syncplane.testdata.access.v1.Folder
-	(*FolderMember)(nil),  // 13: syncplane.testdata.access.v1.FolderMember
-	(*Doc)(nil),           // 14: syncplane.testdata.access.v1.Doc
-	(*Board)(nil),         // 15: syncplane.testdata.access.v1.Board
-	(*Space)(nil),         // 16: syncplane.testdata.access.v1.Space
-	(*PlaceMember)(nil),   // 17: syncplane.testdata.access.v1.PlaceMember
-	(*Card)(nil),          // 18: syncplane.testdata.access.v1.Card
-	(*CardItem)(nil),      // 19: syncplane.testdata.access.v1.CardItem
-	(*PlaceRef)(nil),      // 20: syncplane.testdata.access.v1.PlaceRef
-	(*Pin)(nil),           // 21: syncplane.testdata.access.v1.Pin
-	(*Room)(nil),          // 22: syncplane.testdata.access.v1.Room
-	(*RoomMember)(nil),    // 23: syncplane.testdata.access.v1.RoomMember
-	(*Post)(nil),          // 24: syncplane.testdata.access.v1.Post
-	(*Draft)(nil),         // 25: syncplane.testdata.access.v1.Draft
-	(*Ticket)(nil),        // 26: syncplane.testdata.access.v1.Ticket
-	(*Setting)(nil),       // 27: syncplane.testdata.access.v1.Setting
-	(*Squad)(nil),         // 28: syncplane.testdata.access.v1.Squad
-	(*SquadMember)(nil),   // 29: syncplane.testdata.access.v1.SquadMember
-	(*Repo)(nil),          // 30: syncplane.testdata.access.v1.Repo
-	(*RepoMember)(nil),    // 31: syncplane.testdata.access.v1.RepoMember
-	(*RepoSquad)(nil),     // 32: syncplane.testdata.access.v1.RepoSquad
-	(*Issue)(nil),         // 33: syncplane.testdata.access.v1.Issue
+	(*Page)(nil),          // 6: syncplane.testdata.access.v1.Page
+	(*Label)(nil),         // 7: syncplane.testdata.access.v1.Label
+	(*Note)(nil),          // 8: syncplane.testdata.access.v1.Note
+	(*Entry)(nil),         // 9: syncplane.testdata.access.v1.Entry
+	(*TaskArgs)(nil),      // 10: syncplane.testdata.access.v1.TaskArgs
+	(*TeamMember)(nil),    // 11: syncplane.testdata.access.v1.TeamMember
+	(*Team)(nil),          // 12: syncplane.testdata.access.v1.Team
+	(*Folder)(nil),        // 13: syncplane.testdata.access.v1.Folder
+	(*FolderMember)(nil),  // 14: syncplane.testdata.access.v1.FolderMember
+	(*Doc)(nil),           // 15: syncplane.testdata.access.v1.Doc
+	(*Board)(nil),         // 16: syncplane.testdata.access.v1.Board
+	(*Space)(nil),         // 17: syncplane.testdata.access.v1.Space
+	(*PlaceMember)(nil),   // 18: syncplane.testdata.access.v1.PlaceMember
+	(*Card)(nil),          // 19: syncplane.testdata.access.v1.Card
+	(*CardItem)(nil),      // 20: syncplane.testdata.access.v1.CardItem
+	(*PlaceRef)(nil),      // 21: syncplane.testdata.access.v1.PlaceRef
+	(*Pin)(nil),           // 22: syncplane.testdata.access.v1.Pin
+	(*Room)(nil),          // 23: syncplane.testdata.access.v1.Room
+	(*RoomMember)(nil),    // 24: syncplane.testdata.access.v1.RoomMember
+	(*Post)(nil),          // 25: syncplane.testdata.access.v1.Post
+	(*Draft)(nil),         // 26: syncplane.testdata.access.v1.Draft
+	(*Ticket)(nil),        // 27: syncplane.testdata.access.v1.Ticket
+	(*Setting)(nil),       // 28: syncplane.testdata.access.v1.Setting
+	(*Squad)(nil),         // 29: syncplane.testdata.access.v1.Squad
+	(*SquadMember)(nil),   // 30: syncplane.testdata.access.v1.SquadMember
+	(*Repo)(nil),          // 31: syncplane.testdata.access.v1.Repo
+	(*RepoMember)(nil),    // 32: syncplane.testdata.access.v1.RepoMember
+	(*RepoSquad)(nil),     // 33: syncplane.testdata.access.v1.RepoSquad
+	(*Issue)(nil),         // 34: syncplane.testdata.access.v1.Issue
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
 	2,  // 1: syncplane.testdata.access.v1.Task.project:type_name -> syncplane.testdata.access.v1.Project
 	4,  // 2: syncplane.testdata.access.v1.Comment.task:type_name -> syncplane.testdata.access.v1.Task
-	11, // 3: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
-	0,  // 4: syncplane.testdata.access.v1.TeamMember.role:type_name -> syncplane.testdata.access.v1.TeamRole
-	12, // 5: syncplane.testdata.access.v1.Folder.parent:type_name -> syncplane.testdata.access.v1.Folder
-	12, // 6: syncplane.testdata.access.v1.FolderMember.folder:type_name -> syncplane.testdata.access.v1.Folder
-	12, // 7: syncplane.testdata.access.v1.Doc.folder:type_name -> syncplane.testdata.access.v1.Folder
-	15, // 8: syncplane.testdata.access.v1.PlaceMember.board:type_name -> syncplane.testdata.access.v1.Board
-	16, // 9: syncplane.testdata.access.v1.PlaceMember.space:type_name -> syncplane.testdata.access.v1.Space
-	15, // 10: syncplane.testdata.access.v1.Card.board:type_name -> syncplane.testdata.access.v1.Board
-	16, // 11: syncplane.testdata.access.v1.Card.space:type_name -> syncplane.testdata.access.v1.Space
-	18, // 12: syncplane.testdata.access.v1.CardItem.card:type_name -> syncplane.testdata.access.v1.Card
-	15, // 13: syncplane.testdata.access.v1.PlaceRef.board:type_name -> syncplane.testdata.access.v1.Board
-	16, // 14: syncplane.testdata.access.v1.PlaceRef.space:type_name -> syncplane.testdata.access.v1.Space
-	20, // 15: syncplane.testdata.access.v1.Pin.place:type_name -> syncplane.testdata.access.v1.PlaceRef
-	22, // 16: syncplane.testdata.access.v1.RoomMember.room:type_name -> syncplane.testdata.access.v1.Room
-	22, // 17: syncplane.testdata.access.v1.Post.room:type_name -> syncplane.testdata.access.v1.Room
-	22, // 18: syncplane.testdata.access.v1.Draft.room:type_name -> syncplane.testdata.access.v1.Room
-	22, // 19: syncplane.testdata.access.v1.Ticket.room:type_name -> syncplane.testdata.access.v1.Room
-	28, // 20: syncplane.testdata.access.v1.SquadMember.squad:type_name -> syncplane.testdata.access.v1.Squad
-	30, // 21: syncplane.testdata.access.v1.RepoMember.repo:type_name -> syncplane.testdata.access.v1.Repo
-	28, // 22: syncplane.testdata.access.v1.RepoMember.squad:type_name -> syncplane.testdata.access.v1.Squad
-	30, // 23: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
-	28, // 24: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
-	30, // 25: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
-	26, // [26:26] is the sub-list for method output_type
-	26, // [26:26] is the sub-list for method input_type
-	26, // [26:26] is the sub-list for extension type_name
-	26, // [26:26] is the sub-list for extension extendee
-	0,  // [0:26] is the sub-list for field type_name
+	4,  // 3: syncplane.testdata.access.v1.Page.task:type_name -> syncplane.testdata.access.v1.Task
+	12, // 4: syncplane.testdata.access.v1.TeamMember.team:type_name -> syncplane.testdata.access.v1.Team
+	0,  // 5: syncplane.testdata.access.v1.TeamMember.role:type_name -> syncplane.testdata.access.v1.TeamRole
+	13, // 6: syncplane.testdata.access.v1.Folder.parent:type_name -> syncplane.testdata.access.v1.Folder
+	13, // 7: syncplane.testdata.access.v1.FolderMember.folder:type_name -> syncplane.testdata.access.v1.Folder
+	13, // 8: syncplane.testdata.access.v1.Doc.folder:type_name -> syncplane.testdata.access.v1.Folder
+	16, // 9: syncplane.testdata.access.v1.PlaceMember.board:type_name -> syncplane.testdata.access.v1.Board
+	17, // 10: syncplane.testdata.access.v1.PlaceMember.space:type_name -> syncplane.testdata.access.v1.Space
+	16, // 11: syncplane.testdata.access.v1.Card.board:type_name -> syncplane.testdata.access.v1.Board
+	17, // 12: syncplane.testdata.access.v1.Card.space:type_name -> syncplane.testdata.access.v1.Space
+	19, // 13: syncplane.testdata.access.v1.CardItem.card:type_name -> syncplane.testdata.access.v1.Card
+	16, // 14: syncplane.testdata.access.v1.PlaceRef.board:type_name -> syncplane.testdata.access.v1.Board
+	17, // 15: syncplane.testdata.access.v1.PlaceRef.space:type_name -> syncplane.testdata.access.v1.Space
+	21, // 16: syncplane.testdata.access.v1.Pin.place:type_name -> syncplane.testdata.access.v1.PlaceRef
+	23, // 17: syncplane.testdata.access.v1.RoomMember.room:type_name -> syncplane.testdata.access.v1.Room
+	23, // 18: syncplane.testdata.access.v1.Post.room:type_name -> syncplane.testdata.access.v1.Room
+	23, // 19: syncplane.testdata.access.v1.Draft.room:type_name -> syncplane.testdata.access.v1.Room
+	23, // 20: syncplane.testdata.access.v1.Ticket.room:type_name -> syncplane.testdata.access.v1.Room
+	29, // 21: syncplane.testdata.access.v1.SquadMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	31, // 22: syncplane.testdata.access.v1.RepoMember.repo:type_name -> syncplane.testdata.access.v1.Repo
+	29, // 23: syncplane.testdata.access.v1.RepoMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	31, // 24: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
+	29, // 25: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
+	31, // 26: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
+	27, // [27:27] is the sub-list for method output_type
+	27, // [27:27] is the sub-list for method input_type
+	27, // [27:27] is the sub-list for extension type_name
+	27, // [27:27] is the sub-list for extension extendee
+	0,  // [0:27] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -2616,19 +2701,19 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 	if File_syncplane_testdata_access_v1_access_proto != nil {
 		return
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[16].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[17].OneofWrappers = []any{
 		(*PlaceMember_Board)(nil),
 		(*PlaceMember_Space)(nil),
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[17].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[18].OneofWrappers = []any{
 		(*Card_Board)(nil),
 		(*Card_Space)(nil),
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[19].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[20].OneofWrappers = []any{
 		(*PlaceRef_Board)(nil),
 		(*PlaceRef_Space)(nil),
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[30].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[31].OneofWrappers = []any{
 		(*RepoMember_UserId)(nil),
 		(*RepoMember_Squad)(nil),
 	}
@@ -2638,7 +2723,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   33,
+			NumMessages:   34,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

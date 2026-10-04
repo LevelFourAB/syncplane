@@ -11,6 +11,7 @@ import (
 	. "github.com/onsi/gomega"
 	"google.golang.org/protobuf/proto"
 
+	todov1 "github.com/levelfourab/syncplane/engine/gen/example/todo/v1"
 	testdatav1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
 	"github.com/levelfourab/syncplane/engine/gen/syncplane/v1/syncplanev1connect"
@@ -287,6 +288,42 @@ var _ = Describe("Downstream text delta state", func() {
 			Expect(rc.GetTextDeltas()).To(HaveLen(1))
 			Expect(rc.GetTextDeltas()[0].GetFragment()).NotTo(BeEmpty())
 			Expect(reconstruct(rc, held)).To(Equal(storedRow("w1")))
+		})
+
+		It("ships the document on every page of the catch-up pull after a subscription change", func() {
+			base := bodyDoc("seed", "a document long enough that re-sending it would be a waste of everyone's bytes")
+			push(putMutation("c1", 1, "widget", "w1", &testdatav1.Widget{Id: "w1", Body: base, Count: 1}))
+			first := pull(nil, &syncplanev1.Subscription{Entity: "todo"})
+			Expect(first.GetPatch().GetChanges()).To(BeEmpty())
+
+			// A row the new scope does not hold, written first, puts w1 on a
+			// later page of a catch-up served one row at a time.
+			push(putMutation("c2", 1, "todo", "t1", &todov1.Todo{Id: "t1", Title: "filler"}))
+			push(patchMutation("c2", 2, "widget", "w1", &testdatav1.Widget{Count: 7}, "count"))
+
+			subs := []*syncplanev1.Subscription{{Entity: "widget"}}
+			cursor := first.GetNextCursor()
+			var got *syncplanev1.RowChange
+			for range 10 {
+				resp, err := client.Pull(ctx, connect.NewRequest(&syncplanev1.PullRequest{
+					WorkspaceId: ws, Cursor: cursor, Subscriptions: subs, Limit: 1,
+				}))
+				Expect(err).NotTo(HaveOccurred())
+				Expect(resp.Msg.GetReset_()).To(BeFalse())
+				for _, rc := range resp.Msg.GetPatch().GetChanges() {
+					if rc.GetEntity() == "widget" && rc.GetKey() == "w1" {
+						got = rc
+					}
+				}
+				cursor = resp.Msg.GetNextCursor()
+				if !resp.Msg.GetHasMore() {
+					break
+				}
+			}
+			Expect(got).NotTo(BeNil())
+			Expect(got.GetTextDeltas()).To(BeEmpty(),
+				"the reader never held this row, whichever page of the catch-up delivers it")
+			Expect(got.GetValue()).To(Equal(storedRow("w1")))
 		})
 
 		It("ships the document on a re-creation after a delete", func() {

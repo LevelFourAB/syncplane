@@ -60,9 +60,10 @@ type cursorState struct {
 	// following pull walks it again and clears this at a clean boundary.
 	closureRebuild bool
 	// resynced marks the cursor a delta resync completed with
-	// (Cursor.resynced). The client holds the new scope as of seq only, so the
-	// catch-up pull that consumes it ships every row as full state; the cursor
-	// that pull issues clears it.
+	// (Cursor.resynced). The client holds the new scope as of that resync's seq
+	// only, so every page of the catch-up pull that follows ships every row as
+	// full state; the page that ends the catch-up at a clean boundary issues a
+	// cursor without it.
 	resynced bool
 	// window is the windowed membership as ONE set (Cursor.window), which is
 	// what cursors issued before windows were maintained per window carry.
@@ -863,11 +864,12 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 	// different cursors, and cleared after the scan so the membership diffs
 	// below — which emit rows AT or BELOW the cursor — stay full-state.
 	//
-	// The page after a delta resync is the exception: the resync delivered an
-	// added entity's rows as of seq only, so one written past seq is the
-	// client's first sight of it and no fragment can be folded into anything.
-	// The client holds the whole scope as of the cursor this page issues, so
-	// the mark stops here.
+	// The catch-up after a delta resync is the exception: the resync delivered
+	// the rows the new scope or access shows as of its seq only, so one written
+	// past that seq is the client's first sight of it and no fragment can be
+	// folded into anything. A page that stops short of the current seq leaves
+	// such rows to the next page, so the mark stays on its cursor; the client
+	// holds the whole scope only as of the cursor of the page that catches up.
 	emitter.deltas = !cur.resynced
 	emitter.deltaAfter = cur.seq
 	// What the cursor proves the client holds, for the hidden branches below:
@@ -964,6 +966,7 @@ func (s *Server) pullPage(tx storage.ReadTx, cur cursorState, emitter *rowEmitte
 		next.closureRebuild = cur.closureRebuild
 		next.window = cur.window
 		next.windows = cur.windows
+		next.resynced = cur.resynced
 	} else {
 		next.seq = current
 		// Clean boundary: reconcile both bounded membership sets. Each emits

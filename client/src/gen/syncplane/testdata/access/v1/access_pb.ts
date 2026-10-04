@@ -15,7 +15,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/testdata/access/v1/access.proto.
  */
 export const file_syncplane_testdata_access_v1_access: GenFile = /*@__PURE__*/
-  fileDesc("CilzeW5jcGxhbmUvdGVzdGRhdGEvYWNjZXNzL3YxL2FjY2Vzcy5wcm90bxIcc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MSKsAgoJT3JnTWVtYmVyEgoKAmlkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDAoEcm9sZRgDIAEoCTrzAaK7GO4BCgpvcmdfbWVtYmVyEgJpZFImChAIATIMdmlld19tZW1iZXJzChIoATIObWFuYWdlX21lbWJlcnNaswEKB3VzZXJfaWQSBHJvbGUaNAoKb3JnX21lbWJlchINdmlld19wcm9qZWN0cxIKdmlld190YXNrcxILdmlld19sYWJlbHMabAoJb3JnX2FkbWluEgx2aWV3X21lbWJlcnMSDm1hbmFnZV9tZW1iZXJzEg12aWV3X3Byb2plY3RzEg1lZGl0X3Byb2plY3RzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzEgt2aWV3X2xhYmVscyJeCgdQcm9qZWN0EgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6OaK7GDUKB3Byb2plY3QSAmlkUiYKEQgBMg12aWV3X3Byb2plY3RzChEoATINZWRpdF9wcm9qZWN0cyK6BAoNUHJvamVjdE1lbWJlchIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOr0DorsYuAMKDnByb2plY3RfbWVtYmVyEgJpZFImChAIATIMdmlld19tZW1iZXJzChIoATIObWFuYWdlX21lbWJlcnNa+QIKB3VzZXJfaWQSBHJvbGUaOQoOcHJvamVjdF9yZWFkZXISDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIKdmlld190YXNrcxpFCg5wcm9qZWN0X3dyaXRlchINdmlld19wcm9qZWN0cxIMdmlld19tZW1iZXJzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzGlQKDXByb2plY3RfYWRtaW4SDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnMSCnZpZXdfdGFza3MSCmVkaXRfdGFza3MaKwoOcHJvamVjdF9lZGl0b3ISDXZpZXdfcHJvamVjdHMSCmVkaXRfdGFza3MaYwoNcHJvamVjdF9vd25lchINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxIKdmlld190YXNrcxIKZWRpdF90YXNrcyKTAQoEVGFzaxIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDQoFdGl0bGUYAyABKAk6MKK7GCwKBHRhc2sSAmlkUiAKDggBMgp2aWV3X3Rhc2tzCg4oATIKZWRpdF90YXNrcyKSAQoHQ29tbWVudBIKCgJpZBgBIAEoCRI4CgR0YXNrGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5UYXNrQgaquxgCWgASDAoEYm9keRgDIAEoCTozorsYLwoHY29tbWVudBICaWRSIAoOCAEyCnZpZXdfdGFza3MKDigBMgplZGl0X3Rhc2tzIkUKBUxhYmVsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6IqK7GB4KBWxhYmVsEgJpZFIRCg8IATILdmlld19sYWJlbHMiOgoETm90ZRIKCgJpZBgBIAEoCRIMCgRib2R5GAIgASgJOhiiuxgUCgRub3RlEgJpZFIICgYIASgBOgAiVAoFRW50cnkSCgoCaWQYASABKAkSDAoEYm9keRgCIAEoCToxorsYLQoFZW50cnkSAmlkUiAKDggBMgp2aWV3X3Rhc2tzCg4QATIKdmlld190YXNrcyIbCghUYXNrQXJncxIPCgd0YXNrX2lkGAEgASgJIqwCCgpUZWFtTWVtYmVyEgoKAmlkGAEgASgJEjgKBHRlYW0YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEjQKBHJvbGUYBCABKA4yJi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1Sb2xlOpABorsYiwEKC3RlYW1fbWVtYmVyEgJpZFIeCg0IATIJdmlld190ZWFtCg0oATIJZWRpdF90ZWFtWlgKB3VzZXJfaWQSBHJvbGUaHQoQVEVBTV9ST0xFX1ZJRVdFUhIJdmlld190ZWFtGigKEFRFQU1fUk9MRV9FRElUT1ISCXZpZXdfdGVhbRIJZWRpdF90ZWFtIkIKBFRlYW0SCgoCaWQYASABKAk6LqK7GCoKBHRlYW0SAmlkUh4KDQgBMgl2aWV3X3RlYW0KDSgBMgllZGl0X3RlYW0imAEKBkZvbGRlchIKCgJpZBgBIAEoCRI8CgZwYXJlbnQYAiABKAsyJC5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLkZvbGRlckIGqrsYAloAEgwKBG5hbWUYAyABKAk6NqK7GDIKBmZvbGRlchICaWRSJAoQCAEyDHZpZXdfZm9sZGVycwoQKAEyDGVkaXRfZm9sZGVycyLWAgoMRm9sZGVyTWVtYmVyEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOtwBorsY1wEKDWZvbGRlcl9tZW1iZXISAmlkUiYKEAgBMgx2aWV3X2ZvbGRlcnMKEigBMg5tYW5hZ2VfZm9sZGVyc1qZAQoHdXNlcl9pZBIEcm9sZRodCg1mb2xkZXJfdmlld2VyEgx2aWV3X2ZvbGRlcnMaKwoNZm9sZGVyX2VkaXRvchIMdmlld19mb2xkZXJzEgxlZGl0X2ZvbGRlcnMaPAoOZm9sZGVyX21hbmFnZXISDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzEg5tYW5hZ2VfZm9sZGVycyKTAQoDRG9jEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDQoFdGl0bGUYAyABKAk6M6K7GC8KA2RvYxICaWRSJAoQCAEyDHZpZXdfZm9sZGVycwoQKAEyDGVkaXRfZm9sZGVycyJICgVCb2FyZBIKCgJpZBgBIAEoCTozorsYLwoFYm9hcmQSAmlkUiIKDwgBMgt2aWV3X3BsYWNlcwoPKAEyC2VkaXRfcGxhY2VzIkgKBVNwYWNlEgoKAmlkGAEgASgJOjOiuxgvCgVzcGFjZRICaWRSIgoPCAEyC3ZpZXdfcGxhY2VzCg8oATILZWRpdF9wbGFjZXMixQQKC1BsYWNlTWVtYmVyEgoKAmlkGAEgASgJEjwKBWJvYXJkGAIgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Cb2FyZEIGqrsYAloASAASPAoFc3BhY2UYAyABKAsyIy5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlNwYWNlQgaquxgCWgBIABIPCgd1c2VyX2lkGAQgASgJEgwKBHJvbGUYBSABKAk6hQOiuxiAAwoMcGxhY2VfbWVtYmVyEgJpZFIyChYIATISdmlld19wbGFjZV9tZW1iZXJzChgoATIUbWFuYWdlX3BsYWNlX21lbWJlcnNatwIKB3VzZXJfaWQSBHJvbGUaRgoMcGxhY2Vfdmlld2VyEgt2aWV3X3BsYWNlcxISdmlld19wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgl2aWV3X3BpbnMaXQoMcGxhY2VfZWRpdG9yEgt2aWV3X3BsYWNlcxISdmlld19wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgplZGl0X2NhcmRzEgl2aWV3X3BpbnMSCWVkaXRfcGlucxp/CgtwbGFjZV9hZG1pbhILdmlld19wbGFjZXMSC2VkaXRfcGxhY2VzEhJ2aWV3X3BsYWNlX21lbWJlcnMSFG1hbmFnZV9wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgplZGl0X2NhcmRzEgl2aWV3X3BpbnMSCWVkaXRfcGluc0IHCgVwbGFjZSLYAQoEQ2FyZBIKCgJpZBgBIAEoCRI8CgVib2FyZBgCIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQm9hcmRCBqq7GAJaAEgAEjwKBXNwYWNlGAMgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcGFjZUIGqrsYAloASAASDQoFdGl0bGUYBCABKAk6MKK7GCwKBGNhcmQSAmlkUiAKDggBMgp2aWV3X2NhcmRzCg4oATIKZWRpdF9jYXJkc0IHCgVwbGFjZSKVAQoIQ2FyZEl0ZW0SCgoCaWQYASABKAkSOAoEY2FyZBgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQ2FyZEIGqrsYAloAEgwKBHRleHQYAyABKAk6NaK7GDEKCWNhcmRfaXRlbRICaWRSIAoOCAEyCnZpZXdfY2FyZHMKDigBMgplZGl0X2NhcmRzIoYBCghQbGFjZVJlZhI0CgVib2FyZBgBIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQm9hcmRIABI0CgVzcGFjZRgCIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuU3BhY2VIADoEsrsYAEIICgZ0YXJnZXQijgEKA1BpbhIKCgJpZBgBIAEoCRI9CgVwbGFjZRgCIAEoCzImLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuUGxhY2VSZWZCBqq7GAJaABINCgVsYWJlbBgDIAEoCTotorsYKQoDcGluEgJpZFIeCg0IATIJdmlld19waW5zCg0oATIJZWRpdF9waW5zIlIKBFJvb20SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCToworsYLAoEcm9vbRICaWRSIAoOCAEyCnZpZXdfcm9vbXMKDigBMgplZGl0X3Jvb21zItUDCgpSb29tTWVtYmVyEgoKAmlkGAEgASgJEjgKBHJvb20YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJvb21CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEgwKBHJvbGUYBCABKAk64QKiuxjcAgoLcm9vbV9tZW1iZXISAmlkUkkKFQgBMhF2aWV3X3Jvb21fbWVtYmVycwoXKAEyE21hbmFnZV9yb29tX21lbWJlcnMKFyABQgd1c2VyX2lkMgp2aWV3X3Jvb21zWv0BCgd1c2VyX2lkEgRyb2xlGjgKC3Jvb21fdmlld2VyEgp2aWV3X3Jvb21zEhF2aWV3X3Jvb21fbWVtYmVycxIKdmlld19wb3N0cxo+Cgtyb29tX3Bvc3RlchIKdmlld19yb29tcxIRdmlld19yb29tX21lbWJlcnMSCnZpZXdfcG9zdHMSBHBvc3QacgoOcm9vbV9tb2RlcmF0b3ISCnZpZXdfcm9vbXMSCmVkaXRfcm9vbXMSEXZpZXdfcm9vbV9tZW1iZXJzEhNtYW5hZ2Vfcm9vbV9tZW1iZXJzEgp2aWV3X3Bvc3RzEgRwb3N0Eg5tb2RlcmF0ZV9wb3N0cyLuAQoEUG9zdBIKCgJpZBgBIAEoCRI4CgRyb29tGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Sb29tQgaquxgCWgASGQoJYXV0aG9yX2lkGAMgASgJQgaquxgCYgASDAoEYm9keRgEIAEoCRINCgV0aXRsZRgFIAEoCTpoorsYZAoEcG9zdBICaWRSWAoOCAEyCnZpZXdfcG9zdHMKFRABIAFCCWF1dGhvcl9pZDIEcG9zdAoZGAFCCWF1dGhvcl9pZEoEYm9keTIEcG9zdAoUGAEgATIObW9kZXJhdGVfcG9zdHMipgEKBURyYWZ0EgoKAmlkGAEgASgJEjgKBHJvb20YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJvb21CBqq7GAJaABIZCglhdXRob3JfaWQYAyABKAlCBqq7GAJiABIMCgRib2R5GAQgASgJOi6iuxgqCgVkcmFmdBICaWRSHQobCAEoAUIJYXV0aG9yX2lkMgp2aWV3X3Bvc3RzIt8BCgZUaWNrZXQSCgoCaWQYASABKAkSOAoEcm9vbRgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuUm9vbUIGqrsYAloAEhMKC2Fzc2lnbmVlX2lkGAMgASgJEg4KBnN0YXR1cxgEIAEoCRINCgV0aXRsZRgFIAEoCTpborsYVwoGdGlja2V0EgJpZFJJCg4IATIKdmlld19wb3N0cwoSKAEyDm1vZGVyYXRlX3Bvc3RzCiMYAUILYXNzaWduZWVfaWRKBnN0YXR1czIKdmlld19wb3N0cyJUCgdTZXR0aW5nEg8KB3VzZXJfaWQYASABKAkSDQoFdGhlbWUYAiABKAk6KaK7GCUKB3NldHRpbmcSB3VzZXJfaWRSEQoPCAEoAUIHdXNlcl9pZDoAIloKBVNxdWFkEgoKAmlkGAEgASgJOkWiuxhBCgVzcXVhZBICaWRSJAoPCAEyC3ZpZXdfc3F1YWRzChEoATINbWFuYWdlX3NxdWFkc2IOCgxzcXVhZF9tZW1iZXIijAIKC1NxdWFkTWVtYmVyEgoKAmlkGAEgASgJEjoKBXNxdWFkGAIgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcXVhZEIGqrsYAloAEg8KB3VzZXJfaWQYAyABKAkSDAoEcm9sZRgEIAEoCTqVAaK7GJABCgxzcXVhZF9tZW1iZXISAmlkUiQKDwgBMgt2aWV3X3NxdWFkcwoRKAEyDW1hbmFnZV9zcXVhZHNaVgoHdXNlcl9pZBIEcm9sZRobCgxzcXVhZF9tZW1iZXISC3ZpZXdfc3F1YWRzGigKCnNxdWFkX2xlYWQSC3ZpZXdfc3F1YWRzEg1tYW5hZ2Vfc3F1YWRzIkQKBFJlcG8SCgoCaWQYASABKAk6MKK7GCwKBHJlcG8SAmlkUiAKDggBMgp2aWV3X3JlcG9zCg4oATIKZWRpdF9yZXBvcyKTBAoKUmVwb01lbWJlchIKCgJpZBgBIAEoCRI4CgRyZXBvGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5SZXBvQgaquxgCWgASEQoHdXNlcl9pZBgDIAEoCUgAEjQKBXNxdWFkGAQgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcXVhZEgAEgwKBHJvbGUYBSABKAk63QKiuxjYAgoLcmVwb19tZW1iZXISAmlkUkkKFQgBMhF2aWV3X3JlcG9fbWVtYmVycwoXKAEyE21hbmFnZV9yZXBvX21lbWJlcnMKFyABQgd1c2VyX2lkMgp2aWV3X3JlcG9zWvkBCgZtZW1iZXISBHJvbGUaOQoLcmVwb19yZWFkZXISCnZpZXdfcmVwb3MSEXZpZXdfcmVwb19tZW1iZXJzEgt2aWV3X2lzc3VlcxpGCgtyZXBvX3dyaXRlchIKdmlld19yZXBvcxIRdmlld19yZXBvX21lbWJlcnMSC3ZpZXdfaXNzdWVzEgtlZGl0X2lzc3VlcxpmCgpyZXBvX2FkbWluEgp2aWV3X3JlcG9zEgplZGl0X3JlcG9zEhF2aWV3X3JlcG9fbWVtYmVycxITbWFuYWdlX3JlcG9fbWVtYmVycxILdmlld19pc3N1ZXMSC2VkaXRfaXNzdWVzQggKBm1lbWJlciKZAgoJUmVwb1NxdWFkEgoKAmlkGAEgASgJEjgKBHJlcG8YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJlcG9CBqq7GAJaABIyCgVzcXVhZBgDIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuU3F1YWQSDAoEcm9sZRgEIAEoCTqDAaK7GH8KCnJlcG9fc3F1YWQSAmlkUjAKFQgBMhF2aWV3X3JlcG9fbWVtYmVycwoXKAEyE21hbmFnZV9yZXBvX21lbWJlcnNaOwoFc3F1YWQSBHJvbGUaLAoRcmVwb19zcXVhZF9yZWFkZXISCnZpZXdfcmVwb3MSC3ZpZXdfaXNzdWVzIpEBCgVJc3N1ZRIKCgJpZBgBIAEoCRI4CgRyZXBvGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5SZXBvQgaquxgCWgASDQoFdGl0bGUYAyABKAk6M6K7GC8KBWlzc3VlEgJpZFIiCg8IATILdmlld19pc3N1ZXMKDygBMgtlZGl0X2lzc3VlcypRCghUZWFtUm9sZRIZChVURUFNX1JPTEVfVU5TUEVDSUZJRUQQABIUChBURUFNX1JPTEVfVklFV0VSEAESFAoQVEVBTV9ST0xFX0VESVRPUhACQlNaUWdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3Rlc3RkYXRhL2FjY2Vzcy92MTthY2Nlc3N2MWIGcHJvdG8z", [file_syncplane_v1_options]);
+  fileDesc("CilzeW5jcGxhbmUvdGVzdGRhdGEvYWNjZXNzL3YxL2FjY2Vzcy5wcm90bxIcc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MSKsAgoJT3JnTWVtYmVyEgoKAmlkGAEgASgJEg8KB3VzZXJfaWQYAiABKAkSDAoEcm9sZRgDIAEoCTrzAaK7GO4BCgpvcmdfbWVtYmVyEgJpZFImChAIATIMdmlld19tZW1iZXJzChIoATIObWFuYWdlX21lbWJlcnNaswEKB3VzZXJfaWQSBHJvbGUaNAoKb3JnX21lbWJlchINdmlld19wcm9qZWN0cxIKdmlld190YXNrcxILdmlld19sYWJlbHMabAoJb3JnX2FkbWluEgx2aWV3X21lbWJlcnMSDm1hbmFnZV9tZW1iZXJzEg12aWV3X3Byb2plY3RzEg1lZGl0X3Byb2plY3RzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzEgt2aWV3X2xhYmVscyJeCgdQcm9qZWN0EgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6OaK7GDUKB3Byb2plY3QSAmlkUiYKEQgBMg12aWV3X3Byb2plY3RzChEoATINZWRpdF9wcm9qZWN0cyK6BAoNUHJvamVjdE1lbWJlchIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOr0DorsYuAMKDnByb2plY3RfbWVtYmVyEgJpZFImChAIATIMdmlld19tZW1iZXJzChIoATIObWFuYWdlX21lbWJlcnNa+QIKB3VzZXJfaWQSBHJvbGUaOQoOcHJvamVjdF9yZWFkZXISDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIKdmlld190YXNrcxpFCg5wcm9qZWN0X3dyaXRlchINdmlld19wcm9qZWN0cxIMdmlld19tZW1iZXJzEgp2aWV3X3Rhc2tzEgplZGl0X3Rhc2tzGlQKDXByb2plY3RfYWRtaW4SDXZpZXdfcHJvamVjdHMSDHZpZXdfbWVtYmVycxIObWFuYWdlX21lbWJlcnMSCnZpZXdfdGFza3MSCmVkaXRfdGFza3MaKwoOcHJvamVjdF9lZGl0b3ISDXZpZXdfcHJvamVjdHMSCmVkaXRfdGFza3MaYwoNcHJvamVjdF9vd25lchINdmlld19wcm9qZWN0cxINZWRpdF9wcm9qZWN0cxIMdmlld19tZW1iZXJzEg5tYW5hZ2VfbWVtYmVycxIKdmlld190YXNrcxIKZWRpdF90YXNrcyKTAQoEVGFzaxIKCgJpZBgBIAEoCRI+Cgdwcm9qZWN0GAIgASgLMiUuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Qcm9qZWN0QgaquxgCWgASDQoFdGl0bGUYAyABKAk6MKK7GCwKBHRhc2sSAmlkUiAKDggBMgp2aWV3X3Rhc2tzCg4oATIKZWRpdF90YXNrcyKSAQoHQ29tbWVudBIKCgJpZBgBIAEoCRI4CgR0YXNrGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5UYXNrQgaquxgCWgASDAoEYm9keRgDIAEoCTozorsYLwoHY29tbWVudBICaWRSIAoOCAEyCnZpZXdfdGFza3MKDigBMgplZGl0X3Rhc2tzIsMBCgRQYWdlEgoKAmlkGAEgASgJEjgKBHRhc2sYAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRhc2tCBqq7GAJaABIQCghvd25lcl9pZBgDIAEoCRIUCgRib2R5GAQgASgMQgaquxgCIAE6TaK7GEkKBHBhZ2USAmlkUj0KDggBMgp2aWV3X3Rhc2tzChsIAUIIb3duZXJfaWQyDXZpZXdfcHJvamVjdHMKDigBMgplZGl0X3Rhc2tzIkUKBUxhYmVsEgoKAmlkGAEgASgJEgwKBG5hbWUYAiABKAk6IqK7GB4KBWxhYmVsEgJpZFIRCg8IATILdmlld19sYWJlbHMiOgoETm90ZRIKCgJpZBgBIAEoCRIMCgRib2R5GAIgASgJOhiiuxgUCgRub3RlEgJpZFIICgYIASgBOgAiVAoFRW50cnkSCgoCaWQYASABKAkSDAoEYm9keRgCIAEoCToxorsYLQoFZW50cnkSAmlkUiAKDggBMgp2aWV3X3Rhc2tzCg4QATIKdmlld190YXNrcyIbCghUYXNrQXJncxIPCgd0YXNrX2lkGAEgASgJIqwCCgpUZWFtTWVtYmVyEgoKAmlkGAEgASgJEjgKBHRlYW0YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEjQKBHJvbGUYBCABKA4yJi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlRlYW1Sb2xlOpABorsYiwEKC3RlYW1fbWVtYmVyEgJpZFIeCg0IATIJdmlld190ZWFtCg0oATIJZWRpdF90ZWFtWlgKB3VzZXJfaWQSBHJvbGUaHQoQVEVBTV9ST0xFX1ZJRVdFUhIJdmlld190ZWFtGigKEFRFQU1fUk9MRV9FRElUT1ISCXZpZXdfdGVhbRIJZWRpdF90ZWFtIkIKBFRlYW0SCgoCaWQYASABKAk6LqK7GCoKBHRlYW0SAmlkUh4KDQgBMgl2aWV3X3RlYW0KDSgBMgllZGl0X3RlYW0imAEKBkZvbGRlchIKCgJpZBgBIAEoCRI8CgZwYXJlbnQYAiABKAsyJC5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLkZvbGRlckIGqrsYAloAEgwKBG5hbWUYAyABKAk6NqK7GDIKBmZvbGRlchICaWRSJAoQCAEyDHZpZXdfZm9sZGVycwoQKAEyDGVkaXRfZm9sZGVycyLWAgoMRm9sZGVyTWVtYmVyEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDwoHdXNlcl9pZBgDIAEoCRIMCgRyb2xlGAQgASgJOtwBorsY1wEKDWZvbGRlcl9tZW1iZXISAmlkUiYKEAgBMgx2aWV3X2ZvbGRlcnMKEigBMg5tYW5hZ2VfZm9sZGVyc1qZAQoHdXNlcl9pZBIEcm9sZRodCg1mb2xkZXJfdmlld2VyEgx2aWV3X2ZvbGRlcnMaKwoNZm9sZGVyX2VkaXRvchIMdmlld19mb2xkZXJzEgxlZGl0X2ZvbGRlcnMaPAoOZm9sZGVyX21hbmFnZXISDHZpZXdfZm9sZGVycxIMZWRpdF9mb2xkZXJzEg5tYW5hZ2VfZm9sZGVycyKTAQoDRG9jEgoKAmlkGAEgASgJEjwKBmZvbGRlchgCIAEoCzIkLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuRm9sZGVyQgaquxgCWgASDQoFdGl0bGUYAyABKAk6M6K7GC8KA2RvYxICaWRSJAoQCAEyDHZpZXdfZm9sZGVycwoQKAEyDGVkaXRfZm9sZGVycyJICgVCb2FyZBIKCgJpZBgBIAEoCTozorsYLwoFYm9hcmQSAmlkUiIKDwgBMgt2aWV3X3BsYWNlcwoPKAEyC2VkaXRfcGxhY2VzIkgKBVNwYWNlEgoKAmlkGAEgASgJOjOiuxgvCgVzcGFjZRICaWRSIgoPCAEyC3ZpZXdfcGxhY2VzCg8oATILZWRpdF9wbGFjZXMixQQKC1BsYWNlTWVtYmVyEgoKAmlkGAEgASgJEjwKBWJvYXJkGAIgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Cb2FyZEIGqrsYAloASAASPAoFc3BhY2UYAyABKAsyIy5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlNwYWNlQgaquxgCWgBIABIPCgd1c2VyX2lkGAQgASgJEgwKBHJvbGUYBSABKAk6hQOiuxiAAwoMcGxhY2VfbWVtYmVyEgJpZFIyChYIATISdmlld19wbGFjZV9tZW1iZXJzChgoATIUbWFuYWdlX3BsYWNlX21lbWJlcnNatwIKB3VzZXJfaWQSBHJvbGUaRgoMcGxhY2Vfdmlld2VyEgt2aWV3X3BsYWNlcxISdmlld19wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgl2aWV3X3BpbnMaXQoMcGxhY2VfZWRpdG9yEgt2aWV3X3BsYWNlcxISdmlld19wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgplZGl0X2NhcmRzEgl2aWV3X3BpbnMSCWVkaXRfcGlucxp/CgtwbGFjZV9hZG1pbhILdmlld19wbGFjZXMSC2VkaXRfcGxhY2VzEhJ2aWV3X3BsYWNlX21lbWJlcnMSFG1hbmFnZV9wbGFjZV9tZW1iZXJzEgp2aWV3X2NhcmRzEgplZGl0X2NhcmRzEgl2aWV3X3BpbnMSCWVkaXRfcGluc0IHCgVwbGFjZSLYAQoEQ2FyZBIKCgJpZBgBIAEoCRI8CgVib2FyZBgCIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQm9hcmRCBqq7GAJaAEgAEjwKBXNwYWNlGAMgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcGFjZUIGqrsYAloASAASDQoFdGl0bGUYBCABKAk6MKK7GCwKBGNhcmQSAmlkUiAKDggBMgp2aWV3X2NhcmRzCg4oATIKZWRpdF9jYXJkc0IHCgVwbGFjZSKVAQoIQ2FyZEl0ZW0SCgoCaWQYASABKAkSOAoEY2FyZBgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQ2FyZEIGqrsYAloAEgwKBHRleHQYAyABKAk6NaK7GDEKCWNhcmRfaXRlbRICaWRSIAoOCAEyCnZpZXdfY2FyZHMKDigBMgplZGl0X2NhcmRzIoYBCghQbGFjZVJlZhI0CgVib2FyZBgBIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuQm9hcmRIABI0CgVzcGFjZRgCIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuU3BhY2VIADoEsrsYAEIICgZ0YXJnZXQijgEKA1BpbhIKCgJpZBgBIAEoCRI9CgVwbGFjZRgCIAEoCzImLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuUGxhY2VSZWZCBqq7GAJaABINCgVsYWJlbBgDIAEoCTotorsYKQoDcGluEgJpZFIeCg0IATIJdmlld19waW5zCg0oATIJZWRpdF9waW5zIlIKBFJvb20SCgoCaWQYASABKAkSDAoEbmFtZRgCIAEoCToworsYLAoEcm9vbRICaWRSIAoOCAEyCnZpZXdfcm9vbXMKDigBMgplZGl0X3Jvb21zItUDCgpSb29tTWVtYmVyEgoKAmlkGAEgASgJEjgKBHJvb20YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJvb21CBqq7GAJaABIPCgd1c2VyX2lkGAMgASgJEgwKBHJvbGUYBCABKAk64QKiuxjcAgoLcm9vbV9tZW1iZXISAmlkUkkKFQgBMhF2aWV3X3Jvb21fbWVtYmVycwoXKAEyE21hbmFnZV9yb29tX21lbWJlcnMKFyABQgd1c2VyX2lkMgp2aWV3X3Jvb21zWv0BCgd1c2VyX2lkEgRyb2xlGjgKC3Jvb21fdmlld2VyEgp2aWV3X3Jvb21zEhF2aWV3X3Jvb21fbWVtYmVycxIKdmlld19wb3N0cxo+Cgtyb29tX3Bvc3RlchIKdmlld19yb29tcxIRdmlld19yb29tX21lbWJlcnMSCnZpZXdfcG9zdHMSBHBvc3QacgoOcm9vbV9tb2RlcmF0b3ISCnZpZXdfcm9vbXMSCmVkaXRfcm9vbXMSEXZpZXdfcm9vbV9tZW1iZXJzEhNtYW5hZ2Vfcm9vbV9tZW1iZXJzEgp2aWV3X3Bvc3RzEgRwb3N0Eg5tb2RlcmF0ZV9wb3N0cyLuAQoEUG9zdBIKCgJpZBgBIAEoCRI4CgRyb29tGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5Sb29tQgaquxgCWgASGQoJYXV0aG9yX2lkGAMgASgJQgaquxgCYgASDAoEYm9keRgEIAEoCRINCgV0aXRsZRgFIAEoCTpoorsYZAoEcG9zdBICaWRSWAoOCAEyCnZpZXdfcG9zdHMKFRABIAFCCWF1dGhvcl9pZDIEcG9zdAoZGAFCCWF1dGhvcl9pZEoEYm9keTIEcG9zdAoUGAEgATIObW9kZXJhdGVfcG9zdHMipgEKBURyYWZ0EgoKAmlkGAEgASgJEjgKBHJvb20YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJvb21CBqq7GAJaABIZCglhdXRob3JfaWQYAyABKAlCBqq7GAJiABIMCgRib2R5GAQgASgJOi6iuxgqCgVkcmFmdBICaWRSHQobCAEoAUIJYXV0aG9yX2lkMgp2aWV3X3Bvc3RzIt8BCgZUaWNrZXQSCgoCaWQYASABKAkSOAoEcm9vbRgCIAEoCzIiLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuUm9vbUIGqrsYAloAEhMKC2Fzc2lnbmVlX2lkGAMgASgJEg4KBnN0YXR1cxgEIAEoCRINCgV0aXRsZRgFIAEoCTpborsYVwoGdGlja2V0EgJpZFJJCg4IATIKdmlld19wb3N0cwoSKAEyDm1vZGVyYXRlX3Bvc3RzCiMYAUILYXNzaWduZWVfaWRKBnN0YXR1czIKdmlld19wb3N0cyJUCgdTZXR0aW5nEg8KB3VzZXJfaWQYASABKAkSDQoFdGhlbWUYAiABKAk6KaK7GCUKB3NldHRpbmcSB3VzZXJfaWRSEQoPCAEoAUIHdXNlcl9pZDoAIloKBVNxdWFkEgoKAmlkGAEgASgJOkWiuxhBCgVzcXVhZBICaWRSJAoPCAEyC3ZpZXdfc3F1YWRzChEoATINbWFuYWdlX3NxdWFkc2IOCgxzcXVhZF9tZW1iZXIijAIKC1NxdWFkTWVtYmVyEgoKAmlkGAEgASgJEjoKBXNxdWFkGAIgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcXVhZEIGqrsYAloAEg8KB3VzZXJfaWQYAyABKAkSDAoEcm9sZRgEIAEoCTqVAaK7GJABCgxzcXVhZF9tZW1iZXISAmlkUiQKDwgBMgt2aWV3X3NxdWFkcwoRKAEyDW1hbmFnZV9zcXVhZHNaVgoHdXNlcl9pZBIEcm9sZRobCgxzcXVhZF9tZW1iZXISC3ZpZXdfc3F1YWRzGigKCnNxdWFkX2xlYWQSC3ZpZXdfc3F1YWRzEg1tYW5hZ2Vfc3F1YWRzIkQKBFJlcG8SCgoCaWQYASABKAk6MKK7GCwKBHJlcG8SAmlkUiAKDggBMgp2aWV3X3JlcG9zCg4oATIKZWRpdF9yZXBvcyKTBAoKUmVwb01lbWJlchIKCgJpZBgBIAEoCRI4CgRyZXBvGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5SZXBvQgaquxgCWgASEQoHdXNlcl9pZBgDIAEoCUgAEjQKBXNxdWFkGAQgASgLMiMuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5TcXVhZEgAEgwKBHJvbGUYBSABKAk63QKiuxjYAgoLcmVwb19tZW1iZXISAmlkUkkKFQgBMhF2aWV3X3JlcG9fbWVtYmVycwoXKAEyE21hbmFnZV9yZXBvX21lbWJlcnMKFyABQgd1c2VyX2lkMgp2aWV3X3JlcG9zWvkBCgZtZW1iZXISBHJvbGUaOQoLcmVwb19yZWFkZXISCnZpZXdfcmVwb3MSEXZpZXdfcmVwb19tZW1iZXJzEgt2aWV3X2lzc3VlcxpGCgtyZXBvX3dyaXRlchIKdmlld19yZXBvcxIRdmlld19yZXBvX21lbWJlcnMSC3ZpZXdfaXNzdWVzEgtlZGl0X2lzc3VlcxpmCgpyZXBvX2FkbWluEgp2aWV3X3JlcG9zEgplZGl0X3JlcG9zEhF2aWV3X3JlcG9fbWVtYmVycxITbWFuYWdlX3JlcG9fbWVtYmVycxILdmlld19pc3N1ZXMSC2VkaXRfaXNzdWVzQggKBm1lbWJlciKZAgoJUmVwb1NxdWFkEgoKAmlkGAEgASgJEjgKBHJlcG8YAiABKAsyIi5zeW5jcGxhbmUudGVzdGRhdGEuYWNjZXNzLnYxLlJlcG9CBqq7GAJaABIyCgVzcXVhZBgDIAEoCzIjLnN5bmNwbGFuZS50ZXN0ZGF0YS5hY2Nlc3MudjEuU3F1YWQSDAoEcm9sZRgEIAEoCTqDAaK7GH8KCnJlcG9fc3F1YWQSAmlkUjAKFQgBMhF2aWV3X3JlcG9fbWVtYmVycwoXKAEyE21hbmFnZV9yZXBvX21lbWJlcnNaOwoFc3F1YWQSBHJvbGUaLAoRcmVwb19zcXVhZF9yZWFkZXISCnZpZXdfcmVwb3MSC3ZpZXdfaXNzdWVzIpEBCgVJc3N1ZRIKCgJpZBgBIAEoCRI4CgRyZXBvGAIgASgLMiIuc3luY3BsYW5lLnRlc3RkYXRhLmFjY2Vzcy52MS5SZXBvQgaquxgCWgASDQoFdGl0bGUYAyABKAk6M6K7GC8KBWlzc3VlEgJpZFIiCg8IATILdmlld19pc3N1ZXMKDygBMgtlZGl0X2lzc3VlcypRCghUZWFtUm9sZRIZChVURUFNX1JPTEVfVU5TUEVDSUZJRUQQABIUChBURUFNX1JPTEVfVklFV0VSEAESFAoQVEVBTV9ST0xFX0VESVRPUhACQlNaUWdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3Rlc3RkYXRhL2FjY2Vzcy92MTthY2Nlc3N2MWIGcHJvdG8z", [file_syncplane_v1_options]);
 
 /**
  * A role on the whole workspace.
@@ -160,6 +160,43 @@ export const CommentSchema: GenMessage<Comment> = /*@__PURE__*/
   messageDesc(file_syncplane_testdata_access_v1_access, 4);
 
 /**
+ * A page on a task, two access_parent hops below its project, whose body is
+ * collaborative text. A caller who can read the task's tasks reads it, and so
+ * does its owner where they can read the project. Registered with the org
+ * schema by the specs that ship text to readers below the workspace root.
+ *
+ * @generated from message syncplane.testdata.access.v1.Page
+ */
+export type Page = Message<"syncplane.testdata.access.v1.Page"> & {
+  /**
+   * @generated from field: string id = 1;
+   */
+  id: string;
+
+  /**
+   * @generated from field: syncplane.testdata.access.v1.Task task = 2;
+   */
+  task?: Task | undefined;
+
+  /**
+   * @generated from field: string owner_id = 3;
+   */
+  ownerId: string;
+
+  /**
+   * @generated from field: bytes body = 4;
+   */
+  body: Uint8Array;
+};
+
+/**
+ * Describes the message syncplane.testdata.access.v1.Page.
+ * Use `create(PageSchema)` to create a new message.
+ */
+export const PageSchema: GenMessage<Page> = /*@__PURE__*/
+  messageDesc(file_syncplane_testdata_access_v1_access, 5);
+
+/**
  * Readable by every org member. No rule admits a write, so only trusted
  * writes create, change and delete labels.
  *
@@ -182,7 +219,7 @@ export type Label = Message<"syncplane.testdata.access.v1.Label"> & {
  * Use `create(LabelSchema)` to create a new message.
  */
 export const LabelSchema: GenMessage<Label> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 5);
+  messageDesc(file_syncplane_testdata_access_v1_access, 6);
 
 /**
  * Every admitted caller reads and writes it.
@@ -206,7 +243,7 @@ export type Note = Message<"syncplane.testdata.access.v1.Note"> & {
  * Use `create(NoteSchema)` to create a new message.
  */
 export const NoteSchema: GenMessage<Note> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 6);
+  messageDesc(file_syncplane_testdata_access_v1_access, 7);
 
 /**
  * An entry in an append-only log: a caller who can read tasks posts one, and
@@ -232,7 +269,7 @@ export type Entry = Message<"syncplane.testdata.access.v1.Entry"> & {
  * Use `create(EntrySchema)` to create a new message.
  */
 export const EntrySchema: GenMessage<Entry> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 7);
+  messageDesc(file_syncplane_testdata_access_v1_access, 8);
 
 /**
  * The args of the test mutators that act on one task.
@@ -251,7 +288,7 @@ export type TaskArgs = Message<"syncplane.testdata.access.v1.TaskArgs"> & {
  * Use `create(TaskArgsSchema)` to create a new message.
  */
 export const TaskArgsSchema: GenMessage<TaskArgs> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 8);
+  messageDesc(file_syncplane_testdata_access_v1_access, 9);
 
 /**
  * A grant entity whose role field is an enum. Registered on its own with
@@ -286,7 +323,7 @@ export type TeamMember = Message<"syncplane.testdata.access.v1.TeamMember"> & {
  * Use `create(TeamMemberSchema)` to create a new message.
  */
 export const TeamMemberSchema: GenMessage<TeamMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 9);
+  messageDesc(file_syncplane_testdata_access_v1_access, 10);
 
 /**
  * @generated from message syncplane.testdata.access.v1.Team
@@ -303,7 +340,7 @@ export type Team = Message<"syncplane.testdata.access.v1.Team"> & {
  * Use `create(TeamSchema)` to create a new message.
  */
 export const TeamSchema: GenMessage<Team> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 10);
+  messageDesc(file_syncplane_testdata_access_v1_access, 11);
 
 /**
  * A folder inside a folder, or at the top when parent is unset. Registered
@@ -333,7 +370,7 @@ export type Folder = Message<"syncplane.testdata.access.v1.Folder"> & {
  * Use `create(FolderSchema)` to create a new message.
  */
 export const FolderSchema: GenMessage<Folder> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 11);
+  messageDesc(file_syncplane_testdata_access_v1_access, 12);
 
 /**
  * A role on one folder and everything below it.
@@ -367,7 +404,7 @@ export type FolderMember = Message<"syncplane.testdata.access.v1.FolderMember"> 
  * Use `create(FolderMemberSchema)` to create a new message.
  */
 export const FolderMemberSchema: GenMessage<FolderMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 12);
+  messageDesc(file_syncplane_testdata_access_v1_access, 13);
 
 /**
  * A document in a folder.
@@ -396,7 +433,7 @@ export type Doc = Message<"syncplane.testdata.access.v1.Doc"> & {
  * Use `create(DocSchema)` to create a new message.
  */
 export const DocSchema: GenMessage<Doc> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 13);
+  messageDesc(file_syncplane_testdata_access_v1_access, 14);
 
 /**
  * A board, the top of one of two trees in the polymorphic schema below:
@@ -417,7 +454,7 @@ export type Board = Message<"syncplane.testdata.access.v1.Board"> & {
  * Use `create(BoardSchema)` to create a new message.
  */
 export const BoardSchema: GenMessage<Board> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 14);
+  messageDesc(file_syncplane_testdata_access_v1_access, 15);
 
 /**
  * A space, the top of the other tree.
@@ -436,7 +473,7 @@ export type Space = Message<"syncplane.testdata.access.v1.Space"> & {
  * Use `create(SpaceSchema)` to create a new message.
  */
 export const SpaceSchema: GenMessage<Space> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 15);
+  messageDesc(file_syncplane_testdata_access_v1_access, 16);
 
 /**
  * A role on one board or one space and the rows below it.
@@ -482,7 +519,7 @@ export type PlaceMember = Message<"syncplane.testdata.access.v1.PlaceMember"> & 
  * Use `create(PlaceMemberSchema)` to create a new message.
  */
 export const PlaceMemberSchema: GenMessage<PlaceMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 16);
+  messageDesc(file_syncplane_testdata_access_v1_access, 17);
 
 /**
  * A card on a board or in a space: below whichever of the two it names.
@@ -523,7 +560,7 @@ export type Card = Message<"syncplane.testdata.access.v1.Card"> & {
  * Use `create(CardSchema)` to create a new message.
  */
 export const CardSchema: GenMessage<Card> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 17);
+  messageDesc(file_syncplane_testdata_access_v1_access, 18);
 
 /**
  * An item on a card, two access_parent hops below the card's board or space.
@@ -552,7 +589,7 @@ export type CardItem = Message<"syncplane.testdata.access.v1.CardItem"> & {
  * Use `create(CardItemSchema)` to create a new message.
  */
 export const CardItemSchema: GenMessage<CardItem> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 18);
+  messageDesc(file_syncplane_testdata_access_v1_access, 19);
 
 /**
  * A reference to a board or a space.
@@ -583,7 +620,7 @@ export type PlaceRef = Message<"syncplane.testdata.access.v1.PlaceRef"> & {
  * Use `create(PlaceRefSchema)` to create a new message.
  */
 export const PlaceRefSchema: GenMessage<PlaceRef> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 19);
+  messageDesc(file_syncplane_testdata_access_v1_access, 20);
 
 /**
  * A pin on a board or in a space, placed through a reference message rather
@@ -613,7 +650,7 @@ export type Pin = Message<"syncplane.testdata.access.v1.Pin"> & {
  * Use `create(PinSchema)` to create a new message.
  */
 export const PinSchema: GenMessage<Pin> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 20);
+  messageDesc(file_syncplane_testdata_access_v1_access, 21);
 
 /**
  * A room, the top of the owner-rule schema below: Room, RoomMember, Post,
@@ -638,7 +675,7 @@ export type Room = Message<"syncplane.testdata.access.v1.Room"> & {
  * Use `create(RoomSchema)` to create a new message.
  */
 export const RoomSchema: GenMessage<Room> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 21);
+  messageDesc(file_syncplane_testdata_access_v1_access, 22);
 
 /**
  * A role on one room and the rows below it. A member can leave the room by
@@ -673,7 +710,7 @@ export type RoomMember = Message<"syncplane.testdata.access.v1.RoomMember"> & {
  * Use `create(RoomMemberSchema)` to create a new message.
  */
 export const RoomMemberSchema: GenMessage<RoomMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 22);
+  messageDesc(file_syncplane_testdata_access_v1_access, 23);
 
 /**
  * A post in a room: its author edits the body and deletes it, and a
@@ -713,7 +750,7 @@ export type Post = Message<"syncplane.testdata.access.v1.Post"> & {
  * Use `create(PostSchema)` to create a new message.
  */
 export const PostSchema: GenMessage<Post> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 23);
+  messageDesc(file_syncplane_testdata_access_v1_access, 24);
 
 /**
  * A draft in a room, which only its author reads and writes while they can
@@ -748,7 +785,7 @@ export type Draft = Message<"syncplane.testdata.access.v1.Draft"> & {
  * Use `create(DraftSchema)` to create a new message.
  */
 export const DraftSchema: GenMessage<Draft> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 24);
+  messageDesc(file_syncplane_testdata_access_v1_access, 25);
 
 /**
  * A ticket in a room: a moderator writes it, and its assignee changes its
@@ -788,7 +825,7 @@ export type Ticket = Message<"syncplane.testdata.access.v1.Ticket"> & {
  * Use `create(TicketSchema)` to create a new message.
  */
 export const TicketSchema: GenMessage<Ticket> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 25);
+  messageDesc(file_syncplane_testdata_access_v1_access, 26);
 
 /**
  * The settings of one user, which every admitted caller reads and writes for
@@ -813,7 +850,7 @@ export type Setting = Message<"syncplane.testdata.access.v1.Setting"> & {
  * Use `create(SettingSchema)` to create a new message.
  */
 export const SettingSchema: GenMessage<Setting> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 26);
+  messageDesc(file_syncplane_testdata_access_v1_access, 27);
 
 /**
  * A squad, the team of the team schema below: Squad, SquadMember, Repo,
@@ -833,7 +870,7 @@ export type Squad = Message<"syncplane.testdata.access.v1.Squad"> & {
  * Use `create(SquadSchema)` to create a new message.
  */
 export const SquadSchema: GenMessage<Squad> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 27);
+  messageDesc(file_syncplane_testdata_access_v1_access, 28);
 
 /**
  * Makes its user a member of one squad, whatever the role.
@@ -867,7 +904,7 @@ export type SquadMember = Message<"syncplane.testdata.access.v1.SquadMember"> & 
  * Use `create(SquadMemberSchema)` to create a new message.
  */
 export const SquadMemberSchema: GenMessage<SquadMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 28);
+  messageDesc(file_syncplane_testdata_access_v1_access, 29);
 
 /**
  * @generated from message syncplane.testdata.access.v1.Repo
@@ -884,7 +921,7 @@ export type Repo = Message<"syncplane.testdata.access.v1.Repo"> & {
  * Use `create(RepoSchema)` to create a new message.
  */
 export const RepoSchema: GenMessage<Repo> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 29);
+  messageDesc(file_syncplane_testdata_access_v1_access, 30);
 
 /**
  * A role on one repo for one user, or for every member of one squad. A user
@@ -931,7 +968,7 @@ export type RepoMember = Message<"syncplane.testdata.access.v1.RepoMember"> & {
  * Use `create(RepoMemberSchema)` to create a new message.
  */
 export const RepoMemberSchema: GenMessage<RepoMember> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 30);
+  messageDesc(file_syncplane_testdata_access_v1_access, 31);
 
 /**
  * A role on one repo for every member of one squad, named by a plain
@@ -966,7 +1003,7 @@ export type RepoSquad = Message<"syncplane.testdata.access.v1.RepoSquad"> & {
  * Use `create(RepoSquadSchema)` to create a new message.
  */
 export const RepoSquadSchema: GenMessage<RepoSquad> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 31);
+  messageDesc(file_syncplane_testdata_access_v1_access, 32);
 
 /**
  * An issue in a repo.
@@ -995,7 +1032,7 @@ export type Issue = Message<"syncplane.testdata.access.v1.Issue"> & {
  * Use `create(IssueSchema)` to create a new message.
  */
 export const IssueSchema: GenMessage<Issue> = /*@__PURE__*/
-  messageDesc(file_syncplane_testdata_access_v1_access, 32);
+  messageDesc(file_syncplane_testdata_access_v1_access, 33);
 
 /**
  * Roles a TeamMember row can hold, matched by value name.

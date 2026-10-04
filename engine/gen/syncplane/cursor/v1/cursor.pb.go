@@ -116,11 +116,13 @@ type Cursor struct {
 	// following pull walks the closure again from the new scope's seeds, and
 	// clears this once it stores the rebuilt set at a clean version boundary.
 	ClosureRebuild bool `protobuf:"varint,13,opt,name=closure_rebuild,json=closureRebuild,proto3" json:"closure_rebuild,omitempty"`
-	// Set on the cursor a delta resync completes with, and cleared by the pull
-	// that follows it. The resync reconciles the client's rows as of seq only,
-	// so a row an added entity gained past seq reaches the client for the first
-	// time on that catch-up page — which therefore ships every row as full
-	// state, since delta state presumes the client holds the row as of seq.
+	// Set on the cursor a delta resync completes with, and kept by the pages of
+	// the catch-up pull that follows it until one ends at a clean version
+	// boundary. The resync reconciles the client's rows as of its seq only, so
+	// a row the new scope or access shows that was written past that seq
+	// reaches the client for the first time on some page of the catch-up —
+	// which therefore ships every row as full state, since delta state presumes
+	// the client holds the row as of the page's cursor.
 	Resynced bool `protobuf:"varint,14,opt,name=resynced,proto3" json:"resynced,omitempty"`
 	// Fingerprint of the read rules of the access model the cursor was issued
 	// under (see ReadAccess.rules), 0 for a schema without the model. A pull

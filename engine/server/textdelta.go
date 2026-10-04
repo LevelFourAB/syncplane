@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
+	"strings"
 
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -160,6 +162,65 @@ func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, path
 		}
 	}
 	return nil
+}
+
+// readInputs is what a row's own fields decide about which callers may read it
+// in the access model: its access parent, and the values of the fields its
+// read rules check against the caller's subjects. The zero value is a row
+// whose fields decide nothing: one that does not exist, or one whose
+// entity's read rules do not read its fields.
+type readInputs struct {
+	decides bool
+	parent  chainEdge
+	// subjects holds the value of each read rule's subject field, quoted, in
+	// rule order.
+	subjects string
+}
+
+// readInputsOf returns what row's own fields decide about which callers may
+// read it. model is nil for a schema without the access model, and row is nil
+// for a row that does not exist.
+func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readInputs {
+	if model == nil || row == nil || info.access == nil || info.access.read.all {
+		return readInputs{}
+	}
+	owned := info.access.read.owned
+	if len(model.parents[info.name]) == 0 && len(owned) == 0 {
+		return readInputs{}
+	}
+	r := row.ProtoReflect()
+	in := readInputs{decides: true, parent: edgeOf(model, info, r)}
+	if len(owned) > 0 {
+		var b strings.Builder
+		for _, rule := range owned {
+			b.WriteString(strconv.Quote(r.Get(rule.subject).String()))
+		}
+		in.subjects = b.String()
+	}
+	return in
+}
+
+// recordReadGaps marks every document of next as un-deltaable at seq when the
+// write changes what the row's own fields decide about which callers may read
+// it. prev is what they decided before the write, and next is the row about to
+// be stored.
+//
+// A reader the write shows the row to for the first time cannot fold a
+// fragment into anything, and the log cannot tell it apart from a reader that
+// held the row, so every reader whose span covers the write receives the
+// documents whole.
+func (info *entityInfo) recordReadGaps(
+	tx storage.WriteTx,
+	model *accessModel,
+	key string,
+	prev readInputs,
+	next proto.Message,
+	seq uint64,
+) error {
+	if len(info.textFields) == 0 || !prev.decides || prev == readInputsOf(model, info, next) {
+		return nil
+	}
+	return info.recordTextDeltaGaps(tx, key, info.textStatePaths(next.ProtoReflect()), seq)
 }
 
 // putTextDelta writes one log entry, folding it into whatever is already logged
