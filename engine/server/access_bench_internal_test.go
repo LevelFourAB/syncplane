@@ -11,22 +11,84 @@ package server
 // deployment. Run with:
 //
 //	go test ./engine/server/ -run '^$' -bench Access
+//
+// The store is SQLite. Set SYNCPLANE_BENCH_PG to 1 and SYNCPLANE_TEST_PG_DSN
+// to a Postgres the benchmark may create schemas in, to measure pgstore
+// instead. Each case seeds a fresh schema and drops it at the end.
 
 import (
 	"context"
 	"fmt"
+	"net/url"
+	"os"
 	"path/filepath"
 	"slices"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"connectrpc.com/connect"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/protobuf/proto"
 
 	accessv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/testdata/access/v1"
 	syncplanev1 "github.com/levelfourab/syncplane/engine/gen/syncplane/v1"
+	"github.com/levelfourab/syncplane/engine/internal/pgtest"
 	"github.com/levelfourab/syncplane/engine/storage"
+	"github.com/levelfourab/syncplane/engine/storage/pgstore"
 	"github.com/levelfourab/syncplane/engine/storage/sqlitestore"
 )
+
+// benchSchemaSeq numbers the Postgres schemas of one benchmark process.
+var benchSchemaSeq atomic.Int64
+
+// openAccessBenchStore opens an empty store for one benchmark case: SQLite in
+// a temporary directory, or a fresh Postgres schema when SYNCPLANE_BENCH_PG is
+// set. The store and the schema go away when b ends.
+func openAccessBenchStore(b *testing.B) storage.Adapter {
+	b.Helper()
+	ctx := context.Background()
+	if os.Getenv("SYNCPLANE_BENCH_PG") == "" {
+		store, err := sqlitestore.Open(filepath.Join(b.TempDir(), "bench.db"))
+		if err != nil {
+			b.Fatal(err)
+		}
+		b.Cleanup(func() { _ = store.Close() })
+		return store
+	}
+	dsn := os.Getenv(pgtest.DSNEnv)
+	if dsn == "" {
+		b.Skipf("SYNCPLANE_BENCH_PG needs %s", pgtest.DSNEnv)
+	}
+	schema := fmt.Sprintf("sp_access_bench_%d_%d", time.Now().UnixNano(), benchSchemaSeq.Add(1))
+	exec := func(sql string) {
+		conn, err := pgx.Connect(ctx, dsn)
+		if err != nil {
+			b.Fatalf("connect to %s: %v", pgtest.DSNEnv, err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+		if _, err := conn.Exec(ctx, sql); err != nil {
+			b.Fatal(err)
+		}
+	}
+	exec(`CREATE SCHEMA "` + schema + `"`)
+	// Registered before the store's Close, so it runs after it: a DROP would
+	// otherwise wait on the pool's open connections.
+	b.Cleanup(func() { exec(`DROP SCHEMA "` + schema + `" CASCADE`) })
+	u, err := url.Parse(dsn)
+	if err != nil {
+		b.Fatalf("%s must be a URI (postgres://...): %v", pgtest.DSNEnv, err)
+	}
+	q := u.Query()
+	q.Set("options", "-c search_path="+schema)
+	u.RawQuery = q.Encode()
+	store, err := pgstore.Open(ctx, u.String())
+	if err != nil {
+		b.Fatal(err)
+	}
+	b.Cleanup(func() { _ = store.Close() })
+	return store
+}
 
 // accessBenchCase is the access a benchmark gives its caller.
 type accessBenchCase struct {
@@ -63,11 +125,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 		c.role = "repo_writer"
 	}
 	ctx := context.Background()
-	store, err := sqlitestore.Open(filepath.Join(b.TempDir(), "bench.db"))
-	if err != nil {
-		b.Fatal(err)
-	}
-	b.Cleanup(func() { _ = store.Close() })
+	store := openAccessBenchStore(b)
 	srv, err := New(store, WithEntities(
 		&accessv1.Squad{}, &accessv1.SquadMember{}, &accessv1.Repo{},
 		&accessv1.RepoMember{}, &accessv1.RepoSquad{}, &accessv1.Issue{},
