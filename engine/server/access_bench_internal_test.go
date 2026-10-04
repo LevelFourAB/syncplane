@@ -14,7 +14,8 @@ package server
 //
 // The store is SQLite. Set SYNCPLANE_BENCH_PG to 1 and SYNCPLANE_TEST_PG_DSN
 // to a Postgres the benchmark may create schemas in, to measure pgstore
-// instead. Each case seeds a fresh schema and drops it at the end.
+// instead. Each case seeds a fresh schema, vacuums and analyzes it before it
+// measures, and drops it at the end.
 
 import (
 	"context"
@@ -23,6 +24,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -45,7 +47,11 @@ var benchSchemaSeq atomic.Int64
 // openAccessBenchStore opens an empty store for one benchmark case: SQLite in
 // a temporary directory, or a fresh Postgres schema when SYNCPLANE_BENCH_PG is
 // set. The store and the schema go away when b ends.
-func openAccessBenchStore(b *testing.B) storage.Adapter {
+//
+// analyze, called once the store is seeded, gives Postgres the table
+// statistics and visibility map a running deployment has from autovacuum,
+// which decide its plans. It does nothing on SQLite.
+func openAccessBenchStore(b *testing.B) (store storage.Adapter, analyze func()) {
 	b.Helper()
 	ctx := context.Background()
 	if os.Getenv("SYNCPLANE_BENCH_PG") == "" {
@@ -54,7 +60,7 @@ func openAccessBenchStore(b *testing.B) storage.Adapter {
 			b.Fatal(err)
 		}
 		b.Cleanup(func() { _ = store.Close() })
-		return store
+		return store, func() {}
 	}
 	dsn := os.Getenv(pgtest.DSNEnv)
 	if dsn == "" {
@@ -82,12 +88,34 @@ func openAccessBenchStore(b *testing.B) storage.Adapter {
 	q := u.Query()
 	q.Set("options", "-c search_path="+schema)
 	u.RawQuery = q.Encode()
-	store, err := pgstore.Open(ctx, u.String())
+	pg, err := pgstore.Open(ctx, u.String())
 	if err != nil {
 		b.Fatal(err)
 	}
-	b.Cleanup(func() { _ = store.Close() })
-	return store
+	b.Cleanup(func() { _ = pg.Close() })
+	analyze = func() {
+		conn, err := pgx.Connect(ctx, u.String())
+		if err != nil {
+			b.Fatal(err)
+		}
+		defer func() { _ = conn.Close(ctx) }()
+		rows, err := conn.Query(ctx, `SELECT tablename FROM pg_tables WHERE schemaname = current_schema()`)
+		if err != nil {
+			b.Fatal(err)
+		}
+		tables, err := pgx.CollectRows(rows, func(row pgx.CollectableRow) (string, error) {
+			var name string
+			err := row.Scan(&name)
+			return pgx.Identifier{name}.Sanitize(), err
+		})
+		if err != nil {
+			b.Fatal(err)
+		}
+		if _, err := conn.Exec(ctx, `VACUUM (ANALYZE) `+strings.Join(tables, ", ")); err != nil {
+			b.Fatal(err)
+		}
+	}
+	return pg, analyze
 }
 
 // accessBenchCase is the access a benchmark gives its caller.
@@ -140,7 +168,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 		c.role = "repo_writer"
 	}
 	ctx := context.Background()
-	store := openAccessBenchStore(b)
+	store, analyze := openAccessBenchStore(b)
 	srv, err := New(store, WithEntities(
 		&accessv1.Squad{}, &accessv1.SquadMember{}, &accessv1.Repo{},
 		&accessv1.RepoMember{}, &accessv1.RepoSquad{}, &accessv1.Issue{},
@@ -224,6 +252,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 	if err := srv.BuildIndexes(ctx, "ws"); err != nil {
 		b.Fatal(err)
 	}
+	analyze()
 	model := srv.catalogPtr().access
 	// A scan would give the same set at a different cost, so the indexes the
 	// resolution probes must be ready for the numbers to mean anything.
@@ -353,6 +382,52 @@ func BenchmarkQueryAccess(b *testing.B) {
 			}
 			for b.Loop() {
 				query()
+			}
+		})
+	}
+}
+
+// BenchmarkPushAccess measures a push of one mutation by the caller: an update
+// of an issue in a repo the caller holds repo_writer at, which the push checks
+// against the caller's grants before it writes.
+func BenchmarkPushAccess(b *testing.B) {
+	for _, repos := range accessScales[:2] {
+		c := accessBenchCase{repos: repos}
+		b.Run(c.name(), func(b *testing.B) {
+			ab := newAccessBench(b, c)
+			var mutationID uint64
+			push := func() {
+				mutationID++
+				value, err := proto.Marshal(&accessv1.Issue{
+					Id: "i-0", Repo: &accessv1.Repo{Id: repoKey(0)}, Title: fmt.Sprintf("issue %d", mutationID),
+				})
+				if err != nil {
+					b.Fatal(err)
+				}
+				resp, err := ab.srv.Push(ab.as, connect.NewRequest(&syncplanev1.PushRequest{
+					Batches: []*syncplanev1.WorkspaceBatch{{
+						WorkspaceId: "ws",
+						Mutations: []*syncplanev1.Mutation{{
+							ClientId: "c-me", MutationId: mutationID,
+							Payload: &syncplanev1.Mutation_Crud{Crud: &syncplanev1.CrudMutation{
+								Entity: "issue", Key: "i-0", Op: syncplanev1.CrudOp_CRUD_OP_PUT, Value: value,
+							}},
+						}},
+					}},
+				}))
+				if err != nil {
+					b.Fatal(err)
+				}
+				batch := resp.Msg.GetResults()[0]
+				if batch.GetErrorCode() != "" {
+					b.Fatalf("the push failed: %s", batch.GetErrorMessage())
+				}
+				if got := batch.GetResults()[0].GetStatus(); got != syncplanev1.MutationStatus_MUTATION_STATUS_APPLIED {
+					b.Fatalf("the mutation is %v, want applied", got)
+				}
+			}
+			for b.Loop() {
+				push()
 			}
 		})
 	}

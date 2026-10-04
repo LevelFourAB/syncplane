@@ -70,35 +70,27 @@ func (r replicaReader) WithReadTxMinSeq(ctx context.Context, workspaceID string,
 	s := r.s
 	// The same isolation as WithReadTx: fn's contract is one consistent
 	// snapshot wherever it runs.
-	tx, err := s.replica.BeginTx(ctx, pgx.TxOptions{
-		IsoLevel:   pgx.RepeatableRead,
-		AccessMode: pgx.ReadOnly,
-	})
+	t, err := beginTx(ctx, s.replica, workspaceID, beginRead)
 	if err != nil {
 		return storage.ReadRouteFallbackError, s.WithReadTx(ctx, workspaceID, fn)
 	}
-	if minSeq > 0 {
-		// Judged INSIDE the open transaction, so the answer holds for the
-		// snapshot fn would read — a check on a separate connection could pass
-		// against a fresher snapshot than the transaction's own.
-		var seq int64
-		err := tx.QueryRow(ctx,
-			`SELECT last_seq FROM workspaces WHERE workspace_id = $1`,
-			workspaceID).Scan(&seq)
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			seq = 0
-		case err != nil:
-			_ = tx.Rollback(ctx)
-			return storage.ReadRouteFallbackError, s.WithReadTx(ctx, workspaceID, fn)
-		}
-		if uint64(seq) < minSeq {
-			_ = tx.Rollback(ctx)
-			return storage.ReadRouteFallbackStale, s.WithReadTx(ctx, workspaceID, fn)
-		}
+	// Judged INSIDE the open transaction, so the answer holds for the
+	// snapshot fn would read — a check on a separate connection could pass
+	// against a fresher snapshot than the transaction's own. The read is the
+	// one that sends BEGIN, which puts a replica that cannot serve on the
+	// fallback path before fn runs, also when there is no floor to check. It
+	// loads what fn reads first anyway (see loadState), so fn pays nothing for
+	// it.
+	if err := t.loadWorkspace(); err != nil {
+		t.end()
+		return storage.ReadRouteFallbackError, s.WithReadTx(ctx, workspaceID, fn)
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	return storage.ReadRouteReplica, fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ws: workspaceID}})
+	if t.wsSeq < minSeq {
+		t.end()
+		return storage.ReadRouteFallbackStale, s.WithReadTx(ctx, workspaceID, fn)
+	}
+	defer t.end()
+	return storage.ReadRouteReplica, fn(readOnlyTx{t})
 }
 
 func (r replicaReader) WithReadTxAnchored(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) (storage.ReadRoute, error) {

@@ -60,7 +60,7 @@ var _ = Describe("Postgres scan reads", func() {
 
 				// The unnamed portal of this count is in the view too.
 				var open int
-				Expect(t.tx.QueryRow(ctx, `SELECT count(*) FROM pg_cursors WHERE name <> ''`).
+				Expect(t.conn.QueryRow(ctx, `SELECT count(*) FROM pg_cursors WHERE name <> ''`).
 					Scan(&open)).To(Succeed())
 				Expect(open).To(BeZero(), "a scan must close the cursor it declared")
 				return nil

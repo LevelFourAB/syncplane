@@ -4,7 +4,7 @@
 
 ## Invariants
 
-- **Write mutual exclusion per workspace.** `WithWriteTx` must lock the workspace for the entire closure, including reads before the first write. Under multiversion concurrency control (MVCC), such as in PostgreSQL, lock the workspace row before invoking the closure.
+- **Write mutual exclusion per workspace.** `WithWriteTx` must lock the workspace from before the closure's first read or write until the transaction ends, including reads before the first write. Under multiversion concurrency control (MVCC), such as in PostgreSQL, take a workspace-level lock before the closure's first statement runs: before invoking the closure, or in the same batch as that statement and ahead of it.
 - **Write closure retry.** `WithWriteTx` closures may be retried. `WithReadTx` closures run at most once. The engine writes closures to be re-runnable.
 - **Re-entrant reads during scans.** A scan callback may issue any read on the active transaction, and it must see the same snapshot as the scan. `ScanIndex` callbacks re-read candidate rows through `GetRows` to apply read filters, and `ScanChanges` callbacks read `FieldDeltas` to ship text deltas. The same applies to `ScanIndexRanges` callbacks. Drivers that cannot interleave statements on one connection (such as pgx with an open result set) must buffer or page the scan instead of holding a result set open across the callback. Adapters do not need to tolerate writes during iteration; the engine collects rows from a scan and rewrites them after the scan returns.
 

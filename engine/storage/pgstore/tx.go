@@ -10,22 +10,25 @@ import (
 	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/levelfourab/syncplane/engine/storage"
 )
 
 // pgTx implements storage.WriteTx (and, narrowed by readOnlyTx, storage.ReadTx)
-// over one pgx transaction.
+// over one transaction on a connection it holds for its whole life.
 //
 // ctx is held on the struct because storage.ReadTx's methods take none: the
 // engine scopes cancellation at WithReadTx/WithWriteTx, so every statement this
 // transaction issues belongs to that one context and there is no second
 // lifetime for a field to confuse it with.
 type pgTx struct {
-	tx  pgx.Tx
-	ctx context.Context
-	ns  string
-	ws  string
+	conn *pgxpool.Conn
+	ctx  context.Context
+	ns   string
+	ws   string
+	// opening counts the statements beginTx queued to open the transaction.
+	opening int
 	// savepoint nesting depth; names savepoints sp1, sp2, ...
 	spDepth int
 	// spPending names the savepoint whose InSavepoint has returned but which is
@@ -50,6 +53,9 @@ type pgTx struct {
 	wsSeq     uint64
 	wsHorizon uint64
 	wsEpoch   uint64
+	// indexStates memoizes every index_state row of the workspace (see
+	// IndexState). nil means "not read yet, or dropped by a savepoint rewind".
+	indexStates map[indexKey]indexState
 	// queued holds the write-only statements this transaction has not sent yet,
 	// in the order they were written; sends counts the batches that have gone
 	// out, and failed holds the first error one of them returned. See queue.go.
@@ -57,6 +63,71 @@ type pgTx struct {
 	queued []queuedStmt
 	sends  int
 	failed error
+}
+
+// The statements that open a transaction. beginTx queues them rather than
+// sending them, so they travel with the transaction's first statement.
+var (
+	// REPEATABLE READ, not the default: a scan's callback issues further reads
+	// on the transaction, and under READ COMMITTED each of them would take its
+	// own snapshot.
+	beginRead  = queuedStmt{sql: `BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY`}
+	beginWrite = queuedStmt{sql: `BEGIN`}
+)
+
+// beginTx acquires a connection from pool and opens a transaction for ws on
+// it. Nothing reaches the server here: the opening statements wait in the
+// queue for the transaction's first send, which saves the round trip BEGIN
+// would take on its own, and a transaction that issues no statement costs
+// none. The caller must call end.
+func beginTx(ctx context.Context, pool *pgxpool.Pool, ws string, opening ...queuedStmt) (*pgTx, error) {
+	conn, err := pool.Acquire(ctx)
+	if err != nil {
+		return nil, err
+	}
+	t := &pgTx{conn: conn, ctx: ctx, ws: ws, opening: len(opening)}
+	t.queued = append(t.queued, opening...)
+	return t, nil
+}
+
+// commit sends what is still queued and COMMIT as one batch. It returns the
+// error of a statement in the batch that failed, and pgx.ErrTxCommitRollback
+// for a COMMIT the server turned into a rollback.
+//
+// A transaction that has sent nothing and queued nothing past its opening has
+// nothing on the server to commit, so it sends nothing, and fails only when
+// its context has ended.
+func (t *pgTx) commit() error {
+	if t.failed != nil {
+		return t.failed
+	}
+	if t.sends == 0 && len(t.queued) == t.opening {
+		return t.ctx.Err()
+	}
+	tag, err := t.exec(`COMMIT`)
+	if err != nil {
+		return err
+	}
+	if tag.String() == "ROLLBACK" {
+		return pgx.ErrTxCommitRollback
+	}
+	return nil
+}
+
+// end rolls back whatever transaction the connection still has open and
+// returns the connection to its pool. It runs after commit as well as after a
+// failure or a panic.
+//
+// The server's own transaction status decides, not this struct's: it is right
+// after a batch that failed half way, and it is idle when the opening
+// statements never left the queue. A ROLLBACK that fails leaves the status as
+// it was, and the pool closes a connection released in a transaction or in
+// the middle of a result instead of reusing it.
+func (t *pgTx) end() {
+	if t.conn.Conn().PgConn().TxStatus() != 'I' {
+		_, _ = t.conn.Exec(t.ctx, `ROLLBACK`)
+	}
+	t.conn.Release()
 }
 
 // loadWorkspace reads last_seq, tombstone_horizon and store_epoch in one
@@ -76,21 +147,88 @@ func (t *pgTx) loadWorkspace() error {
 	if t.wsLoaded {
 		return nil
 	}
-	// store_epoch is stored as a signed BIGINT because Postgres has no unsigned
-	// one; reinterpret the bits. The value is opaque — only equality matters.
-	var seq, horizon, epoch int64
-	err := t.queryRow(
-		`SELECT last_seq, tombstone_horizon, store_epoch FROM workspaces
-		 WHERE workspace_id = $1`, t.ws,
-	).Scan(&seq, &horizon, &epoch)
-	switch {
-	case errors.Is(err, pgx.ErrNoRows):
-		seq, horizon, epoch = 0, 0, 0
-	case err != nil:
+	return t.loadState()
+}
+
+// loadIndexStates reads every index_state row of the workspace into the memo,
+// unless it holds them already.
+func (t *pgTx) loadIndexStates() error {
+	if t.indexStates != nil {
+		return nil
+	}
+	return t.loadState()
+}
+
+// loadState fills whichever of the workspace memo and the index state memo is
+// empty, both in one round trip. Most transactions that need one of them need
+// the other — a request reads its position and probes indexes — and the
+// second read costs the server less than the round trip it saves when it is
+// needed.
+func (t *pgTx) loadState() error {
+	var reads []queuedStmt
+	if !t.wsLoaded {
+		reads = append(reads, queuedStmt{
+			sql: `SELECT last_seq, tombstone_horizon, store_epoch FROM workspaces
+			      WHERE workspace_id = $1`,
+			args: []any{t.ws},
+		})
+	}
+	if t.indexStates == nil {
+		reads = append(reads, queuedStmt{
+			sql:  `SELECT entity, idx, spec_hash, ready FROM index_state WHERE workspace_id = $1`,
+			args: []any{t.ws},
+		})
+	}
+	br, err := t.sendWith(reads...)
+	if err != nil {
 		return err
 	}
-	t.wsSeq, t.wsHorizon, t.wsEpoch = uint64(seq), uint64(horizon), uint64(epoch)
-	t.wsLoaded = true
+	if err := t.decodeState(br); err != nil {
+		_ = br.Close()
+		return err
+	}
+	return br.Close()
+}
+
+// decodeState reads the results loadState asked for from br, in its order.
+func (t *pgTx) decodeState(br pgx.BatchResults) error {
+	if !t.wsLoaded {
+		// store_epoch is stored as a signed BIGINT because Postgres has no
+		// unsigned one; reinterpret the bits. The value is opaque — only
+		// equality matters.
+		var seq, horizon, epoch int64
+		err := br.QueryRow().Scan(&seq, &horizon, &epoch)
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			seq, horizon, epoch = 0, 0, 0
+		case err != nil:
+			return err
+		}
+		t.wsSeq, t.wsHorizon, t.wsEpoch = uint64(seq), uint64(horizon), uint64(epoch)
+		t.wsLoaded = true
+	}
+	if t.indexStates == nil {
+		rows, err := br.Query()
+		if err != nil {
+			return err
+		}
+		defer rows.Close()
+		states := make(map[indexKey]indexState)
+		for rows.Next() {
+			var (
+				k  indexKey
+				st indexState
+			)
+			if err := rows.Scan(&k.entity, &k.index, &st.specHash, &st.ready); err != nil {
+				return err
+			}
+			states[k] = st
+		}
+		if err := rows.Err(); err != nil {
+			return err
+		}
+		t.indexStates = states
+	}
 	return nil
 }
 
@@ -897,22 +1035,35 @@ func (t *pgTx) scanBoundedRanges(
 	return nil
 }
 
+// indexKey names one (entity, index) pair of index_state.
+type indexKey struct {
+	entity, index string
+}
+
+// indexState is what index_state records for one indexKey.
+type indexState struct {
+	specHash string
+	ready    bool
+}
+
+// IndexState answers from one read of every index state of the workspace,
+// made on the first call and kept for the rest of the transaction. A request
+// asks for several pairs, and the table holds one row per pair the schema
+// declares, so the whole set costs what one point read costs.
+//
+// Holding the set is exact for loadWorkspace's reason. A read transaction's
+// snapshot cannot change, and only a write transaction of this workspace
+// writes index_state; such a transaction holds the workspace lock, so inside
+// one the only writer is the transaction itself, and SetIndexState keeps the
+// memo current.
 func (t *pgTx) IndexState(entity, index string) (string, bool, error) {
-	var (
-		specHash string
-		ready    bool
-	)
-	err := t.queryRow(
-		`SELECT spec_hash, ready FROM index_state
-		 WHERE workspace_id = $1 AND entity = $2 AND idx = $3`,
-		t.ws, entity, index,
-	).Scan(&specHash, &ready)
-	if errors.Is(err, pgx.ErrNoRows) {
-		// An index nothing has built yet, which is the normal state right after
-		// registration — not an error.
-		return "", false, nil
+	if err := t.loadIndexStates(); err != nil {
+		return "", false, err
 	}
-	return specHash, ready, err
+	// A pair with no row is an index nothing has built yet, which is the
+	// normal state right after registration — not an error.
+	st := t.indexStates[indexKey{entity, index}]
+	return st.specHash, st.ready, nil
 }
 
 // SetIndexBuildMark updates the workspace row and never calls register: the
@@ -963,13 +1114,22 @@ func (t *pgTx) SetIndexState(entity, index, specHash string, ready bool) error {
 	if err := t.register(); err != nil {
 		return err
 	}
-	return t.queue(
+	if err := t.queue(
 		`INSERT INTO index_state (workspace_id, entity, idx, spec_hash, ready)
 		 VALUES ($1, $2, $3, $4, $5)
 		 ON CONFLICT (workspace_id, entity, idx)
 		 DO UPDATE SET spec_hash = excluded.spec_hash, ready = excluded.ready`,
 		t.ws, entity, index, specHash, ready,
-	)
+	); err != nil {
+		return err
+	}
+	// The upsert has not reached the server yet. If it fails there, it fails
+	// the whole transaction, which then cannot commit anything decided on the
+	// memo.
+	if t.indexStates != nil {
+		t.indexStates[indexKey{entity, index}] = indexState{specHash: specHash, ready: ready}
+	}
+	return nil
 }
 
 func (t *pgTx) PutIndexEntries(entity, key string, entries []storage.IndexEntry) error {
@@ -1234,10 +1394,12 @@ func (t *pgTx) InSavepoint(fn func() error) error {
 
 	if err := fn(); err != nil {
 		t.seq, t.seqPersisted, t.seqLoaded, t.registered = seq, seqPersisted, seqLoaded, registered
-		// The rewind may undo a register or a CollectTombstones, so the memo is
-		// dropped rather than restored: what fn saw is not what the row holds now,
-		// and what preceded fn may not be either.
+		// The rewind may undo a register, a CollectTombstones or a
+		// SetIndexState, so the memos are dropped rather than restored: what fn
+		// saw is not what the tables hold now, and what preceded fn may not be
+		// either.
 		t.wsLoaded = false
+		t.indexStates = nil
 		switch {
 		case t.failed != nil:
 			// A queued statement has already failed, which aborts the whole

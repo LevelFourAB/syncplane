@@ -214,4 +214,24 @@ var _ = Describe("Postgres write batching", func() {
 
 		Expect(keys(store, "widget")).To(BeEmpty())
 	})
+
+	It("keeps reporting a batched statement's failure after the read that sent it", func() {
+		// The read travelled in the batch that failed, and every operation
+		// after it must name the statement that failed rather than the aborted
+		// transaction it left behind.
+		store := oneConn()
+		var first, later error
+		err := store.WithWriteTx(ctx, ws, func(tx storage.WriteTx) error {
+			if err := tx.PutRow("widget", unwritableKey, []byte("v"), 1, storage.Actor{}); err != nil {
+				return err
+			}
+			_, first = tx.GetRow("widget", "anything")
+			_, later = tx.ClientLastMutationID("c1")
+			return later
+		})
+		Expect(first).To(HaveOccurred())
+		Expect(first).NotTo(MatchError(storage.ErrNotFound))
+		Expect(later).To(MatchError(first))
+		Expect(err).To(MatchError(first))
+	})
 })

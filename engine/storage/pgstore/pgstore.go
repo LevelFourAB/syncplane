@@ -25,12 +25,15 @@
 // # Write mutual exclusion
 //
 // WithWriteTx takes pg_advisory_xact_lock over a hash of the workspace id as
-// its FIRST statement, before invoking fn. The contract
-// demands exclusion for the whole of fn including the reads it makes before
-// its first write (the push path reads a client watermark, then writes it
-// back), and row locks cannot give that: lazy registration means a workspace's
-// first write has no workspaces row to lock, and SELECT ... FOR UPDATE on a
-// row that does not exist locks nothing.
+// the statement after BEGIN. Both travel in one batch with fn's first
+// statement (see Batching), so the lock is held before anything fn reads or
+// writes reaches the server; what fn does before that touches nothing another
+// transaction can observe. The contract demands exclusion from fn's first
+// statement, including the reads it makes before its first write (the push
+// path reads a client watermark, then writes it back), and row locks cannot
+// give that: lazy registration means a workspace's first write has no
+// workspaces row to lock, and SELECT ... FOR UPDATE on a row that does not
+// exist locks nothing.
 //
 // The lock is keyed by a 64-bit hash, so two workspaces can collide and
 // serialize against each other needlessly. That costs throughput, never
@@ -55,14 +58,16 @@
 // the replica path bounds staleness per read by workspace sequence rather
 // than by replication position.
 //
-// # Write batching
+// # Batching
 //
-// A write transaction queues its write-only statements and sends them as one
-// pgx batch at the next read, at the next statement whose command tag it
-// inspects, and before COMMIT. A push of N mutations therefore costs a handful
-// of round trips rather than three per mutation, and savepoints ride in the
-// queue with the writes they bracket. See queue.go, which carries the rules
-// this rests on.
+// A transaction sends nothing when it opens. BEGIN, a write transaction's
+// workspace lock and its write-only statements wait in a queue, and the queue
+// travels as one pgx batch with the next read, the next statement whose
+// command tag is inspected, or COMMIT. A read transaction therefore costs a
+// round trip per read and one for its ROLLBACK, a push of N mutations a
+// handful rather than three per mutation, and a transaction that issues no
+// statement nothing at all. Savepoints ride in the queue with the writes they
+// bracket. See queue.go, which carries the rules this rests on.
 //
 // # Scans and re-entrant reads
 //
@@ -124,7 +129,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -320,18 +324,12 @@ type readOnlyTx struct {
 }
 
 func (s *Store) WithReadTx(ctx context.Context, workspaceID string, fn func(storage.ReadTx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{
-		// REPEATABLE READ, not the default: a scan's callback issues further
-		// reads on this transaction, and under READ COMMITTED each of them
-		// would take its own snapshot.
-		IsoLevel:   pgx.RepeatableRead,
-		AccessMode: pgx.ReadOnly,
-	})
+	t, err := beginTx(ctx, s.pool, workspaceID, beginRead)
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-	return fn(readOnlyTx{&pgTx{tx: tx, ctx: ctx, ws: workspaceID}})
+	defer t.end()
+	return fn(readOnlyTx{t})
 }
 
 func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
@@ -360,41 +358,29 @@ func (s *Store) WithWriteTx(ctx context.Context, workspaceID string, fn func(sto
 // writeOnce is one attempt of WithWriteTx: a fresh transaction, the workspace
 // lock, and one invocation of fn.
 func (s *Store) writeOnce(ctx context.Context, workspaceID string, fn func(storage.WriteTx) error) error {
-	tx, err := s.pool.BeginTx(ctx, pgx.TxOptions{})
+	// The lock is the statement after BEGIN, so it is held before anything fn
+	// reads: the contract's exclusion covers the reads fn makes before its
+	// first write, and an advisory lock — unlike a row lock — does not need
+	// the workspace to exist yet. It releases on commit or rollback.
+	t, err := beginTx(ctx, s.pool, workspaceID, beginWrite,
+		queuedStmt{sql: `SELECT pg_advisory_xact_lock($1)`, args: []any{workspaceLockKey(workspaceID)}})
 	if err != nil {
 		return err
 	}
-	defer func() { _ = tx.Rollback(ctx) }()
-
-	// Before fn, unconditionally: the contract's exclusion covers the reads fn
-	// makes before its first write, and an advisory lock — unlike a row lock —
-	// does not need the workspace to exist yet. It releases on commit or
-	// rollback.
-	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`,
-		workspaceLockKey(workspaceID)); err != nil {
-		return err
-	}
+	defer t.end()
 	// The workspaces row is NOT created here: pgTx.register mints it on the
 	// transaction's first actual write. A closure that only reads (a read-only
 	// Mutate, a push whose every mutation was already applied) must leave the
 	// workspace unregistered — see the WithWriteTx contract.
-	ptx := &pgTx{tx: tx, ctx: ctx, ws: workspaceID}
-	if err := fn(ptx); err != nil {
+	if err := fn(t); err != nil {
 		return err
 	}
 	// pgTx defers some of its bookkeeping to the end of the transaction (see
 	// pgTx.flush); COMMIT must not be the first thing that follows fn.
-	if err := ptx.flush(); err != nil {
+	if err := t.flush(); err != nil {
 		return err
 	}
-	// And it defers the statements themselves (see queue.go). Anything still
-	// queued — the sequence write-back above included — has to reach the server
-	// before COMMIT, and a statement that fails here fails the transaction as
-	// it would have at the point it was written.
-	if err := ptx.send(); err != nil {
-		return err
-	}
-	return tx.Commit(ctx)
+	return t.commit()
 }
 
 // isRetryable reports whether err is a transient conflict WithWriteTx may

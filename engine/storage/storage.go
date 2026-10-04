@@ -9,12 +9,14 @@
 // An adapter must provide, in order of importance:
 //
 //   - Per-workspace write mutual exclusion: WithWriteTx must guarantee that
-//     for one workspace at most one fn runs at a time, for the ENTIRE
-//     duration of fn — including reads fn performs before its first write.
-//     A SQL adapter under MVCC must therefore take a workspace-level lock
-//     (e.g. lock the workspace row) BEFORE invoking fn; relying on
-//     row-locking at first write loses read-then-write updates such as the
-//     push path's watermark check.
+//     for one workspace at most one write transaction holds the workspace at
+//     a time, from BEFORE fn's first read or write reaches the store until
+//     the transaction ends — including reads fn performs before its first
+//     write. A SQL adapter under MVCC must therefore take a workspace-level
+//     lock (e.g. lock the workspace row) before fn's first statement runs:
+//     before it invokes fn, or in the same batch as that statement and ahead
+//     of it. Relying on row-locking at first write loses read-then-write
+//     updates such as the push path's watermark check.
 //   - Write-tx retries: WithWriteTx MAY invoke fn multiple times (e.g. retry
 //     on a serialization failure or deadlock). The engine writes its
 //     closures to be re-runnable; adapters must discard all effects of an
@@ -300,11 +302,14 @@ type Adapter interface {
 	// WithWriteTx runs fn inside a write transaction for the workspace and
 	// commits iff fn returns nil.
 	//
-	// Mutual exclusion: while fn runs, no other write tx for the SAME
-	// workspace may run — not even its reads. Adapters on MVCC databases
-	// must acquire a workspace-level lock before invoking fn (the engine
-	// reads, e.g. client watermarks, before its first write and relies on
-	// those reads being stable until commit).
+	// Mutual exclusion: from fn's first read or write until the transaction
+	// ends, no other write tx for the SAME workspace may run — not even its
+	// reads. Adapters on MVCC databases must acquire a workspace-level lock
+	// before fn's first statement runs (the engine reads, e.g. client
+	// watermarks, before its first write and relies on those reads being
+	// stable until commit). The exclusion does not cover what fn does before
+	// its first call on the transaction, so fn must not rely on it for
+	// in-process state it touches there.
 	//
 	// Retries: the adapter MAY invoke fn multiple times (serialization
 	// failure, deadlock). Callers must write fn to be re-runnable: reset any
