@@ -69,7 +69,13 @@ import {
 	searchPositions,
 	writeSearchRecord,
 } from './index-maintain.js';
-import { dropAcked, enqueuePending, readPending, writePushedThrough } from './queue.js';
+import {
+	dropAcked,
+	enqueuePending,
+	readPending,
+	recountPendingAccess,
+	writePushedThrough,
+} from './queue.js';
 
 /**
  * Typed storage facade custom-mutation mirrors run against. Reads resolve
@@ -1115,6 +1121,9 @@ export async function finalizeRebase(
 	} else {
 		const acked = await dropAcked(tx, workspaceId, input.lastAckedMutationId);
 		touchPendingAccess(touched, registry, workspaceId, acked.dropped);
+		if (acked.dropped.length > 0) {
+			await recountPendingAccess(tx, registry, workspaceId, acked.remaining);
+		}
 		remaining = acked.remaining;
 	}
 	await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
@@ -1148,6 +1157,7 @@ export async function rollbackRejected(
 			}
 		}
 		touchPendingAccess(touched, registry, workspaceId, dropped);
+		if (dropped.length > 0) await recountPendingAccess(tx, registry, workspaceId, remaining);
 		await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, remaining, touched);
 		await tx.commit();
 		return { touched, pendingCount: remaining.length };
@@ -1334,6 +1344,7 @@ async function runResequence(
 			// upward would manufacture the very gap this closes. dropAcked retires
 			// those ids instead.
 			if (dropped) {
+				await recountPendingAccess(tx, registry, workspaceId, survivors);
 				await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, survivors, touched);
 				await tx.commit();
 			} else {
@@ -1360,6 +1371,7 @@ async function runResequence(
 		// what the next local write mints from, and an id above the watermark gaps
 		// the workspace again on the very next edit.
 		await tx.put(metaLastMutationId(workspaceId), (nextId - 1n).toString());
+		await recountPendingAccess(tx, registry, workspaceId, renumbered, nextId - 1n);
 		await writePushedThrough(tx, workspaceId, firstId - 1n);
 		if (dropped || renumbered.length > 0) {
 			await clearOverlayAndReplay(tx, registry, mirrors, workspaceId, renumbered, touched);

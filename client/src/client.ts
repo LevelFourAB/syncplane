@@ -76,6 +76,7 @@ import {
 	META_WS_PREFIX,
 	metaCallerAccess,
 	metaLastMutationId,
+	metaPendingAccess,
 	metaPushedThrough,
 	metaWsPrefix,
 	overlayGenerationFor,
@@ -138,7 +139,12 @@ import { createKvMutex, type Mutex } from './mutex.js';
 import { validateRowKey, validateWorkspaceId } from './naming.js';
 import { buildIndexes } from './optimistic/index-build.js';
 import { IndexCache } from './optimistic/index-maintain.js';
-import { enqueuePending, readPending } from './optimistic/queue.js';
+import {
+	enqueuePending,
+	notePendingAppended,
+	pendingAccessOf,
+	readPending,
+} from './optimistic/queue.js';
 import {
 	applyCrudLocally,
 	applyMutationLocally,
@@ -1837,17 +1843,17 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		{ generation: unknown; summary: Promise<AccessSummary | undefined> }
 	>();
 	/**
-	 * Per workspace, the CallerAccess that storedAccessIn read last, or that
+	 * Per workspace, the CallerAccess that storedAccessUnder read last, or that
 	 * this tab stored last (see accessStored), with its stored bytes and the
 	 * CallerAccess generation it was read under (see
 	 * keys.callerAccessGeneration), undefined where that is not known.
-	 * storedAccessIn uses it again with no read of the stored bytes while the
+	 * storedAccessUnder uses it again with no read of the stored bytes while the
 	 * generation stays the same, so a local write, which moves the access
 	 * generation through the pending queue, does not read the CallerAccess
 	 * again.
 	 */
 	private decodedAccess = new Map<string, { generation: unknown; access: DecodedAccess }>();
-	/** The workspaces storedAccessIn has read the stored CallerAccess for. */
+	/** The workspaces storedAccessUnder has read the stored CallerAccess for. */
 	private accessAsked = new Set<string>();
 	/** The access batch that still takes predictions; see askAccess. */
 	private accessBatch: AccessAsk[] | undefined;
@@ -3563,22 +3569,37 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 	/**
 	 * The summary canIn decides from in `workspaceId`, or undefined when it
 	 * cannot decide: none is stored, or a queued write can change the caller's
-	 * grants. Reuses the one decided under the same access generation, which
-	 * spares every answer after the first a walk of the pending queue. Under a
-	 * new generation it walks the queue again, and reads the stored
-	 * CallerAccess only when it changed (see storedAccessIn).
+	 * grants. Reuses the one decided under the same access generation. Under a
+	 * new generation it reads the stored CallerAccess only when it changed (see
+	 * storedAccessUnder), and walks the pending queue unless the pending-access
+	 * record counts no queued write that can change the grants (see
+	 * keys.metaPendingAccess).
 	 */
 	private async accessSummaryIn(
 		tx: KVRead,
 		workspaceId: string,
 	): Promise<AccessSummary | undefined> {
-		const generation = await tx.get(accessGeneration(workspaceId));
+		// The generations and the pending-access record in one getMany:
+		// IndexedDB opens one transaction for it where a get per key opens one
+		// each.
+		const [ generation, storedGeneration, pendingRecord, lastMutationId ] = await tx.getMany([
+			accessGeneration(workspaceId),
+			callerAccessGeneration(workspaceId),
+			metaPendingAccess(workspaceId),
+			metaLastMutationId(workspaceId),
+		]);
 		const cached = this.accessSummaries.get(workspaceId);
 		if (generation !== undefined && cached?.generation === generation) return cached.summary;
 		const summary = (async () => {
-			const decoded = await this.storedAccessIn(tx, workspaceId);
+			const decoded = await this.storedAccessUnder(tx, workspaceId, storedGeneration);
 			if (decoded === undefined) return undefined;
-			if (pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))) {
+			// Only a count of zero is trusted. A build that predates the record
+			// drops queued writes without counting them down, so a count above
+			// zero can be too high, and the walk keeps the answer exact for it.
+			if (
+				pendingAccessOf(pendingRecord, lastMutationId) !== 0
+				&& pendingChangesAccess(this.entityRegistry, await readPending(tx, workspaceId))
+			) {
 				return undefined;
 			}
 			return decoded.summary;
@@ -3596,19 +3617,31 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 		return summary;
 	}
 
-	/**
-	 * The CallerAccess stored for `workspaceId`, or undefined when none is.
-	 * Returns the one read last with no read of the stored bytes while the
-	 * CallerAccess generation is the one it was read under. Otherwise it reads
-	 * the bytes, and decodes them only when they differ from the ones read or
-	 * stored last.
-	 */
+	/** storedAccessUnder, with the CallerAccess generation read from `tx`. */
 	private async storedAccessIn(
 		tx: KVRead,
 		workspaceId: string,
 	): Promise<DecodedAccess | undefined> {
+		return this.storedAccessUnder(
+			tx,
+			workspaceId,
+			await tx.get(callerAccessGeneration(workspaceId)),
+		);
+	}
+
+	/**
+	 * The CallerAccess stored for `workspaceId`, or undefined when none is.
+	 * `generation` is the CallerAccess generation as `tx` read it. Returns the
+	 * one read last with no read of the stored bytes while the generation is
+	 * the one it was read under. Otherwise it reads the bytes, and decodes them
+	 * only when they differ from the ones read or stored last.
+	 */
+	private async storedAccessUnder(
+		tx: KVRead,
+		workspaceId: string,
+		generation: unknown,
+	): Promise<DecodedAccess | undefined> {
 		this.accessAsked.add(workspaceId);
-		const generation = await tx.get(callerAccessGeneration(workspaceId));
 		const last = this.decodedAccess.get(workspaceId);
 		// Every commit that writes or deletes the stored bytes restamps the
 		// generation in the same transaction, so an equal token means equal
@@ -3627,7 +3660,7 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 
 	/**
 	 * Keeps `access`, which a commit of this tab just stored for `workspaceId`,
-	 * for storedAccessIn to compare the stored bytes with, so the next read
+	 * for storedAccessUnder to compare the stored bytes with, so the next read
 	 * does not decode the bytes this tab encoded. The comparison is what keeps
 	 * it correct when a later commit, in this tab or another, stores other
 	 * bytes. The generation the commit stamped is not known here, so the next
@@ -5435,12 +5468,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 						);
 					// One read-only round trip for the whole payload: the mutation-id
 					// watermark together with the records every crud below resolves its
-					// prior row from. A backend answers a getMany in ONE transaction
-					// where per-key gets each open their own (kv/idb.ts), and those
-					// transactions are most of what a local write costs.
+					// prior row from, and the pending-access record the append updates.
+					// A backend answers a getMany in ONE transaction where per-key gets
+					// each open their own (kv/idb.ts), and those transactions are most
+					// of what a local write costs.
 					const pre = await tx.getMany([
 						metaLastMutationId(workspaceId),
 						...(plan?.keys ?? []),
+						metaPendingAccess(workspaceId),
 					]);
 					const lastRaw = pre[0] as string | undefined;
 					const mutationId = (lastRaw ? BigInt(lastRaw) : 0n) + 1n;
@@ -5594,6 +5629,14 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 							touched,
 						);
 					}
+					await notePendingAppended(
+						tx,
+						this.entityRegistry,
+						workspaceId,
+						{ record: pre[pre.length - 1], lastMutationId: lastRaw },
+						[ mutation ],
+						mutationId,
+					);
 					if (this.intentReg && this.opts.undo) {
 						// Persist the PREDICTED post-commit fold-barrier set in this same
 						// transaction: recordGroup below only runs after the commit, so

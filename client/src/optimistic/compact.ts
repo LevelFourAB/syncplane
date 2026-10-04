@@ -17,7 +17,12 @@ import {
 } from '../mutations.js';
 import { isFragment, mergeFragments, mergeText } from '../text/index.js';
 import { TouchSet } from '../touch.js';
-import { enqueuePending, readPending, readPushedThrough } from './queue.js';
+import {
+	enqueuePending,
+	readPending,
+	readPushedThrough,
+	recountPendingAccess,
+} from './queue.js';
 import { clearOverlayAndReplay, type MirrorMap } from './rebase.js';
 
 /**
@@ -392,6 +397,7 @@ export async function compactPending(
 			? plan.mutations[plan.mutations.length - 1]!.mutationId
 			: pushedThrough;
 		await tx.put(metaLastMutationId(workspaceId), maxId.toString());
+		await recountPendingAccess(tx, registry, workspaceId, plan.mutations, maxId);
 		// The fold preserves the overlay ROW by construction, but the optimistic
 		// text log does not ride on the row: an entry is keyed by the mutation id
 		// that wrote it (keys.ts), and the renumbering above frees the ids above

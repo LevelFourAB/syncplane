@@ -35,6 +35,7 @@ import {
 	metaBootstrapResume,
 	metaCursor,
 	metaLastMutationId,
+	metaPendingAccess,
 	metaPushedThrough,
 	metaSnapshotGen,
 	stagingPrefix,
@@ -48,6 +49,7 @@ import { markIndexesBuilt } from '../optimistic/index-build.js';
 import type { IndexCache } from '../optimistic/index-maintain.js';
 import {
 	enqueuePending,
+	notePendingAppended,
 	readPending,
 	readPushedThrough,
 	writePushedThrough,
@@ -1935,8 +1937,12 @@ export class Coordinator {
 			await this.opts.kvMutex.run(async () => {
 				const tx = await this.opts.kv.write();
 				try {
-					const lastRaw = (await tx.get(metaLastMutationId(workspaceId))) as string | undefined;
+					const [ lastRaw, pendingRecord ] = await tx.getMany([
+						metaLastMutationId(workspaceId),
+						metaPendingAccess(workspaceId),
+					]) as [string | undefined, unknown];
 					let mutationId = lastRaw ? BigInt(lastRaw) : 0n;
+					const appended: Mutation[] = [];
 					for (const row of rows) {
 						const def = this.opts.registry.get(row.entity);
 						if (!def) continue;
@@ -1974,9 +1980,18 @@ export class Coordinator {
 							payload: { case: 'crud', value: crud },
 						});
 						await enqueuePending(tx, workspaceId, mutation);
+						appended.push(mutation);
 						touchPendingAccess(touched, this.opts.registry, workspaceId, [ mutation ]);
 						await applyCrudLocally(tx, this.opts.registry, workspaceId, crud, touched);
 					}
+					await notePendingAppended(
+						tx,
+						this.opts.registry,
+						workspaceId,
+						{ record: pendingRecord, lastMutationId: lastRaw },
+						appended,
+						mutationId,
+					);
 					await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
 					await tx.commit();
 				} catch (err) {
@@ -2032,8 +2047,12 @@ export class Coordinator {
 		await this.opts.kvMutex.run(async () => {
 			const tx = await this.opts.kv.write();
 			try {
-				const lastRaw = (await tx.get(metaLastMutationId(workspaceId))) as string | undefined;
+				const [ lastRaw, pendingRecord ] = await tx.getMany([
+					metaLastMutationId(workspaceId),
+					metaPendingAccess(workspaceId),
+				]) as [string | undefined, unknown];
 				let mutationId = lastRaw ? BigInt(lastRaw) : 0n;
+				const appended: Mutation[] = [];
 				for (const row of rows) {
 					const def = this.opts.registry.get(row.entity);
 					if (!def) continue;
@@ -2055,9 +2074,18 @@ export class Coordinator {
 						payload: { case: 'crud', value: crud },
 					});
 					await enqueuePending(tx, workspaceId, mutation);
+					appended.push(mutation);
 					touchPendingAccess(touched, this.opts.registry, workspaceId, [ mutation ]);
 					await applyCrudLocally(tx, this.opts.registry, workspaceId, crud, touched);
 				}
+				await notePendingAppended(
+					tx,
+					this.opts.registry,
+					workspaceId,
+					{ record: pendingRecord, lastMutationId: lastRaw },
+					appended,
+					mutationId,
+				);
 				await tx.put(metaLastMutationId(workspaceId), mutationId.toString());
 				await tx.commit();
 			} catch (err) {

@@ -1,6 +1,7 @@
 /**
  * What the stored CallerAccess costs local writes through the real client, for
- * a caller with many grants.
+ * a caller with many grants, and what the pending queue costs the first
+ * prediction after a local write.
  *
  * access.bench.ts measures the steps of a CallerAccess change: decode,
  * summary, lookups. This file measures the time between two changes, when the
@@ -18,7 +19,10 @@
  * IDBKVStore on fake-indexeddb. MemoryKVStore gives back the value it holds,
  * so a read of a large value costs it nothing. fake-indexeddb structured-clones
  * each value a read gives back, so its arms include the CPU cost of the copy
- * that a browser also makes. Neither says anything about the disk of a
+ * that a browser also makes. fake-indexeddb also keeps each finished
+ * transaction and walks all of them when a new one opens, so a transaction
+ * costs more after a long setup: compare its arms within one group, and the
+ * bytes across groups. Neither backend says anything about the disk of a
  * browser; the bytes below are the measure for that. The CallerAccess has the
  * shape of access.bench.ts: four permissions, each held at every one of N
  * rows, with UUID-shaped keys.
@@ -27,10 +31,19 @@
  * counted over the values of get, getMany, scan and scanRange: the size of
  * each byte array and string in them.
  *
- * Nothing acks, so the pending queue grows during a run, and a prediction
- * reads the queue when a write changes it. Each arm runs a fixed number of
- * iterations, so the queue gets to the same length in each run and two runs
- * compare fairly.
+ * In the "N rows" groups nothing acks, so the pending queue grows during a
+ * run. Each arm runs a fixed number of iterations, so the queue gets to the
+ * same length in each run and two runs compare fairly.
+ *
+ * The "queue of N writes" groups hold the pending queue at N entries, with a
+ * CallerAccess of QUEUE_ROWS rows. The setup queues N writes, and each
+ * iteration deletes the entry its write added, directly in the store, so the
+ * next iteration starts from the same queue. That entry is a patch of a task,
+ * so the client's count of queued writes that can change the grants stays
+ * right without it. Both arms pay for that delete, so the difference between
+ * them is still the prediction. "a grant write
+ * queued" puts a write to a grant row at the head of the queue, so the
+ * prediction answers 'unknown'.
  *
  * Run with: client/node_modules/.bin/vitest bench --project bench test/bench/access-client.bench.ts
  */
@@ -50,7 +63,7 @@ import {
 	TaskSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
-import { metaCallerAccess } from '../../src/keys.js';
+import { metaCallerAccess, pendingKey } from '../../src/keys.js';
 import { IDBKVStore } from '../../src/kv/idb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type {
@@ -63,6 +76,10 @@ import type {
 
 const WS = 'ws';
 const SIZES = [ 50, 1000, 5000 ];
+/** Pending-queue lengths of the "queue of N writes" groups. */
+const QUEUES = [ 10, 100, 1000 ];
+/** The rows of the CallerAccess in the "queue of N writes" groups. */
+const QUEUE_ROWS = 50;
 const BACKENDS = [ 'memory', 'fake-indexeddb' ] as const;
 type Backend = (typeof BACKENDS)[number];
 
@@ -104,7 +121,8 @@ function sizeOf(value: unknown): number {
 class ByteCountingStore implements KVStore {
 	bytes = 0;
 
-	constructor(private inner: KVStore & GenerationTracking) {}
+	/** The store the reads go to, for writes that the count leaves out. */
+	constructor(readonly inner: KVStore & GenerationTracking) {}
 
 	async read(): Promise<KVRead> {
 		return this.counting(await this.inner.read());
@@ -179,6 +197,8 @@ interface Arm {
 	kv: ByteCountingStore;
 	/** Iterations run so far. */
 	ops: number;
+	/** The mutation id the next local write takes. */
+	nextId: bigint;
 }
 
 /**
@@ -205,7 +225,41 @@ async function writer(backend: Backend, rows: number): Promise<Arm> {
 	if (await client.hasPermission(TaskSchema, 't1', 'edit_tasks') !== 'yes') {
 		throw new Error('the setup does not predict yes');
 	}
-	return { client, kv, ops: 0 };
+	return { client, kv, ops: 0, nextId: 2n };
+}
+
+/**
+ * A writer with `length` entries in the pending queue, the first of them the
+ * task. With `grant`, the second is a put of a project member, a grant row,
+ * so a prediction answers 'unknown'.
+ */
+async function queued(backend: Backend, length: number, grant: boolean): Promise<Arm> {
+	const arm = await writer(backend, QUEUE_ROWS);
+	if (grant) {
+		await arm.client.mutate.put(ProjectMemberSchema, {
+			id: 'pm-queued',
+			project: { id: rowKey(0) },
+			userId: 'someone',
+			role: 'project_reader',
+		});
+		arm.nextId++;
+	}
+	while (arm.nextId <= BigInt(length)) {
+		await arm.client.mutate.patch(TaskSchema, 't1', { title: `queued ${arm.nextId}` });
+		arm.nextId++;
+	}
+	return arm;
+}
+
+/**
+ * Deletes the pending entry of the write that took `arm.nextId - 1`, so the
+ * queue holds what it held before that write. It goes to the store itself, so
+ * the byte count leaves it out.
+ */
+async function unqueue(arm: Arm): Promise<void> {
+	const tx = await arm.kv.inner.write();
+	await tx.del(pendingKey(WS, arm.nextId - 1n));
+	await tx.commit();
 }
 
 /** A client that may post in `rows` rooms, as the subject `me`. */
@@ -227,7 +281,7 @@ async function poster(backend: Backend, rows: number): Promise<Arm> {
 	if ((await client.get(PostSchema, 'po-setup'))?.authorId !== 'me') {
 		throw new Error('the setup does not store the primary subject');
 	}
-	return { client, kv, ops: 0 };
+	return { client, kv, ops: 0, nextId: 2n };
 }
 
 /**
@@ -280,6 +334,49 @@ for (const n of SIZES) {
 					room: { id: rowKey(0) },
 				});
 			}, reporting(`${n} rows, ${backend}: create with a creator field`, () => creating));
+		}
+	});
+}
+
+for (const n of QUEUES) {
+	describe(`queue of ${n} writes`, () => {
+		for (const backend of BACKENDS) {
+			let floor: Arm | undefined;
+			bench(`${backend}: local write`, async () => {
+				floor ??= await queued(backend, n, false);
+				await floor.client.mutate.patch(TaskSchema, 't1', { title: `edit ${floor.ops++}` });
+				floor.nextId++;
+				await unqueue(floor);
+			}, reporting(`queue of ${n}, ${backend}: local write`, () => floor));
+
+			let asking: Arm | undefined;
+			bench(`${backend}: local write, then hasPermission`, async () => {
+				asking ??= await queued(backend, n, false);
+				await asking.client.mutate.patch(TaskSchema, 't1', { title: `edit ${asking.ops++}` });
+				asking.nextId++;
+				if (await asking.client.hasPermission(TaskSchema, 't1', 'edit_tasks') !== 'yes') {
+					throw new Error('the prediction changed');
+				}
+				await unqueue(asking);
+			}, reporting(`queue of ${n}, ${backend}: local write, then hasPermission`, () => asking));
+
+			let granting: Arm | undefined;
+			bench(
+				`${backend}: local write, then hasPermission, a grant write queued`,
+				async () => {
+					granting ??= await queued(backend, n, true);
+					await granting.client.mutate.patch(TaskSchema, 't1', { title: `edit ${granting.ops++}` });
+					granting.nextId++;
+					if (await granting.client.hasPermission(TaskSchema, 't1', 'edit_tasks') !== 'unknown') {
+						throw new Error('the prediction changed');
+					}
+					await unqueue(granting);
+				},
+				reporting(
+					`queue of ${n}, ${backend}: local write, then hasPermission, a grant write queued`,
+					() => granting,
+				),
+			);
 		}
 	});
 }

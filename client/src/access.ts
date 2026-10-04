@@ -406,22 +406,43 @@ export function pendingChangesAccess(
 	pending: readonly Mutation[],
 ): boolean {
 	const anchors = anchorEntities(registry);
+	return pending.some((m) => changesAccess(registry, anchors, m));
+}
+
+/**
+ * How many of `mutations` can change what the caller holds, each one decided
+ * as {@link pendingChangesAccess} decides it.
+ */
+export function countAccessChanges(
+	registry: EntityRegistry,
+	mutations: readonly Mutation[],
+): number {
+	const anchors = anchorEntities(registry);
+	let count = 0;
+	for (const m of mutations) {
+		if (changesAccess(registry, anchors, m)) count++;
+	}
+	return count;
+}
+
+function changesAccess(
+	registry: EntityRegistry,
+	anchors: ReadonlySet<string>,
+	m: Mutation,
+): boolean {
 	const touches = (crud: CrudMutation): boolean => {
 		const def = registry.get(crud.entity);
 		if (def?.grant) return true;
 		return crud.op === CrudOp.DELETE && anchors.has(crud.entity);
 	};
-	for (const m of pending) {
-		switch (m.payload.case) {
-			case 'crud':
-				if (touches(m.payload.value)) return true;
-				break;
-			case 'batch':
-				if (m.payload.value.mutations.some(touches)) return true;
-				break;
-		}
+	switch (m.payload.case) {
+		case 'crud':
+			return touches(m.payload.value);
+		case 'batch':
+			return m.payload.value.mutations.some(touches);
+		default:
+			return false;
 	}
-	return false;
 }
 
 /**

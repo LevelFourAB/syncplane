@@ -5,13 +5,14 @@
 // parent this client does not register still decides, how can() fills in
 // the inputs of the access rules from local rows, that predictions asked
 // together share one read of the store and answer as they do one at a time,
-// and that the stored CallerAccess is read and decoded again only when it
-// changes.
+// that the stored CallerAccess is read and decoded again only when it
+// changes, and that the pending queue is read only when it can hold a write
+// that changes the grants.
 
 import { create, type DescMessage, type MessageInitShape, toBinary } from '@bufbuild/protobuf';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { CanAnswer } from '../../src/access.js';
+import { type CanAnswer, countAccessChanges } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
 	CardItemSchema,
@@ -32,10 +33,26 @@ import {
 	TaskSchema,
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
+import { CrudOp, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
 import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
-import { accessGeneration, metaCallerAccess, pendingPrefix } from '../../src/keys.js';
+import {
+	accessGeneration,
+	metaCallerAccess,
+	metaLastMutationId,
+	metaPendingAccess,
+	pendingKey,
+	pendingPrefix,
+} from '../../src/keys.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
 import type { GenerationOf, KVRead, KVStore, KVWrite } from '../../src/kv/store.js';
+import { EntityRegistry } from '../../src/mutations.js';
+import { compactPending } from '../../src/optimistic/compact.js';
+import { pendingAccessOf, readPending } from '../../src/optimistic/queue.js';
+import {
+	dropAndResequencePending,
+	resequencePending,
+	rollbackRejected,
+} from '../../src/optimistic/rebase.js';
 import { createTestClient, DEFAULT_WORKSPACE, TestServer } from '../../src/testing/index.js';
 
 const WS = 'ws-can';
@@ -736,7 +753,7 @@ describe('predictions asked together', () => {
 		await c.close();
 	});
 
-	it('share one read of the store, and one getMany per level of their chains', async () => {
+	it('share one read of the store, one getMany for the summary and one per level of their chains', async () => {
 		const store = new ReadCountingStore(new MemoryKVStore());
 		const p1 = [ { permission: 'view_tasks', anchors: [ { entity: 'project', keys: [ 'p1' ] } ] } ];
 		await storeSummary(store, { permissions: p1 });
@@ -755,7 +772,7 @@ describe('predictions asked together', () => {
 		);
 		expect(answers).toEqual(Array.from({ length: 50 }, (_, i) => i % 5 < 3 ? 'yes' : 'no'));
 		expect(store.reads).toBe(1);
-		expect(store.getManys).toBe(2);
+		expect(store.getManys).toBe(3);
 
 		store.reads = 0;
 		expect(await c.can(CommentSchema, 'c3', 'read')).toBe('no');
@@ -1113,6 +1130,248 @@ describe('the stored CallerAccess', () => {
 		await purging.close();
 	});
 });
+
+describe('the pending queue', () => {
+	const entities = [ ProjectSchema, ProjectMemberSchema, TaskSchema ];
+	const member = { project: { id: 'p1' }, userId: 'someone', role: 'project_reader' };
+	const root = { permissions: [ { permission: 'edit_tasks', root: true } ] };
+
+	it('is not read for a prediction after a local write that cannot change the grants', async () => {
+		const store = new QueueScanCountingStore(new MemoryKVStore());
+		const c = offlineClient(store, entities);
+		// The first answer opens the store, so the summary written next is
+		// stamped like one a pull writes.
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(store, root);
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		store.queueScans = 0;
+		for (let i = 0; i < 3; i++) {
+			await c.mutate.patch(TaskSchema, 't1', { title: `edit ${i}` });
+			expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		}
+		expect(store.queueScans).toBe(0);
+		await c.close();
+	});
+
+	// Two clients on one store stand in for two tabs.
+	it('answers unknown while either client has a write to a grant row queued', async () => {
+		const kv = new MemoryKVStore();
+		const first = offlineClient(kv, entities);
+		const second = offlineClient(kv, entities);
+		const ask = () =>
+			Promise.all([ first, second ].map((c) => c.hasPermission(TaskSchema, 't1', 'edit_tasks')));
+		expect(await ask()).toEqual([ 'unknown', 'unknown' ]);
+		await storeSummary(kv, root);
+		for (let i = 0; i < 3; i++) {
+			await second.mutate.put(TaskSchema, { id: `t${i}`, project: { id: 'p1' } });
+		}
+		expect(await ask()).toEqual([ 'yes', 'yes' ]);
+
+		await second.mutate.put(ProjectMemberSchema, { id: 'pm-second', ...member });
+		expect(await ask()).toEqual([ 'unknown', 'unknown' ]);
+		await first.mutate.patch(TaskSchema, 't1', { title: 'queued behind it' });
+		expect(await ask()).toEqual([ 'unknown', 'unknown' ]);
+		await first.mutate.put(ProjectMemberSchema, { id: 'pm-first', ...member });
+		await second.mutate.patch(TaskSchema, 't1', { title: 'and behind that' });
+		expect(await ask()).toEqual([ 'unknown', 'unknown' ]);
+		await first.close();
+		await second.close();
+	});
+
+	it('is not read once the write to a grant row is acked or rolled back', async () => {
+		const server = new TestServer({ entities });
+		server.put(TaskSchema, { id: 't1', project: { id: 'p1' } }, { workspace: WS });
+		server.setCallerAccess(root, { workspace: WS });
+		const store = new QueueScanCountingStore(new MemoryKVStore());
+		const never = 2 ** 31 - 1;
+		const c = new SyncClient({
+			workspaceId: WS,
+			kvStore: store,
+			entities,
+			transport: server.transport(),
+			streamEnabled: false,
+			presenceEnabled: false,
+			pollIntervalMs: 0,
+			// Pushes only when the spec syncs, so no push scans the queue between
+			// a write and the prediction after it.
+			pushDebounceMs: never,
+			pushMaxDelayMs: never,
+		});
+		await c.start();
+		await c.syncNow();
+		const ask = () => c.hasPermission(TaskSchema, 't1', 'edit_tasks');
+		/** Writes once more, and counts the scans of the queue the next answer makes. */
+		const scansAfterWrite = async () => {
+			store.queueScans = 0;
+			await c.mutate.patch(TaskSchema, 't1', { title: `edit ${Math.random()}` });
+			expect(await ask()).toBe('yes');
+			return store.queueScans;
+		};
+		// The first write counts the queue, which no write has counted yet.
+		await c.mutate.patch(TaskSchema, 't1', { title: 'first' });
+		expect(await ask()).toBe('yes');
+		expect(await scansAfterWrite()).toBe(0);
+
+		await c.mutate.put(ProjectMemberSchema, { id: 'pm-acked', ...member });
+		expect(await ask()).toBe('unknown');
+		// The server sends a CallerAccess only when it changes, so the pull that
+		// acks the write carries none and the client keeps the one it holds.
+		server.setCallerAccess(undefined, { workspace: WS });
+		await c.syncNow();
+		expect(await ask()).toBe('yes');
+		expect(await scansAfterWrite()).toBe(0);
+
+		// Acks the patch first, so the pull after the rollback drops nothing and
+		// the rollback alone has to bring the answer back.
+		await c.syncNow();
+		server.reject({ entity: ProjectMemberSchema });
+		await c.mutate.put(ProjectMemberSchema, { id: 'pm-rejected', ...member });
+		expect(await ask()).toBe('unknown');
+		await c.syncNow();
+		expect(await ask()).toBe('yes');
+		expect(await scansAfterWrite()).toBe(0);
+		await c.close();
+	});
+
+	it('keeps the answer through a compaction of the queue', async () => {
+		const store = new QueueScanCountingStore(new MemoryKVStore());
+		const c = offlineClient(store, entities);
+		const compact = () =>
+			compactPending(store, new EntityRegistry(entities), {}, WS, () => new Set<bigint>());
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(store, root);
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		for (let i = 0; i < 3; i++) await c.mutate.patch(TaskSchema, 't1', { title: `edit ${i}` });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		expect((await compact()).changed).toBe(true);
+		store.queueScans = 0;
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		await c.mutate.patch(TaskSchema, 't1', { title: 'after the compaction' });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+		expect(store.queueScans).toBe(0);
+
+		// The fold lowers the mutation-id counter to the value it held before
+		// the write that a build without the record queued.
+		await c.mutate.patch(TaskSchema, 't1', { title: 'folds into the one before' });
+		await queueUnrecorded(store, { id: 'pm-old', ...member });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		expect((await compact()).changed).toBe(true);
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await c.close();
+	});
+
+	it('answers unknown while a build that does not count them has a write to a grant row queued', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, entities);
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await storeSummary(kv, root);
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('yes');
+
+		await queueUnrecorded(kv, { id: 'pm-old', ...member });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await c.mutate.patch(TaskSchema, 't1', { title: 'queued behind it' });
+		expect(await c.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('unknown');
+		await c.close();
+	});
+
+	it('keeps its count of writes that can change the grants exact through each rewrite', async () => {
+		const kv = new MemoryKVStore();
+		const c = offlineClient(kv, entities);
+		const registry = new EntityRegistry(entities);
+		/** The count the record gives, and the count of the queue itself. */
+		const counts = async () => {
+			const tx = await kv.read();
+			try {
+				const [ record, last ] = await tx.getMany([ metaPendingAccess(WS), metaLastMutationId(WS) ]);
+				return {
+					recorded: pendingAccessOf(record, last),
+					queued: countAccessChanges(registry, await readPending(tx, WS)),
+				};
+			} finally {
+				tx.release();
+			}
+		};
+		await c.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		await c.mutate.put(ProjectMemberSchema, { id: 'pm-a', ...member });
+		await c.mutate.patch(TaskSchema, 't1', { title: 'a' });
+		await c.mutate.patch(TaskSchema, 't1', { title: 'b' });
+		await c.mutate.put(ProjectMemberSchema, { id: 'pm-b', ...member });
+		expect(await counts()).toEqual({ recorded: 2, queued: 2 });
+
+		expect((await compactPending(kv, registry, {}, WS, () => new Set<bigint>())).changed).toBe(true);
+		expect(await counts()).toEqual({ recorded: 2, queued: 2 });
+		// Drops the put of the task at the head, and renumbers the rest from 1.
+		expect((await dropAndResequencePending(kv, registry, {}, WS, 1n)).changed).toBe(true);
+		expect(await counts()).toEqual({ recorded: 2, queued: 2 });
+		// The put of pm-a, renumbered to 1.
+		await rollbackRejected(kv, registry, {}, WS, [ 1n ]);
+		expect(await counts()).toEqual({ recorded: 1, queued: 1 });
+		expect((await resequencePending(kv, registry, {}, WS, 1n)).changed).toBe(true);
+		expect(await counts()).toEqual({ recorded: 1, queued: 1 });
+		await c.mutate.patch(TaskSchema, 't1', { title: 'c' });
+		expect(await counts()).toEqual({ recorded: 1, queued: 1 });
+		// The put of pm-b, at 2 behind the patch at 1, so nothing is renumbered.
+		expect((await dropAndResequencePending(kv, registry, {}, WS, 2n)).changed).toBe(false);
+		expect(await counts()).toEqual({ recorded: 0, queued: 0 });
+		await c.close();
+	});
+
+	it('keeps the answer through a purge of the workspace', async () => {
+		const kv = new MemoryKVStore();
+		// Two clients on one store stand in for two tabs.
+		const tab = offlineClient(kv, entities);
+		const purging = offlineClient(kv, entities);
+		const ask = () => tab.hasPermission(TaskSchema, 't1', 'edit_tasks');
+		expect(await ask()).toBe('unknown');
+		await storeSummary(kv, root);
+		await purging.mutate.put(ProjectMemberSchema, { id: 'pm-purged', ...member });
+		expect(await ask()).toBe('unknown');
+
+		await purging.removeWorkspace(WS, { purge: true });
+		await storeSummary(kv, root);
+		expect(await ask()).toBe('yes');
+		const scope = purging.addWorkspace(WS);
+		await scope.mutate.put(TaskSchema, { id: 't1', project: { id: 'p1' } });
+		expect(await ask()).toBe('yes');
+		await scope.mutate.put(ProjectMemberSchema, { id: 'pm-after', ...member });
+		expect(await ask()).toBe('unknown');
+		await tab.close();
+		await purging.close();
+	});
+});
+
+/**
+ * Queues a put of a project member in WS, and moves the mutation-id counter,
+ * as a build that keeps no pending-access record does.
+ */
+async function queueUnrecorded(
+	kv: KVStore,
+	row: MessageInitShape<typeof ProjectMemberSchema>,
+): Promise<void> {
+	const tx = await kv.write();
+	const raw = (await tx.get(metaLastMutationId(WS))) as string | undefined;
+	const mutationId = (raw ? BigInt(raw) : 0n) + 1n;
+	const mutation = create(MutationSchema, {
+		clientId: 'older-build',
+		mutationId,
+		payload: {
+			case: 'crud',
+			value: {
+				entity: 'project_member',
+				key: String(row.id),
+				op: CrudOp.PUT,
+				value: toBinary(ProjectMemberSchema, create(ProjectMemberSchema, row)),
+			},
+		},
+	});
+	await tx.put(pendingKey(WS, mutationId), toBinary(MutationSchema, mutation));
+	await tx.put(metaLastMutationId(WS), mutationId.toString());
+	await tx.commit();
+}
 
 async function generationIn(kv: KVStore, workspaceId: string): Promise<unknown> {
 	const tx = await kv.read();

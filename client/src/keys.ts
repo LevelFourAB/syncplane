@@ -186,11 +186,25 @@ export const metaCallerAccess = (workspaceId: string): string =>
 	`${metaWsPrefix(workspaceId)}callerAccess`;
 
 /**
+ * How many mutations of one workspace's pending queue can change the
+ * caller's grants (see access.ts pendingChangesAccess), counted when its
+ * {@link metaLastMutationId} held the value the record names. Written in the
+ * same transaction as each change to the queue, so a prediction reads one
+ * small record rather than the whole queue. A record whose counter value
+ * differs from the stored counter, or an absent record, tells nothing: a
+ * build that predates the record writes the queue and mints ids without it.
+ * See optimistic/queue.ts pendingAccessOf.
+ */
+export const metaPendingAccess = (workspaceId: string): string =>
+	`${metaWsPrefix(workspaceId)}pendingAccess`;
+
+/**
  * The access generation of one workspace: a token restamped by every
- * committed transaction that writes or deletes its {@link metaCallerAccess}
- * or anything in its pending queue, the two inputs `can()` decides from
- * besides the row itself. Like {@link overlayGeneration}, the stamp rides in
- * the writer's own transaction, and an ABSENT token means unknown.
+ * committed transaction that writes or deletes its {@link metaCallerAccess},
+ * anything in its pending queue or its {@link metaPendingAccess}, the inputs
+ * `can()` decides from besides the rows. Like {@link overlayGeneration}, the
+ * stamp rides in the writer's own transaction, and an ABSENT token means
+ * unknown.
  */
 export const accessGeneration = (workspaceId: string): string => `${metaWsPrefix(workspaceId)}agen`;
 
@@ -207,8 +221,9 @@ export const callerAccessGeneration = (workspaceId: string): string =>
 
 /**
  * The generations a write at `key` restamps: {@link accessGeneration} for a
- * pending-queue entry, that and {@link callerAccessGeneration} for a stored
- * CallerAccess, and none for every other key.
+ * pending-queue entry or a {@link metaPendingAccess}, that and
+ * {@link callerAccessGeneration} for a stored CallerAccess, and none for every
+ * other key.
  */
 export const accessGenerationFor = (key: string): string | string[] | undefined => {
 	const root = key.startsWith(PENDING_ROOT)
@@ -219,9 +234,16 @@ export const accessGenerationFor = (key: string): string | string[] | undefined 
 	if (root === undefined) return undefined;
 	const segmentEnd = key.indexOf('/', root.length);
 	if (segmentEnd === -1) return undefined;
-	if (root === META_WS_PREFIX && key.slice(segmentEnd + 1) !== 'callerAccess') return undefined;
 	const prefix = `${META_WS_PREFIX}${key.slice(root.length, segmentEnd)}/`;
-	return root === PENDING_ROOT ? `${prefix}agen` : [ `${prefix}agen`, `${prefix}cagen` ];
+	if (root === PENDING_ROOT) return `${prefix}agen`;
+	switch (key.slice(segmentEnd + 1)) {
+		case 'pendingAccess':
+			return `${prefix}agen`;
+		case 'callerAccess':
+			return [ `${prefix}agen`, `${prefix}cagen` ];
+		default:
+			return undefined;
+	}
 };
 
 /**
