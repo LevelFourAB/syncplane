@@ -726,23 +726,37 @@ func (x *PullResponse) GetCallerAccess() *CallerAccess {
 	return nil
 }
 
-// What one caller holds in one workspace under the access model: for each
-// permission, the anchors it holds the permission at.
+// What one caller holds in one workspace under the access model: the
+// permissions it holds at the workspace root, and the rows it holds
+// permissions at, grouped by the permissions held there.
+//
+// The caller holds a permission at a row when root_permissions lists it, or
+// when the anchor group that lists the row lists it. A permission held at a
+// row applies to the row and to every row whose `access_parent` field points
+// at it. A permission that no list names is held nowhere.
+//
+// Every list except subjects is sorted and holds no duplicates, so equal
+// access has one encoding, apart from seq.
 //
 // It is advisory. The server decides every read and every write itself, and a
 // client uses this to predict an answer, for example to hide a control the
 // caller cannot use.
 type CallerAccess struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
-	// The permissions the caller holds, sorted by name. A permission that is
-	// not listed is held nowhere.
-	Permissions []*PermissionAccess `protobuf:"bytes,1,rep,name=permissions,proto3" json:"permissions,omitempty"`
 	// The workspace sequence this summary is current through.
 	Seq uint64 `protobuf:"varint,2,opt,name=seq,proto3" json:"seq,omitempty"`
 	// The caller's subjects: the values grant rows and `subject` checks
 	// compare with. The first is the primary subject, which a create stores
 	// in each `creator` field. Empty for an anonymous caller.
-	Subjects      []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
+	Subjects []string `protobuf:"bytes,3,rep,name=subjects,proto3" json:"subjects,omitempty"`
+	// The permissions the caller holds at the workspace root, which covers
+	// every row. Sorted.
+	RootPermissions []string `protobuf:"bytes,4,rep,name=root_permissions,json=rootPermissions,proto3" json:"root_permissions,omitempty"`
+	// One group for each distinct set of permissions the caller holds at rows,
+	// sorted by permission list: compared element by element, with a list
+	// before the longer lists it begins. A row is in at most one group, which
+	// lists all the permissions the caller's grants at the row give together.
+	AnchorGroups  []*AnchorGroup `protobuf:"bytes,5,rep,name=anchor_groups,json=anchorGroups,proto3" json:"anchor_groups,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -777,13 +791,6 @@ func (*CallerAccess) Descriptor() ([]byte, []int) {
 	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{7}
 }
 
-func (x *CallerAccess) GetPermissions() []*PermissionAccess {
-	if x != nil {
-		return x.Permissions
-	}
-	return nil
-}
-
 func (x *CallerAccess) GetSeq() uint64 {
 	if x != nil {
 		return x.Seq
@@ -798,34 +805,47 @@ func (x *CallerAccess) GetSubjects() []string {
 	return nil
 }
 
-// Where a caller holds one permission.
-type PermissionAccess struct {
-	state      protoimpl.MessageState `protogen:"open.v1"`
-	Permission string                 `protobuf:"bytes,1,opt,name=permission,proto3" json:"permission,omitempty"`
-	// Held at the workspace root, which covers every row.
-	Root bool `protobuf:"varint,2,opt,name=root,proto3" json:"root,omitempty"`
-	// The rows the permission is held at, per entity, sorted by entity. A
-	// permission held at a row applies to the row and to every row whose
-	// `access_parent` field points at it.
-	Anchors       []*AnchorRows `protobuf:"bytes,3,rep,name=anchors,proto3" json:"anchors,omitempty"`
+func (x *CallerAccess) GetRootPermissions() []string {
+	if x != nil {
+		return x.RootPermissions
+	}
+	return nil
+}
+
+func (x *CallerAccess) GetAnchorGroups() []*AnchorGroup {
+	if x != nil {
+		return x.AnchorGroups
+	}
+	return nil
+}
+
+// Rows at which the caller holds the same set of permissions.
+type AnchorGroup struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// The permissions held at each row of the group. Sorted and never empty.
+	// It leaves out the permissions in CallerAccess.root_permissions, so a row
+	// whose permissions are all held at the root is in no group.
+	Permissions []string `protobuf:"bytes,1,rep,name=permissions,proto3" json:"permissions,omitempty"`
+	// The rows, per entity, sorted by entity.
+	Anchors       []*AnchorRows `protobuf:"bytes,2,rep,name=anchors,proto3" json:"anchors,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *PermissionAccess) Reset() {
-	*x = PermissionAccess{}
+func (x *AnchorGroup) Reset() {
+	*x = AnchorGroup{}
 	mi := &file_syncplane_v1_service_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *PermissionAccess) String() string {
+func (x *AnchorGroup) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*PermissionAccess) ProtoMessage() {}
+func (*AnchorGroup) ProtoMessage() {}
 
-func (x *PermissionAccess) ProtoReflect() protoreflect.Message {
+func (x *AnchorGroup) ProtoReflect() protoreflect.Message {
 	mi := &file_syncplane_v1_service_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -837,26 +857,19 @@ func (x *PermissionAccess) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use PermissionAccess.ProtoReflect.Descriptor instead.
-func (*PermissionAccess) Descriptor() ([]byte, []int) {
+// Deprecated: Use AnchorGroup.ProtoReflect.Descriptor instead.
+func (*AnchorGroup) Descriptor() ([]byte, []int) {
 	return file_syncplane_v1_service_proto_rawDescGZIP(), []int{8}
 }
 
-func (x *PermissionAccess) GetPermission() string {
+func (x *AnchorGroup) GetPermissions() []string {
 	if x != nil {
-		return x.Permission
+		return x.Permissions
 	}
-	return ""
+	return nil
 }
 
-func (x *PermissionAccess) GetRoot() bool {
-	if x != nil {
-		return x.Root
-	}
-	return false
-}
-
-func (x *PermissionAccess) GetAnchors() []*AnchorRows {
+func (x *AnchorGroup) GetAnchors() []*AnchorRows {
 	if x != nil {
 		return x.Anchors
 	}
@@ -2205,17 +2218,15 @@ const file_syncplane_v1_service_proto_rawDesc = "" +
 	"\bhas_more\x18\x05 \x01(\bR\ahasMore\x12\x10\n" +
 	"\x03seq\x18\x06 \x01(\x04R\x03seq\x12'\n" +
 	"\x0fschema_revision\x18\a \x01(\tR\x0eschemaRevision\x12?\n" +
-	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"~\n" +
-	"\fCallerAccess\x12@\n" +
-	"\vpermissions\x18\x01 \x03(\v2\x1e.syncplane.v1.PermissionAccessR\vpermissions\x12\x10\n" +
+	"\rcaller_access\x18\b \x01(\v2\x1a.syncplane.v1.CallerAccessR\fcallerAccess\"\xba\x01\n" +
+	"\fCallerAccess\x12\x10\n" +
 	"\x03seq\x18\x02 \x01(\x04R\x03seq\x12\x1a\n" +
-	"\bsubjects\x18\x03 \x03(\tR\bsubjects\"z\n" +
-	"\x10PermissionAccess\x12\x1e\n" +
-	"\n" +
-	"permission\x18\x01 \x01(\tR\n" +
-	"permission\x12\x12\n" +
-	"\x04root\x18\x02 \x01(\bR\x04root\x122\n" +
-	"\aanchors\x18\x03 \x03(\v2\x18.syncplane.v1.AnchorRowsR\aanchors\"8\n" +
+	"\bsubjects\x18\x03 \x03(\tR\bsubjects\x12)\n" +
+	"\x10root_permissions\x18\x04 \x03(\tR\x0frootPermissions\x12>\n" +
+	"\ranchor_groups\x18\x05 \x03(\v2\x19.syncplane.v1.AnchorGroupR\fanchorGroupsJ\x04\b\x01\x10\x02R\vpermissions\"c\n" +
+	"\vAnchorGroup\x12 \n" +
+	"\vpermissions\x18\x01 \x03(\tR\vpermissions\x122\n" +
+	"\aanchors\x18\x02 \x03(\v2\x18.syncplane.v1.AnchorRowsR\aanchors\"8\n" +
 	"\n" +
 	"AnchorRows\x12\x16\n" +
 	"\x06entity\x18\x01 \x01(\tR\x06entity\x12\x12\n" +
@@ -2341,7 +2352,7 @@ var file_syncplane_v1_service_proto_goTypes = []any{
 	(*PullRequest)(nil),             // 7: syncplane.v1.PullRequest
 	(*PullResponse)(nil),            // 8: syncplane.v1.PullResponse
 	(*CallerAccess)(nil),            // 9: syncplane.v1.CallerAccess
-	(*PermissionAccess)(nil),        // 10: syncplane.v1.PermissionAccess
+	(*AnchorGroup)(nil),             // 10: syncplane.v1.AnchorGroup
 	(*AnchorRows)(nil),              // 11: syncplane.v1.AnchorRows
 	(*BootstrapRequest)(nil),        // 12: syncplane.v1.BootstrapRequest
 	(*BootstrapResume)(nil),         // 13: syncplane.v1.BootstrapResume
@@ -2376,8 +2387,8 @@ var file_syncplane_v1_service_proto_depIdxs = []int32{
 	26, // 5: syncplane.v1.PullRequest.subscriptions:type_name -> syncplane.v1.Subscription
 	27, // 6: syncplane.v1.PullResponse.patch:type_name -> syncplane.v1.Patch
 	9,  // 7: syncplane.v1.PullResponse.caller_access:type_name -> syncplane.v1.CallerAccess
-	10, // 8: syncplane.v1.CallerAccess.permissions:type_name -> syncplane.v1.PermissionAccess
-	11, // 9: syncplane.v1.PermissionAccess.anchors:type_name -> syncplane.v1.AnchorRows
+	10, // 8: syncplane.v1.CallerAccess.anchor_groups:type_name -> syncplane.v1.AnchorGroup
+	11, // 9: syncplane.v1.AnchorGroup.anchors:type_name -> syncplane.v1.AnchorRows
 	26, // 10: syncplane.v1.BootstrapRequest.subscriptions:type_name -> syncplane.v1.Subscription
 	13, // 11: syncplane.v1.BootstrapRequest.resume:type_name -> syncplane.v1.BootstrapResume
 	22, // 12: syncplane.v1.BootstrapResponse.begin:type_name -> syncplane.v1.BootstrapResponse.Begin

@@ -2018,7 +2018,7 @@ Exported functions and types:
 - `createTestClient(opts: TestClientOptions): Promise<TestClient>`: Returns an instance configured with an in-memory server.
 - `createTestServer(opts?: TestServerOptions): TestServer`: Creates a shared in-memory sync server.
 - `TestClient`: Implements `client`, `db`, `server`, `net` (`offline()`, `online()`, `isOffline`), `clientId`, `rejections`, `sync()`, and `close()`.
-- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` sets the access summary every later bootstrap and pull carries, which `can` and `useCan` answer from; the test server enforces none of it.
+- `TestServer`: Implements `transport()`, `reject(match?, code?, message?)`, `holdPushes()`, `gc(workspace?)`, `revoke(id)`, `restore(id)`, `mutator(name, m)`, `setCallerAccess(access, { workspace? })`, and data inspection helpers (`put`, `del`, `get`, `rows`). `setCallerAccess` takes a `TestCallerAccess`: the caller's `subjects`, and for each permission it holds, `root: true` or the `anchors` rows. It sets the access summary every later bootstrap and pull carries, which `can` and `useCan` answer from; the test server enforces none of it.
 - `Rejection`: Error class thrown inside test mutators to simulate server rejections.
 - `DEFAULT_WORKSPACE`: Constant string `'main'`.
 

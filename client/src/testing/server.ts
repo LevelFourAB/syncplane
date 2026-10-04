@@ -24,7 +24,6 @@ import {
 	type BootstrapRequest,
 	BootstrapResponseSchema,
 	type CallerAccess,
-	CallerAccessSchema,
 	MutationStatus,
 	type PullRequest,
 	type PushRequest,
@@ -41,6 +40,7 @@ import {
 	mergeTextFieldsInto,
 	textSchemaPathOf,
 } from '../mutations.js';
+import { callerAccessOf, type TestCallerAccess } from './access.js';
 
 /** The workspace the kit reads and writes when none is named. */
 export const DEFAULT_WORKSPACE = 'main';
@@ -454,16 +454,13 @@ export class TestServer<const E extends readonly DescMessage[] = readonly DescMe
 	 * });
 	 * ```
 	 */
-	setCallerAccess(
-		access: MessageInitShape<typeof CallerAccessSchema> | undefined,
-		opts?: { workspace?: string },
-	): void {
+	setCallerAccess(access: TestCallerAccess | undefined, opts?: { workspace?: string }): void {
 		const workspace = opts?.workspace ?? DEFAULT_WORKSPACE;
 		if (access === undefined) {
 			this.callerAccess.delete(workspace);
 			return;
 		}
-		this.callerAccess.set(workspace, create(CallerAccessSchema, access));
+		this.callerAccess.set(workspace, callerAccessOf(access));
 		this.ws(workspace).wake();
 	}
 

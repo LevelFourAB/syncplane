@@ -149,6 +149,85 @@ describe('access model on the client', () => {
 		expect(await admin.hasPermission(TaskSchema, 'not-here', 'edit_tasks')).toBe('yes');
 	});
 
+	it('answers for rows that hold different permissions, and at the root besides', async () => {
+		const ws = freshWorkspace();
+		// Mia holds repo_reader at r1, repo_admin at r2, and at r3 repo_reader
+		// herself and repo_writer through a squad. org_member holds some
+		// project permissions at the root, and project_writer adds the rest at
+		// p2.
+		await trusted(ws, [
+			{ entity: 'org_member', value: { id: 'om-mia', userId: 'mia', role: 'org_member' } },
+			{ entity: 'project', value: { id: 'p1', name: 'one' } },
+			{ entity: 'project', value: { id: 'p2', name: 'two' } },
+			{
+				entity: 'project_member',
+				value: { id: 'pm-mia', project: { id: 'p2' }, userId: 'mia', role: 'project_writer' },
+			},
+			{ entity: 'task', value: { id: 't1', project: { id: 'p1' }, title: 'one' } },
+			{ entity: 'task', value: { id: 't2', project: { id: 'p2' }, title: 'two' } },
+			{ entity: 'squad', value: { id: 'design' } },
+			{
+				entity: 'squad_member',
+				value: { id: 'sm-mia', squad: { id: 'design' }, userId: 'mia', role: 'squad_member' },
+			},
+			...[ 'r1', 'r2', 'r3' ].flatMap((r, i) => [
+				{ entity: 'repo', value: { id: r } },
+				{ entity: 'issue', value: { id: `i${i + 1}`, repo: { id: r }, title: r } },
+			]),
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-mia1', repo: { id: 'r1' }, userId: 'mia', role: 'repo_reader' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-mia2', repo: { id: 'r2' }, userId: 'mia', role: 'repo_admin' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-mia3', repo: { id: 'r3' }, userId: 'mia', role: 'repo_reader' },
+			},
+			{
+				entity: 'repo_member',
+				value: { id: 'rm-design', repo: { id: 'r3' }, squad: { id: 'design' }, role: 'repo_writer' },
+			},
+		]);
+		const mia = await synced(clientAs('mia', ws));
+
+		const repoPermissions = [
+			'view_repos',
+			'edit_repos',
+			'view_repo_members',
+			'manage_repo_members',
+			'view_issues',
+			'edit_issues',
+		];
+		const heldAt: Record<string, string[]> = {
+			r1: [ 'view_repos', 'view_repo_members', 'view_issues' ],
+			r2: repoPermissions,
+			r3: [ 'view_repos', 'view_repo_members', 'view_issues', 'edit_issues' ],
+		};
+		for (const [ i, repo ] of [ 'r1', 'r2', 'r3' ].entries()) {
+			for (const permission of repoPermissions) {
+				const want = heldAt[repo]!.includes(permission) ? 'yes' : 'no';
+				expect(await mia.hasPermission(RepoSchema, repo, permission), `${permission} at ${repo}`)
+					.toBe(want);
+				expect(
+					await mia.hasPermission(IssueSchema, `i${i + 1}`, permission),
+					`${permission} below ${repo}`,
+				).toBe(want);
+			}
+		}
+
+		expect(await mia.hasPermission(ProjectSchema, 'p1', 'view_projects')).toBe('yes');
+		expect(await mia.hasPermission(TaskSchema, 't1', 'view_tasks')).toBe('yes');
+		expect(await mia.hasPermission(TaskSchema, 't1', 'edit_tasks')).toBe('no');
+		expect(await mia.hasPermission(ProjectSchema, 'p1', 'view_members')).toBe('no');
+		expect(await mia.hasPermission(TaskSchema, 't2', 'view_tasks')).toBe('yes');
+		expect(await mia.hasPermission(TaskSchema, 't2', 'edit_tasks')).toBe('yes');
+		expect(await mia.hasPermission(ProjectSchema, 'p2', 'view_members')).toBe('yes');
+		expect(await mia.hasPermission(ProjectSchema, 'p2', 'manage_members')).toBe('no');
+	});
+
 	it("follows a change of the caller's grants", async () => {
 		const ws = freshWorkspace();
 		await seed(ws);

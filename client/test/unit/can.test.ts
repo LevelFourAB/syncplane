@@ -53,7 +53,13 @@ import {
 	resequencePending,
 	rollbackRejected,
 } from '../../src/optimistic/rebase.js';
-import { createTestClient, DEFAULT_WORKSPACE, TestServer } from '../../src/testing/index.js';
+import { callerAccessOf } from '../../src/testing/access.js';
+import {
+	createTestClient,
+	DEFAULT_WORKSPACE,
+	type TestCallerAccess,
+	TestServer,
+} from '../../src/testing/index.js';
 
 const WS = 'ws-can';
 
@@ -154,13 +160,13 @@ class KeyReadCountingStore implements KVStore {
 
 async function storeSummary(
 	kv: KVStore,
-	access: MessageInitShape<typeof CallerAccessSchema>,
+	access: TestCallerAccess,
 	ws = WS,
 ): Promise<void> {
 	const tx = await kv.write();
 	await tx.put(
 		metaCallerAccess(ws),
-		toBinary(CallerAccessSchema, create(CallerAccessSchema, access)),
+		toBinary(CallerAccessSchema, callerAccessOf(access)),
 	);
 	await tx.commit();
 }
@@ -387,7 +393,7 @@ const roomEntities = [
  * A test client over the room schema: a post, a draft and a ticket of ann's
  * and of bob's in room r1, and the caller is ann, posting in r1.
  */
-async function roomClient(permissions: MessageInitShape<typeof CallerAccessSchema>['permissions']) {
+async function roomClient(permissions: TestCallerAccess['permissions']) {
 	const t = await createTestClient({ entities: roomEntities });
 	t.server.put(RoomSchema, { id: 'r1' });
 	t.server.put(PostSchema, { id: 'po-ann', room: { id: 'r1' }, authorId: 'ann', body: 'hi' });

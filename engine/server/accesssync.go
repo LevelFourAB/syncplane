@@ -48,9 +48,8 @@ func readAccessOf(model *accessModel, caller *accessCaller, set *accessSet) *syn
 	return ra
 }
 
-// anchorRowsByEntity groups rows by entity, for the deterministic forms a
-// cursor and a client receive: the entities sorted, and each one's keys
-// sorted.
+// anchorRowsByEntity groups rows by entity, for the deterministic form a
+// cursor records: the entities sorted, and each one's keys sorted.
 func anchorRowsByEntity(rows map[anchorRow]struct{}) ([]string, map[string][]string) {
 	keys := map[string][]string{}
 	for at := range rows {
@@ -770,27 +769,74 @@ func appendMissing(list, names []string) []string {
 }
 
 // callerAccessOf renders everything set holds, and the subjects of caller,
-// for the client.
+// for the client: the permissions held at the root, and each anchored row once,
+// in the group of the permissions held there and not at the root.
 func callerAccessOf(caller *accessCaller, set *accessSet) *syncplanev1.CallerAccess {
-	perms := make([]string, 0, len(set.perms))
-	for perm, a := range set.perms {
-		if a.root || len(a.rows) > 0 {
-			perms = append(perms, perm)
-		}
-	}
-	sort.Strings(perms)
 	ca := &syncplanev1.CallerAccess{Subjects: callerSubjects(caller)}
-	for _, perm := range perms {
-		a := set.perms[perm]
-		pa := &syncplanev1.PermissionAccess{Permission: perm, Root: a.root}
-		if !a.root {
-			entities, keys := anchorRowsByEntity(a.rows)
-			for _, entity := range entities {
-				pa.Anchors = append(pa.Anchors, &syncplanev1.AnchorRows{Entity: entity, Keys: keys[entity]})
-			}
+	var anchored []string
+	for perm, a := range set.perms {
+		switch {
+		case a.root:
+			ca.RootPermissions = append(ca.RootPermissions, perm)
+		case len(a.rows) > 0:
+			anchored = append(anchored, perm)
 		}
-		ca.Permissions = append(ca.Permissions, pa)
 	}
+	sort.Strings(ca.RootPermissions)
+	sort.Strings(anchored)
+
+	// A row finds its set of permissions by steps, one per permission in
+	// sorted order, from the set it holds so far to that set plus the
+	// permission. Each step is one map lookup, and each distinct set is built
+	// once, already sorted. Set 0 is the empty set.
+	type step struct{ from, perm int }
+	next := map[step]int{}
+	sets := [][]string{nil}
+	setOf := map[anchorRow]int{}
+	for i, perm := range anchored {
+		for row := range set.perms[perm].rows {
+			from := setOf[row]
+			to, ok := next[step{from, i}]
+			if !ok {
+				to = len(sets)
+				sets = append(sets, append(slices.Clip(sets[from]), perm))
+				next[step{from, i}] = to
+			}
+			setOf[row] = to
+		}
+	}
+	rows := make([][]anchorRow, len(sets))
+	for row, s := range setOf {
+		rows[s] = append(rows[s], row)
+	}
+	for s, members := range rows {
+		if len(members) == 0 {
+			continue
+		}
+		slices.SortFunc(members, func(a, b anchorRow) int {
+			if c := strings.Compare(a.entity, b.entity); c != 0 {
+				return c
+			}
+			return strings.Compare(a.key, b.key)
+		})
+		g := &syncplanev1.AnchorGroup{Permissions: sets[s]}
+		for start := 0; start < len(members); {
+			end := start + 1
+			for end < len(members) && members[end].entity == members[start].entity {
+				end++
+			}
+			keys := make([]string, end-start)
+			for i, row := range members[start:end] {
+				keys[i] = row.key
+			}
+			g.Anchors = append(g.Anchors, &syncplanev1.AnchorRows{Entity: members[start].entity, Keys: keys})
+			start = end
+		}
+		ca.AnchorGroups = append(ca.AnchorGroups, g)
+	}
+	slices.SortFunc(ca.AnchorGroups, func(a, b *syncplanev1.AnchorGroup) int {
+		return slices.Compare(a.Permissions, b.Permissions)
+	})
 	return ca
 }
 

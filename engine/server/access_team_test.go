@@ -316,14 +316,7 @@ var _ = Describe("Access model teams", func() {
 		It("sends the anchors a squad's grant gives in the CallerAccess summary", func() {
 			r := newAccessReplica(f, "dave")
 			resp := r.pullOnce(0)
-			held := map[string][]string{}
-			for _, p := range resp.GetCallerAccess().GetPermissions() {
-				for _, a := range p.GetAnchors() {
-					for _, k := range a.GetKeys() {
-						held[p.GetPermission()] = append(held[p.GetPermission()], a.GetEntity()+"/"+k)
-					}
-				}
-			}
+			held := heldAt(resp.GetCallerAccess())
 			Expect(held).To(HaveKeyWithValue("edit_issues", []string{"repo/r1"}))
 			Expect(held).To(HaveKeyWithValue("view_issues", ConsistOf("repo/r1", "repo/r3")))
 		})

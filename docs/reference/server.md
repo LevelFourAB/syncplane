@@ -564,7 +564,7 @@ A cursor records what its caller could read: a hash in the cursor, and the full 
 
 Without a cursor-state store, every change of a caller's grants resets that caller's clients. So does an entity that joins or leaves the access model or changes who its read rules admit or its access parent.
 
-Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from.
+Every response that changes what the caller holds carries a `CallerAccess` summary (`PullResponse.caller_access`, `BootstrapResponse.Begin.caller_access`), which the TypeScript client stores and answers `can()` from. It lists the permissions held at the workspace root, and each anchor row once, in a group with the other rows that hold the same permissions. Its size is proportional to the number of anchor rows, plus one list of permissions for each distinct set.
 
 ## Rooms
 

@@ -121,6 +121,28 @@ func (f *accessFixture) plant(entity, key string, msg proto.Message) {
 
 func project(id string) *accessv1.Project { return &accessv1.Project{Id: id} }
 
+// heldAt flattens ca to the rows each permission is held at, as sorted
+// "entity/key" strings, with "*" alone for a permission held at the root.
+func heldAt(ca *syncplanev1.CallerAccess) map[string][]string {
+	out := map[string][]string{}
+	for _, perm := range ca.GetRootPermissions() {
+		out[perm] = []string{"*"}
+	}
+	for _, g := range ca.GetAnchorGroups() {
+		for _, perm := range g.GetPermissions() {
+			for _, a := range g.GetAnchors() {
+				for _, k := range a.GetKeys() {
+					out[perm] = append(out[perm], a.GetEntity()+"/"+k)
+				}
+			}
+		}
+	}
+	for _, rows := range out {
+		sort.Strings(rows)
+	}
+	return out
+}
+
 // seedOrg writes the org every access spec starts from:
 //
 //   - admin and member hold org_admin and org_member at the root;

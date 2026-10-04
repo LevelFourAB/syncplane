@@ -301,26 +301,48 @@ var _ = Describe("Access model sync", func() {
 	})
 
 	Context("the CallerAccess summary", func() {
-		anchors := func(ca *syncplanev1.CallerAccess) map[string][]string {
-			out := map[string][]string{}
-			for _, p := range ca.GetPermissions() {
-				if p.GetRoot() {
-					out[p.GetPermission()] = []string{"*"}
-					continue
-				}
-				for _, a := range p.GetAnchors() {
-					for _, k := range a.GetKeys() {
-						out[p.GetPermission()] = append(out[p.GetPermission()], a.GetEntity()+"/"+k)
-					}
-				}
+		It("sends each row once, in the group of the permissions held there and not at the root", func() {
+			f.seed(
+				&accessv1.Project{Id: "p3", Name: "three"},
+				&accessv1.OrgMember{Id: "om-mia", UserId: "mia", Role: "org_member"},
+				&accessv1.ProjectMember{Id: "pm-mia1", Project: project("p1"), UserId: "mia", Role: "project_reader"},
+				&accessv1.ProjectMember{Id: "pm-mia2", Project: project("p2"), UserId: "mia", Role: "project_editor"},
+				&accessv1.ProjectMember{Id: "pm-mia2b", Project: project("p2"), UserId: "mia", Role: "project_admin"},
+				&accessv1.ProjectMember{Id: "pm-mia3", Project: project("p3"), UserId: "mia", Role: "project_writer"},
+				&accessv1.ProjectMember{Id: "pm-admin", Project: project("p1"), UserId: "admin", Role: "project_reader"},
+			)
+			got := newAccessReplica(f, "mia").pullOnce(0).GetCallerAccess()
+			want := &syncplanev1.CallerAccess{
+				Seq:             got.GetSeq(),
+				Subjects:        []string{"mia"},
+				RootPermissions: []string{"view_labels", "view_projects", "view_tasks"},
+				AnchorGroups: []*syncplanev1.AnchorGroup{
+					{
+						Permissions: []string{"edit_tasks", "manage_members", "view_members"},
+						Anchors:     []*syncplanev1.AnchorRows{{Entity: "project", Keys: []string{"p2"}}},
+					},
+					{
+						Permissions: []string{"edit_tasks", "view_members"},
+						Anchors:     []*syncplanev1.AnchorRows{{Entity: "project", Keys: []string{"p3"}}},
+					},
+					{
+						Permissions: []string{"view_members"},
+						Anchors:     []*syncplanev1.AnchorRows{{Entity: "project", Keys: []string{"p1"}}},
+					},
+				},
 			}
-			return out
-		}
+			Expect(proto.Equal(got, want)).To(BeTrue(), "%v", got)
+
+			// org_admin at the root holds everything project_reader gives.
+			admin := newAccessReplica(f, "admin").pullOnce(0).GetCallerAccess()
+			Expect(admin.GetRootPermissions()).To(ContainElement("view_members"))
+			Expect(admin.GetAnchorGroups()).To(BeEmpty())
+		})
 
 		It("is sent on the first pull and again only when it changes", func() {
 			guest := newAccessReplica(f, "guest")
 			first := guest.pullOnce(0)
-			Expect(anchors(first.GetCallerAccess())).To(Equal(map[string][]string{
+			Expect(heldAt(first.GetCallerAccess())).To(Equal(map[string][]string{
 				"view_members": {"project/p1"}, "view_projects": {"project/p1"}, "view_tasks": {"project/p1"},
 			}))
 			Expect(first.GetCallerAccess().GetSeq()).To(BeNumerically(">", 0))
@@ -337,7 +359,7 @@ var _ = Describe("Access model sync", func() {
 					break
 				}
 			}
-			Expect(anchors(changed)).To(HaveKeyWithValue("view_tasks", []string{"*"}))
+			Expect(heldAt(changed)).To(HaveKeyWithValue("view_tasks", []string{"*"}))
 		})
 
 		It("rides on the Begin frame of a bootstrap", func() {
@@ -347,7 +369,7 @@ var _ = Describe("Access model sync", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(stream.Receive()).To(BeTrue())
 			begin := stream.Msg().GetBegin()
-			Expect(anchors(begin.GetCallerAccess())).To(HaveKeyWithValue("edit_tasks", []string{"project/p2"}))
+			Expect(heldAt(begin.GetCallerAccess())).To(HaveKeyWithValue("edit_tasks", []string{"project/p2"}))
 			for stream.Receive() {
 			}
 			Expect(stream.Err()).NotTo(HaveOccurred())
@@ -379,7 +401,7 @@ var _ = Describe("Access model sync", func() {
 				Expect(stream.Msg().GetDropped()).To(BeNil(), "the stream dropped the scope")
 				changed = stream.Msg().GetPage().GetCallerAccess()
 			}
-			Expect(anchors(changed)).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
+			Expect(heldAt(changed)).To(HaveKeyWithValue("manage_members", []string{"project/p2"}))
 		})
 	})
 

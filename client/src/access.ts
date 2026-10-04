@@ -57,29 +57,27 @@ export const ACCESS_TOUCH_ENTITY = '#access';
 
 /** A CallerAccess indexed for lookups. */
 export class AccessSummary {
-	private readonly roots = new Set<string>();
-	/** The keys of the rows each permission is held at, by entity. */
-	private readonly anchors = new Map<string, Map<string, Set<string>>>();
+	private readonly roots: ReadonlySet<string>;
+	/** The permissions of each anchor group, by its index in the message. */
+	private readonly groups: readonly ReadonlySet<string>[];
+	/** The index of the anchor group of each row, by entity and key. */
+	private readonly rows = new Map<string, Map<string, number>>();
 	/** The caller's subjects, the primary subject first. */
 	readonly subjects: readonly string[];
 
 	constructor(access: CallerAccess) {
 		this.subjects = access.subjects;
-		for (const p of access.permissions) {
-			if (p.root) {
-				this.roots.add(p.permission);
-				continue;
+		this.roots = new Set(access.rootPermissions);
+		this.groups = access.anchorGroups.map((g) => new Set(g.permissions));
+		// Nested maps and not one map of entity and key joined: a joined string
+		// costs an allocation for each key here and for each lookup in holds,
+		// and the keys the decode made can go in as they are.
+		for (let i = 0; i < access.anchorGroups.length; i++) {
+			for (const a of access.anchorGroups[i]!.anchors) {
+				let keys = this.rows.get(a.entity);
+				if (keys === undefined) this.rows.set(a.entity, keys = new Map());
+				for (const key of a.keys) keys.set(key, i);
 			}
-			// Nested maps and not one set of entity and key joined: a joined
-			// string costs an allocation for each key here and for each lookup
-			// in holds, and the keys the decode made can go in as they are.
-			const byEntity = new Map<string, Set<string>>();
-			for (const a of p.anchors) {
-				const keys = byEntity.get(a.entity);
-				if (keys === undefined) byEntity.set(a.entity, new Set(a.keys));
-				else for (const key of a.keys) keys.add(key);
-			}
-			this.anchors.set(p.permission, byEntity);
 		}
 	}
 
@@ -93,8 +91,9 @@ export class AccessSummary {
 	 * itself, or at the root.
 	 */
 	holds(permission: string, entity: string, key: string): boolean {
-		return this.roots.has(permission)
-			|| (this.anchors.get(permission)?.get(entity)?.has(key) ?? false);
+		if (this.roots.has(permission)) return true;
+		const group = this.rows.get(entity)?.get(key);
+		return group !== undefined && this.groups[group]!.has(permission);
 	}
 }
 

@@ -94,7 +94,22 @@ func openAccessBenchStore(b *testing.B) storage.Adapter {
 type accessBenchCase struct {
 	repos int    // the repos the caller holds role at
 	teams int    // 0 gives the caller one grant of its own per repo
-	role  string // a role of repo_member; repo_writer when empty
+	role  string // a role of repo_member, or twoRoles; repo_writer when empty
+}
+
+// twoRoles is the accessBenchCase role that gives the caller repo_reader at
+// the even repos and repo_admin at the odd ones.
+const twoRoles = "repo_reader+repo_admin"
+
+// roleAt is the role c gives the caller at repo r.
+func (c accessBenchCase) roleAt(r int) string {
+	if c.role != twoRoles {
+		return c.role
+	}
+	if r%2 == 0 {
+		return "repo_reader"
+	}
+	return "repo_admin"
 }
 
 func (c accessBenchCase) name() string {
@@ -174,7 +189,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 			for r := range c.repos {
 				if err := tx.Put(&accessv1.RepoMember{
 					Id: fmt.Sprintf("rm-me-%d", r), Repo: &accessv1.Repo{Id: repoKey(r)},
-					Member: &accessv1.RepoMember_UserId{UserId: "me"}, Role: c.role,
+					Member: &accessv1.RepoMember_UserId{UserId: "me"}, Role: c.roleAt(r),
 				}); err != nil {
 					return err
 				}
@@ -196,7 +211,7 @@ func newAccessBench(b *testing.B, c accessBenchCase) *accessBench {
 			sq := fmt.Sprintf("mine-%d", r%c.teams)
 			if err := tx.Put(&accessv1.RepoMember{
 				Id: fmt.Sprintf("rm-%s-%d", sq, r), Repo: &accessv1.Repo{Id: repoKey(r)},
-				Member: &accessv1.RepoMember_Squad{Squad: &accessv1.Squad{Id: sq}}, Role: c.role,
+				Member: &accessv1.RepoMember_Squad{Squad: &accessv1.Squad{Id: sq}}, Role: c.roleAt(r),
 			}); err != nil {
 				return err
 			}
@@ -345,10 +360,11 @@ func BenchmarkQueryAccess(b *testing.B) {
 
 // BenchmarkRenderAccess measures rendering a resolved set as a cursor records
 // it and as a client receives it, hashes included, which every pull and every
-// Subscribe drain pays. The roles grant 3, 4 and 6 permissions at each repo.
+// Subscribe drain pays. The roles grant 3, 4 and 6 permissions at each repo,
+// and twoRoles 3 at half the repos and 6 at the other half.
 func BenchmarkRenderAccess(b *testing.B) {
 	for _, repos := range accessScales {
-		for _, role := range []string{"repo_reader", "repo_writer", "repo_admin"} {
+		for _, role := range []string{"repo_reader", "repo_writer", "repo_admin", twoRoles} {
 			c := accessBenchCase{repos: repos, role: role}
 			b.Run(fmt.Sprintf("repos=%d/%s", repos, role), func(b *testing.B) {
 				ab := newAccessBench(b, c)

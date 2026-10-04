@@ -50,7 +50,7 @@
 
 import 'fake-indexeddb/auto';
 
-import { create, toBinary } from '@bufbuild/protobuf';
+import { toBinary } from '@bufbuild/protobuf';
 import { bench, describe } from 'vitest';
 
 import { SyncClient } from '../../src/client.js';
@@ -73,6 +73,7 @@ import type {
 	KVStore,
 	KVWrite,
 } from '../../src/kv/store.js';
+import { callerAccessOf } from '../../src/testing/access.js';
 
 const WS = 'ws';
 const SIZES = [ 50, 1000, 5000 ];
@@ -94,17 +95,12 @@ function rowKey(r: number): string {
 /** Encodes a CallerAccess that holds each of `permissions` at `rows` rows of `entity`. */
 function accessBytes(entity: string, permissions: readonly string[], rows: number): Uint8Array {
 	const keys = Array.from({ length: rows }, (_, r) => rowKey(r)).sort();
-	return toBinary(
-		CallerAccessSchema,
-		create(CallerAccessSchema, {
-			subjects: [ 'me' ],
-			seq: 1n,
-			permissions: permissions.map((permission) => ({
-				permission,
-				anchors: [ { entity, keys } ],
-			})),
-		}),
-	);
+	const access = callerAccessOf({
+		subjects: [ 'me' ],
+		permissions: permissions.map((permission) => ({ permission, anchors: [ { entity, keys } ] })),
+	});
+	access.seq = 1n;
+	return toBinary(CallerAccessSchema, access);
 }
 
 /** The size of the byte arrays and strings in `value`. */

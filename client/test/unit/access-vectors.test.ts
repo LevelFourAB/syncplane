@@ -4,7 +4,6 @@
 // summary the engine sent. Where both can decide they must agree; only the
 // client can lack an input, and answers 'unknown' for it.
 
-import { create } from '@bufbuild/protobuf';
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -12,7 +11,7 @@ import { fileURLToPath } from 'node:url';
 import { describe, expect, it } from 'vitest';
 
 import { AccessSummary, type CanAnswer, canAt } from '../../src/access.js';
-import { CallerAccessSchema } from '../../src/gen/syncplane/v1/service_pb.js';
+import { callerAccessOf } from '../../src/testing/access.js';
 
 interface AccessCase {
 	name: string;
@@ -32,7 +31,7 @@ const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { cases: Acces
 
 function summaryOf(access: AccessCase['access']): AccessSummary | undefined {
 	if (access === null) return undefined;
-	return new AccessSummary(create(CallerAccessSchema, {
+	return new AccessSummary(callerAccessOf({
 		permissions: Object.entries(access).map(([ permission, p ]) => ({
 			permission,
 			root: p.root ?? false,
