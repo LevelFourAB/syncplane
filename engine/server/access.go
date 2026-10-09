@@ -70,9 +70,9 @@ var accessOpNames = []struct {
 // accessRule is one rule of an entity's access option.
 type accessRule struct {
 	ops accessOp
-	// permission is the permission the rule needs, "" for a rule that admits
-	// every admitted caller.
-	permission string
+	// requires are the permissions the rule needs, sorted. Empty for a rule
+	// that admits every admitted caller.
+	requires []string
 	// subject is the field that must hold one of the caller's subjects, nil
 	// when the rule sets no subject check.
 	subject protoreflect.FieldDescriptor
@@ -89,7 +89,7 @@ type accessRule struct {
 // admitted reports whether the rule admits every caller admitted to the
 // workspace.
 func (r accessRule) admitted() bool {
-	return r.permission == ""
+	return len(r.requires) == 0
 }
 
 // names reports whether the rule admits op, one of opRead, opCreate, opUpdate
@@ -102,6 +102,20 @@ func (r accessRule) names(op accessOp) bool {
 // sets a subject check or a when check.
 func (r accessRule) checksRow() bool {
 	return r.subject != nil || r.when != nil
+}
+
+// joint reports whether the rule needs more than one permission.
+func (r accessRule) joint() bool {
+	return len(r.requires) > 1
+}
+
+// source renders who the rule admits: the permissions it needs joined by
+// "+", or "admitted" for a rule that admits every admitted caller.
+func (r accessRule) source() string {
+	if r.admitted() {
+		return "admitted"
+	}
+	return strings.Join(r.requires, "+")
 }
 
 // rowHolds reports whether row passes the rule's checks on the row: the
@@ -150,7 +164,7 @@ func (r accessRule) spec() string {
 	}
 	source := "admitted"
 	if !r.admitted() {
-		source = "permission=" + r.permission
+		source = "requires=" + r.source()
 	}
 	spec := strings.Join(ops, ",") + ":" + source
 	if r.subject != nil {
@@ -204,8 +218,8 @@ type readers struct {
 	perms []string
 	all   bool
 	// checked are the entity's read rules with a subject check or a when
-	// check, sorted by spec. Empty when all is set, since all admits every row
-	// they could.
+	// check, or that need more than one permission, sorted by spec. Empty when
+	// all is set, since all admits every row they could.
 	checked []accessRule
 }
 
@@ -225,21 +239,59 @@ func (r readers) key() string {
 
 // loose returns r with every check on the row dropped: who may read some row
 // of the entity where a row sits. It is a superset of r, for the checks that
-// cannot read each row.
+// cannot read each row. A rule that needs more than one permission stays in
+// checked without its checks on the row, since where it holds depends on
+// where the row sits, unless one of perms admits every caller it admits.
 func (r readers) loose() readers {
 	if r.all || len(r.checked) == 0 {
 		return readers{perms: r.perms, all: r.all}
 	}
 	out := readers{perms: slices.Clone(r.perms)}
+	var joint []accessRule
 	for _, o := range r.checked {
-		if o.admitted() {
+		switch {
+		case o.admitted():
 			return readers{all: true}
-		}
-		if !slices.Contains(out.perms, o.permission) {
-			out.perms = append(out.perms, o.permission)
+		case o.joint():
+			joint = append(joint, accessRule{ops: opRead, requires: o.requires})
+		case !slices.Contains(out.perms, o.requires[0]):
+			out.perms = append(out.perms, o.requires[0])
 		}
 	}
 	sort.Strings(out.perms)
+	for _, o := range joint {
+		if slices.ContainsFunc(o.requires, func(p string) bool { return slices.Contains(out.perms, p) }) ||
+			slices.ContainsFunc(out.checked, func(c accessRule) bool { return c.source() == o.source() }) {
+			continue
+		}
+		out.checked = append(out.checked, o)
+	}
+	sort.Slice(out.checked, func(i, j int) bool { return out.checked[i].spec() < out.checked[j].spec() })
+	return out
+}
+
+// sources renders each way r admits a caller, for an error: each of perms,
+// then the permissions of each rule in checked joined by "+".
+func (r readers) sources() []string {
+	out := slices.Clone(r.perms)
+	for _, o := range r.checked {
+		out = append(out, o.source())
+	}
+	return out
+}
+
+// named returns every permission r names, sorted and without repeats: those
+// of perms and those the rules in checked need.
+func (r readers) named() []string {
+	out := slices.Clone(r.perms)
+	for _, o := range r.checked {
+		for _, p := range o.requires {
+			if !slices.Contains(out, p) {
+				out = append(out, p)
+			}
+		}
+	}
+	sort.Strings(out)
 	return out
 }
 
@@ -453,12 +505,12 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		}
 		switch {
 		case !rule.names(opRead):
-		case rule.checksRow():
+		case rule.checksRow() || rule.joint():
 			a.read.checked = append(a.read.checked, rule)
 		case rule.admitted():
 			a.read.all = true
 		default:
-			reads[rule.permission] = true
+			reads[rule.requires[0]] = true
 		}
 	}
 	if a.read.all {
@@ -493,21 +545,26 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 	if rule.ops == 0 {
 		return accessRule{}, fmt.Errorf("%s names no operation; set read, create, update, delete or write", where)
 	}
-	switch src := r.GetSource().(type) {
-	case *syncplanev1.AccessRule_Permission:
-		if err := naming.ValidatePermissionName(src.Permission); err != nil {
-			return accessRule{}, fmt.Errorf("%s: %w", where, err)
+	switch {
+	case len(r.GetRequires()) > 0 && r.GetAdmitted() != nil:
+		return accessRule{}, fmt.Errorf("%s sets both requires and admitted; set exactly one", where)
+	case r.GetAdmitted() != nil:
+		if err := refuseUnknownOptionFields(where+" admitted", r.GetAdmitted()); err != nil {
+			return accessRule{}, err
 		}
-		rule.permission = src.Permission
-	case *syncplanev1.AccessRule_Admitted:
-		if src.Admitted != nil {
-			if err := refuseUnknownOptionFields(where+" admitted", src.Admitted); err != nil {
-				return accessRule{}, err
-			}
-		}
-	default:
-		return accessRule{}, fmt.Errorf("%s names no source; set permission or admitted", where)
+	case len(r.GetRequires()) == 0:
+		return accessRule{}, fmt.Errorf("%s names no source; set requires or admitted", where)
 	}
+	for _, p := range r.GetRequires() {
+		if err := naming.ValidatePermissionName(p); err != nil {
+			return accessRule{}, fmt.Errorf("%s requires: %w", where, err)
+		}
+		if slices.Contains(rule.requires, p) {
+			return accessRule{}, fmt.Errorf("%s requires %q twice", where, p)
+		}
+		rule.requires = append(rule.requires, p)
+	}
+	sort.Strings(rule.requires)
 	if name := r.GetSubject(); name != "" {
 		fd, err := stringField(desc, name)
 		if err != nil {
@@ -1290,8 +1347,10 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 			m.children[target.name] = append(m.children[target.name], e)
 		}
 		for _, r := range a.rules {
-			if p := r.permission; p != "" && !slices.Contains(used[p], name) {
-				used[p] = append(used[p], name)
+			for _, p := range r.requires {
+				if !slices.Contains(used[p], name) {
+					used[p] = append(used[p], name)
+				}
 			}
 		}
 		if info.members != "" {
@@ -1393,7 +1452,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 		}
 	}
 	for _, name := range names {
-		for _, p := range c.entities[name].access.read.loose().perms {
+		for _, p := range c.entities[name].access.read.loose().named() {
 			if !slices.Contains(m.readPerms, p) {
 				m.readPerms = append(m.readPerms, p)
 			}
@@ -1402,6 +1461,7 @@ func compileAccessModel(c *catalog, mutators map[string]*mutatorInfo, maxDepth i
 	sort.Strings(m.readPerms)
 	for _, name := range names {
 		m.warnings = append(m.warnings, m.undecidingRules(c.entities[name])...)
+		m.warnings = append(m.warnings, m.impliedPermissions(c.entities[name])...)
 	}
 	// One permission on a row and on the rows below it is the common case: a
 	// comment is read with its task. Two entities that are not on one chain
@@ -1503,13 +1563,20 @@ func (m *accessModel) undecidingRules(info *entityInfo) []string {
 }
 
 // covers reports whether rule a admits every caller and row that rule b
-// admits, for an operation both name: a's source holds wherever b's does, and
-// each check a sets is one b sets as well, or a looser one.
+// admits, for an operation both name: each permission a needs is held
+// wherever b's permissions are, and each check a sets is one b sets as well,
+// or a looser one.
 func (m *accessModel) covers(a, b accessRule) bool {
 	switch {
 	case a.admitted():
-	case b.admitted() || !m.implies(b.permission, a.permission):
+	case b.admitted():
 		return false
+	default:
+		for _, q := range a.requires {
+			if !slices.ContainsFunc(b.requires, func(p string) bool { return m.implies(p, q) }) {
+				return false
+			}
+		}
 	}
 	if a.subject != nil && a.subject != b.subject {
 		return false
@@ -1521,6 +1588,34 @@ func (m *accessModel) covers(a, b accessRule) bool {
 		return false
 	}
 	return true
+}
+
+// impliedPermissions returns a warning for each rule of info that needs two
+// permissions where every role that grants one also grants the other. The
+// rule admits the callers it would admit without the implied one, so it reads
+// as stricter than it is.
+func (m *accessModel) impliedPermissions(info *entityInfo) []string {
+	var out []string
+	for i, r := range info.access.rules {
+		perms := r.requires
+		for _, q := range perms {
+			p := ""
+			for _, other := range perms {
+				if other != q && m.implies(other, q) {
+					p = other
+					break
+				}
+			}
+			if p != "" {
+				out = append(out, fmt.Sprintf(
+					"entity %q: access allow[%d] needs %q and %q together, but every role that grants %q grants %q as well, "+
+						"so the rule admits the same callers as one that needs %q alone",
+					info.name, i, p, q, p, q, p))
+				break
+			}
+		}
+	}
+	return out
 }
 
 // fieldsWithin reports whether every unit r's fields check allows is in
@@ -1607,7 +1702,7 @@ func (m *accessModel) entitiesBelow(anchor string) []string {
 }
 
 // readersBelow returns who may read some row of each entity whose rows can
-// sit below rows of the named entity, with subject checks dropped (see
+// sit below rows of the named entity, with checks on the row dropped (see
 // readers.loose), sorted by key and without repeats.
 func (m *accessModel) readersBelow(name string) []readers {
 	var out []readers

@@ -361,21 +361,49 @@ func movedForCaller(
 			continue // the entity left the model, which a change of policy resets
 		}
 		for _, r := range model.readersBelow(row.entity) {
-			before, err := was.holdsAt(wasSet.readAnchors(r), row)
+			changed, err := readsChange(was, wasSet, is, isSet, r, row)
 			if err != nil {
 				return nil, err
 			}
-			after, err := is.holdsAt(isSet.readAnchors(r), row)
-			if err != nil {
-				return nil, err
-			}
-			if before != after {
+			if changed {
 				out = append(out, row)
 				break
 			}
 		}
 	}
 	return out, nil
+}
+
+// readsChange reports whether the rows of an entity read by r, a
+// readers.loose result, that sit below row can be read on one side and not on
+// the other: was and wasSet read the chains on one side, is and isSet on the
+// other. A rule in r.checked needs its permissions together, which can each
+// change on their own, so it is compared apart from r.perms.
+func readsChange(was *accessChains, wasSet *accessSet, is *accessChains, isSet *accessSet, r readers, row anchorRow) (bool, error) {
+	before, err := was.holdsAt(wasSet.readAnchors(r), row)
+	if err != nil {
+		return false, err
+	}
+	after, err := is.holdsAt(isSet.readAnchors(r), row)
+	if err != nil || before != after {
+		return before != after, err
+	}
+	if before {
+		// One of r.perms admits every row on both sides.
+		return false, nil
+	}
+	for _, o := range r.checked {
+		perms := o.requires
+		before, err := was.holdsAllAt(wasSet.anchorsOf(perms), row)
+		if err != nil {
+			return false, err
+		}
+		after, err := is.holdsAllAt(isSet.anchorsOf(perms), row)
+		if err != nil || before != after {
+			return before != after, err
+		}
+	}
+	return false, nil
 }
 
 // accessUnchanged reports whether cur was issued under the access model and
@@ -442,7 +470,7 @@ func sameAnchors(x, y *permAnchors) bool {
 }
 
 // readAccessUnchanged reports whether the two sides of a resync read entity
-// under the same anchors, for every permission its read rules name. The
+// under the same anchors, for every permission its read rules need. The
 // subjects a subject check compares with are the same on both sides: a
 // cursor recorded for other subjects cannot resync. A when check reads only
 // the row, so it decides the same on both sides.
@@ -459,8 +487,10 @@ func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 		return false
 	}
 	for _, o := range r.checked {
-		if !o.admitted() && !sameAnchors(oldEm.access.perms[o.permission], newEm.access.perms[o.permission]) {
-			return false
+		for _, p := range o.requires {
+			if !sameAnchors(oldEm.access.perms[p], newEm.access.perms[p]) {
+				return false
+			}
 		}
 	}
 	return true
@@ -528,19 +558,23 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	}
 	changed := map[anchorRow]struct{}{}
 	addChanged(changed, o, n)
-	// A read rule with a check on the row reads the rows below its own
-	// permission's anchors that pass the check. One whose permission moved to
-	// or from the root can show or hide every such row, wherever it sits: the
-	// rows that name the caller for a subject check, and any row for a rule
-	// with only a when check, which no index finds.
+	// A read rule in checked reads the rows below the anchors of each of its
+	// own permissions that pass its checks. One with a permission that moved
+	// to or from the root can show or hide every such row, wherever it sits:
+	// the rows that name the caller for a subject check, and any row
+	// otherwise, which no index finds.
 	var named []string
 	for _, rule := range a.read.checked {
-		if rule.admitted() {
-			continue // held at the root on both sides
-		}
-		ro, rn := oldEm.access.perms[rule.permission], newEm.access.perms[rule.permission]
-		if (ro != nil && ro.root) == (rn != nil && rn.root) {
+		rooted := false
+		for _, p := range rule.requires {
+			ro, rn := oldEm.access.perms[p], newEm.access.perms[p]
+			if (ro != nil && ro.root) != (rn != nil && rn.root) {
+				rooted = true
+				continue
+			}
 			addChanged(changed, ro, rn)
+		}
+		if !rooted {
 			continue
 		}
 		if rule.subject == nil {

@@ -309,6 +309,16 @@ func (s *accessSet) readAnchors(r readers) *permAnchors {
 	return union
 }
 
+// anchorsOf returns where the set holds each of perms, in the order perms
+// names them: nil for a permission it holds nowhere.
+func (s *accessSet) anchorsOf(perms []string) []*permAnchors {
+	out := make([]*permAnchors, len(perms))
+	for i, p := range perms {
+		out[i] = s.perms[p]
+	}
+	return out
+}
+
 func (a *permAnchors) holds(entity, key string) bool {
 	if a == nil {
 		return false
@@ -604,10 +614,11 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 
 // modelReadFilter returns the filter the access model puts on reads of info
 // for the bound caller, or nil when the model hides no row of it: the entity
-// is outside the model, or a read rule that checks nothing on the row admits
-// the caller at the root. A row is readable when the caller holds the
-// permission of one of the read rules at the row or at a row up its parent
-// chain, and the row passes that rule's subject and when checks.
+// is outside the model, or a read rule that checks nothing on the row and
+// needs one permission admits the caller at the root. A row is readable when
+// the caller holds every permission of one of the read rules at the row or at
+// a row up its parent chain, and the row passes that rule's subject and when
+// checks.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
 	if a == nil {
@@ -637,7 +648,7 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 			if !o.rule.rowHolds(subjects, r) {
 				continue
 			}
-			if ok, err := chains.holds(o.anchors, info, key, r); err != nil || ok {
+			if ok, err := chains.holdsAll(o.anchors, info, key, r); err != nil || ok {
 				return ok, err
 			}
 		}
@@ -645,27 +656,37 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	}
 }
 
-// checkedRead is a read rule with a subject check or a when check, and where
-// the caller holds its source: the workspace root for an admitted rule.
+// checkedRead is a read rule in readers.checked, and where the caller holds
+// each permission it needs: one entry, the workspace root, for an admitted
+// rule.
 type checkedRead struct {
 	rule    accessRule
-	anchors *permAnchors
+	anchors []*permAnchors
 }
 
-// checkedReadsOf returns the read rules of r with a subject check or a when
-// check that can admit caller under set: the caller has a subject when the
-// rule checks one, and holds the rule's source somewhere.
+// checkedReadsOf returns the read rules in r.checked that can admit caller
+// under set: the caller has a subject when the rule checks one, and holds
+// each permission the rule needs somewhere.
 func checkedReadsOf(r readers, caller *accessCaller, set *accessSet) []checkedRead {
 	var out []checkedRead
 	for _, rule := range r.checked {
 		if rule.subject != nil && len(caller.subjects) == 0 {
 			continue
 		}
-		anchors := rootAnchors
-		if !rule.admitted() {
-			anchors = set.perms[rule.permission]
+		if rule.admitted() {
+			out = append(out, checkedRead{rule: rule, anchors: []*permAnchors{rootAnchors}})
+			continue
 		}
-		if anchors != nil && (anchors.root || len(anchors.rows) > 0) {
+		var anchors []*permAnchors
+		for _, p := range rule.requires {
+			a := set.perms[p]
+			if a == nil || (!a.root && len(a.rows) == 0) {
+				anchors = nil
+				break
+			}
+			anchors = append(anchors, a)
+		}
+		if anchors != nil {
 			out = append(out, checkedRead{rule: rule, anchors: anchors})
 		}
 	}
@@ -787,10 +808,11 @@ func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCa
 // checkedCandidates returns, in key order, a superset of the keys of the rows
 // of info that the read rule o admits the bound caller to: the rows whose
 // subject field names one of the caller's subjects when the rule has a
-// subject check and the field's index is ready, and the rows below the rule's
-// anchors otherwise. ok is false when neither can be read within
+// subject check and the field's index is ready, and otherwise the rows below
+// the anchors of every permission the rule needs that the caller does not
+// hold at the root. ok is false when neither can be read within
 // maxCandidates keys, which is always the case for a rule without a subject
-// check that the caller holds at the root.
+// check whose permissions the caller holds at the root.
 func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o checkedRead, maxCandidates int) ([]string, bool, error) {
 	if o.rule.subject != nil {
 		keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
@@ -798,10 +820,46 @@ func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o ch
 			return keys, ok, err
 		}
 	}
-	if o.anchors.root {
-		return nil, false, nil
+	var keys []string
+	found := false
+	for _, a := range o.anchors {
+		if a.root {
+			continue
+		}
+		// The rows below the anchors of one permission are a superset on their
+		// own, so a walk that overflows costs precision only while another fits.
+		below, ok, err := rowsBelow(tx, e.caller.model, info, anchorRowsOf(a), maxCandidates, e.srv.limits)
+		if err != nil {
+			return nil, false, err
+		}
+		switch {
+		case !ok:
+		case found:
+			keys = intersectKeys(keys, below)
+		default:
+			keys, found = below, true
+		}
 	}
-	return rowsBelow(tx, e.caller.model, info, anchorRowsOf(o.anchors), maxCandidates, e.srv.limits)
+	return keys, found, nil
+}
+
+// intersectKeys returns the keys that both a and b hold. Both are in key
+// order, and so is the result.
+func intersectKeys(a, b []string) []string {
+	out := make([]string, 0, min(len(a), len(b)))
+	for i, j := 0, 0; i < len(a) && j < len(b); {
+		switch {
+		case a[i] < b[j]:
+			i++
+		case a[i] > b[j]:
+			j++
+		default:
+			out = append(out, a[i])
+			i++
+			j++
+		}
+	}
+	return out
 }
 
 // subjectRows returns, in key order, the keys of the rows of info whose field

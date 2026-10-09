@@ -37,7 +37,7 @@ Validation timing:
 
 ## Permission and role names
 
-Permission names and role names belong to the [access model](proto-options.md#access-model). A permission name appears in the `permission` of a rule in `(syncplane.v1.entity).access.allow`, in the `grants` of a role, and in a `MutatorAccess`. A role name appears in `(syncplane.v1.entity).grant.roles[].name`.
+Permission names and role names belong to the [access model](proto-options.md#access-model). A permission name appears in the `requires` of a rule in `(syncplane.v1.entity).access.allow`, in the `grants` of a role, and in a `MutatorAccess`. A role name appears in `(syncplane.v1.entity).grant.roles[].name`.
 
 Both follow the syntax rules for entity names: an ASCII letter or `_`, followed by ASCII letters, digits, or `_`, from 1 to 64 characters.
 

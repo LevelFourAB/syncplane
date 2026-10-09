@@ -141,6 +141,29 @@ func (c *accessChains) holdsAt(a *permAnchors, at anchorRow) (bool, error) {
 	return c.holdsAbove(a, e)
 }
 
+// holdsAll reports whether each of anchors holds its permission at the row of
+// info with key, as holds decides it for one. Each can hold at a different
+// row of the chain.
+func (c *accessChains) holdsAll(anchors []*permAnchors, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
+	for _, a := range anchors {
+		if ok, err := c.holds(a, info, key, row); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
+// holdsAllAt reports whether each of anchors holds its permission at the row
+// at, as holdsAt decides it for one.
+func (c *accessChains) holdsAllAt(anchors []*permAnchors, at anchorRow) (bool, error) {
+	for _, a := range anchors {
+		if ok, err := c.holdsAt(a, at); err != nil || !ok {
+			return false, err
+		}
+	}
+	return true, nil
+}
+
 // holdsAbove reports whether a holds its permission at a row of the chain
 // that starts with e, within maxDepth hops.
 func (c *accessChains) holdsAbove(a *permAnchors, e chainEdge) (bool, error) {

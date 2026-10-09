@@ -20,17 +20,17 @@ const ruled = (name: string, ...allow: AccessRuleDecl[]) =>
 
 const bundle = defineSchema(
 	// Server-owned: clients read its rows, and no rule admits a write.
-	ruled('activity', { read: true, permission: 'view' }),
+	ruled('activity', { read: true, requires: 'view' }),
 	// Append-only: a client posts a row, but cannot change or remove it.
-	ruled('comment', { read: true, create: true, permission: 'view' }),
+	ruled('comment', { read: true, create: true, requires: 'view' }),
 	// Everything but a delete.
-	ruled('ledger', { read: true, permission: 'view' }, {
+	ruled('ledger', { read: true, requires: 'view' }, {
 		create: true,
 		update: true,
-		permission: 'edit',
+		requires: 'edit',
 	}),
 	// Rows a client changes but never creates.
-	ruled('setting', { read: true, update: true, permission: 'view' }),
+	ruled('setting', { read: true, update: true, requires: 'view' }),
 	// Every admitted caller writes.
 	ruled('memo', { read: true, write: true, admitted: true }),
 );

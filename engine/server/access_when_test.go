@@ -95,7 +95,7 @@ var _ = Describe("Access model registration of when checks", func() {
 		Expect(register(func(file *descriptorpb.FileDescriptorProto) {
 			rules := rulesOf(file, "Thread")
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_posts"},
+				Read: true, Requires: []string{"view_posts"},
 				When: query.Eq("title", "pinned"),
 			})
 		})).To(Succeed())
@@ -105,7 +105,7 @@ var _ = Describe("Access model registration of when checks", func() {
 		Expect(register(func(file *descriptorpb.FileDescriptorProto) {
 			rules := rulesOf(file, "Thread")
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_posts"},
+				Read: true, Requires: []string{"view_posts"},
 				When: query.Eq("hidden", false),
 			})
 		})).To(MatchError(ContainSubstring(`access allow[0] and allow[4] are the same rule`)))
@@ -118,7 +118,7 @@ var _ = Describe("Access model registration of when checks", func() {
 			rules := rulesOf(file, "Thread")
 			// Wider than allow[0] on every check, so allow[0] decides nothing.
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_posts"},
+				Read: true, Requires: []string{"view_posts"},
 			})
 		})).To(Succeed())
 		var findings []string

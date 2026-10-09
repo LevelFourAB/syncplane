@@ -21,8 +21,8 @@ message Project {
 		history: {}
 		access: {
 			allow: [
-				{ read: true permission: "view_projects" },
-				{ create: true update: true permission: "edit_projects" }
+				{ read: true requires: "view_projects" },
+				{ create: true update: true requires: "edit_projects" }
 			]
 		}
 	};

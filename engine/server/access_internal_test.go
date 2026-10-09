@@ -107,8 +107,8 @@ var _ = Describe("access model fingerprint", func() {
 		}),
 		Entry("an entity splits its write rule by operation", func(s []DynamicEntity) {
 			s[1].Access.Allow = append(s[1].Access.Allow[:1],
-				&syncplanev1.AccessRule{Create: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit"}},
-				&syncplanev1.AccessRule{Update: true, Delete: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view"}})
+				&syncplanev1.AccessRule{Create: true, Requires: []string{"edit"}},
+				&syncplanev1.AccessRule{Update: true, Delete: true, Requires: []string{"view"}})
 		}),
 		Entry("an entity declares its rules in another order", func(s []DynamicEntity) {
 			allow := s[1].Access.Allow
@@ -127,10 +127,10 @@ var _ = Describe("access model fingerprint", func() {
 		}),
 		Entry("an entity reads by a second permission", func(s []DynamicEntity) {
 			s[1].Access.Allow = append(s[1].Access.Allow,
-				&syncplanev1.AccessRule{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit"}})
+				&syncplanev1.AccessRule{Read: true, Requires: []string{"edit"}})
 		}),
 		Entry("an entity is read by every admitted caller", func(s []DynamicEntity) {
-			s[1].Access.Allow[0].Source = &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}
+			s[1].Access.Allow[0].Requires, s[1].Access.Allow[0].Admitted = nil, &syncplanev1.AdmittedCaller{}
 		}),
 		Entry("the access parent is dropped", func(s []DynamicEntity) {
 			s[0].Fields[1].AccessParent = false
@@ -146,8 +146,8 @@ var _ = Describe("access model fingerprint", func() {
 // one that admits every write by write.
 func rwAccess(read, write string) *syncplanev1.AccessOptions {
 	return &syncplanev1.AccessOptions{Allow: []*syncplanev1.AccessRule{
-		{Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: read}},
-		{Write: true, Source: &syncplanev1.AccessRule_Permission{Permission: write}},
+		{Read: true, Requires: []string{read}},
+		{Write: true, Requires: []string{write}},
 	}}
 }
 

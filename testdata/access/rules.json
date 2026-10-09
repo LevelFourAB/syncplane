@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`permission`, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, and `when`, a name that stands for the rule's condition on the row). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each subject field, and `matches` says whether the row matches each condition. testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields` or `matches` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when its source holds and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
+	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`requires`, the permissions a caller must hold together, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, and `when`, a name that stands for the rule's condition on the row). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each subject field, and `matches` says whether the row matches each condition. testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields` or `matches` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when the caller holds each permission in `requires` and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
 	"cases": [
 		{
 			"name": "a read rule admits a caller who holds its permission",
@@ -7,7 +7,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -27,7 +29,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -47,7 +51,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -67,7 +73,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -85,7 +93,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -108,7 +118,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -132,7 +144,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -155,7 +169,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -178,7 +194,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -199,7 +217,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -222,7 +242,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -245,7 +267,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				}
 			],
@@ -312,12 +336,16 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				},
 				{
 					"read": true,
-					"permission": "view_all"
+					"requires": [
+						"view_all"
+					]
 				}
 			],
 			"subjects": [
@@ -340,12 +368,16 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				},
 				{
 					"read": true,
-					"permission": "view_all"
+					"requires": [
+						"view_all"
+					]
 				}
 			],
 			"subjects": [
@@ -368,12 +400,16 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "author_id"
 				},
 				{
 					"read": true,
-					"permission": "view_all"
+					"requires": [
+						"view_all"
+					]
 				}
 			],
 			"subjects": [
@@ -396,7 +432,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -423,17 +461,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -442,7 +486,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -466,17 +512,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -485,7 +537,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -509,7 +563,9 @@
 			"rules": [
 				{
 					"write": true,
-					"permission": "edit"
+					"requires": [
+						"edit"
+					]
 				}
 			],
 			"subjects": [
@@ -529,17 +585,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -548,7 +610,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -572,17 +636,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -591,7 +661,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -615,17 +687,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -634,7 +712,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -658,17 +738,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -677,7 +763,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -714,17 +802,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -733,7 +827,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -771,17 +867,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -790,7 +892,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -825,17 +929,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -844,7 +954,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -879,17 +991,23 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_posts"
+					"requires": [
+						"view_posts"
+					]
 				},
 				{
 					"create": true,
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id"
 				},
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"subject": "author_id",
 					"fields": [
 						"body"
@@ -898,7 +1016,9 @@
 				{
 					"update": true,
 					"delete": true,
-					"permission": "moderate_posts"
+					"requires": [
+						"moderate_posts"
+					]
 				}
 			],
 			"subjects": [
@@ -933,7 +1053,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "assignee_id"
 				}
 			],
@@ -967,7 +1089,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "view_posts",
+					"requires": [
+						"view_posts"
+					],
 					"subject": "assignee_id"
 				}
 			],
@@ -1001,7 +1125,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "edit"
+					"requires": [
+						"edit"
+					]
 				}
 			],
 			"subjects": [
@@ -1030,7 +1156,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "edit"
+					"requires": [
+						"edit"
+					]
 				}
 			],
 			"subjects": [
@@ -1059,11 +1187,15 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "edit_here"
+					"requires": [
+						"edit_here"
+					]
 				},
 				{
 					"update": true,
-					"permission": "edit_there"
+					"requires": [
+						"edit_there"
+					]
 				}
 			],
 			"subjects": [
@@ -1094,11 +1226,15 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "edit_here"
+					"requires": [
+						"edit_here"
+					]
 				},
 				{
 					"update": true,
-					"permission": "edit_there"
+					"requires": [
+						"edit_there"
+					]
 				}
 			],
 			"subjects": [
@@ -1129,7 +1265,9 @@
 			"rules": [
 				{
 					"write": true,
-					"permission": "edit"
+					"requires": [
+						"edit"
+					]
 				}
 			],
 			"subjects": [
@@ -1156,7 +1294,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_threads",
+					"requires": [
+						"view_threads"
+					],
 					"when": "visible"
 				}
 			],
@@ -1180,7 +1320,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_threads",
+					"requires": [
+						"view_threads"
+					],
 					"when": "visible"
 				}
 			],
@@ -1204,7 +1346,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_threads",
+					"requires": [
+						"view_threads"
+					],
 					"when": "visible"
 				}
 			],
@@ -1228,7 +1372,9 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_threads",
+					"requires": [
+						"view_threads"
+					],
 					"when": "visible"
 				}
 			],
@@ -1317,12 +1463,16 @@
 			"rules": [
 				{
 					"read": true,
-					"permission": "view_threads",
+					"requires": [
+						"view_threads"
+					],
 					"when": "visible"
 				},
 				{
 					"read": true,
-					"permission": "moderate_threads"
+					"requires": [
+						"moderate_threads"
+					]
 				}
 			],
 			"subjects": [
@@ -1346,7 +1496,9 @@
 			"rules": [
 				{
 					"create": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1370,7 +1522,9 @@
 			"rules": [
 				{
 					"delete": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1394,7 +1548,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1430,7 +1586,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1466,7 +1624,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1502,7 +1662,9 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				}
 			],
@@ -1538,12 +1700,16 @@
 			"rules": [
 				{
 					"update": true,
-					"permission": "post",
+					"requires": [
+						"post"
+					],
 					"when": "open"
 				},
 				{
 					"update": true,
-					"permission": "moderate_threads"
+					"requires": [
+						"moderate_threads"
+					]
 				}
 			],
 			"subjects": [
@@ -1573,6 +1739,265 @@
 				"archived"
 			],
 			"want": "yes"
+		},
+		{
+			"name": "a rule that needs two permissions admits a caller who holds both",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_tasks",
+						"read_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_tasks": true,
+					"read_billing": true
+				},
+				"fields": {}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a rule that needs two permissions refuses a caller who holds one of them",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_tasks",
+						"read_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_tasks": true,
+					"read_billing": false
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a rule that needs two permissions refuses a caller who holds only the second",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_tasks",
+						"read_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"read_billing": true
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a rule that needs two permissions answers unknown when the client cannot place one of them",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_tasks",
+						"read_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_tasks": true,
+					"read_billing": null
+				},
+				"fields": {}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "a rule that needs two permissions refuses when one is not held, whatever the client knows of the other",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"requires": [
+						"view_tasks",
+						"read_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_tasks": null,
+					"read_billing": false
+				},
+				"fields": {}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a rule that needs one permission admits a caller that another rule needing two refuses",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks",
+						"use_billing"
+					]
+				},
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks"
+					],
+					"subject": "owner_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": false
+				},
+				"fields": {
+					"owner_id": "ann"
+				}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": false
+				},
+				"fields": {
+					"owner_id": "ann"
+				}
+			},
+			"changed": [
+				"title"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "an update with a rule that needs two permissions needs both on both sides",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks",
+						"use_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": false
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update with a rule that needs two permissions admits a move where both hold at both ends",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"requires": [
+						"edit_tasks",
+						"use_billing"
+					]
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": true
+				},
+				"fields": {}
+			},
+			"final": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": true
+				},
+				"fields": {}
+			},
+			"changed": [
+				"project"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "a rule that needs two permissions still checks its subject",
+			"op": "delete",
+			"rules": [
+				{
+					"delete": true,
+					"requires": [
+						"edit_tasks",
+						"use_billing"
+					],
+					"subject": "owner_id"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"edit_tasks": true,
+					"use_billing": true
+				},
+				"fields": {
+					"owner_id": "bob"
+				}
+			},
+			"want": "no"
 		}
 	]
 }

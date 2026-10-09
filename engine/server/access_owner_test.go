@@ -143,14 +143,14 @@ var _ = Describe("Access model registration of owner rules", func() {
 		Entry("a fields list that names a oneof member", func(file *descriptorpb.FileDescriptorProto) {
 			rules := rulesOf(file, "Card")
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Update: true, Source: &syncplanev1.AccessRule_Permission{Permission: "edit_cards"}, Fields: []string{"board"},
+				Update: true, Requires: []string{"edit_cards"}, Fields: []string{"board"},
 			})
 		}, `field "board" is a member of oneof "place"; name the oneof`),
 		Entry("two rules that differ only in order of their fields", func(file *descriptorpb.FileDescriptorProto) {
 			rules := rulesOf(file, "Ticket")
 			rules.Allow[2].Fields = []string{"status", "title"}
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Update: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_posts"},
+				Update: true, Requires: []string{"view_posts"},
 				Subject: "assignee_id", Fields: []string{"title", "status"},
 			})
 		}, `access allow[2] and allow[3] are the same rule`),
@@ -182,7 +182,7 @@ var _ = Describe("Access model registration of owner rules", func() {
 			rules := rulesOf(file, "Post")
 			// Wider than allow[2] on every check, so allow[2] decides nothing.
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Update: true, Source: &syncplanev1.AccessRule_Permission{Permission: "post"},
+				Update: true, Requires: []string{"post"},
 				Subject: "author_id", Fields: []string{"body", "title"},
 			})
 		})).To(Succeed())
@@ -199,7 +199,7 @@ var _ = Describe("Access model registration of owner rules", func() {
 			// Every role that grants moderate_posts grants view_posts, so the
 			// view_posts rule admits every caller this one admits.
 			rules.Allow = append(rules.Allow, &syncplanev1.AccessRule{
-				Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "moderate_posts"},
+				Read: true, Requires: []string{"moderate_posts"},
 			})
 		})).To(Succeed())
 		Expect(neverDecides(logs)).To(ConsistOf(

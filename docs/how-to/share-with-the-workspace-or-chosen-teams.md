@@ -51,8 +51,8 @@ message WorkspaceMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_members" },
-				{ write: true permission: "manage_members" }
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
 			]
 		}
 	};
@@ -86,8 +86,8 @@ message Admin {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_admins" },
-				{ write: true permission: "manage_admins" }
+				{ read: true requires: "view_admins" },
+				{ write: true requires: "manage_admins" }
 			]
 		}
 	};
@@ -110,8 +110,8 @@ message Project {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_projects" },
-				{ write: true permission: "edit_projects" }
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" }
 			]
 		}
 	};

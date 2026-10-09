@@ -75,7 +75,7 @@ import { schema } from 'syncplane';
    	id: schema.text().key(),
    	what: schema.text(),
    }, {
-   	access: { allow: [ { read: true, permission: 'view_activity' } ] },
+   	access: { allow: [ { read: true, requires: 'view_activity' } ] },
    });
 
    // Append-only: a client may post a comment but not edit or remove one.
@@ -85,8 +85,8 @@ import { schema } from 'syncplane';
    }, {
    	access: {
    		allow: [
-   			{ read: true, permission: 'view_comments' },
-   			{ create: true, permission: 'post_comments' },
+   			{ read: true, requires: 'view_comments' },
+   			{ create: true, requires: 'post_comments' },
    		],
    	},
    });

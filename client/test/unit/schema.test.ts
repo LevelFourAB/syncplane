@@ -91,19 +91,19 @@ describe('schema builder', () => {
 
 		// Append-only: creating is admitted, changing and deleting are not.
 		const entry = entity('entry', { id: text().key() }, {
-			access: { allow: [ { read: true, create: true, permission: 'post' } ] },
+			access: { allow: [ { read: true, create: true, requires: 'post' } ] },
 		});
 		expect(writeAccessOf(entry)).toEqual({ create: true, update: false, delete: false });
 
 		// `write` admits every write operation, whatever the source.
 		const note = entity('note', { id: text().key() }, {
-			access: { allow: [ { read: true, permission: 'view' }, { write: true, admitted: true } ] },
+			access: { allow: [ { read: true, requires: 'view' }, { write: true, admitted: true } ] },
 		});
 		expect(writeAccessOf(note)).toEqual({ create: true, update: true, delete: true });
 
 		// Server-owned: no rule admits a write.
 		const label = entity('label', { id: text().key() }, {
-			access: { allow: [ { read: true, permission: 'view' } ] },
+			access: { allow: [ { read: true, requires: 'view' } ] },
 		});
 		expect(writeAccessOf(label)).toEqual({ create: false, update: false, delete: false });
 
@@ -111,9 +111,9 @@ describe('schema builder', () => {
 		const comment = entity('comment', { id: text().key() }, {
 			access: {
 				allow: [
-					{ read: true, create: true, permission: 'view' },
-					{ update: true, permission: 'edit' },
-					{ delete: true, permission: 'moderate' },
+					{ read: true, create: true, requires: 'view' },
+					{ update: true, requires: 'edit' },
+					{ delete: true, requires: 'moderate' },
 				],
 			},
 		});
@@ -433,8 +433,8 @@ describe('schema builder — access model', () => {
 	const project = entity('project', { id: text().key() }, {
 		access: {
 			allow: [
-				{ read: true, permission: 'view_projects' },
-				{ write: true, permission: 'edit_projects' },
+				{ read: true, requires: 'view_projects' },
+				{ write: true, requires: 'edit_projects' },
 			],
 		},
 	});
@@ -451,8 +451,8 @@ describe('schema builder — access model', () => {
 		},
 		access: {
 			allow: [
-				{ read: true, permission: 'view_projects' },
-				{ write: true, permission: 'edit_projects' },
+				{ read: true, requires: 'view_projects' },
+				{ write: true, requires: 'edit_projects' },
 			],
 		},
 	});
@@ -472,7 +472,8 @@ describe('schema builder — access model', () => {
 			delete: false,
 			write: false,
 		});
-		expect(read!.source).toEqual({ case: 'permission', value: 'view_projects' });
+		expect(read!.requires).toEqual([ 'view_projects' ]);
+		expect(read!.admitted).toBeUndefined();
 		expect(write).toMatchObject({
 			read: false,
 			create: false,
@@ -480,14 +481,14 @@ describe('schema builder — access model', () => {
 			delete: false,
 			write: true,
 		});
-		expect(write!.source).toEqual({ case: 'permission', value: 'edit_projects' });
+		expect(write!.requires).toEqual([ 'edit_projects' ]);
 	});
 
-	it('lowers an admitted rule onto the source oneof', () => {
+	it('lowers an admitted rule without permissions', () => {
 		const [ rule, ...rest ] = options('note').access!.allow;
 		expect(rest).toEqual([]);
-		expect(rule).toMatchObject({ read: true, write: true });
-		expect(rule!.source.case).toBe('admitted');
+		expect(rule).toMatchObject({ read: true, write: true, requires: [] });
+		expect(rule!.admitted).toBeDefined();
 	});
 
 	it('keeps the rules through the serialized descriptor set', () => {
@@ -497,7 +498,7 @@ describe('schema builder — access model', () => {
 			getOption(d, entityExt).name === 'note'
 		)!;
 		const [ rule ] = getOption(decoded, entityExt).access!.allow;
-		expect(rule!.source.case).toBe('admitted');
+		expect(rule!.admitted).toBeDefined();
 		expect(rule).toMatchObject({ read: true, write: true });
 	});
 
@@ -526,7 +527,7 @@ describe('schema builder — access model', () => {
 					{ name: 'project_lead', includes: [ 'project_editor' ] },
 				],
 			},
-			access: { allow: [ { read: true, permission: 'view_projects' } ] },
+			access: { allow: [ { read: true, requires: 'view_projects' } ] },
 		});
 		const roles =
 			getOption(defineSchema(project, viewer).descMessage('viewer'), entityExt).grant!.roles;
@@ -540,7 +541,7 @@ describe('schema builder — access model', () => {
 	it('lowers members, and a grant whose subject is a ref() to a team', () => {
 		const team = entity('team', { id: text().key() }, {
 			members: { entity: 'team_member' },
-			access: { allow: [ { read: true, write: true, permission: 'view_teams' } ] },
+			access: { allow: [ { read: true, write: true, requires: 'view_teams' } ] },
 		});
 		const teamMember = entity('team_member', {
 			id: text().key(),
@@ -553,7 +554,7 @@ describe('schema builder — access model', () => {
 				role: 'role',
 				roles: [ { name: 'team_member', grants: [ 'view_teams' ] } ],
 			},
-			access: { allow: [ { read: true, write: true, permission: 'view_teams' } ] },
+			access: { allow: [ { read: true, write: true, requires: 'view_teams' } ] },
 		});
 		const projectTeam = entity('project_team', {
 			id: text().key(),
@@ -566,7 +567,7 @@ describe('schema builder — access model', () => {
 				role: 'role',
 				roles: [ { name: 'project_team_writer', grants: [ 'view_projects' ] } ],
 			},
-			access: { allow: [ { read: true, write: true, permission: 'view_projects' } ] },
+			access: { allow: [ { read: true, write: true, requires: 'view_projects' } ] },
 		});
 		const teams = defineSchema(project, team, teamMember, projectTeam);
 
@@ -588,7 +589,7 @@ describe('schema builder — access model', () => {
 	describe('validation', () => {
 		const fields = { id: text().key(), userId: text(), role: text() };
 		const access: AccessDecl = {
-			allow: [ { read: true, permission: 'view' }, { write: true, permission: 'edit' } ],
+			allow: [ { read: true, requires: 'view' }, { write: true, requires: 'edit' } ],
 		};
 		const roles = [ { name: 'writer', grants: [ 'view', 'edit' ] } ];
 		const allowing = (...allow: AccessRuleDecl[]) => () => entity('e', fields, { access: { allow } });
@@ -598,11 +599,11 @@ describe('schema builder — access model', () => {
 			expect(() => refList(() => project).accessParent()).toThrow(/only valid on a ref\(\)/);
 		});
 		it('rejects a permission name that is not an identifier', () => {
-			expect(allowing({ read: true, permission: 'view-all' })).toThrow(
-				'entity "e" access.allow[0]: permission name "view-all" is not an identifier',
+			expect(allowing({ read: true, requires: 'view-all' })).toThrow(
+				'entity "e" access.allow[0] requires: permission name "view-all" is not an identifier',
 			);
-			expect(allowing({ read: true, permission: '' })).toThrow(
-				'entity "e" access.allow[0]: permission name is empty',
+			expect(allowing({ read: true, requires: '' })).toThrow(
+				'entity "e" access.allow[0] requires: permission name is empty',
 			);
 		});
 		it('rejects an access declaration without rules', () => {
@@ -614,7 +615,7 @@ describe('schema builder — access model', () => {
 			);
 		});
 		it('rejects a rule that admits no operation', () => {
-			expect(allowing({ read: true, permission: 'view' }, { permission: 'edit' })).toThrow(
+			expect(allowing({ read: true, requires: 'view' }, { requires: 'edit' })).toThrow(
 				'entity "e" access.allow[1]: the rule admits no operation; '
 					+ 'set read, create, update, delete or write',
 			);
@@ -626,21 +627,21 @@ describe('schema builder — access model', () => {
 			// @ts-expect-error a rule needs a source
 			const sourceless: AccessRuleDecl = { read: true };
 			expect(allowing(sourceless)).toThrow(
-				'entity "e" access.allow[0]: the rule has no source; set permission or admitted: true',
+				'entity "e" access.allow[0]: the rule has no source; set requires or admitted: true',
 			);
 			// @ts-expect-error a rule takes one source
-			const both: AccessRuleDecl = { read: true, permission: 'view', admitted: true };
+			const both: AccessRuleDecl = { read: true, requires: 'view', admitted: true };
 			expect(allowing(both)).toThrow(
-				'entity "e" access.allow[0]: the rule sets both permission and admitted; set exactly one',
+				'entity "e" access.allow[0]: the rule sets both requires and admitted; set exactly one',
 			);
 			const unadmitted = { read: true, admitted: false } as unknown as AccessRuleDecl;
 			expect(allowing(unadmitted)).toThrow('entity "e" access.allow[0]: admitted must be true');
 		});
 		it('rejects a rule declared twice', () => {
 			expect(allowing(
-				{ read: true, permission: 'view' },
-				{ write: true, permission: 'edit' },
-				{ read: true, create: false, permission: 'view' },
+				{ read: true, requires: 'view' },
+				{ write: true, requires: 'edit' },
+				{ read: true, create: false, requires: 'view' },
 			)).toThrow('entity "e" access.allow[2]: the rule repeats access.allow[0]');
 			expect(allowing({ read: true, admitted: true }, { read: true, admitted: true })).toThrow(
 				/access.allow\[1\]: the rule repeats access.allow\[0\]/,
@@ -648,10 +649,10 @@ describe('schema builder — access model', () => {
 		});
 		it('accepts rules that differ in operations or source', () => {
 			expect(allowing(
-				{ read: true, permission: 'view' },
+				{ read: true, requires: 'view' },
 				{ read: true, admitted: true },
-				{ read: true, create: true, permission: 'view' },
-				{ write: true, permission: 'view' },
+				{ read: true, create: true, requires: 'view' },
+				{ write: true, requires: 'view' },
 			)).not.toThrow();
 		});
 		it('rejects two access parents', () => {
@@ -775,7 +776,7 @@ describe('schema builder — access model', () => {
 
 describe('schema builder — owner rules', () => {
 	const room = entity('room', { id: text().key() }, {
-		access: { allow: [ { read: true, write: true, permission: 'view' } ] },
+		access: { allow: [ { read: true, write: true, requires: 'view' } ] },
 	});
 	const post = entity('post', {
 		id: text().key(),
@@ -786,9 +787,9 @@ describe('schema builder — owner rules', () => {
 	}, {
 		access: {
 			allow: [
-				{ read: true, permission: 'view' },
-				{ create: true, delete: true, permission: 'post', subject: 'authorId' },
-				{ update: true, permission: 'post', subject: 'authorId', fields: [ 'title', 'body' ] },
+				{ read: true, requires: 'view' },
+				{ create: true, delete: true, requires: 'post', subject: 'authorId' },
+				{ update: true, requires: 'post', subject: 'authorId', fields: [ 'title', 'body' ] },
 			],
 		},
 	});
@@ -811,7 +812,7 @@ describe('schema builder — owner rules', () => {
 		expect(def.protectedFields).toEqual([ 'author_id' ]);
 		expect(def.accessRules![2]).toMatchObject({
 			update: true,
-			permission: 'post',
+			requires: [ 'post' ],
 			fields: [ 'body', 'title' ],
 		});
 		expect(def.accessRules![2]!.subject?.name).toBe('author_id');
@@ -844,41 +845,41 @@ describe('schema builder — owner rules', () => {
 			expect(() => text().creator().protected()).toThrow(/not valid on a creator\(\) field/);
 		});
 		it('rejects a subject that is not a declared text() field', () => {
-			expect(allowing({ read: true, permission: 'p', subject: 'who' })).toThrow(
+			expect(allowing({ read: true, requires: 'p', subject: 'who' })).toThrow(
 				'entity "e" access.allow[0]: subject field "who" is not declared',
 			);
-			expect(allowing({ read: true, permission: 'p', subject: 'count' })).toThrow(
+			expect(allowing({ read: true, requires: 'p', subject: 'count' })).toThrow(
 				'entity "e" access.allow[0]: subject field "count" must be a singular text() field',
 			);
 		});
 		it('rejects fields on a rule that names another operation than update', () => {
-			expect(allowing({ update: true, delete: true, permission: 'p', fields: [ 'note' ] })).toThrow(
+			expect(allowing({ update: true, delete: true, requires: 'p', fields: [ 'note' ] })).toThrow(
 				'entity "e" access.allow[0]: fields is valid only on a rule whose one operation is update',
 			);
-			expect(allowing({ write: true, permission: 'p', fields: [ 'note' ] })).toThrow(
+			expect(allowing({ write: true, requires: 'p', fields: [ 'note' ] })).toThrow(
 				/fields is valid only/,
 			);
 		});
 		it('rejects a fields list that is empty, names an unknown or key field, or repeats one', () => {
-			expect(allowing({ update: true, permission: 'p', fields: [] })).toThrow(/fields lists no field/);
-			expect(allowing({ update: true, permission: 'p', fields: [ 'text' ] })).toThrow(
+			expect(allowing({ update: true, requires: 'p', fields: [] })).toThrow(/fields lists no field/);
+			expect(allowing({ update: true, requires: 'p', fields: [ 'text' ] })).toThrow(
 				/fields names "text", which is not declared/,
 			);
-			expect(allowing({ update: true, permission: 'p', fields: [ 'id' ] })).toThrow(
+			expect(allowing({ update: true, requires: 'p', fields: [ 'id' ] })).toThrow(
 				/fields names key field "id"/,
 			);
-			expect(allowing({ update: true, permission: 'p', fields: [ 'note', 'note' ] })).toThrow(
+			expect(allowing({ update: true, requires: 'p', fields: [ 'note', 'note' ] })).toThrow(
 				/fields names "note" twice/,
 			);
 		});
 		it('treats rules that differ only in the order of their fields as the same rule', () => {
 			expect(allowing(
-				{ update: true, permission: 'p', fields: [ 'note', 'count' ] },
-				{ update: true, permission: 'p', fields: [ 'count', 'note' ] },
+				{ update: true, requires: 'p', fields: [ 'note', 'count' ] },
+				{ update: true, requires: 'p', fields: [ 'count', 'note' ] },
 			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
 			expect(allowing(
-				{ read: true, permission: 'p', subject: 'ownerId' },
-				{ read: true, permission: 'p' },
+				{ read: true, requires: 'p', subject: 'ownerId' },
+				{ read: true, requires: 'p' },
 			)).not.toThrow();
 		});
 	});
@@ -886,7 +887,7 @@ describe('schema builder — owner rules', () => {
 
 describe('schema builder — when checks', () => {
 	const room = entity('room', { id: text().key() }, {
-		access: { allow: [ { read: true, write: true, permission: 'view' } ] },
+		access: { allow: [ { read: true, write: true, requires: 'view' } ] },
 	});
 	const thread = entity('thread', {
 		id: text().key(),
@@ -897,13 +898,13 @@ describe('schema builder — when checks', () => {
 	}, {
 		access: {
 			allow: [
-				{ read: true, permission: 'view' },
+				{ read: true, requires: 'view' },
 				{
 					update: true,
-					permission: 'view',
+					requires: 'view',
 					when: (t) => and(t.isArchived.eq(false), t.meta.lockState.neq('locked'), t.room.id.eq('r1')),
 				},
-				{ delete: true, permission: 'view', when: (t) => t.tags.at('pinKey').isNotSet() },
+				{ delete: true, requires: 'view', when: (t) => t.tags.at('pinKey').isNotSet() },
 			],
 		},
 	});
@@ -939,24 +940,84 @@ describe('schema builder — when checks', () => {
 
 		it('rejects a condition that reads another row', () => {
 			expect(
-				allowing({ read: true, permission: 'p', when: (e) => e.ref.matches((r) => r.id.eq('x')) }),
+				allowing({ read: true, requires: 'p', when: (e) => e.ref.matches((r) => r.id.eq('x')) }),
 			)
 				.toThrow('entity "e" access.allow[0]: when uses matches(), which reads another row');
 		});
 		it('rejects a match condition', () => {
-			expect(allowing({ read: true, permission: 'p', when: (e) => or(e.note.eq('x'), e.match('y')) }))
+			expect(allowing({ read: true, requires: 'p', when: (e) => or(e.note.eq('x'), e.match('y')) }))
 				.toThrow('entity "e" access.allow[0]: when uses match(), which cannot decide access');
 		});
 		it('tells apart rules that differ only in their condition', () => {
 			expect(allowing(
-				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
-				{ read: true, permission: 'p', when: (e) => e.note.eq('b') },
-				{ read: true, permission: 'p' },
+				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
+				{ read: true, requires: 'p', when: (e) => e.note.eq('b') },
+				{ read: true, requires: 'p' },
 			)).not.toThrow();
 			expect(allowing(
-				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
-				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
+				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
+				{ read: true, requires: 'p', when: (e) => e.note.eq('a') },
 			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+		});
+	});
+});
+
+describe('schema builder — rules that need several permissions', () => {
+	const project = entity('project', { id: text().key() }, {
+		access: { allow: [ { read: true, requires: 'view_tasks' } ] },
+	});
+	const task = entity('task', {
+		id: text().key(),
+		project: ref(() => project).accessParent(),
+		title: text(),
+	}, {
+		access: {
+			allow: [
+				{ read: true, requires: 'view_tasks' },
+				{ update: true, requires: [ 'edit_tasks', 'use_billing', 'audit' ] },
+			],
+		},
+	});
+	const bundle = defineSchema(project, task);
+
+	it('lowers the list onto the rule as written', () => {
+		const [ read, update ] = getOption(bundle.descMessage('task'), entityExt).access!.allow;
+		expect(read!.requires).toEqual([ 'view_tasks' ]);
+		expect(update!.requires).toEqual([ 'edit_tasks', 'use_billing', 'audit' ]);
+	});
+
+	it('reads the list onto the EntityDef, sorted', () => {
+		const def = entityDefOf(bundle.descMessage('task'));
+		expect(def.accessRules![0]!.requires).toEqual([ 'view_tasks' ]);
+		expect(def.accessRules![1]!.requires).toEqual([ 'audit', 'edit_tasks', 'use_billing' ]);
+	});
+
+	describe('validation', () => {
+		const fields = { id: text().key() };
+		const allowing = (...allow: AccessRuleDecl<typeof fields>[]) => () =>
+			entity('e', fields, { access: { allow } });
+
+		it('rejects an empty list', () => {
+			// @ts-expect-error requires names at least one permission.
+			const empty: AccessRuleDecl<typeof fields> = { read: true, requires: [] };
+			expect(allowing(empty)).toThrow('entity "e" access.allow[0]: requires names no permission');
+		});
+		it('rejects a list that names a permission twice', () => {
+			expect(allowing({ read: true, requires: [ 'q', 'p', 'q' ] }))
+				.toThrow('entity "e" access.allow[0]: requires "q" twice');
+		});
+		it('rejects a permission name that breaks the naming rule', () => {
+			expect(allowing({ read: true, requires: [ 'p', 'q-r' ] })).toThrow('access.allow[0] requires');
+		});
+		it('treats rules that require the same permissions in another order as the same rule', () => {
+			expect(allowing(
+				{ read: true, requires: [ 'p', 'q' ] },
+				{ read: true, requires: [ 'q', 'p' ] },
+			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
+			expect(allowing(
+				{ read: true, requires: [ 'p', 'q' ] },
+				{ read: true, requires: 'p' },
+			)).not.toThrow();
 		});
 	});
 });

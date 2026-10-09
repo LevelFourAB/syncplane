@@ -173,8 +173,8 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 }
 
 // admits reports whether rule admits the caller at the row of info with key,
-// as of tx. A rule with a permission needs it at the workspace root, at the
-// row itself, or at a row up its parent chain. A rule that admits every
+// as of tx. A rule with permissions needs each of them at the workspace root,
+// at the row itself, or at a row up its parent chain. A rule that admits every
 // admitted caller holds for every caller that passed the workspace gate,
 // which is every caller with an access. A rule with a subject check also
 // needs the row's subject field to hold one of the caller's subjects, and a
@@ -185,10 +185,12 @@ func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, 
 	if rule.checksRow() && (row == nil || !rule.rowHolds(a.caller.subjects, row)) {
 		return false, nil
 	}
-	if rule.admitted() {
-		return true, nil
+	for _, p := range rule.requires {
+		if ok, err := a.holds(tx, p, info, key, row); err != nil || !ok {
+			return false, err
+		}
 	}
-	return a.holds(tx, rule.permission, info, key, row)
+	return true, nil
 }
 
 // admitting returns the rules of info that name op and admit the caller at
@@ -528,13 +530,19 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 		chains := w.access.chainsOf(tx)
 		for _, r := range model.readersBelow(w.info.name) {
 			ok, err := chains.holds(set.readAnchors(r), w.info, w.key, w.stored)
+			for _, o := range r.checked {
+				if err != nil || ok {
+					break
+				}
+				ok, err = chains.holdsAll(set.anchorsOf(o.requires), w.info, w.key, w.stored)
+			}
 			if err != nil {
 				return err
 			}
 			if !ok {
 				return Reject(CodePermissionDenied, fmt.Sprintf(
 					"entity %q: moving row %q needs one of the permissions %s where it is now, to carry the rows below it",
-					w.info.name, w.key, strings.Join(r.perms, ", ")))
+					w.info.name, w.key, strings.Join(r.sources(), ", ")))
 			}
 		}
 	}

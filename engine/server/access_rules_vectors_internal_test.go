@@ -17,15 +17,15 @@ import (
 const accessRulesVectorsPath = "../../testdata/access/rules.json"
 
 type rulesVectorRule struct {
-	Read       bool     `json:"read"`
-	Create     bool     `json:"create"`
-	Update     bool     `json:"update"`
-	Delete     bool     `json:"delete"`
-	Write      bool     `json:"write"`
-	Permission string   `json:"permission"`
-	Admitted   bool     `json:"admitted"`
-	Subject    string   `json:"subject"`
-	Fields     []string `json:"fields"`
+	Read     bool     `json:"read"`
+	Create   bool     `json:"create"`
+	Update   bool     `json:"update"`
+	Delete   bool     `json:"delete"`
+	Write    bool     `json:"write"`
+	Requires []string `json:"requires"`
+	Admitted bool     `json:"admitted"`
+	Subject  string   `json:"subject"`
+	Fields   []string `json:"fields"`
 	// When names the rule's condition, which each row's Matches answers.
 	When string `json:"when"`
 }
@@ -108,11 +108,12 @@ var _ = Describe("access rule conformance vectors", func() {
 						return false
 					}
 				}
-				if rule.admitted() {
-					return true
+				for _, p := range rule.requires {
+					if held := row.Held[p]; held == nil || !*held {
+						return false
+					}
 				}
-				held := row.Held[rule.permission]
-				return held != nil && *held
+				return true
 			}
 
 			var got bool
@@ -155,7 +156,7 @@ func rulesVectorRuleOf(r rulesVectorRule) accessRule {
 		}
 	}
 	if !r.Admitted {
-		rule.permission = r.Permission
+		rule.requires = slices.Sorted(slices.Values(r.Requires))
 	}
 	if r.Subject != "" {
 		rule.subject = vectorKeyField(r.Subject)

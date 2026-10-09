@@ -32,8 +32,8 @@ message OrgMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_members" },
-				{ write: true permission: "manage_members" }
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
 			]
 		}
 	};
@@ -56,8 +56,8 @@ message ProjectMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_roster" },
-				{ write: true permission: "manage_roster" }
+				{ read: true requires: "view_roster" },
+				{ write: true requires: "manage_roster" }
 			]
 		}
 	};
@@ -95,8 +95,8 @@ message Team {
 		members: { entity: "team_member" }
 		access: {
 			allow: [
-				{ read: true permission: "view_teams" },
-				{ write: true permission: "manage_teams" }
+				{ read: true requires: "view_teams" },
+				{ write: true requires: "manage_teams" }
 			]
 		}
 	};
@@ -118,8 +118,8 @@ message TeamMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_teams" },
-				{ write: true permission: "manage_teams" }
+				{ read: true requires: "view_teams" },
+				{ write: true requires: "manage_teams" }
 			]
 		}
 	};
@@ -147,8 +147,8 @@ message ProjectMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_roster" },
-				{ write: true permission: "manage_roster" }
+				{ read: true requires: "view_roster" },
+				{ write: true requires: "manage_roster" }
 			]
 		}
 	};
@@ -170,7 +170,7 @@ Before you ship, check these points:
 - **Every role of the member entity makes a member.** For guests who see a team but do not get its grants, use a separate grant entity anchored at the team.
 - **A team cannot be a member of a team.** Registration refuses a member entity whose subject is a team.
 - **To give teams other roles than users**, declare a separate grant entity with a plain `Team team` subject and its own roles. Role names are unique across the schema, so name them differently, such as `project_team_reader`.
-- **To let a user leave a project**, add `{ delete: true permission: "view_roster" subject: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
+- **To let a user leave a project**, add `{ delete: true requires: "view_roster" subject: "user_id" }`. A team's row holds no `user_id`, so the rule does not let a member remove the team.
 - **Delete the grants before the team.** A client cannot delete a team that a live grant row names.
 - **Admins are members only with a row.** A role at the workspace root does not make a caller a member of a team. To let an admin see what a team sees, grant the admin the same permissions at the root.
 
@@ -185,8 +185,8 @@ message Project {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_projects" },
-				{ write: true permission: "edit_projects" }
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" }
 			]
 		}
 	};
@@ -200,8 +200,8 @@ message Task {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ write: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -220,8 +220,8 @@ message Comment {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ write: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -240,8 +240,8 @@ message Folder {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_folders" },
-				{ write: true permission: "edit_folders" }
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "edit_folders" }
 			]
 		}
 	};
@@ -261,8 +261,8 @@ message Comment {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_comments" },
-				{ write: true permission: "edit_comments" }
+				{ read: true requires: "view_comments" },
+				{ write: true requires: "edit_comments" }
 			]
 		}
 	};
@@ -294,9 +294,9 @@ message Comment {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ create: true permission: "post_comments" },
-				{ update: true delete: true permission: "moderate_comments" }
+				{ read: true requires: "view_tasks" },
+				{ create: true requires: "post_comments" },
+				{ update: true delete: true requires: "moderate_comments" }
 			]
 		}
 	};
@@ -316,7 +316,7 @@ message Activity {
 	option (syncplane.v1.entity) = {
 		name: "activity"
 		key_fields: [ "id" ]
-		access: { allow: [ { read: true permission: "view_tasks" } ] }
+		access: { allow: [ { read: true requires: "view_tasks" } ] }
 	};
 	string id = 1;
 	Task task = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
@@ -335,8 +335,8 @@ message TaskNote {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ create: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ create: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -359,7 +359,7 @@ message Label {
 		access: {
 			allow: [
 				{ read: true admitted: {} },
-				{ write: true permission: "edit_projects" }
+				{ write: true requires: "edit_projects" }
 			]
 		}
 	};
@@ -385,16 +385,16 @@ message Task {
 			allow: [
 				{
 					read: true
-					permission: "view_tasks"
+					requires: "view_tasks"
 					when: { cmp: { path: [ "hidden" ] op: CMP_OP_EQ value: { bool_value: false } } }
 				},
-				{ read: true permission: "manage_tasks" },
+				{ read: true requires: "manage_tasks" },
 				{
 					update: true
-					permission: "edit_tasks"
+					requires: "edit_tasks"
 					when: { cmp: { path: [ "archived" ] op: CMP_OP_EQ value: { bool_value: false } } }
 				},
-				{ write: true permission: "manage_tasks" }
+				{ write: true requires: "manage_tasks" }
 			]
 		}
 	};
@@ -413,10 +413,60 @@ message Task {
 In the TypeScript schema builder, `when` takes the same field proxy as a query's `where`:
 
 ```ts
-{ update: true, permission: 'edit_tasks', when: (t) => t.archived.eq(false) }
+{ update: true, requires: 'edit_tasks', when: (t) => t.archived.eq(false) }
 ```
 
 `can()` evaluates the condition on the row the client holds. It answers `'unknown'` for an update whose `fields` include a field the condition reads, because the new value decides.
+
+### Require two permissions together
+
+Rules join with OR, so a caller that holds either of two rules' permissions passes. To require two permissions together, list both in one rule's `requires`. Here a project writer edits a task only when they also hold `use_billing`, which a billing role grants at the workspace root:
+
+```proto
+message Biller {
+	option (syncplane.v1.entity) = {
+		name: "biller"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ { name: "billing_clerk" grants: [ "view_billers", "use_billing" ] } ]
+		}
+		access: { allow: [ { read: true requires: "view_billers" } ] }
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: [ "edit_tasks", "use_billing" ] }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+}
+```
+
+- Each permission can be held at a different place on the row's chain: `edit_tasks` at the task's project and `use_billing` at the workspace root, or both at the project.
+- A caller that holds only one of them cannot write the task.
+- To move a task, the caller needs both permissions at the old project and at the new one.
+- On a read rule, a caller reads only the rows where it holds every permission of the rule. When it loses one, its clients receive a delete for each row it can no longer read.
+
+In the TypeScript schema builder, `requires` takes one name or a list:
+
+```ts
+{ write: true, requires: [ 'edit_tasks', 'use_billing' ] }
+```
+
+`can()` answers `'yes'` only when the client can place every permission of the rule on the row's chain.
 
 ### Moving and deleting rows that other rows sit below
 

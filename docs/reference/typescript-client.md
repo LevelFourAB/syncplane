@@ -1429,8 +1429,8 @@ The `access`, `grant` and `members` entity options and the `.accessParent()` fie
 const project = schema.entity('project', { id: schema.text().key() }, {
 	access: {
 		allow: [
-			{ read: true, permission: 'view_projects' },
-			{ write: true, permission: 'edit_projects' },
+			{ read: true, requires: 'view_projects' },
+			{ write: true, requires: 'edit_projects' },
 		],
 	},
 });
@@ -1455,8 +1455,8 @@ const projectMember = schema.entity('project_member', {
 	},
 	access: {
 		allow: [
-			{ read: true, permission: 'view_projects' },
-			{ write: true, permission: 'edit_projects' },
+			{ read: true, requires: 'view_projects' },
+			{ write: true, requires: 'edit_projects' },
 		],
 	},
 });
@@ -1470,7 +1470,7 @@ const label = schema.entity('label', { id: schema.text().key() }, {
 });
 ```
 
-Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `permission: '<name>'` or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
+Each rule in `access.allow` sets one or more of `read`, `create`, `update`, `delete` and `write`, and exactly one source: `requires: '<name>'` or `requires: [ '<name>', ... ]`, which needs every permission it names, or `admitted: true`. The rules lower to `syncplane.v1.AccessRule`; see [Access model](proto-options.md#access-model) for how they admit each operation.
 A rule can also set checks on the row: `subject` names a `text()` field by accessor name, `fields` lists accessor names, and `when` is a function that takes the row's field proxy, as a query's `where` does, and returns the condition the row must match, such as `when: (t) => t.archived.eq(false)`. `entity()` throws on a `when` that uses `matches()` or `match()`.
 `grant.subject` and `grant.role` name fields by accessor name. `grant.role` names a `text()` field. `grant.subject` names a `text()` field, or a singular `ref()` to an entity whose `members` option names its member entity, which grants to every member of the team the row names. See [Teams](proto-options.md#teams). `.accessParent()` is valid on a singular `ref()` only.
 Each role sets `grants`, `includes` or both. `includes` names roles of the same `grant`, and the role grants every permission of each of them.

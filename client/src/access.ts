@@ -192,13 +192,14 @@ export interface RuleRow {
  * server applies, with `'unknown'` where the client lacks an input;
  * testdata/access/rules.json pins the two against each other.
  *
- * A rule admits an operation it names when its source holds on the row, its
- * subject check passes, and the row matches its `when` condition: `subjects`
- * holds the subject field's value, which must not be empty. `row` is the row
- * read or deleted, the row a create will store, or the stored row of an
- * update. An update also needs the same rule to admit `final`, the row it
- * will store, and its fields check to allow `changed`, the units the update
- * changes; `null` stands for fields that no list covers.
+ * A rule admits an operation it names when the caller holds each permission in
+ * its `requires` on the row, its subject check passes, and the row matches its
+ * `when` condition: `subjects` holds the subject field's value,
+ * which must not be empty. `row` is the row read or deleted, the row a create
+ * will store, or the stored row of an update. An update also needs the same
+ * rule to admit `final`, the row it will store, and its fields check to allow
+ * `changed`, the units the update changes; `null` stands for fields that no
+ * list covers.
  */
 export function decideRules(
 	rules: readonly AccessRuleDef[],
@@ -219,7 +220,8 @@ export function decideRules(
 				: 'no';
 		}
 		const when: CanAnswer = rule.when === undefined ? 'yes' : side.matches(rule);
-		const source: CanAnswer = rule.permission === undefined ? 'yes' : side.held(rule.permission);
+		let source: CanAnswer = 'yes';
+		for (const permission of rule.requires) source = and(source, side.held(permission));
 		return and(and(subject, when), source);
 	};
 	let answer: CanAnswer = 'no';

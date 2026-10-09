@@ -26,7 +26,7 @@ interface VectorRule {
 	update?: boolean;
 	delete?: boolean;
 	write?: boolean;
-	permission?: string;
+	requires?: string[];
 	admitted?: boolean;
 	subject?: string;
 	fields?: string[];
@@ -70,7 +70,7 @@ const ruleOf = (r: VectorRule): AccessRuleDef => {
 		create: r.write === true || r.create === true,
 		update: r.write === true || r.update === true,
 		delete: r.write === true || r.delete === true,
-		permission: r.admitted === true ? undefined : r.permission,
+		requires: r.admitted === true ? [] : [ ...(r.requires ?? []) ].sort(),
 		subject: r.subject === undefined ? undefined : ({ name: r.subject } as DescField),
 		fields: r.fields === undefined ? undefined : [ ...r.fields ].sort(),
 		when: r.when === undefined ? undefined : create(ConditionSchema),

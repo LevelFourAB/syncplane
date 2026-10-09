@@ -92,9 +92,9 @@ message EntityOptions {
 //   option (syncplane.v1.entity) = {
 //     name: "comment" key_fields: ["id"]
 //     access: { allow: [
-//       { read: true permission: "view_tasks" },
-//       { create: true permission: "comment" },
-//       { update: true delete: true permission: "moderate_comments" }
+//       { read: true requires: "view_tasks" },
+//       { create: true requires: "comment" },
+//       { update: true delete: true requires: "moderate_comments" }
 //     ] }
 //   };
 //   string id = 1;
@@ -123,8 +123,8 @@ message AccessOptions {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, a rule with `subject` admits no write that changes the subject field to
-// a value outside the caller's subjects, and a rule with `when` admits no
+// one, a rule with `subject` admits no write that changes the subject field
+// to a value outside the caller's subjects, and a rule with `when` admits no
 // write that makes the row fail the condition.
 //
 // ```protobuf
@@ -132,10 +132,10 @@ message AccessOptions {
 //   option (syncplane.v1.entity) = {
 //     name: "comment" key_fields: ["id"]
 //     access: { allow: [
-//       { read: true permission: "view_tasks" },
+//       { read: true requires: "view_tasks" },
 //       { create: true delete: true
-//         permission: "comment" subject: "author_id" },
-//       { update: true permission: "comment"
+//         requires: "comment" subject: "author_id" },
+//       { update: true requires: "comment"
 //         subject: "author_id" fields: ["body"] }
 //     ] }
 //   };
@@ -146,8 +146,9 @@ message AccessOptions {
 // }
 // ```
 //
-// Registration refuses a rule without an operation or without a source, and
-// unknown fields inside this message.
+// Registration refuses a rule without an operation, a rule that sets neither
+// or both of `requires` and `admitted`, and unknown fields inside this
+// message.
 message AccessRule {
 	// Admits reading rows.
 	bool read = 1;
@@ -162,15 +163,30 @@ message AccessRule {
 	// write operation a later version adds.
 	bool write = 5;
 
-	// Who the rule admits.
-	oneof source {
-		// A caller that holds this permission at the workspace root, at the
-		// row, or at a row up the row's chain of access parents. Starts with a
-		// letter or an underscore, followed by letters, digits and underscores.
-		string permission = 6;
-		// Every caller admitted to the workspace. See `AdmittedCaller`.
-		AdmittedCaller admitted = 7;
-	}
+	// The source of the rule: a caller that holds every one of these
+	// permissions where the row sits, at the workspace root, at the row, or at
+	// a row up the row's chain of access parents. Each permission can be held
+	// at a different one of these places. Each entry starts with a letter or
+	// an underscore, followed by letters, digits and underscores, and no entry
+	// is named twice.
+	//
+	// The text format writes one permission without brackets:
+	//
+	// ```protobuf
+	// access: { allow: [
+	//   { read: true requires: "view_tasks" },
+	//   { update: true requires: ["edit_tasks", "use_billing"] }
+	// ] }
+	// ```
+	//
+	// A caller that holds `edit_tasks` at the task's project and `use_billing`
+	// at the workspace root updates the task. A caller that holds only one of
+	// them does not. To admit a caller that holds either of two permissions,
+	// declare two rules.
+	repeated string requires = 6;
+	// The source of the rule: every caller admitted to the workspace. See
+	// `AdmittedCaller`.
+	AdmittedCaller admitted = 7;
 
 	// Admits only rows whose field with this name holds one of the caller's
 	// subjects. Names a top-level, singular `string` field. An empty field
@@ -200,11 +216,11 @@ message AccessRule {
 	//
 	// ```protobuf
 	// access: { allow: [
-	//   { read: true permission: "view_tasks" },
-	//   { update: true permission: "edit_tasks"
+	//   { read: true requires: "view_tasks" },
+	//   { update: true requires: "edit_tasks"
 	//     when: { cmp: { path: ["archived"] op: CMP_OP_EQ
 	//       value: { bool_value: false } } } },
-	//   { update: true permission: "archive_tasks" }
+	//   { update: true requires: "archive_tasks" }
 	// ] }
 	// ```
 	//
@@ -243,8 +259,8 @@ message AdmittedCaller {}
 //       ]
 //     }
 //     access: { allow: [
-//       { read: true permission: "view_members" },
-//       { write: true permission: "manage_members" }
+//       { read: true requires: "view_members" },
+//       { write: true requires: "manage_members" }
 //     ] }
 //   };
 //   string id = 1;
@@ -336,8 +352,8 @@ message Role {
 //     name: "team" key_fields: ["id"]
 //     members: { entity: "team_member" }
 //     access: { allow: [
-//       { read: true permission: "view_teams" },
-//       { write: true permission: "manage_teams" }
+//       { read: true requires: "view_teams" },
+//       { write: true requires: "manage_teams" }
 //     ] }
 //   };
 //   string id = 1;
@@ -354,8 +370,8 @@ message Role {
 //       ]
 //     }
 //     access: { allow: [
-//       { read: true permission: "view_teams" },
-//       { write: true permission: "manage_teams" }
+//       { read: true requires: "view_teams" },
+//       { write: true requires: "manage_teams" }
 //     ] }
 //   };
 //   string id = 1;

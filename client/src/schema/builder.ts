@@ -385,9 +385,9 @@ export class Field<T> {
 	 * }, {
 	 *   access: {
 	 *     allow: [
-	 *       { read: true, permission: 'view_tasks' },
-	 *       { create: true, delete: true, permission: 'comment', subject: 'authorId' },
-	 *       { update: true, permission: 'comment', subject: 'authorId', fields: ['body'] },
+	 *       { read: true, requires: 'view_tasks' },
+	 *       { create: true, delete: true, requires: 'comment', subject: 'authorId' },
+	 *       { update: true, requires: 'comment', subject: 'authorId', fields: ['body'] },
 	 *     ],
 	 *   },
 	 * });
@@ -456,8 +456,8 @@ export class Field<T> {
 	 * }, {
 	 *   access: {
 	 *     allow: [
-	 *       { read: true, permission: 'view_tasks' },
-	 *       { write: true, permission: 'edit_tasks' },
+	 *       { read: true, requires: 'view_tasks' },
+	 *       { write: true, requires: 'edit_tasks' },
 	 *     ],
 	 *   },
 	 * });
@@ -731,12 +731,14 @@ export interface AccessDecl<F extends Fields = Fields> {
  * pass.
  *
  * At least one operation must be `true`. `write` admits `create`, `update`
- * and `delete`. The source is either `permission`, which admits a caller that
- * holds that permission at the workspace root, at the row, or at a row up the
- * row's chain of `.accessParent()` references, or `admitted: true`, which
- * admits every caller admitted to the workspace. The server's workspace hook
- * admits a caller; in a schema where some entity declares `grant`, the caller
- * must also hold at least one permission in the workspace.
+ * and `delete`. The source is either `requires`, which admits a caller that
+ * holds every permission it names at the workspace root, at the row, or at a
+ * row up the row's chain of `.accessParent()` references, each at any one of
+ * these places, or `admitted: true`, which admits every caller admitted to the
+ * workspace. `requires` names no permission twice. To admit a caller that
+ * holds either of two permissions, declare two rules. The server's workspace
+ * hook admits a caller; in a schema where some entity declares `grant`, the
+ * caller must also hold at least one permission in the workspace.
  *
  * `subject` names a singular `text()` field that must hold one of the
  * caller's subjects; an empty value never matches, and a permission held at
@@ -758,10 +760,19 @@ export interface AccessDecl<F extends Fields = Fields> {
  * @example
  * ```ts
  * const allow: schema.AccessRuleDecl[] = [
- *   { read: true, permission: 'view_tasks' },
- *   { create: true, delete: true, permission: 'comment', subject: 'authorId' },
- *   { update: true, permission: 'comment', subject: 'authorId', fields: ['body'] },
- *   { update: true, delete: true, permission: 'moderate_comments' },
+ *   { read: true, requires: 'view_tasks' },
+ *   { create: true, delete: true, requires: 'comment', subject: 'authorId' },
+ *   { update: true, requires: 'comment', subject: 'authorId', fields: ['body'] },
+ *   { update: true, delete: true, requires: 'moderate_comments' },
+ * ];
+ * ```
+ *
+ * @example
+ * Tasks that need a project role and a billing role at the root to edit:
+ * ```ts
+ * const allow: schema.AccessRuleDecl[] = [
+ *   { read: true, requires: 'view_tasks' },
+ *   { update: true, requires: ['edit_tasks', 'use_billing'] },
  * ];
  * ```
  *
@@ -774,9 +785,9 @@ export interface AccessDecl<F extends Fields = Fields> {
  * }, {
  *   access: {
  *     allow: [
- *       { read: true, permission: 'view_tasks' },
- *       { update: true, permission: 'edit_tasks', when: (t) => t.archived.eq(false) },
- *       { update: true, permission: 'archive_tasks' },
+ *       { read: true, requires: 'view_tasks' },
+ *       { update: true, requires: 'edit_tasks', when: (t) => t.archived.eq(false) },
+ *       { update: true, requires: 'archive_tasks' },
  *     ],
  *   },
  * });
@@ -793,7 +804,10 @@ export type AccessRuleDecl<F extends Fields = Fields> =
 		fields?: string[];
 		when?(row: QueryRef<RowOf<F>>): Cond;
 	}
-	& ({ permission: string; admitted?: never } | { admitted: true; permission?: never });
+	& (
+		| { requires: string | readonly [string, ...string[]]; admitted?: never }
+		| { admitted: true; requires?: never }
+	);
 
 /**
  * The roles an entity's rows grant, mirroring syncplane.v1.GrantOptions. Each
@@ -1008,7 +1022,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *   body: schema.text(),
 	 * }, {
 	 *   access: {
-	 *     allow: [ { read: true, create: true, permission: 'post_entries' } ],
+	 *     allow: [ { read: true, create: true, requires: 'post_entries' } ],
 	 *   },
 	 * });
 	 * ```
@@ -1036,8 +1050,8 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *   },
 	 *   access: {
 	 *     allow: [
-	 *       { read: true, permission: 'view_members' },
-	 *       { write: true, permission: 'manage_members' },
+	 *       { read: true, requires: 'view_members' },
+	 *       { write: true, requires: 'manage_members' },
 	 *     ],
 	 *   },
 	 * });
@@ -1056,7 +1070,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 * ```ts
 	 * const team = schema.entity('team', { id: schema.text().key() }, {
 	 *   members: { entity: 'team_member' },
-	 *   access: { allow: [ { read: true, permission: 'view_teams' } ] },
+	 *   access: { allow: [ { read: true, requires: 'view_teams' } ] },
 	 * });
 	 * const teamMember = schema.entity('team_member', {
 	 *   id: schema.text().key(),
@@ -1065,7 +1079,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *   role: schema.text(),
 	 * }, {
 	 *   grant: { subject: 'userId', role: 'role', roles: [ { name: 'team_member', grants: ['view_teams'] } ] },
-	 *   access: { allow: [ { read: true, permission: 'view_teams' } ] },
+	 *   access: { allow: [ { read: true, requires: 'view_teams' } ] },
 	 * });
 	 * const projectTeam = schema.entity('project_team', {
 	 *   id: schema.text().key(),
@@ -1074,7 +1088,7 @@ export interface EntityOptions<F extends Fields = Fields> {
 	 *   role: schema.text(),
 	 * }, {
 	 *   grant: { subject: 'team', role: 'role', roles: [ { name: 'project_team_writer', grants: ['view_tasks', 'edit_tasks'] } ] },
-	 *   access: { allow: [ { read: true, permission: 'view_tasks' } ] },
+	 *   access: { allow: [ { read: true, requires: 'view_tasks' } ] },
 	 * });
 	 * ```
 	 */
@@ -1218,16 +1232,23 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 				`${at}: the rule admits no operation; set read, create, update, delete or write`,
 			);
 		}
-		const hasPermission = rule.permission !== undefined;
+		const requires = requiresOf(rule);
 		const hasAdmitted = rule.admitted !== undefined;
-		if (hasPermission && hasAdmitted) {
-			throw new Error(`${at}: the rule sets both permission and admitted; set exactly one`);
+		if (requires !== undefined && hasAdmitted) {
+			throw new Error(`${at}: the rule sets both requires and admitted; set exactly one`);
 		}
-		if (!hasPermission && !hasAdmitted) {
-			throw new Error(`${at}: the rule has no source; set permission or admitted: true`);
+		if (requires === undefined && !hasAdmitted) {
+			throw new Error(`${at}: the rule has no source; set requires or admitted: true`);
 		}
-		if (hasPermission) {
-			validatePermissionName(rule.permission!, at);
+		if (requires !== undefined) {
+			// A plain-JS caller can pass the empty list the types refuse.
+			if (requires.length === 0) throw new Error(`${at}: requires names no permission`);
+			const named = new Set<string>();
+			for (const permission of requires) {
+				validatePermissionName(permission, `${at} requires`);
+				if (named.has(permission)) throw new Error(`${at}: requires "${permission}" twice`);
+				named.add(permission);
+			}
 		} else if (rule.admitted !== true) {
 			throw new Error(`${at}: admitted must be true`);
 		}
@@ -1261,10 +1282,10 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 		const when = whenOf(at, rule, fields);
 		// The key is the rule as the proto message holds it: an operation left
 		// unset and one set to false encode the same, so they must collide, and
-		// the order of a fields list does not count.
+		// the order of a requires or a fields list does not count.
 		const key = JSON.stringify([
 			...ACCESS_OPERATIONS.map((op) => rule[op] === true),
-			rule.permission ?? null,
+			requires === undefined ? null : [ ...requires ].sort(),
 			rule.subject ?? null,
 			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
 			when === undefined ? null : toJson(ConditionSchema, when),
@@ -1275,6 +1296,11 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 		}
 		seen.set(key, i);
 	});
+}
+
+/** The permissions a rule requires as a list, `undefined` when it sets none. */
+function requiresOf(rule: AccessRuleDecl): readonly string[] | undefined {
+	return typeof rule.requires === 'string' ? [ rule.requires ] : rule.requires;
 }
 
 /**
@@ -1549,9 +1575,8 @@ function accessRuleOf(rule: AccessRuleDecl, fields: Fields): AccessRule {
 		update: rule.update === true,
 		delete: rule.delete === true,
 		write: rule.write === true,
-		source: rule.permission === undefined
-			? { case: 'admitted', value: create(AdmittedCallerSchema) }
-			: { case: 'permission', value: rule.permission },
+		requires: [ ...(requiresOf(rule) ?? []) ],
+		admitted: rule.requires === undefined ? create(AdmittedCallerSchema) : undefined,
 		// Accessor names lower to proto names, as a grant's fields do.
 		subject: rule.subject === undefined ? '' : snakeCase(rule.subject),
 		fields: (rule.fields ?? []).map(snakeCase),

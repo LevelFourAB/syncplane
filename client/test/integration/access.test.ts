@@ -4,8 +4,13 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 import { SyncClient } from '../../src/client.js';
 import type { RejectionInfo } from '../../src/client.js';
 import {
+	AccountMemberSchema,
+	AccountSchema,
+	BillerSchema,
+	ChargeSchema,
 	CommentSchema,
 	DraftSchema,
+	InvoiceSchema,
 	IssueSchema,
 	LabelSchema,
 	NoteSchema,
@@ -64,6 +69,11 @@ const entities = [
 	RepoMemberSchema,
 	RepoSquadSchema,
 	IssueSchema,
+	AccountSchema,
+	AccountMemberSchema,
+	BillerSchema,
+	InvoiceSchema,
+	ChargeSchema,
 ];
 
 const open: SyncClient[] = [];
@@ -610,6 +620,72 @@ describe('when checks on the client', () => {
 		} ]);
 		await ann.syncNow();
 		expect((await ann.get(ThreadSchema, 'th-open'))?.title).toBe('back');
+	});
+});
+
+describe('rules that need several permissions on the client', () => {
+	// Ann edits in a1 and a2 and uses billing at the root; Bob edits in a1
+	// and reads billing at the root, but cannot use it.
+	async function seedBilling(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'account', value: { id: 'a1' } },
+			{ entity: 'account', value: { id: 'a2' } },
+			{
+				entity: 'account_member',
+				value: { id: 'am-ann-1', account: { id: 'a1' }, userId: 'ann', role: 'account_editor' },
+			},
+			{
+				entity: 'account_member',
+				value: { id: 'am-ann-2', account: { id: 'a2' }, userId: 'ann', role: 'account_editor' },
+			},
+			{
+				entity: 'account_member',
+				value: { id: 'am-bob', account: { id: 'a1' }, userId: 'bob', role: 'account_editor' },
+			},
+			{ entity: 'biller', value: { id: 'b-ann', userId: 'ann', role: 'billing_clerk' } },
+			{ entity: 'biller', value: { id: 'b-bob', userId: 'bob', role: 'billing_reader' } },
+			{ entity: 'invoice', value: { id: 'i1', account: { id: 'a1' }, title: 'one' } },
+			{ entity: 'invoice', value: { id: 'i2', account: { id: 'a2' }, title: 'two' } },
+			{ entity: 'charge', value: { id: 'c1', invoice: { id: 'i1' }, memo: 'one' } },
+		]);
+	}
+
+	it('predicts what the server admits and refuses', async () => {
+		const ws = freshWorkspace();
+		await seedBilling(ws);
+		const rejections: RejectionInfo[] = [];
+		const ann = await synced(clientAs('ann', ws));
+		const bob = await synced(
+			clientAs('bob', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+
+		expect(await ann.can(InvoiceSchema, 'i1', 'update', { fields: [ 'title' ] })).toBe('yes');
+		await ann.mutate.patch(InvoiceSchema, 'i1', { title: 'renamed' });
+		await ann.syncNow();
+		expect(await bob.can(InvoiceSchema, 'i1', 'update', { fields: [ 'title' ] })).toBe('no');
+		await bob.mutate.patch(InvoiceSchema, 'i1', { title: 'by bob' });
+		expect(await bob.canCreate(ChargeSchema, { id: 'c2', invoice: { id: 'i1' } })).toBe('no');
+		await bob.mutate.put(ChargeSchema, { id: 'c2', invoice: { id: 'i1' } });
+		await bob.syncNow();
+
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied', 'permission_denied' ]);
+		expect((await bob.get(InvoiceSchema, 'i1'))?.title).toBe('renamed');
+		expect(await bob.get(ChargeSchema, 'c2')).toBeUndefined();
+	});
+
+	it('syncs the rows where the caller holds both, and drops them when one is revoked', async () => {
+		const ws = freshWorkspace();
+		await seedBilling(ws);
+		const bob = await synced(clientAs('bob', ws));
+		expect(await bob.get(InvoiceSchema, 'i1')).toBeDefined();
+		expect(await bob.get(ChargeSchema, 'c1')).toBeDefined();
+		expect(await bob.get(InvoiceSchema, 'i2')).toBeUndefined();
+		expect(await bob.can(ChargeSchema, 'c1', 'read')).toBe('yes');
+
+		await trusted(ws, [ { entity: 'biller', key: 'b-bob', delete: true } ]);
+		await bob.syncNow();
+		expect(await bob.get(InvoiceSchema, 'i1')).toBeUndefined();
+		expect(await bob.get(ChargeSchema, 'c1')).toBeUndefined();
 	});
 });
 

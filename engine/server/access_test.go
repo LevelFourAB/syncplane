@@ -67,14 +67,14 @@ func readWrite(read, write string) *syncplanev1.AccessOptions {
 // "update", "delete" and "write", to a caller that holds permission.
 func permRule(permission string, ops ...string) *syncplanev1.AccessRule {
 	r := opsRule(ops...)
-	r.Source = &syncplanev1.AccessRule_Permission{Permission: permission}
+	r.Requires = []string{permission}
 	return r
 }
 
 // admittedRule returns a rule that admits ops to every admitted caller.
 func admittedRule(ops ...string) *syncplanev1.AccessRule {
 	r := opsRule(ops...)
-	r.Source = &syncplanev1.AccessRule_Admitted{Admitted: &syncplanev1.AdmittedCaller{}}
+	r.Requires, r.Admitted = nil, &syncplanev1.AdmittedCaller{}
 	return r
 }
 
@@ -368,11 +368,11 @@ var _ = Describe("Access model registration", func() {
 			specNamed(s, "task").Access.Allow[1] = permRule("edit_tasks")
 		}, "access allow[1] names no operation"),
 		Entry("a rule without a source", func(s []server.DynamicEntity) {
-			specNamed(s, "task").Access.Allow[0].Source = nil
+			specNamed(s, "task").Access.Allow[0].Requires = nil
 		}, "access allow[0] names no source"),
 		Entry("a rule with an empty permission", func(s []server.DynamicEntity) {
 			specNamed(s, "task").Access.Allow[0] = permRule("", "read")
-		}, "access allow[0]: permission name"),
+		}, "access allow[0] requires: permission name"),
 		Entry("two rules that are the same", func(s []server.DynamicEntity) {
 			a := specNamed(s, "task").Access
 			a.Allow = append(a.Allow, permRule("view_tasks", "read"))
@@ -402,7 +402,8 @@ var _ = Describe("Access model registration", func() {
 		Entry("unknown fields inside an admitted source", func(s []server.DynamicEntity) {
 			admitted := &syncplanev1.AdmittedCaller{}
 			admitted.ProtoReflect().SetUnknown(unknownField())
-			specNamed(s, "task").Access.Allow[0].Source = &syncplanev1.AccessRule_Admitted{Admitted: admitted}
+			rule := specNamed(s, "task").Access.Allow[0]
+			rule.Requires, rule.Admitted = nil, admitted
 		}, "access allow[0] admitted carries option fields this server does not know"),
 		Entry("a grant entity without access", func(s []server.DynamicEntity) {
 			specNamed(s, "org_member").Access = nil

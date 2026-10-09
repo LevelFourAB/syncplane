@@ -2840,6 +2840,307 @@ func (x *Milestone) GetTitle() string {
 	return ""
 }
 
+// An account, the top of the billing schema below: Account, AccountMember,
+// Biller, Invoice and Charge, registered apart from the schemas above. An
+// invoice and a charge need two permissions together: one that an account
+// role grants, and one that a billing role grants at the workspace root or an
+// account role grants at one account.
+type Account struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Account) Reset() {
+	*x = Account{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Account) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Account) ProtoMessage() {}
+
+func (x *Account) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Account.ProtoReflect.Descriptor instead.
+func (*Account) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *Account) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// A role on one account and the rows below it.
+type AccountMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Account       *Account               `protobuf:"bytes,2,opt,name=account,proto3" json:"account,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *AccountMember) Reset() {
+	*x = AccountMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *AccountMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*AccountMember) ProtoMessage() {}
+
+func (x *AccountMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use AccountMember.ProtoReflect.Descriptor instead.
+func (*AccountMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *AccountMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *AccountMember) GetAccount() *Account {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+func (x *AccountMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *AccountMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A billing role at the workspace root.
+type Biller struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Biller) Reset() {
+	*x = Biller{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[44]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Biller) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Biller) ProtoMessage() {}
+
+func (x *Biller) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[44]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Biller.ProtoReflect.Descriptor instead.
+func (*Biller) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{44}
+}
+
+func (x *Biller) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Biller) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *Biller) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// An invoice of an account.
+type Invoice struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Account       *Account               `protobuf:"bytes,2,opt,name=account,proto3" json:"account,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Invoice) Reset() {
+	*x = Invoice{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[45]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Invoice) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Invoice) ProtoMessage() {}
+
+func (x *Invoice) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[45]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Invoice.ProtoReflect.Descriptor instead.
+func (*Invoice) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{45}
+}
+
+func (x *Invoice) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Invoice) GetAccount() *Account {
+	if x != nil {
+		return x.Account
+	}
+	return nil
+}
+
+func (x *Invoice) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+// A charge on an invoice, two access_parent hops below its account.
+type Charge struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Invoice       *Invoice               `protobuf:"bytes,2,opt,name=invoice,proto3" json:"invoice,omitempty"`
+	Memo          string                 `protobuf:"bytes,3,opt,name=memo,proto3" json:"memo,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Charge) Reset() {
+	*x = Charge{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[46]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Charge) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Charge) ProtoMessage() {}
+
+func (x *Charge) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[46]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Charge.ProtoReflect.Descriptor instead.
+func (*Charge) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{46}
+}
+
+func (x *Charge) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Charge) GetInvoice() *Invoice {
+	if x != nil {
+		return x.Invoice
+	}
+	return nil
+}
+
+func (x *Charge) GetMemo() string {
+	if x != nil {
+		return x.Memo
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -2909,7 +3210,7 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04page\x12\x02idR=\n" +
 	"\x0e\b\x012\n" +
 	"view_tasks\n" +
-	"\x1b\b\x01B\bowner_id2\rview_projects\n" +
+	"\x1b\b\x012\rview_projectsB\bowner_id\n" +
 	"\x0e(\x012\n" +
 	"edit_tasks\"O\n" +
 	"\x05Label\x12\x0e\n" +
@@ -3052,8 +3353,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\vroom_member\x12\x02idRI\n" +
 	"\x15\b\x012\x11view_room_members\n" +
 	"\x17(\x012\x13manage_room_members\n" +
-	"\x17 \x01B\auser_id2\n" +
-	"view_roomsZ\xfd\x01\n" +
+	"\x17 \x012\n" +
+	"view_roomsB\auser_idZ\xfd\x01\n" +
 	"\auser_id\x12\x04role\x1a8\n" +
 	"\vroom_viewer\x12\n" +
 	"view_rooms\x12\x11view_room_members\x12\n" +
@@ -3074,8 +3375,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x04post\x12\x02idRX\n" +
 	"\x0e\b\x012\n" +
 	"view_posts\n" +
-	"\x15\x10\x01 \x01B\tauthor_id2\x04post\n" +
-	"\x19\x18\x01B\tauthor_idJ\x04body2\x04post\n" +
+	"\x15\x10\x01 \x012\x04postB\tauthor_id\n" +
+	"\x19\x18\x012\x04postB\tauthor_idJ\x04body\n" +
 	"\x14\x18\x01 \x012\x0emoderate_posts\"\xc0\x01\n" +
 	"\x05Draft\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
@@ -3083,8 +3384,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\tauthor_id\x18\x03 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\tR\x04body:.\xa2\xbb\x18*\n" +
 	"\x05draft\x12\x02idR\x1d\n" +
-	"\x1b\b\x01(\x01B\tauthor_id2\n" +
-	"view_posts\"\x84\x02\n" +
+	"\x1b\b\x01(\x012\n" +
+	"view_postsB\tauthor_id\"\x84\x02\n" +
 	"\x06Ticket\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
 	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1f\n" +
@@ -3096,13 +3397,13 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x0e\b\x012\n" +
 	"view_posts\n" +
 	"\x12(\x012\x0emoderate_posts\n" +
-	"#\x18\x01B\vassignee_idJ\x06status2\n" +
-	"view_posts\"c\n" +
+	"#\x18\x012\n" +
+	"view_postsB\vassignee_idJ\x06status\"c\n" +
 	"\aSetting\x12\x17\n" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05theme\x18\x02 \x01(\tR\x05theme:)\xa2\xbb\x18%\n" +
 	"\asetting\x12\auser_idR\x11\n" +
-	"\x0f\b\x01(\x01B\auser_id:\x00\"\xc0\x02\n" +
+	"\x0f\b\x01(\x01:\x00B\auser_id\"\xc0\x02\n" +
 	"\x06Thread\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
 	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1a\n" +
@@ -3111,14 +3412,14 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05title\x18\x05 \x01(\tR\x05title\x12\x1c\n" +
 	"\x05notes\x18\x06 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x05notes:~\xa2\xbb\x18z\n" +
 	"\x06thread\x12\x02idRl\n" +
-	" \b\x01R\x10\n" +
+	" \b\x012\n" +
+	"view_postsR\x10\n" +
 	"\x0e\n" +
-	"\x06hidden\x10\x01\x1a\x02(\x002\n" +
-	"view_posts\n" +
+	"\x06hidden\x10\x01\x1a\x02(\x00\n" +
 	"\x12\b\x012\x0emoderate_posts\n" +
-	" \x10\x01\x18\x01 \x01R\x12\n" +
+	" \x10\x01\x18\x01 \x012\x04postR\x12\n" +
 	"\x10\n" +
-	"\barchived\x10\x01\x1a\x02(\x002\x04post\n" +
+	"\barchived\x10\x01\x1a\x02(\x00\n" +
 	"\x12(\x012\x0emoderate_posts\"\xb5\x01\n" +
 	"\bBulletin\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
@@ -3126,11 +3427,11 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x06status\x18\x03 \x01(\tR\x06status\x12\x12\n" +
 	"\x04body\x18\x04 \x01(\tR\x04body:H\xa2\xbb\x18D\n" +
 	"\bbulletin\x12\x02idR4\n" +
-	"\x1f\b\x01R\x19\n" +
+	"\x1f\b\x01:\x00R\x19\n" +
 	"\x17\n" +
 	"\x06status\x10\x01\x1a\v\n" +
-	"\tpublished:\x00\n" +
-	"\x11\b\x01(\x01B\tauthor_id:\x00\"^\n" +
+	"\tpublished\n" +
+	"\x11\b\x01(\x01:\x00B\tauthor_id\"^\n" +
 	"\x05Squad\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:E\xa2\xbb\x18A\n" +
 	"\x05squad\x12\x02idR$\n" +
@@ -3166,8 +3467,8 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\vrepo_member\x12\x02idRI\n" +
 	"\x15\b\x012\x11view_repo_members\n" +
 	"\x17(\x012\x13manage_repo_members\n" +
-	"\x17 \x01B\auser_id2\n" +
-	"view_reposZ\xf9\x01\n" +
+	"\x17 \x012\n" +
+	"view_reposB\auser_idZ\xf9\x01\n" +
 	"\x06member\x12\x04role\x1a9\n" +
 	"\vrepo_reader\x12\n" +
 	"view_repos\x12\x11view_repo_members\x12\vview_issues\x1aF\n" +
@@ -3253,7 +3554,45 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05title\x18\x03 \x01(\tR\x05title:?\xa2\xbb\x18;\n" +
 	"\tmilestone\x12\x02idR*\n" +
 	"\x13\b\x012\x0fview_milestones\n" +
-	"\x13(\x012\x0fedit_milestones*Q\n" +
+	"\x13(\x012\x0fedit_milestones\"A\n" +
+	"\aAccount\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:&\xa2\xbb\x18\"\n" +
+	"\aaccount\x12\x02idR\x13\n" +
+	"\x11\b\x012\rview_accounts\"\xf5\x02\n" +
+	"\rAccountMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountB\x06\xaa\xbb\x18\x02Z\x00R\aaccount\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xdd\x01\xa2\xbb\x18\xd8\x01\n" +
+	"\x0eaccount_member\x12\x02idR\x13\n" +
+	"\x11\b\x012\rview_accountsZ\xac\x01\n" +
+	"\auser_id\x12\x04role\x1a.\n" +
+	"\x0eaccount_viewer\x12\rview_accounts\x12\rview_invoices\x1a/\n" +
+	"\x0eaccount_editor\x12\redit_invoices\x1a\x0eaccount_viewer\x1a:\n" +
+	"\x0eaccount_biller\x12\rview_accounts\x12\fread_billing\x12\vuse_billing\"\xda\x01\n" +
+	"\x06Biller\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role:\x92\x01\xa2\xbb\x18\x8d\x01\n" +
+	"\x06biller\x12\x02idR\x12\n" +
+	"\x10\b\x012\fview_billersZk\n" +
+	"\auser_id\x12\x04role\x1a,\n" +
+	"\x0ebilling_reader\x12\fview_billers\x12\fread_billing\x1a,\n" +
+	"\rbilling_clerk\x12\vuse_billing\x1a\x0ebilling_reader\"\xce\x01\n" +
+	"\aInvoice\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\aaccount\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.AccountB\x06\xaa\xbb\x18\x02Z\x00R\aaccount\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:T\xa2\xbb\x18P\n" +
+	"\ainvoice\x12\x02idRA\n" +
+	"\x1f\b\x012\rview_invoices2\fread_billing\n" +
+	"\x1e(\x012\redit_invoices2\vuse_billing\"\xca\x01\n" +
+	"\x06Charge\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\ainvoice\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.InvoiceB\x06\xaa\xbb\x18\x02Z\x00R\ainvoice\x12\x12\n" +
+	"\x04memo\x18\x03 \x01(\tR\x04memo:S\xa2\xbb\x18O\n" +
+	"\x06charge\x12\x02idRA\n" +
+	"\x1f\b\x012\rview_invoices2\fread_billing\n" +
+	"\x1e(\x012\redit_invoices2\vuse_billing*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -3272,7 +3611,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 47)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -3317,6 +3656,11 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Initiative)(nil),       // 40: syncplane.testdata.access.v1.Initiative
 	(*InitiativeMember)(nil), // 41: syncplane.testdata.access.v1.InitiativeMember
 	(*Milestone)(nil),        // 42: syncplane.testdata.access.v1.Milestone
+	(*Account)(nil),          // 43: syncplane.testdata.access.v1.Account
+	(*AccountMember)(nil),    // 44: syncplane.testdata.access.v1.AccountMember
+	(*Biller)(nil),           // 45: syncplane.testdata.access.v1.Biller
+	(*Invoice)(nil),          // 46: syncplane.testdata.access.v1.Invoice
+	(*Charge)(nil),           // 47: syncplane.testdata.access.v1.Charge
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -3352,11 +3696,14 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	40, // 30: syncplane.testdata.access.v1.InitiativeMember.initiative:type_name -> syncplane.testdata.access.v1.Initiative
 	31, // 31: syncplane.testdata.access.v1.InitiativeMember.squad:type_name -> syncplane.testdata.access.v1.Squad
 	40, // 32: syncplane.testdata.access.v1.Milestone.initiative:type_name -> syncplane.testdata.access.v1.Initiative
-	33, // [33:33] is the sub-list for method output_type
-	33, // [33:33] is the sub-list for method input_type
-	33, // [33:33] is the sub-list for extension type_name
-	33, // [33:33] is the sub-list for extension extendee
-	0,  // [0:33] is the sub-list for field type_name
+	43, // 33: syncplane.testdata.access.v1.AccountMember.account:type_name -> syncplane.testdata.access.v1.Account
+	43, // 34: syncplane.testdata.access.v1.Invoice.account:type_name -> syncplane.testdata.access.v1.Account
+	46, // 35: syncplane.testdata.access.v1.Charge.invoice:type_name -> syncplane.testdata.access.v1.Invoice
+	36, // [36:36] is the sub-list for method output_type
+	36, // [36:36] is the sub-list for method input_type
+	36, // [36:36] is the sub-list for extension type_name
+	36, // [36:36] is the sub-list for extension extendee
+	0,  // [0:36] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -3390,7 +3737,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   42,
+			NumMessages:   47,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

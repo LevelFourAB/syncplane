@@ -193,8 +193,11 @@ export interface AccessRuleDef {
 	create: boolean;
 	update: boolean;
 	delete: boolean;
-	/** The permission the rule needs; `undefined` admits every admitted caller. */
-	permission: string | undefined;
+	/**
+	 * The permissions a caller must hold together, sorted. Empty for a rule
+	 * that admits every admitted caller.
+	 */
+	requires: readonly string[];
 	/** The field that must hold one of the caller's subjects. */
 	subject: DescField | undefined;
 	/** The units an update may change, by proto name, sorted. */
@@ -268,7 +271,7 @@ function accessRulesOf(
 		create: rule.write || rule.create,
 		update: rule.write || rule.update,
 		delete: rule.write || rule.delete,
-		permission: rule.source.case === 'permission' ? rule.source.value : undefined,
+		requires: [ ...rule.requires ].sort(),
 		subject: rule.subject === '' ? undefined : schema.fields.find((f) => f.name === rule.subject),
 		fields: rule.fields.length === 0 ? undefined : [ ...rule.fields ].sort(),
 		when: rule.when,

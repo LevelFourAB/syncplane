@@ -38,8 +38,8 @@ message OrgMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_members" },
-				{ write: true permission: "manage_members" }
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
 			]
 		}
 	};
@@ -54,8 +54,8 @@ message Project {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_projects" },
-				{ write: true permission: "edit_projects" }
+				{ read: true requires: "view_projects" },
+				{ write: true requires: "edit_projects" }
 			]
 		}
 	};
@@ -99,8 +99,8 @@ message ProjectMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_members" },
-				{ write: true permission: "manage_members" }
+				{ read: true requires: "view_members" },
+				{ write: true requires: "manage_members" }
 			]
 		}
 	};
@@ -116,8 +116,8 @@ message Task {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ write: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -134,8 +134,8 @@ message Comment {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ write: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ write: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -154,9 +154,9 @@ message Page {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ read: true permission: "view_projects" subject: "owner_id" },
-				{ write: true permission: "edit_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ read: true requires: "view_projects" subject: "owner_id" },
+				{ write: true requires: "edit_tasks" }
 			]
 		}
 	};
@@ -172,7 +172,7 @@ message Label {
 	option (syncplane.v1.entity) = {
 		name: "label"
 		key_fields: [ "id" ]
-		access: { allow: [ { read: true permission: "view_labels" } ] }
+		access: { allow: [ { read: true requires: "view_labels" } ] }
 	};
 	string id = 1;
 	string name = 2;
@@ -204,8 +204,8 @@ message Entry {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_tasks" },
-				{ create: true permission: "view_tasks" }
+				{ read: true requires: "view_tasks" },
+				{ create: true requires: "view_tasks" }
 			]
 		}
 	};
@@ -247,8 +247,8 @@ message TeamMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_team" },
-				{ write: true permission: "edit_team" }
+				{ read: true requires: "view_team" },
+				{ write: true requires: "edit_team" }
 			]
 		}
 	};
@@ -264,8 +264,8 @@ message Team {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_team" },
-				{ write: true permission: "edit_team" }
+				{ read: true requires: "view_team" },
+				{ write: true requires: "edit_team" }
 			]
 		}
 	};
@@ -280,8 +280,8 @@ message Folder {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_folders" },
-				{ write: true permission: "edit_folders" }
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "edit_folders" }
 			]
 		}
 	};
@@ -315,8 +315,8 @@ message FolderMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_folders" },
-				{ write: true permission: "manage_folders" }
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "manage_folders" }
 			]
 		}
 	};
@@ -333,8 +333,8 @@ message Doc {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_folders" },
-				{ write: true permission: "edit_folders" }
+				{ read: true requires: "view_folders" },
+				{ write: true requires: "edit_folders" }
 			]
 		}
 	};
@@ -352,8 +352,8 @@ message Board {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_places" },
-				{ write: true permission: "edit_places" }
+				{ read: true requires: "view_places" },
+				{ write: true requires: "edit_places" }
 			]
 		}
 	};
@@ -367,8 +367,8 @@ message Space {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_places" },
-				{ write: true permission: "edit_places" }
+				{ read: true requires: "view_places" },
+				{ write: true requires: "edit_places" }
 			]
 		}
 	};
@@ -421,8 +421,8 @@ message PlaceMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_place_members" },
-				{ write: true permission: "manage_place_members" }
+				{ read: true requires: "view_place_members" },
+				{ write: true requires: "manage_place_members" }
 			]
 		}
 	};
@@ -442,8 +442,8 @@ message Card {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_cards" },
-				{ write: true permission: "edit_cards" }
+				{ read: true requires: "view_cards" },
+				{ write: true requires: "edit_cards" }
 			]
 		}
 	};
@@ -462,8 +462,8 @@ message CardItem {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_cards" },
-				{ write: true permission: "edit_cards" }
+				{ read: true requires: "view_cards" },
+				{ write: true requires: "edit_cards" }
 			]
 		}
 	};
@@ -491,8 +491,8 @@ message Pin {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_pins" },
-				{ write: true permission: "edit_pins" }
+				{ read: true requires: "view_pins" },
+				{ write: true requires: "edit_pins" }
 			]
 		}
 	};
@@ -509,8 +509,8 @@ message Room {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_rooms" },
-				{ write: true permission: "edit_rooms" }
+				{ read: true requires: "view_rooms" },
+				{ write: true requires: "edit_rooms" }
 			]
 		}
 	};
@@ -557,9 +557,9 @@ message RoomMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_room_members" },
-				{ write: true permission: "manage_room_members" },
-				{ delete: true permission: "view_rooms" subject: "user_id" }
+				{ read: true requires: "view_room_members" },
+				{ write: true requires: "manage_room_members" },
+				{ delete: true requires: "view_rooms" subject: "user_id" }
 			]
 		}
 	};
@@ -577,20 +577,20 @@ message Post {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_posts" },
+				{ read: true requires: "view_posts" },
 				{
 					create: true
 					delete: true
-					permission: "post"
+					requires: "post"
 					subject: "author_id"
 				},
 				{
 					update: true
-					permission: "post"
+					requires: "post"
 					subject: "author_id"
 					fields: [ "body" ]
 				},
-				{ update: true delete: true permission: "moderate_posts" }
+				{ update: true delete: true requires: "moderate_posts" }
 			]
 		}
 	};
@@ -611,7 +611,7 @@ message Draft {
 			allow: [ {
 				read: true
 				write: true
-				permission: "view_posts"
+				requires: "view_posts"
 				subject: "author_id"
 			} ]
 		}
@@ -630,11 +630,11 @@ message Ticket {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_posts" },
-				{ write: true permission: "moderate_posts" },
+				{ read: true requires: "view_posts" },
+				{ write: true requires: "moderate_posts" },
 				{
 					update: true
-					permission: "view_posts"
+					requires: "view_posts"
 					subject: "assignee_id"
 					fields: [ "status" ]
 				}
@@ -679,7 +679,7 @@ message Thread {
 			allow: [
 				{
 					read: true
-					permission: "view_posts"
+					requires: "view_posts"
 					when: {
 						cmp: {
 							path: [ "hidden" ]
@@ -688,12 +688,12 @@ message Thread {
 						}
 					}
 				},
-				{ read: true permission: "moderate_posts" },
+				{ read: true requires: "moderate_posts" },
 				{
 					create: true
 					update: true
 					delete: true
-					permission: "post"
+					requires: "post"
 					when: {
 						cmp: {
 							path: [ "archived" ]
@@ -702,7 +702,7 @@ message Thread {
 						}
 					}
 				},
-				{ write: true permission: "moderate_posts" }
+				{ write: true requires: "moderate_posts" }
 			]
 		}
 	};
@@ -757,8 +757,8 @@ message Squad {
 		members: { entity: "squad_member" }
 		access: {
 			allow: [
-				{ read: true permission: "view_squads" },
-				{ write: true permission: "manage_squads" }
+				{ read: true requires: "view_squads" },
+				{ write: true requires: "manage_squads" }
 			]
 		}
 	};
@@ -786,8 +786,8 @@ message SquadMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_squads" },
-				{ write: true permission: "manage_squads" }
+				{ read: true requires: "view_squads" },
+				{ write: true requires: "manage_squads" }
 			]
 		}
 	};
@@ -803,8 +803,8 @@ message Repo {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_repos" },
-				{ write: true permission: "edit_repos" }
+				{ read: true requires: "view_repos" },
+				{ write: true requires: "edit_repos" }
 			]
 		}
 	};
@@ -849,9 +849,9 @@ message RepoMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_repo_members" },
-				{ write: true permission: "manage_repo_members" },
-				{ delete: true permission: "view_repos" subject: "user_id" }
+				{ read: true requires: "view_repo_members" },
+				{ write: true requires: "manage_repo_members" },
+				{ delete: true requires: "view_repos" subject: "user_id" }
 			]
 		}
 	};
@@ -880,8 +880,8 @@ message RepoSquad {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_repo_members" },
-				{ write: true permission: "manage_repo_members" }
+				{ read: true requires: "view_repo_members" },
+				{ write: true requires: "manage_repo_members" }
 			]
 		}
 	};
@@ -898,8 +898,8 @@ message Issue {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_issues" },
-				{ write: true permission: "edit_issues" }
+				{ read: true requires: "view_issues" },
+				{ write: true requires: "edit_issues" }
 			]
 		}
 	};
@@ -951,8 +951,8 @@ message CommonsMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_commons_members" },
-				{ write: true permission: "manage_commons_members" }
+				{ read: true requires: "view_commons_members" },
+				{ write: true requires: "manage_commons_members" }
 			]
 		}
 	};
@@ -988,8 +988,8 @@ message Steward {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_stewards" },
-				{ write: true permission: "manage_stewards" }
+				{ read: true requires: "view_stewards" },
+				{ write: true requires: "manage_stewards" }
 			]
 		}
 	};
@@ -1006,8 +1006,8 @@ message Initiative {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_initiatives" },
-				{ write: true permission: "edit_initiatives" }
+				{ read: true requires: "view_initiatives" },
+				{ write: true requires: "edit_initiatives" }
 			]
 		}
 	};
@@ -1047,8 +1047,8 @@ message InitiativeMember {
 		}
 		access: {
 			allow: [
-				{ read: true permission: "view_initiative_members" },
-				{ write: true permission: "manage_initiative_members" }
+				{ read: true requires: "view_initiative_members" },
+				{ write: true requires: "manage_initiative_members" }
 			]
 		}
 	};
@@ -1069,8 +1069,8 @@ message Milestone {
 		key_fields: [ "id" ]
 		access: {
 			allow: [
-				{ read: true permission: "view_milestones" },
-				{ write: true permission: "edit_milestones" }
+				{ read: true requires: "view_milestones" },
+				{ write: true requires: "edit_milestones" }
 			]
 		}
 	};
@@ -1078,4 +1078,123 @@ message Milestone {
 	Initiative initiative = 2
 		[(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
+}
+
+// An account, the top of the billing schema below: Account, AccountMember,
+// Biller, Invoice and Charge, registered apart from the schemas above. An
+// invoice and a charge need two permissions together: one that an account
+// role grants, and one that a billing role grants at the workspace root or an
+// account role grants at one account.
+message Account {
+	option (syncplane.v1.entity) = {
+		name: "account"
+		key_fields: [ "id" ]
+		access: { allow: [ { read: true requires: "view_accounts" } ] }
+	};
+	string id = 1;
+}
+
+// A role on one account and the rows below it.
+message AccountMember {
+	option (syncplane.v1.entity) = {
+		name: "account_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "account_viewer"
+					grants: [ "view_accounts", "view_invoices" ]
+				},
+				{
+					name: "account_editor"
+					includes: [ "account_viewer" ]
+					grants: [ "edit_invoices" ]
+				},
+				{
+					name: "account_biller"
+					grants: [ "view_accounts", "read_billing", "use_billing" ]
+				}
+			]
+		}
+		access: { allow: [ { read: true requires: "view_accounts" } ] }
+	};
+	string id = 1;
+	Account account = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A billing role at the workspace root.
+message Biller {
+	option (syncplane.v1.entity) = {
+		name: "biller"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [
+				{
+					name: "billing_reader"
+					grants: [ "view_billers", "read_billing" ]
+				},
+				{
+					name: "billing_clerk"
+					includes: [ "billing_reader" ]
+					grants: [ "use_billing" ]
+				}
+			]
+		}
+		access: { allow: [ { read: true requires: "view_billers" } ] }
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// An invoice of an account.
+message Invoice {
+	option (syncplane.v1.entity) = {
+		name: "invoice"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					requires: [ "view_invoices", "read_billing" ]
+				},
+				{
+					write: true
+					requires: [ "edit_invoices", "use_billing" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Account account = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}
+
+// A charge on an invoice, two access_parent hops below its account.
+message Charge {
+	option (syncplane.v1.entity) = {
+		name: "charge"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					requires: [ "view_invoices", "read_billing" ]
+				},
+				{
+					write: true
+					requires: [ "edit_invoices", "use_billing" ]
+				}
+			]
+		}
+	};
+	string id = 1;
+	Invoice invoice = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string memo = 3;
 }

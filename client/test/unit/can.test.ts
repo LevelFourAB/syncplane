@@ -15,13 +15,16 @@ import { describe, expect, it, vi } from 'vitest';
 import { type CanAnswer, countAccessChanges } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
+	AccountSchema,
 	BulletinSchema,
 	CardItemSchema,
 	CardSchema,
+	ChargeSchema,
 	CommentSchema,
 	DocSchema,
 	DraftSchema,
 	FolderSchema,
+	InvoiceSchema,
 	PageSchema,
 	PinSchema,
 	PostSchema,
@@ -591,6 +594,72 @@ describe('can() with a when check', () => {
 	it('answers unknown where the row is not held', async () => {
 		const t = await threadClient(inR1('view_posts', 'post'));
 		expect(await t.client.can(ThreadSchema, 'th-gone', 'read')).toBe('unknown');
+		await t.client.close();
+	});
+});
+
+/**
+ * A test client over the billing schema: invoice i1 in account a1 with charge
+ * c1, invoice i2 in account a2, and charge c-far on an invoice the client does
+ * not hold. The caller is ann.
+ */
+async function billingClient(permissions: TestCallerAccess['permissions']) {
+	const t = await createTestClient({ entities: [ AccountSchema, InvoiceSchema, ChargeSchema ] });
+	t.server.put(AccountSchema, { id: 'a1' });
+	t.server.put(AccountSchema, { id: 'a2' });
+	t.server.put(InvoiceSchema, { id: 'i1', account: { id: 'a1' } });
+	t.server.put(InvoiceSchema, { id: 'i2', account: { id: 'a2' } });
+	t.server.put(ChargeSchema, { id: 'c1', invoice: { id: 'i1' } });
+	t.server.put(ChargeSchema, { id: 'c-far', invoice: { id: 'i9' } });
+	t.server.setCallerAccess({ subjects: [ 'ann' ], permissions });
+	await t.sync();
+	return t;
+}
+
+const inAccount = (account: string, ...perms: string[]) =>
+	perms.map((permission) => ({ permission, anchors: [ { entity: 'account', keys: [ account ] } ] }));
+
+describe('can() with a rule that needs several permissions', () => {
+	it('answers yes where the caller holds each of them, at different places on the chain', async () => {
+		const t = await billingClient([
+			...inAccount('a1', 'view_invoices', 'edit_invoices'),
+			{ permission: 'read_billing', root: true },
+			{ permission: 'use_billing', root: true },
+		]);
+		expect(await t.client.can(InvoiceSchema, 'i1', 'read')).toBe('yes');
+		expect(await t.client.can(ChargeSchema, 'c1', 'read')).toBe('yes');
+		expect(await t.client.can(InvoiceSchema, 'i1', 'update', { fields: [ 'title' ] })).toBe('yes');
+		expect(await t.client.canCreate(ChargeSchema, { id: 'c2', invoice: { id: 'i1' } })).toBe('yes');
+		await t.client.close();
+	});
+
+	it('answers no where the caller holds one of them', async () => {
+		const t = await billingClient([
+			...inAccount('a1', 'view_invoices', 'edit_invoices'),
+			{ permission: 'read_billing', root: true },
+		]);
+		expect(await t.client.can(InvoiceSchema, 'i1', 'read')).toBe('yes');
+		expect(await t.client.can(InvoiceSchema, 'i1', 'update', { fields: [ 'title' ] })).toBe('no');
+		expect(await t.client.canCreate(ChargeSchema, { id: 'c2', invoice: { id: 'i1' } })).toBe('no');
+		await t.client.close();
+	});
+
+	it("needs each of them on the row's own chain", async () => {
+		const t = await billingClient([
+			{ permission: 'view_invoices', anchors: [ { entity: 'account', keys: [ 'a1', 'a2' ] } ] },
+			{ permission: 'read_billing', anchors: [ { entity: 'account', keys: [ 'a2' ] } ] },
+		]);
+		expect(await t.client.can(InvoiceSchema, 'i1', 'read')).toBe('no');
+		expect(await t.client.can(InvoiceSchema, 'i2', 'read')).toBe('yes');
+		await t.client.close();
+	});
+
+	it('answers unknown where a row on the chain is not held', async () => {
+		const t = await billingClient([
+			...inAccount('a1', 'view_invoices'),
+			{ permission: 'read_billing', root: true },
+		]);
+		expect(await t.client.can(ChargeSchema, 'c-far', 'read')).toBe('unknown');
 		await t.client.close();
 	});
 });

@@ -539,7 +539,7 @@ var _ = Describe("Access model sync across a policy change", func() {
 			label := messageNamed(file, "Label")
 			eo := proto.GetExtension(label.GetOptions(), syncplanev1.E_Entity).(*syncplanev1.EntityOptions)
 			eo.GetAccess().Allow = append(eo.GetAccess().GetAllow(), &syncplanev1.AccessRule{
-				Read: true, Source: &syncplanev1.AccessRule_Permission{Permission: "view_projects"},
+				Read: true, Requires: []string{"view_projects"},
 			})
 		})
 		Expect(movedTo(after).pullOnce(0).GetReset_()).To(BeTrue())

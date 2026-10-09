@@ -14,7 +14,7 @@ import type { Message } from "@bufbuild/protobuf";
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUi8wEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIUCgpwZXJtaXNzaW9uGAYgASgJSAASMAoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXJIABIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkIICgZzb3VyY2UiEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUi4wEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIQCghyZXF1aXJlcxgGIAMoCRIuCghhZG1pdHRlZBgHIAEoCzIcLnN5bmNwbGFuZS52MS5BZG1pdHRlZENhbGxlchIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbiIQCg5BZG1pdHRlZENhbGxlciJQCgxHcmFudE9wdGlvbnMSDwoHc3ViamVjdBgBIAEoCRIMCgRyb2xlGAIgASgJEiEKBXJvbGVzGAMgAygLMhIuc3luY3BsYW5lLnYxLlJvbGUiNgoEUm9sZRIMCgRuYW1lGAEgASgJEg4KBmdyYW50cxgCIAMoCRIQCghpbmNsdWRlcxgDIAMoCSIgCg5NZW1iZXJzT3B0aW9ucxIOCgZlbnRpdHkYASABKAkiFQoTQWNjZXNzUGFyZW50T3B0aW9ucyIQCg5DcmVhdG9yT3B0aW9ucyIQCg5IaXN0b3J5T3B0aW9ucyISChBSZWZlcmVuY2VPcHRpb25zIhsKC1NlYXJjaEZpZWxkEgwKBHBhdGgYASABKAkiTwoKU2VhcmNoU3BlYxIoCgVmaWVsZBgBIAMoCzIZLnN5bmNwbGFuZS52MS5TZWFyY2hGaWVsZBIXCg9rZWVwX2RpYWNyaXRpY3MYAiABKAgiJgoISW5kZXhLZXkSDAoEcGF0aBgBIAEoCRIMCgRkZXNjGAIgASgIIj4KCUluZGV4U3BlYxIMCgRuYW1lGAEgASgJEiMKA2tleRgCIAMoCzIWLnN5bmNwbGFuZS52MS5JbmRleEtleSLXAgoNRmllbGRCZWhhdmlvchIOCgZvcGFxdWUYASABKAgSEQoJa2V5X2ZpZWxkGAIgAygJEhMKC29yZGVyX2ZpZWxkGAMgASgJEgwKBHRleHQYBCABKAgSDwoHaW5kZXhlZBgFIAEoCBIPCgdoaXN0b3J5GAYgASgIEhIKCnNlYXJjaGFibGUYByABKAgSNAoMd3JpdGVfcG9saWN5GAggASgOMh4uc3luY3BsYW5lLnYxLkZpZWxkV3JpdGVQb2xpY3kSEQoJd29ya3NwYWNlGAkgASgIEhgKEHJldmVyc2VfcmVsYXRpb24YCiABKAkSOAoNYWNjZXNzX3BhcmVudBgLIAEoCzIhLnN5bmNwbGFuZS52MS5BY2Nlc3NQYXJlbnRPcHRpb25zEi0KB2NyZWF0b3IYDCABKAsyHC5zeW5jcGxhbmUudjEuQ3JlYXRvck9wdGlvbnMqeQoQRmllbGRXcml0ZVBvbGljeRIiCh5GSUVMRF9XUklURV9QT0xJQ1lfVU5TUEVDSUZJRUQQABIcChhGSUVMRF9XUklURV9QT0xJQ1lfQUxMT1cQARIjCh9GSUVMRF9XUklURV9QT0xJQ1lfVFJVU1RFRF9PTkxZEAI6VgoGZW50aXR5Eh8uZ29vZ2xlLnByb3RvYnVmLk1lc3NhZ2VPcHRpb25zGLSHAyABKAsyGy5zeW5jcGxhbmUudjEuRW50aXR5T3B0aW9uc1IGZW50aXR5Ol8KCXJlZmVyZW5jZRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi2hwMgASgLMh4uc3luY3BsYW5lLnYxLlJlZmVyZW5jZU9wdGlvbnNSCXJlZmVyZW5jZTpjCg5maWVsZF9iZWhhdmlvchIdLmdvb2dsZS5wcm90b2J1Zi5GaWVsZE9wdGlvbnMYtYcDIAEoCzIbLnN5bmNwbGFuZS52MS5GaWVsZEJlaGF2aW9yUg1maWVsZEJlaGF2aW9yQkZaRGdpdGh1Yi5jb20vbGV2ZWxmb3VyYWIvc3luY3BsYW5lL2VuZ2luZS9nZW4vc3luY3BsYW5lL3YxO3N5bmNwbGFuZXYxYgZwcm90bzM", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -154,9 +154,9 @@ export const EntityOptionsSchema: GenMessage<EntityOptions> = /*@__PURE__*/
  *   option (syncplane.v1.entity) = {
  *     name: "comment" key_fields: ["id"]
  *     access: { allow: [
- *       { read: true permission: "view_tasks" },
- *       { create: true permission: "comment" },
- *       { update: true delete: true permission: "moderate_comments" }
+ *       { read: true requires: "view_tasks" },
+ *       { create: true requires: "comment" },
+ *       { update: true delete: true requires: "moderate_comments" }
  *     ] }
  *   };
  *   string id = 1;
@@ -200,8 +200,8 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * update must be admitted by one rule for both the stored row and the row as
  * it will be stored, so a rule admits a write that moves a row to another
  * access parent only when its source holds at the old place and at the new
- * one, a rule with `subject` admits no write that changes the subject field to
- * a value outside the caller's subjects, and a rule with `when` admits no
+ * one, a rule with `subject` admits no write that changes the subject field
+ * to a value outside the caller's subjects, and a rule with `when` admits no
  * write that makes the row fail the condition.
  *
  * ```protobuf
@@ -209,10 +209,10 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  *   option (syncplane.v1.entity) = {
  *     name: "comment" key_fields: ["id"]
  *     access: { allow: [
- *       { read: true permission: "view_tasks" },
+ *       { read: true requires: "view_tasks" },
  *       { create: true delete: true
- *         permission: "comment" subject: "author_id" },
- *       { update: true permission: "comment"
+ *         requires: "comment" subject: "author_id" },
+ *       { update: true requires: "comment"
  *         subject: "author_id" fields: ["body"] }
  *     ] }
  *   };
@@ -223,8 +223,9 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * }
  * ```
  *
- * Registration refuses a rule without an operation or without a source, and
- * unknown fields inside this message.
+ * Registration refuses a rule without an operation, a rule that sets neither
+ * or both of `requires` and `admitted`, and unknown fields inside this
+ * message.
  *
  * @generated from message syncplane.v1.AccessRule
  */
@@ -267,29 +268,38 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
   write: boolean;
 
   /**
-   * Who the rule admits.
+   * The source of the rule: a caller that holds every one of these
+   * permissions where the row sits, at the workspace root, at the row, or at
+   * a row up the row's chain of access parents. Each permission can be held
+   * at a different one of these places. Each entry starts with a letter or
+   * an underscore, followed by letters, digits and underscores, and no entry
+   * is named twice.
    *
-   * @generated from oneof syncplane.v1.AccessRule.source
+   * The text format writes one permission without brackets:
+   *
+   * ```protobuf
+   * access: { allow: [
+   *   { read: true requires: "view_tasks" },
+   *   { update: true requires: ["edit_tasks", "use_billing"] }
+   * ] }
+   * ```
+   *
+   * A caller that holds `edit_tasks` at the task's project and `use_billing`
+   * at the workspace root updates the task. A caller that holds only one of
+   * them does not. To admit a caller that holds either of two permissions,
+   * declare two rules.
+   *
+   * @generated from field: repeated string requires = 6;
    */
-  source: {
-    /**
-     * A caller that holds this permission at the workspace root, at the
-     * row, or at a row up the row's chain of access parents. Starts with a
-     * letter or an underscore, followed by letters, digits and underscores.
-     *
-     * @generated from field: string permission = 6;
-     */
-    value: string;
-    case: "permission";
-  } | {
-    /**
-     * Every caller admitted to the workspace. See `AdmittedCaller`.
-     *
-     * @generated from field: syncplane.v1.AdmittedCaller admitted = 7;
-     */
-    value: AdmittedCaller;
-    case: "admitted";
-  } | { case: undefined; value?: undefined };
+  requires: string[];
+
+  /**
+   * The source of the rule: every caller admitted to the workspace. See
+   * `AdmittedCaller`.
+   *
+   * @generated from field: syncplane.v1.AdmittedCaller admitted = 7;
+   */
+  admitted?: AdmittedCaller | undefined;
 
   /**
    * Admits only rows whose field with this name holds one of the caller's
@@ -330,11 +340,11 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
    *
    * ```protobuf
    * access: { allow: [
-   *   { read: true permission: "view_tasks" },
-   *   { update: true permission: "edit_tasks"
+   *   { read: true requires: "view_tasks" },
+   *   { update: true requires: "edit_tasks"
    *     when: { cmp: { path: ["archived"] op: CMP_OP_EQ
    *       value: { bool_value: false } } } },
-   *   { update: true permission: "archive_tasks" }
+   *   { update: true requires: "archive_tasks" }
    * ] }
    * ```
    *
@@ -396,8 +406,8 @@ export const AdmittedCallerSchema: GenMessage<AdmittedCaller> = /*@__PURE__*/
  *       ]
  *     }
  *     access: { allow: [
- *       { read: true permission: "view_members" },
- *       { write: true permission: "manage_members" }
+ *       { read: true requires: "view_members" },
+ *       { write: true requires: "manage_members" }
  *     ] }
  *   };
  *   string id = 1;
@@ -539,8 +549,8 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
  *     name: "team" key_fields: ["id"]
  *     members: { entity: "team_member" }
  *     access: { allow: [
- *       { read: true permission: "view_teams" },
- *       { write: true permission: "manage_teams" }
+ *       { read: true requires: "view_teams" },
+ *       { write: true requires: "manage_teams" }
  *     ] }
  *   };
  *   string id = 1;
@@ -557,8 +567,8 @@ export const RoleSchema: GenMessage<Role> = /*@__PURE__*/
  *       ]
  *     }
  *     access: { allow: [
- *       { read: true permission: "view_teams" },
- *       { write: true permission: "manage_teams" }
+ *       { read: true requires: "view_teams" },
+ *       { write: true requires: "manage_teams" }
  *     ] }
  *   };
  *   string id = 1;

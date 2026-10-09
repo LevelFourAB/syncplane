@@ -271,9 +271,9 @@ func (x *EntityOptions) GetMembers() *MembersOptions {
 //	  option (syncplane.v1.entity) = {
 //	    name: "comment" key_fields: ["id"]
 //	    access: { allow: [
-//	      { read: true permission: "view_tasks" },
-//	      { create: true permission: "comment" },
-//	      { update: true delete: true permission: "moderate_comments" }
+//	      { read: true requires: "view_tasks" },
+//	      { create: true requires: "comment" },
+//	      { update: true delete: true requires: "moderate_comments" }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -343,8 +343,8 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, a rule with `subject` admits no write that changes the subject field to
-// a value outside the caller's subjects, and a rule with `when` admits no
+// one, a rule with `subject` admits no write that changes the subject field
+// to a value outside the caller's subjects, and a rule with `when` admits no
 // write that makes the row fail the condition.
 //
 // ```protobuf
@@ -353,10 +353,10 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 //	  option (syncplane.v1.entity) = {
 //	    name: "comment" key_fields: ["id"]
 //	    access: { allow: [
-//	      { read: true permission: "view_tasks" },
+//	      { read: true requires: "view_tasks" },
 //	      { create: true delete: true
-//	        permission: "comment" subject: "author_id" },
-//	      { update: true permission: "comment"
+//	        requires: "comment" subject: "author_id" },
+//	      { update: true requires: "comment"
 //	        subject: "author_id" fields: ["body"] }
 //	    ] }
 //	  };
@@ -368,8 +368,9 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 //
 // ```
 //
-// Registration refuses a rule without an operation or without a source, and
-// unknown fields inside this message.
+// Registration refuses a rule without an operation, a rule that sets neither
+// or both of `requires` and `admitted`, and unknown fields inside this
+// message.
 type AccessRule struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Admits reading rows.
@@ -384,13 +385,32 @@ type AccessRule struct {
 	// Admits every write operation: `create`, `update` and `delete`, and each
 	// write operation a later version adds.
 	Write bool `protobuf:"varint,5,opt,name=write,proto3" json:"write,omitempty"`
-	// Who the rule admits.
+	// The source of the rule: a caller that holds every one of these
+	// permissions where the row sits, at the workspace root, at the row, or at
+	// a row up the row's chain of access parents. Each permission can be held
+	// at a different one of these places. Each entry starts with a letter or
+	// an underscore, followed by letters, digits and underscores, and no entry
+	// is named twice.
 	//
-	// Types that are valid to be assigned to Source:
+	// The text format writes one permission without brackets:
 	//
-	//	*AccessRule_Permission
-	//	*AccessRule_Admitted
-	Source isAccessRule_Source `protobuf_oneof:"source"`
+	// ```protobuf
+	// access: { allow: [
+	//
+	//	{ read: true requires: "view_tasks" },
+	//	{ update: true requires: ["edit_tasks", "use_billing"] }
+	//
+	// ] }
+	// ```
+	//
+	// A caller that holds `edit_tasks` at the task's project and `use_billing`
+	// at the workspace root updates the task. A caller that holds only one of
+	// them does not. To admit a caller that holds either of two permissions,
+	// declare two rules.
+	Requires []string `protobuf:"bytes,6,rep,name=requires,proto3" json:"requires,omitempty"`
+	// The source of the rule: every caller admitted to the workspace. See
+	// `AdmittedCaller`.
+	Admitted *AdmittedCaller `protobuf:"bytes,7,opt,name=admitted,proto3" json:"admitted,omitempty"`
 	// Admits only rows whose field with this name holds one of the caller's
 	// subjects. Names a top-level, singular `string` field. An empty field
 	// value never matches, and a permission held at the workspace root does not
@@ -420,11 +440,11 @@ type AccessRule struct {
 	// ```protobuf
 	// access: { allow: [
 	//
-	//	{ read: true permission: "view_tasks" },
-	//	{ update: true permission: "edit_tasks"
+	//	{ read: true requires: "view_tasks" },
+	//	{ update: true requires: "edit_tasks"
 	//	  when: { cmp: { path: ["archived"] op: CMP_OP_EQ
 	//	    value: { bool_value: false } } } },
-	//	{ update: true permission: "archive_tasks" }
+	//	{ update: true requires: "archive_tasks" }
 	//
 	// ] }
 	// ```
@@ -500,27 +520,16 @@ func (x *AccessRule) GetWrite() bool {
 	return false
 }
 
-func (x *AccessRule) GetSource() isAccessRule_Source {
+func (x *AccessRule) GetRequires() []string {
 	if x != nil {
-		return x.Source
+		return x.Requires
 	}
 	return nil
 }
 
-func (x *AccessRule) GetPermission() string {
-	if x != nil {
-		if x, ok := x.Source.(*AccessRule_Permission); ok {
-			return x.Permission
-		}
-	}
-	return ""
-}
-
 func (x *AccessRule) GetAdmitted() *AdmittedCaller {
 	if x != nil {
-		if x, ok := x.Source.(*AccessRule_Admitted); ok {
-			return x.Admitted
-		}
+		return x.Admitted
 	}
 	return nil
 }
@@ -545,26 +554,6 @@ func (x *AccessRule) GetWhen() *Condition {
 	}
 	return nil
 }
-
-type isAccessRule_Source interface {
-	isAccessRule_Source()
-}
-
-type AccessRule_Permission struct {
-	// A caller that holds this permission at the workspace root, at the
-	// row, or at a row up the row's chain of access parents. Starts with a
-	// letter or an underscore, followed by letters, digits and underscores.
-	Permission string `protobuf:"bytes,6,opt,name=permission,proto3,oneof"`
-}
-
-type AccessRule_Admitted struct {
-	// Every caller admitted to the workspace. See `AdmittedCaller`.
-	Admitted *AdmittedCaller `protobuf:"bytes,7,opt,name=admitted,proto3,oneof"`
-}
-
-func (*AccessRule_Permission) isAccessRule_Source() {}
-
-func (*AccessRule_Admitted) isAccessRule_Source() {}
 
 // Selects every caller admitted to the workspace as the source of an
 // `AccessRule`.
@@ -632,8 +621,8 @@ func (*AdmittedCaller) Descriptor() ([]byte, []int) {
 //	      ]
 //	    }
 //	    access: { allow: [
-//	      { read: true permission: "view_members" },
-//	      { write: true permission: "manage_members" }
+//	      { read: true requires: "view_members" },
+//	      { write: true requires: "manage_members" }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -839,8 +828,8 @@ func (x *Role) GetIncludes() []string {
 //	    name: "team" key_fields: ["id"]
 //	    members: { entity: "team_member" }
 //	    access: { allow: [
-//	      { read: true permission: "view_teams" },
-//	      { write: true permission: "manage_teams" }
+//	      { read: true requires: "view_teams" },
+//	      { write: true requires: "manage_teams" }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -857,8 +846,8 @@ func (x *Role) GetIncludes() []string {
 //	      ]
 //	    }
 //	    access: { allow: [
-//	      { read: true permission: "view_teams" },
-//	      { write: true permission: "manage_teams" }
+//	      { read: true requires: "view_teams" },
+//	      { write: true requires: "manage_teams" }
 //	    ] }
 //	  };
 //	  string id = 1;
@@ -1713,23 +1702,20 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
 	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
 	"\rAccessOptions\x12.\n" +
-	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xc5\x02\n" +
+	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xb3\x02\n" +
 	"\n" +
 	"AccessRule\x12\x12\n" +
 	"\x04read\x18\x01 \x01(\bR\x04read\x12\x16\n" +
 	"\x06create\x18\x02 \x01(\bR\x06create\x12\x16\n" +
 	"\x06update\x18\x03 \x01(\bR\x06update\x12\x16\n" +
 	"\x06delete\x18\x04 \x01(\bR\x06delete\x12\x14\n" +
-	"\x05write\x18\x05 \x01(\bR\x05write\x12 \n" +
-	"\n" +
-	"permission\x18\x06 \x01(\tH\x00R\n" +
-	"permission\x12:\n" +
-	"\badmitted\x18\a \x01(\v2\x1c.syncplane.v1.AdmittedCallerH\x00R\badmitted\x12\x18\n" +
+	"\x05write\x18\x05 \x01(\bR\x05write\x12\x1a\n" +
+	"\brequires\x18\x06 \x03(\tR\brequires\x128\n" +
+	"\badmitted\x18\a \x01(\v2\x1c.syncplane.v1.AdmittedCallerR\badmitted\x12\x18\n" +
 	"\asubject\x18\b \x01(\tR\asubject\x12\x16\n" +
 	"\x06fields\x18\t \x03(\tR\x06fields\x12+\n" +
 	"\x04when\x18\n" +
-	" \x01(\v2\x17.syncplane.v1.ConditionR\x04whenB\b\n" +
-	"\x06source\"\x10\n" +
+	" \x01(\v2\x17.syncplane.v1.ConditionR\x04when\"\x10\n" +
 	"\x0eAdmittedCaller\"f\n" +
 	"\fGrantOptions\x12\x18\n" +
 	"\asubject\x18\x01 \x01(\tR\asubject\x12\x12\n" +
@@ -1853,10 +1839,6 @@ func file_syncplane_v1_options_proto_init() {
 		return
 	}
 	file_syncplane_v1_query_proto_init()
-	file_syncplane_v1_options_proto_msgTypes[2].OneofWrappers = []any{
-		(*AccessRule_Permission)(nil),
-		(*AccessRule_Admitted)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
