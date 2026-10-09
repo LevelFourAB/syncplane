@@ -444,7 +444,8 @@ func sameAnchors(x, y *permAnchors) bool {
 // readAccessUnchanged reports whether the two sides of a resync read entity
 // under the same anchors, for every permission its read rules name. The
 // subjects a subject check compares with are the same on both sides: a
-// cursor recorded for other subjects cannot resync.
+// cursor recorded for other subjects cannot resync. A when check reads only
+// the row, so it decides the same on both sides.
 func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if newEm.caller == nil {
 		return true
@@ -457,7 +458,7 @@ func readAccessUnchanged(oldEm, newEm *rowEmitter, entity string) bool {
 	if !sameAnchors(oldEm.access.readAnchors(r), newEm.access.readAnchors(r)) {
 		return false
 	}
-	for _, o := range r.owned {
+	for _, o := range r.checked {
 		if !o.admitted() && !sameAnchors(oldEm.access.perms[o.permission], newEm.access.perms[o.permission]) {
 			return false
 		}
@@ -527,11 +528,13 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	}
 	changed := map[anchorRow]struct{}{}
 	addChanged(changed, o, n)
-	// A read rule with a subject check reads the rows below its own
-	// permission's anchors that name the caller. One whose permission moved
-	// to or from the root can show or hide every such row, wherever it sits.
-	var owned []string
-	for _, rule := range a.read.owned {
+	// A read rule with a check on the row reads the rows below its own
+	// permission's anchors that pass the check. One whose permission moved to
+	// or from the root can show or hide every such row, wherever it sits: the
+	// rows that name the caller for a subject check, and any row for a rule
+	// with only a when check, which no index finds.
+	var named []string
+	for _, rule := range a.read.checked {
 		if rule.admitted() {
 			continue // held at the root on both sides
 		}
@@ -540,11 +543,14 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 			addChanged(changed, ro, rn)
 			continue
 		}
+		if rule.subject == nil {
+			return nil, false, nil
+		}
 		rows, ok, err := subjectRows(tx, info, rule.subject, newEm.caller.subjects, maxCandidates, newEm.srv.limits)
 		if err != nil || !ok {
 			return nil, false, err
 		}
-		if owned, ok = mergeKeys(owned, rows, maxCandidates); !ok {
+		if named, ok = mergeKeys(named, rows, maxCandidates); !ok {
 			return nil, false, nil
 		}
 	}
@@ -559,7 +565,7 @@ func accessDeltaCandidates(tx storage.ReadTx, oldEm, newEm *rowEmitter, info *en
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	if keys, ok = mergeKeys(keys, owned, maxCandidates); !ok {
+	if keys, ok = mergeKeys(keys, named, maxCandidates); !ok {
 		return nil, false, nil
 	}
 	return withWindowMembers(keys, info.name, maxCandidates, oldEm.windowMembers, newEm.windowMembers)

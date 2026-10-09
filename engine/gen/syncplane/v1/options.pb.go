@@ -343,8 +343,9 @@ func (x *AccessOptions) GetAllow() []*AccessRule {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, and a rule with `subject` admits no write that changes the subject
-// field to a value outside the caller's subjects.
+// one, a rule with `subject` admits no write that changes the subject field to
+// a value outside the caller's subjects, and a rule with `when` admits no
+// write that makes the row fail the condition.
 //
 // ```protobuf
 //
@@ -405,7 +406,31 @@ type AccessRule struct {
 	// A `PATCH` fails before the row is read when every `update` rule of the
 	// entity has a `fields` list and no list names every field the mask
 	// names.
-	Fields        []string `protobuf:"bytes,9,rep,name=fields,proto3" json:"fields,omitempty"`
+	Fields []string `protobuf:"bytes,9,rep,name=fields,proto3" json:"fields,omitempty"`
+	// Admits only rows that match this condition. The condition uses the query
+	// predicate language with paths from the row, and reads only the row
+	// itself: a `rel` or a `match` condition is refused.
+	//
+	// A read rule with `when` hides a row when a write makes it fail the
+	// condition, and a client that holds the row receives a delete. An update
+	// rule with `when` must admit the stored row and the row as it will be
+	// stored, so it refuses a write that makes a row fail the condition, and
+	// a write to a row that fails it:
+	//
+	// ```protobuf
+	// access: { allow: [
+	//
+	//	{ read: true permission: "view_tasks" },
+	//	{ update: true permission: "edit_tasks"
+	//	  when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+	//	    value: { bool_value: false } } } },
+	//	{ update: true permission: "archive_tasks" }
+	//
+	// ] }
+	// ```
+	//
+	// A permission held at the workspace root does not skip the check.
+	When          *Condition `protobuf:"bytes,10,opt,name=when,proto3" json:"when,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -510,6 +535,13 @@ func (x *AccessRule) GetSubject() string {
 func (x *AccessRule) GetFields() []string {
 	if x != nil {
 		return x.Fields
+	}
+	return nil
+}
+
+func (x *AccessRule) GetWhen() *Condition {
+	if x != nil {
+		return x.When
 	}
 	return nil
 }
@@ -1666,7 +1698,7 @@ var File_syncplane_v1_options_proto protoreflect.FileDescriptor
 
 const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\n" +
-	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\"\xda\x03\n" +
+	"\x1asyncplane/v1/options.proto\x12\fsyncplane.v1\x1a google/protobuf/descriptor.proto\x1a\x18syncplane/v1/query.proto\"\xda\x03\n" +
 	"\rEntityOptions\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x1d\n" +
 	"\n" +
@@ -1681,7 +1713,7 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"\x05grant\x18\v \x01(\v2\x1a.syncplane.v1.GrantOptionsR\x05grant\x126\n" +
 	"\amembers\x18\f \x01(\v2\x1c.syncplane.v1.MembersOptionsR\amembersJ\x04\b\x04\x10\x05J\x04\b\a\x10\bJ\x04\b\b\x10\tR\rdelete_policyR\rcreate_policyR\rupdate_policy\"?\n" +
 	"\rAccessOptions\x12.\n" +
-	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\x98\x02\n" +
+	"\x05allow\x18\x01 \x03(\v2\x18.syncplane.v1.AccessRuleR\x05allow\"\xc5\x02\n" +
 	"\n" +
 	"AccessRule\x12\x12\n" +
 	"\x04read\x18\x01 \x01(\bR\x04read\x12\x16\n" +
@@ -1694,7 +1726,9 @@ const file_syncplane_v1_options_proto_rawDesc = "" +
 	"permission\x12:\n" +
 	"\badmitted\x18\a \x01(\v2\x1c.syncplane.v1.AdmittedCallerH\x00R\badmitted\x12\x18\n" +
 	"\asubject\x18\b \x01(\tR\asubject\x12\x16\n" +
-	"\x06fields\x18\t \x03(\tR\x06fieldsB\b\n" +
+	"\x06fields\x18\t \x03(\tR\x06fields\x12+\n" +
+	"\x04when\x18\n" +
+	" \x01(\v2\x17.syncplane.v1.ConditionR\x04whenB\b\n" +
 	"\x06source\"\x10\n" +
 	"\x0eAdmittedCaller\"f\n" +
 	"\fGrantOptions\x12\x18\n" +
@@ -1780,8 +1814,9 @@ var file_syncplane_v1_options_proto_goTypes = []any{
 	(*IndexKey)(nil),                    // 14: syncplane.v1.IndexKey
 	(*IndexSpec)(nil),                   // 15: syncplane.v1.IndexSpec
 	(*FieldBehavior)(nil),               // 16: syncplane.v1.FieldBehavior
-	(*descriptorpb.MessageOptions)(nil), // 17: google.protobuf.MessageOptions
-	(*descriptorpb.FieldOptions)(nil),   // 18: google.protobuf.FieldOptions
+	(*Condition)(nil),                   // 17: syncplane.v1.Condition
+	(*descriptorpb.MessageOptions)(nil), // 18: google.protobuf.MessageOptions
+	(*descriptorpb.FieldOptions)(nil),   // 19: google.protobuf.FieldOptions
 }
 var file_syncplane_v1_options_proto_depIdxs = []int32{
 	15, // 0: syncplane.v1.EntityOptions.index:type_name -> syncplane.v1.IndexSpec
@@ -1792,23 +1827,24 @@ var file_syncplane_v1_options_proto_depIdxs = []int32{
 	7,  // 5: syncplane.v1.EntityOptions.members:type_name -> syncplane.v1.MembersOptions
 	3,  // 6: syncplane.v1.AccessOptions.allow:type_name -> syncplane.v1.AccessRule
 	4,  // 7: syncplane.v1.AccessRule.admitted:type_name -> syncplane.v1.AdmittedCaller
-	6,  // 8: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
-	12, // 9: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
-	14, // 10: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
-	0,  // 11: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
-	8,  // 12: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
-	9,  // 13: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
-	17, // 14: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
-	17, // 15: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
-	18, // 16: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
-	1,  // 17: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
-	11, // 18: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
-	16, // 19: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
-	20, // [20:20] is the sub-list for method output_type
-	20, // [20:20] is the sub-list for method input_type
-	17, // [17:20] is the sub-list for extension type_name
-	14, // [14:17] is the sub-list for extension extendee
-	0,  // [0:14] is the sub-list for field type_name
+	17, // 8: syncplane.v1.AccessRule.when:type_name -> syncplane.v1.Condition
+	6,  // 9: syncplane.v1.GrantOptions.roles:type_name -> syncplane.v1.Role
+	12, // 10: syncplane.v1.SearchSpec.field:type_name -> syncplane.v1.SearchField
+	14, // 11: syncplane.v1.IndexSpec.key:type_name -> syncplane.v1.IndexKey
+	0,  // 12: syncplane.v1.FieldBehavior.write_policy:type_name -> syncplane.v1.FieldWritePolicy
+	8,  // 13: syncplane.v1.FieldBehavior.access_parent:type_name -> syncplane.v1.AccessParentOptions
+	9,  // 14: syncplane.v1.FieldBehavior.creator:type_name -> syncplane.v1.CreatorOptions
+	18, // 15: syncplane.v1.entity:extendee -> google.protobuf.MessageOptions
+	18, // 16: syncplane.v1.reference:extendee -> google.protobuf.MessageOptions
+	19, // 17: syncplane.v1.field_behavior:extendee -> google.protobuf.FieldOptions
+	1,  // 18: syncplane.v1.entity:type_name -> syncplane.v1.EntityOptions
+	11, // 19: syncplane.v1.reference:type_name -> syncplane.v1.ReferenceOptions
+	16, // 20: syncplane.v1.field_behavior:type_name -> syncplane.v1.FieldBehavior
+	21, // [21:21] is the sub-list for method output_type
+	21, // [21:21] is the sub-list for method input_type
+	18, // [18:21] is the sub-list for extension type_name
+	15, // [15:18] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_v1_options_proto_init() }
@@ -1816,6 +1852,7 @@ func file_syncplane_v1_options_proto_init() {
 	if File_syncplane_v1_options_proto != nil {
 		return
 	}
+	file_syncplane_v1_query_proto_init()
 	file_syncplane_v1_options_proto_msgTypes[2].OneofWrappers = []any{
 		(*AccessRule_Permission)(nil),
 		(*AccessRule_Admitted)(nil),

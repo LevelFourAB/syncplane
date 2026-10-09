@@ -372,6 +372,52 @@ An entity whose rules use `admitted` stays in the model. It can have an access p
 
 To keep a client from deleting rows in a schema that does not use the access model, refuse the delete in `CanMutate`. See [Reserve an operation for trusted writes](authentication-and-permissions.md#reserve-an-operation-for-trusted-writes).
 
+### Make a row read-only, or hide it, by a field of the row
+
+Add `when` to a rule to admit only rows that match a condition. The condition uses the query predicate language, with paths from the row. Here a task writer edits a task until someone archives it, a hidden task is read only by admins, and an admin archives and restores tasks:
+
+```proto
+message Task {
+	option (syncplane.v1.entity) = {
+		name: "task"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					permission: "view_tasks"
+					when: { cmp: { path: [ "hidden" ] op: CMP_OP_EQ value: { bool_value: false } } }
+				},
+				{ read: true permission: "manage_tasks" },
+				{
+					update: true
+					permission: "edit_tasks"
+					when: { cmp: { path: [ "archived" ] op: CMP_OP_EQ value: { bool_value: false } } }
+				},
+				{ write: true permission: "manage_tasks" }
+			]
+		}
+	};
+	string id = 1;
+	Project project = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	bool archived = 3;
+	bool hidden = 4;
+}
+```
+
+- The update rule must admit the stored row and the row as it will be stored, so a holder of `edit_tasks` cannot archive a task or restore one. Give that to another rule, here the `write` rule with `manage_tasks`.
+- When a task becomes hidden, clients that read it through the first rule alone receive a delete. When it stops being hidden, they receive it again.
+- To let the author read their own draft, add a second read rule with `subject` beside the one with `when`. The rules join with OR.
+- A condition reads only the row. It cannot read the project above the task.
+
+In the TypeScript schema builder, `when` takes the same field proxy as a query's `where`:
+
+```ts
+{ update: true, permission: 'edit_tasks', when: (t) => t.archived.eq(false) }
+```
+
+`can()` evaluates the condition on the row the client holds. It answers `'unknown'` for an update whose `fields` include a field the condition reads, because the new value decides.
+
 ### Moving and deleting rows that other rows sit below
 
 Rows below a row move with it. To move a task to another project, the caller needs one update rule that admits it at both projects, here the `write` rule with `edit_tasks`, and, at the old project, the read permission of every entity that can sit below a task, here `view_tasks` for the comments. Without the read permission a caller could carry rows it cannot read to a project where other people can read them.

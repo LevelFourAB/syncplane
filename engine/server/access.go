@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"slices"
@@ -11,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 
 	syncplanecursorv1 "github.com/levelfourab/syncplane/engine/gen/syncplane/cursor/v1"
@@ -78,6 +80,10 @@ type accessRule struct {
 	// names of top-level fields outside a oneof, and of oneofs. Nil when the
 	// rule sets no fields check.
 	fields []string
+	// when is the condition a row must match, nil when the rule sets no when
+	// check. whenSpec renders it in a canonical form, "" without one.
+	when     *query.Compiled
+	whenSpec string
 }
 
 // admitted reports whether the rule admits every caller admitted to the
@@ -92,11 +98,21 @@ func (r accessRule) names(op accessOp) bool {
 	return r.ops&op != 0 || (op != opRead && r.ops&opWrite != 0)
 }
 
-// subjectHolds reports whether row passes the rule's subject check: the rule
-// sets none, or the field holds one of subjects. subjects are sorted, and an
-// empty value never matches.
-func (r accessRule) subjectHolds(subjects []string, row protoreflect.Message) bool {
-	return r.subject == nil || subjectMatches(subjects, row.Get(r.subject).String())
+// checksRow reports whether the rule reads the row's fields to decide: it
+// sets a subject check or a when check.
+func (r accessRule) checksRow() bool {
+	return r.subject != nil || r.when != nil
+}
+
+// rowHolds reports whether row passes the rule's checks on the row: the
+// subject field holds one of subjects, and the row matches the when
+// condition. A check the rule does not set holds. subjects are sorted, and an
+// empty subject value never matches.
+func (r accessRule) rowHolds(subjects []string, row protoreflect.Message) bool {
+	if r.subject != nil && !subjectMatches(subjects, row.Get(r.subject).String()) {
+		return false
+	}
+	return r.when == nil || r.when.Eval(row)
 }
 
 // subjectMatches reports whether a subject field holding value names one of
@@ -143,6 +159,9 @@ func (r accessRule) spec() string {
 	if r.fields != nil {
 		spec += ":fields=" + strings.Join(r.fields, ",")
 	}
+	if r.when != nil {
+		spec += ":when=" + r.whenSpec
+	}
 	return spec
 }
 
@@ -178,15 +197,16 @@ func (a *entityAccess) maskCovered(info *entityInfo, paths []string) (heads []st
 
 // readers is who may read the rows of an entity: a caller that holds one of
 // perms where a row sits, every admitted caller when all is set, and the
-// callers that one of owned admits.
+// callers that one of checked admits.
 type readers struct {
-	// perms are the permissions of the entity's read rules without a subject
-	// check, sorted and without repeats. Empty when all is set.
+	// perms are the permissions of the entity's read rules that check nothing
+	// on the row, sorted and without repeats. Empty when all is set.
 	perms []string
 	all   bool
-	// owned are the entity's read rules with a subject check, sorted by spec.
-	// Empty when all is set, since all admits every row they could.
-	owned []accessRule
+	// checked are the entity's read rules with a subject check or a when
+	// check, sorted by spec. Empty when all is set, since all admits every row
+	// they could.
+	checked []accessRule
 }
 
 // key renders r in a canonical form: entities with equal keys are read by
@@ -197,21 +217,21 @@ func (r readers) key() string {
 		return "*"
 	}
 	key := strings.Join(r.perms, ",")
-	for _, o := range r.owned {
+	for _, o := range r.checked {
 		key += "|" + o.spec()
 	}
 	return key
 }
 
-// loose returns r with every subject check dropped: who may read some row of
-// the entity where a row sits. It is a superset of r, for the checks that
-// cannot read the subject of each row.
+// loose returns r with every check on the row dropped: who may read some row
+// of the entity where a row sits. It is a superset of r, for the checks that
+// cannot read each row.
 func (r readers) loose() readers {
-	if r.all || len(r.owned) == 0 {
+	if r.all || len(r.checked) == 0 {
 		return readers{perms: r.perms, all: r.all}
 	}
 	out := readers{perms: slices.Clone(r.perms)}
-	for _, o := range r.owned {
+	for _, o := range r.checked {
 		if o.admitted() {
 			return readers{all: true}
 		}
@@ -433,8 +453,8 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		}
 		switch {
 		case !rule.names(opRead):
-		case rule.subject != nil:
-			a.read.owned = append(a.read.owned, rule)
+		case rule.checksRow():
+			a.read.checked = append(a.read.checked, rule)
 		case rule.admitted():
 			a.read.all = true
 		default:
@@ -442,13 +462,13 @@ func accessOf(desc protoreflect.MessageDescriptor, eo *syncplanev1.EntityOptions
 		}
 	}
 	if a.read.all {
-		a.read.owned = nil
+		a.read.checked = nil
 	} else {
 		for p := range reads {
 			a.read.perms = append(a.read.perms, p)
 		}
 		sort.Strings(a.read.perms)
-		sort.Slice(a.read.owned, func(i, j int) bool { return a.read.owned[i].spec() < a.read.owned[j].spec() })
+		sort.Slice(a.read.checked, func(i, j int) bool { return a.read.checked[i].spec() < a.read.checked[j].spec() })
 	}
 	return a, nil
 }
@@ -505,7 +525,85 @@ func accessRuleOf(i int, r *syncplanev1.AccessRule, desc protoreflect.MessageDes
 		}
 		rule.fields = fields
 	}
+	if r.GetWhen() != nil {
+		when, spec, err := ruleWhenOf(desc, r.GetWhen())
+		if err != nil {
+			return accessRule{}, fmt.Errorf("%s when: %w", where, err)
+		}
+		rule.when, rule.whenSpec = when, spec
+	}
 	return rule, nil
+}
+
+// ruleWhenOf compiles the when condition of an access rule against the
+// entity's message, and renders it in a canonical form for the rule's spec.
+// The condition must read only the row, so a rel and a match condition are
+// refused. So are fields this build does not know in any message of the
+// condition, since they could narrow it.
+func ruleWhenOf(desc protoreflect.MessageDescriptor, cond *syncplanev1.Condition) (*query.Compiled, string, error) {
+	if err := refuseUnknownCondFields(cond.ProtoReflect()); err != nil {
+		return nil, "", err
+	}
+	if err := refuseNonRowConds(cond); err != nil {
+		return nil, "", err
+	}
+	compiled, err := query.Compile(desc, cond)
+	if err != nil {
+		return nil, "", err
+	}
+	raw, err := proto.MarshalOptions{Deterministic: true}.Marshal(cond)
+	if err != nil {
+		return nil, "", err
+	}
+	return compiled, hex.EncodeToString(raw), nil
+}
+
+// refuseUnknownCondFields refuses a condition in which any message carries
+// fields this build does not know.
+func refuseUnknownCondFields(m protoreflect.Message) error {
+	if len(m.GetUnknown()) > 0 {
+		return fmt.Errorf("the condition carries fields this server does not know; upgrade the server before using them")
+	}
+	var err error
+	m.Range(func(fd protoreflect.FieldDescriptor, v protoreflect.Value) bool {
+		switch {
+		case fd.Message() == nil:
+		case fd.IsList():
+			for i := 0; i < v.List().Len() && err == nil; i++ {
+				err = refuseUnknownCondFields(v.List().Get(i).Message())
+			}
+		default:
+			err = refuseUnknownCondFields(v.Message())
+		}
+		return err == nil
+	})
+	return err
+}
+
+// refuseNonRowConds refuses a rel condition or a match condition anywhere in
+// cond.
+func refuseNonRowConds(cond *syncplanev1.Condition) error {
+	switch kind := cond.GetKind().(type) {
+	case *syncplanev1.Condition_Rel:
+		return fmt.Errorf("path %v: a rel condition reads another row; a when condition reads only the row", kind.Rel.GetPath())
+	case *syncplanev1.Condition_Match:
+		return fmt.Errorf("a match condition cannot decide access")
+	case *syncplanev1.Condition_And:
+		for _, sub := range kind.And.GetConds() {
+			if err := refuseNonRowConds(sub); err != nil {
+				return err
+			}
+		}
+	case *syncplanev1.Condition_Or:
+		for _, sub := range kind.Or.GetConds() {
+			if err := refuseNonRowConds(sub); err != nil {
+				return err
+			}
+		}
+	case *syncplanev1.Condition_Not:
+		return refuseNonRowConds(kind.Not)
+	}
+	return nil
 }
 
 // singularStringField resolves a field that is set on every row: a
@@ -951,8 +1049,10 @@ func buildSubjectIndexes(info *entityInfo) error {
 		fields = append(fields, info.grant.stringCases()...)
 	}
 	if info.access != nil {
-		for _, o := range info.access.read.owned {
-			fields = append(fields, o.subject)
+		for _, o := range info.access.read.checked {
+			if o.subject != nil {
+				fields = append(fields, o.subject)
+			}
 		}
 	}
 	desc := info.msgType.Descriptor()
@@ -1412,6 +1512,9 @@ func (m *accessModel) covers(a, b accessRule) bool {
 		return false
 	}
 	if a.subject != nil && a.subject != b.subject {
+		return false
+	}
+	if a.when != nil && a.whenSpec != b.whenSpec {
 		return false
 	}
 	if a.fields != nil && (b.fields == nil || !b.fieldsWithin(a.fields)) {

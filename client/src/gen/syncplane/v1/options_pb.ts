@@ -6,13 +6,15 @@ import type { GenEnum, GenExtension, GenFile, GenMessage } from "@bufbuild/proto
 import { enumDesc, extDesc, fileDesc, messageDesc } from "@bufbuild/protobuf/codegenv2";
 import type { FieldOptions, MessageOptions } from "@bufbuild/protobuf/wkt";
 import { file_google_protobuf_descriptor } from "@bufbuild/protobuf/wkt";
+import type { Condition } from "./query_pb.js";
+import { file_syncplane_v1_query } from "./query_pb.js";
 import type { Message } from "@bufbuild/protobuf";
 
 /**
  * Describes the file syncplane/v1/options.proto.
  */
 export const file_syncplane_v1_options: GenFile = /*@__PURE__*/
-  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUizAEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIUCgpwZXJtaXNzaW9uGAYgASgJSAASMAoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXJIABIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCUIICgZzb3VyY2UiEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor]);
+  fileDesc("ChpzeW5jcGxhbmUvdjEvb3B0aW9ucy5wcm90bxIMc3luY3BsYW5lLnYxIo0DCg1FbnRpdHlPcHRpb25zEgwKBG5hbWUYASABKAkSEgoKa2V5X2ZpZWxkcxgCIAMoCRImCgVpbmRleBgDIAMoCzIXLnN5bmNwbGFuZS52MS5JbmRleFNwZWMSEwoLc2VydmVyX29ubHkYBSABKAgSLQoHaGlzdG9yeRgGIAEoCzIcLnN5bmNwbGFuZS52MS5IaXN0b3J5T3B0aW9ucxIoCgZzZWFyY2gYCSABKAsyGC5zeW5jcGxhbmUudjEuU2VhcmNoU3BlYxIrCgZhY2Nlc3MYCiABKAsyGy5zeW5jcGxhbmUudjEuQWNjZXNzT3B0aW9ucxIpCgVncmFudBgLIAEoCzIaLnN5bmNwbGFuZS52MS5HcmFudE9wdGlvbnMSLQoHbWVtYmVycxgMIAEoCzIcLnN5bmNwbGFuZS52MS5NZW1iZXJzT3B0aW9uc0oECAQQBUoECAcQCEoECAgQCVINZGVsZXRlX3BvbGljeVINY3JlYXRlX3BvbGljeVINdXBkYXRlX3BvbGljeSI4Cg1BY2Nlc3NPcHRpb25zEicKBWFsbG93GAEgAygLMhguc3luY3BsYW5lLnYxLkFjY2Vzc1J1bGUi8wEKCkFjY2Vzc1J1bGUSDAoEcmVhZBgBIAEoCBIOCgZjcmVhdGUYAiABKAgSDgoGdXBkYXRlGAMgASgIEg4KBmRlbGV0ZRgEIAEoCBINCgV3cml0ZRgFIAEoCBIUCgpwZXJtaXNzaW9uGAYgASgJSAASMAoIYWRtaXR0ZWQYByABKAsyHC5zeW5jcGxhbmUudjEuQWRtaXR0ZWRDYWxsZXJIABIPCgdzdWJqZWN0GAggASgJEg4KBmZpZWxkcxgJIAMoCRIlCgR3aGVuGAogASgLMhcuc3luY3BsYW5lLnYxLkNvbmRpdGlvbkIICgZzb3VyY2UiEAoOQWRtaXR0ZWRDYWxsZXIiUAoMR3JhbnRPcHRpb25zEg8KB3N1YmplY3QYASABKAkSDAoEcm9sZRgCIAEoCRIhCgVyb2xlcxgDIAMoCzISLnN5bmNwbGFuZS52MS5Sb2xlIjYKBFJvbGUSDAoEbmFtZRgBIAEoCRIOCgZncmFudHMYAiADKAkSEAoIaW5jbHVkZXMYAyADKAkiIAoOTWVtYmVyc09wdGlvbnMSDgoGZW50aXR5GAEgASgJIhUKE0FjY2Vzc1BhcmVudE9wdGlvbnMiEAoOQ3JlYXRvck9wdGlvbnMiEAoOSGlzdG9yeU9wdGlvbnMiEgoQUmVmZXJlbmNlT3B0aW9ucyIbCgtTZWFyY2hGaWVsZBIMCgRwYXRoGAEgASgJIk8KClNlYXJjaFNwZWMSKAoFZmllbGQYASADKAsyGS5zeW5jcGxhbmUudjEuU2VhcmNoRmllbGQSFwoPa2VlcF9kaWFjcml0aWNzGAIgASgIIiYKCEluZGV4S2V5EgwKBHBhdGgYASABKAkSDAoEZGVzYxgCIAEoCCI+CglJbmRleFNwZWMSDAoEbmFtZRgBIAEoCRIjCgNrZXkYAiADKAsyFi5zeW5jcGxhbmUudjEuSW5kZXhLZXki1wIKDUZpZWxkQmVoYXZpb3ISDgoGb3BhcXVlGAEgASgIEhEKCWtleV9maWVsZBgCIAMoCRITCgtvcmRlcl9maWVsZBgDIAEoCRIMCgR0ZXh0GAQgASgIEg8KB2luZGV4ZWQYBSABKAgSDwoHaGlzdG9yeRgGIAEoCBISCgpzZWFyY2hhYmxlGAcgASgIEjQKDHdyaXRlX3BvbGljeRgIIAEoDjIeLnN5bmNwbGFuZS52MS5GaWVsZFdyaXRlUG9saWN5EhEKCXdvcmtzcGFjZRgJIAEoCBIYChByZXZlcnNlX3JlbGF0aW9uGAogASgJEjgKDWFjY2Vzc19wYXJlbnQYCyABKAsyIS5zeW5jcGxhbmUudjEuQWNjZXNzUGFyZW50T3B0aW9ucxItCgdjcmVhdG9yGAwgASgLMhwuc3luY3BsYW5lLnYxLkNyZWF0b3JPcHRpb25zKnkKEEZpZWxkV3JpdGVQb2xpY3kSIgoeRklFTERfV1JJVEVfUE9MSUNZX1VOU1BFQ0lGSUVEEAASHAoYRklFTERfV1JJVEVfUE9MSUNZX0FMTE9XEAESIwofRklFTERfV1JJVEVfUE9MSUNZX1RSVVNURURfT05MWRACOlYKBmVudGl0eRIfLmdvb2dsZS5wcm90b2J1Zi5NZXNzYWdlT3B0aW9ucxi0hwMgASgLMhsuc3luY3BsYW5lLnYxLkVudGl0eU9wdGlvbnNSBmVudGl0eTpfCglyZWZlcmVuY2USHy5nb29nbGUucHJvdG9idWYuTWVzc2FnZU9wdGlvbnMYtocDIAEoCzIeLnN5bmNwbGFuZS52MS5SZWZlcmVuY2VPcHRpb25zUglyZWZlcmVuY2U6YwoOZmllbGRfYmVoYXZpb3ISHS5nb29nbGUucHJvdG9idWYuRmllbGRPcHRpb25zGLWHAyABKAsyGy5zeW5jcGxhbmUudjEuRmllbGRCZWhhdmlvclINZmllbGRCZWhhdmlvckJGWkRnaXRodWIuY29tL2xldmVsZm91cmFiL3N5bmNwbGFuZS9lbmdpbmUvZ2VuL3N5bmNwbGFuZS92MTtzeW5jcGxhbmV2MWIGcHJvdG8z", [file_google_protobuf_descriptor, file_syncplane_v1_query]);
 
 /**
  * Declares a message as a syncable entity.
@@ -198,8 +200,9 @@ export const AccessOptionsSchema: GenMessage<AccessOptions> = /*@__PURE__*/
  * update must be admitted by one rule for both the stored row and the row as
  * it will be stored, so a rule admits a write that moves a row to another
  * access parent only when its source holds at the old place and at the new
- * one, and a rule with `subject` admits no write that changes the subject
- * field to a value outside the caller's subjects.
+ * one, a rule with `subject` admits no write that changes the subject field to
+ * a value outside the caller's subjects, and a rule with `when` admits no
+ * write that makes the row fail the condition.
  *
  * ```protobuf
  * message Comment {
@@ -313,6 +316,33 @@ export type AccessRule = Message<"syncplane.v1.AccessRule"> & {
    * @generated from field: repeated string fields = 9;
    */
   fields: string[];
+
+  /**
+   * Admits only rows that match this condition. The condition uses the query
+   * predicate language with paths from the row, and reads only the row
+   * itself: a `rel` or a `match` condition is refused.
+   *
+   * A read rule with `when` hides a row when a write makes it fail the
+   * condition, and a client that holds the row receives a delete. An update
+   * rule with `when` must admit the stored row and the row as it will be
+   * stored, so it refuses a write that makes a row fail the condition, and
+   * a write to a row that fails it:
+   *
+   * ```protobuf
+   * access: { allow: [
+   *   { read: true permission: "view_tasks" },
+   *   { update: true permission: "edit_tasks"
+   *     when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+   *       value: { bool_value: false } } } },
+   *   { update: true permission: "archive_tasks" }
+   * ] }
+   * ```
+   *
+   * A permission held at the workspace root does not skip the check.
+   *
+   * @generated from field: syncplane.v1.Condition when = 10;
+   */
+  when?: Condition | undefined;
 };
 
 /**

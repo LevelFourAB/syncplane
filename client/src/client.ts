@@ -28,6 +28,7 @@ import {
 	type RuleRow,
 	ruleRowOf,
 	touchPendingAccess,
+	whenReads,
 } from './access.js';
 import { CodeFormatUpgraded, CodeWatchFailed, CodeWorkspacePurged } from './codes.js';
 import {
@@ -3305,14 +3306,16 @@ export class SyncClient<const E extends readonly DescMessage[] = readonly DescMe
 				const stored = ruleRowOf(summary, def, key, row, chain);
 				if (operation !== 'update') return decideRules(rules, operation, summary.subjects, stored);
 				const changed = opts?.fields ?? null;
-				// The new value of a changed subject field or access parent decides
-				// the final side, and neither is known here.
+				// The new value of a changed subject field, access parent or field a
+				// condition reads decides the final side, and none is known here.
 				const moves = changed !== null && accessParentUnits(def).some((u) => changed.includes(u));
 				const final: RuleRow = {
 					held: moves
 						? (p) => canAt(summary, p, def.name, key, { rows: [], complete: false })
 						: stored.held,
 					subject: (field) => (changed?.includes(field) ? undefined : stored.subject(field)),
+					matches: (rule) =>
+						changed !== null && whenReads(def.schema, rule, changed) ? 'unknown' : stored.matches(rule),
 				};
 				return decideRules(rules, 'update', summary.subjects, stored, final, changed);
 			},

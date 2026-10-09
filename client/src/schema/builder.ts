@@ -37,6 +37,7 @@ import {
 	hasOption,
 	setExtension,
 	toBinary,
+	toJson,
 } from '@bufbuild/protobuf';
 import {
 	type DescriptorProto,
@@ -78,11 +79,20 @@ import {
 	SearchSpecSchema,
 } from '../gen/syncplane/v1/options_pb.js';
 import {
+	type Condition,
+	ConditionSchema,
+	file_syncplane_v1_query,
+} from '../gen/syncplane/v1/query_pb.js';
+import {
 	validateEntityName,
 	validatePermissionName,
 	validateRelationName,
 	validateRoleName,
 } from '../naming.js';
+import type { Cond } from '../query/ast.js';
+import { condToProto } from '../query/proto.js';
+import { rootRef } from '../query/proxy.js';
+import type { QueryRef } from '../query/types.js';
 
 /**
  * Package the synthesized messages live in. Matches engine/server/dynamic.go's
@@ -711,8 +721,8 @@ export interface EntitySchema<F extends Fields = Fields> {
  *
  * `allow` holds at least one rule, and no two rules the same.
  */
-export interface AccessDecl {
-	allow: AccessRuleDecl[];
+export interface AccessDecl<F extends Fields = Fields> {
+	allow: AccessRuleDecl<F>[];
 }
 
 /**
@@ -735,10 +745,15 @@ export interface AccessDecl {
  * `update`, and cannot name a key field. A move changes the access parent
  * field, so a rule with `fields` admits a move only when it lists that field.
  *
+ * `when` builds a condition the row must match, with the same field proxy a
+ * query's `where` takes. It reads only the row: a `matches` or a `match`
+ * condition is refused. A permission held at the root does not skip it.
+ *
  * An update must be admitted by one rule for both the stored row and the row
  * as it will be stored, so a rule admits moving a row to another access parent
- * only when its source holds at both places, and a rule with `subject` admits
- * no update that writes someone else into the subject field.
+ * only when its source holds at both places, a rule with `subject` admits no
+ * update that writes someone else into the subject field, and a rule with
+ * `when` admits no update that makes the row fail the condition.
  *
  * @example
  * ```ts
@@ -749,8 +764,25 @@ export interface AccessDecl {
  *   { update: true, delete: true, permission: 'moderate_comments' },
  * ];
  * ```
+ *
+ * @example
+ * Tasks a writer edits until someone archives them:
+ * ```ts
+ * const task = schema.entity('task', {
+ *   id: schema.text().key(),
+ *   archived: schema.bool(),
+ * }, {
+ *   access: {
+ *     allow: [
+ *       { read: true, permission: 'view_tasks' },
+ *       { update: true, permission: 'edit_tasks', when: (t) => t.archived.eq(false) },
+ *       { update: true, permission: 'archive_tasks' },
+ *     ],
+ *   },
+ * });
+ * ```
  */
-export type AccessRuleDecl =
+export type AccessRuleDecl<F extends Fields = Fields> =
 	& {
 		read?: boolean;
 		create?: boolean;
@@ -759,6 +791,7 @@ export type AccessRuleDecl =
 		write?: boolean;
 		subject?: string;
 		fields?: string[];
+		when?(row: QueryRef<RowOf<F>>): Cond;
 	}
 	& ({ permission: string; admitted?: never } | { admitted: true; permission?: never });
 
@@ -885,7 +918,7 @@ function assertFields(where: string, fields: Fields): void {
 export function entity<F extends Fields>(
 	name: string,
 	fields: F,
-	options?: EntityOptions,
+	options?: EntityOptions<F>,
 ): EntitySchema<F> {
 	// The name reaches the wire, storage and the KV key layout, and is lowered to
 	// a proto message name below — the shared rule (naming.ts) covers all of it.
@@ -902,13 +935,16 @@ export function entity<F extends Fields>(
 
 	const indexes = options?.indexes ?? [];
 	assertIndexes(name, indexes);
-	assertAccess(name, fields, options);
+	// A rule's `when` is typed against F for the caller. Past this point only
+	// the builder calls it, with a field proxy that serves any row type.
+	const opts = options as EntityOptions | undefined;
+	assertAccess(name, fields, opts);
 	return {
 		name,
 		fields,
 		indexes,
 		...(options?.search === undefined ? {} : { search: options.search }),
-		...(options?.access === undefined ? {} : { access: options.access }),
+		...(opts?.access === undefined ? {} : { access: opts.access }),
 		...(options?.grant === undefined ? {} : { grant: options.grant }),
 		...(options?.members === undefined ? {} : { members: options.members }),
 		typeName: `${DYNAMIC_PACKAGE}.${pascalCase(name)}`,
@@ -929,7 +965,7 @@ export interface SearchOpts {
 }
 
 /** Optional per-entity settings, beyond the fields themselves. */
-export interface EntityOptions {
+export interface EntityOptions<F extends Fields = Fields> {
 	/**
 	 * Composite secondary indexes over this entity's fields. See
 	 * {@link IndexDecl}; for a single field, `.indexed()` is the simpler
@@ -977,7 +1013,7 @@ export interface EntityOptions {
 	 * });
 	 * ```
 	 */
-	access?: AccessDecl;
+	access?: AccessDecl<F>;
 	/**
 	 * Declares the entity's rows as grant rows; see {@link GrantDecl}. A grant
 	 * entity must also declare `access`.
@@ -1222,6 +1258,7 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 				listed.add(name);
 			}
 		}
+		const when = whenOf(at, rule, fields);
 		// The key is the rule as the proto message holds it: an operation left
 		// unset and one set to false encode the same, so they must collide, and
 		// the order of a fields list does not count.
@@ -1230,6 +1267,7 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 			rule.permission ?? null,
 			rule.subject ?? null,
 			rule.fields === undefined ? null : [ ...rule.fields ].sort(),
+			when === undefined ? null : toJson(ConditionSchema, when),
 		]);
 		const first = seen.get(key);
 		if (first !== undefined) {
@@ -1237,6 +1275,118 @@ function assertAccessRules(where: string, access: AccessDecl, fields: Fields): v
 		}
 		seen.set(key, i);
 	});
+}
+
+/**
+ * Builds a rule's `when` condition over the entity's `fields` and lowers its
+ * accessor-name paths to proto names, as the server reads them. Refuses a
+ * condition that reads anything but the row, which the server refuses at
+ * registration. `at` names the rule in an error.
+ */
+function whenOf(at: string, rule: AccessRuleDecl, fields: Fields): Condition | undefined {
+	if (rule.when === undefined) return undefined;
+	const cond = rule.when(rootRef());
+	const refuse = (c: Cond): void => {
+		switch (c.kind) {
+			case 'rel':
+				throw new Error(
+					`${at}: when uses matches(), which reads another row; a when condition reads only the row`,
+				);
+			case 'match':
+				throw new Error(`${at}: when uses match(), which cannot decide access`);
+			case 'and':
+			case 'or':
+				c.conds.forEach(refuse);
+				break;
+			case 'not':
+				refuse(c.cond);
+				break;
+		}
+	};
+	refuse(cond);
+	return condToProto(condProtoNames(fields, cond));
+}
+
+/**
+ * Lowers the accessor-name paths of `cond`, scoped to a row of `fields`, to
+ * proto names. A segment that names no declared field keeps its spelling, for
+ * the server to report.
+ */
+function condProtoNames(fields: Fields | undefined, cond: Cond): Cond {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return { ...cond, conds: cond.conds.map((c) => condProtoNames(fields, c)) };
+		case 'not':
+			return { ...cond, cond: condProtoNames(fields, cond.cond) };
+		case 'match':
+			return cond;
+		case 'exists': {
+			const { path, spec } = pathProtoNames(fields, cond.path);
+			// The sub-condition reads the element: a message of a list, or an
+			// entry of a map, whose `key` and `value` are not field names.
+			if (spec?.kind === 'map') {
+				return { ...cond, path, cond: entryProtoNames(spec.mapMessage, cond.cond) };
+			}
+			return { ...cond, path, cond: condProtoNames(spec?.message, cond.cond) };
+		}
+		default:
+			// A rel condition keeps its sub-condition, which whenOf refuses.
+			return { ...cond, path: pathProtoNames(fields, cond.path).path };
+	}
+}
+
+/** condProtoNames inside a map entry whose value has `value` fields. */
+function entryProtoNames(value: Fields | undefined, cond: Cond): Cond {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return { ...cond, conds: cond.conds.map((c) => entryProtoNames(value, c)) };
+		case 'not':
+			return { ...cond, cond: entryProtoNames(value, cond.cond) };
+		case 'match':
+			return cond;
+		default: {
+			const [ head, ...rest ] = cond.path;
+			if (head !== 'value' || rest.length === 0) return cond;
+			return { ...cond, path: [ head, ...pathProtoNames(value, rest).path ] } as Cond;
+		}
+	}
+}
+
+/**
+ * Lowers one accessor-name path scoped to a row of `fields`, and returns the
+ * spec of the field it ends at. A map field's next segment is an entry key,
+ * which keeps its spelling.
+ */
+function pathProtoNames(
+	fields: Fields | undefined,
+	path: readonly string[],
+): { path: string[]; spec?: FieldSpec } {
+	const out: string[] = [];
+	let scope = fields;
+	let spec: FieldSpec | undefined;
+	for (let i = 0; i < path.length; i++) {
+		const seg = path[i]!;
+		spec = scope?.[seg]?.spec;
+		if (spec === undefined) {
+			out.push(seg);
+			scope = undefined;
+			continue;
+		}
+		out.push(snakeCase(seg));
+		if (spec.kind === 'map') {
+			if (i + 1 < path.length) out.push(path[++i]!);
+			scope = spec.mapMessage;
+			continue;
+		}
+		scope = spec.kind === 'message'
+			? spec.message
+			: spec.kind === 'ref'
+			? spec.ref!().fields
+			: undefined;
+	}
+	return { path: out, spec };
 }
 
 /**
@@ -1289,8 +1439,9 @@ export interface SchemaBundle {
 
 /**
  * Assembles a self-contained FileDescriptorSet in topological order:
- * `google/protobuf/descriptor.proto`, then `syncplane/v1/options.proto` (which
- * extends it with the entity options), then ONE synthesized file holding every
+ * `google/protobuf/descriptor.proto` and `syncplane/v1/query.proto`, then
+ * `syncplane/v1/options.proto` (which extends the first with the entity
+ * options and imports the second), then ONE synthesized file holding every
  * entity (and its nested non-entity types). Bundling the framework's own files
  * means any consumer — a fresh TS client or a Go server — resolves the whole
  * schema from these bytes alone, with no `buf`, no codegen, and no published
@@ -1300,6 +1451,7 @@ function buildSet(entities: readonly EntitySchema[]): FileDescriptorSet {
 	return create(FileDescriptorSetSchema, {
 		file: [
 			file_google_protobuf_descriptor.proto,
+			file_syncplane_v1_query.proto,
 			file_syncplane_v1_options.proto,
 			oneSchemaFile(entities),
 		],
@@ -1389,8 +1541,8 @@ function oneSchemaFile(entities: readonly EntitySchema[]): FileDescriptorProto {
 	});
 }
 
-/** Lowers one access rule to its syncplane.v1.AccessRule. */
-function accessRuleOf(rule: AccessRuleDecl): AccessRule {
+/** Lowers one access rule of an entity with `fields` to its syncplane.v1.AccessRule. */
+function accessRuleOf(rule: AccessRuleDecl, fields: Fields): AccessRule {
 	return create(AccessRuleSchema, {
 		read: rule.read === true,
 		create: rule.create === true,
@@ -1403,6 +1555,7 @@ function accessRuleOf(rule: AccessRuleDecl): AccessRule {
 		// Accessor names lower to proto names, as a grant's fields do.
 		subject: rule.subject === undefined ? '' : snakeCase(rule.subject),
 		fields: (rule.fields ?? []).map(snakeCase),
+		when: whenOf('', rule, fields),
 	});
 }
 
@@ -1423,7 +1576,9 @@ function entityMessageOf(e: EntitySchema): DescriptorProto {
 			name: e.name,
 			keyFields: keyFieldNames,
 			...(e.access === undefined ? {} : {
-				access: create(AccessOptionsSchema, { allow: e.access.allow.map(accessRuleOf) }),
+				access: create(AccessOptionsSchema, {
+					allow: e.access.allow.map((r) => accessRuleOf(r, e.fields)),
+				}),
 			}),
 			...(e.grant === undefined ? {} : {
 				grant: create(GrantOptionsSchema, {

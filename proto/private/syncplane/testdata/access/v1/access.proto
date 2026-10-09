@@ -667,6 +667,87 @@ message Setting {
 	string theme = 2;
 }
 
+// A thread in a room, registered with the owner-rule schema, whose rules test
+// fields of the row: a poster writes a thread while it is not archived, a
+// moderator writes every thread, and a hidden thread is read only by
+// moderators.
+message Thread {
+	option (syncplane.v1.entity) = {
+		name: "thread"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					permission: "view_posts"
+					when: {
+						cmp: {
+							path: [ "hidden" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ read: true permission: "moderate_posts" },
+				{
+					create: true
+					update: true
+					delete: true
+					permission: "post"
+					when: {
+						cmp: {
+							path: [ "archived" ]
+							op: CMP_OP_EQ
+							value: { bool_value: false }
+						}
+					}
+				},
+				{ write: true permission: "moderate_posts" }
+			]
+		}
+	};
+	string id = 1;
+	Room room = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	bool archived = 3;
+	bool hidden = 4;
+	string title = 5;
+	bytes notes = 6 [(syncplane.v1.field_behavior) = { text: true }];
+}
+
+// A bulletin on the whole workspace: every admitted caller reads the
+// published ones, and its author reads and writes their own.
+message Bulletin {
+	option (syncplane.v1.entity) = {
+		name: "bulletin"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{
+					read: true
+					admitted: {}
+					when: {
+						cmp: {
+							path: [ "status" ]
+							op: CMP_OP_EQ
+							value: { string_value: "published" }
+						}
+					}
+				},
+				{
+					read: true
+					write: true
+					admitted: {}
+					subject: "author_id"
+				}
+			]
+		}
+	};
+	string id = 1;
+	string author_id = 2 [(syncplane.v1.field_behavior) = { creator: {} }];
+	string status = 3;
+	string body = 4;
+}
+
 // A squad, the team of the team schema below: Squad, SquadMember, Repo,
 // RepoMember, RepoSquad and Issue, registered apart from the schemas above.
 message Squad {

@@ -30,6 +30,8 @@ var accessPrototypes = map[string]proto.Message{
 	"draft":          &accessv1.Draft{},
 	"ticket":         &accessv1.Ticket{},
 	"setting":        &accessv1.Setting{},
+	"thread":         &accessv1.Thread{},
+	"bulletin":       &accessv1.Bulletin{},
 	"squad":          &accessv1.Squad{},
 	"squad_member":   &accessv1.SquadMember{},
 	"repo":           &accessv1.Repo{},

@@ -16,6 +16,8 @@ import {
 	keyOf,
 	refKeyFields,
 } from '../../src/mutations.js';
+import { condFromProto } from '../../src/query/proto.js';
+import { and, or } from '../../src/query/proxy.js';
 import {
 	type AccessDecl,
 	type AccessRuleDecl,
@@ -878,6 +880,83 @@ describe('schema builder — owner rules', () => {
 				{ read: true, permission: 'p', subject: 'ownerId' },
 				{ read: true, permission: 'p' },
 			)).not.toThrow();
+		});
+	});
+});
+
+describe('schema builder — when checks', () => {
+	const room = entity('room', { id: text().key() }, {
+		access: { allow: [ { read: true, write: true, permission: 'view' } ] },
+	});
+	const thread = entity('thread', {
+		id: text().key(),
+		room: ref(() => room).accessParent(),
+		isArchived: bool(),
+		meta: message({ lockState: text() }),
+		tags: map('string', text()),
+	}, {
+		access: {
+			allow: [
+				{ read: true, permission: 'view' },
+				{
+					update: true,
+					permission: 'view',
+					when: (t) => and(t.isArchived.eq(false), t.meta.lockState.neq('locked'), t.room.id.eq('r1')),
+				},
+				{ delete: true, permission: 'view', when: (t) => t.tags.at('pinKey').isNotSet() },
+			],
+		},
+	});
+	const bundle = defineSchema(room, thread);
+
+	it('lowers the condition with proto field names, and an entry key as written', () => {
+		const [ , update, del ] = getOption(bundle.descMessage('thread'), entityExt).access!.allow;
+		expect(condFromProto(update!.when!)).toEqual({
+			kind: 'and',
+			conds: [
+				{ kind: 'cmp', path: [ 'is_archived' ], op: 'eq', value: false },
+				{ kind: 'cmp', path: [ 'meta', 'lock_state' ], op: 'neq', value: 'locked' },
+				{ kind: 'cmp', path: [ 'room', 'id' ], op: 'eq', value: 'r1' },
+			],
+		});
+		expect(condFromProto(del!.when!)).toEqual({
+			kind: 'present',
+			path: [ 'tags', 'pinKey' ],
+			op: 'isNotSet',
+		});
+	});
+
+	it('reads the condition onto the EntityDef', () => {
+		const def = entityDefOf(bundle.descMessage('thread'));
+		expect(def.accessRules![0]!.when).toBeUndefined();
+		expect(def.accessRules![1]!.when).toBeDefined();
+	});
+
+	describe('validation', () => {
+		const fields = { id: text().key(), ref: ref(() => room), note: text() };
+		const allowing = (...allow: AccessRuleDecl<typeof fields>[]) => () =>
+			entity('e', fields, { access: { allow } });
+
+		it('rejects a condition that reads another row', () => {
+			expect(
+				allowing({ read: true, permission: 'p', when: (e) => e.ref.matches((r) => r.id.eq('x')) }),
+			)
+				.toThrow('entity "e" access.allow[0]: when uses matches(), which reads another row');
+		});
+		it('rejects a match condition', () => {
+			expect(allowing({ read: true, permission: 'p', when: (e) => or(e.note.eq('x'), e.match('y')) }))
+				.toThrow('entity "e" access.allow[0]: when uses match(), which cannot decide access');
+		});
+		it('tells apart rules that differ only in their condition', () => {
+			expect(allowing(
+				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
+				{ read: true, permission: 'p', when: (e) => e.note.eq('b') },
+				{ read: true, permission: 'p' },
+			)).not.toThrow();
+			expect(allowing(
+				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
+				{ read: true, permission: 'p', when: (e) => e.note.eq('a') },
+			)).toThrow('entity "e" access.allow[1]: the rule repeats access.allow[0]');
 		});
 	});
 });

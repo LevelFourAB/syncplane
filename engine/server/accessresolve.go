@@ -604,10 +604,10 @@ func grantRoleOf(g *grantSpec, msg protoreflect.Message) string {
 
 // modelReadFilter returns the filter the access model puts on reads of info
 // for the bound caller, or nil when the model hides no row of it: the entity
-// is outside the model, or a read rule without a subject check admits the
-// caller at the root. A row is readable when the caller holds the permission
-// of one of the read rules at the row or at a row up its parent chain, and
-// the row passes that rule's subject check.
+// is outside the model, or a read rule that checks nothing on the row admits
+// the caller at the root. A row is readable when the caller holds the
+// permission of one of the read rules at the row or at a row up its parent
+// chain, and the row passes that rule's subject and when checks.
 func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	a := info.access
 	if a == nil {
@@ -620,8 +620,8 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	if anchors != nil && len(anchors.rows) == 0 {
 		anchors = nil
 	}
-	owned := ownedReadsOf(a.read, e.caller, e.access)
-	if anchors == nil && len(owned) == 0 {
+	checked := checkedReadsOf(a.read, e.caller, e.access)
+	if anchors == nil && len(checked) == 0 {
 		return denyAll
 	}
 	chains := e.chains
@@ -633,8 +633,8 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 				return ok, err
 			}
 		}
-		for _, o := range owned {
-			if !o.rule.subjectHolds(subjects, r) {
+		for _, o := range checked {
+			if !o.rule.rowHolds(subjects, r) {
 				continue
 			}
 			if ok, err := chains.holds(o.anchors, info, key, r); err != nil || ok {
@@ -645,28 +645,28 @@ func (e *rowEmitter) modelReadFilter(info *entityInfo) readFilter {
 	}
 }
 
-// ownedRead is a read rule with a subject check, and where the caller holds
-// its source: the workspace root for an admitted rule.
-type ownedRead struct {
+// checkedRead is a read rule with a subject check or a when check, and where
+// the caller holds its source: the workspace root for an admitted rule.
+type checkedRead struct {
 	rule    accessRule
 	anchors *permAnchors
 }
 
-// ownedReadsOf returns the read rules of r with a subject check that can
-// admit caller under set: the caller has a subject, and holds the rule's
-// source somewhere.
-func ownedReadsOf(r readers, caller *accessCaller, set *accessSet) []ownedRead {
-	if len(r.owned) == 0 || len(caller.subjects) == 0 {
-		return nil
-	}
-	var out []ownedRead
-	for _, rule := range r.owned {
+// checkedReadsOf returns the read rules of r with a subject check or a when
+// check that can admit caller under set: the caller has a subject when the
+// rule checks one, and holds the rule's source somewhere.
+func checkedReadsOf(r readers, caller *accessCaller, set *accessSet) []checkedRead {
+	var out []checkedRead
+	for _, rule := range r.checked {
+		if rule.subject != nil && len(caller.subjects) == 0 {
+			continue
+		}
 		anchors := rootAnchors
 		if !rule.admitted() {
 			anchors = set.perms[rule.permission]
 		}
 		if anchors != nil && (anchors.root || len(anchors.rows) > 0) {
-			out = append(out, ownedRead{rule: rule, anchors: anchors})
+			out = append(out, checkedRead{rule: rule, anchors: anchors})
 		}
 	}
 	return out
@@ -758,9 +758,10 @@ func (e *rowEmitter) accessNarrows(info *entityInfo) bool {
 // bound access set can let the caller read: the anchors of its read
 // permissions that are rows of info, and the rows of info below such an
 // anchor (see rowsBelow). For a read rule with a subject check, the rows whose
-// subject field names the caller stand in when its subject index is ready. It
-// is a superset of the rows the model's filter admits, so reading these keys
-// and classifying each row gives what a scan would. ok is false when the set
+// subject field names the caller stand in when its subject index is ready. A
+// when check does not narrow the keys. The keys are a superset of the rows
+// the model's filter admits, so reading these keys and classifying each row
+// gives what a scan would. ok is false when the set
 // does not narrow the entity, or when narrowing would cost more than
 // maxCandidates keys or needs an index that is not ready; the caller scans.
 func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCandidates int) (keys []string, ok bool, err error) {
@@ -771,27 +772,31 @@ func (e *rowEmitter) accessCandidates(tx storage.ReadTx, info *entityInfo, maxCa
 	if err != nil || !ok {
 		return nil, false, err
 	}
-	for _, o := range ownedReadsOf(info.access.read, e.caller, e.access) {
-		owned, ok, err := e.ownedCandidates(tx, info, o, maxCandidates)
+	for _, o := range checkedReadsOf(info.access.read, e.caller, e.access) {
+		checked, ok, err := e.checkedCandidates(tx, info, o, maxCandidates)
 		if err != nil || !ok {
 			return nil, false, err
 		}
-		if keys, ok = mergeKeys(keys, owned, maxCandidates); !ok {
+		if keys, ok = mergeKeys(keys, checked, maxCandidates); !ok {
 			return nil, false, nil
 		}
 	}
 	return keys, true, nil
 }
 
-// ownedCandidates returns, in key order, a superset of the keys of the rows of
-// info that the read rule o admits the bound caller to: the rows whose
-// subject field names one of the caller's subjects when the field's index is
-// ready, and the rows below the rule's anchors otherwise. ok is false when
-// neither can be read within maxCandidates keys.
-func (e *rowEmitter) ownedCandidates(tx storage.ReadTx, info *entityInfo, o ownedRead, maxCandidates int) ([]string, bool, error) {
-	keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
-	if err != nil || ok {
-		return keys, ok, err
+// checkedCandidates returns, in key order, a superset of the keys of the rows
+// of info that the read rule o admits the bound caller to: the rows whose
+// subject field names one of the caller's subjects when the rule has a
+// subject check and the field's index is ready, and the rows below the rule's
+// anchors otherwise. ok is false when neither can be read within
+// maxCandidates keys, which is always the case for a rule without a subject
+// check that the caller holds at the root.
+func (e *rowEmitter) checkedCandidates(tx storage.ReadTx, info *entityInfo, o checkedRead, maxCandidates int) ([]string, bool, error) {
+	if o.rule.subject != nil {
+		keys, ok, err := subjectRows(tx, info, o.rule.subject, e.caller.subjects, maxCandidates, e.srv.limits)
+		if err != nil || ok {
+			return keys, ok, err
+		}
 	}
 	if o.anchors.root {
 		return nil, false, nil

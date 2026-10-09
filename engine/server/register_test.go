@@ -174,6 +174,7 @@ func descriptorSetBytes(specs ...server.DynamicEntity) []byte {
 	set := &descriptorpb.FileDescriptorSet{
 		File: []*descriptorpb.FileDescriptorProto{
 			protodesc.ToFileDescriptorProto(descFile),
+			protodesc.ToFileDescriptorProto(syncplanev1.File_syncplane_v1_query_proto),
 			protodesc.ToFileDescriptorProto(syncplanev1.File_syncplane_v1_options_proto),
 		},
 	}

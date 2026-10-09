@@ -8,7 +8,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import type { DescField } from '@bufbuild/protobuf';
+import { create, type DescField } from '@bufbuild/protobuf';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -17,6 +17,7 @@ import {
 	decideRules,
 	type RuleRow,
 } from '../../src/access.js';
+import { ConditionSchema } from '../../src/gen/syncplane/v1/query_pb.js';
 import type { AccessRuleDef } from '../../src/mutations.js';
 
 interface VectorRule {
@@ -29,11 +30,14 @@ interface VectorRule {
 	admitted?: boolean;
 	subject?: string;
 	fields?: string[];
+	/** Names the rule's condition, which each row's `matches` answers. */
+	when?: string;
 }
 
 interface VectorRow {
 	held: Record<string, boolean | null>;
 	fields: Record<string, string | null>;
+	matches?: Record<string, boolean | null>;
 }
 
 interface RulesCase {
@@ -53,23 +57,35 @@ const vectorsPath = join(
 );
 const vectors = JSON.parse(readFileSync(vectorsPath, 'utf-8')) as { cases: RulesCase[] };
 
+/**
+ * The name each rule's condition stands for. The vectors name a condition
+ * rather than spell one out, so a placeholder carries the name to `matches`.
+ */
+const whenNames = new WeakMap<AccessRuleDef, string>();
+
 /** Only the name of a subject field is read, so the rest stays unbuilt. */
-const ruleOf = (r: VectorRule): AccessRuleDef => ({
-	read: r.read === true,
-	create: r.write === true || r.create === true,
-	update: r.write === true || r.update === true,
-	delete: r.write === true || r.delete === true,
-	permission: r.admitted === true ? undefined : r.permission,
-	subject: r.subject === undefined ? undefined : ({ name: r.subject } as DescField),
-	fields: r.fields === undefined ? undefined : [ ...r.fields ].sort(),
-});
+const ruleOf = (r: VectorRule): AccessRuleDef => {
+	const rule: AccessRuleDef = {
+		read: r.read === true,
+		create: r.write === true || r.create === true,
+		update: r.write === true || r.update === true,
+		delete: r.write === true || r.delete === true,
+		permission: r.admitted === true ? undefined : r.permission,
+		subject: r.subject === undefined ? undefined : ({ name: r.subject } as DescField),
+		fields: r.fields === undefined ? undefined : [ ...r.fields ].sort(),
+		when: r.when === undefined ? undefined : create(ConditionSchema),
+	};
+	if (r.when !== undefined) whenNames.set(rule, r.when);
+	return rule;
+};
+
+const answerOf = (v: boolean | null | undefined): CanAnswer =>
+	v === null ? 'unknown' : v === true ? 'yes' : 'no';
 
 const rowOf = (v: VectorRow): RuleRow => ({
-	held: (permission) => {
-		const held = v.held[permission];
-		return held === null ? 'unknown' : held === true ? 'yes' : 'no';
-	},
+	held: (permission) => answerOf(v.held[permission]),
 	subject: (field) => v.fields[field] ?? undefined,
+	matches: (rule) => answerOf(v.matches?.[whenNames.get(rule)!]),
 });
 
 describe('access rule conformance vectors', () => {

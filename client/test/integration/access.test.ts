@@ -23,6 +23,7 @@ import {
 	SquadMemberSchema,
 	SquadSchema,
 	TaskSchema,
+	ThreadSchema,
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { MemoryKVStore } from '../../src/kv/memory.js';
@@ -56,6 +57,7 @@ const entities = [
 	DraftSchema,
 	TicketSchema,
 	SettingSchema,
+	ThreadSchema,
 	SquadSchema,
 	SquadMemberSchema,
 	RepoSchema,
@@ -548,6 +550,66 @@ describe('owner rules on the client', () => {
 		expect(await ann.get(DraftSchema, 'd-bob')).toBeUndefined();
 		expect(await bob.get(DraftSchema, 'd-bob')).toBeDefined();
 		expect(await bob.can(DraftSchema, 'd-bob', 'read')).toBe('yes');
+	});
+});
+
+describe('when checks on the client', () => {
+	async function seedThreads(ws: string): Promise<void> {
+		await trusted(ws, [
+			{ entity: 'room', value: { id: 'r1' } },
+			{
+				entity: 'room_member',
+				value: { id: 'rm-ann', room: { id: 'r1' }, userId: 'ann', role: 'room_poster' },
+			},
+			{ entity: 'thread', value: { id: 'th-open', room: { id: 'r1' }, title: 'open' } },
+			{ entity: 'thread', value: { id: 'th-archived', room: { id: 'r1' }, archived: true } },
+			{ entity: 'thread', value: { id: 'th-hidden', room: { id: 'r1' }, hidden: true } },
+		]);
+	}
+
+	it('predicts what the server admits and refuses', async () => {
+		const ws = freshWorkspace();
+		await seedThreads(ws);
+		const rejections: RejectionInfo[] = [];
+		const ann = await synced(
+			clientAs('ann', ws, new MemoryKVStore(), (info) => rejections.push(info)),
+		);
+
+		expect(await ann.can(ThreadSchema, 'th-open', 'update', { fields: [ 'title' ] })).toBe('yes');
+		await ann.mutate.patch(ThreadSchema, 'th-open', { title: 'renamed' });
+		expect(await ann.can(ThreadSchema, 'th-archived', 'update', { fields: [ 'title' ] })).toBe('no');
+		await ann.mutate.patch(ThreadSchema, 'th-archived', { title: 'renamed' });
+		expect(await ann.canCreate(ThreadSchema, { id: 'th-new', room: { id: 'r1' }, archived: true }))
+			.toBe('no');
+		await ann.mutate.put(ThreadSchema, { id: 'th-new', room: { id: 'r1' }, archived: true });
+		await ann.syncNow();
+
+		expect(rejections.map((r) => r.errorCode)).toEqual([ 'permission_denied', 'permission_denied' ]);
+		expect((await ann.get(ThreadSchema, 'th-open'))?.title).toBe('renamed');
+		expect((await ann.get(ThreadSchema, 'th-archived'))?.title).toBe('');
+		expect(await ann.get(ThreadSchema, 'th-new')).toBeUndefined();
+	});
+
+	it('removes a row that stops matching, and sends it back when it matches again', async () => {
+		const ws = freshWorkspace();
+		await seedThreads(ws);
+		const ann = await synced(clientAs('ann', ws));
+		expect(await ann.get(ThreadSchema, 'th-hidden')).toBeUndefined();
+		expect(await ann.can(ThreadSchema, 'th-open', 'read')).toBe('yes');
+
+		await trusted(ws, [ {
+			entity: 'thread',
+			value: { id: 'th-open', room: { id: 'r1' }, hidden: true },
+		} ]);
+		await ann.syncNow();
+		expect(await ann.get(ThreadSchema, 'th-open')).toBeUndefined();
+
+		await trusted(ws, [ {
+			entity: 'thread',
+			value: { id: 'th-open', room: { id: 'r1' }, title: 'back' },
+		} ]);
+		await ann.syncNow();
+		expect((await ann.get(ThreadSchema, 'th-open'))?.title).toBe('back');
 	});
 });
 

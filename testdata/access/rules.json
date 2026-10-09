@@ -1,5 +1,5 @@
 {
-	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`permission`, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, and `fields`, the units an update may change). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, and `fields` gives the value of each subject field. A permission missing from `held` is held nowhere. A null in `held` or in `fields` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when its source holds and its subject check holds on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
+	"comment": "Shared conformance vectors for the decision an entity's access rules make on one operation: the server's write checks (engine/server/accesswrite.go: txAccess.admits and admitsUpdate) and the client's can() (client/src/access.ts: decideRules) must agree on every case the server can decide. `rules` are an entity's (syncplane.v1.entity).access rules: the operations each names (`write` covers create, update and delete), its source (`permission`, or `admitted: true` for every admitted caller), and its checks (`subject`, the field that must name one of the caller's `subjects`, `fields`, the units an update may change, and `when`, a name that stands for the rule's condition on the row). `row` is the row the operation reads or deletes, the row a create will store, or the stored row of an update; `final` is the row an update will store, and `changed` the units the update changes, null for an update of fields that no fields list covers. For each row, `held` says whether the caller holds each permission at the row or at a row up its chain of access parents, `fields` gives the value of each subject field, and `matches` says whether the row matches each condition. testdata/queryeval pins how a condition evaluates, so these cases name a condition rather than spell one out. A permission missing from `held` is held nowhere. A null in `held`, `fields` or `matches` is an input the client cannot know, such as a parent row it does not hold; the server always knows every input, so it checks only the cases without a null. A rule admits an operation it names when its source holds and its subject and when checks hold on the row; an update needs one rule whose fields check allows `changed` to admit both `row` and `final`. The answer is \"yes\" when one rule admits the operation, \"no\" when every rule refuses it, and \"unknown\" otherwise.",
 	"cases": [
 		{
 			"name": "a read rule admits a caller who holds its permission",
@@ -1148,6 +1148,430 @@
 				"fields": {}
 			},
 			"changed": null,
+			"want": "yes"
+		},
+		{
+			"name": "a when check admits a row that matches the condition",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_threads",
+					"when": "visible"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"visible": true
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a when check refuses a row that does not match, wherever the permission is held",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_threads",
+					"when": "visible"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"visible": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a when check refuses a row that does not match before the permission is known",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_threads",
+					"when": "visible"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_threads": null
+				},
+				"fields": {},
+				"matches": {
+					"visible": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a condition the client cannot evaluate answers unknown",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_threads",
+					"when": "visible"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"visible": null
+				}
+			},
+			"want": "unknown"
+		},
+		{
+			"name": "an admitted rule with a when check admits a row that matches",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"admitted": true,
+					"when": "published"
+				}
+			],
+			"subjects": [],
+			"row": {
+				"held": {},
+				"fields": {},
+				"matches": {
+					"published": true
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "an admitted rule with a when check refuses a row that does not match",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"admitted": true,
+					"when": "published"
+				}
+			],
+			"subjects": [],
+			"row": {
+				"held": {},
+				"fields": {},
+				"matches": {
+					"published": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a rule needs its subject check and its when check to hold",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"admitted": true,
+					"subject": "author_id",
+					"when": "published"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {},
+				"fields": {
+					"author_id": "ann"
+				},
+				"matches": {
+					"published": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "another rule without the when check admits a row that does not match",
+			"op": "read",
+			"rules": [
+				{
+					"read": true,
+					"permission": "view_threads",
+					"when": "visible"
+				},
+				{
+					"read": true,
+					"permission": "moderate_threads"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"view_threads": true,
+					"moderate_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"visible": false
+				}
+			},
+			"want": "yes"
+		},
+		{
+			"name": "a create rule with a when check checks the row as it will be stored",
+			"op": "create",
+			"rules": [
+				{
+					"create": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "a delete rule with a when check refuses a row that does not match",
+			"op": "delete",
+			"rules": [
+				{
+					"delete": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": false
+				}
+			},
+			"want": "no"
+		},
+		{
+			"name": "an update needs the stored row and the row as it will be stored to match",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"final": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"changed": [
+				"title"
+			],
+			"want": "yes"
+		},
+		{
+			"name": "an update that makes the row stop matching is refused",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"final": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": false
+				}
+			},
+			"changed": [
+				"archived"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update of a row that does not match is refused, even when it makes the row match",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": false
+				}
+			},
+			"final": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"changed": [
+				"archived"
+			],
+			"want": "no"
+		},
+		{
+			"name": "an update whose new row the client cannot evaluate answers unknown",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "post",
+					"when": "open"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"final": {
+				"held": {
+					"post": true
+				},
+				"fields": {},
+				"matches": {
+					"open": null
+				}
+			},
+			"changed": [
+				"archived"
+			],
+			"want": "unknown"
+		},
+		{
+			"name": "a rule without the when check admits an update that makes the row stop matching",
+			"op": "update",
+			"rules": [
+				{
+					"update": true,
+					"permission": "post",
+					"when": "open"
+				},
+				{
+					"update": true,
+					"permission": "moderate_threads"
+				}
+			],
+			"subjects": [
+				"ann"
+			],
+			"row": {
+				"held": {
+					"post": true,
+					"moderate_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"open": true
+				}
+			},
+			"final": {
+				"held": {
+					"post": true,
+					"moderate_threads": true
+				},
+				"fields": {},
+				"matches": {
+					"open": false
+				}
+			},
+			"changed": [
+				"archived"
+			],
 			"want": "yes"
 		}
 	]

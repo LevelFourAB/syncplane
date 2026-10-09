@@ -165,16 +165,18 @@ func (info *entityInfo) recordTextDeltaGaps(tx storage.WriteTx, key string, path
 }
 
 // readInputs is what a row's own fields decide about which callers may read it
-// in the access model: its access parent, and the values of the fields its
-// read rules check against the caller's subjects. The zero value is a row
-// whose fields decide nothing: one that does not exist, or one whose
-// entity's read rules do not read its fields.
+// in the access model: its access parent, the values of the fields its read
+// rules check against the caller's subjects, and whether it matches each read
+// rule's when condition. The zero value is a row whose fields decide nothing:
+// one that does not exist, or one whose entity's read rules do not read its
+// fields.
 type readInputs struct {
 	decides bool
 	parent  chainEdge
-	// subjects holds the value of each read rule's subject field, quoted, in
-	// rule order.
-	subjects string
+	// checks holds, for each read rule with a check on the row in rule order,
+	// the value of its subject field quoted and whether the row matches its
+	// when condition.
+	checks string
 }
 
 // readInputsOf returns what row's own fields decide about which callers may
@@ -184,18 +186,23 @@ func readInputsOf(model *accessModel, info *entityInfo, row proto.Message) readI
 	if model == nil || row == nil || info.access == nil || info.access.read.all {
 		return readInputs{}
 	}
-	owned := info.access.read.owned
-	if len(model.parents[info.name]) == 0 && len(owned) == 0 {
+	checked := info.access.read.checked
+	if len(model.parents[info.name]) == 0 && len(checked) == 0 {
 		return readInputs{}
 	}
 	r := row.ProtoReflect()
 	in := readInputs{decides: true, parent: edgeOf(model, info, r)}
-	if len(owned) > 0 {
+	if len(checked) > 0 {
 		var b strings.Builder
-		for _, rule := range owned {
-			b.WriteString(strconv.Quote(r.Get(rule.subject).String()))
+		for _, rule := range checked {
+			if rule.subject != nil {
+				b.WriteString(strconv.Quote(r.Get(rule.subject).String()))
+			}
+			if rule.when != nil {
+				b.WriteString(strconv.FormatBool(rule.when.Eval(r)))
+			}
 		}
-		in.subjects = b.String()
+		in.checks = b.String()
 	}
 	return in
 }

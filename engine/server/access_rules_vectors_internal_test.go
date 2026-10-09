@@ -7,6 +7,8 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+
+	"github.com/levelfourab/syncplane/engine/query"
 )
 
 // The rule vectors are shared with the TS client
@@ -24,13 +26,16 @@ type rulesVectorRule struct {
 	Admitted   bool     `json:"admitted"`
 	Subject    string   `json:"subject"`
 	Fields     []string `json:"fields"`
+	// When names the rule's condition, which each row's Matches answers.
+	When string `json:"when"`
 }
 
 // rulesVectorRow is one side of an operation. A nil value is an input only
 // the server knows.
 type rulesVectorRow struct {
-	Held   map[string]*bool   `json:"held"`
-	Fields map[string]*string `json:"fields"`
+	Held    map[string]*bool   `json:"held"`
+	Fields  map[string]*string `json:"fields"`
+	Matches map[string]*bool   `json:"matches"`
 }
 
 func (r *rulesVectorRow) known() bool {
@@ -43,6 +48,11 @@ func (r *rulesVectorRow) known() bool {
 		}
 	}
 	for _, v := range r.Fields {
+		if v == nil {
+			return false
+		}
+	}
+	for _, v := range r.Matches {
 		if v == nil {
 			return false
 		}
@@ -83,12 +93,18 @@ var _ = Describe("access rule conformance vectors", func() {
 			for i, r := range tc.Rules {
 				rules[i] = rulesVectorRuleOf(r)
 			}
-			// admits mirrors txAccess.admits, with the chain walk answered by
-			// the vector.
+			// admits mirrors txAccess.admits, with the chain walk and the
+			// condition answered by the vector.
 			admits := func(rule accessRule, row *rulesVectorRow) bool {
 				if rule.subject != nil {
 					v := row.Fields[string(rule.subject.Name())]
 					if v == nil || !subjectMatches(subjects, *v) {
+						return false
+					}
+				}
+				if rule.when != nil {
+					v := row.Matches[rule.whenSpec]
+					if v == nil || !*v {
 						return false
 					}
 				}
@@ -146,6 +162,11 @@ func rulesVectorRuleOf(r rulesVectorRule) accessRule {
 	}
 	if r.Fields != nil {
 		rule.fields = slices.Sorted(slices.Values(r.Fields))
+	}
+	if r.When != "" {
+		// The vector names the condition, so the spec carries the name and
+		// the compiled condition only marks that the rule sets one.
+		rule.when, rule.whenSpec = &query.Compiled{}, r.When
 	}
 	return rule
 }

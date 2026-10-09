@@ -177,11 +177,12 @@ func (a *txAccess) holdsAt(tx storage.ReadTx, perm string, at *anchorRow) (bool,
 // row itself, or at a row up its parent chain. A rule that admits every
 // admitted caller holds for every caller that passed the workspace gate,
 // which is every caller with an access. A rule with a subject check also
-// needs the row's subject field to hold one of the caller's subjects. row is
-// the row's decoded value, or nil for a row that does not exist, which no
-// subject check admits.
+// needs the row's subject field to hold one of the caller's subjects, and a
+// rule with a when check needs the row to match its condition. row is the
+// row's decoded value, or nil for a row that does not exist, which no check
+// on the row admits.
 func (a *txAccess) admits(tx storage.ReadTx, rule accessRule, info *entityInfo, key string, row protoreflect.Message) (bool, error) {
-	if rule.subject != nil && (row == nil || !rule.subjectHolds(a.caller.subjects, row)) {
+	if rule.checksRow() && (row == nil || !rule.rowHolds(a.caller.subjects, row)) {
 		return false, nil
 	}
 	if rule.admitted() {
@@ -504,9 +505,9 @@ func (w *accessWrite) finish(tx storage.ReadTx, final proto.Message) error {
 			func() []string { return changedUnits(w.info.msgType.Descriptor(), w.stored, fr) },
 			func(rule accessRule) (bool, error) {
 				// Unmoved, the row sits on the chain the rule's source was
-				// checked against, so only a subject check can answer
+				// checked against, so only a check on the row can answer
 				// differently.
-				if !moved && rule.subject == nil {
+				if !moved && !rule.checksRow() {
 					return true, nil
 				}
 				return w.access.admits(tx, rule, w.info, w.key, fr)

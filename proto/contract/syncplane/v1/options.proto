@@ -3,6 +3,7 @@ syntax = "proto3";
 package syncplane.v1;
 
 import "google/protobuf/descriptor.proto";
+import "syncplane/v1/query.proto";
 
 option go_package = "github.com/levelfourab/syncplane/engine/gen/syncplane/v1;syncplanev1";
 
@@ -122,8 +123,9 @@ message AccessOptions {
 // update must be admitted by one rule for both the stored row and the row as
 // it will be stored, so a rule admits a write that moves a row to another
 // access parent only when its source holds at the old place and at the new
-// one, and a rule with `subject` admits no write that changes the subject
-// field to a value outside the caller's subjects.
+// one, a rule with `subject` admits no write that changes the subject field to
+// a value outside the caller's subjects, and a rule with `when` admits no
+// write that makes the row fail the condition.
 //
 // ```protobuf
 // message Comment {
@@ -186,6 +188,28 @@ message AccessRule {
 	// entity has a `fields` list and no list names every field the mask
 	// names.
 	repeated string fields = 9;
+	// Admits only rows that match this condition. The condition uses the query
+	// predicate language with paths from the row, and reads only the row
+	// itself: a `rel` or a `match` condition is refused.
+	//
+	// A read rule with `when` hides a row when a write makes it fail the
+	// condition, and a client that holds the row receives a delete. An update
+	// rule with `when` must admit the stored row and the row as it will be
+	// stored, so it refuses a write that makes a row fail the condition, and
+	// a write to a row that fails it:
+	//
+	// ```protobuf
+	// access: { allow: [
+	//   { read: true permission: "view_tasks" },
+	//   { update: true permission: "edit_tasks"
+	//     when: { cmp: { path: ["archived"] op: CMP_OP_EQ
+	//       value: { bool_value: false } } } },
+	//   { update: true permission: "archive_tasks" }
+	// ] }
+	// ```
+	//
+	// A permission held at the workspace root does not skip the check.
+	Condition when = 10;
 }
 
 // Selects every caller admitted to the workspace as the source of an

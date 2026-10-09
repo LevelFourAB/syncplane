@@ -36,6 +36,7 @@ import {
 	FieldWritePolicy,
 	reference as referenceExt,
 } from './gen/syncplane/v1/options_pb.js';
+import type { Condition } from './gen/syncplane/v1/query_pb.js';
 import {
 	rowKey,
 	scalarKeyString,
@@ -198,6 +199,8 @@ export interface AccessRuleDef {
 	subject: DescField | undefined;
 	/** The units an update may change, by proto name, sorted. */
 	fields: readonly string[] | undefined;
+	/** The condition a row must match, with proto-name paths. */
+	when: Condition | undefined;
 }
 
 /** One secondary index of an entity: a name unique within it, and the
@@ -268,13 +271,14 @@ function accessRulesOf(
 		permission: rule.source.case === 'permission' ? rule.source.value : undefined,
 		subject: rule.subject === '' ? undefined : schema.fields.find((f) => f.name === rule.subject),
 		fields: rule.fields.length === 0 ? undefined : [ ...rule.fields ].sort(),
+		when: rule.when,
 	}));
 }
 
 /**
  * Folds an entity's access rules into the write operations they admit. The
- * source of a rule and its subject check are left out: whether they hold is
- * decided on the stored row, which only the server has.
+ * source of a rule and its checks on the row are left out: whether they hold
+ * is decided on the stored row, which only the server has.
  */
 function writeAccessOf(rules: readonly AccessRuleDef[] | undefined): WriteAccess | undefined {
 	if (rules === undefined) return undefined;

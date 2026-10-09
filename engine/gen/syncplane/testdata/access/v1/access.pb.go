@@ -1873,6 +1873,164 @@ func (x *Setting) GetTheme() string {
 	return ""
 }
 
+// A thread in a room, registered with the owner-rule schema, whose rules test
+// fields of the row: a poster writes a thread while it is not archived, a
+// moderator writes every thread, and a hidden thread is read only by
+// moderators.
+type Thread struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Room          *Room                  `protobuf:"bytes,2,opt,name=room,proto3" json:"room,omitempty"`
+	Archived      bool                   `protobuf:"varint,3,opt,name=archived,proto3" json:"archived,omitempty"`
+	Hidden        bool                   `protobuf:"varint,4,opt,name=hidden,proto3" json:"hidden,omitempty"`
+	Title         string                 `protobuf:"bytes,5,opt,name=title,proto3" json:"title,omitempty"`
+	Notes         []byte                 `protobuf:"bytes,6,opt,name=notes,proto3" json:"notes,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Thread) Reset() {
+	*x = Thread{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Thread) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Thread) ProtoMessage() {}
+
+func (x *Thread) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Thread.ProtoReflect.Descriptor instead.
+func (*Thread) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{28}
+}
+
+func (x *Thread) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Thread) GetRoom() *Room {
+	if x != nil {
+		return x.Room
+	}
+	return nil
+}
+
+func (x *Thread) GetArchived() bool {
+	if x != nil {
+		return x.Archived
+	}
+	return false
+}
+
+func (x *Thread) GetHidden() bool {
+	if x != nil {
+		return x.Hidden
+	}
+	return false
+}
+
+func (x *Thread) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
+func (x *Thread) GetNotes() []byte {
+	if x != nil {
+		return x.Notes
+	}
+	return nil
+}
+
+// A bulletin on the whole workspace: every admitted caller reads the
+// published ones, and its author reads and writes their own.
+type Bulletin struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	AuthorId      string                 `protobuf:"bytes,2,opt,name=author_id,json=authorId,proto3" json:"author_id,omitempty"`
+	Status        string                 `protobuf:"bytes,3,opt,name=status,proto3" json:"status,omitempty"`
+	Body          string                 `protobuf:"bytes,4,opt,name=body,proto3" json:"body,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Bulletin) Reset() {
+	*x = Bulletin{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Bulletin) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Bulletin) ProtoMessage() {}
+
+func (x *Bulletin) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Bulletin.ProtoReflect.Descriptor instead.
+func (*Bulletin) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{29}
+}
+
+func (x *Bulletin) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Bulletin) GetAuthorId() string {
+	if x != nil {
+		return x.AuthorId
+	}
+	return ""
+}
+
+func (x *Bulletin) GetStatus() string {
+	if x != nil {
+		return x.Status
+	}
+	return ""
+}
+
+func (x *Bulletin) GetBody() string {
+	if x != nil {
+		return x.Body
+	}
+	return ""
+}
+
 // A squad, the team of the team schema below: Squad, SquadMember, Repo,
 // RepoMember, RepoSquad and Issue, registered apart from the schemas above.
 type Squad struct {
@@ -1884,7 +2042,7 @@ type Squad struct {
 
 func (x *Squad) Reset() {
 	*x = Squad{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1896,7 +2054,7 @@ func (x *Squad) String() string {
 func (*Squad) ProtoMessage() {}
 
 func (x *Squad) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[28]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1909,7 +2067,7 @@ func (x *Squad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Squad.ProtoReflect.Descriptor instead.
 func (*Squad) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{28}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{30}
 }
 
 func (x *Squad) GetId() string {
@@ -1932,7 +2090,7 @@ type SquadMember struct {
 
 func (x *SquadMember) Reset() {
 	*x = SquadMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1944,7 +2102,7 @@ func (x *SquadMember) String() string {
 func (*SquadMember) ProtoMessage() {}
 
 func (x *SquadMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[29]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1957,7 +2115,7 @@ func (x *SquadMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SquadMember.ProtoReflect.Descriptor instead.
 func (*SquadMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{29}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{31}
 }
 
 func (x *SquadMember) GetId() string {
@@ -1997,7 +2155,7 @@ type Repo struct {
 
 func (x *Repo) Reset() {
 	*x = Repo{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2009,7 +2167,7 @@ func (x *Repo) String() string {
 func (*Repo) ProtoMessage() {}
 
 func (x *Repo) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[30]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2022,7 +2180,7 @@ func (x *Repo) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Repo.ProtoReflect.Descriptor instead.
 func (*Repo) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{30}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{32}
 }
 
 func (x *Repo) GetId() string {
@@ -2050,7 +2208,7 @@ type RepoMember struct {
 
 func (x *RepoMember) Reset() {
 	*x = RepoMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2062,7 +2220,7 @@ func (x *RepoMember) String() string {
 func (*RepoMember) ProtoMessage() {}
 
 func (x *RepoMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[31]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2075,7 +2233,7 @@ func (x *RepoMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoMember.ProtoReflect.Descriptor instead.
 func (*RepoMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{31}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{33}
 }
 
 func (x *RepoMember) GetId() string {
@@ -2154,7 +2312,7 @@ type RepoSquad struct {
 
 func (x *RepoSquad) Reset() {
 	*x = RepoSquad{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2166,7 +2324,7 @@ func (x *RepoSquad) String() string {
 func (*RepoSquad) ProtoMessage() {}
 
 func (x *RepoSquad) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[32]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2179,7 +2337,7 @@ func (x *RepoSquad) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RepoSquad.ProtoReflect.Descriptor instead.
 func (*RepoSquad) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{32}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{34}
 }
 
 func (x *RepoSquad) GetId() string {
@@ -2222,7 +2380,7 @@ type Issue struct {
 
 func (x *Issue) Reset() {
 	*x = Issue{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2234,7 +2392,7 @@ func (x *Issue) String() string {
 func (*Issue) ProtoMessage() {}
 
 func (x *Issue) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[33]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2247,7 +2405,7 @@ func (x *Issue) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Issue.ProtoReflect.Descriptor instead.
 func (*Issue) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{33}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{35}
 }
 
 func (x *Issue) GetId() string {
@@ -2286,7 +2444,7 @@ type Commons struct {
 
 func (x *Commons) Reset() {
 	*x = Commons{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2298,7 +2456,7 @@ func (x *Commons) String() string {
 func (*Commons) ProtoMessage() {}
 
 func (x *Commons) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2311,7 +2469,7 @@ func (x *Commons) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Commons.ProtoReflect.Descriptor instead.
 func (*Commons) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{34}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{36}
 }
 
 func (x *Commons) GetId() string {
@@ -2335,7 +2493,7 @@ type CommonsMember struct {
 
 func (x *CommonsMember) Reset() {
 	*x = CommonsMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2347,7 +2505,7 @@ func (x *CommonsMember) String() string {
 func (*CommonsMember) ProtoMessage() {}
 
 func (x *CommonsMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2360,7 +2518,7 @@ func (x *CommonsMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CommonsMember.ProtoReflect.Descriptor instead.
 func (*CommonsMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{35}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{37}
 }
 
 func (x *CommonsMember) GetId() string {
@@ -2403,7 +2561,7 @@ type Steward struct {
 
 func (x *Steward) Reset() {
 	*x = Steward{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2415,7 +2573,7 @@ func (x *Steward) String() string {
 func (*Steward) ProtoMessage() {}
 
 func (x *Steward) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2428,7 +2586,7 @@ func (x *Steward) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Steward.ProtoReflect.Descriptor instead.
 func (*Steward) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{36}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{38}
 }
 
 func (x *Steward) GetId() string {
@@ -2465,7 +2623,7 @@ type Initiative struct {
 
 func (x *Initiative) Reset() {
 	*x = Initiative{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2477,7 +2635,7 @@ func (x *Initiative) String() string {
 func (*Initiative) ProtoMessage() {}
 
 func (x *Initiative) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2490,7 +2648,7 @@ func (x *Initiative) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Initiative.ProtoReflect.Descriptor instead.
 func (*Initiative) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{37}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{39}
 }
 
 func (x *Initiative) GetId() string {
@@ -2531,7 +2689,7 @@ type InitiativeMember struct {
 
 func (x *InitiativeMember) Reset() {
 	*x = InitiativeMember{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[40]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2543,7 +2701,7 @@ func (x *InitiativeMember) String() string {
 func (*InitiativeMember) ProtoMessage() {}
 
 func (x *InitiativeMember) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[40]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2556,7 +2714,7 @@ func (x *InitiativeMember) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use InitiativeMember.ProtoReflect.Descriptor instead.
 func (*InitiativeMember) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{38}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{40}
 }
 
 func (x *InitiativeMember) GetId() string {
@@ -2633,7 +2791,7 @@ type Milestone struct {
 
 func (x *Milestone) Reset() {
 	*x = Milestone{}
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[41]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -2645,7 +2803,7 @@ func (x *Milestone) String() string {
 func (*Milestone) ProtoMessage() {}
 
 func (x *Milestone) ProtoReflect() protoreflect.Message {
-	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[41]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -2658,7 +2816,7 @@ func (x *Milestone) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Milestone.ProtoReflect.Descriptor instead.
 func (*Milestone) Descriptor() ([]byte, []int) {
-	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{39}
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{41}
 }
 
 func (x *Milestone) GetId() string {
@@ -2944,7 +3102,35 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\auser_id\x18\x01 \x01(\tR\x06userId\x12\x14\n" +
 	"\x05theme\x18\x02 \x01(\tR\x05theme:)\xa2\xbb\x18%\n" +
 	"\asetting\x12\auser_idR\x11\n" +
-	"\x0f\b\x01(\x01B\auser_id:\x00\"^\n" +
+	"\x0f\b\x01(\x01B\auser_id:\x00\"\xc0\x02\n" +
+	"\x06Thread\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12>\n" +
+	"\x04room\x18\x02 \x01(\v2\".syncplane.testdata.access.v1.RoomB\x06\xaa\xbb\x18\x02Z\x00R\x04room\x12\x1a\n" +
+	"\barchived\x18\x03 \x01(\bR\barchived\x12\x16\n" +
+	"\x06hidden\x18\x04 \x01(\bR\x06hidden\x12\x14\n" +
+	"\x05title\x18\x05 \x01(\tR\x05title\x12\x1c\n" +
+	"\x05notes\x18\x06 \x01(\fB\x06\xaa\xbb\x18\x02 \x01R\x05notes:~\xa2\xbb\x18z\n" +
+	"\x06thread\x12\x02idRl\n" +
+	" \b\x01R\x10\n" +
+	"\x0e\n" +
+	"\x06hidden\x10\x01\x1a\x02(\x002\n" +
+	"view_posts\n" +
+	"\x12\b\x012\x0emoderate_posts\n" +
+	" \x10\x01\x18\x01 \x01R\x12\n" +
+	"\x10\n" +
+	"\barchived\x10\x01\x1a\x02(\x002\x04post\n" +
+	"\x12(\x012\x0emoderate_posts\"\xb5\x01\n" +
+	"\bBulletin\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12#\n" +
+	"\tauthor_id\x18\x02 \x01(\tB\x06\xaa\xbb\x18\x02b\x00R\bauthorId\x12\x16\n" +
+	"\x06status\x18\x03 \x01(\tR\x06status\x12\x12\n" +
+	"\x04body\x18\x04 \x01(\tR\x04body:H\xa2\xbb\x18D\n" +
+	"\bbulletin\x12\x02idR4\n" +
+	"\x1f\b\x01R\x19\n" +
+	"\x17\n" +
+	"\x06status\x10\x01\x1a\v\n" +
+	"\tpublished:\x00\n" +
+	"\x11\b\x01(\x01B\tauthor_id:\x00\"^\n" +
 	"\x05Squad\x12\x0e\n" +
 	"\x02id\x18\x01 \x01(\tR\x02id:E\xa2\xbb\x18A\n" +
 	"\x05squad\x12\x02idR$\n" +
@@ -3086,7 +3272,7 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 42)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
 	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
@@ -3117,18 +3303,20 @@ var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
 	(*Draft)(nil),            // 26: syncplane.testdata.access.v1.Draft
 	(*Ticket)(nil),           // 27: syncplane.testdata.access.v1.Ticket
 	(*Setting)(nil),          // 28: syncplane.testdata.access.v1.Setting
-	(*Squad)(nil),            // 29: syncplane.testdata.access.v1.Squad
-	(*SquadMember)(nil),      // 30: syncplane.testdata.access.v1.SquadMember
-	(*Repo)(nil),             // 31: syncplane.testdata.access.v1.Repo
-	(*RepoMember)(nil),       // 32: syncplane.testdata.access.v1.RepoMember
-	(*RepoSquad)(nil),        // 33: syncplane.testdata.access.v1.RepoSquad
-	(*Issue)(nil),            // 34: syncplane.testdata.access.v1.Issue
-	(*Commons)(nil),          // 35: syncplane.testdata.access.v1.Commons
-	(*CommonsMember)(nil),    // 36: syncplane.testdata.access.v1.CommonsMember
-	(*Steward)(nil),          // 37: syncplane.testdata.access.v1.Steward
-	(*Initiative)(nil),       // 38: syncplane.testdata.access.v1.Initiative
-	(*InitiativeMember)(nil), // 39: syncplane.testdata.access.v1.InitiativeMember
-	(*Milestone)(nil),        // 40: syncplane.testdata.access.v1.Milestone
+	(*Thread)(nil),           // 29: syncplane.testdata.access.v1.Thread
+	(*Bulletin)(nil),         // 30: syncplane.testdata.access.v1.Bulletin
+	(*Squad)(nil),            // 31: syncplane.testdata.access.v1.Squad
+	(*SquadMember)(nil),      // 32: syncplane.testdata.access.v1.SquadMember
+	(*Repo)(nil),             // 33: syncplane.testdata.access.v1.Repo
+	(*RepoMember)(nil),       // 34: syncplane.testdata.access.v1.RepoMember
+	(*RepoSquad)(nil),        // 35: syncplane.testdata.access.v1.RepoSquad
+	(*Issue)(nil),            // 36: syncplane.testdata.access.v1.Issue
+	(*Commons)(nil),          // 37: syncplane.testdata.access.v1.Commons
+	(*CommonsMember)(nil),    // 38: syncplane.testdata.access.v1.CommonsMember
+	(*Steward)(nil),          // 39: syncplane.testdata.access.v1.Steward
+	(*Initiative)(nil),       // 40: syncplane.testdata.access.v1.Initiative
+	(*InitiativeMember)(nil), // 41: syncplane.testdata.access.v1.InitiativeMember
+	(*Milestone)(nil),        // 42: syncplane.testdata.access.v1.Milestone
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -3152,22 +3340,23 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	23, // 18: syncplane.testdata.access.v1.Post.room:type_name -> syncplane.testdata.access.v1.Room
 	23, // 19: syncplane.testdata.access.v1.Draft.room:type_name -> syncplane.testdata.access.v1.Room
 	23, // 20: syncplane.testdata.access.v1.Ticket.room:type_name -> syncplane.testdata.access.v1.Room
-	29, // 21: syncplane.testdata.access.v1.SquadMember.squad:type_name -> syncplane.testdata.access.v1.Squad
-	31, // 22: syncplane.testdata.access.v1.RepoMember.repo:type_name -> syncplane.testdata.access.v1.Repo
-	29, // 23: syncplane.testdata.access.v1.RepoMember.squad:type_name -> syncplane.testdata.access.v1.Squad
-	31, // 24: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
-	29, // 25: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
-	31, // 26: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
-	35, // 27: syncplane.testdata.access.v1.CommonsMember.commons:type_name -> syncplane.testdata.access.v1.Commons
-	35, // 28: syncplane.testdata.access.v1.Initiative.commons:type_name -> syncplane.testdata.access.v1.Commons
-	38, // 29: syncplane.testdata.access.v1.InitiativeMember.initiative:type_name -> syncplane.testdata.access.v1.Initiative
-	29, // 30: syncplane.testdata.access.v1.InitiativeMember.squad:type_name -> syncplane.testdata.access.v1.Squad
-	38, // 31: syncplane.testdata.access.v1.Milestone.initiative:type_name -> syncplane.testdata.access.v1.Initiative
-	32, // [32:32] is the sub-list for method output_type
-	32, // [32:32] is the sub-list for method input_type
-	32, // [32:32] is the sub-list for extension type_name
-	32, // [32:32] is the sub-list for extension extendee
-	0,  // [0:32] is the sub-list for field type_name
+	23, // 21: syncplane.testdata.access.v1.Thread.room:type_name -> syncplane.testdata.access.v1.Room
+	31, // 22: syncplane.testdata.access.v1.SquadMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	33, // 23: syncplane.testdata.access.v1.RepoMember.repo:type_name -> syncplane.testdata.access.v1.Repo
+	31, // 24: syncplane.testdata.access.v1.RepoMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	33, // 25: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
+	31, // 26: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
+	33, // 27: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
+	37, // 28: syncplane.testdata.access.v1.CommonsMember.commons:type_name -> syncplane.testdata.access.v1.Commons
+	37, // 29: syncplane.testdata.access.v1.Initiative.commons:type_name -> syncplane.testdata.access.v1.Commons
+	40, // 30: syncplane.testdata.access.v1.InitiativeMember.initiative:type_name -> syncplane.testdata.access.v1.Initiative
+	31, // 31: syncplane.testdata.access.v1.InitiativeMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	40, // 32: syncplane.testdata.access.v1.Milestone.initiative:type_name -> syncplane.testdata.access.v1.Initiative
+	33, // [33:33] is the sub-list for method output_type
+	33, // [33:33] is the sub-list for method input_type
+	33, // [33:33] is the sub-list for extension type_name
+	33, // [33:33] is the sub-list for extension extendee
+	0,  // [0:33] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -3187,11 +3376,11 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 		(*PlaceRef_Board)(nil),
 		(*PlaceRef_Space)(nil),
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[31].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[33].OneofWrappers = []any{
 		(*RepoMember_UserId)(nil),
 		(*RepoMember_Squad)(nil),
 	}
-	file_syncplane_testdata_access_v1_access_proto_msgTypes[38].OneofWrappers = []any{
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[40].OneofWrappers = []any{
 		(*InitiativeMember_UserId)(nil),
 		(*InitiativeMember_Squad)(nil),
 	}
@@ -3201,7 +3390,7 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   40,
+			NumMessages:   42,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

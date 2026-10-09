@@ -15,6 +15,7 @@ import {
 } from '@bufbuild/protobuf';
 
 import { type CrudMutation, CrudOp, type Mutation } from './gen/syncplane/v1/mutation_pb.js';
+import type { Condition } from './gen/syncplane/v1/query_pb.js';
 import { type CallerAccess, CallerAccessSchema } from './gen/syncplane/v1/service_pb.js';
 import {
 	type AccessRuleDef,
@@ -27,6 +28,10 @@ import {
 	refShapes,
 	refStub,
 } from './mutations.js';
+import type { Cond } from './query/ast.js';
+import { evalCond } from './query/evaluate.js';
+import { condFromProto } from './query/proto.js';
+import { condLocalNames, prepareQuery } from './query/wire.js';
 import type { TouchSet } from './touch.js';
 
 /**
@@ -172,12 +177,14 @@ function sameBytes(a: Uint8Array, b: Uint8Array): boolean {
 
 /**
  * One row of an operation, as {@link decideRules} reads it: whether the
- * caller holds each permission at the row or up its chain, and the value of
- * each subject field, `undefined` where the client cannot know it.
+ * caller holds each permission at the row or up its chain, the value of each
+ * subject field, `undefined` where the client cannot know it, and whether the
+ * row matches a rule's `when` condition.
  */
 export interface RuleRow {
 	held(permission: string): CanAnswer;
 	subject(field: string): string | undefined;
+	matches(rule: AccessRuleDef): CanAnswer;
 }
 
 /**
@@ -185,13 +192,13 @@ export interface RuleRow {
  * server applies, with `'unknown'` where the client lacks an input;
  * testdata/access/rules.json pins the two against each other.
  *
- * A rule admits an operation it names when its source holds on the row and
- * its subject check passes: `subjects` holds the subject field's value, which
- * must not be empty. `row` is the row read or deleted, the row a create will
- * store, or the stored row of an update. An update also needs the same rule
- * to admit `final`, the row it will store, and its fields check to allow
- * `changed`, the units the update changes; `null` stands for fields that no
- * list covers.
+ * A rule admits an operation it names when its source holds on the row, its
+ * subject check passes, and the row matches its `when` condition: `subjects`
+ * holds the subject field's value, which must not be empty. `row` is the row
+ * read or deleted, the row a create will store, or the stored row of an
+ * update. An update also needs the same rule to admit `final`, the row it
+ * will store, and its fields check to allow `changed`, the units the update
+ * changes; `null` stands for fields that no list covers.
  */
 export function decideRules(
 	rules: readonly AccessRuleDef[],
@@ -211,8 +218,9 @@ export function decideRules(
 				? 'yes'
 				: 'no';
 		}
+		const when: CanAnswer = rule.when === undefined ? 'yes' : side.matches(rule);
 		const source: CanAnswer = rule.permission === undefined ? 'yes' : side.held(rule.permission);
-		return and(subject, source);
+		return and(and(subject, when), source);
 	};
 	let answer: CanAnswer = 'no';
 	for (const rule of rules) {
@@ -280,7 +288,8 @@ export function canAt(
 /**
  * The row of `def` with `key` as {@link decideRules} reads it from local
  * data: a permission is decided by {@link canAt} over `chain`, and a subject
- * field reads `row`, which is unknown when the client does not hold the row.
+ * field and a `when` condition read `row`, which is unknown when the client
+ * does not hold the row.
  */
 export function ruleRowOf(
 	summary: AccessSummary,
@@ -299,7 +308,72 @@ export function ruleRowOf(
 				: fieldValueOf(row as unknown as Record<string, unknown>, field);
 			return typeof value === 'string' ? value : '';
 		},
+		matches: (rule) => {
+			if (rule.when === undefined) return 'yes';
+			if (row === undefined) return 'unknown';
+			return evalCond(row, ruleWhenOf(def.schema, rule.when).cond, def.schema) ? 'yes' : 'no';
+		},
 	};
+}
+
+/** A rule's `when` condition, compiled for {@link evalCond}. */
+interface RuleWhen {
+	cond: Cond;
+	/** The units the condition reads, by proto name: fields, and oneofs for their members. */
+	units: readonly string[];
+}
+
+const ruleWhens = new WeakMap<Condition, RuleWhen>();
+
+/**
+ * Compiles a rule's `when` condition against the entity's schema. The server
+ * refuses a condition that does not compile at registration, so one that
+ * reaches the client compiles.
+ */
+function ruleWhenOf(schema: DescMessage, when: Condition): RuleWhen {
+	let out = ruleWhens.get(when);
+	if (out === undefined) {
+		const cond = prepareQuery(schema, { where: condLocalNames(schema, condFromProto(when)) }).where!;
+		const units = new Set<string>();
+		for (const head of condHeads(condFromProto(when))) {
+			const field = schema.fields.find((f) => f.name === head);
+			if (field !== undefined) units.add(field.oneof?.name ?? field.name);
+		}
+		out = { cond, units: [ ...units ] };
+		ruleWhens.set(when, out);
+	}
+	return out;
+}
+
+/** The first segment of every path of `cond` that starts at the row. */
+function condHeads(cond: Cond): string[] {
+	switch (cond.kind) {
+		case 'and':
+		case 'or':
+			return cond.conds.flatMap(condHeads);
+		case 'not':
+			return condHeads(cond.cond);
+		case 'match':
+			return [];
+		default:
+			// An exists or rel sub-condition is scoped to an element or another
+			// row, so only its own path starts at the row.
+			return cond.path.length === 0 ? [] : [ cond.path[0]! ];
+	}
+}
+
+/**
+ * Whether an update that changes the units in `changed` can change whether
+ * the row matches the rule's `when` condition: the condition reads one of
+ * them. `changed` holds proto names, and a oneof counts by its name.
+ */
+export function whenReads(
+	schema: DescMessage,
+	rule: AccessRuleDef,
+	changed: readonly string[],
+): boolean {
+	if (rule.when === undefined) return false;
+	return ruleWhenOf(schema, rule.when).units.some((u) => changed.includes(u));
 }
 
 /**

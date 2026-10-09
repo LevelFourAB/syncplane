@@ -15,6 +15,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { type CanAnswer, countAccessChanges } from '../../src/access.js';
 import { SyncClient } from '../../src/client.js';
 import {
+	BulletinSchema,
 	CardItemSchema,
 	CardSchema,
 	CommentSchema,
@@ -31,6 +32,7 @@ import {
 	SettingSchema,
 	SpaceSchema,
 	TaskSchema,
+	ThreadSchema,
 	TicketSchema,
 } from '../../src/gen/syncplane/testdata/access/v1/access_pb.js';
 import { CrudOp, MutationSchema } from '../../src/gen/syncplane/v1/mutation_pb.js';
@@ -510,6 +512,85 @@ describe('canCreate()', () => {
 		const t = await roomClient(inR1('view_posts'));
 		expect(await t.client.canCreate(SettingSchema, { userId: 'ann' })).toBe('yes');
 		expect(await t.client.canCreate(SettingSchema, { userId: 'bob' })).toBe('no');
+		await t.client.close();
+	});
+});
+
+/**
+ * A test client over the room schema with threads and bulletins: an open, an
+ * archived and a hidden thread in room r1, and a published bulletin and a
+ * draft by bob. The caller is ann.
+ */
+async function threadClient(permissions: TestCallerAccess['permissions']) {
+	const t = await createTestClient({ entities: [ ...roomEntities, ThreadSchema, BulletinSchema ] });
+	t.server.put(RoomSchema, { id: 'r1' });
+	t.server.put(ThreadSchema, { id: 'th-open', room: { id: 'r1' } });
+	t.server.put(ThreadSchema, { id: 'th-archived', room: { id: 'r1' }, archived: true });
+	t.server.put(ThreadSchema, { id: 'th-hidden', room: { id: 'r1' }, hidden: true });
+	t.server.put(BulletinSchema, { id: 'bu-pub', authorId: 'bob', status: 'published' });
+	t.server.put(BulletinSchema, { id: 'bu-draft', authorId: 'bob', status: 'draft' });
+	t.server.setCallerAccess({ subjects: [ 'ann' ], permissions });
+	await t.sync();
+	return t;
+}
+
+describe('can() with a when check', () => {
+	it('evaluates the condition on the row held locally', async () => {
+		const t = await threadClient(inR1('view_posts', 'post'));
+		expect(await t.client.can(ThreadSchema, 'th-open', 'read')).toBe('yes');
+		expect(await t.client.can(ThreadSchema, 'th-hidden', 'read')).toBe('no');
+		expect(await t.client.can(ThreadSchema, 'th-open', 'update', { fields: [ 'title' ] })).toBe(
+			'yes',
+		);
+		expect(await t.client.can(ThreadSchema, 'th-archived', 'update', { fields: [ 'title' ] })).toBe(
+			'no',
+		);
+		expect(await t.client.can(ThreadSchema, 'th-open', 'delete')).toBe('yes');
+		expect(await t.client.can(ThreadSchema, 'th-archived', 'delete')).toBe('no');
+		await t.client.close();
+	});
+
+	it('answers unknown where the new value of a field the condition reads decides', async () => {
+		const t = await threadClient(inR1('view_posts', 'post'));
+		expect(await t.client.can(ThreadSchema, 'th-open', 'update', { fields: [ 'archived' ] })).toBe(
+			'unknown',
+		);
+		// The stored row already fails the condition, whatever the update does.
+		expect(await t.client.can(ThreadSchema, 'th-archived', 'update', { fields: [ 'archived' ] }))
+			.toBe(
+				'no',
+			);
+		await t.client.close();
+	});
+
+	it('lets a rule without the check decide a row that fails it', async () => {
+		const t = await threadClient(inR1('view_posts', 'post', 'moderate_posts'));
+		expect(await t.client.can(ThreadSchema, 'th-hidden', 'read')).toBe('yes');
+		expect(await t.client.can(ThreadSchema, 'th-archived', 'update', { fields: [ 'archived' ] }))
+			.toBe(
+				'yes',
+			);
+		await t.client.close();
+	});
+
+	it('still checks the condition for a rule that admits every admitted caller', async () => {
+		const t = await threadClient(inR1('view_posts'));
+		expect(await t.client.can(BulletinSchema, 'bu-pub', 'read')).toBe('yes');
+		expect(await t.client.can(BulletinSchema, 'bu-draft', 'read')).toBe('no');
+		await t.client.close();
+	});
+
+	it('checks a create on the row as the server would store it', async () => {
+		const t = await threadClient(inR1('view_posts', 'post'));
+		expect(await t.client.canCreate(ThreadSchema, { id: 'new', room: { id: 'r1' } })).toBe('yes');
+		expect(await t.client.canCreate(ThreadSchema, { id: 'new', room: { id: 'r1' }, archived: true }))
+			.toBe('no');
+		await t.client.close();
+	});
+
+	it('answers unknown where the row is not held', async () => {
+		const t = await threadClient(inR1('view_posts', 'post'));
+		expect(await t.client.can(ThreadSchema, 'th-gone', 'read')).toBe('unknown');
 		await t.client.close();
 	});
 });
