@@ -239,32 +239,22 @@ func (r readers) key() string {
 
 // loose returns r with every check on the row dropped: who may read some row
 // of the entity where a row sits. It is a superset of r, for the checks that
-// cannot read each row. A rule that needs more than one permission stays in
-// checked without its checks on the row, since where it holds depends on
-// where the row sits, unless one of perms admits every caller it admits.
+// cannot read each row. Each rule of checked stays there without its checks
+// on the row, since a rule that checks the row admits other rows than perms
+// do, and a rule that needs more than one permission holds where all of them
+// do. A rule leaves checked when one of perms admits every caller it admits,
+// and two rules with the same source are kept once.
 func (r readers) loose() readers {
 	if r.all || len(r.checked) == 0 {
 		return readers{perms: r.perms, all: r.all}
 	}
-	out := readers{perms: slices.Clone(r.perms)}
-	var joint []accessRule
+	out := readers{perms: r.perms}
 	for _, o := range r.checked {
-		switch {
-		case o.admitted():
-			return readers{all: true}
-		case o.joint():
-			joint = append(joint, accessRule{ops: opRead, requires: o.requires})
-		case !slices.Contains(out.perms, o.requires[0]):
-			out.perms = append(out.perms, o.requires[0])
-		}
-	}
-	sort.Strings(out.perms)
-	for _, o := range joint {
 		if slices.ContainsFunc(o.requires, func(p string) bool { return slices.Contains(out.perms, p) }) ||
 			slices.ContainsFunc(out.checked, func(c accessRule) bool { return c.source() == o.source() }) {
 			continue
 		}
-		out.checked = append(out.checked, o)
+		out.checked = append(out.checked, accessRule{ops: opRead, requires: o.requires})
 	}
 	sort.Slice(out.checked, func(i, j int) bool { return out.checked[i].spec() < out.checked[j].spec() })
 	return out

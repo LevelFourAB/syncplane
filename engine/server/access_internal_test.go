@@ -278,3 +278,42 @@ var _ = Describe("rowEmitter text delta verdict", func() {
 			"the filter reads the row, and nothing records what it read at the cursor")
 	})
 })
+
+// A move compares where each way of reading the rows below it holds, so
+// loose must keep apart every rule that admits other rows than the plain
+// permissions do.
+var _ = Describe("readers.loose", func() {
+	// owned stands for a rule that checks the row: loose drops the check, so
+	// which check it is does not matter here.
+	owned := func(requires ...string) accessRule {
+		return accessRule{ops: opRead, requires: requires, whenSpec: "owned"}
+	}
+	rule := func(requires ...string) accessRule {
+		return accessRule{ops: opRead, requires: requires}
+	}
+
+	It("keeps a rule with a check on the row apart from the plain permissions", func() {
+		r := readers{perms: []string{"view_all"}, checked: []accessRule{owned("view_own")}}
+		Expect(r.loose()).To(Equal(readers{perms: []string{"view_all"}, checked: []accessRule{rule("view_own")}}))
+	})
+
+	It("keeps an admitted rule with a check on the row instead of reading every row", func() {
+		r := readers{perms: []string{"view_all"}, checked: []accessRule{owned()}}
+		Expect(r.loose()).To(Equal(readers{perms: []string{"view_all"}, checked: []accessRule{rule()}}))
+	})
+
+	It("drops a rule whose permission is one of the plain permissions", func() {
+		r := readers{perms: []string{"view_all"}, checked: []accessRule{owned("view_all"), rule("view_all", "use")}}
+		Expect(r.loose()).To(Equal(readers{perms: []string{"view_all"}}))
+	})
+
+	It("keeps a rule that needs several permissions beside a checked rule that needs one of them", func() {
+		r := readers{checked: []accessRule{owned("view_own"), rule("use", "view_own")}}
+		Expect(r.loose()).To(Equal(readers{checked: []accessRule{rule("use", "view_own"), rule("view_own")}}))
+	})
+
+	It("keeps two rules with the same permissions once", func() {
+		r := readers{checked: []accessRule{owned("view_own"), {ops: opRead, requires: []string{"view_own"}, whenSpec: "open"}}}
+		Expect(r.loose()).To(Equal(readers{checked: []accessRule{rule("view_own")}}))
+	})
+})

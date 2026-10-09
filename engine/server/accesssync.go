@@ -377,8 +377,9 @@ func movedForCaller(
 // readsChange reports whether the rows of an entity read by r, a
 // readers.loose result, that sit below row can be read on one side and not on
 // the other: was and wasSet read the chains on one side, is and isSet on the
-// other. A rule in r.checked needs its permissions together, which can each
-// change on their own, so it is compared apart from r.perms.
+// other. A rule in r.checked admits other rows than r.perms do, or needs its
+// permissions together, which can each change on their own, so each is
+// compared apart from r.perms and from the others.
 func readsChange(was *accessChains, wasSet *accessSet, is *accessChains, isSet *accessSet, r readers, row anchorRow) (bool, error) {
 	before, err := was.holdsAt(wasSet.readAnchors(r), row)
 	if err != nil {

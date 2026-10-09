@@ -582,6 +582,46 @@ var _ = Describe("Owner rules", func() {
 	})
 })
 
+var _ = Describe("A subject check on a read rule below a row that moves", func() {
+	var f *accessFixture
+
+	// seedOrg plus pages below t1 in p1: pg-own owned by editor, and pg-other
+	// owned by someone else. editor reads the pages it owns where it holds
+	// view_projects, at p1 and p2, and every page where it holds view_tasks,
+	// at p2 alone.
+	BeforeEach(func() {
+		f = newAccessFixture(server.WithEntities(&accessv1.Page{}))
+		f.seedOrg()
+		f.seed(
+			&accessv1.ProjectMember{Id: "pm-editor-1", Project: project("p1"), UserId: "editor", Role: "project_editor"},
+			&accessv1.ProjectMember{Id: "pm-editor-2", Project: project("p2"), UserId: "editor", Role: "project_reader"},
+			&accessv1.Page{Id: "pg-own", Task: task("t1"), OwnerId: "editor"},
+			&accessv1.Page{Id: "pg-other", Task: task("t1"), OwnerId: "someone"},
+		)
+	})
+
+	It("sends the rows below a row that moves to where a rule without the check holds, and removes them when it moves back", func() {
+		r := newAccessReplica(f, "editor")
+		r.sync()
+		Expect(r.view()).To(ContainElement("page/pg-own"))
+		Expect(r.view()).NotTo(ContainElement("page/pg-other"))
+
+		// editor holds a permission of a read rule of page at p1 and at p2,
+		// so the move changes only which of the rules admits it.
+		f.seed(&accessv1.Task{Id: "t1", Project: project("p2"), Title: "in one"})
+		r.sync()
+		Expect(r.view()).To(ContainElements("page/pg-own", "page/pg-other"))
+		Expect(r.view()).To(Equal(f.pull("editor")))
+
+		f.seed(&accessv1.Task{Id: "t1", Project: project("p1"), Title: "in one"})
+		r.sync()
+		Expect(r.view()).To(ContainElement("page/pg-own"))
+		Expect(r.view()).NotTo(ContainElement("page/pg-other"))
+		Expect(r.view()).To(Equal(f.pull("editor")))
+		Expect(r.resets).To(BeZero())
+	})
+})
+
 var _ = Describe("A creator field outside the access model", func() {
 	It("records the caller's primary subject, and keeps it from untrusted writes", func() {
 		spec := server.DynamicEntity{
