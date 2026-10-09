@@ -78,11 +78,12 @@ Every write refuses a role that the schema does not declare, but registration do
 
 First choose how your app uses teams:
 
-| Your app needs                                                     | Use                                                                                     |
-| ------------------------------------------------------------------ | --------------------------------------------------------------------------------------- |
-| Each project belongs to one team                                   | Make `Team` the `access_parent` of `Project`, and grant roles on the team.              |
-| Teams come from your identity provider                             | Return the caller's groups from `WithSubjects`, such as `group:eng`, and grant to them. |
-| A team gets a role on projects that other teams or users also have | Team grants, below.                                                                     |
+| Your app needs                                                     | Use                                                                                                           |
+| ------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------- |
+| Each project belongs to one team                                   | Make `Team` the `access_parent` of `Project`, and grant roles on the team.                                    |
+| Teams come from your identity provider                             | Return the caller's groups from `WithSubjects`, such as `group:eng`, and grant to them.                       |
+| A team gets a role on projects that other teams or users also have | Team grants, below.                                                                                           |
+| A project is open to the whole workspace or to chosen teams        | [Share a project with the whole workspace or with chosen teams](share-with-the-workspace-or-chosen-teams.md). |
 
 For team grants, declare who the members of a team are with `members` on the team entity. Each `team_member` row makes its user a member of its team, whatever the role:
 
