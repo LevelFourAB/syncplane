@@ -826,3 +826,175 @@ message Issue {
 	Repo repo = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
 	string title = 3;
 }
+
+// The commons of the share-control schema below: Commons, CommonsMember,
+// Steward, Initiative, InitiativeMember and Milestone, registered apart from
+// the schemas above together with Squad and SquadMember. A shared initiative
+// sits below the one commons row, so every commons member reads it; a
+// restricted initiative sits at the root, where only stewards and its own
+// grants reach it.
+message Commons {
+	option (syncplane.v1.entity) = {
+		name: "commons"
+		key_fields: [ "id" ]
+		access: {
+			allow: [ {
+				read: true
+				admitted: {}
+			} ]
+		}
+	};
+	string id = 1;
+}
+
+// Makes its user a member of the workspace. Its role applies at the commons
+// row, not at the root, so it reaches shared initiatives alone.
+message CommonsMember {
+	option (syncplane.v1.entity) = {
+		name: "commons_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "commons_member"
+				grants: [
+					"view_commons_members",
+					"view_initiatives",
+					"edit_initiatives",
+					"view_initiative_members",
+					"view_milestones",
+					"edit_milestones"
+				]
+			} ]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_commons_members" },
+				{ write: true permission: "manage_commons_members" }
+			]
+		}
+	};
+	string id = 1;
+	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string user_id = 3;
+	string role = 4;
+}
+
+// A role at the workspace root.
+message Steward {
+	option (syncplane.v1.entity) = {
+		name: "steward"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "user_id"
+			role: "role"
+			roles: [ {
+				name: "steward"
+				grants: [
+					"view_stewards",
+					"manage_stewards",
+					"view_commons_members",
+					"manage_commons_members",
+					"view_initiatives",
+					"edit_initiatives",
+					"view_initiative_members",
+					"manage_initiative_members",
+					"view_milestones",
+					"edit_milestones"
+				]
+			} ]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_stewards" },
+				{ write: true permission: "manage_stewards" }
+			]
+		}
+	};
+	string id = 1;
+	string user_id = 2;
+	string role = 3;
+}
+
+// An initiative, shared with the workspace when commons is set and restricted
+// to its own grants when it is not.
+message Initiative {
+	option (syncplane.v1.entity) = {
+		name: "initiative"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_initiatives" },
+				{ write: true permission: "edit_initiatives" }
+			]
+		}
+	};
+	string id = 1;
+	Commons commons = 2 [(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string name = 3;
+}
+
+// A role on one initiative for one user, or for every member of one squad.
+message InitiativeMember {
+	option (syncplane.v1.entity) = {
+		name: "initiative_member"
+		key_fields: [ "id" ]
+		grant: {
+			subject: "member"
+			role: "role"
+			roles: [
+				{
+					name: "initiative_reader"
+					grants: [
+						"view_initiatives",
+						"view_initiative_members",
+						"view_milestones"
+					]
+				},
+				{
+					name: "initiative_writer"
+					includes: [ "initiative_reader" ]
+					grants: [ "edit_milestones" ]
+				},
+				{
+					name: "initiative_admin"
+					includes: [ "initiative_writer" ]
+					grants: [ "edit_initiatives", "manage_initiative_members" ]
+				}
+			]
+		}
+		access: {
+			allow: [
+				{ read: true permission: "view_initiative_members" },
+				{ write: true permission: "manage_initiative_members" }
+			]
+		}
+	};
+	string id = 1;
+	Initiative initiative = 2
+		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	oneof member {
+		string user_id = 3;
+		Squad squad = 4;
+	}
+	string role = 5;
+}
+
+// A milestone in an initiative.
+message Milestone {
+	option (syncplane.v1.entity) = {
+		name: "milestone"
+		key_fields: [ "id" ]
+		access: {
+			allow: [
+				{ read: true permission: "view_milestones" },
+				{ write: true permission: "edit_milestones" }
+			]
+		}
+	};
+	string id = 1;
+	Initiative initiative = 2
+		[(syncplane.v1.field_behavior) = { access_parent: {} }];
+	string title = 3;
+}

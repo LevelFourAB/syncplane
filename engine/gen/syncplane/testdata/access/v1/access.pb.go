@@ -2271,6 +2271,417 @@ func (x *Issue) GetTitle() string {
 	return ""
 }
 
+// The commons of the share-control schema below: Commons, CommonsMember,
+// Steward, Initiative, InitiativeMember and Milestone, registered apart from
+// the schemas above together with Squad and SquadMember. A shared initiative
+// sits below the one commons row, so every commons member reads it; a
+// restricted initiative sits at the root, where only stewards and its own
+// grants reach it.
+type Commons struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Commons) Reset() {
+	*x = Commons{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Commons) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Commons) ProtoMessage() {}
+
+func (x *Commons) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[34]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Commons.ProtoReflect.Descriptor instead.
+func (*Commons) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{34}
+}
+
+func (x *Commons) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+// Makes its user a member of the workspace. Its role applies at the commons
+// row, not at the root, so it reaches shared initiatives alone.
+type CommonsMember struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Commons       *Commons               `protobuf:"bytes,2,opt,name=commons,proto3" json:"commons,omitempty"`
+	UserId        string                 `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,4,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CommonsMember) Reset() {
+	*x = CommonsMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CommonsMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CommonsMember) ProtoMessage() {}
+
+func (x *CommonsMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[35]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CommonsMember.ProtoReflect.Descriptor instead.
+func (*CommonsMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{35}
+}
+
+func (x *CommonsMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *CommonsMember) GetCommons() *Commons {
+	if x != nil {
+		return x.Commons
+	}
+	return nil
+}
+
+func (x *CommonsMember) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *CommonsMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// A role at the workspace root.
+type Steward struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	UserId        string                 `protobuf:"bytes,2,opt,name=user_id,json=userId,proto3" json:"user_id,omitempty"`
+	Role          string                 `protobuf:"bytes,3,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Steward) Reset() {
+	*x = Steward{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Steward) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Steward) ProtoMessage() {}
+
+func (x *Steward) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[36]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Steward.ProtoReflect.Descriptor instead.
+func (*Steward) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{36}
+}
+
+func (x *Steward) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Steward) GetUserId() string {
+	if x != nil {
+		return x.UserId
+	}
+	return ""
+}
+
+func (x *Steward) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+// An initiative, shared with the workspace when commons is set and restricted
+// to its own grants when it is not.
+type Initiative struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Commons       *Commons               `protobuf:"bytes,2,opt,name=commons,proto3" json:"commons,omitempty"`
+	Name          string                 `protobuf:"bytes,3,opt,name=name,proto3" json:"name,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Initiative) Reset() {
+	*x = Initiative{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Initiative) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Initiative) ProtoMessage() {}
+
+func (x *Initiative) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[37]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Initiative.ProtoReflect.Descriptor instead.
+func (*Initiative) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{37}
+}
+
+func (x *Initiative) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Initiative) GetCommons() *Commons {
+	if x != nil {
+		return x.Commons
+	}
+	return nil
+}
+
+func (x *Initiative) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+// A role on one initiative for one user, or for every member of one squad.
+type InitiativeMember struct {
+	state      protoimpl.MessageState `protogen:"open.v1"`
+	Id         string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Initiative *Initiative            `protobuf:"bytes,2,opt,name=initiative,proto3" json:"initiative,omitempty"`
+	// Types that are valid to be assigned to Member:
+	//
+	//	*InitiativeMember_UserId
+	//	*InitiativeMember_Squad
+	Member        isInitiativeMember_Member `protobuf_oneof:"member"`
+	Role          string                    `protobuf:"bytes,5,opt,name=role,proto3" json:"role,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *InitiativeMember) Reset() {
+	*x = InitiativeMember{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *InitiativeMember) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*InitiativeMember) ProtoMessage() {}
+
+func (x *InitiativeMember) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[38]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use InitiativeMember.ProtoReflect.Descriptor instead.
+func (*InitiativeMember) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{38}
+}
+
+func (x *InitiativeMember) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *InitiativeMember) GetInitiative() *Initiative {
+	if x != nil {
+		return x.Initiative
+	}
+	return nil
+}
+
+func (x *InitiativeMember) GetMember() isInitiativeMember_Member {
+	if x != nil {
+		return x.Member
+	}
+	return nil
+}
+
+func (x *InitiativeMember) GetUserId() string {
+	if x != nil {
+		if x, ok := x.Member.(*InitiativeMember_UserId); ok {
+			return x.UserId
+		}
+	}
+	return ""
+}
+
+func (x *InitiativeMember) GetSquad() *Squad {
+	if x != nil {
+		if x, ok := x.Member.(*InitiativeMember_Squad); ok {
+			return x.Squad
+		}
+	}
+	return nil
+}
+
+func (x *InitiativeMember) GetRole() string {
+	if x != nil {
+		return x.Role
+	}
+	return ""
+}
+
+type isInitiativeMember_Member interface {
+	isInitiativeMember_Member()
+}
+
+type InitiativeMember_UserId struct {
+	UserId string `protobuf:"bytes,3,opt,name=user_id,json=userId,proto3,oneof"`
+}
+
+type InitiativeMember_Squad struct {
+	Squad *Squad `protobuf:"bytes,4,opt,name=squad,proto3,oneof"`
+}
+
+func (*InitiativeMember_UserId) isInitiativeMember_Member() {}
+
+func (*InitiativeMember_Squad) isInitiativeMember_Member() {}
+
+// A milestone in an initiative.
+type Milestone struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Id            string                 `protobuf:"bytes,1,opt,name=id,proto3" json:"id,omitempty"`
+	Initiative    *Initiative            `protobuf:"bytes,2,opt,name=initiative,proto3" json:"initiative,omitempty"`
+	Title         string                 `protobuf:"bytes,3,opt,name=title,proto3" json:"title,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *Milestone) Reset() {
+	*x = Milestone{}
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *Milestone) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*Milestone) ProtoMessage() {}
+
+func (x *Milestone) ProtoReflect() protoreflect.Message {
+	mi := &file_syncplane_testdata_access_v1_access_proto_msgTypes[39]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use Milestone.ProtoReflect.Descriptor instead.
+func (*Milestone) Descriptor() ([]byte, []int) {
+	return file_syncplane_testdata_access_v1_access_proto_rawDescGZIP(), []int{39}
+}
+
+func (x *Milestone) GetId() string {
+	if x != nil {
+		return x.Id
+	}
+	return ""
+}
+
+func (x *Milestone) GetInitiative() *Initiative {
+	if x != nil {
+		return x.Initiative
+	}
+	return nil
+}
+
+func (x *Milestone) GetTitle() string {
+	if x != nil {
+		return x.Title
+	}
+	return ""
+}
+
 var File_syncplane_testdata_access_v1_access_proto protoreflect.FileDescriptor
 
 const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
@@ -2599,7 +3010,64 @@ const file_syncplane_testdata_access_v1_access_proto_rawDesc = "" +
 	"\x05title\x18\x03 \x01(\tR\x05title:3\xa2\xbb\x18/\n" +
 	"\x05issue\x12\x02idR\"\n" +
 	"\x0f\b\x012\vview_issues\n" +
-	"\x0f(\x012\vedit_issues*Q\n" +
+	"\x0f(\x012\vedit_issues\"4\n" +
+	"\aCommons\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id:\x19\xa2\xbb\x18\x15\n" +
+	"\acommons\x12\x02idR\x06\n" +
+	"\x04\b\x01:\x00\"\x83\x03\n" +
+	"\rCommonsMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsB\x06\xaa\xbb\x18\x02Z\x00R\acommons\x12\x17\n" +
+	"\auser_id\x18\x03 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x04 \x01(\tR\x04role:\xeb\x01\xa2\xbb\x18\xe6\x01\n" +
+	"\x0ecommons_member\x12\x02idR6\n" +
+	"\x18\b\x012\x14view_commons_members\n" +
+	"\x1a(\x012\x16manage_commons_membersZ\x97\x01\n" +
+	"\auser_id\x12\x04role\x1a\x85\x01\n" +
+	"\x0ecommons_member\x12\x14view_commons_members\x12\x10view_initiatives\x12\x10edit_initiatives\x12\x17view_initiative_members\x12\x0fview_milestones\x12\x0fedit_milestones\"\xeb\x02\n" +
+	"\aSteward\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12\x17\n" +
+	"\auser_id\x18\x02 \x01(\tR\x06userId\x12\x12\n" +
+	"\x04role\x18\x03 \x01(\tR\x04role:\xa2\x02\xa2\xbb\x18\x9d\x02\n" +
+	"\asteward\x12\x02idR(\n" +
+	"\x11\b\x012\rview_stewards\n" +
+	"\x13(\x012\x0fmanage_stewardsZ\xe3\x01\n" +
+	"\auser_id\x12\x04role\x1a\xd1\x01\n" +
+	"\asteward\x12\rview_stewards\x12\x0fmanage_stewards\x12\x14view_commons_members\x12\x16manage_commons_members\x12\x10view_initiatives\x12\x10edit_initiatives\x12\x17view_initiative_members\x12\x19manage_initiative_members\x12\x0fview_milestones\x12\x0fedit_milestones\"\xbd\x01\n" +
+	"\n" +
+	"Initiative\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12G\n" +
+	"\acommons\x18\x02 \x01(\v2%.syncplane.testdata.access.v1.CommonsB\x06\xaa\xbb\x18\x02Z\x00R\acommons\x12\x12\n" +
+	"\x04name\x18\x03 \x01(\tR\x04name:B\xa2\xbb\x18>\n" +
+	"\n" +
+	"initiative\x12\x02idR,\n" +
+	"\x14\b\x012\x10view_initiatives\n" +
+	"\x14(\x012\x10edit_initiatives\"\xb6\x04\n" +
+	"\x10InitiativeMember\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12P\n" +
+	"\n" +
+	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeB\x06\xaa\xbb\x18\x02Z\x00R\n" +
+	"initiative\x12\x19\n" +
+	"\auser_id\x18\x03 \x01(\tH\x00R\x06userId\x12;\n" +
+	"\x05squad\x18\x04 \x01(\v2#.syncplane.testdata.access.v1.SquadH\x00R\x05squad\x12\x12\n" +
+	"\x04role\x18\x05 \x01(\tR\x04role:\xc9\x02\xa2\xbb\x18\xc4\x02\n" +
+	"\x11initiative_member\x12\x02idR<\n" +
+	"\x1b\b\x012\x17view_initiative_members\n" +
+	"\x1d(\x012\x19manage_initiative_membersZ\xec\x01\n" +
+	"\x06member\x12\x04role\x1aO\n" +
+	"\x11initiative_reader\x12\x10view_initiatives\x12\x17view_initiative_members\x12\x0fview_milestones\x1a7\n" +
+	"\x11initiative_writer\x12\x0fedit_milestones\x1a\x11initiative_reader\x1aR\n" +
+	"\x10initiative_admin\x12\x10edit_initiatives\x12\x19manage_initiative_members\x1a\x11initiative_writerB\b\n" +
+	"\x06member\"\xc4\x01\n" +
+	"\tMilestone\x12\x0e\n" +
+	"\x02id\x18\x01 \x01(\tR\x02id\x12P\n" +
+	"\n" +
+	"initiative\x18\x02 \x01(\v2(.syncplane.testdata.access.v1.InitiativeB\x06\xaa\xbb\x18\x02Z\x00R\n" +
+	"initiative\x12\x14\n" +
+	"\x05title\x18\x03 \x01(\tR\x05title:?\xa2\xbb\x18;\n" +
+	"\tmilestone\x12\x02idR*\n" +
+	"\x13\b\x012\x0fview_milestones\n" +
+	"\x13(\x012\x0fedit_milestones*Q\n" +
 	"\bTeamRole\x12\x19\n" +
 	"\x15TEAM_ROLE_UNSPECIFIED\x10\x00\x12\x14\n" +
 	"\x10TEAM_ROLE_VIEWER\x10\x01\x12\x14\n" +
@@ -2618,43 +3086,49 @@ func file_syncplane_testdata_access_v1_access_proto_rawDescGZIP() []byte {
 }
 
 var file_syncplane_testdata_access_v1_access_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
-var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 34)
+var file_syncplane_testdata_access_v1_access_proto_msgTypes = make([]protoimpl.MessageInfo, 40)
 var file_syncplane_testdata_access_v1_access_proto_goTypes = []any{
-	(TeamRole)(0),         // 0: syncplane.testdata.access.v1.TeamRole
-	(*OrgMember)(nil),     // 1: syncplane.testdata.access.v1.OrgMember
-	(*Project)(nil),       // 2: syncplane.testdata.access.v1.Project
-	(*ProjectMember)(nil), // 3: syncplane.testdata.access.v1.ProjectMember
-	(*Task)(nil),          // 4: syncplane.testdata.access.v1.Task
-	(*Comment)(nil),       // 5: syncplane.testdata.access.v1.Comment
-	(*Page)(nil),          // 6: syncplane.testdata.access.v1.Page
-	(*Label)(nil),         // 7: syncplane.testdata.access.v1.Label
-	(*Note)(nil),          // 8: syncplane.testdata.access.v1.Note
-	(*Entry)(nil),         // 9: syncplane.testdata.access.v1.Entry
-	(*TaskArgs)(nil),      // 10: syncplane.testdata.access.v1.TaskArgs
-	(*TeamMember)(nil),    // 11: syncplane.testdata.access.v1.TeamMember
-	(*Team)(nil),          // 12: syncplane.testdata.access.v1.Team
-	(*Folder)(nil),        // 13: syncplane.testdata.access.v1.Folder
-	(*FolderMember)(nil),  // 14: syncplane.testdata.access.v1.FolderMember
-	(*Doc)(nil),           // 15: syncplane.testdata.access.v1.Doc
-	(*Board)(nil),         // 16: syncplane.testdata.access.v1.Board
-	(*Space)(nil),         // 17: syncplane.testdata.access.v1.Space
-	(*PlaceMember)(nil),   // 18: syncplane.testdata.access.v1.PlaceMember
-	(*Card)(nil),          // 19: syncplane.testdata.access.v1.Card
-	(*CardItem)(nil),      // 20: syncplane.testdata.access.v1.CardItem
-	(*PlaceRef)(nil),      // 21: syncplane.testdata.access.v1.PlaceRef
-	(*Pin)(nil),           // 22: syncplane.testdata.access.v1.Pin
-	(*Room)(nil),          // 23: syncplane.testdata.access.v1.Room
-	(*RoomMember)(nil),    // 24: syncplane.testdata.access.v1.RoomMember
-	(*Post)(nil),          // 25: syncplane.testdata.access.v1.Post
-	(*Draft)(nil),         // 26: syncplane.testdata.access.v1.Draft
-	(*Ticket)(nil),        // 27: syncplane.testdata.access.v1.Ticket
-	(*Setting)(nil),       // 28: syncplane.testdata.access.v1.Setting
-	(*Squad)(nil),         // 29: syncplane.testdata.access.v1.Squad
-	(*SquadMember)(nil),   // 30: syncplane.testdata.access.v1.SquadMember
-	(*Repo)(nil),          // 31: syncplane.testdata.access.v1.Repo
-	(*RepoMember)(nil),    // 32: syncplane.testdata.access.v1.RepoMember
-	(*RepoSquad)(nil),     // 33: syncplane.testdata.access.v1.RepoSquad
-	(*Issue)(nil),         // 34: syncplane.testdata.access.v1.Issue
+	(TeamRole)(0),            // 0: syncplane.testdata.access.v1.TeamRole
+	(*OrgMember)(nil),        // 1: syncplane.testdata.access.v1.OrgMember
+	(*Project)(nil),          // 2: syncplane.testdata.access.v1.Project
+	(*ProjectMember)(nil),    // 3: syncplane.testdata.access.v1.ProjectMember
+	(*Task)(nil),             // 4: syncplane.testdata.access.v1.Task
+	(*Comment)(nil),          // 5: syncplane.testdata.access.v1.Comment
+	(*Page)(nil),             // 6: syncplane.testdata.access.v1.Page
+	(*Label)(nil),            // 7: syncplane.testdata.access.v1.Label
+	(*Note)(nil),             // 8: syncplane.testdata.access.v1.Note
+	(*Entry)(nil),            // 9: syncplane.testdata.access.v1.Entry
+	(*TaskArgs)(nil),         // 10: syncplane.testdata.access.v1.TaskArgs
+	(*TeamMember)(nil),       // 11: syncplane.testdata.access.v1.TeamMember
+	(*Team)(nil),             // 12: syncplane.testdata.access.v1.Team
+	(*Folder)(nil),           // 13: syncplane.testdata.access.v1.Folder
+	(*FolderMember)(nil),     // 14: syncplane.testdata.access.v1.FolderMember
+	(*Doc)(nil),              // 15: syncplane.testdata.access.v1.Doc
+	(*Board)(nil),            // 16: syncplane.testdata.access.v1.Board
+	(*Space)(nil),            // 17: syncplane.testdata.access.v1.Space
+	(*PlaceMember)(nil),      // 18: syncplane.testdata.access.v1.PlaceMember
+	(*Card)(nil),             // 19: syncplane.testdata.access.v1.Card
+	(*CardItem)(nil),         // 20: syncplane.testdata.access.v1.CardItem
+	(*PlaceRef)(nil),         // 21: syncplane.testdata.access.v1.PlaceRef
+	(*Pin)(nil),              // 22: syncplane.testdata.access.v1.Pin
+	(*Room)(nil),             // 23: syncplane.testdata.access.v1.Room
+	(*RoomMember)(nil),       // 24: syncplane.testdata.access.v1.RoomMember
+	(*Post)(nil),             // 25: syncplane.testdata.access.v1.Post
+	(*Draft)(nil),            // 26: syncplane.testdata.access.v1.Draft
+	(*Ticket)(nil),           // 27: syncplane.testdata.access.v1.Ticket
+	(*Setting)(nil),          // 28: syncplane.testdata.access.v1.Setting
+	(*Squad)(nil),            // 29: syncplane.testdata.access.v1.Squad
+	(*SquadMember)(nil),      // 30: syncplane.testdata.access.v1.SquadMember
+	(*Repo)(nil),             // 31: syncplane.testdata.access.v1.Repo
+	(*RepoMember)(nil),       // 32: syncplane.testdata.access.v1.RepoMember
+	(*RepoSquad)(nil),        // 33: syncplane.testdata.access.v1.RepoSquad
+	(*Issue)(nil),            // 34: syncplane.testdata.access.v1.Issue
+	(*Commons)(nil),          // 35: syncplane.testdata.access.v1.Commons
+	(*CommonsMember)(nil),    // 36: syncplane.testdata.access.v1.CommonsMember
+	(*Steward)(nil),          // 37: syncplane.testdata.access.v1.Steward
+	(*Initiative)(nil),       // 38: syncplane.testdata.access.v1.Initiative
+	(*InitiativeMember)(nil), // 39: syncplane.testdata.access.v1.InitiativeMember
+	(*Milestone)(nil),        // 40: syncplane.testdata.access.v1.Milestone
 }
 var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	2,  // 0: syncplane.testdata.access.v1.ProjectMember.project:type_name -> syncplane.testdata.access.v1.Project
@@ -2684,11 +3158,16 @@ var file_syncplane_testdata_access_v1_access_proto_depIdxs = []int32{
 	31, // 24: syncplane.testdata.access.v1.RepoSquad.repo:type_name -> syncplane.testdata.access.v1.Repo
 	29, // 25: syncplane.testdata.access.v1.RepoSquad.squad:type_name -> syncplane.testdata.access.v1.Squad
 	31, // 26: syncplane.testdata.access.v1.Issue.repo:type_name -> syncplane.testdata.access.v1.Repo
-	27, // [27:27] is the sub-list for method output_type
-	27, // [27:27] is the sub-list for method input_type
-	27, // [27:27] is the sub-list for extension type_name
-	27, // [27:27] is the sub-list for extension extendee
-	0,  // [0:27] is the sub-list for field type_name
+	35, // 27: syncplane.testdata.access.v1.CommonsMember.commons:type_name -> syncplane.testdata.access.v1.Commons
+	35, // 28: syncplane.testdata.access.v1.Initiative.commons:type_name -> syncplane.testdata.access.v1.Commons
+	38, // 29: syncplane.testdata.access.v1.InitiativeMember.initiative:type_name -> syncplane.testdata.access.v1.Initiative
+	29, // 30: syncplane.testdata.access.v1.InitiativeMember.squad:type_name -> syncplane.testdata.access.v1.Squad
+	38, // 31: syncplane.testdata.access.v1.Milestone.initiative:type_name -> syncplane.testdata.access.v1.Initiative
+	32, // [32:32] is the sub-list for method output_type
+	32, // [32:32] is the sub-list for method input_type
+	32, // [32:32] is the sub-list for extension type_name
+	32, // [32:32] is the sub-list for extension extendee
+	0,  // [0:32] is the sub-list for field type_name
 }
 
 func init() { file_syncplane_testdata_access_v1_access_proto_init() }
@@ -2712,13 +3191,17 @@ func file_syncplane_testdata_access_v1_access_proto_init() {
 		(*RepoMember_UserId)(nil),
 		(*RepoMember_Squad)(nil),
 	}
+	file_syncplane_testdata_access_v1_access_proto_msgTypes[38].OneofWrappers = []any{
+		(*InitiativeMember_UserId)(nil),
+		(*InitiativeMember_Squad)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_syncplane_testdata_access_v1_access_proto_rawDesc), len(file_syncplane_testdata_access_v1_access_proto_rawDesc)),
 			NumEnums:      1,
-			NumMessages:   34,
+			NumMessages:   40,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
